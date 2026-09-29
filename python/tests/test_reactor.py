@@ -551,5 +551,181 @@ class TestReactorPurity(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestWorkerStartupDeadline(unittest.TestCase):
+    """W-REL6-3.1: fork-in-threaded-host hang is bounded.
+
+    String payloads resolve in the parent (no post-fork import);
+    children signal readiness (READY_BYTE); generations that never
+    signal are SIGKILLed at the startup deadline and recovery
+    proceeds through the normal death path.
+    """
+
+    def tearDown(self):
+        assert_no_zombies(self)
+
+    def test_string_payload_imports_in_parent(self):
+        """String payload's module is imported by the parent (x5).
+
+        Deterministic: fresh module name per iteration (import cache).
+        Pre-fix the import happened in the child (post-fork) -- the
+        IMPORT_PID record distinguishes the two.
+        """
+        from forkrun import _worker as _worker_mod  # noqa: F401
+        for i in range(5):
+            modname = "w31par_%d_%d" % (os.getpid(), i)
+            plugdir = tempfile.mkdtemp(prefix="w31par_")
+            path = _make_input(200)
+            try:
+                with open(os.path.join(plugdir, modname + ".py"),
+                          "w") as fh:
+                    fh.write(
+                        "import os\n"
+                        "IMPORT_PID = os.getpid()\n"
+                        "def payload(batch):\n"
+                        "    return bytes(batch.data).upper()\n")
+                sys.path.insert(0, plugdir)
+                try:
+                    sys.modules.pop(modname, None)
+                    res = forkrun.map(modname + ":payload", path,
+                                      workers=2, nodes=1)
+                    self.assertIn(modname, sys.modules)
+                    self.assertEqual(
+                        sys.modules[modname].IMPORT_PID, os.getpid(),
+                        "payload module imported in a child, not parent")
+                    got = sorted(b"".join(res).split())
+                    want = sorted([b"LINE"] * 200 +
+                                  [str(n).encode() for n in range(200)])
+                    self.assertEqual(got, want)
+                finally:
+                    sys.path.remove(plugdir)
+            finally:
+                os.unlink(path)
+                import shutil as _shutil
+                _shutil.rmtree(plugdir, ignore_errors=True)
+
+    def test_startup_deadline_fires_and_recovers(self):
+        """Pre-ready hang is SIGKILLed; recovery completes (x10).
+
+        Timing: the child-side mock hangs pre-ready while the wall
+        clock is inside the gate, so early generations must be
+        deadline-killed; generations forked past the gate proceed.
+        Deadline 1.0s / gate 1.2s admits at most 2 kills per worker
+        (gen-1 dies ~1.1s; a gen-2 forked just under the gate dies
+        ~2.2s; later generations proceed) -- safely under the
+        default respawn cap of 3, so the run always completes via
+        recovery. Without the deadline the first generation sleeps
+        10s (>=10s run); with it the run completes in ~gate+work.
+        The 8s bound has 2x+ headroom over the ~2.5s nominal.
+        """
+        from unittest import mock as _mock
+        from forkrun import _worker as _worker_mod
+        path = _make_input(500)
+        try:
+            parent = os.getpid()
+            real_resolve = _worker_mod._resolve_payload
+            for i in range(10):
+                gate = time.monotonic() + 1.2
+
+                def _blocking(spec, _real=real_resolve,
+                              _pp=parent, _gate=gate):
+                    if os.getpid() != _pp \
+                            and time.monotonic() < _gate:
+                        time.sleep(10)  # pre-ready hang, past deadline
+                    return _real(spec)
+
+                with _mock.patch.dict(
+                        os.environ,
+                        {"FORKRUN_WORKER_STARTUP_S": "1.0"}):
+                    with _mock.patch.object(
+                            _worker_mod, "_resolve_payload", _blocking):
+                        t0 = time.monotonic()
+                        res = forkrun.map(_up, path, workers=2, nodes=1)
+                        dt = time.monotonic() - t0
+                got = sorted(b"".join(res).split())
+                want = sorted([b"LINE"] * 500 +
+                              [str(n).encode() for n in range(500)])
+                self.assertEqual(got, want,
+                                 "iter %d: recovery lost data" % i)
+                self.assertLess(
+                    dt, 8.0,
+                    "iter %d: %.1fs -- deadline never fired (hang "
+                    "survived to the mock sleep)" % (i, dt))
+        finally:
+            os.unlink(path)
+
+    def test_check_startup_timeouts_kills_and_records(self):
+        """Expired unready slot is SIGKILLed + recorded; ready spared.
+
+        Engine-free unit (x5): real sleeper subprocess as the victim
+        verifies the kill signal, not just the bookkeeping.
+        """
+        import signal as _signal
+        from forkrun._reactor import ReactorState, WorkerSlot
+        for i in range(5):
+            state = ReactorState(2, startup_deadline=0.2)
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(30)
+                os._exit(0)
+            try:
+                slot = WorkerSlot(0, 0, pid, -1, -1)
+                slot.spawned_at = time.monotonic() - 10.0
+                state.workers[0] = slot
+                state.check_startup_timeouts()
+                self.assertEqual(state.startup_kills, [0])
+                _, status = os.waitpid(pid, 0)
+                pid = None
+                self.assertTrue(os.WIFSIGNALED(status),
+                                "victim was not signaled")
+                self.assertEqual(os.WTERMSIG(status), _signal.SIGKILL)
+            finally:
+                if pid is not None:
+                    try:
+                        os.kill(pid, _signal.SIGKILL)
+                    except OSError:
+                        pass
+                    try:
+                        os.waitpid(pid, 0)
+                    except (ChildProcessError, OSError):
+                        pass
+            # Control: a ready worker past its deadline is spared.
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(30)
+                os._exit(0)
+            try:
+                slot = WorkerSlot(0, 0, pid, -1, -1)
+                slot.ready = True
+                slot.spawned_at = time.monotonic() - 10.0
+                state.workers[0] = slot
+                state.check_startup_timeouts()
+                self.assertEqual(state.startup_kills, [0])
+                os.kill(pid, 0)  # still alive: raises otherwise
+            finally:
+                try:
+                    os.kill(pid, _signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    os.waitpid(pid, 0)
+                except (ChildProcessError, OSError):
+                    pass
+
+    def test_note_ready_consumes_handshake(self):
+        """note_ready marks ready on READY_BYTE, EOF means death (x5)."""
+        from forkrun._reactor import ReactorState, WorkerSlot
+        from forkrun._worker import READY_BYTE
+        for i in range(5):
+            st = ReactorState(1)
+            slot = WorkerSlot(0, 0, 424242 + i, -1, -1)
+            st.workers[0] = slot
+            self.assertTrue(st.note_ready(0, READY_BYTE))
+            self.assertTrue(slot.ready)
+            self.assertTrue(st.note_ready(0, READY_BYTE))
+            self.assertFalse(st.note_ready(0, b""))
+            self.assertFalse(st.note_ready(999, READY_BYTE))
+
+
 if __name__ == "__main__":
     unittest.main()

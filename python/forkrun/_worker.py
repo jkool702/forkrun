@@ -115,11 +115,16 @@ def _write_all(fd, buf) -> None:
 
 
 def _resolve_payload(spec):
-    """Resolve the payload spec IN THE WORKER (post-fork).
+    """Resolve the payload spec (shared import logic).
 
-    "pkg.mod:func" -> import here (keeps the parent virgin of native
-    threadpool imports — the fork-safety mechanism). Callables pass through
-    via fork-inherited memory (never pickled).
+    Callables pass through (fork-inherited memory, never pickled).
+    "pkg.mod:func" strings are imported. Safe to call anywhere; the
+    fork-safety rule (W-REL6-3.1) is about CALL SITE: string specs
+    must be resolved in the PARENT before fork (see
+    resolve_payload_parent) so a child forked from a threaded host
+    never imports (frozen import locks in the child deadlock). This
+    function remains the child-side fallback -- resolving an already
+    resolved callable is a no-op.
     """
     if isinstance(spec, str):
         mod_name, _, func_name = spec.partition(":")
@@ -137,6 +142,29 @@ def _resolve_payload(spec):
     if not callable(spec):
         raise TypeError("payload must be 'pkg.mod:func' or callable")
     return spec
+
+
+#: Single byte a reactor child writes on its death pipe once startup
+#: completes (payload resolved + worker_init + output named). The
+#: death pipe is otherwise write-silent, so any pre-EOF byte is the
+#: readiness signal (W-REL6-3.1); EOF remains the death signal.
+READY_BYTE = b"\x01"
+
+
+def resolve_payload_parent(spec):
+    """Resolve a payload/sink spec IN THE PARENT, before fork (W-REL6-3.1).
+
+    "pkg.mod:func" strings are imported here -- in the live parent,
+    where import locks function -- and the resulting callable crosses
+    by fork inheritance like the callable form always did. Eliminates
+    the post-fork import for the string form (in a threaded host the
+    child can inherit a frozen import lock and deadlock; Python 3.12+
+    warns on fork-in-threaded-host). Idempotent: callables (and
+    already-resolved specs) pass through, so this is also safe as a
+    backstop at every fork site. Import errors surface here, loudly
+    and early, instead of as worker crashes.
+    """
+    return _resolve_payload(spec)
 
 
 def _coerce_result(ret):
@@ -259,7 +287,7 @@ def _escrow_deposit_exit_loud(lib, wid):
 
 def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
          signal_w, on_error, fallow_fd=None, trap_ack_w=None,
-         order_target=-1, wincarn=0, node=0):
+         order_target=-1, wincarn=0, node=0, ready_w=None):
     lib = get()
     payload_fn = _resolve_payload(payload_spec)
     sink_fn = _resolve_payload(sink_spec) if sink_spec is not None else None
@@ -479,6 +507,17 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
             # (worker exit 1 → parent RuntimeError), never silently
             # short. OSError/ValueError: mapping itself failed.
             return False
+
+    # W-REL6-3.1: readiness signal. All setup above (payload
+    # resolution, worker_init, output naming, mmap) completed without
+    # hanging -- tell the parent before entering the claim loop. The
+    # parent's startup deadline fires only for children that never get
+    # here (e.g. deadlocked post-fork import). Best effort, never fatal.
+    if ready_w is not None and ready_w >= 0:
+        try:
+            os.write(ready_w, READY_BYTE)
+        except OSError:
+            pass
 
     try:
         while True:
@@ -937,6 +976,10 @@ def worker_main_with_death_pipe(wid, node, payload_spec, sink_spec,
     node/wincarn: worker identity for fr_py_worker_init (respawn
       lineage: the reactor increments wincarn per generation).
 
+    The reactor's death pipe doubles as the readiness channel
+    (W-REL6-3.1): death_w is passed through to _run as ready_w, which
+    writes READY_BYTE once setup completes, before the claim loop.
+
     No signal handlers are installed here: KeyboardInterrupt inside
     the payload stays a payload error (retry path), matching
     worker_main. Global abort arrives via the engine fire alarm.
@@ -960,7 +1003,7 @@ def worker_main_with_death_pipe(wid, node, payload_spec, sink_spec,
         code = _run(wid, payload_spec, sink_spec, memfd_fd, file_size,
                     out_fd, signal_w, on_error, fallow_fd,
                     trap_ack_w=trap_ack_w, order_target=order_pipe,
-                    wincarn=wincarn, node=node)
+                    wincarn=wincarn, node=node, ready_w=death_w)
     except BaseException:
         try:
             traceback.print_exc()

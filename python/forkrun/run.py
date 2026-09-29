@@ -56,7 +56,8 @@ from ._resume import (ORDERER_REAP_TIMEOUT, WORKER_REAP_TIMEOUT,
 from ._signals import guard as _signal_guard
 from ._spawn import make_spawn_payload
 from ._worker import _HDR, _c_plugin_spec, _c_spawn_spec, \
-    _fork_c_plugin_worker, _fork_c_spawn_worker, worker_main
+    _fork_c_plugin_worker, _fork_c_spawn_worker, resolve_payload_parent, \
+    worker_main
 from .exceptions import ForkrunInterrupted, ForkrunPoisonSkip
 
 import fcntl as _fcntl
@@ -738,6 +739,13 @@ def _coerce_payload(payload, mode):
         # already required payload=None; the marker carries the mode so
         # run/map/stream dispatch to the C-loop executors below.
         return None, "splice"
+    if isinstance(payload, str):
+        # W-REL6-3.1: resolve "pkg.mod:func" in the PARENT, before any
+        # fork, so a child forked from a threaded host never imports
+        # (frozen import locks in the child deadlock). The callable
+        # crosses by fork inheritance like the callable form always
+        # did; import errors surface here, loudly and early.
+        payload = resolve_payload_parent(payload)
     return payload, mode
 
 

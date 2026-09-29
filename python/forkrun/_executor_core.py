@@ -96,7 +96,17 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
     ``src_fd``/``must_close``: materialized executors close the source in
     the Python child post-fork (parent spilled already; I3 hygiene).
     C-loop children never held it (scrub drops it by construction).
+
+    W-REL6-3.1: string payload/sink specs are resolved HERE, in the
+    parent, before the fork loop (backstop: the primary path is
+    _coerce_payload at the public-API entry; resolving a callable is
+    a no-op). Nothing reaching worker_main is ever imported post-fork.
     """
+    from ._worker import resolve_payload_parent as _resolve_parent
+    if payload is not None and isinstance(payload, str):
+        payload = _resolve_parent(payload)
+    if sink is not None and isinstance(sink, str):
+        sink = _resolve_parent(sink)
     # Deferred: _fork_splice_worker lives in run.py (moved here in Phase 3;
     # lazy binding avoids the import cycle meanwhile).
     import sys as _sys

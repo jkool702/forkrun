@@ -27,13 +27,19 @@ fork. Any worker exit (clean, crash, SIGKILL) closes the last write
 end, which the parent observes as readable EOF on the read end —
 the kernel-observable mechanism (SIGKILL/OOM run no code, so traps
 alone cannot be the detector). select() reports the EOF pipe as
-readable; a zero-length read confirms the death.
+readable; a zero-length read confirms the death. The one pre-EOF
+byte with meaning is READY_BYTE (W-REL6-3.1): the child writes it
+once startup completes (payload resolved, worker_init done), and
+the parent's per-worker startup deadline SIGKILLs children that
+never send it (fork-from-threaded-host hangs become bounded
+recovery instead of a silent select() wait).
 """
 
 from __future__ import annotations
 
 import os
 import select as _select
+import signal as _signal
 import time as _time
 from collections import defaultdict
 
@@ -63,6 +69,17 @@ RESPAWN_SIGKILL_BACKOFF_MAX_S = 0.2
 # Per-round drain burst cap (see reactor_loop §4).
 DRAIN_BURST = 64
 
+# W-REL6-3.1: per-worker startup deadline. A child forked from a
+# threaded host can deadlock before signaling readiness (frozen
+# post-fork import); the reactor select()s forever on its silent
+# death pipe. Any reactor child that has not written READY_BYTE
+# within this long is SIGKILLed and treated as a death (the normal
+# recovery path respawns it). Generous default: healthy startup is
+# milliseconds; only a hung child ever observes this. Override with
+# FORKRUN_WORKER_STARTUP_S (tests use sub-second values).
+STARTUP_DEADLINE_S = 30.0
+STARTUP_DEADLINE_ENV = "FORKRUN_WORKER_STARTUP_S"
+
 # Order-pipe capacity (bash H3 invariant: 1 page for backpressure).
 ORDER_PIPE_SIZE = 4096
 
@@ -88,7 +105,7 @@ class WorkerSlot:
     """One worker's lifecycle state (bash: W_INCARN, P, W_NODE arrays)."""
 
     __slots__ = ('wid', 'node', 'pid', 'incarn', 'death_r', 'death_w',
-                 'trap_ack_pending', 'alive')
+                 'trap_ack_pending', 'alive', 'ready', 'spawned_at')
 
     def __init__(self, wid, node, pid, death_r, death_w, incarn=0):
         self.wid = wid
@@ -99,6 +116,11 @@ class WorkerSlot:
         self.death_w = death_w    # closed in parent after fork (child owns)
         self.trap_ack_pending = 0  # >0 = death seen, waiting for ACK
         self.alive = True
+        # W-REL6-3.1: startup handshake. ready flips when the child
+        # writes READY_BYTE on the death pipe (setup complete); the
+        # startup deadline runs from spawned_at (fork moment).
+        self.ready = False
+        self.spawned_at = _time.monotonic()
 
 
 class ReactorState:
@@ -114,10 +136,15 @@ class ReactorState:
       Mirrors fr_config_t.spawn_ceiling.
     trap_ack_grace: seconds to wait for trap-ACK after a non-zero
       death before declaring catastrophic (default TRAP_ACK_GRACE_S).
+    startup_deadline: seconds a forked worker may take to signal
+      readiness (READY_BYTE) before it is SIGKILLed and treated as
+      a death (W-REL6-3.1). None resolves via
+      FORKRUN_WORKER_STARTUP_S, else STARTUP_DEADLINE_S.
     """
 
     def __init__(self, max_workers, num_nodes=1, respawn_cap=-1,
-                 spawn_ceiling=-1, trap_ack_grace=TRAP_ACK_GRACE_S):
+                 spawn_ceiling=-1, trap_ack_grace=TRAP_ACK_GRACE_S,
+                 startup_deadline=None):
         self.workers = {}  # wid -> WorkerSlot
         self.max_workers = max_workers
         self.num_nodes = max(1, num_nodes)
@@ -125,6 +152,19 @@ class ReactorState:
         self.spawn_ceiling = (spawn_ceiling if spawn_ceiling is not None
                               and spawn_ceiling >= 0 else max_workers)
         self.trap_ack_grace = trap_ack_grace
+        if startup_deadline is None:
+            try:
+                startup_deadline = float(
+                    os.environ.get(STARTUP_DEADLINE_ENV, ""))
+            except (TypeError, ValueError):
+                startup_deadline = STARTUP_DEADLINE_S
+            if not startup_deadline or startup_deadline <= 0:
+                startup_deadline = STARTUP_DEADLINE_S
+        self.startup_deadline = startup_deadline
+        # wid list: workers SIGKILLed by the startup deadline
+        # (observability for tests/forensics; recovery proceeds
+        # through the normal death path).
+        self.startup_kills = []
         self.node_workers = defaultdict(int)  # node -> live count
         self.node_worker_max = max(1, max_workers // self.num_nodes)
 
@@ -177,7 +217,19 @@ class ReactorState:
         workers then run fr_py_worker_spawn_loop (zero Python per
         batch) instead of worker_main. Mutually exclusive with
         plugin_loop/splice (the caller gates the envelope).
+
+        W-REL6-3.1: string payload/sink specs are resolved HERE, in
+        the parent, before any fork (backstop: the primary path is
+        _coerce_payload at the public-API entry; resolving a callable
+        is a no-op, so direct configure() callers with strings are
+        covered too). Nothing reaching spawn_worker is ever imported
+        post-fork.
         """
+        from ._worker import resolve_payload_parent as _resolve_parent
+        if payload_spec is not None:
+            payload_spec = _resolve_parent(payload_spec)
+        if sink_spec is not None:
+            sink_spec = _resolve_parent(sink_spec)
         self.ctx = {
             "payload_spec": payload_spec,
             "sink_spec": sink_spec,
@@ -528,6 +580,50 @@ class ReactorState:
                         % (wid, self.trap_ack_grace))
                 self.trap_ack_deadlines.pop(wid, None)
 
+    def note_ready(self, wid, data):
+        """Consume death-pipe bytes for a live worker (W-REL6-3.1).
+
+        Returns True when the bytes were the readiness signal (caller
+        must NOT treat the pipe as dead), False on EOF (caller runs
+        the normal death path). The pipe is otherwise write-silent,
+        so any pre-EOF byte marks the worker ready; stray bytes on
+        an already-ready worker are consumed and ignored (never a
+        death -- the kernel still reports the true exit as EOF).
+        """
+        slot = self.workers.get(wid)
+        if slot is None or not slot.alive:
+            return False
+        if not data:
+            return False  # EOF: dead
+        from ._worker import READY_BYTE as _READY
+        if not slot.ready and data[:1] == _READY:
+            slot.ready = True
+        return True
+
+    def check_startup_timeouts(self):
+        """SIGKILL workers that never signaled readiness (W-REL6-3.1).
+
+        A child forked from a threaded host can deadlock before setup
+        completes (no READY_BYTE, no exit -- the death pipe stays
+        silent and select() would wait forever). Expired workers are
+        SIGKILLed here; the resulting death flows through the normal
+        reap/respawn path (bounded by respawn_cap), so a hung
+        generation becomes bounded recovery instead of a hang. Never
+        raises; records kills in startup_kills for observability.
+        """
+        now = _time.monotonic()
+        for wid, slot in list(self.workers.items()):
+            if not slot.alive or slot.ready:
+                continue
+            if now - slot.spawned_at < self.startup_deadline:
+                continue
+            try:
+                os.kill(slot.pid, _signal.SIGKILL)
+            except OSError:
+                pass
+            else:
+                self.startup_kills.append(wid)
+
     def reap_clean_exits(self):
         """WNOHANG sweep for exits the death pipe hasn't flagged yet.
 
@@ -546,6 +642,21 @@ class ReactorState:
                 continue
             if wpid == slot.pid:
                 self.note_exit(wid, status)
+
+
+def _signal_ready(death_w):
+    """Best-effort READY_BYTE write on the death pipe (W-REL6-3.1).
+
+    Runs in the forked child once startup completes (C-loop children:
+    after worker_init + setup, before the loop). The parent's startup
+    deadline fires only for children that never get here. Never raises.
+    """
+    if death_w is not None and death_w >= 0:
+        try:
+            from ._worker import READY_BYTE as _READY
+            os.write(death_w, _READY)
+        except (OSError, ValueError):
+            pass
 
 
 def _splice_child_main(ctx, wid, node, incarn, death_w):
@@ -582,6 +693,7 @@ def _splice_child_main(ctx, wid, node, incarn, death_w):
         sig = sig_w if sig_w is not None and sig_w >= 0 else -1
         fal_w = ctx.get("fallow_w", -1)
         fal = fal_w if fal_w is not None and fal_w >= 0 else -1
+        _signal_ready(death_w)
         rc = lib.fr_py_worker_splice_loop(
             wid, ctx["memfd"], out_fd, sig, fal)
     except BaseException:
@@ -640,6 +752,7 @@ def _c_plugin_child_main(ctx, wid, node, incarn, death_w):
         trap = trap_w if trap_w is not None and trap_w >= 0 else -1
         on_error = ctx.get("on_error", "retry")
         from ._api import _resolve_retry_limit as _retry_limit
+        _signal_ready(death_w)
         rc = lib.fr_py_worker_plugin_loop(
             wid,
             path.encode("utf-8") if isinstance(path, str) else path,
@@ -706,6 +819,7 @@ def _c_spawn_child_main(ctx, wid, node, incarn, death_w):
         trap = trap_w if trap_w is not None and trap_w >= 0 else -1
         on_error = ctx.get("on_error", "retry")
         from ._api import _resolve_retry_limit as _retry_limit
+        _signal_ready(death_w)
         rc = lib.fr_py_worker_spawn_loop(
             wid, argv_c, len(_argv_b),
             ctx["memfd"], out_fd, sig, fal, ord_fd, trap, incarn,
@@ -842,6 +956,10 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
         # 1. Catastrophic check first (a dead grace aborts even when
         #    fresh work is arriving).
         state.check_trap_timeouts()
+        # W-REL6-3.1: startup deadline (a hung child shows neither
+        # readiness nor death -- SIGKILL it so the reap/respawn path
+        # bounds the hang instead of select() waiting forever).
+        state.check_startup_timeouts()
 
         # 2. Death-pipe + spawn + trap-ACK events.
         watch = []
@@ -893,17 +1011,21 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
                     wid = death_of.get(fd)
                     if wid is None:
                         continue
-                    # Readable death pipe: consume to EOF. Any bytes
-                    # (none are ever written — the pipe is purely a
-                    # kernel-observable lifetime channel) or EOF both
-                    # mean the worker is gone; the non-blocking poll
-                    # twin reaps it (W-REL5-B5: EOF precedes os._exit,
-                    # so a descheduled child defers to the sweep
-                    # instead of stalling the loop).
+                    # Readable death pipe: EOF means the worker is
+                    # gone (the non-blocking poll twin reaps it --
+                    # W-REL5-B5: EOF precedes os._exit, so a
+                    # descheduled child defers to the sweep instead
+                    # of stalling the loop).
+                    # W-REL6-3.1: the one exception is READY_BYTE --
+                    # the startup handshake. note_ready consumes it
+                    # (marking the worker ready) and reports True;
+                    # only EOF (False) runs the death path below.
                     try:
-                        os.read(fd, 4096)
+                        _chunk = os.read(fd, 4096)
                     except OSError:
-                        pass
+                        _chunk = b""
+                    if state.note_ready(wid, _chunk):
+                        continue
                     kind, _new = state.worker_died_poll(wid)
                     _slot = state.workers.get(wid)
                     if _slot is not None and not _slot.alive:
@@ -1018,6 +1140,9 @@ def reactor_poll_once(state, poll_timeout=0.0):
     trap-ACK timeout.
     """
     state.check_trap_timeouts()
+    # W-REL6-3.1: startup deadline also bounds spill-loop supervision
+    # (a hung child would otherwise stall the spill, not just the run).
+    state.check_startup_timeouts()
     watch = []
     death_of = {}
     for slot in state.workers.values():
@@ -1053,9 +1178,14 @@ def reactor_poll_once(state, poll_timeout=0.0):
                 if wid is None:
                     continue
                 try:
-                    os.read(fd, 4096)
+                    chunk = os.read(fd, 4096)
                 except OSError:
-                    pass
+                    chunk = b""
+                # W-REL6-3.1: READY_BYTE is the startup handshake,
+                # not a death -- note_ready consumes it; only EOF
+                # runs the reap path.
+                if state.note_ready(wid, chunk):
+                    continue
                 # W-REL5-B5: the non-blocking twin — worker_died
                 # would block here on a descheduled child (EOF
                 # precedes os._exit), contradicting this function's
