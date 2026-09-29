@@ -592,6 +592,31 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   return w;
 }
 
+/* W-REL6-4.3: checked hole-punch. PUNCH_HOLE is advisory space
+ * reclamation (a failure leaks backing pages, never data), but an
+ * unchecked failure also advances last_punched past the hole, so a
+ * transient error permanently skips that range. Returns 0 on
+ * success (caller advances); on failure warns once per consecutive
+ * streak (strerror-named) and returns -1 (caller retries the same
+ * range next round -- "stop advancing on persistent failure"). */
+static inline int fallocate_punch_checked(int fd, off_t off, off_t len,
+                                          unsigned *fail_streak,
+                                          const char *site) {
+  if (fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                off, len) == 0) {
+    *fail_streak = 0;
+    return 0;
+  }
+  int saved_errno = errno;
+  (*fail_streak)++;
+  if (*fail_streak == 1)
+    fprintf(stderr,
+            "forkrun [WARN]: %s: fallocate(PUNCH_HOLE, off=%jd, "
+            "len=%jd) failed: %s (retrying; backing pages retained)\n",
+            site, (intmax_t)off, (intmax_t)len, strerror(saved_errno));
+  return -1;
+}
+
 static __thread off_t tls_batch_offset = 0;
 static __thread uint32_t tls_batch_lines = 0;
 
@@ -1849,11 +1874,28 @@ static inline void cleanup_waiter_state() {
 //             checkpoint IS needed)
 static inline void pull_fire_alarm_reason(uint8_t reason) {
     if (!state) return;
+    /* W-REL6-4.4: publish abort_reason BEFORE the CAS that gates
+     * readers. The old order (CAS on emergency_abort, then store the
+     * reason) let a reader observe abort==1 with a still-zero reason
+     * (winner descheduled between the two). Election now rides the
+     * reason word itself: the first reason-CAS wins and is visible
+     * before emergency_abort is ever set, so any reader gated on
+     * abort==1 observes a settled reason. Same single-attempt CAS
+     * shape and orderings (no retry loop, no fence change); the
+     * evfd blast still fires exactly once, for the winner. */
+    if (reason != 0) {
+        uint8_t expected = 0;
+        if (!__atomic_compare_exchange_n(&g_state->abort_reason, &expected,
+                                         reason, 0, __ATOMIC_SEQ_CST,
+                                         __ATOMIC_RELAXED))
+            return; /* another reason already published; its winner
+                     * sets the abort flag (same liveness as before:
+                     * losers never set it). */
+    }
     uint8_t expected = 0;
     if (__atomic_compare_exchange_n(&state[0].emergency_abort, &expected, 1,
                                     0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
-        // First caller wins: record why we aborted.
-        __atomic_store_n(&g_state->abort_reason, reason, __ATOMIC_RELEASE);
+        // First caller wins: blast the EOF eventfds.
         uint64_t blast = 999999;
         for (uint32_t n = 0; n < allocated_num_nodes; n++) {
             if (evfd_eof_arr && evfd_eof_arr[n] >= 0)
@@ -3593,7 +3635,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       struct pollfd pfds[2] = {
           {.fd = evfd_indexer_arr[my_node_id], .events = POLLIN},
           {.fd = evfd_ingest_eof, .events = POLLIN}};
-      poll(pfds, 2, -1);
+      /* W-REL6-4.1: bounded (ARCHITECTURE.md CROSS-PROCESS WAIT
+       * ESCAPE) -- the loop re-checks head + abort every round. */
+      poll(pfds, 2, 100);
 
       if (atomic_load_relaxed(&state[0].emergency_abort)) {
         __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
@@ -4125,10 +4169,22 @@ uint64_t chunk_bounds[16] = {0};
 
   // ---- NEW: Pin scanner ----
   if (g_logical_to_phys_map) {
+    int _pin_rc = 0;
     if (is_numa && (uint32_t)my_node_id < global_num_nodes) {
-      pin_to_numa_node(g_logical_to_phys_map[my_node_id]);
+      _pin_rc = pin_to_numa_node(g_logical_to_phys_map[my_node_id]);
     } else if (!is_numa && g_explicit_pinning) {
-      pin_to_numa_node(g_logical_to_phys_map[0]);
+      _pin_rc = pin_to_numa_node(g_logical_to_phys_map[0]);
+    }
+    /* W-REL6-4.2: finish the pinning-failure arm (was unchecked).
+     * Log once under g_debug, mirroring the indexer site. */
+    if (_pin_rc != 0 && g_debug) {
+      static int _pin_warn_once = 0;
+      if (!_pin_warn_once) {
+        _pin_warn_once = 1;
+        fprintf(stderr,
+                "forkrun [DEBUG] Failed to pin scanner %d\n",
+                my_node_id);
+      }
     }
   }
   // --------------------------
@@ -4454,7 +4510,9 @@ uint64_t chunk_bounds[16] = {0};
               struct pollfd pfds[2] = {
                   {.fd = evfd_meta_arr[my_node_id], .events = POLLIN},
                   {.fd = evfd_ingest_eof, .events = POLLIN}};
-              poll(pfds, 2, -1);
+              /* W-REL6-4.1: bounded (ARCHITECTURE.md CROSS-PROCESS
+               * WAIT ESCAPE) -- outer loop re-checks ready + abort. */
+              poll(pfds, 2, 100);
               if (atomic_load_relaxed(&state[0].emergency_abort)) {
                   __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
                   goto unified_scanner_eof;
@@ -4512,7 +4570,9 @@ uint64_t chunk_bounds[16] = {0};
           struct pollfd pfds[2] = {
               {.fd = evfd_meta_arr[steal_target], .events = POLLIN},
               {.fd = evfd_ingest_eof, .events = POLLIN}};
-          poll(pfds, 2, -1);
+          /* W-REL6-4.1: bounded (ARCHITECTURE.md CROSS-PROCESS WAIT
+           * ESCAPE) -- loop re-checks claim + abort every round. */
+          poll(pfds, 2, 100);
           if (atomic_load_relaxed(&state[0].emergency_abort)) {
               __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
               goto unified_scanner_eof;
@@ -6016,7 +6076,10 @@ dlc_restart_loop:
       if (atomic_load_acquire(&local_state->scanner_finished))
         break;
 
-      poll(pfds, 3, -1);
+      /* W-REL6-4.1: bounded (ARCHITECTURE.md CROSS-PROCESS WAIT
+       * ESCAPE) -- write_idx, scanner_finished and abort are
+       * re-checked every round above. */
+      poll(pfds, 3, 100);
 
       if (atomic_load_relaxed(&state[0].emergency_abort)) {
         cleanup_waiter_state();
@@ -6068,7 +6131,10 @@ dlc_evaluate_claim:
         struct pollfd pfds[2] = {
             {.fd = evfd_data_arr[my_numa_node],  .events = POLLIN},
             {.fd = evfd_eof_arr[my_numa_node],   .events = POLLIN}};
-        poll(pfds, 2, -1);
+        /* W-REL6-4.1: bounded (ARCHITECTURE.md CROSS-PROCESS WAIT
+         * ESCAPE) -- write_idx, scanner_finished and abort are
+         * re-checked every round. */
+        poll(pfds, 2, 100);
         if (atomic_load_relaxed(&state[0].emergency_abort)) {
           cleanup_waiter_state();
           return EXECUTION_FAILURE;
@@ -7172,8 +7238,14 @@ static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len, struct O
 
         off_t aligned = (off_t)((fs->limit / 4096ULL) * 4096ULL);
         if (aligned > fs->last_punched) {
-            fallocate(p_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, fs->last_punched, aligned - fs->last_punched);
-            fs->last_punched = aligned;
+            /* W-REL6-4.3: checked punch -- advance only on success so
+             * a transient failure retries the same range next round. */
+            static unsigned _punch_fails = 0;
+            if (fallocate_punch_checked(p_fd, fs->last_punched,
+                                        aligned - fs->last_punched,
+                                        &_punch_fails,
+                                        "safe_hole_punch") == 0)
+                fs->last_punched = aligned;
         }
     } else {
         interval_heap_push(&fs->heap, &fs->heap_sz, &fs->heap_cap, (uint64_t)p_off, (uint64_t)p_off + p_len);
@@ -7565,8 +7637,13 @@ static int ring_fallow_phys_main(int argc, char **argv) {
         }
         off_t aligned = (off_t)((limit / 4096ULL) * 4096ULL);
         if (aligned > last_punched) {
-          fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
-          last_punched = aligned;
+          /* W-REL6-4.3: checked punch -- advance only on success. */
+          static unsigned _punch_fails = 0;
+          if (fallocate_punch_checked(fd_file, last_punched,
+                                      aligned - last_punched,
+                                      &_punch_fails,
+                                      "ring_fallow_phys_main") == 0)
+            last_punched = aligned;
         }
       } else {
         interval_heap_push(&heap, &heap_sz, &heap_cap, pp->off, pp->off + pp->len);
@@ -7641,7 +7718,16 @@ static int ring_worker_main(int argc, char **argv) {
       my_numa_node = node = g_fr_config.ring_node_id;
     // CHANGED: Trigger pinning for explicit map even if nodes == 1
     if ((global_num_nodes > 1 || g_explicit_pinning) && g_logical_to_phys_map) {
+      /* W-REL6-4.2: finish the empty failure arm (was a bare {}) --
+       * log once under g_debug, mirroring the indexer site. */
       if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {
+        static int _pin_warn_once = 0;
+        if (!_pin_warn_once) {
+          _pin_warn_once = 1;
+          fprintf(stderr,
+                  "forkrun [DEBUG] Failed to pin worker to phys node %d\n",
+                  g_logical_to_phys_map[node]);
+        }
       }
     }
     __atomic_fetch_add(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
@@ -8321,8 +8407,13 @@ static int ring_fallow_main(int argc, char **argv) {
           if (g_state) g_state->fallow_horizon_bytes = byte_limit;
           off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
           if (aligned > last_punched) {
-            fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
-            last_punched = aligned;
+            /* W-REL6-4.3: checked punch -- advance only on success. */
+            static unsigned _punch_fails = 0;
+            if (fallocate_punch_checked(fd_file, last_punched,
+                                        aligned - last_punched,
+                                        &_punch_fails,
+                                        "ring_fallow_main") == 0)
+              last_punched = aligned;
           }
         }
       } else {
