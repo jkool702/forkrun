@@ -6464,12 +6464,17 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
     if mode not in ("python", "splice"):
         raise NotImplementedError(
             "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    # W-REL6-5: lattice position (executor #9: NUMA, reactor-implied,
+    # blocking) + this call's behavior flags.
+    _spec = ExecutorSpec(topology="numa", ingest="materialized",
+                         supervision="reactor", shape="blocking",
+                         collect=collect, splice=splice, c_drain=c_drain,
+                         order=order)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init_numa(lines or 0, bytes_ or 0, num_nodes,
-                           numa_map.encode() if numa_map else None
-                           ) != RC_OK:
-        raise RuntimeError("NUMA substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      num_nodes=num_nodes, numa_map=numa_map,
+                      spec=_spec)
     engine_fds = snapshot_fds() - pre_fds
 
     src_fd, must_close = _open_source(source)
@@ -6940,12 +6945,17 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
+    # W-REL6-5: lattice position (executor #10: NUMA, reactor-implied,
+    # generator) + this call's behavior flags.
+    _spec = ExecutorSpec(topology="numa", ingest="materialized",
+                         supervision="reactor", shape="generator",
+                         collect=True, splice=splice, c_drain=c_drain,
+                         order=order)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init_numa(lines or 0, bytes_ or 0, num_nodes,
-                           numa_map.encode() if numa_map else None
-                           ) != RC_OK:
-        raise RuntimeError("NUMA substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      num_nodes=num_nodes, numa_map=numa_map,
+                      spec=_spec)
     engine_fds = snapshot_fds() - pre_fds
 
     src_fd, must_close = _open_source(source)

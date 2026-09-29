@@ -283,14 +283,17 @@ def init_engine(lib, *, lines, bytes_, topology=None, num_nodes=1,
     if topology is None:
         topology = spec.topology if spec is not None else "uma"
     if topology == "numa":
+        # Call-site-exact form (matches the inlined bodies this
+        # replaces): falsy map -> NULL, else encoded/passed through.
         rc = lib.fr_py_init_numa(lines or 0, bytes_ or 0,
                                  num_nodes, numa_map.encode()
-                                 if isinstance(numa_map, str)
-                                 else numa_map)
+                                 if numa_map else None)
     else:
         rc = lib.fr_py_init(lines or 0, bytes_ or 0)
     if rc != RC_OK:
-        raise RuntimeError("substrate init failed")
+        raise RuntimeError("NUMA substrate init failed"
+                           if topology == "numa"
+                           else "substrate init failed")
     return rc
 
 
