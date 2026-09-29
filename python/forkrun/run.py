@@ -4214,6 +4214,97 @@ def _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued):
                     "(status %r)" % (st,))
 
 
+def _parse_drain_quantum(drain, coll_fd, use_orderer, out_fds, per_worker,
+                         sig_struct):
+    """Incremental preads into drain["pending"] (W-REL6-5: single impl).
+
+    Unifies the _parse_quantum twins (NUMA locked/stream): orderer
+    collection-file preads or per-worker memfd preads (+ optional
+    reassembly), all through the shared ``drain`` dict. Returns True
+    if any complete record buffered. Zero mode branches (same code,
+    parameterized carriers).
+    """
+    got = False
+    if use_orderer:
+        try:
+            _sz = os.fstat(coll_fd).st_size
+        except OSError:
+            _sz = drain["coll_off"]
+        if _sz > drain["coll_off"]:
+            try:
+                _ch = os.pread(coll_fd, _sz - drain["coll_off"],
+                               drain["coll_off"])
+            except OSError:
+                _ch = b""
+            if _ch:
+                drain["coll_off"] += len(_ch)
+                recs, tail = _split_records(
+                    drain["coll_tail"] + _ch)
+                drain["coll_tail"] = tail
+                if recs:
+                    drain["pending"].extend(
+                        blob for _, blob in recs)
+                    got = True
+        while len(drain["sig_buf"]) >= sig_struct.size:
+            drain["sig_buf"] = drain["sig_buf"][sig_struct.size:]
+    else:
+        while len(drain["sig_buf"]) >= sig_struct.size:
+            wid, _idx = sig_struct.unpack_from(
+                drain["sig_buf"][:sig_struct.size])
+            drain["sig_buf"] = drain["sig_buf"][sig_struct.size:]
+            if 0 <= wid:
+                while len(per_worker) <= wid:
+                    per_worker.append([0, b""])
+                if wid < len(out_fds):
+                    for _bidx, blob in _drain_worker_memfd(
+                            out_fds[wid], per_worker[wid]):
+                        if drain["reassembly"] is None:
+                            drain["pending"].append(blob)
+                        else:
+                            drain["reassembly"].add(_bidx, blob)
+                            for _, ordered in drain[
+                                    "reassembly"].drain():
+                                drain["pending"].append(ordered)
+                        got = True
+    return got
+
+
+def _poll_ingest_once(lib, helpers, pipe):
+    """One nonblocking ingest-death classification (W-REL6-5: single).
+
+    Unifies the _poll_ingest twins (NUMA locked/stream): records
+    definitive outcomes (pipe consumed/closed inside); raises on
+    error. Same rule both callers.
+    """
+    if helpers["ingest_kind"] is not None:
+        return
+    from ._reactor import check_scanner_death as _check_death
+    kind, code = _check_death(
+        pipe["ingest_pid"], pipe["ingest_death"])
+    if kind != "running":
+        helpers["ingest_kind"] = kind
+        helpers["ingest_code"] = code
+        pipe["ingest_death"] = None
+        if kind == "error":
+            lib.fr_py_abort()
+            raise RuntimeError(
+                "forkrun: NUMA ingest failed (status %r)"
+                % (code,))
+
+
+def _pipeline_quiescent(helpers, num_nodes):
+    """Full-pipeline quiescence (W-REL6-5: single implementation).
+
+    Unifies the _all_helpers_done twins (NUMA locked/stream): ingest
+    clean + index/scan coverage on every node. Ingest-clean alone
+    never triggers the verdict (indexers/scanners still spinning
+    up) -- only the whole pipeline being done does.
+    """
+    return (helpers["ingest_kind"] == "clean"
+            and len(helpers["index"]) >= num_nodes
+            and len(helpers["scan"]) >= num_nodes)
+
+
 def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                                workers, on_error, strict_poison=False, mode="python",
                                nodes="auto", order="none", stats=None,
@@ -5618,52 +5709,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 _maybe_fork_workers()
 
         def _parse_quantum():
-            # Incremental preads → drain["pending"]. Returns True if
-            # any complete record was buffered.
-            got = False
-            if use_orderer:
-                try:
-                    _sz = os.fstat(coll_fd).st_size
-                except OSError:
-                    _sz = drain["coll_off"]
-                if _sz > drain["coll_off"]:
-                    try:
-                        _ch = os.pread(coll_fd, _sz - drain["coll_off"],
-                                       drain["coll_off"])
-                    except OSError:
-                        _ch = b""
-                    if _ch:
-                        drain["coll_off"] += len(_ch)
-                        recs, tail = _split_records(
-                            drain["coll_tail"] + _ch)
-                        drain["coll_tail"] = tail
-                        if recs:
-                            drain["pending"].extend(
-                                blob for _, blob in recs)
-                            got = True
-                while len(drain["sig_buf"]) >= _sig.size:
-                    drain["sig_buf"] = drain["sig_buf"][_sig.size:]
-            else:
-                while len(drain["sig_buf"]) >= _sig.size:
-                    wid, _idx = _sig.unpack_from(
-                        drain["sig_buf"][:_sig.size])
-                    drain["sig_buf"] = drain["sig_buf"][_sig.size:]
-                    if 0 <= wid:
-                        while len(per_worker) <= wid:
-                            per_worker.append([0, b""])
-                        if wid < len(out_fds):
-                            for _bidx, blob in _drain_worker_memfd(
-                                    out_fds[wid], per_worker[wid]):
-                                if drain["reassembly"] is None:
-                                    drain["pending"].append(blob)
-                                else:
-                                    drain["reassembly"].add(_bidx, blob)
-                                    for _, ordered in drain[
-                                            "reassembly"].drain():
-                                        drain["pending"].append(ordered)
-                                got = True
-            return got
-
+            return _parse_drain_quantum(drain, coll_fd, use_orderer,
+                                         out_fds, per_worker, _sig)
         def _pump_drain_c():
             # W-PY21-A quantum: spill interleave (drives forks) +
             # results-pipe consumer. Same StopIteration contract as
@@ -6529,23 +6576,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 return [0] * num_nodes
 
         def _poll_ingest():
-            # One nonblocking ingest-death classification. Records
-            # definitive outcomes (the pipe is consumed/closed
-            # inside); raises on error.
-            if helpers["ingest_kind"] is not None:
-                return
-            kind, code = check_scanner_death(
-                pipe["ingest_pid"], pipe["ingest_death"])
-            if kind != "running":
-                helpers["ingest_kind"] = kind
-                helpers["ingest_code"] = code
-                pipe["ingest_death"] = None
-                if kind == "error":
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: NUMA ingest failed (status %r)"
-                        % (code,))
-
+            return _poll_ingest_once(lib, helpers, pipe)
         def _watch_pipeline():
             # Fallow death (WNOHANG) is fatal; indexer/scanner/ingest
             # deaths classify via their death pipes. Error kinds
@@ -6614,10 +6645,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             forked.add(node)
 
         def _all_helpers_done():
-            return (helpers["ingest_kind"] == "clean"
-                    and len(helpers["index"]) >= num_nodes
-                    and len(helpers["scan"]) >= num_nodes)
-
+            return _pipeline_quiescent(helpers, num_nodes)
         # Fork-timing loop: per-node publish gating + global stall
         # fallback. Ends when every node forked, or when the whole
         # pipeline is done (ingest + all indexers + all scanners
@@ -7017,20 +7045,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             forked.add(node)
 
         def _poll_ingest():
-            if helpers["ingest_kind"] is not None:
-                return
-            kind, code = check_scanner_death(
-                pipe["ingest_pid"], pipe["ingest_death"])
-            if kind != "running":
-                helpers["ingest_kind"] = kind
-                helpers["ingest_code"] = code
-                pipe["ingest_death"] = None
-                if kind == "error":
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: NUMA ingest failed (status %r)"
-                        % (code,))
-
+            return _poll_ingest_once(lib, helpers, pipe)
         def _watch_pipeline():
             # Same classification contract as the locked NUMA path:
             # clean helper exits key on ingest EOF POSTED (not on
@@ -7104,15 +7119,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                         _fork_node(node)
 
         def _all_helpers_done():
-            # Full-pipeline quiescence (same rule as the locked NUMA
-            # path): the ingest is fast (ms on small files) while
-            # indexers/scanners are still spinning up, so ingest-clean
-            # alone must never trigger the empty/anomaly verdict —
-            # only the whole pipeline being done does.
-            return (helpers["ingest_kind"] == "clean"
-                    and len(helpers["index"]) >= num_nodes
-                    and len(helpers["scan"]) >= num_nodes)
-
+            return _pipeline_quiescent(helpers, num_nodes)
         # W-PY21-A drain delegation state (pipe mode; forked lazily
         # once some node forked — signals queue until the drain
         # starts; empty inputs never need one).
@@ -7164,50 +7171,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         per_worker = [[0, b""] for _ in range(workers)]
 
         def _parse_quantum():
-            got = False
-            if use_orderer:
-                try:
-                    _sz = os.fstat(coll_fd).st_size
-                except OSError:
-                    _sz = drain["coll_off"]
-                if _sz > drain["coll_off"]:
-                    try:
-                        _ch = os.pread(coll_fd, _sz - drain["coll_off"],
-                                       drain["coll_off"])
-                    except OSError:
-                        _ch = b""
-                    if _ch:
-                        drain["coll_off"] += len(_ch)
-                        recs, tail = _split_records(
-                            drain["coll_tail"] + _ch)
-                        drain["coll_tail"] = tail
-                        if recs:
-                            drain["pending"].extend(
-                                blob for _, blob in recs)
-                            got = True
-                while len(drain["sig_buf"]) >= _sig.size:
-                    drain["sig_buf"] = drain["sig_buf"][_sig.size:]
-            else:
-                while len(drain["sig_buf"]) >= _sig.size:
-                    wid, _idx = _sig.unpack_from(
-                        drain["sig_buf"][:_sig.size])
-                    drain["sig_buf"] = drain["sig_buf"][_sig.size:]
-                    if 0 <= wid:
-                        while len(per_worker) <= wid:
-                            per_worker.append([0, b""])
-                        if wid < len(out_fds):
-                            for _bidx, blob in _drain_worker_memfd(
-                                    out_fds[wid], per_worker[wid]):
-                                if drain["reassembly"] is None:
-                                    drain["pending"].append(blob)
-                                else:
-                                    drain["reassembly"].add(_bidx, blob)
-                                    for _, ordered in drain[
-                                            "reassembly"].drain():
-                                        drain["pending"].append(ordered)
-                                got = True
-            return got
-
+            return _parse_drain_quantum(drain, coll_fd, use_orderer,
+                                         out_fds, per_worker, _sig)
         def _sweep_memfds():
             # Safety sweep before EOF (short final writes).
             if use_orderer:
