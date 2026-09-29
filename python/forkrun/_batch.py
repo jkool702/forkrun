@@ -55,7 +55,7 @@ class Batch:
         self._data = data
         self._offsets = offsets
         self._offsets_materialized = offsets is not None
-        self._mm = None  # shared mmap anchor (see from_window)
+        self._mm: memoryview | None = None  # shared mmap anchor (see from_window)
         self._valid = True
 
     @classmethod

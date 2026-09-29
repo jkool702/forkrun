@@ -32,9 +32,10 @@ class ForkrunSignalError(RuntimeError):
     number (or None when synthesized); ``bash_code`` is the Bash
     exit code this cause corresponds to (or None)."""
 
-    bash_code = None
+    bash_code: int | None = None
+    signo: int | None
 
-    def __init__(self, msg, *, signo=None):
+    def __init__(self, msg, *, signo: int | None = None):
         super().__init__(msg)
         self.signo = signo
 
@@ -84,10 +85,29 @@ class ForkrunPoisonSkip(RuntimeError):
         self.count = count
 
 
+class ForkrunWorkerFailure(RuntimeError):
+    """Workers died without recovery (W-REL6-3.5; Bash: exit 1).
+
+    Engine faults with no signal *cause contract* stay a
+    RuntimeError subclass (``except RuntimeError`` callers keep
+    working; NOT a ForkrunSignalError -- the taxonomy reserves
+    that for signal causes). ``signo`` is the first death-signal
+    number, or None for plain exits -- a proper typed attribute
+    (setting ``.signo`` on a bare RuntimeError is what mypy
+    rejects and what AttributeErrors on any other RuntimeError).
+    """
+
+    bash_code = 1
+
+    def __init__(self, msg, *, signo: int | None = None):
+        super().__init__(msg)
+        self.signo: int | None = signo
+
+
 #: Bash exit code -> Python exception (cause fidelity, not number
 #: fidelity). Codes without a signal cause (1, 42, 200/254) stay
 #: plain RuntimeError/SpawnError/PluginError by design.
-BASH_CODE_MAP = {
+BASH_CODE_MAP: dict[int, type[RuntimeError]] = {
     130: ForkrunInterrupted,
     138: ForkrunPreempted,
     143: ForkrunTerminated,
@@ -97,4 +117,4 @@ BASH_CODE_MAP = {
 
 __all__ = ["ForkrunSignalError", "ForkrunInterrupted",
            "ForkrunPreempted", "ForkrunTerminated",
-           "ForkrunPoisonSkip", "BASH_CODE_MAP"]
+           "ForkrunPoisonSkip", "ForkrunWorkerFailure", "BASH_CODE_MAP"]

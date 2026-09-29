@@ -12,7 +12,7 @@ and `sink=` plumb — or it validates an API that won't ship.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union, cast
 import io
 import os
 
@@ -235,9 +235,13 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     hazard, message = check_cuda_hazard()
     if hazard:
         raise RuntimeError(message)
-    return RunConfig(payload=payload, source=source, mode=mode, sink=sink,
-                     order=order, lines=lines, bytes=bytes_, workers=workers,
-                     nodes=nodes, on_error=on_error, streaming=streaming,
+    # W-REL6-3.5: mode/order/on_error were validated against their
+    # literal sets above -- cast (not re-check) into RunConfig.
+    return RunConfig(payload=payload, source=source,
+                     mode=cast(Mode, mode), sink=sink,
+                     order=cast(Order, order), lines=lines, bytes=bytes_,
+                     workers=workers, nodes=nodes,
+                     on_error=cast(OnError, on_error), streaming=streaming,
                      resume=resume_path, checkpoint_file=checkpoint_path,
                      strict_poison=strict_poison,
                      signal_policy=signal_policy)

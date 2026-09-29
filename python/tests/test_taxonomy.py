@@ -21,7 +21,8 @@ from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._reactor import _death_cause  # noqa: E402
 from forkrun.exceptions import (BASH_CODE_MAP, ForkrunInterrupted,  # noqa: E402
                                 ForkrunPoisonSkip, ForkrunPreempted,
-                                ForkrunSignalError, ForkrunTerminated)
+                                ForkrunSignalError, ForkrunTerminated,
+                                ForkrunWorkerFailure)
 
 from _helpers import assert_no_zombies, write_lines  # noqa: E402
 
@@ -156,6 +157,31 @@ class TestCrashStaysRuntimeError(unittest.TestCase):
             assert_no_zombies(self)
         finally:
             os.unlink(path)
+
+    def test_worker_failure_carries_typed_signo(self):
+        """W-REL6-3.5: ForkrunWorkerFailure is a RuntimeError with a
+        typed .signo (x5, deterministic -- genuine waitpid statuses
+        from real SIGKILLed children, no engine needed)."""
+        import sys as _sys
+        run_mod = _sys.modules["forkrun.run"]
+        for _ in range(5):
+            pid = os.fork()
+            if pid == 0:
+                os.kill(os.getpid(), _signal.SIGKILL)
+                os._exit(42)  # unreachable
+            _, status = os.waitpid(pid, 0)
+            self.assertTrue(os.WIFSIGNALED(status))
+            with self.assertRaises(ForkrunWorkerFailure) as ctx:
+                run_mod._raise_worker_failure(
+                    [pid], 1, "retry", statuses=[(pid, status)])
+            self.assertIsInstance(ctx.exception, RuntimeError)
+            self.assertNotIsInstance(ctx.exception, ForkrunSignalError)
+            self.assertEqual(ctx.exception.signo, _signal.SIGKILL)
+            # Plain-exit deaths carry None, not AttributeError.
+            with self.assertRaises(ForkrunWorkerFailure) as ctx2:
+                run_mod._raise_worker_failure(
+                    [pid], 1, "retry", statuses=[(pid, 0)])
+            self.assertIsNone(ctx2.exception.signo)
 
 
 def _slow(batch):

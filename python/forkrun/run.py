@@ -58,7 +58,8 @@ from ._spawn import make_spawn_payload
 from ._worker import _HDR, _c_plugin_spec, _c_spawn_spec, \
     _fork_c_plugin_worker, _fork_c_spawn_worker, resolve_payload_parent, \
     worker_main
-from .exceptions import ForkrunInterrupted, ForkrunPoisonSkip
+from .exceptions import (ForkrunInterrupted, ForkrunPoisonSkip,
+                           ForkrunWorkerFailure)
 
 import fcntl as _fcntl
 import time as _time
@@ -1462,7 +1463,7 @@ def _splice_ingest_stream_reactor_gen(source, *, bytes_, workers,
         splice=True, c_drain=c_drain)
 
 
-def _drain_worker_memfd(fd, state) -> tuple:
+def _drain_worker_memfd(fd, state) -> list:
     """Incrementally pread new bytes from one worker memfd.
 
     state is [read_offset, tail]; pread (never read/lseek — the fd's open
@@ -3529,15 +3530,15 @@ def _reactor_poison_summary(lib, state, strict_poison=False) -> None:
 def _reactor_failure_check(state, n_workers, on_error) -> None:
     """Raise when the reactor run lost work (cap-reached deaths)."""
     if getattr(state, "n_unrecovered", 0):
-        exc = RuntimeError(
+        # W-REL5-B8: cause fidelity — the first signal death rides
+        # along as .signo (None for plain exits). A ForkrunWorkerFailure
+        # stays a RuntimeError subclass (Bash exit-1 contract for
+        # engine faults; .signo is a typed attribute, not a monkeypatch).
+        raise ForkrunWorkerFailure(
             "forkrun: %d worker(s) failed without recovery "
             "(respawn cap reached) (on_error=%s)"
-            % (state.n_unrecovered, on_error))
-        # W-REL5-B8: cause fidelity — the first signal death rides
-        # along as .signo (None for plain exits). Stays plain
-        # RuntimeError (Bash exit-1 contract for engine faults).
-        exc.signo = _failure_signo(getattr(state, "statuses", ()))
-        raise exc
+            % (state.n_unrecovered, on_error),
+            signo=_failure_signo(getattr(state, "statuses", ())))
 
 
 def _failure_signo(statuses):
@@ -3561,16 +3562,15 @@ def _raise_worker_failure(failed, total, on_error, statuses=None):
 
     Message is identical to the historical raise; the exception
     additionally carries .signo (first signal death, or None) for
-    cause fidelity (exceptions.py D-PORT3). Stays plain
-    RuntimeError — engine faults keep the Bash-exit-1 contract
+    cause fidelity (exceptions.py D-PORT3). Stays a RuntimeError
+    subclass — engine faults keep the Bash-exit-1 contract
     (see test_taxonomy.TestCrashStaysRuntimeError).
     """
-    exc = RuntimeError(
+    raise ForkrunWorkerFailure(
         "forkrun: %d/%d workers failed%s" % (
-            len(failed), total, " (on_error=%s)" % on_error))
-    exc.signo = _failure_signo(
-        statuses if statuses is not None else failed)
-    raise exc
+            len(failed), total, " (on_error=%s)" % on_error),
+        signo=_failure_signo(
+            statuses if statuses is not None else failed))
 
 
 def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
@@ -5981,6 +5981,12 @@ def _execute_sweep_with_source(payload, source, combinations,
 # safe rule, same rationale as W-PY19 ingest.
 # =====================================================================
 
+# W-REL6-3.5: last-throttle timestamp for _pump_debug_tick (was a
+# function attribute, which mypy cannot model -- a module global
+# carries the identical single-writer semantics).
+_pump_debug_last = 0.0
+
+
 def _pump_debug_tick():
     """Env-gated pump diagnostic throttle (W-PY21-A debugging).
 
@@ -5991,14 +5997,12 @@ def _pump_debug_tick():
     """
     import time as _t
     now = _t.monotonic()
-    last = _pump_debug_tick._last
+    global _pump_debug_last
+    last = _pump_debug_last
     if os.environ.get("FORKRUN_DEBUG_PUMP") and now - last >= 1.0:
-        _pump_debug_tick._last = now
+        _pump_debug_last = now
         return True
     return False
-
-
-_pump_debug_tick._last = 0.0
 
 
 def _pump_debug_log(msg):
