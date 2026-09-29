@@ -43,35 +43,26 @@ first. Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 
 |-------------------------------------|-------------------------|-------------------------|------------------------|
 | **★ forkrun C plugin (†)**          | **5.38M rec/s (573 MB/s)** | **1.91M rec/s (894 MB/s)** | **634k rec/s (852 MB/s)** |
 | **★ forkrun C plugin (max)**        | **6.70M rec/s (714 MB/s)** | **2.34M rec/s (1,097 MB/s)** | **698k rec/s (938 MB/s)** |
-| Polars native (streaming NDJSON)    |           —             | 2.20M rec/s (1,033 MB/s) |          —             |
+| Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
 | **★ forkrun Python UDF (†)**        | **1.56M rec/s (167 MB/s)** |  **672k rec/s (315 MB/s)**   |  **90k rec/s (121 MB/s)**  |
-| **★ forkrun Python UDF (max)**      | **1.65M rec/s (175 MB/s)** |  **720k rec/s (338 MB/s)**   |  **91k rec/s (122 MB/s)**¹ |
-| ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s)  |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
-| multiprocessing.Pool                | 1.60M rec/s (170 MB/s)  |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
-| DuckDB native (SQL/JSON)            |           —             |  189k rec/s (89 MB/s)   |          —             |
-| Ray Data [†]                        |  250k rec/s (27 MB/s)   |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
-| HuggingFace Datasets                |  120k rec/s (13 MB/s)   |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
-|-------------------------------------|-------------------------|-------------------------|------------------------|
-| **forkrun C (†) vs Executor**       | **3.3×**                | **2.4×**                | **6.7×**               |
-| **forkrun C (max) vs Executor**     | **4.1×**                | **2.9×**                | **7.4×**               |
-| **forkrun C vs Polars**             |           —             | **0.87× (†) · 1.06× (max)** |          —             |
+| **★ forkrun Python UDF (max)**      | **1.65M rec/s (175 MB/s)** |  **720k rec/s (338 MB/s)**   |  **91k rec/s (122 MB/s)**  |
+| ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s) |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
+| multiprocessing.Pool                | 1.60M rec/s (170 MB/s) |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
+| DuckDB native (SQL/JSON)            |           —            |  189k rec/s (89 MB/s)   |          —             |
+| Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
+| HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
+|-------------------------------------|---------------------------|---------------------------|---------------------------|
+| **forkrun C vs Executor**           | **3.3× (†) · 4.1× (max)** | **2.4× (†) · 2.9× (max)** | **6.7× (†) · 7.4× (max)** |
+| **forkrun C vs Polars**             |           —              | **0.87× (†) · 1.06× (max)** |            —             |
 
-¹ Python-(max)-heavy was BLOCKED at table-cut time by the W-P0LEGACY legacy-scanner
-hang (legacy fail-fast hung in the materialized scanner on heavy-Python 5M: scanner-helper
-watchdog 10s → SIGKILL → `scan failed (status 9)`, deterministic). Root cause was the
-W-REL5-B4 10s bound on the legacy scanner-first join — the backpressured scanner lives
-~the full run by design; the legacy parent now reaps workers first (reactor pattern).
-Refreshed post-fix median-of-3: 91k rec/s (55.15s; trials 55.15/55.26/54.39), exact
-5000000/4997982 — at Executor parity (94k), as expected for the Python UDF path.
-
-**[†] Tested worker-failure recovery:** the (†) forkrun rows run the reactor default and
+**(†) Tested worker-failure recovery:** the (†) forkrun rows run the reactor default and
 automatically recover from unhandled worker
 exceptions, `SIGSEGV`, and `SIGKILL`-class deaths — including OOM-kill, which the kernel
 delivers as SIGKILL — completing with 100% byte-exact output on the tested cases
 (orphaned batches are rolled back via `ftruncate`, re-queued to escrow, and re-executed). SIGKILL-tested;
 a cgroup-OOM scenario test is queued (no cgroup-specific test exists yet — the mechanism
 claim is true-by-mechanism, untested-by-scenario).
-The (max) rows run legacy fail-fast (`orchestrator=False`, `order="none"`): a worker death
+The **(max)** rows run legacy fail-fast (`orchestrator=False`, `order="none"`): a worker death
 aborts the run — ceiling throughput, no recovery, unordered output.
 Ray Data's tested recovery uses task retry. The other systems were not observed to autonomously
 recover from the injected worker-failure cases tested here; observed behavior included pipeline
