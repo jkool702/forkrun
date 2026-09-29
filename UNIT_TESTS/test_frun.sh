@@ -392,6 +392,25 @@ run_test "Batch size range (-l 1:5)" \
   "cat '$LINE_INPUT' | frun -l 1:5 printf \"%s\\n\"" \
   "$(cat "$LINE_INPUT")"
 
+# Sentinels (FLAGS.md: 0 = default max, -1 = maximum max). Regression
+# lock-in: W-REL5-A10's fail-closed _expand_unit briefly refused -1
+# (and -0/+0) before it ever reached the engine's nibble machine.
+run_test "Batch max sentinel (-l 1:-1 runs, max-max)" \
+  "cat '$LINE_INPUT' | frun -l 1:-1 printf \"%s\\n\"" \
+  "$(cat "$LINE_INPUT")"
+
+run_test "Batch max sentinel (-l 1:0 runs, default max)" \
+  "cat '$LINE_INPUT' | frun -l 1:0 printf \"%s\\n\"" \
+  "$(cat "$LINE_INPUT")"
+
+run_test "Worker max sentinel (-j -1 runs)" \
+  "cat '$LINE_INPUT' | frun -j -1 printf \"%s\\n\"" \
+  "$(cat "$LINE_INPUT")"
+
+run_test "Non-sentinel negative still refused (-l -2)" \
+  "cat '$LINE_INPUT' | frun -l -2 printf \"%s\\n\"" \
+  "" 1
+
 run_test "Exact lines (-L 3)" \
   "cat '$LINE_INPUT' | frun -L 3 printf \"%s\\n\"" \
   "$(cat "$LINE_INPUT")"

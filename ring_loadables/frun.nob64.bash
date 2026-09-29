@@ -246,8 +246,15 @@ frun __exec__ "$@"
         # (1.5G truncated to 1, -5M clamped to INT64_MAX, 1e3 exponent
         # form clamped, 0x10 read as octal 8, 1_000 mangled). Empty
         # stays empty-ok for open ranges; 0 stays 0.
+        # Engine-defined sentinels (apply_config: "0"->default max,
+        # "-1"->maximum max; "-0"/"+0"->min/max slots) pass through
+        # verbatim -- they are not integers to expand. Every other
+        # negative stays refused.
         if [[ -z "$val" ]]; then REPLY=""; return 0; fi
         [[ "$val" == "0" ]] && { REPLY=0; return 0; }
+        [[ "$val" == "-1" ]] && { REPLY=-1; return 0; }
+        [[ "$val" == "-0" ]] && { REPLY=-0; return 0; }
+        [[ "$val" == "+0" ]] && { REPLY=+0; return 0; }
         [[ "$val" =~ ^\+?[0-9]+(([kmgtpe]i?)?b?)?$ ]] || {
             printf 'forkrun [ERROR]: invalid size or count value %q (want <integer>[k|m|g|t|p|e][i][B], e.g. 100, 1k, 2MiB).\n' "$1" >&2
             return 1
