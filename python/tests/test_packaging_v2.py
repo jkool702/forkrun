@@ -241,7 +241,8 @@ class TestReleaseChecklist(unittest.TestCase):
         """release_check.py gate -- only on committed trees.
 
         The checklist asserts a clean tree, which a working tree
-        cannot satisfy by construction; it skips there and runs
+        cannot satisfy by construction; it FAILS there (fail-closed:
+        a skip would let a dirty tree look release-ready) and runs
         fully on CI release branches / pre-tag checkouts.
         Skips too when running UNDER release_check itself
         (FORKRUN_UNDER_RELEASE_CHECK — otherwise the checklist's
@@ -253,6 +254,8 @@ class TestReleaseChecklist(unittest.TestCase):
         state is current: pre-finalization it asserts exactly one
         failure (the changelog guard) with everything else green;
         post-finalization it asserts the full green.
+        W-REL6-2.1: the dirty-tree branch below is a FAIL, not a
+        skip -- commit or stash first, then re-run.
         """
         if os.environ.get("FORKRUN_UNDER_RELEASE_CHECK"):
             self.skipTest("running under release_check — no recursion")
@@ -261,7 +264,11 @@ class TestReleaseChecklist(unittest.TestCase):
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)
         if proc.stdout.strip():
-            self.skipTest("tree dirty — checklist runs pre-tag only")
+            self.fail(
+                "release checklist requires a committed tree (it asserts "
+                "a clean tree plus HEAD-anchored checks) -- commit or "
+                "stash first, then re-run. Dirty paths:\n%s"
+                % proc.stdout.strip())
             return
         with open(os.path.join(REPO_ROOT, "DOCS", "CHANGELOG.md")) as fh:
             unreleased = re.search(
