@@ -163,7 +163,19 @@ def resolve_payload_parent(spec):
     already-resolved specs) pass through, so this is also safe as a
     backstop at every fork site. Import errors surface here, loudly
     and early, instead of as worker crashes.
+
+    Freshness: the leaf module is dropped from sys.modules and
+    re-imported on every call. Pre-fix each child imported fresh per
+    generation (children _exit, so nothing persisted); without the
+    drop, a same-named module rewritten between calls (test
+    fixtures, REPL/notebook iteration) would resolve stale in the
+    parent. Only the leaf is dropped ("pkg" stays cached; the
+    re-import rebinds it).
     """
+    if isinstance(spec, str):
+        mod_name, _, func_name = spec.partition(":")
+        if mod_name and func_name:
+            sys.modules.pop(mod_name, None)
     return _resolve_payload(spec)
 
 
