@@ -3881,10 +3881,23 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. Raises before any
     # child exists. engine_live gates the abort choreography below.
-    resume_state = resume_begin(lib, resume, order=order,
-                                 orchestrator=True, mode=mode,
-                                 collect=collect, splice=splice,
-                                 source=source)
+    try:
+        resume_state = resume_begin(lib, resume, order=order,
+                                     orchestrator=True, mode=mode,
+                                     collect=collect, splice=splice,
+                                     source=source)
+    except BaseException:
+        # W-REL6-3.4b: resume_begin raises BEFORE the try/finally
+        # below is entered (pre-fork, by design) -- but AFTER
+        # fr_py_init. Without this destroy the initialized engine
+        # leaks live into the next map() in this process (observed:
+        # total output loss on the following run). No children or
+        # fds exist yet, so a bare destroy is complete teardown.
+        try:
+            lib.fr_py_destroy()
+        except Exception:
+            pass
+        raise
     engine_live = True
 
     src_fd, must_close = _open_source(source)
@@ -4218,10 +4231,23 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
-    resume_state = resume_begin(lib, resume, order=order,
-                                 orchestrator=True, mode=mode,
-                                 collect=True, splice=splice,
-                                 source=source)
+    try:
+        resume_state = resume_begin(lib, resume, order=order,
+                                     orchestrator=True, mode=mode,
+                                     collect=True, splice=splice,
+                                     source=source)
+    except BaseException:
+        # W-REL6-3.4b: resume_begin raises BEFORE the try/finally
+        # below is entered (pre-fork, by design) -- but AFTER
+        # fr_py_init. Without this destroy the initialized engine
+        # leaks live into the next map() in this process (observed:
+        # total output loss on the following run). No children or
+        # fds exist yet, so a bare destroy is complete teardown.
+        try:
+            lib.fr_py_destroy()
+        except Exception:
+            pass
+        raise
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (spill/scan, before assignment below).
@@ -4728,10 +4754,23 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
-    resume_state = resume_begin(lib, resume, order=order,
-                                 orchestrator=True, mode=mode,
-                                 collect=collect, splice=splice,
-                                 source=source)
+    try:
+        resume_state = resume_begin(lib, resume, order=order,
+                                     orchestrator=True, mode=mode,
+                                     collect=collect, splice=splice,
+                                     source=source)
+    except BaseException:
+        # W-REL6-3.4b: resume_begin raises BEFORE the try/finally
+        # below is entered (pre-fork, by design) -- but AFTER
+        # fr_py_init. Without this destroy the initialized engine
+        # leaks live into the next map() in this process (observed:
+        # total output loss on the following run). No children or
+        # fds exist yet, so a bare destroy is complete teardown.
+        try:
+            lib.fr_py_destroy()
+        except Exception:
+            pass
+        raise
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
@@ -5272,10 +5311,23 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
-    resume_state = resume_begin(lib, resume, order=order,
-                                 orchestrator=True, mode=mode,
-                                 collect=True, splice=splice,
-                                 source=source)
+    try:
+        resume_state = resume_begin(lib, resume, order=order,
+                                     orchestrator=True, mode=mode,
+                                     collect=True, splice=splice,
+                                     source=source)
+    except BaseException:
+        # W-REL6-3.4b: resume_begin raises BEFORE the try/finally
+        # below is entered (pre-fork, by design) -- but AFTER
+        # fr_py_init. Without this destroy the initialized engine
+        # leaks live into the next map() in this process (observed:
+        # total output loss on the following run). No children or
+        # fds exist yet, so a bare destroy is complete teardown.
+        try:
+            lib.fr_py_destroy()
+        except Exception:
+            pass
+        raise
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
