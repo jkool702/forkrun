@@ -1243,7 +1243,8 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[bytes]:
               streaming=kwargs.get("streaming"),
               resume=kwargs.get("resume"),
               checkpoint_file=kwargs.get("checkpoint_file"),
-               strict_poison=kwargs.get("strict_poison", False))
+               strict_poison=kwargs.get("strict_poison", False),
+               signal_policy=kwargs.get("signal_policy", "default"))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
     if orchestrator is None:
         # W-REL1/R1 (ratified Option A): recovery is the default.

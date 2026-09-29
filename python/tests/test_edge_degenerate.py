@@ -109,7 +109,10 @@ class TestResumeBoundaries(unittest.TestCase):
         data = b"".join(b"line %d\n" % i for i in range(100))
         path = self._write_input(data)
         ckpt = self._write_ckpt(CheckpointState(1 << 40, 0, []))
-        with self.assertRaises(RuntimeError):
+        # W-REL6-3.4: the cross-field semantics gate fires first
+        # (ValueError naming the horizon, pre-fork); the engine-side
+        # RuntimeError remains the fallback -- either is loud.
+        with self.assertRaises((RuntimeError, ValueError)):
             forkrun.map(_identity, path, workers=2, nodes=1,
                         order="index", orchestrator=True, resume=ckpt)
         assert_no_zombies(self)
