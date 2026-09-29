@@ -26,32 +26,53 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 
 ## 0. Headline HN Release Table (AI/ML Python Benchmark)
 
-### 5M-Record Steady-State Benchmark — 28 Workers, `order="index"`
+### 5M-Record Steady-State Benchmark — 28 Workers, UMA (`nodes=1`)
 
-All systems process the same 5,000,000-record input on the same 28-thread Intel i9-7940X. 
-forkrun measurements are v3.6.0 (re-run 2026-09-25). Throughput is steady-state after warmup. 
-MB/s uses decimal units (1 MB = 10⁶ bytes/s).
+All systems process the same 5,000,000-record input on the same 28-thread Intel i9-7940X.
+forkrun rows re-measured 2026-09-29 (post-W-REL6, `ff99eb7`; median-of-3 + warmup, exact
+totals everywhere: light 5000000, medium 4997892, heavy 4997982).
+Two forkrun configurations per engine: **(†) the reactor default** (`orchestrator=True`,
+`order="index"`) — crash recovery, pays the C-orderer transit; **(max) the unordered
+ceiling** (`orchestrator=False`, `order="none"`) — legacy fail-fast, no recovery, no
+ordering. The (max) legs reproduce the 2026-09-25 single-line numbers (6.70 vs 6.61M,
+2.34 vs 2.37M, 698k vs 718k), confirming those were legacy-path measurements; the W-REL1/R1
+default flip (reactor-by-default, 2026-09-27) moved the default from the second row to the
+first. Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ bytes/s).
 
 | System                              | Light (533 MB)          | Medium (2.35 GB)        | Heavy (6.72 GB)        |
 |-------------------------------------|-------------------------|-------------------------|------------------------|
-| **★ forkrun C plugin** [†]          | **6.61M rec/s (704 MB/s)** | **2.37M rec/s (1,113 MB/s)** | **718k rec/s (965 MB/s)** |
+| **★ forkrun C plugin (†)**          | **5.38M rec/s (573 MB/s)** | **1.91M rec/s (894 MB/s)** | **634k rec/s (852 MB/s)** |
+| **★ forkrun C plugin (max)**        | **6.70M rec/s (714 MB/s)** | **2.34M rec/s (1,097 MB/s)** | **698k rec/s (938 MB/s)** |
 | Polars native (streaming NDJSON)    |           —             | 2.20M rec/s (1,033 MB/s) |          —             |
-| **★ forkrun Python UDF** [†]        | **1.74M rec/s (185 MB/s)** |  **730k rec/s (343 MB/s)**   |  **95k rec/s (128 MB/s)**  |
+| **★ forkrun Python UDF (†)**        | **1.56M rec/s (167 MB/s)** |  **672k rec/s (315 MB/s)**   |  **90k rec/s (121 MB/s)**  |
+| **★ forkrun Python UDF (max)**      | **1.65M rec/s (175 MB/s)** |  **720k rec/s (338 MB/s)**   |  **91k rec/s (122 MB/s)**¹ |
 | ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s)  |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
 | multiprocessing.Pool                | 1.60M rec/s (170 MB/s)  |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
 | DuckDB native (SQL/JSON)            |           —             |  189k rec/s (89 MB/s)   |          —             |
-| **Ray Data** [†]                    |  250k rec/s (27 MB/s)   |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
+| Ray Data [†]                        |  250k rec/s (27 MB/s)   |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)   |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|-------------------------|-------------------------|------------------------|
-| **forkrun C plugin vs Executor**    | **4.0×**                | **3.0×**                | **7.6×**               |
-| **forkrun C plugin vs Polars**      |           —             | **1.08×**               |          —             |
+| **forkrun C (†) vs Executor**       | **3.3×**                | **2.4×**                | **6.7×**               |
+| **forkrun C (max) vs Executor**     | **4.1×**                | **2.9×**                | **7.4×**               |
+| **forkrun C vs Polars**             |           —             | **0.87× (†) · 1.06× (max)** |          —             |
 
-**[†] Tested worker-failure recovery:** Forkrun automatically recovers from unhandled worker
+¹ Python-(max)-heavy was BLOCKED at table-cut time by the W-P0LEGACY legacy-scanner
+hang (legacy fail-fast hung in the materialized scanner on heavy-Python 5M: scanner-helper
+watchdog 10s → SIGKILL → `scan failed (status 9)`, deterministic). Root cause was the
+W-REL5-B4 10s bound on the legacy scanner-first join — the backpressured scanner lives
+~the full run by design; the legacy parent now reaps workers first (reactor pattern).
+Refreshed post-fix median-of-3: 91k rec/s (55.15s; trials 55.15/55.26/54.39), exact
+5000000/4997982 — at Executor parity (94k), as expected for the Python UDF path.
+
+**[†] Tested worker-failure recovery:** the (†) forkrun rows run the reactor default and
+automatically recover from unhandled worker
 exceptions, `SIGSEGV`, and `SIGKILL`-class deaths — including OOM-kill, which the kernel
 delivers as SIGKILL — completing with 100% byte-exact output on the tested cases
 (orphaned batches are rolled back via `ftruncate`, re-queued to escrow, and re-executed). SIGKILL-tested;
 a cgroup-OOM scenario test is queued (no cgroup-specific test exists yet — the mechanism
 claim is true-by-mechanism, untested-by-scenario).
+The (max) rows run legacy fail-fast (`orchestrator=False`, `order="none"`): a worker death
+aborts the run — ceiling throughput, no recovery, unordered output.
 Ray Data's tested recovery uses task retry. The other systems were not observed to autonomously
 recover from the injected worker-failure cases tested here; observed behavior included pipeline
 abort (`BrokenProcessPool`), lost state, or indefinite hang.
@@ -326,6 +347,12 @@ speed). (`AI_benchmark_results.md` W-PY31–33.)
 - F-NUMA1 resolved (was: "known open item" — heavy-20M `@4`
   silently partial ~25% in 2 of ~10): meta-ring lapping fixed
   and gated as above; the NOTE† stands corrected, not open.
+- §0 four-line revision (2026-09-29, post-W-REL6): the single
+  2026-09-25 forkrun rows are superseded by (†)/(max) pairs —
+  the old numbers were legacy-path measurements (the (max) legs
+  reproduce them: 6.70 vs 6.61M, 2.34 vs 2.37M, 698k vs 718k).
+  Python-(max)-heavy (W-P0LEGACY hang, fixed pre-tag) refreshed to
+  91k post-fix; all twelve cells qualified, zero BLOCKs.
 
 ## v3.6.0 claims (what the tables above support)
 

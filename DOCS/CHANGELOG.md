@@ -90,6 +90,24 @@ with one blob cycle at the end (R6.3).
   buffering, gate both forms, -I argv form; 15/15 green).
   v3.5.2 `(unreleased)` marker removed (was tagged).
 
+### Legacy scanner-join watchdog misfire, fixed pre-tag (W-P0LEGACY)
+
+Regression from W-REL5-B4 (bounded 10s helper joins, `fce8651`):
+the legacy parent joined the materialized scanner FIRST, but the
+scanner parks under backpressure (`uma_max_ahead`) for ~the full
+run on slow-UDF workloads — so any legacy run past ~10s wall died
+with the helper watchdog SIGKILL + `scan failed (status 9)`.
+Deterministic on heavy-Python 5M (legacy, either order, 4/28w);
+the reactor was immune (workers-first join order). Fix reorders
+the legacy teardown to the reactor pattern — reap workers first
+(unbounded) while watching the scanner WNOHANG (fail-fast on
+scanner death preserves the old order's crash-safety), then
+backstop-join the scanner. No new mode branches, no engine diff.
+Lock-in `python/tests/test_p0legacy.py` (corpus-gated medium-5M
+legacy 2w, `lines=1000` pinned race-independent): FAIL pre-fix
+(watchdog 10.5s) / PASS post-fix. Headline Python-(max)-heavy cell
+refreshed post-fix (91k); all twelve §0 cells qualified.
+
 ### Engine + Bash surgical fixes, one blob cycle (W-REL3)
 
 Error-propagation and bounds-checking only; zero contact with
