@@ -2237,7 +2237,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
-    # W-REL6-5: lattice position (executor #4: UMA, streaming-ingest,
+    # W-REL6-5: lattice position (executor #4: UMA, streaming,
     # plain, generator) + this call's behavior flags.
     _spec = ExecutorSpec(topology="uma", ingest="streaming",
                          supervision="plain", shape="generator",
@@ -2786,7 +2786,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
     use_drain = bool(c_drain) and collect
     if use_drain:
         _require_drain_symbol()
-    # W-REL6-5: lattice position (executor #2: UMA, streaming-ingest,
+    # W-REL6-5: lattice position (executor #2: UMA, streaming,
     # plain, blocking) + this call's behavior flags.
     _spec = ExecutorSpec(topology="uma", ingest="streaming",
                          supervision="plain", shape="blocking",
@@ -3901,10 +3901,17 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 "c_spawn_loop=True takes no sink (no per-batch "
                 "Python hook in the C loop)")
         _require_spawn_loop_symbol()
+    # W-REL6-5: lattice position (executor #5: UMA, materialized,
+    # reactor, blocking) + this call's behavior flags.
+    _spec = ExecutorSpec(topology="uma", ingest="materialized",
+                         supervision="reactor", shape="blocking",
+                         collect=collect, splice=splice, c_drain=c_drain,
+                         order=order, c_worker_loop=c_worker_loop,
+                         c_spawn_loop=c_spawn_loop)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
-        raise RuntimeError("substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      spec=_spec)
     engine_fds = snapshot_fds() - pre_fds
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. Raises before any
@@ -4251,10 +4258,16 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
+    # W-REL6-5: lattice position (executor #6: UMA, materialized,
+    # reactor, generator) + this call's behavior flags.
+    _spec = ExecutorSpec(topology="uma", ingest="materialized",
+                         supervision="reactor", shape="generator",
+                         collect=True, splice=splice, c_drain=c_drain,
+                         order=order)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
-        raise RuntimeError("substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      spec=_spec)
     engine_fds = snapshot_fds() - pre_fds
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
@@ -4774,10 +4787,16 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    # W-REL6-5: lattice position (executor #7: UMA, streaming,
+    # reactor, blocking) + this call's behavior flags.
+    _spec = ExecutorSpec(topology="uma", ingest="streaming",
+                         supervision="reactor", shape="blocking",
+                         collect=collect, splice=splice, c_drain=c_drain,
+                         order=order)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
-        raise RuntimeError("substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      spec=_spec)
     engine_fds = snapshot_fds() - pre_fds
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
@@ -5331,10 +5350,16 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
+    # W-REL6-5: lattice position (executor #8: UMA, streaming,
+    # reactor, generator) + this call's behavior flags.
+    _spec = ExecutorSpec(topology="uma", ingest="streaming",
+                         supervision="reactor", shape="generator",
+                         collect=True, splice=splice, c_drain=c_drain,
+                         order=order)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
-        raise RuntimeError("substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      spec=_spec)
     engine_fds = snapshot_fds() - pre_fds
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
