@@ -121,6 +121,59 @@ def parse_checkpoint(path):
     return CheckpointState(horizon, stdout_bytes, jagged)
 
 
+def check_checkpoint_semantics(state, source_size=None):
+    """Cross-field semantic validation (W-REL6-3.4).
+
+    The format parser (parse_checkpoint) accepts any well-formed
+    uint64s -- HORIZON=1000000 with STDOUT_BYTES=1 on a 100-byte
+    source parses clean. This check rejects coordinate sets that
+    cannot describe the given source, naming the offending field:
+
+    - horizon > source_size (when known): the contiguous committed
+      offset cannot exceed the input.
+    - jagged intervals must be sorted ascending by start, must not
+      overlap each other, and must lie beyond the horizon
+      (jagged = out-of-order committed ranges BEYOND the horizon;
+      an interval starting below it double-commits).
+    - jagged interval ends must be within source_size (when known).
+
+    No STDOUT_BYTES rule: a horizon > 0 with stdout_bytes == 0 is
+    legitimate (None-returning payloads commit input with no
+    output), and no output-size bound is knowable here -- so the
+    absurd-STDOUT class is caught only via the horizon rule. Unknown
+    source_size (streaming/unstatable sources) skips the size rules
+    and still enforces ordering/overlap/horizon shape.
+
+    Raises ValueError (fail-closed). Returns True when valid.
+    """
+    prev_end = None
+    prev_start = None
+    for i, (start, end) in enumerate(state.jagged):
+        if prev_start is not None and start < prev_start:
+            raise ValueError(
+                "jagged intervals not sorted: interval %d starts at %d "
+                "after start %d" % (i, start, prev_start))
+        if prev_end is not None and start < prev_end:
+            raise ValueError(
+                "jagged intervals overlap: interval %d (%d:%d) overlaps "
+                "the previous end %d" % (i, start, end, prev_end))
+        if start < state.horizon:
+            raise ValueError(
+                "jagged interval %d:%d overlaps the horizon %d"
+                % (start, end, state.horizon))
+        if source_size is not None and end > source_size:
+            raise ValueError(
+                "jagged interval end %d exceeds source size %d"
+                % (end, source_size))
+        prev_start = start
+        prev_end = end
+    if source_size is not None and state.horizon > source_size:
+        raise ValueError(
+            "horizon %d exceeds source size %d"
+            % (state.horizon, source_size))
+    return True
+
+
 def collapse_intervals(intervals):
     """Sort + collapse overlapping/contiguous intervals.
 
@@ -276,5 +329,5 @@ def snapshot_from_engine(lib):
 
 __all__ = ["DEFAULT_CHECKPOINT_FILE", "MAX_JAGGED", "CheckpointState",
            "parse_checkpoint", "serialize_checkpoint", "write_checkpoint",
-           "check_checkpoint_safety", "collapse_intervals",
-           "snapshot_from_engine"]
+           "check_checkpoint_safety", "check_checkpoint_semantics",
+           "collapse_intervals", "snapshot_from_engine"]

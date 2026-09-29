@@ -31,7 +31,8 @@ import sys
 import time
 
 from ._checkpoint import (DEFAULT_CHECKPOINT_FILE, CheckpointState,
-                          check_checkpoint_safety, parse_checkpoint,
+                          check_checkpoint_safety,
+                          check_checkpoint_semantics, parse_checkpoint,
                           snapshot_from_engine, write_checkpoint)
 
 # Sidecar suffix: framed engine-committed output of aborted runs,
@@ -122,15 +123,44 @@ def resolve_checkpoint_dest(checkpoint_file, resume_path):
     return DEFAULT_CHECKPOINT_FILE
 
 
+def _source_size(source):
+    """Best-effort input size for checkpoint semantics (W-REL6-3.4).
+
+    Paths stat, int fds + fileno() objects fstat; anything else
+    (streams, unknowns, failures) returns None and the size-gated
+    semantic rules are skipped (ordering/overlap/horizon shape still
+    enforced). Never raises.
+    """
+    if source is None:
+        return None
+    try:
+        if isinstance(source, (str, bytes, os.PathLike)):
+            return os.stat(source).st_size
+        if isinstance(source, bool):
+            return None
+        if isinstance(source, int):
+            if source < 0:
+                return None
+            return os.fstat(source).st_size
+        fileno = getattr(source, "fileno", None)
+        if callable(fileno):
+            return os.fstat(fileno()).st_size
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def resume_begin(lib, resume_path, *, order, orchestrator, mode,
-                 collect=True, splice=False, num_nodes=1):
+                 collect=True, splice=False, num_nodes=1, source=None):
     """Begin a resumed run: gate + parse + safety + engine state.
 
     Call AFTER fr_py_init (which zeroes the ledger) and BEFORE the
     scan/worker forks. Returns the CheckpointState, or None when no
     resume was requested. Raises FileNotFoundError (missing file),
-    ValueError (malformed checkpoint), RuntimeError (unsafe file,
-    unsupported path, engine failure) — always before any fork.
+    ValueError (malformed checkpoint OR failed cross-field semantics
+    -- W-REL6-3.4: horizon/intervals checked against source_size),
+    RuntimeError (unsafe file, unsupported path, engine failure) --
+    always before any fork.
     """
     if resume_path is None:
         return None
@@ -139,6 +169,8 @@ def resume_begin(lib, resume_path, *, order, orchestrator, mode,
                         collect=collect, splice=splice,
                         num_nodes=num_nodes)
     state = parse_checkpoint(resume_path)
+    check_checkpoint_semantics(state,
+                               source_size=_source_size(source))
     ok, warnings = check_checkpoint_safety(resume_path)
     if not ok:
         raise RuntimeError(

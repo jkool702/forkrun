@@ -3790,7 +3790,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # child exists. engine_live gates the abort choreography below.
     resume_state = resume_begin(lib, resume, order=order,
                                  orchestrator=True, mode=mode,
-                                 collect=collect, splice=splice)
+                                 collect=collect, splice=splice,
+                                 source=source)
     engine_live = True
 
     src_fd, must_close = _open_source(source)
@@ -4126,7 +4127,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     # abort choreography below.
     resume_state = resume_begin(lib, resume, order=order,
                                  orchestrator=True, mode=mode,
-                                 collect=True, splice=splice)
+                                 collect=True, splice=splice,
+                                 source=source)
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (spill/scan, before assignment below).
@@ -4635,7 +4637,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     # abort choreography below.
     resume_state = resume_begin(lib, resume, order=order,
                                  orchestrator=True, mode=mode,
-                                 collect=collect, splice=splice)
+                                 collect=collect, splice=splice,
+                                 source=source)
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
@@ -5178,7 +5181,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     # abort choreography below.
     resume_state = resume_begin(lib, resume, order=order,
                                  orchestrator=True, mode=mode,
-                                 collect=True, splice=splice)
+                                 collect=True, splice=splice,
+                                 source=source)
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
