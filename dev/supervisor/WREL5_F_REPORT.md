@@ -99,6 +99,15 @@ in the bundle.
   designed-red state instead of weakening the gate); no product
   halts (no C in scope to collide with).
 
+## 9. Final verification runs (post-commit)
+
+- Full `release_check.py`: **19/20, the single failure exactly the
+  designed-red changelog guard** (`SOME CHECKS FAILED (1) — DO NOT
+  TAG`), everything else green incl. a further full-suite pass,
+  tag-freedom, IDL freshness, and the single-build checksums.
+- Referee gates 30/30; twins lockstep (72 headings, frun pair);
+  R5.3 empty; perf A/B parity (~2%, noise).
+
 ## 8. What this does NOT prove
 
 - Version-matrix/deadsnakes/static-analysis/freshness CI legs
