@@ -49,6 +49,8 @@ from ._fd_scrub import scrub_fds, snapshot_fds
 from ._pipes import make_pipe
 from ._plugin import make_plugin_payload
 from ._reassembly import ReassemblyBuffer
+from ._executor_core import ExecutorSpec
+from ._executor_core import init_engine as _core_init_engine
 from ._resume import (ORDERER_REAP_TIMEOUT, WORKER_REAP_TIMEOUT,
                        _waitpid_bounded, checkpoint_on_abort,
                        consume_sidecar, require_resume_path,
@@ -1878,10 +1880,17 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
+    # W-REL6-5: lattice position (executor #3: UMA, materialized,
+    # plain, generator) + this call's behavior flags (stream always
+    # collects into yields: collect=True).
+    _spec = ExecutorSpec(topology="uma", ingest="materialized",
+                         supervision="plain", shape="generator",
+                         collect=True, splice=splice, c_drain=c_drain,
+                         order=order)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
-        raise RuntimeError("substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      spec=_spec)
     # Engine fds for child keep sets (W-PY16 addendum scrub).
     engine_fds = snapshot_fds() - pre_fds
 
@@ -1965,9 +1974,9 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             lib, workers=workers, memfd=memfd, size=size,
             out_fds=out_fds, signal_w=signal_w, fallow_w=None,
             engine_fds=engine_fds, payload=payload, sink=None,
-            mode="python", on_error=on_error, splice=splice,
+            mode="python", on_error=on_error,
             src_fd=src_fd, must_close=must_close,
-            signal_r_to_close=signal_r))
+            signal_r_to_close=signal_r, spec=_spec))
         # Parent drops its write copy: EOF on signal_r then means every
         # worker has exited (or abandoned teardown closed it).
         try:
@@ -2228,10 +2237,16 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
+    # W-REL6-5: lattice position (executor #4: UMA, streaming-ingest,
+    # plain, generator) + this call's behavior flags.
+    _spec = ExecutorSpec(topology="uma", ingest="streaming",
+                         supervision="plain", shape="generator",
+                         collect=True, splice=splice, c_drain=c_drain,
+                         order=order)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
-        raise RuntimeError("substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      spec=_spec)
     # Engine fds for child keep sets (see locked path).
     engine_fds = snapshot_fds() - pre_fds
 
@@ -2336,7 +2351,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                 lib, workers=workers, memfd=memfd, size=-1,
                 out_fds=out_fds, signal_w=signal_w, fallow_w=fallow_w,
                 engine_fds=engine_fds, payload=payload, sink=None,
-                mode="python", on_error=on_error, splice=splice))
+                mode="python", on_error=on_error, spec=_spec))
             _drop_parent_copies()
             state["workers"] = True
             state["fork_at"] = _time.monotonic()
@@ -2771,10 +2786,16 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
     use_drain = bool(c_drain) and collect
     if use_drain:
         _require_drain_symbol()
+    # W-REL6-5: lattice position (executor #2: UMA, streaming-ingest,
+    # plain, blocking) + this call's behavior flags.
+    _spec = ExecutorSpec(topology="uma", ingest="streaming",
+                         supervision="plain", shape="blocking",
+                         collect=collect, splice=splice, c_drain=c_drain,
+                         order=order)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
-        raise RuntimeError("substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      spec=_spec)
     # Engine fds (escrow/eventfds, born in init) stay open in every
     # child: closing them breaks escrow retry and forces claim-polling
     # into POLLNVAL spins. Differenced out of the pre-init baseline so
@@ -2867,7 +2888,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 out_fds=out_fds if collect else [], signal_w=signal_w
                 if use_drain else None, fallow_w=fallow_w,
                 engine_fds=engine_fds, payload=payload, sink=sink,
-                mode="python", on_error=on_error, splice=splice))
+                mode="python", on_error=on_error, spec=_spec))
             _drop_fallow_copies()
             workers_forked = True
             fork_at = _time.monotonic()
@@ -3100,8 +3121,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
 
         if not collect:
             return None
-        return _core_collect(use_drain=use_drain, results_fd=results_fd,
-                             out_fds=out_fds, order=order)
+        return _core_collect(results_fd=results_fd,
+                             out_fds=out_fds, spec=_spec)
     finally:
         if drain_pid is not None:
             # Stray drain (exception path): SIGKILL + reap.
@@ -3227,10 +3248,18 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 "c_spawn_loop=True needs collection with a "
                 "spawn argv payload")
         _require_spawn_loop_symbol()
+    # W-REL6-5: lattice position (executor #1: UMA, materialized,
+    # plain, blocking) + this call's behavior flags, threaded through
+    # the core calls below instead of flag soup.
+    _spec = ExecutorSpec(topology="uma", ingest="materialized",
+                         supervision="plain", shape="blocking",
+                         collect=collect, splice=splice, c_drain=c_drain,
+                         order=order, c_worker_loop=c_worker_loop,
+                         c_spawn_loop=c_spawn_loop)
     pre_fds = snapshot_fds()
     lib = load()
-    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
-        raise RuntimeError("substrate init failed")
+    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                      spec=_spec)
     # Engine fds for child keep sets (W-PY16 addendum: scrub host
     # event-loop fds in every forked child, keep engine + job fds).
     engine_fds = snapshot_fds() - pre_fds
@@ -3285,9 +3314,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             out_fds=out_fds if collect else [], signal_w=signal_w
             if use_drain else None, fallow_w=None, engine_fds=engine_fds,
             payload=payload, sink=sink, mode="python", on_error=on_error,
-            plugin_spec=plugin_spec, spawn_argv=spawn_argv, splice=splice,
-            c_worker_loop=c_worker_loop, c_spawn_loop=c_spawn_loop,
-            src_fd=src_fd, must_close=must_close)
+            plugin_spec=plugin_spec, spawn_argv=spawn_argv,
+            src_fd=src_fd, must_close=must_close, spec=_spec)
 
         if use_drain:
             # Parent never writes signals and (no respawns here)
@@ -3368,8 +3396,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
 
         if not collect:
             return None
-        return _core_collect(use_drain=use_drain, results_fd=results_fd,
-                             out_fds=out_fds, order=order)
+        return _core_collect(results_fd=results_fd,
+                             out_fds=out_fds, spec=_spec)
     finally:
         if scan_pid is not None:
             # Stray scanner (exception path): SIGKILL + reap so no

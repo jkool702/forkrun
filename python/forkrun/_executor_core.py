@@ -50,6 +50,13 @@ class ExecutorSpec:
     {"materialized", "streaming"} ("numa" ignores ``ingest`` — the NUMA
     pipeline owns the source uniformly); ``supervision`` in {"plain",
     "reactor"}; ``shape`` in {"blocking", "generator"} (lifetime only).
+
+    W-REL6-5: the spec is LOAD-BEARING, not documentation. Every core
+    function below accepts ``spec=`` and reads its mapped fields from
+    it (explicit keywords override per call). Each executor constructs
+    one spec naming its lattice position (topology/ingest/supervision/
+    shape + behavior flags) and threads it through -- the per-executor
+    flag soup collapses to one object.
     """
 
     __slots__ = ("topology", "ingest", "supervision", "shape",
@@ -81,10 +88,11 @@ class ExecutorSpec:
 # ---------------------------------------------------------------------------
 
 def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
-                 engine_fds, payload, sink, mode, on_error,
-                 plugin_spec=None, spawn_argv=None, splice=False,
-                 c_worker_loop=False, c_spawn_loop=False,
-                 src_fd=None, must_close=False, signal_r_to_close=None):
+                  engine_fds, payload, sink, mode, on_error,
+                  plugin_spec=None, spawn_argv=None, splice=None,
+                  c_worker_loop=None, c_spawn_loop=None,
+                  src_fd=None, must_close=False, signal_r_to_close=None,
+                  spec=None):
     """Fork ``workers`` children; return pid list. Single dispatch site.
 
     Branches: splice / c_plugin / c_spawn / python — a dispatch table over
@@ -97,11 +105,30 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
     the Python child post-fork (parent spilled already; I3 hygiene).
     C-loop children never held it (scrub drops it by construction).
 
+    W-REL6-5: ``splice``/``c_worker_loop``/``c_spawn_loop`` default from
+    ``spec`` when not passed explicitly (None = unset; False stays a
+    valid explicit value). Callers pass one ExecutorSpec naming their
+    lattice position instead of flag soup.
+
     W-REL6-3.1: string payload/sink specs are resolved HERE, in the
     parent, before the fork loop (backstop: the primary path is
     _coerce_payload at the public-API entry; resolving a callable is
     a no-op). Nothing reaching worker_main is ever imported post-fork.
     """
+    if spec is not None:
+        if splice is None:
+            splice = spec.splice
+        if c_worker_loop is None:
+            c_worker_loop = spec.c_worker_loop
+        if c_spawn_loop is None:
+            c_spawn_loop = spec.c_spawn_loop
+    else:
+        if splice is None:
+            splice = False
+        if c_worker_loop is None:
+            c_worker_loop = False
+        if c_spawn_loop is None:
+            c_spawn_loop = False
     from ._worker import resolve_payload_parent as _resolve_parent
     if payload is not None and isinstance(payload, str):
         payload = _resolve_parent(payload)
@@ -182,13 +209,27 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
 # Single collection (I7 EOF verification at the callers' join)
 # ---------------------------------------------------------------------------
 
-def collect_records(*, use_drain, results_fd, out_fds, order):
+def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
+                      spec=None):
     """Parse collected output memfds into ordered blobs. Single site.
 
     Branches: drain-vs-direct (1), order-index-vs-none (1). Byte-identical
     to the ten inline copies it replaces (drain reads ``results_fd``;
     direct reads each of ``out_fds``; ``order == "index"`` sorts).
+
+    W-REL6-5: ``use_drain``/``order`` default from ``spec``
+    (``use_drain = spec.c_drain and spec.collect``).
     """
+    if spec is not None:
+        if use_drain is None:
+            use_drain = bool(spec.c_drain and spec.collect)
+        if order is None:
+            order = spec.order
+    else:
+        if use_drain is None:
+            raise TypeError("collect_records: no spec and no use_drain")
+        if order is None:
+            raise TypeError("collect_records: no spec and no order")
     import sys as _sys
     _run_mod = _sys.modules["forkrun.run"]
 
@@ -233,9 +274,14 @@ def report_poison(lib, *, strict_poison=False):
 # Single engine init (UMA vs NUMA selection, 1 branch)
 # ---------------------------------------------------------------------------
 
-def init_engine(lib, *, lines, bytes_, topology="uma", num_nodes=1,
-                numa_map=""):
-    """Call fr_py_init / fr_py_init_numa. Single selection site."""
+def init_engine(lib, *, lines, bytes_, topology=None, num_nodes=1,
+                 numa_map="", spec=None):
+    """Call fr_py_init / fr_py_init_numa. Single selection site.
+
+    W-REL6-5: ``topology`` defaults from ``spec`` (explicit wins).
+    """
+    if topology is None:
+        topology = spec.topology if spec is not None else "uma"
     if topology == "numa":
         rc = lib.fr_py_init_numa(lines or 0, bytes_ or 0,
                                  num_nodes, numa_map.encode()
@@ -252,15 +298,15 @@ def init_engine(lib, *, lines, bytes_, topology="uma", num_nodes=1,
 # Union teardown (I3 + I8, zero mode branches)
 # ---------------------------------------------------------------------------
 
-def teardown_union(lib, *, supervision="plain", state=None,
-                   pids=(), extra_pids=(), orderer_pid=None,
-                   drain_pid=None, results_fd=None,
-                   signal_r=None, signal_w=None, spare_signal_w=None,
-                   out_fds=(), out_hold=None, memfd=None, mem_hold=None,
-                   src_fd=None, must_close=False,
-                   order_r=None, order_w=None, trap_r=None, trap_w=None,
-                   coll_fd=None, coll_hold=None, fallow_w=None,
-                   scan_pid=None):
+def teardown_union(lib, *, supervision=None, state=None,
+                    pids=(), extra_pids=(), orderer_pid=None,
+                    drain_pid=None, results_fd=None,
+                    signal_r=None, signal_w=None, spare_signal_w=None,
+                    out_fds=(), out_hold=None, memfd=None, mem_hold=None,
+                    src_fd=None, must_close=False,
+                    order_r=None, order_w=None, trap_r=None, trap_w=None,
+                    coll_fd=None, coll_hold=None, fallow_w=None,
+                    scan_pid=None, spec=None):
     """Kill strays + close union fd set + destroy. Single implementation.
 
     ``supervision == "reactor"`` routes to ``_teardown_reactor`` (which
@@ -268,7 +314,11 @@ def teardown_union(lib, *, supervision="plain", state=None,
     the scanner death pipe); otherwise routes to ``_teardown_stream``.
     Callers pass already-assembled pid/fd sets — this function adds no
     per-mode branches beyond the one supervision selection.
+
+    W-REL6-5: ``supervision`` defaults from ``spec`` (explicit wins).
     """
+    if supervision is None:
+        supervision = spec.supervision if spec is not None else "plain"
     import sys as _sys
     _run_mod = _sys.modules["forkrun.run"]
 
