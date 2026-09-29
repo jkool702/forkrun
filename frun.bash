@@ -995,6 +995,73 @@ EOF
                             # Execute the user's custom setup environment hooks
                             [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && eval "${FORKRUN_EXTRA_SETUP}"
                         fi
+                    else
+                        # W-REL6-1.1: provenance gate for the explicit-command
+                        # form (extra args present, so $# != 1). Before this
+                        # wave the $# == 1 auto-resume block above was the
+                        # ONLY gate: any additional argument skipped the
+                        # ownership/permission/consent checks while the
+                        # stream coordinates (HORIZON/STDOUT_BYTES, parsed
+                        # above) were still honored at ring_set_resume — a
+                        # world-writable checkpoint's truncation took effect
+                        # silently. The coordinates cross here, so the
+                        # filesystem provenance boundary must hold here too.
+                        # No code frames cross in this form (ORIG_ARGS,
+                        # SETUP and FUNCS are never restored when a command
+                        # is given explicitly), so there is nothing to
+                        # preview beyond the honored coordinates — but the
+                        # owner/mode trust decision is identical to the
+                        # auto-resume path: TRUST=1 (or an interactive yes)
+                        # passes, anything else fails closed.
+                        if [[ "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                            local _rf_uid_x _rf_mode_x _rf_reject_x _rf_reason_x _my_uid_x
+                            read -r _rf_uid_x _rf_mode_x < <(stat -Lc '%u %04a' "$_proc_rf" 2>/dev/null)
+
+                            if [[ -z "${_rf_uid_x:-}" ]]; then
+                                # Cannot stat (broken symlink, race, perms):
+                                # fail CLOSED, mirroring the auto-resume path.
+                                echo "forkrun [ABORT]: Cannot stat resume file '$resume_file'. Refusing resumption with explicit command." >&2
+                                exec {_rf_fd}<&-
+                                NORMAL_EXIT_FLAG=true
+                                return 1
+                            fi
+
+                            _my_uid_x=$(id -u)
+
+                            if (( _rf_uid_x != _my_uid_x )); then
+                                # Not ours: someone else's file is someone
+                                # else's truncation. HARD reject.
+                                _rf_reject_x="hard"
+                                _rf_reason_x="owned by uid ${_rf_uid_x} (you are ${_my_uid_x})"
+                            elif (( (8#${_rf_mode_x:-0} & 8#022) != 0 )); then
+                                # Ours but group/world-writable: anyone
+                                # sharing the dir can rewrite it.
+                                _rf_reject_x="soft"
+                                _rf_reason_x="mode ${_rf_mode_x} is group/world-writable"
+                            fi
+
+                            if [[ -n "${_rf_reject_x:-}" ]]; then
+                                echo "forkrun [SECURITY]: Resume file '$resume_file' ${_rf_reason_x}." >&2
+                                echo "  [coordinates honored from this file]: HORIZON=${FORKRUN_RESUME_HORIZON:-unset} STDOUT_BYTES=${FORKRUN_RESUME_STDOUT_BYTES:-unset}" >&2
+                                if { true; } 2>/dev/null </dev/tty; then
+                                    read -p $'\nforkrun [SECURITY]: Proceed with resumption using the above coordinates? (y/N): ' -n 1 -r -t 60 </dev/tty
+                                    echo >&2
+                                    if [[ ! ${REPLY,,} == 'y' ]]; then
+                                        echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                        exec {_rf_fd}<&-
+                                        NORMAL_EXIT_FLAG=true
+                                        return 1
+                                    fi
+                                else
+                                    echo "                   Refusing resumption (no TTY to confirm)." >&2
+                                    echo "                   Fix with: chmod go-w '$resume_file'" >&2
+                                    echo "                   Or set FORKRUN_TRUST_RESUME=1 for unattended resumption." >&2
+                                    exec {_rf_fd}<&-
+                                    NORMAL_EXIT_FLAG=true
+                                    return 1
+                                fi
+                            fi
+                        fi
                     fi
                     exec {_rf_fd}<&-
 
