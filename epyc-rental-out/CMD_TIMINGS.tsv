@@ -59,3 +59,9 @@ ml5m-light	0	1090
 ml5m-medium	0	2216
 ml5m-heavy	0	7911
 ml5m-fault	0	169
+numa5m-part-a	0	795
+numa5m-part-b	1	12
+numa5m-part-c-light	0	32
+numa5m-part-c-medium	0	66
+numa5m-part-c-heavy	0	167
+numa5m-part-d	0	13

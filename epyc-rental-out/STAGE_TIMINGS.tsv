@@ -8,3 +8,4 @@
 31_utest_python	1	423
 20_datagen	0	1198
 40_bench_ml5m	1	11391
+41_bench_numa5m	1	1086

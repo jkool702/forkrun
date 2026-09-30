@@ -1,0 +1,29 @@
+### numa5m-part-d
+### 2026-09-30T07:53:32Z
+### cmd: python3 python/benchmarks/ml/bench_numa_5m.py --records 5000000 --parts d --tmpdir //numa5 --csv /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_d.csv
+
+forkrun NUMA steady-state: 5000000 records/variant, workers=[28]
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Nodes under test: [1, '@2', 'auto']
+NUMA online: 0-1
+reusing //numa5/ml_light_5000000.jsonl (0.5GB)
+reusing //numa5/ml_medium_5000000.jsonl (2.2GB)
+reusing //numa5/ml_heavy_5000000.jsonl (6.3GB)
+--- D: streaming+NUMA slow-consumer memory ---
+forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=23 read=23 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+memory check: {'batches': 51, 'lines': 1000000, 'expected': 1000000, 'complete': True, 'rss_delta_mb': 12.2890625}
+
++-----------------+--------------+--------+---------+----------+------+-------------------------------------------------+
+| Benchmark       | Mode         | Path   | Lines/s | Peak RSS | CPU% | Notes                                           |
++-----------------+--------------+--------+---------+----------+------+-------------------------------------------------+
+| stream-numa-mem | forkrun-numa | stream | -       | 34MB     | -    | batches=51 lines=1000000/1000000 rss-delta=12MB |
++-----------------+--------------+--------+---------+----------+------+-------------------------------------------------+
+
+MEDIANS:
+  stream-numa-mem                         0 records/s
+CSV: /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_d.csv
+
+### rc=0  elapsed=13s  finished=2026-09-30T07:53:45Z

@@ -1,0 +1,2 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+stream-numa-mem,forkrun-numa,stream,0,33.515625,-1.0,batches=51 lines=1000000/1000000 rss-delta=12MB,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic

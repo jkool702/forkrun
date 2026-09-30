@@ -1,0 +1,30 @@
+### numa5m-part-c-light
+### 2026-09-30T07:49:07Z
+### cmd: python3 python/benchmarks/ml/bench_numa_5m.py --records 5000000 --variants light --workers 96 --nodes 1,@2,@4,auto --parts c --tmpdir //numa5 --csv /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_c_light.csv
+
+forkrun NUMA steady-state: 5000000 records/variant, workers=[96]
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Nodes under test: [1, '@2', '@4', 'auto']
+NUMA online: 0-1
+reusing //numa5/ml_light_5000000.jsonl (0.5GB)
+--- C: Pool/Executor same boot ---
++--------------------+----------+------+---------+----------+------+-----------------------------+
+| Benchmark          | Mode     | Path | Lines/s | Peak RSS | CPU% | Notes                       |
++--------------------+----------+------+---------+----------+------+-----------------------------+
+| executor-light-96w | executor | udf  | 1.6M    | 1536MB   | -    | out=5000000/5000000 records |
+| pool-light-96w     | pool     | udf  | 1.4M    | 1536MB   | -    | out=5000000/5000000 records |
++--------------------+----------+------+---------+----------+------+-----------------------------+
+
++--------------------+----------+------+---------+----------+------+-----------------------------+
+| Benchmark          | Mode     | Path | Lines/s | Peak RSS | CPU% | Notes                       |
++--------------------+----------+------+---------+----------+------+-----------------------------+
+| executor-light-96w | executor | udf  | 1.6M    | 1536MB   | -    | out=5000000/5000000 records |
+| pool-light-96w     | pool     | udf  | 1.4M    | 1536MB   | -    | out=5000000/5000000 records |
++--------------------+----------+------+---------+----------+------+-----------------------------+
+
+MEDIANS:
+  executor-light-96w                1627731 records/s
+  pool-light-96w                    1432546 records/s
+CSV: /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_c_light.csv
+
+### rc=0  elapsed=32s  finished=2026-09-30T07:49:39Z
