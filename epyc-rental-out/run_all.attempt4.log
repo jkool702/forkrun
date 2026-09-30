@@ -211017,3 +211017,8 @@ Any row whose verdict is not EXACT/ok(quality-gate) is a correctness finding, no
 2026-09-30T13:15:12Z  [publish]   review with:  git fetch origin && git log --oneline origin/epyc-rental-results
 2026-09-30T13:15:12Z  WARN  stage 50_bench_bash SKIPPED (deadline: estimate 10800s > remaining 6606s)
 2026-09-30T13:15:12Z  publishing results after 50_bench_bash
+2026-09-30T13:15:13Z  [publish] committed 102 file(s) to epyc-rental-results: cc76d7d3c -> 9a4a0c71e
+2026-09-30T13:15:15Z  [publish] pushed to origin/epyc-rental-results
+2026-09-30T13:15:15Z  [publish]   review with:  git fetch origin && git log --oneline origin/epyc-rental-results
+2026-09-30T13:15:15Z  WARN  stage 51_bench_core SKIPPED (deadline: estimate 7200s > remaining 6603s)
+2026-09-30T13:15:15Z  publishing results after 51_bench_core
