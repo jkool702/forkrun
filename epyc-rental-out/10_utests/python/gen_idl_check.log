@@ -1,0 +1,9 @@
+### gen_idl--check
+### 2026-09-30T04:14:43Z
+### cmd: python3 tools/gen_idl.py --check
+
+OK forkrun_callschema.h
+OK tools/generated/fr_ctypes.py
+OK tools/generated/usage_table.json
+
+### rc=0  elapsed=0s  finished=2026-09-30T04:14:43Z

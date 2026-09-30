@@ -48,3 +48,10 @@ test_c_plugins_raw.sh	0	2
 test_c_plugins_stdin.sh	1	2
 test_c_plugins_config.sh	0	2
 canary	0	0
+python-suite-pass1	1	210
+python-suite-pass2	1	212
+gen_idl--check	0	0
+gen_shim--check	0	0
+tools/test_idl.py	0	1
+test_shim_abi.py	0	0
+check_canary_versions	0	0

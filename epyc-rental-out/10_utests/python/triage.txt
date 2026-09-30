@@ -1,0 +1,70 @@
+# python suite failure triage
+
+## Known pre-existing (FAKE4_REVERIFY.md §5) — NOT findings for this box:
+  - test_death_cause_mapping  (suite-order signal-disposition flake)
+  - test_claim_taxonomy        (cascade from the above)
+  - test_release_check_passes  (runs the suite inline, same flake)
+
+## pass 1 — FAILED/ERROR test ids
+FAIL: test_release_check_passes (test_packaging_v2.TestReleaseChecklist.test_release_check_passes)
+FAIL: test_resume_sigint (test_resume.TestResumeExecution.test_resume_sigint)
+
+## pass 2 — FAILED/ERROR test ids
+FAIL: test_release_check_passes (test_packaging_v2.TestReleaseChecklist.test_release_check_passes)
+FAIL: test_resume_sigint (test_resume.TestResumeExecution.test_resume_sigint)
+
+## tails
+--- pass 1 tail
+?? UNIT_TESTS/c_plugin_test/out_stdin_3a.txt
+?? UNIT_TESTS/c_plugin_test/out_stdin_3b.txt
+?? UNIT_TESTS/c_plugin_test/out_stdin_4.txt
+?? UNIT_TESTS/c_plugin_test/out_stdin_5.txt
+?? epyc-rental-out/
+
+======================================================================
+FAIL: test_resume_sigint (test_resume.TestResumeExecution.test_resume_sigint)
+SIGINT mid-pipeline checkpoints; resume completes.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/opt/forkrun/python/tests/test_resume.py", line 464, in tearDown
+    assert_no_zombies(self)
+    ~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/forkrun/python/tests/_helpers.py", line 39, in assert_no_zombies
+    testcase.fail("reaped unexpected child %r — zombie leak" % (pid,))
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: reaped unexpected child (278362, 256) — zombie leak
+
+----------------------------------------------------------------------
+Ran 644 tests in 209.973s
+
+FAILED (failures=2, skipped=1)
+
+### rc=1  elapsed=210s  finished=2026-09-30T04:11:11Z
+
+--- pass 2 tail
+?? UNIT_TESTS/c_plugin_test/out_stdin_3a.txt
+?? UNIT_TESTS/c_plugin_test/out_stdin_3b.txt
+?? UNIT_TESTS/c_plugin_test/out_stdin_4.txt
+?? UNIT_TESTS/c_plugin_test/out_stdin_5.txt
+?? epyc-rental-out/
+
+======================================================================
+FAIL: test_resume_sigint (test_resume.TestResumeExecution.test_resume_sigint)
+SIGINT mid-pipeline checkpoints; resume completes.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/opt/forkrun/python/tests/test_resume.py", line 464, in tearDown
+    assert_no_zombies(self)
+    ~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/forkrun/python/tests/_helpers.py", line 39, in assert_no_zombies
+    testcase.fail("reaped unexpected child %r — zombie leak" % (pid,))
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: reaped unexpected child (286127, 256) — zombie leak
+
+----------------------------------------------------------------------
+Ran 644 tests in 211.871s
+
+FAILED (failures=2, skipped=1)
+
+### rc=1  elapsed=212s  finished=2026-09-30T04:14:43Z
+

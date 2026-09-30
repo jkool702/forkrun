@@ -1,19 +1,19 @@
-### python-suite-pass1
-### 2026-09-30T04:07:41Z
+### python-suite-pass2
+### 2026-09-30T04:11:11Z
 ### cmd: python3 -m unittest discover -s python/tests -v
 
 test_abort_in_flight_excuses (test_abort_reason.TestDispositionTable.test_abort_in_flight_excuses) ... ok
 test_clean_with_eof_records (test_abort_reason.TestDispositionTable.test_clean_with_eof_records) ... ok
 test_no_abort_is_fatal (test_abort_reason.TestDispositionTable.test_no_abort_is_fatal) ... ok
-test_hup_abort_has_no_spurious_index_fatal (test_abort_reason.TestNumaHupSuppression.test_hup_abort_has_no_spurious_index_fatal) ... /opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_hup_abort_has_no_spurious_index_fatal (test_abort_reason.TestNumaHupSuppression.test_hup_abort_has_no_spurious_index_fatal) ... /opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/run.py:6283: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/run.py:6283: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   fallow_pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/run.py:6300: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/run.py:6300: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/run.py:6324: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/run.py:6324: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/run.py:6346: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/run.py:6346: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   ingest_pid = os.fork()
 ok
 test_missing_symbol_reads_unknown (test_abort_reason.TestReasonAccessor.test_missing_symbol_reads_unknown) ... ok
@@ -275,7 +275,7 @@ test_foreign_uid_allowed_with_trust (test_checkpoint_gate.TestCheckpointGate.tes
 test_foreign_uid_refused_without_trust (test_checkpoint_gate.TestCheckpointGate.test_foreign_uid_refused_without_trust) ... ok
 test_go_w_allowed_with_trust (test_checkpoint_gate.TestCheckpointGate.test_go_w_allowed_with_trust) ... ok
 test_go_w_refused_without_trust (test_checkpoint_gate.TestCheckpointGate.test_go_w_refused_without_trust) ... ok
-test_resume_begin_gets_past_safety_with_trust (test_checkpoint_gate.TestCheckpointGate.test_resume_begin_gets_past_safety_with_trust) ... forkrun [WARN]: FORKRUN_TRUST_RESUME=1: ownership/permission checks bypassed for /tmp/tmp1e6_34jp.ckpt
+test_resume_begin_gets_past_safety_with_trust (test_checkpoint_gate.TestCheckpointGate.test_resume_begin_gets_past_safety_with_trust) ... forkrun [WARN]: FORKRUN_TRUST_RESUME=1: ownership/permission checks bypassed for /tmp/tmpnsl7infa.ckpt
 ok
 test_unstatable_fails_closed_even_with_trust (test_checkpoint_gate.TestCheckpointGate.test_unstatable_fails_closed_even_with_trust) ... ok
 test_resume_begin_rejects_absurd_checkpoint (test_checkpoint_gate.TestCheckpointSemantics.test_resume_begin_rejects_absurd_checkpoint) ... ok
@@ -301,14 +301,14 @@ test_parity_truncated_tail (test_complete.TestDescriptorParsing.test_parity_trun
 test_raw_descriptor_boundaries (test_complete.TestDescriptorParsing.test_raw_descriptor_boundaries) ... ok
 test_file_source_parity (test_complete.TestSequentialSpill.test_file_source_parity) ... ok
 test_pipe_source_parity (test_complete.TestSequentialSpill.test_pipe_source_parity) ... ok
-test_two_runs_concurrent_threads (test_concurrent.TestConcurrentInvocations.test_two_runs_concurrent_threads) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_two_runs_concurrent_threads (test_concurrent.TestConcurrentInvocations.test_two_runs_concurrent_threads) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-forkrun [DIAG-NUMA1] orderer done: numa=0 recv=58 emitted=58 expected=(58,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=76 emitted=76 expected=(76,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=58 emitted=58 expected=(58,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_many_runs_fd_stable (test_concurrent.TestSequentialInvocations.test_many_runs_fd_stable) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
@@ -352,23 +352,23 @@ test_claim_insert_id_argv_form (test_doc_accuracy.TestDocAccuracy.test_claim_ins
 test_claim_new_params (test_doc_accuracy.TestDocAccuracy.test_claim_new_params) ... forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
 forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
 forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
-/opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=10 emitted=10 expected=(10,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpn6fe6aje.ckpt (engine committed frontier: 8890 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpn6fe6aje.ckpt'
+forkrun: checkpoint written to /tmp/tmp96u8n2nc.ckpt (engine committed frontier: 8890 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp96u8n2nc.ckpt'
 ok
 test_claim_numa_coverage (test_doc_accuracy.TestDocAccuracy.test_claim_numa_coverage) ... forkrun [DIAG-NUMA1] map/run completion:
   nodes=4 workers=4 forked=[0, 1, 2, 3]
-  node=0 write=42 read=42 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0]
+  node=0 write=49 read=49 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0]
   node=1 write=6 read=6 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[1]
-  node=2 write=5 read=5 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[2]
+  node=2 write=3 read=3 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[2]
   node=3 write=6 read=6 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[3]
-forkrun [DIAG-NUMA1] orderer done: numa=1 recv=59 emitted=59 expected=(15,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=64 emitted=64 expected=(15,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_claim_order_index_buffering (test_doc_accuracy.TestDocAccuracy.test_claim_order_index_buffering) ... ok
@@ -428,8 +428,8 @@ test_claim_recovery (test_doc_accuracy.TestDocAccuracy.test_claim_recovery) ... 
 forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
 ok
 test_claim_resume (test_doc_accuracy.TestDocAccuracy.test_claim_resume) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=7 emitted=7 expected=(7,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpdmg6nvwl.txt.ckpt (engine committed frontier: 19712 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpdmg6nvwl.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmpcvaw_736.txt.ckpt (engine committed frontier: 19712 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpcvaw_736.txt.ckpt'
 ok
 test_claim_resume_gate_both_forms (test_doc_accuracy.TestDocAccuracy.test_claim_resume_gate_both_forms) ... ok
 test_claim_sink_at_least_once (test_doc_accuracy.TestDocAccuracy.test_claim_sink_at_least_once) ... forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
@@ -797,8 +797,8 @@ and were permanently skipped:
 =================================================================
 ok
 test_all_segfault_fail_fast_raises_no_zombies (test_fault.TestWorkerSegfault.test_all_segfault_fail_fast_raises_no_zombies) ... ok
-test_all_segfault_parent_raises_no_zombies (test_fault.TestWorkerSegfault.test_all_segfault_parent_raises_no_zombies) ... forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
-forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+test_all_segfault_parent_raises_no_zombies (test_fault.TestWorkerSegfault.test_all_segfault_parent_raises_no_zombies) ... forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
 ok
 test_mixed_segfault_fail_fast_prefix (test_fault.TestWorkerSegfault.test_mixed_segfault_fail_fast_prefix) ... ok
 test_mixed_segfault_recovers_byte_exact (test_fault.TestWorkerSegfault.test_mixed_segfault_recovers_byte_exact) ... forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
@@ -874,12 +874,12 @@ test_numa_dynamic_fork_pipelining (test_numa.TestNumaExecution.test_numa_dynamic
 ok
 test_numa_empty_input (test_numa.TestNumaExecution.test_numa_empty_input) ... forkrun [DIAG-NUMA1] map/run completion:
   nodes=2 workers=4 forked=[]
-  node=0 write=0 read=0 finished=1 chunks(head=1 tail=1) tail_empty=1 forked=NO wids=[0, 1]
-  node=1 write=1 read=0 finished=1 chunks(head=0 tail=0) tail_empty=1 forked=NO wids=[2, 3]
+  node=0 write=1 read=0 finished=1 chunks(head=1 tail=1) tail_empty=1 forked=NO wids=[0, 1]
+  node=1 write=0 read=0 finished=1 chunks(head=0 tail=0) tail_empty=1 forked=NO wids=[2, 3]
 forkrun [DIAG-NUMA1] stream completion:
   nodes=2 workers=4 forked=[0, 1]
-  node=0 write=1 read=1 finished=1 chunks(head=1 tail=1) tail_empty=1 forked=yes wids=[0, 1]
-  node=1 write=0 read=0 finished=1 chunks(head=0 tail=0) tail_empty=1 forked=yes wids=[2, 3]
+  node=0 write=0 read=0 finished=1 chunks(head=1 tail=1) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=1 read=1 finished=1 chunks(head=0 tail=0) tail_empty=1 forked=yes wids=[2, 3]
 ok
 test_numa_fault_tolerance (test_numa.TestNumaExecution.test_numa_fault_tolerance) ... forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
 forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
@@ -978,11 +978,11 @@ test_bump_uma_exempt (test_numa_bump.TestNumaWorkerBump.test_bump_uma_exempt) ..
 ok
 test_bumped_run_drain_guard_quiet (test_numa_bump.TestNumaWorkerBump.test_bumped_run_drain_guard_quiet) ... forkrun [DIAG-NUMA1] map/run completion:
   nodes=4 workers=4 forked=[0, 1, 2, 3]
-  node=0 write=49 read=49 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0]
+  node=0 write=42 read=42 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0]
   node=1 write=6 read=6 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[1]
-  node=2 write=3 read=3 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[2]
+  node=2 write=5 read=5 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[2]
   node=3 write=6 read=6 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[3]
-forkrun [DIAG-NUMA1] orderer done: numa=1 recv=64 emitted=64 expected=(15,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=59 emitted=59 expected=(15,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=48 emitted=48 expected=(48,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_distribution_floor_unit (test_numa_bump.TestNumaWorkerBump.test_distribution_floor_unit) ... ok
@@ -1006,11 +1006,11 @@ forkrun [DIAG-NUMA1] orderer done: numa=0 recv=48 emitted=48 expected=(48,0) hea
 ok
 test_workers_bumped_to_node_count (test_numa_bump.TestNumaWorkerBump.test_workers_bumped_to_node_count) ... forkrun [DIAG-NUMA1] map/run completion:
   nodes=4 workers=4 forked=[0, 1, 2, 3]
-  node=0 write=42 read=42 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0]
+  node=0 write=49 read=49 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0]
   node=1 write=6 read=6 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[1]
-  node=2 write=5 read=5 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[2]
+  node=2 write=3 read=3 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[2]
   node=3 write=6 read=6 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[3]
-forkrun [DIAG-NUMA1] orderer done: numa=1 recv=59 emitted=59 expected=(15,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=64 emitted=64 expected=(15,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=48 emitted=48 expected=(48,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_workers_equal_nodes_no_warning (test_numa_bump.TestNumaWorkerBump.test_workers_equal_nodes_no_warning) ... forkrun [DIAG-NUMA1] map/run completion:
@@ -1523,17 +1523,17 @@ test_safety (test_resume.TestCheckpointCodec.test_safety) ... ok
 test_serialize_degenerate_rejected (test_resume.TestCheckpointCodec.test_serialize_degenerate_rejected) ... ok
 test_engine_commit_exactly_once (test_resume.TestResumeExecution.test_engine_commit_exactly_once)
 No input line is delivered twice across abort + resume. ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=7 emitted=7 expected=(7,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpeoq5s4uf.txt.ckpt (engine committed frontier: 39424 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpeoq5s4uf.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmpuh3tc8bs.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpuh3tc8bs.txt.ckpt'
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=34 emitted=34 expected=(34,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_multi_resume_cumulative (test_resume.TestResumeExecution.test_multi_resume_cumulative)
 Two aborts then completion: frontiers mount, union whole. ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=7 emitted=7 expected=(7,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpia7ac9m6.txt.ckpt (engine committed frontier: 39424 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpia7ac9m6.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmp0875qbfg.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp0875qbfg.txt.ckpt'
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=11 emitted=11 expected=(11,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpia7ac9m6.txt.ckpt (engine committed frontier: 101376 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpia7ac9m6.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmp0875qbfg.txt.ckpt (engine committed frontier: 101376 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp0875qbfg.txt.ckpt'
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=23 emitted=23 expected=(23,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=41 emitted=41 expected=(41,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
@@ -1543,28 +1543,28 @@ test_no_checkpoint_on_success (test_resume.TestResumeExecution.test_no_checkpoin
 ok
 test_resume_committed_intervals_skipped (test_resume.TestResumeExecution.test_resume_committed_intervals_skipped)
 Byte-coordinate proof: the resumed run never re-executes ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=7 emitted=7 expected=(7,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpd61dvw9u.txt.ckpt (engine committed frontier: 39424 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpd61dvw9u.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmpz7xobj39.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpz7xobj39.txt.ckpt'
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=34 emitted=34 expected=(34,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_resume_complete_output (test_resume.TestResumeExecution.test_resume_complete_output)
 Abort + resume = byte-identical to an uninterrupted run. ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=7 emitted=7 expected=(7,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmp_07q1eys.txt.ckpt (engine committed frontier: 39424 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmp_07q1eys.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmpj4picg5l.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpj4picg5l.txt.ckpt'
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=34 emitted=34 expected=(34,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=41 emitted=41 expected=(41,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=34 emitted=34 expected=(34,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_resume_sigint (test_resume.TestResumeExecution.test_resume_sigint)
 SIGINT mid-pipeline checkpoints; resume completes. ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=9 emitted=9 expected=(9,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpskrv22zy.txt.ckpt (engine committed frontier: 50688 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpskrv22zy.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmp4fm0sneh.txt.ckpt (engine committed frontier: 50688 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp4fm0sneh.txt.ckpt'
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=32 emitted=32 expected=(32,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=41 emitted=41 expected=(41,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 FAIL
 test_resume_worker_crash (test_resume.TestResumeExecution.test_resume_worker_crash) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=7 emitted=7 expected=(7,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpplqlujv0.txt.ckpt (engine committed frontier: 39424 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpplqlujv0.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmp79da7tr6.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp79da7tr6.txt.ckpt'
 ok
 test_checkpoint_file_unsupported_path_fails (test_resume.TestResumePathValidation.test_checkpoint_file_unsupported_path_fails) ... ok
 test_resume_bad_type_fails (test_resume.TestResumePathValidation.test_resume_bad_type_fails) ... ok
@@ -1579,8 +1579,8 @@ test_run_checkpoint_file_fails (test_resume.TestResumePathValidation.test_run_ch
 test_run_resume_fails (test_resume.TestResumePathValidation.test_run_resume_fails) ... ok
 test_stream_resume_unsupported_path_fails (test_resume.TestResumePathValidation.test_stream_resume_unsupported_path_fails) ... ok
 test_stream_abandon_checkpoint_resume (test_resume.TestResumeStream.test_stream_abandon_checkpoint_resume) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=28 emitted=28 expected=(28,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpe05ddeue.txt.ckpt (engine committed frontier: 157696 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpe05ddeue.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmps8mtnwwv.txt.ckpt (engine committed frontier: 157696 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmps8mtnwwv.txt.ckpt'
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=13 emitted=13 expected=(13,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_set_snapshot_roundtrip (test_resume.TestSnapshotAPI.test_set_snapshot_roundtrip) ... ok
@@ -1761,19 +1761,19 @@ test_header_lists_all_externs (test_shim_abi.TestShimArtifactsFresh.test_header_
 test_bindings_cover_externs (test_shim_abi.TestShimBindings.test_bindings_cover_externs) ... ok
 test_no_order_regression (test_shim_abi.TestShimBindings.test_no_order_regression) ... ok
 test_exports_match_table (test_shim_abi.TestShimExports.test_exports_match_table) ... ok
-test_hup_aborts_checkpoints_raises (test_signals.TestCheckpointPolicy.test_hup_aborts_checkpoints_raises) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_hup_aborts_checkpoints_raises (test_signals.TestCheckpointPolicy.test_hup_aborts_checkpoints_raises) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=10 emitted=10 expected=(10,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmp2vvrs90q.ckpt (engine committed frontier: 8890 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmp2vvrs90q.ckpt'
+forkrun: checkpoint written to /tmp/tmp4a31yjt_.ckpt (engine committed frontier: 8890 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp4a31yjt_.ckpt'
 ok
 test_hup_checkpoint_resumes_byte_identical (test_signals.TestCheckpointPolicy.test_hup_checkpoint_resumes_byte_identical) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=10 emitted=10 expected=(10,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
-forkrun: checkpoint written to /tmp/tmpjzik09rx.ckpt (engine committed frontier: 8890 bytes)
-forkrun: to resume: re-run with resume='/tmp/tmpjzik09rx.ckpt'
+forkrun: checkpoint written to /tmp/tmpmn1ubxwf.ckpt (engine committed frontier: 8890 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpmn1ubxwf.ckpt'
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=33 emitted=33 expected=(33,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=48 emitted=48 expected=(48,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
@@ -2142,13 +2142,13 @@ test_payload_required_absent (test_splice_mode.TestSpliceValidation.test_payload
 test_run_rejected (test_splice_mode.TestSpliceValidation.test_run_rejected) ... ok
 test_sink_rejected (test_splice_mode.TestSpliceValidation.test_sink_rejected) ... ok
 test_splice_symbol_present (test_splice_mode.TestSpliceValidation.test_splice_symbol_present) ... ok
-test_nested_map_inside_stream_completes (test_stream_lock.TestNestedStreamMap.test_nested_map_inside_stream_completes) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_nested_map_inside_stream_completes (test_stream_lock.TestNestedStreamMap.test_nested_map_inside_stream_completes) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-forkrun [DIAG-NUMA1] orderer done: numa=0 recv=48 emitted=48 expected=(48,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=0 emitted=0 expected=(0,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
 test_two_threads_two_streams_serialized_exact (test_stream_lock.TestStreamThreadSerialization.test_two_threads_two_streams_serialized_exact) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
@@ -2246,9 +2246,9 @@ forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
 ok
 test_worker_failure_carries_typed_signo (test_taxonomy.TestCrashStaysRuntimeError.test_worker_failure_carries_typed_signo)
 W-REL6-3.5: ForkrunWorkerFailure is a RuntimeError with a ... ok
-test_sigint_becomes_forkrun_interrupted (test_taxonomy.TestParentInterrupt.test_sigint_becomes_forkrun_interrupted) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_sigint_becomes_forkrun_interrupted (test_taxonomy.TestParentInterrupt.test_sigint_becomes_forkrun_interrupted) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
 ok
 test_default_stays_warn_and_partial (test_taxonomy.TestStrictPoison.test_default_stays_warn_and_partial) ... forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
@@ -2782,27 +2782,27 @@ forkrun [DIAG-NUMA1] map/run completion:
   node=1 write=1 read=0 finished=1 chunks(head=1 tail=1) tail_empty=1 forked=NO wids=[1]
 forkrun [DIAG-NUMA1] orderer done: numa=1 recv=2 emitted=2 expected=(1,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
 ok
-test_sigint_ingest_stream_plain (test_wrel5b.TestB2StreamTaxonomy.test_sigint_ingest_stream_plain) ... /opt/forkrun/python/tests/../forkrun/run.py:2707: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_sigint_ingest_stream_plain (test_wrel5b.TestB2StreamTaxonomy.test_sigint_ingest_stream_plain) ... /opt/forkrun/python/tests/../forkrun/run.py:2707: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   fallow_pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/run.py:2715: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/run.py:2715: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   scan_pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_executor_core.py:162: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_executor_core.py:162: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
 ok
-test_sigint_ingest_stream_reactor (test_wrel5b.TestB2StreamTaxonomy.test_sigint_ingest_stream_reactor) ... /opt/forkrun/python/tests/../forkrun/run.py:5561: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_sigint_ingest_stream_reactor (test_wrel5b.TestB2StreamTaxonomy.test_sigint_ingest_stream_reactor) ... /opt/forkrun/python/tests/../forkrun/run.py:5561: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   fallow_pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:1261: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:1261: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
 ok
-test_sigint_stream_plain (test_wrel5b.TestB2StreamTaxonomy.test_sigint_stream_plain) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_sigint_stream_plain (test_wrel5b.TestB2StreamTaxonomy.test_sigint_stream_plain) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
 ok
 test_sigint_stream_reactor (test_wrel5b.TestB2StreamTaxonomy.test_sigint_stream_reactor) ... ok
-test_reactor_alive_during_source_stall (test_wrel5b.TestB3IngestReactorLiveness.test_reactor_alive_during_source_stall) ... /opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+test_reactor_alive_during_source_stall (test_wrel5b.TestB3IngestReactorLiveness.test_reactor_alive_during_source_stall) ... /opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   pid = os.fork()
-/opt/forkrun/python/tests/../forkrun/run.py:5009: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+/opt/forkrun/python/tests/../forkrun/run.py:5009: DeprecationWarning: This process (pid=281302) is multi-threaded, use of fork() may lead to deadlocks in the child.
   fallow_pid = os.fork()
 ok
 test_wedged_helper_reaped_with_alarm (test_wrel5b.TestB4BoundedHelperJoin.test_wedged_helper_reaped_with_alarm) ... ok
@@ -2946,11 +2946,11 @@ Traceback (most recent call last):
   File "/opt/forkrun/python/tests/_helpers.py", line 39, in assert_no_zombies
     testcase.fail("reaped unexpected child %r — zombie leak" % (pid,))
     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError: reaped unexpected child (278362, 256) — zombie leak
+AssertionError: reaped unexpected child (286127, 256) — zombie leak
 
 ----------------------------------------------------------------------
-Ran 644 tests in 209.973s
+Ran 644 tests in 211.871s
 
 FAILED (failures=2, skipped=1)
 
-### rc=1  elapsed=210s  finished=2026-09-30T04:11:11Z
+### rc=1  elapsed=212s  finished=2026-09-30T04:14:43Z
