@@ -1,0 +1,5 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+forkrun-fault-96w,forkrun,fault,0,2259.77734375,-1.0,"survived, out=4771285 records; crash-once SIGSEGV@idx5 + transient x5 all fired; orchestrator respawn; output truncated at hole",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-fault-96w,pool,fault,0,2259.77734375,-1.0,survived=False; POOL-DIED TimeoutError ,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+ray-fault-96w,ray,fault,0,2259.77734375,-1.0,"died, count=0; died: ml5/ml_fault.jsonl",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+plugin-fault-96w,plugin,fault,0,2280.9921875,-1.0,"survived, out=4771285 records; crash-once SIGSEGV@idx5 fired; orchestrator respawn; output truncated at hole",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic

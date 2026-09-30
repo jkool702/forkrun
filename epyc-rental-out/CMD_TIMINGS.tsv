@@ -55,3 +55,7 @@ gen_shim--check	0	0
 tools/test_idl.py	0	1
 test_shim_abi.py	0	0
 check_canary_versions	0	0
+ml5m-light	0	1090
+ml5m-medium	0	2216
+ml5m-heavy	0	7911
+ml5m-fault	0	169

@@ -1,0 +1,34 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+serial-medium,serial,udf,63851.45264191006,5037.8515625,-1.0,"out=4997892/5000000 records, 2.3GB in",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-medium-8w,pool,udf,397152.41985033656,5357.02734375,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-medium-8w,executor,udf,402304.85818391177,5371.8046875,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+hf-datasets-medium-8w,hf_datasets,udf,69766.35744076016,5371.8046875,-1.0,"out=4997892/5000000 of 5000000 text rows, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-medium-8w,forkrun,udf,211754.0860950616,5371.8046875,-1.0,"out=4997892/5000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-medium-8w,plugin,c-callback,446227.3476364531,5371.8046875,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-yyjson-medium-8w,plugin,c-callback-yyjson,591896.9996580848,5371.8046875,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-medium-16w,pool,udf,666143.6375946263,8413.85546875,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-medium-16w,executor,udf,584376.2444497059,8451.296875,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+hf-datasets-medium-16w,hf_datasets,udf,76934.73739570135,8451.296875,-1.0,"out=4997892/5000000 of 5000000 text rows, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-medium-16w,forkrun,udf,328828.3371709182,8451.296875,-1.0,"out=4997892/5000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-medium-16w,plugin,c-callback,568023.360965013,8451.296875,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-yyjson-medium-16w,plugin,c-callback-yyjson,671635.4782326524,8451.296875,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-medium-32w,pool,udf,711011.2435209901,8451.296875,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-medium-32w,executor,udf,993232.5525940802,8456.734375,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+hf-datasets-medium-32w,hf_datasets,udf,79874.35983906047,8456.734375,-1.0,"out=4997892/5000000 of 5000000 text rows, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-medium-32w,forkrun,udf,418757.19786564156,8456.734375,-1.0,"out=4997892/5000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-medium-32w,plugin,c-callback,591133.2831024008,8456.734375,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-yyjson-medium-32w,plugin,c-callback-yyjson,648784.6215048723,8456.734375,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-medium-48w,pool,udf,1000329.1328928872,8565.85546875,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-medium-48w,executor,udf,989220.1587004288,8566.54296875,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+hf-datasets-medium-48w,hf_datasets,udf,75919.26709424783,8566.54296875,-1.0,"out=4997892/5000000 of 5000000 text rows, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-medium-48w,forkrun,udf,432967.5565542721,8566.54296875,-1.0,"out=4997892/5000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-medium-48w,plugin,c-callback,529799.6591219378,8566.54296875,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-yyjson-medium-48w,plugin,c-callback-yyjson,529049.5292857852,8566.54296875,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-medium-96w,pool,udf,1093874.8930633427,8579.41015625,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-medium-96w,executor,udf,1199490.9760443496,8579.41015625,-1.0,out=4997892/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+hf-datasets-medium-96w,hf_datasets,udf,68654.86157603246,8579.41015625,-1.0,"out=4997892/5000000 of 5000000 text rows, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-medium-96w,forkrun,udf,344081.63537468476,8579.41015625,-1.0,"out=4997892/5000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-medium-96w,plugin,c-callback,330713.09038743685,8579.41015625,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-yyjson-medium-96w,plugin,c-callback-yyjson,324621.8801094164,8579.41015625,-1.0,"out=4997892/5000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+polars-native,polars,native,3904436.276488682,8579.41015625,-1.0,"out=4997892 rows, lazy/streaming NDJSON",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+duckdb-native,duckdb,native,397026.715807214,8579.41015625,-1.0,"out=4997892 rows, SQL/JSON",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic

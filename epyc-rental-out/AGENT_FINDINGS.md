@@ -250,3 +250,62 @@ Tier-1 file mid-run is what `INTEGRITY_AUDIT.md` is built to catch.
   31_utest_python running; 40/41/42/43/44/50/51/60/90 pending.
 - 41/43 UNBLOCKED: `EPYC_TOPOLOGY_OK=1`, genuine 2-socket NPS1.
 - publishing works end to end (commit + push to `origin/epyc-rental-results`).
+
+### Finding 5 — `test_resume_sigint`: unreaped child (zombie leak) after SIGINT. ESCALATED, deterministic 2/2.
+
+- stage: 31_utest_python — **FAIL rc=1** (423 s). Suite: 644 tests, both passes.
+- exact command: `bash epyc/31_utest_python.sh` -> `python -m unittest discover`
+  (both passes, ~210 s each).
+- the harness runs the suite **twice for flake discrimination**. Both passes
+  produced the **identical** pair of failures, so this is DETERMINISTIC, not a
+  flake — that is exactly what the x2 design is for.
+- exact error (verbatim, both passes):
+      FAIL: test_resume_sigint (test_resume.TestResumeExecution.test_resume_sigint)
+      SIGINT mid-pipeline checkpoints; resume completes.
+      File "/opt/forkrun/python/tests/test_resume.py", line 464, in tearDown
+        assert_no_zombies(self)
+      File "/opt/forkrun/python/tests/_helpers.py", line 39, in assert_no_zombies
+        testcase.fail("reaped unexpected child %r — zombie leak" % (pid,))
+      AssertionError: reaped unexpected child (278362, 256) — zombie leak
+      # pass 2: reaped unexpected child (286127, 256) — zombie leak
+- diagnosis: `assert_no_zombies` (python/tests/_helpers.py:33-40) documents its
+  own contract — "All children reaped: a WNOHANG poll must report ECHILD". It
+  calls `os.waitpid(-1, os.WNOHANG)` and fails if a pid comes back. A pid DID
+  come back, with status 256 (>> 8 == 1, i.e. the child exited 1), so after
+  `test_resume_sigint` — which drives `forkrun.map(..., workers=2,
+  orchestrator=True, checkpoint_file=ckpt)` into a KeyboardInterrupt and then
+  resumes at workers=4 — an unreaped child remains. The SIGINT abort path
+  checkpoints correctly (`self.assertTrue(os.path.exists(ckpt), "SIGINT abort
+  must checkpoint")` is not what failed) but does not fully reap its children.
+  Not a launcher artefact: the test pins `SIGINT` to
+  `signal.default_int_handler` explicitly and self-inflicts the signal, so
+  running the harness under `setsid` (no controlling terminal) cannot explain
+  it. Failure is in `tearDown`, so the test *body* completed — the leak is the
+  defect, not the checkpoint/resume result.
+- why it is a finding and not noise: it is NOT in the harness's own
+  known-pre-existing list (`31_utest_python.sh` triage: `test_death_cause_mapping`,
+  `test_claim_taxonomy`, `test_release_check_passes` per FAKE4_REVERIFY.md §5).
+  The other failure in both passes, `test_release_check_passes`, IS on that list
+  and is benign here: it requires a committed tree and the dirt is the harness's
+  own documented worker-cap patch — verified, its message is literally
+  "release checklist requires a committed tree ... Dirty paths:". So of stage
+  31's two failures, exactly one is a new product finding.
+- **PATTERN worth the operator's attention:** Finding 3 (bash suites) and this
+  are independent suites in two different frontends, and both land on the SAME
+  class — signal / fault-injection paths misbehaving (fault "never landed";
+  child not reaped after SIGINT). Two independent suites agreeing on a signal-
+  handling weakness is a stronger signal than either alone. It does not affect
+  benchmark numbers (benchmarks are not SIGINT'd mid-run; `run_all.sh` steps
+  over failures rather than interrupting them), so it does not threaten this
+  run's scientific validity — but it is a real defect in forkrun's signal paths.
+- what I did: **nothing to the code.** Reproducible + deterministic + clearly a
+  product bug => write it up and move on (brief §4). I did not touch
+  `python/tests/*` (Tier-1 / edit-denied) or `python/forkrun/*`.
+- smallest reproduction: `python -m unittest test_resume.TestResumeExecution.test_resume_sigint`
+  from `python/tests/`. It is already order-independent enough to fail in a
+  full-suite pass; the tearDown leak reproduces on a single test.
+- confidence: **high** on the finding (deterministic 2/2, exact traceback,
+  helper's contract read directly); **medium** on it being forkrun's own bug
+  rather than a test-harness assumption — the "no zombies at teardown"
+  invariant is the test's, and a reviewer should confirm forkrun is expected to
+  reap synchronously on KeyboardInterrupt.

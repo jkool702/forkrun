@@ -1,0 +1,354 @@
+### ml5m-light
+### 2026-09-30T04:25:49Z
+### cmd: python3 python/benchmarks/ml/bench_ml_pipeline.py --records 5000000 --variants light --workers 8,16,32,48,96 --trials 3 --no-fault --tmpdir //ml5 --csv /opt/forkrun/epyc-rental-out/20_benchmarks/ml5m/ml5m_light.csv
+
+forkrun ML pipeline benchmark — 5000000 records/variant
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Versions: {'python': '3.14.4', 'ray': '2.58.0', 'polars': '1.44.2', 'duckdb': '1.5.5', 'datasets': '5.0.1', 'pyarrow': '25.0.1', 'forkrun': '0.16.0'}
+Frameworks: {'serial': True, 'pool': True, 'executor': True, 'forkrun': True, 'ray': True, 'polars': True, 'duckdb': True, 'hf_datasets': True}
+Worker sweep: [8, 16, 32, 48, 96] (best reported per system)
+--- light: 5000000 records, 508.0MB ---
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 98409 examples [00:00, 876649.49 examples/s]Generating train split: 295236 examples [00:00, 1025925.02 examples/s]Generating train split: 492067 examples [00:00, 1083505.23 examples/s]Generating train split: 688901 examples [00:00, 1134952.05 examples/s]Generating train split: 885747 examples [00:00, 1162714.02 examples/s]Generating train split: 1082601 examples [00:00, 1180870.81 examples/s]Generating train split: 1279427 examples [00:01, 1146749.68 examples/s]Generating train split: 1476268 examples [00:01, 1150157.36 examples/s]Generating train split: 1673110 examples [00:01, 1171193.72 examples/s]Generating train split: 1869938 examples [00:01, 1184911.50 examples/s]Generating train split: 2066775 examples [00:01, 1194279.24 examples/s]Generating train split: 2263601 examples [00:01, 1201689.33 examples/s]Generating train split: 2460432 examples [00:02, 1207870.96 examples/s]Generating train split: 2657276 examples [00:02, 1157442.18 examples/s]Generating train split: 2854108 examples [00:02, 1176165.47 examples/s]Generating train split: 3050942 examples [00:02, 1187770.61 examples/s]Generating train split: 3247773 examples [00:02, 1197541.64 examples/s]Generating train split: 3444606 examples [00:02, 1203459.94 examples/s]Generating train split: 3641431 examples [00:03, 1210777.33 examples/s]Generating train split: 3838272 examples [00:03, 1172278.54 examples/s]Generating train split: 4035133 examples [00:03, 1175991.17 examples/s]Generating train split: 4231983 examples [00:03, 1189600.74 examples/s]Generating train split: 4428830 examples [00:03, 1194915.68 examples/s]Generating train split: 4625687 examples [00:03, 1202511.30 examples/s]Generating train split: 4822541 examples [00:04, 1208054.86 examples/s]Generating train split: 5000000 examples [00:04, 1211727.70 examples/s]Generating train split: 5000000 examples [00:04, 1178070.11 examples/s]
+Map (num_proc=8):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=8):   0%|          | 5000/5000000 [00:00<05:12, 15977.47 examples/s]Map (num_proc=8):   2%|▏         | 102000/5000000 [00:00<00:15, 308792.03 examples/s]Map (num_proc=8):   4%|▍         | 206000/5000000 [00:00<00:09, 520881.46 examples/s]Map (num_proc=8):   6%|▋         | 318000/5000000 [00:00<00:06, 675471.27 examples/s]Map (num_proc=8):   9%|▊         | 429000/5000000 [00:00<00:05, 781088.61 examples/s]Map (num_proc=8):  11%|█         | 541000/5000000 [00:00<00:05, 848205.31 examples/s]Map (num_proc=8):  13%|█▎        | 653000/5000000 [00:00<00:04, 892874.02 examples/s]Map (num_proc=8):  15%|█▌        | 750000/5000000 [00:01<00:04, 875353.17 examples/s]Map (num_proc=8):  17%|█▋        | 861000/5000000 [00:01<00:04, 909888.32 examples/s]Map (num_proc=8):  19%|█▉        | 973000/5000000 [00:01<00:04, 936556.77 examples/s]Map (num_proc=8):  22%|██▏       | 1085000/5000000 [00:01<00:04, 954465.23 examples/s]Map (num_proc=8):  24%|██▍       | 1194000/5000000 [00:01<00:03, 971603.82 examples/s]Map (num_proc=8):  26%|██▌       | 1299000/5000000 [00:01<00:03, 962408.56 examples/s]Map (num_proc=8):  28%|██▊       | 1411000/5000000 [00:01<00:03, 973614.57 examples/s]Map (num_proc=8):  30%|███       | 1513000/5000000 [00:01<00:03, 943819.16 examples/s]Map (num_proc=8):  32%|███▏      | 1611000/5000000 [00:01<00:03, 944231.48 examples/s]Map (num_proc=8):  34%|███▍      | 1716000/5000000 [00:02<00:03, 947753.54 examples/s]Map (num_proc=8):  37%|███▋      | 1828000/5000000 [00:02<00:03, 963868.10 examples/s]Map (num_proc=8):  39%|███▉      | 1940000/5000000 [00:02<00:03, 974206.42 examples/s]Map (num_proc=8):  41%|████      | 2052000/5000000 [00:02<00:03, 980901.58 examples/s]Map (num_proc=8):  43%|████▎     | 2157000/5000000 [00:02<00:02, 994282.42 examples/s]Map (num_proc=8):  45%|████▌     | 2269000/5000000 [00:02<00:02, 989184.87 examples/s]Map (num_proc=8):  48%|████▊     | 2381000/5000000 [00:02<00:02, 982883.98 examples/s]Map (num_proc=8):  50%|████▉     | 2493000/5000000 [00:02<00:02, 980977.56 examples/s]Map (num_proc=8):  52%|█████▏    | 2605000/5000000 [00:02<00:02, 988151.67 examples/s]Map (num_proc=8):  54%|█████▍    | 2716000/5000000 [00:03<00:02, 990745.62 examples/s]Map (num_proc=8):  57%|█████▋    | 2828000/5000000 [00:03<00:02, 995393.26 examples/s]Map (num_proc=8):  59%|█████▊    | 2933000/5000000 [00:03<00:02, 911945.52 examples/s]Map (num_proc=8):  61%|██████    | 3027000/5000000 [00:03<00:02, 897424.23 examples/s]Map (num_proc=8):  63%|██████▎   | 3138000/5000000 [00:03<00:01, 933983.42 examples/s]Map (num_proc=8):  65%|██████▍   | 3249000/5000000 [00:03<00:01, 961878.85 examples/s]Map (num_proc=8):  67%|██████▋   | 3347000/5000000 [00:03<00:01, 962059.93 examples/s]Map (num_proc=8):  69%|██████▉   | 3452000/5000000 [00:03<00:01, 957293.45 examples/s]Map (num_proc=8):  71%|███████▏  | 3563000/5000000 [00:03<00:01, 963730.22 examples/s]Map (num_proc=8):  74%|███████▎  | 3675000/5000000 [00:04<00:01, 972197.76 examples/s]Map (num_proc=8):  76%|███████▌  | 3786000/5000000 [00:04<00:01, 976073.02 examples/s]Map (num_proc=8):  78%|███████▊  | 3898000/5000000 [00:04<00:01, 981623.69 examples/s]Map (num_proc=8):  80%|████████  | 4010000/5000000 [00:04<00:01, 983361.07 examples/s]Map (num_proc=8):  82%|████████▏ | 4122000/5000000 [00:04<00:00, 987762.59 examples/s]Map (num_proc=8):  85%|████████▍ | 4234000/5000000 [00:04<00:00, 989511.62 examples/s]Map (num_proc=8):  87%|████████▋ | 4346000/5000000 [00:04<00:00, 991824.43 examples/s]Map (num_proc=8):  89%|████████▉ | 4458000/5000000 [00:04<00:00, 992736.58 examples/s]Map (num_proc=8):  91%|█████████▏| 4570000/5000000 [00:05<00:00, 994129.92 examples/s]Map (num_proc=8):  94%|█████████▎| 4682000/5000000 [00:05<00:00, 994401.07 examples/s]Map (num_proc=8):  96%|█████████▌| 4794000/5000000 [00:05<00:00, 993537.07 examples/s]Map (num_proc=8):  98%|█████████▊| 4906000/5000000 [00:05<00:00, 993106.29 examples/s]Map (num_proc=8): 100%|██████████| 5000000/5000000 [00:11<00:00, 428094.16 examples/s]
+Map (num_proc=8):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=8):   0%|          | 5000/5000000 [00:00<08:39, 9611.65 examples/s]Map (num_proc=8):   2%|▏         | 95000/5000000 [00:00<00:24, 198905.77 examples/s]Map (num_proc=8):   4%|▍         | 198000/5000000 [00:00<00:12, 385067.83 examples/s]Map (num_proc=8):   6%|▌         | 309000/5000000 [00:00<00:08, 546285.76 examples/s]Map (num_proc=8):   8%|▊         | 414000/5000000 [00:00<00:06, 656240.85 examples/s]Map (num_proc=8):  11%|█         | 526000/5000000 [00:01<00:05, 750547.62 examples/s]Map (num_proc=8):  13%|█▎        | 637000/5000000 [00:01<00:05, 817424.41 examples/s]Map (num_proc=8):  15%|█▍        | 740000/5000000 [00:01<00:04, 863222.82 examples/s]Map (num_proc=8):  17%|█▋        | 850000/5000000 [00:01<00:04, 896935.79 examples/s]Map (num_proc=8):  19%|█▉        | 962000/5000000 [00:01<00:04, 923345.52 examples/s]Map (num_proc=8):  21%|██▏       | 1074000/5000000 [00:01<00:04, 940950.72 examples/s]Map (num_proc=8):  24%|██▎       | 1185000/5000000 [00:01<00:04, 952250.68 examples/s]Map (num_proc=8):  26%|██▌       | 1291000/5000000 [00:01<00:03, 949753.07 examples/s]Map (num_proc=8):  28%|██▊       | 1403000/5000000 [00:01<00:03, 962374.53 examples/s]Map (num_proc=8):  30%|███       | 1505000/5000000 [00:02<00:03, 927263.42 examples/s]Map (num_proc=8):  32%|███▏      | 1603000/5000000 [00:02<00:03, 927234.97 examples/s]Map (num_proc=8):  34%|███▍      | 1708000/5000000 [00:02<00:03, 946805.21 examples/s]Map (num_proc=8):  36%|███▋      | 1820000/5000000 [00:02<00:03, 960387.73 examples/s]Map (num_proc=8):  39%|███▊      | 1932000/5000000 [00:02<00:03, 971406.40 examples/s]Map (num_proc=8):  41%|████      | 2044000/5000000 [00:02<00:03, 977910.95 examples/s]Map (num_proc=8):  43%|████▎     | 2156000/5000000 [00:02<00:02, 982440.92 examples/s]Map (num_proc=8):  45%|████▌     | 2268000/5000000 [00:02<00:02, 986046.10 examples/s]Map (num_proc=8):  48%|████▊     | 2380000/5000000 [00:02<00:02, 988949.37 examples/s]Map (num_proc=8):  50%|████▉     | 2492000/5000000 [00:03<00:02, 992093.65 examples/s]Map (num_proc=8):  52%|█████▏    | 2604000/5000000 [00:03<00:02, 992255.70 examples/s]Map (num_proc=8):  54%|█████▍    | 2709000/5000000 [00:03<00:02, 1005749.03 examples/s]Map (num_proc=8):  56%|█████▋    | 2821000/5000000 [00:03<00:02, 999331.32 examples/s] Map (num_proc=8):  58%|█████▊    | 2922000/5000000 [00:03<00:02, 885880.84 examples/s]Map (num_proc=8):  60%|██████    | 3019000/5000000 [00:03<00:02, 890879.99 examples/s]Map (num_proc=8):  63%|██████▎   | 3131000/5000000 [00:03<00:02, 921724.79 examples/s]Map (num_proc=8):  65%|██████▍   | 3243000/5000000 [00:03<00:01, 943454.76 examples/s]Map (num_proc=8):  67%|██████▋   | 3355000/5000000 [00:04<00:01, 958733.13 examples/s]Map (num_proc=8):  69%|██████▉   | 3467000/5000000 [00:04<00:01, 967752.66 examples/s]Map (num_proc=8):  72%|███████▏  | 3579000/5000000 [00:04<00:01, 975160.29 examples/s]Map (num_proc=8):  74%|███████▍  | 3691000/5000000 [00:04<00:01, 981097.22 examples/s]Map (num_proc=8):  76%|███████▌  | 3803000/5000000 [00:04<00:01, 986507.47 examples/s]Map (num_proc=8):  78%|███████▊  | 3915000/5000000 [00:04<00:01, 989627.11 examples/s]Map (num_proc=8):  81%|████████  | 4027000/5000000 [00:04<00:00, 991997.77 examples/s]Map (num_proc=8):  83%|████████▎ | 4139000/5000000 [00:04<00:00, 992768.76 examples/s]Map (num_proc=8):  85%|████████▌ | 4251000/5000000 [00:04<00:00, 993668.81 examples/s]Map (num_proc=8):  87%|████████▋ | 4363000/5000000 [00:05<00:00, 994074.27 examples/s]Map (num_proc=8):  90%|████████▉ | 4475000/5000000 [00:05<00:00, 994246.27 examples/s]Map (num_proc=8):  92%|█████████▏| 4587000/5000000 [00:05<00:00, 994300.32 examples/s]Map (num_proc=8):  94%|█████████▍| 4699000/5000000 [00:05<00:00, 994038.22 examples/s]Map (num_proc=8):  96%|█████████▌| 4811000/5000000 [00:05<00:00, 992874.73 examples/s]Map (num_proc=8):  98%|█████████▊| 4923000/5000000 [00:05<00:00, 991799.98 examples/s]Map (num_proc=8): 100%|██████████| 5000000/5000000 [00:11<00:00, 423348.68 examples/s]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=301 read=301 finished=1 chunks(head=25 tail=25) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1216 read=1216 finished=1 chunks(head=231 tail=231) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1517 emitted=1517 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=335 read=335 finished=1 chunks(head=36 tail=36) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1206 read=1206 finished=1 chunks(head=220 tail=220) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1541 emitted=1541 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=241 read=241 finished=1 chunks(head=16 tail=16) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1231 read=1231 finished=1 chunks(head=240 tail=240) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1472 emitted=1472 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=355 read=355 finished=1 chunks(head=36 tail=36) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1196 read=1196 finished=1 chunks(head=220 tail=220) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1551 emitted=1551 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=261 read=261 finished=1 chunks(head=19 tail=19) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1226 read=1226 finished=1 chunks(head=237 tail=237) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1487 emitted=1487 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=365 read=365 finished=1 chunks(head=32 tail=32) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1191 read=1191 finished=1 chunks(head=224 tail=224) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1556 emitted=1556 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=385 read=385 finished=1 chunks(head=35 tail=35) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1181 read=1181 finished=1 chunks(head=221 tail=221) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1566 emitted=1566 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=385 read=385 finished=1 chunks(head=29 tail=29) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1181 read=1181 finished=1 chunks(head=227 tail=227) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1566 emitted=1566 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=365 read=365 finished=1 chunks(head=31 tail=31) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1191 read=1191 finished=1 chunks(head=225 tail=225) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1556 emitted=1556 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=385 read=385 finished=1 chunks(head=34 tail=34) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=1181 read=1181 finished=1 chunks(head=222 tail=222) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1566 emitted=1566 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+Map (num_proc=16):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=16):   0%|          | 5000/5000000 [00:00<13:29, 6169.53 examples/s]Map (num_proc=16):   1%|          | 27000/5000000 [00:00<02:10, 37991.79 examples/s]Map (num_proc=16):   4%|▍         | 216000/5000000 [00:01<00:13, 360363.56 examples/s]Map (num_proc=16):   8%|▊         | 418000/5000000 [00:01<00:06, 689736.35 examples/s]Map (num_proc=16):  13%|█▎        | 635000/5000000 [00:01<00:04, 984051.52 examples/s]Map (num_proc=16):  17%|█▋        | 850000/5000000 [00:01<00:03, 1225525.64 examples/s]Map (num_proc=16):  21%|██▏       | 1073000/5000000 [00:01<00:02, 1431376.32 examples/s]Map (num_proc=16):  26%|██▌       | 1295000/5000000 [00:01<00:02, 1587244.35 examples/s]Map (num_proc=16):  30%|██▉       | 1492000/5000000 [00:01<00:02, 1676110.99 examples/s]Map (num_proc=16):  34%|███▍      | 1692000/5000000 [00:01<00:01, 1748983.24 examples/s]Map (num_proc=16):  38%|███▊      | 1894000/5000000 [00:01<00:01, 1807686.38 examples/s]Map (num_proc=16):  42%|████▏     | 2089000/5000000 [00:01<00:01, 1839063.89 examples/s]Map (num_proc=16):  46%|████▌     | 2296000/5000000 [00:02<00:01, 1857429.08 examples/s]Map (num_proc=16):  50%|█████     | 2504000/5000000 [00:02<00:01, 1879572.81 examples/s]Map (num_proc=16):  55%|█████▍    | 2725000/5000000 [00:02<00:01, 1904496.18 examples/s]Map (num_proc=16):  59%|█████▊    | 2930000/5000000 [00:02<00:01, 1902859.73 examples/s]Map (num_proc=16):  63%|██████▎   | 3127000/5000000 [00:02<00:01, 1819166.77 examples/s]Map (num_proc=16):  67%|██████▋   | 3326000/5000000 [00:02<00:00, 1850778.69 examples/s]Map (num_proc=16):  71%|███████   | 3547000/5000000 [00:02<00:00, 1932329.14 examples/s]Map (num_proc=16):  75%|███████▌  | 3768000/5000000 [00:02<00:00, 1985184.44 examples/s]Map (num_proc=16):  79%|███████▉  | 3968000/5000000 [00:02<00:00, 1969594.02 examples/s]Map (num_proc=16):  83%|████████▎ | 4168000/5000000 [00:03<00:00, 1954630.13 examples/s]Map (num_proc=16):  87%|████████▋ | 4368000/5000000 [00:03<00:00, 1956134.90 examples/s]Map (num_proc=16):  91%|█████████▏| 4568000/5000000 [00:03<00:00, 1915909.72 examples/s]Map (num_proc=16):  96%|█████████▌| 4775500/5000000 [00:03<00:00, 1958529.21 examples/s]Map (num_proc=16):  99%|█████████▉| 4973500/5000000 [00:03<00:00, 1923050.43 examples/s]Map (num_proc=16): 100%|██████████| 5000000/5000000 [00:09<00:00, 543969.36 examples/s] 
+Map (num_proc=16):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=16):   0%|          | 5000/5000000 [00:00<13:41, 6081.99 examples/s]Map (num_proc=16):   1%|          | 29000/5000000 [00:00<02:03, 40302.22 examples/s]Map (num_proc=16):   4%|▍         | 224000/5000000 [00:01<00:13, 365695.10 examples/s]Map (num_proc=16):   9%|▊         | 430000/5000000 [00:01<00:06, 688005.88 examples/s]Map (num_proc=16):  13%|█▎        | 635000/5000000 [00:01<00:04, 981378.45 examples/s]Map (num_proc=16):  17%|█▋        | 854000/5000000 [00:01<00:03, 1236069.88 examples/s]Map (num_proc=16):  21%|██▏       | 1074000/5000000 [00:01<00:02, 1435249.99 examples/s]Map (num_proc=16):  26%|██▌       | 1293000/5000000 [00:01<00:02, 1583609.20 examples/s]Map (num_proc=16):  30%|██▉       | 1488000/5000000 [00:01<00:02, 1654484.34 examples/s]Map (num_proc=16):  34%|███▍      | 1706000/5000000 [00:01<00:01, 1745580.03 examples/s]Map (num_proc=16):  39%|███▊      | 1926000/5000000 [00:01<00:01, 1814953.64 examples/s]Map (num_proc=16):  43%|████▎     | 2133000/5000000 [00:02<00:01, 1874889.43 examples/s]Map (num_proc=16):  47%|████▋     | 2332000/5000000 [00:02<00:01, 1878930.51 examples/s]Map (num_proc=16):  51%|█████     | 2531000/5000000 [00:02<00:01, 1864953.93 examples/s]Map (num_proc=16):  54%|█████▍    | 2723000/5000000 [00:02<00:01, 1838893.25 examples/s]Map (num_proc=16):  58%|█████▊    | 2910000/5000000 [00:02<00:01, 1835923.33 examples/s]Map (num_proc=16):  62%|██████▏   | 3099000/5000000 [00:02<00:01, 1766568.87 examples/s]Map (num_proc=16):  66%|██████▌   | 3305000/5000000 [00:02<00:00, 1820673.60 examples/s]Map (num_proc=16):  70%|███████   | 3516000/5000000 [00:02<00:00, 1888361.87 examples/s]Map (num_proc=16):  75%|███████▍  | 3729000/5000000 [00:02<00:00, 1917304.40 examples/s]Map (num_proc=16):  79%|███████▉  | 3948000/5000000 [00:02<00:00, 1934080.47 examples/s]Map (num_proc=16):  83%|████████▎ | 4170000/5000000 [00:03<00:00, 1941713.44 examples/s]Map (num_proc=16):  88%|████████▊ | 4391000/5000000 [00:03<00:00, 1949789.51 examples/s]Map (num_proc=16):  92%|█████████▏| 4604000/5000000 [00:03<00:00, 1997943.44 examples/s]Map (num_proc=16):  96%|█████████▌| 4805000/5000000 [00:03<00:00, 1984142.36 examples/s]Map (num_proc=16): 100%|██████████| 5000000/5000000 [00:09<00:00, 543244.29 examples/s] 
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=241 read=241 finished=1 chunks(head=16 tail=16) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1231 read=1231 finished=1 chunks(head=240 tail=240) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1472 emitted=1472 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=365 read=365 finished=1 chunks(head=36 tail=36) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1191 read=1191 finished=1 chunks(head=220 tail=220) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1556 emitted=1556 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=335 read=335 finished=1 chunks(head=33 tail=33) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1206 read=1206 finished=1 chunks(head=223 tail=223) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1541 emitted=1541 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=301 read=301 finished=1 chunks(head=29 tail=29) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1216 read=1216 finished=1 chunks(head=227 tail=227) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1517 emitted=1517 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=281 read=281 finished=1 chunks(head=24 tail=24) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1221 read=1221 finished=1 chunks(head=232 tail=232) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1502 emitted=1502 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=345 read=345 finished=1 chunks(head=22 tail=22) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1201 read=1201 finished=1 chunks(head=234 tail=234) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1546 emitted=1546 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=375 read=375 finished=1 chunks(head=25 tail=25) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1186 read=1186 finished=1 chunks(head=231 tail=231) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1561 emitted=1561 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=395 read=395 finished=1 chunks(head=36 tail=36) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1176 read=1176 finished=1 chunks(head=220 tail=220) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1571 emitted=1571 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=395 read=395 finished=1 chunks(head=37 tail=37) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1176 read=1176 finished=1 chunks(head=219 tail=219) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1571 emitted=1571 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=385 read=385 finished=1 chunks(head=27 tail=27) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=1181 read=1181 finished=1 chunks(head=229 tail=229) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1566 emitted=1566 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+Map (num_proc=32):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=32):   0%|          | 5000/5000000 [00:01<23:07, 3601.09 examples/s]Map (num_proc=32):   1%|          | 28000/5000000 [00:01<03:21, 24720.35 examples/s]Map (num_proc=32):   6%|▌         | 310000/5000000 [00:01<00:13, 353169.79 examples/s]Map (num_proc=32):  14%|█▍        | 706000/5000000 [00:01<00:04, 871078.36 examples/s]Map (num_proc=32):  22%|██▏       | 1106000/5000000 [00:01<00:02, 1400443.59 examples/s]Map (num_proc=32):  30%|██▉       | 1496000/5000000 [00:01<00:01, 1885965.69 examples/s]Map (num_proc=32):  37%|███▋      | 1858000/5000000 [00:01<00:01, 2263505.18 examples/s]Map (num_proc=32):  45%|████▌     | 2260000/5000000 [00:02<00:01, 2672536.30 examples/s]Map (num_proc=32):  54%|█████▎    | 2680000/5000000 [00:02<00:00, 3029172.06 examples/s]Map (num_proc=32):  61%|██████▏   | 3064000/5000000 [00:02<00:00, 3233861.35 examples/s]Map (num_proc=32):  69%|██████▉   | 3453000/5000000 [00:02<00:00, 3404980.52 examples/s]Map (num_proc=32):  77%|███████▋  | 3852000/5000000 [00:02<00:00, 3552263.19 examples/s]Map (num_proc=32):  85%|████████▍ | 4246000/5000000 [00:02<00:00, 3659416.26 examples/s]Map (num_proc=32):  93%|█████████▎| 4634500/5000000 [00:02<00:00, 3709061.31 examples/s]Map (num_proc=32): 100%|██████████| 5000000/5000000 [00:08<00:00, 612316.40 examples/s] 
+Map (num_proc=32):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=32):   0%|          | 5000/5000000 [00:01<23:05, 3606.10 examples/s]Map (num_proc=32):   1%|          | 29000/5000000 [00:01<03:13, 25636.82 examples/s]Map (num_proc=32):   6%|▌         | 295000/5000000 [00:01<00:14, 334530.40 examples/s]Map (num_proc=32):  13%|█▎        | 671000/5000000 [00:01<00:05, 824876.31 examples/s]Map (num_proc=32):  21%|██▏       | 1068000/5000000 [00:01<00:02, 1345597.75 examples/s]Map (num_proc=32):  29%|██▉       | 1468000/5000000 [00:01<00:01, 1857424.29 examples/s]Map (num_proc=32):  37%|███▋      | 1862000/5000000 [00:01<00:01, 2305084.33 examples/s]Map (num_proc=32):  45%|████▍     | 2228000/5000000 [00:02<00:01, 2605661.75 examples/s]Map (num_proc=32):  52%|█████▏    | 2615000/5000000 [00:02<00:00, 2920698.22 examples/s]Map (num_proc=32):  60%|██████    | 3006000/5000000 [00:02<00:00, 3162455.81 examples/s]Map (num_proc=32):  69%|██████▊   | 3429000/5000000 [00:02<00:00, 3427313.35 examples/s]Map (num_proc=32):  77%|███████▋  | 3837000/5000000 [00:02<00:00, 3601513.25 examples/s]Map (num_proc=32):  85%|████████▍ | 4227000/5000000 [00:02<00:00, 3666618.96 examples/s]Map (num_proc=32):  92%|█████████▏| 4616750/5000000 [00:02<00:00, 3651747.02 examples/s]Map (num_proc=32): 100%|█████████▉| 4995750/5000000 [00:02<00:00, 3255750.00 examples/s]Map (num_proc=32): 100%|██████████| 5000000/5000000 [00:08<00:00, 594129.48 examples/s] 
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=301 read=301 finished=1 chunks(head=30 tail=30) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1216 read=1216 finished=1 chunks(head=226 tail=226) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1517 emitted=1517 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=261 read=261 finished=1 chunks(head=19 tail=19) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1226 read=1226 finished=1 chunks(head=237 tail=237) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1487 emitted=1487 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=335 read=335 finished=1 chunks(head=32 tail=32) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1206 read=1206 finished=1 chunks(head=224 tail=224) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1541 emitted=1541 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=261 read=261 finished=1 chunks(head=18 tail=18) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1226 read=1226 finished=1 chunks(head=238 tail=238) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1487 emitted=1487 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=281 read=281 finished=1 chunks(head=24 tail=24) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1221 read=1221 finished=1 chunks(head=232 tail=232) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1502 emitted=1502 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=405 read=405 finished=1 chunks(head=29 tail=29) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1171 read=1171 finished=1 chunks(head=227 tail=227) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1576 emitted=1576 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=425 read=425 finished=1 chunks(head=35 tail=35) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1161 read=1161 finished=1 chunks(head=221 tail=221) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1586 emitted=1586 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=455 read=455 finished=1 chunks(head=44 tail=44) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1146 read=1146 finished=1 chunks(head=212 tail=212) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1601 emitted=1601 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=425 read=425 finished=1 chunks(head=32 tail=32) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1161 read=1161 finished=1 chunks(head=224 tail=224) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1586 emitted=1586 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=385 read=385 finished=1 chunks(head=32 tail=32) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=1181 read=1181 finished=1 chunks(head=224 tail=224) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1566 emitted=1566 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+Map (num_proc=48):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=48):   0%|          | 3000/5000000 [00:02<59:23, 1402.26 examples/s]Map (num_proc=48):   1%|          | 28000/5000000 [00:02<04:53, 16926.88 examples/s]Map (num_proc=48):   7%|▋         | 374000/5000000 [00:02<00:15, 298712.20 examples/s]Map (num_proc=48):  18%|█▊        | 897000/5000000 [00:02<00:05, 813950.17 examples/s]Map (num_proc=48):  29%|██▉       | 1469000/5000000 [00:02<00:02, 1450113.14 examples/s]Map (num_proc=48):  41%|████      | 2029000/5000000 [00:02<00:01, 2090899.35 examples/s]Map (num_proc=48):  52%|█████▏    | 2582000/5000000 [00:02<00:00, 2716666.93 examples/s]Map (num_proc=48):  64%|██████▍   | 3192000/5000000 [00:02<00:00, 3397200.42 examples/s]Map (num_proc=48):  76%|███████▌  | 3801000/5000000 [00:02<00:00, 3997833.71 examples/s]Map (num_proc=48):  87%|████████▋ | 4346332/5000000 [00:03<00:00, 4314708.78 examples/s]Map (num_proc=48):  98%|█████████▊| 4885669/5000000 [00:03<00:00, 4507729.78 examples/s]Map (num_proc=48): 100%|██████████| 5000000/5000000 [00:09<00:00, 548379.58 examples/s] 
+Map (num_proc=48):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=48):   0%|          | 6000/5000000 [00:02<31:06, 2675.55 examples/s]Map (num_proc=48):   1%|          | 41000/5000000 [00:02<03:31, 23452.76 examples/s]Map (num_proc=48):   8%|▊         | 407000/5000000 [00:02<00:14, 309699.18 examples/s]Map (num_proc=48):  19%|█▊        | 927000/5000000 [00:02<00:05, 803043.40 examples/s]Map (num_proc=48):  29%|██▊       | 1437000/5000000 [00:02<00:02, 1344451.44 examples/s]Map (num_proc=48):  39%|███▉      | 1966000/5000000 [00:02<00:01, 1942659.48 examples/s]Map (num_proc=48):  50%|█████     | 2522000/5000000 [00:02<00:00, 2585668.06 examples/s]Map (num_proc=48):  63%|██████▎   | 3139000/5000000 [00:02<00:00, 3313263.38 examples/s]Map (num_proc=48):  74%|███████▍  | 3716000/5000000 [00:03<00:00, 3857595.74 examples/s]Map (num_proc=48):  86%|████████▌ | 4282332/5000000 [00:03<00:00, 4284469.62 examples/s]Map (num_proc=48):  96%|█████████▋| 4824668/5000000 [00:03<00:00, 4477429.61 examples/s]Map (num_proc=48): 100%|██████████| 5000000/5000000 [00:09<00:00, 551800.71 examples/s] 
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=241 read=241 finished=1 chunks(head=16 tail=16) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1231 read=1231 finished=1 chunks(head=240 tail=240) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1472 emitted=1472 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=321 read=321 finished=1 chunks(head=32 tail=32) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1211 read=1211 finished=1 chunks(head=224 tail=224) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1532 emitted=1532 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=301 read=301 finished=1 chunks(head=24 tail=24) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1216 read=1216 finished=1 chunks(head=232 tail=232) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1517 emitted=1517 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=301 read=301 finished=1 chunks(head=23 tail=23) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1216 read=1216 finished=1 chunks(head=233 tail=233) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1517 emitted=1517 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=261 read=261 finished=1 chunks(head=21 tail=21) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1226 read=1226 finished=1 chunks(head=235 tail=235) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1487 emitted=1487 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=385 read=385 finished=1 chunks(head=35 tail=35) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1181 read=1181 finished=1 chunks(head=221 tail=221) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1566 emitted=1566 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=415 read=415 finished=1 chunks(head=37 tail=37) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1166 read=1166 finished=1 chunks(head=219 tail=219) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1581 emitted=1581 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=375 read=375 finished=1 chunks(head=35 tail=35) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1186 read=1186 finished=1 chunks(head=221 tail=221) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1561 emitted=1561 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=321 read=321 finished=1 chunks(head=26 tail=26) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1211 read=1211 finished=1 chunks(head=230 tail=230) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1532 emitted=1532 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=365 read=365 finished=1 chunks(head=35 tail=35) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=1191 read=1191 finished=1 chunks(head=221 tail=221) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1556 emitted=1556 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+Map (num_proc=96):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=96):   0%|          | 3000/5000000 [00:04<2:04:05, 671.16 examples/s]Map (num_proc=96):   2%|▏         | 89000/5000000 [00:04<03:00, 27237.76 examples/s]Map (num_proc=96):   6%|▌         | 309000/5000000 [00:04<00:39, 119088.64 examples/s]Map (num_proc=96):  13%|█▎        | 627000/5000000 [00:04<00:14, 293050.11 examples/s]Map (num_proc=96):  25%|██▌       | 1253000/5000000 [00:04<00:05, 741405.21 examples/s]Map (num_proc=96):  39%|███▊      | 1934000/5000000 [00:04<00:02, 1323727.52 examples/s]Map (num_proc=96):  50%|████▉     | 2487000/5000000 [00:05<00:01, 1828930.60 examples/s]Map (num_proc=96):  59%|█████▉    | 2970000/5000000 [00:05<00:00, 2207849.79 examples/s]Map (num_proc=96):  70%|███████   | 3522000/5000000 [00:05<00:00, 2769376.42 examples/s]Map (num_proc=96):  82%|████████▏ | 4107001/5000000 [00:05<00:00, 3367072.37 examples/s]Map (num_proc=96):  93%|█████████▎| 4626010/5000000 [00:07<00:00, 634432.22 examples/s] Map (num_proc=96): 100%|█████████▉| 4991419/5000000 [00:07<00:00, 757355.99 examples/s]Map (num_proc=96): 100%|██████████| 5000000/5000000 [00:11<00:00, 417600.34 examples/s]
+Map (num_proc=96):   0%|          | 0/5000000 [00:00<?, ? examples/s]Map (num_proc=96):   0%|          | 3000/5000000 [00:04<1:55:22, 721.81 examples/s]Map (num_proc=96):   2%|▏         | 108000/5000000 [00:04<02:17, 35550.54 examples/s]Map (num_proc=96):   7%|▋         | 350000/5000000 [00:04<00:32, 143444.69 examples/s]Map (num_proc=96):  14%|█▎        | 682000/5000000 [00:04<00:12, 336307.70 examples/s]Map (num_proc=96):  25%|██▍       | 1245000/5000000 [00:04<00:04, 758766.61 examples/s]Map (num_proc=96):  36%|███▋      | 1814000/5000000 [00:04<00:02, 1263327.88 examples/s]Map (num_proc=96):  49%|████▉     | 2459000/5000000 [00:04<00:01, 1923270.41 examples/s]Map (num_proc=96):  62%|██████▏   | 3093000/5000000 [00:04<00:00, 2603097.63 examples/s]Map (num_proc=96):  74%|███████▍  | 3709000/5000000 [00:04<00:00, 3243205.44 examples/s]Map (num_proc=96):  86%|████████▌ | 4275757/5000000 [00:05<00:00, 3739545.79 examples/s]Map (num_proc=96):  97%|█████████▋| 4839094/5000000 [00:07<00:00, 666813.75 examples/s] Map (num_proc=96): 100%|██████████| 5000000/5000000 [00:11<00:00, 433293.90 examples/s]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=345 read=345 finished=1 chunks(head=33 tail=33) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1201 read=1201 finished=1 chunks(head=223 tail=223) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1546 emitted=1546 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=345 read=345 finished=1 chunks(head=33 tail=33) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1201 read=1201 finished=1 chunks(head=223 tail=223) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1546 emitted=1546 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=301 read=301 finished=1 chunks(head=30 tail=30) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1216 read=1216 finished=1 chunks(head=226 tail=226) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1517 emitted=1517 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=355 read=355 finished=1 chunks(head=37 tail=37) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1196 read=1196 finished=1 chunks(head=219 tail=219) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1551 emitted=1551 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=345 read=345 finished=1 chunks(head=34 tail=34) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1201 read=1201 finished=1 chunks(head=222 tail=222) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1546 emitted=1546 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=405 read=405 finished=1 chunks(head=37 tail=37) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1171 read=1171 finished=1 chunks(head=219 tail=219) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1576 emitted=1576 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=415 read=415 finished=1 chunks(head=40 tail=40) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1166 read=1166 finished=1 chunks(head=216 tail=216) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1581 emitted=1581 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=365 read=365 finished=1 chunks(head=31 tail=31) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1191 read=1191 finished=1 chunks(head=225 tail=225) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1556 emitted=1556 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=355 read=355 finished=1 chunks(head=24 tail=24) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1196 read=1196 finished=1 chunks(head=232 tail=232) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1551 emitted=1551 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=455 read=455 finished=1 chunks(head=47 tail=47) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=1146 read=1146 finished=1 chunks(head=209 tail=209) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=1601 emitted=1601 expected=(256,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+2026-09-30 04:43:56,026	INFO worker.py:2024 -- Started a local Ray instance.
+ray failed: ml5/ml_light.jsonl
+--- light results (this variant) ---
++--------------------------+-------------+------------+---------+----------+------+--------------------------------------------------------+
+| Benchmark                | Mode        | Path       | Lines/s | Peak RSS | CPU% | Notes                                                  |
++--------------------------+-------------+------------+---------+----------+------+--------------------------------------------------------+
+| serial-light             | serial      | udf        | 135k    | 1590MB   | -    | out=5000000/5000000 records, 0.5GB in                  |
+| pool-light-8w            | pool        | udf        | 871k    | 1760MB   | -    | out=5000000/5000000 records                            |
+| executor-light-8w        | executor    | udf        | 866k    | 1784MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-8w     | hf_datasets | udf        | 97k     | 1784MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-8w         | forkrun     | udf        | 428k    | 1784MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-8w  | plugin      | c-callback | 1.1M    | 1784MB   | -    | out=5000000/5000000 records, frozen ABI                |
+| pool-light-16w           | pool        | udf        | 1.5M    | 2744MB   | -    | out=5000000/5000000 records                            |
+| executor-light-16w       | executor    | udf        | 1.5M    | 2774MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-16w    | hf_datasets | udf        | 104k    | 2774MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-16w        | forkrun     | udf        | 665k    | 2774MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-16w | plugin      | c-callback | 1.3M    | 2774MB   | -    | out=5000000/5000000 records, frozen ABI                |
+| pool-light-32w           | pool        | udf        | 1.8M    | 2774MB   | -    | out=5000000/5000000 records                            |
+| executor-light-32w       | executor    | udf        | 2.0M    | 2774MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-32w    | hf_datasets | udf        | 105k    | 2774MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-32w        | forkrun     | udf        | 821k    | 2774MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-32w | plugin      | c-callback | 1.2M    | 2774MB   | -    | out=5000000/5000000 records, frozen ABI                |
+| pool-light-48w           | pool        | udf        | 1.8M    | 2774MB   | -    | out=5000000/5000000 records                            |
+| executor-light-48w       | executor    | udf        | 2.3M    | 2810MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-48w    | hf_datasets | udf        | 86k     | 2810MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-48w        | forkrun     | udf        | 814k    | 2810MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-48w | plugin      | c-callback | 976k    | 2810MB   | -    | out=5000000/5000000 records, frozen ABI                |
+| pool-light-96w           | pool        | udf        | 2.0M    | 2891MB   | -    | out=5000000/5000000 records                            |
+| executor-light-96w       | executor    | udf        | 2.5M    | 2895MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-96w    | hf_datasets | udf        | 96k     | 2895MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-96w        | forkrun     | udf        | 636k    | 2895MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-96w | plugin      | c-callback | 644k    | 2895MB   | -    | out=5000000/5000000 records, frozen ABI                |
++--------------------------+-------------+------------+---------+----------+------+--------------------------------------------------------+
+
++--------------------------+-------------+------------+---------+----------+------+--------------------------------------------------------+
+| Benchmark                | Mode        | Path       | Lines/s | Peak RSS | CPU% | Notes                                                  |
++--------------------------+-------------+------------+---------+----------+------+--------------------------------------------------------+
+| serial-light             | serial      | udf        | 135k    | 1590MB   | -    | out=5000000/5000000 records, 0.5GB in                  |
+| pool-light-8w            | pool        | udf        | 871k    | 1760MB   | -    | out=5000000/5000000 records                            |
+| executor-light-8w        | executor    | udf        | 866k    | 1784MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-8w     | hf_datasets | udf        | 97k     | 1784MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-8w         | forkrun     | udf        | 428k    | 1784MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-8w  | plugin      | c-callback | 1.1M    | 1784MB   | -    | out=5000000/5000000 records, frozen ABI                |
+| pool-light-16w           | pool        | udf        | 1.5M    | 2744MB   | -    | out=5000000/5000000 records                            |
+| executor-light-16w       | executor    | udf        | 1.5M    | 2774MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-16w    | hf_datasets | udf        | 104k    | 2774MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-16w        | forkrun     | udf        | 665k    | 2774MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-16w | plugin      | c-callback | 1.3M    | 2774MB   | -    | out=5000000/5000000 records, frozen ABI                |
+| pool-light-32w           | pool        | udf        | 1.8M    | 2774MB   | -    | out=5000000/5000000 records                            |
+| executor-light-32w       | executor    | udf        | 2.0M    | 2774MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-32w    | hf_datasets | udf        | 105k    | 2774MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-32w        | forkrun     | udf        | 821k    | 2774MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-32w | plugin      | c-callback | 1.2M    | 2774MB   | -    | out=5000000/5000000 records, frozen ABI                |
+| pool-light-48w           | pool        | udf        | 1.8M    | 2774MB   | -    | out=5000000/5000000 records                            |
+| executor-light-48w       | executor    | udf        | 2.3M    | 2810MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-48w    | hf_datasets | udf        | 86k     | 2810MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-48w        | forkrun     | udf        | 814k    | 2810MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-48w | plugin      | c-callback | 976k    | 2810MB   | -    | out=5000000/5000000 records, frozen ABI                |
+| pool-light-96w           | pool        | udf        | 2.0M    | 2891MB   | -    | out=5000000/5000000 records                            |
+| executor-light-96w       | executor    | udf        | 2.5M    | 2895MB   | -    | out=5000000/5000000 records                            |
+| hf-datasets-light-96w    | hf_datasets | udf        | 96k     | 2895MB   | -    | out=5000000/5000000 of 5000000 text rows, batched=1000 |
+| forkrun-light-96w        | forkrun     | udf        | 636k    | 2895MB   | -    | out=5000000/5000000 records, order=index               |
+| forkrun-plugin-light-96w | plugin      | c-callback | 644k    | 2895MB   | -    | out=5000000/5000000 records, frozen ABI                |
++--------------------------+-------------+------------+---------+----------+------+--------------------------------------------------------+
+
+BEST (worker sweep):
+  executor     light     2475833 records/s (297.1 MB/s input)
+  forkrun      light      820906 records/s ( 98.5 MB/s input)
+  forkrun-plugin light     1287577 records/s (154.5 MB/s input)
+  hf_datasets  light      105487 records/s ( 12.7 MB/s input)
+  pool         light     1984173 records/s (238.1 MB/s input)
+  serial       light      134604 records/s ( 16.2 MB/s input)
+
+NOTES:
+- Worker sweep [8, 16, 32, 48, 96]; each system's best rate shown above.
+- UDF systems run the IDENTICAL Python transformation (ml_payload.py); only batching/transport/scheduling differ.
+- Native systems (Polars/DuckDB) use their own expression language (medium variant only); the heavy UDF cannot be expressed natively, which is the point of the comparison.
+- forkrun uses order=index (validated counts); Pool/Executor chunk into workers*4 line-chunks (pickled); Ray uses pandas batches via read_text; HF Datasets uses from_text + batched map (batch_size=1000, in-memory).
+- Fault injection is crash-once (file markers): first attempt crashes, retry succeeds. forkrun recovers via orchestrator respawn; Pool has no retry (documented).
+- RSS is parent-process peak (ru_maxrss); worker/subprocess memory is not attributed per system.
+CSV: /opt/forkrun/epyc-rental-out/20_benchmarks/ml5m/ml5m_light.csv
+
+### rc=0  elapsed=1090s  finished=2026-09-30T04:43:59Z
