@@ -565,6 +565,19 @@ say "  EPYC_SWEEP_FAST=$SWEEP_FAST    (competitor matrices)"
 say "  EPYC_SWEEP_FULL=$SWEEP_FULL    (forkrun-only + core suite)"
 say "  EPYC_SWEEP_NUMA=$SWEEP_NUMA    (numa_5m scaling sweep)"
 
+# Derive child paths with a trailing-slash-safe join.
+#   ${EPYC_DATA%/}/venv   "/"       -> /venv      (NOT //venv)
+#                         "/data"   -> /data/venv
+#                         "/data/"  -> /data/venv
+# This is the actual defect behind the earlier "could not create venv at
+# //venv": the data dir was correctly "/" all along — it is the largest real
+# filesystem on a normal single-volume box — and "$EPYC_DATA/venv" simply does
+# not join correctly when the base is the filesystem root.
+EPYC_VENV_PATH="${EPYC_DATA%/}/venv"
+EPYC_TMP_PATH="${EPYC_DATA%/}/tmp"
+HF_CACHE_PATH="${EPYC_DATA%/}/hf_cache"
+HF_HOME_PATH="${EPYC_DATA%/}/hf_home"
+
 # ---------------------------------------------------------------- write env --
 ENVF="$EPYC_DIR/env/epyc.env"
 cat >"$ENVF" <<EOF
@@ -572,8 +585,10 @@ cat >"$ENVF" <<EOF
 EPYC_ROOT="$EPYC_ROOT"
 EPYC_OUT="$EPYC_OUT"
 EPYC_DATA="$EPYC_DATA"
-EPYC_VENV="$EPYC_DATA/venv"
-EPYC_TMPDIR="$EPYC_DATA/tmp"
+EPYC_VENV="$EPYC_VENV_PATH"
+EPYC_TMPDIR="$EPYC_TMP_PATH"
+EPYC_HF_CACHE="$HF_CACHE_PATH"
+EPYC_HF_HOME="$HF_HOME_PATH"
 EPYC_STATE="$EPYC_DIR/state"
 EPYC_NPROC=$NPROC
 EPYC_PHYS=$PHYS

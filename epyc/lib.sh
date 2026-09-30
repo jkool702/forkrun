@@ -78,8 +78,9 @@ load_env() {
     export PYTHONPATH="$EPYC_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
     export FORKRUN_LIB="$EPYC_ROOT/python/forkrun/libforkrun_python.so"
     export TMPDIR="$EPYC_TMPDIR"
-    export HF_DATASETS_CACHE="$EPYC_DATA/hf_cache"
-    export HF_HOME="$EPYC_DATA/hf_home"
+    # Trailing-slash-safe join, so a data dir of "/" does not produce "//hf_cache".
+    export HF_DATASETS_CACHE="${EPYC_HF_CACHE:-${EPYC_DATA%/}/hf_cache}"
+    export HF_HOME="${EPYC_HF_HOME:-${EPYC_DATA%/}/hf_home}"
     export RAY_DISABLE_IMPORT_WARNING=1
     export FORKRUN_DIAG_NUMA1=1
     return 0

@@ -137,20 +137,40 @@ fi
 PY="$EPYC_VENV/bin/python"
 PIP="$EPYC_VENV/bin/pip"
 
-# Fail loudly and early if the derived paths are not sane. A venv path of
-# "//venv" means the data dir was empty or unnormalised, and the resulting
-# `python3 -m venv` failure is a very confusing way to learn that. Check before
-# spending money on anything.
+# Fail loudly and early if a derived path is malformed. NOTE: "/" is a VALID
+# data directory — it is the largest real filesystem on a normal single-volume
+# box, and preflight legitimately picks it. An earlier version of this guard
+# rejected "/" as unusable, which was wrong: it blocked the single most common
+# correct answer while the real defect (a "$BASE/child" join that yields
+# "//venv" when the base is "/") lives in how the paths are derived, not in the
+# base being "/". Preflight now derives them with ${BASE%/}/child.
 for _pair in "EPYC_DATA:$EPYC_DATA" "EPYC_VENV:$EPYC_VENV" \
              "EPYC_TMPDIR:$EPYC_TMPDIR" "EPYC_OUT:$EPYC_OUT"; do
     _name=${_pair%%:*}
     _val=${_pair#*:}
-    if [ -z "$_val" ] || [ "$_val" = "/" ] || [ "${_val//\/\//}" != "$_val" ]; then
-        die "$_name is not a usable path: '$_val'
-   epyc/env/epyc.env is malformed, or was written by an older 00_preflight.sh
-   that did not normalise the data dir. Re-run:
-       bash epyc/00_preflight.sh $EPYC_OUT $EPYC_DATA
-   (both arguments optional; preflight will auto-select the data dir)"
+    if [ -z "$_val" ]; then
+        die "$_name is empty. epyc/env/epyc.env is malformed — re-run:
+       bash epyc/00_preflight.sh"
+    fi
+    # A double slash anywhere means a path was concatenated without the
+    # trailing-slash-safe join. That is the original //venv bug.
+    if [ "${_val//\/\//}" != "$_val" ]; then
+        die "$_name contains '//': '$_val'
+     A path was joined without the trailing-slash-safe form (\${BASE%/}/child),
+     which yields //venv when the data dir is / . Re-run preflight to regenerate:
+       bash epyc/00_preflight.sh"
+    fi
+    # A venv inside a shared system directory would collide with whatever else
+    # lives there. Note this is per-variable: EPYC_TMPDIR=/tmp is perfectly
+    # legitimate (it is the system default) when the data dir is /, so the
+    # shared-path check must NOT apply to the tmpdir.
+    if [ "$_name" = "EPYC_VENV" ]; then
+        case "$_val" in
+            /tmp|/home|/usr|/var|/etc|/bin|/sbin)
+                die "EPYC_VENV resolved to the shared system path '$_val' — refusing.
+       Pass an explicit data directory to preflight instead of / :
+           bash epyc/00_preflight.sh <out_dir> <data_dir>" ;;
+        esac
     fi
 done
 log "paths OK: data=$EPYC_DATA venv=$EPYC_VENV tmp=$EPYC_TMPDIR"
