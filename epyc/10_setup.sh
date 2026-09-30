@@ -22,7 +22,11 @@ APT_PKGS=(
     numactl libnuma1 libnuma-dev
     time parallel
     python3 python3-venv python3-pip python3-numpy
-    bc numfmt coreutils procps psmisc
+    # NOTE: `numfmt` is NOT a package — it is a binary inside GNU coreutils.
+    # An earlier version of this list named it and apt failed with "Unable to
+    # locate package numfmt", which then looked like a setup failure. coreutils
+    # is listed instead, and lib.sh's human() has an awk fallback anyway.
+    bc coreutils procps psmisc
     iproute2 sysstat ethtool
     xz-utils
 )
@@ -132,6 +136,25 @@ if [ ! -x "$EPYC_VENV/bin/python" ]; then
 fi
 PY="$EPYC_VENV/bin/python"
 PIP="$EPYC_VENV/bin/pip"
+
+# Fail loudly and early if the derived paths are not sane. A venv path of
+# "//venv" means the data dir was empty or unnormalised, and the resulting
+# `python3 -m venv` failure is a very confusing way to learn that. Check before
+# spending money on anything.
+for _pair in "EPYC_DATA:$EPYC_DATA" "EPYC_VENV:$EPYC_VENV" \
+             "EPYC_TMPDIR:$EPYC_TMPDIR" "EPYC_OUT:$EPYC_OUT"; do
+    _name=${_pair%%:*}
+    _val=${_pair#*:}
+    if [ -z "$_val" ] || [ "$_val" = "/" ] || [ "${_val//\/\//}" != "$_val" ]; then
+        die "$_name is not a usable path: '$_val'
+   epyc/env/epyc.env is malformed, or was written by an older 00_preflight.sh
+   that did not normalise the data dir. Re-run:
+       bash epyc/00_preflight.sh $EPYC_OUT $EPYC_DATA
+   (both arguments optional; preflight will auto-select the data dir)"
+    fi
+done
+log "paths OK: data=$EPYC_DATA venv=$EPYC_VENV tmp=$EPYC_TMPDIR"
+
 log "venv python: $($PY --version)"
 
 # Pin to the versions the published baselines used (tokenize_study.md line 7:

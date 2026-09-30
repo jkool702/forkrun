@@ -466,17 +466,75 @@ if ! echo "$THPS" | grep -q '\[always\]'; then
 fi
 
 # --------------------------------------------------------------- data dir ----
+# Pick the largest real, writable filesystem for the ~56 GB of datasets.
+#
+# This has to be robust, because a wrong pick costs real money: pointing the
+# datasets at `/dev/shm` would silently consume RAM, and pointing them at a
+# 500 MB boot partition would OOM the run two hours in. The previous version
+# filtered by POSITIONAL columns and tested the mount point against filesystem
+# TYPE names (dead code), and fell back to "/" with no warning when the awk
+# matched nothing — which produced EPYC_DATA="/" and then EPYC_VENV="//venv".
+#
+# Use NAMED output columns, filter on the real fstype, and verify the result.
 if [ -n "${2:-}" ]; then
     EPYC_DATA="$2"
 elif [ -n "${EPYC_DATA:-}" ]; then
     : # caller already chose
 else
-    EPYC_DATA=$(df -B1 --output=size,target 2>/dev/null \
-        | awk 'NR>1 {t=$2; if (t ~ /^\/(run|dev|proc|sys|tmp)$/) next; if (t ~ /^(tmpfs|devtmpfs|overlay|udev)$/) next; if ($1>m) {m=$1; best=t}} END{print (best==""?"/":best)}')
+    EPYC_DATA=$(df -B1 --output=source,fstype,size,target 2>/dev/null \
+        | awk -F'[[:space:]]+' '
+            NR==1 { next }
+            NF >= 4 {
+                src=$1; fst=$2; sz=$3; tgt=$4
+                # real filesystems only — tmpfs/devtmpfs/overlay are RAM or
+                # read-only, never a place to put 56 GB of benchmark corpora
+                if (fst ~ /^(tmpfs|devtmpfs|ramfs|overlay|efivarfs|squashfs)$/) next
+                # pseudo-filesystems by mount point
+                if (tgt ~ /^\/(run|dev|proc|sys|tmp|boot)(\/|$)/) next
+                if (sz !~ /^[0-9]+$/) next
+                if (sz > best) { best=sz; chosen=tgt; how=src }
+            }
+            END {
+                if (chosen == "") { print "NONE"; exit }
+                print chosen
+            }')
+    if [ "$EPYC_DATA" = "NONE" ] || [ -z "$EPYC_DATA" ]; then
+        # Do NOT silently fall back. Say so, pick /, and let the writability
+        # check below surface it immediately.
+        warn "could not identify a data filesystem from df; falling back to /"
+        warn "  pass an explicit path:  bash epyc/00_preflight.sh <out_dir> <data_dir>"
+        EPYC_DATA="/"
+    fi
 fi
+
+# Normalise: strip trailing slashes so "/" + "/venv" cannot become "//venv".
+while [ "${EPYC_DATA%/}" != "$EPYC_DATA" ] && [ "$EPYC_DATA" != "/" ]; do
+    EPYC_DATA="${EPYC_DATA%/}"
+done
+
+# Verify it is usable BEFORE anything writes 56 GB to it. Cheap, and it turns a
+# failure two hours into the run into a failure in the first minute.
 say ""
 say "data directory  : $EPYC_DATA"
 say "output directory: $EPYC_OUT"
+if mkdir -p "$EPYC_DATA" 2>/dev/null; then
+    if [ -w "$EPYC_DATA" ]; then
+        AVAIL=$(df -B1 --output=avail "$EPYC_DATA" 2>/dev/null | tail -1 | tr -cd '0-9')
+        say "  writable      : yes"
+        say "  free space    : ${AVAIL:-unknown} bytes ($(human "${AVAIL:-0}"))"
+        say "  filesystem    : $(df -hT "$EPYC_DATA" 2>/dev/null | tail -1)"
+        # The datasets need ~56 GB; the 20M pool/executor legs also want the
+        # page cache to hold them, so headroom well beyond the raw total helps.
+        if [ -n "$AVAIL" ] && [ "$AVAIL" -lt 80000000000 ]; then
+            gate_warn "only $(human "$AVAIL") free on $EPYC_DATA; the harness wants >= 80 GB"
+            gate_warn "  Datasets alone are ~56 GB. Pass a different path as argument 2."
+        fi
+    else
+        gate_fatal "$EPYC_DATA is not writable by the current user"
+    fi
+else
+    gate_fatal "cannot create $EPYC_DATA"
+fi
 
 # ------------------------------------------------------- derived parameters --
 # Worker sweep. MUST start at >= $NODES: a workers<nodes run returns INCOMPLETE
