@@ -35,3 +35,15 @@ test_c_plugins_rigorous.sh	0	41
 test_c_plugins_raw.sh	0	2
 test_c_plugins_stdin.sh	1	1
 test_c_plugins_config.sh	0	2
+make-canary	0	4
+make-python-substrate	0	4
+bash-bootstrap	0	1
+python-bootstrap	0	0
+test_frun.sh	0	35
+test_frun_security.sh	1	22
+test_c_plugins.sh	0	4
+test_c_plugins_v2.sh	0	2
+test_c_plugins_rigorous.sh	0	41
+test_c_plugins_raw.sh	0	2
+test_c_plugins_stdin.sh	1	2
+test_c_plugins_config.sh	0	2

@@ -160,3 +160,38 @@ Flagging it because it is precisely how a run ends up confidently wrong.
   regime. A reboot into NPS2/NPS4 + re-run of 41/43 is the stronger experiment.
 - deadline: `2026-09-30T14:42:22Z` (operator's explicit choice of a fresh
   `--hours 11` at relaunch, superseding the original 14:32:15Z).
+
+### Finding 4 — worker-cap patch misses `bench_memory.py` (10th module). REPORTED, not fixed (Tier-1).
+
+- stage: would affect 51_bench_core (`run_all.py --scale large`, 44 benchmarks)
+- symptom: `10_setup.sh` logs `patched 0 file(s): none` on a re-run (correctly
+  idempotent — a prior run already patched them), but a full audit finds
+  `python/benchmarks/core/bench_memory.py:130` still reading
+      workers=min(8, os.cpu_count() or 4), order="index"
+  i.e. **live, unpatched code**. It is one of the five `rss_*` benchmarks that
+  `python/benchmarks/run_all.py:75-79` imports and runs in stage 51.
+- diagnosis: the patch matcher is an exact string for a RETURN statement,
+      grep -q 'return min(8, os\.cpu_count() or 4)'
+  `bench_memory.py` uses the **inline keyword-argument** form
+  `workers=min(8, ...)`, so the pattern cannot match it by construction. The
+  README's "ten modules" is therefore 9 patched + 1 structurally unreachable.
+  (`bench_throughput.py:6` also matches `min(8` but only inside a stale
+  docstring; its real `_nworkers()` IS patched. Not an issue.)
+- severity — honest reading, deliberately not inflated: the 5 affected legs
+  (`rss_no_output`, `rss_output_sized`, `rss_streaming_bounded`,
+  `rss_amplification`, `rss_in_process`) are **memory-footprint** benchmarks,
+  not throughput, and the i9-7940X reference box ALSO ran them at 8 workers.
+  So for these legs `min(8)` is closer to the baseline, not further from it.
+  The defect is that the run silently deviates from its own stated policy and
+  nothing records which files carry the deviation.
+- why I did not fix it: `python/benchmarks/**` is Tier-1 and edit-denied by
+  `epyc/opencode.json`. Fixing it would be a boundary violation, not diligence.
+- secondary audit gap (harness, Tier-2, also not changed): the deviation record
+  writes `files:` from `"${PATCHED[@]:-}"`, which yields nothing once the patch
+  is already applied, so `00_environment/DEVIATIONS_worker_cap.txt` lists no
+  files. The one document whose job is to make this deviation auditable does
+  not identify the files. A reader cannot verify the deviation from the results
+  tree alone.
+- confidence: **high** (read directly from source and from the patch matcher).
+- operator decision: either patch `bench_memory.py:130` by hand before stage 51,
+  or record in DEVIATIONS.md that the 5 `rss_*` legs ran at 8 workers by design.

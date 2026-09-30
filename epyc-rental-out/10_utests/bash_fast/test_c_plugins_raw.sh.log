@@ -1,5 +1,5 @@
 ### test_c_plugins_raw.sh
-### 2026-09-30T03:56:03Z
+### 2026-09-30T04:07:32Z
 ### cmd: bash ./test_c_plugins_raw.sh
 
 === forkrun v3.5.2 C Plugin RAW Window Delivery Tests (T-RAW-1..7) ===
@@ -35,4 +35,4 @@ T-RAW-7: RAW overrides -s (window, not stdin feed)
 ------------------------------------------------------
 === All RAW Window Delivery Tests Passed (T-RAW-1..7) ===
 
-### rc=0  elapsed=2s  finished=2026-09-30T03:56:06Z
+### rc=0  elapsed=2s  finished=2026-09-30T04:07:34Z

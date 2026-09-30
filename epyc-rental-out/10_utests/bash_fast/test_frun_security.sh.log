@@ -1,5 +1,5 @@
 ### test_frun_security.sh
-### 2026-09-30T03:54:55Z
+### 2026-09-30T04:06:23Z
 ### cmd: bash ./test_frun_security.sh
 
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
@@ -115,16 +115,19 @@
   [0;32m✓[0m R[4]: trap clean, sourcing under set -u survives, output exact
   [0;32m✓[0m R[5]: trap clean, sourcing under set -u survives, output exact
 [1;34m[1m▶ C: crash message instruction, followed verbatim, resumes exactly (x1)[0m
-  [0;32m✓[0m C[1]: verbatim hint resumes to byte-exact output
+  [0;31m✗[0m C[1]: verbatim hint resumes to byte-exact output[0;31m crash produced no checkpoint[0m
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [1mTEST SUMMARY[0m
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Total:  101
-Passed: 101
-Failed:   0
+Passed: 100
+Failed:   1
 
-[0;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-[0;32m[1mALL TESTS PASSED![0m
-[0;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;31m[1mFAILED TESTS:[0m
+  - C[1]: verbatim hint resumes to byte-exact output: crash produced no checkpoint
 
-### rc=0  elapsed=22s  finished=2026-09-30T03:55:17Z
+[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;31mOVERALL: 1 FAILURE(S)[0m
+[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+### rc=1  elapsed=22s  finished=2026-09-30T04:06:45Z

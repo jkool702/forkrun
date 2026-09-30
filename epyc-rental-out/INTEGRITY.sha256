@@ -1,5 +1,5 @@
 # forkrun EPYC rental — integrity manifest
-# written by epyc/10_setup.sh at 2026-09-30T03:47:57Z
+# written by epyc/10_setup.sh at 2026-09-30T04:05:48Z
 #
 # Tier 1: the product under test, the benchmark sources, and the validator.
 # The opencode agent is denied write access to all of these AND their
@@ -49,7 +49,7 @@ bc7e223559d85073654dcc5b6db9d20c44810669540155d2e6f281dea1fc7f9e  /opt/forkrun/p
 588520bb79b8e9ff7225090a41e64342bf9f3d8b87c7b821625510c64175e679  /opt/forkrun/python/benchmarks/core/bench_batch_size.py
 db821c497d811810d4925a82f0c48ee3e339b836362a2ec5bdd1150f16624530  /opt/forkrun/python/benchmarks/core/bench_c_drain.py
 9ca75bc2ab54085e2b3f488bc1424ba5e3811fe9284f1bdf32d11377cc59e677  /opt/forkrun/python/benchmarks/core/bench_fault.py
-f7da42f3820af6a6433c13d07999187742ea025acd9aa4578758c996f96f0200  /opt/forkrun/python/benchmarks/core/bench_memory.py
+b88041d109045fcb48e7f1098f16cae4e3d4aadee1f26711964c4a2428acaf4e  /opt/forkrun/python/benchmarks/core/bench_memory.py
 76e4867988a5fcb17ad7eaaa21185402e4cf00e7f6807b2c03cd046e03fcd97e  /opt/forkrun/python/benchmarks/core/bench_scaling.py
 508978b3fecfb3fd5afe48828dbde0839ebc3a4ac150b8f2c82e34ce76b9709b  /opt/forkrun/python/benchmarks/core/bench_splice.py
 db29ccb5d83c16cad724c8d22ca92ca8db6401c2e64e64133bc636538c581bba  /opt/forkrun/python/benchmarks/core/bench_streaming_ingest.py
@@ -259,7 +259,7 @@ ee486129c6d28d1c44db115b142ecfab467fb60aa9b2a94515218b31b2d08dcf  /opt/forkrun/U
 
 ## TIER2 harness stage scripts (agent-editable, changes reported)
 ed350aabfe7700e991a4f833e92a20baa782dc512adbf92627a474d5deb28fe9  /opt/forkrun/epyc/00_preflight.sh
-b7e965b470eb427a6158132f839a277a442e3cb8c1002f9b7d491ad24be15ec7  /opt/forkrun/epyc/10_setup.sh
+ffcece37fbae8e899aec37f3e772c8bd94460c57f052208da97cf6d152ce6a70  /opt/forkrun/epyc/10_setup.sh
 3725df83a9994a1b3d7a6284d6fad85e53624014249aa241ec665503853b3ca8  /opt/forkrun/epyc/20_datagen.sh
 7bc8e7bd8650b91a3119094dd089486ab266b37c9c9021127547eb93127a3ba8  /opt/forkrun/epyc/30_utest_bash_fast.sh
 a40dfb6a6c4665da2a1e7227265cdf359ab092c2444531574d18bdb0f69cab2c  /opt/forkrun/epyc/31_utest_python.sh

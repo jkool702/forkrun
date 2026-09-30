@@ -3,3 +3,5 @@
 10_setup	0	19
 10_setup	0	46
 30_utest_bash_fast	1	110
+10_setup	0	30
+30_utest_bash_fast	1	110

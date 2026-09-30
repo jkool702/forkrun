@@ -1,5 +1,5 @@
 ### make-canary
-### 2026-09-30T03:47:43Z
+### 2026-09-30T04:05:32Z
 ### cmd: make -C /opt/forkrun -f Makefile.substrate canary
 
 make: Entering directory '/opt/forkrun'
@@ -54,4 +54,4 @@ canary compiler: cc -> x86_64-linux-gnu (expecting ELF machine: x86-64)
 canary OK: libforkrun.so links with no undefined symbols
 make: Leaving directory '/opt/forkrun'
 
-### rc=0  elapsed=3s  finished=2026-09-30T03:47:46Z
+### rc=0  elapsed=4s  finished=2026-09-30T04:05:36Z
