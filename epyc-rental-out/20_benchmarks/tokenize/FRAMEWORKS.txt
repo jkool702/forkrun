@@ -1,0 +1,10 @@
+# tokenize framework probe (recorded 2026-09-30T07:53:48Z)
+  ray          PRESENT  2.58.0
+  polars       PRESENT  1.44.2
+  duckdb       PRESENT  1.5.5
+  hf_datasets  PRESENT  5.0.1
+  pandas       PRESENT  3.0.6
+
+NOTE: bench_tokenize.py probes and versions duckdb but never benchmarks it.
+      The 8 measured systems are: serial, pool, executor, forkrun-python,
+      forkrun-C-plugin, hf_datasets, ray, polars.

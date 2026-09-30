@@ -309,3 +309,85 @@ Tier-1 file mid-run is what `INTEGRITY_AUDIT.md` is built to catch.
   rather than a test-harness assumption — the "no zombies at teardown"
   invariant is the test's, and a reviewer should confirm forkrun is expected to
   reap synchronously on KeyboardInterrupt.
+
+### Finding 6 — THE INTEGRITY JUDGE NEVER RAN. Stages 40 and 41 reported "SILENT DATA LOSS" from an argparse crash. FIXED; real verdict is ZERO loss.
+
+This is the most important entry of the night, and it inverts the alarm.
+
+- stages: 40_bench_ml5m (rc=1, 11391 s) and 41_bench_numa5m (rc=1, 1086 s)
+- what the harness reported:
+      2026-09-30T07:35:36Z  ERROR VALIDATION FOUND SILENT LOSS — see .../ml5m/validation.md
+      2026-09-30T07:53:45Z  ERROR F-NUMA1 AUDIT FOUND SILENT DATA LOSS — see .../F_NUMA1_AUDIT.md
+      2026-09-30T07:53:45Z  ERROR This is the most valuable thing this rental could produce. Keep the box.
+      2026-09-30T07:53:45Z  ERROR Re-run the affected cell in isolation before quoting any rate from it.
+- **what actually happened** — the exact stderr, which the stage scripts never
+  surfaced because they only test the exit code:
+      validate_cells.py: error: unrecognized arguments:
+        .../ml5m_heavy.csv .../ml5m_light.csv .../ml5m_medium.csv
+      validate_cells.py: error: unrecognized arguments:
+        .../numa5m_part_c_heavy.csv .../numa5m_part_c_light.csv
+        .../numa5m_part_c_medium.csv .../numa5m_part_d.csv
+  The validator **aborted on argument parsing and examined zero cells.**
+  Corroborating evidence that it never ran: `--out .../ml5m/validation.md` was
+  never created, and `F_NUMA1_AUDIT.md` still contains only the cross-check
+  recipe (678 B) with no verdict table — i.e. it is the stage's own pre-written
+  heredoc, never overwritten by a report.
+- root cause (Tier-2 stage scripts, not the validator):
+      40_bench_ml5m.sh:133    --csv "$OUTD"/ml5m_*.csv
+      41_bench_numa5m.sh:246  --csv "$OUTD"/numa5m_*.csv
+      43_bench_ml20m.sh:157   --csv "$OUTD"/ml20m_*.csv
+  The glob is **unquoted**, so the shell expands it into N arguments. `--csv` is
+  `action="append"` and consumes only the first; the remainder become stray
+  positionals and argparse rejects them. `validate_cells.py` globs internally
+  (`paths.extend(sorted(glob.glob(p)) or [p]))`, so the quoted-glob form is the
+  intended usage. Single-CSV calls in the same scripts were already correct,
+  which is why only the three aggregate validations were broken. Stage 43 was
+  still 2 h from running and would have hit the identical failure.
+- **the real verdict, from the UNMODIFIED validator on the stages' own CSVs:**
+  - Stage 41 / F-NUMA1 audit: **45 rows examined, 0 cells with real loss.**
+    "No cell lost records." 1 cell UNVALIDATED (below).
+    -> **forkrun returns every record it consumes on this real 2-socket NUMA
+    box. F-NUMA1 did not reproduce.** That is the question this rental exists
+    to answer, and the answer is negative (no loss found).
+  - Stage 40: 89 rows, 2 flagged, 2 unvalidated. Both flagged cells are in
+    `ml5m_fault.csv` — `forkrun-fault-96w` and `plugin-fault-96w`, each
+    5,000,000 in / 4,771,285 out. `ml_fault.jsonl` is the medium corpus
+    regenerated with **malformed_pct=5.0**; `DROP_FRACTION` has no entry for
+    the fault corpus, so the validator expects 5,000,000 valid and flags the
+    4.6% the payload legitimately dropped as malformed input. 4.6% vs an
+    injected 5% is the payload behaving correctly, not silent loss.
+  - So: **no genuine record loss anywhere in this run.**
+- UNVALIDATED cells (real, but "uncheckable", not "lossy"):
+  - `numa5m_part_d.csv` / `stream-numa-mem` — notes read
+    `batches=51 lines=1000000/1000000 rss-delta=12MB`. It **self-reports full
+    cardinality**, but the validator's regex is `out=(\d+)` and this harness
+    spells it `lines=`, so the judge cannot parse the row. A coverage gap in the
+    judge, not a loss. Per the repo's own rule an uncheckable rate is not a
+    passing rate, so it stays UNVALIDATED. I did **not** widen the regex —
+    `validate_cells.py` is Tier-1 and forbidden, and teaching the judge a new
+    spelling is exactly the "tune the check" move to avoid.
+  - `pool-fault-96w`, `ray-fault-96w` — competitor legs emitting no counts.
+- what I changed: **only the quoting**, in the three Tier-2 stage scripts —
+  3 files, 1 line each, 3 insertions / 3 deletions, `bash -n` clean on all
+  three. `git diff --stat`: `3 +++---`. No logic touched, no threshold touched,
+  no `--no-fail-on-loss`, no removal of `--require-counts`. This change
+  STRENGTHENS the check: before it, the comparator could not run at all and its
+  failure was indistinguishable from a catastrophic product bug; after it, the
+  comparator runs and can genuinely fail. `validate_cells.py` itself was not
+  touched.
+- **failure mode worth naming:** a validator that dies on argument parsing is
+  reported by the stage as a DATA-LOSS FINDING. The repo's rule is "a
+  comparator that always passes is worse than none"; this is the sharper
+  version — a comparator that cannot start reports the *most alarming possible
+  verdict*. Any future agent reading only the stage summary would have escalated
+  a phantom data-loss bug and possibly re-run hours of benchmarks chasing it.
+  Recommended (operator, not me): have the stages test for the argparse error
+  string, or check that `--out` was actually written, before believing a loss.
+- artefacts: the stages' own reports were left untouched (the verdict-less
+  `F_NUMA1_AUDIT.md` is preserved as evidence). I added clearly-named recheck
+  reports produced by the unmodified validator alongside them:
+      20_benchmarks/F_NUMA1_AUDIT.agent-recheck.md   (5590 B)
+      20_benchmarks/ml5m/validation.agent-recheck.md (9066 B)
+- confidence: **high.** Root cause read from source and from the literal stderr;
+  fix verified by `bash -n` and by re-running the unmodified validator the fixed
+  way, which now completes and produces a real table for the first time.
