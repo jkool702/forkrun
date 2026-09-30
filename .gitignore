@@ -72,9 +72,21 @@ python/benchmarks/stage0/results/stage0_error.txt
 *.swp
 *.kate-swp
 
-# epyc/ real-NUMA rental harness: per-machine state and results, not repo
-# content. epyc/ itself IS tracked (it is the harness); these are its outputs.
-epyc-rental-out/
+# epyc/ real-NUMA rental harness.
+#
+# epyc/ itself IS tracked (it is the harness). epyc-rental-out/ is ALSO tracked:
+# it holds the benchmark results, and the whole point of 98_publish.sh is to
+# commit those to the results branch as each stage lands, so that a night of
+# metered compute is never lost. What stays ignored is per-machine state and
+# build output, none of which belongs in a results branch.
+epyc-rental-out/**/*.so
+epyc-rental-out/**/headline_plugins/
+epyc-rental-out/**/*.i32
+epyc-rental-out/**/hf_cache/
+epyc-rental-out/**/ray_session*/
+epyc-rental-out/**/logs/
+# Machine-local run state: the recorded topology is per-box, and the stage
+# markers would make the results branch depend on which box produced it.
 epyc/env/epyc.env
 epyc/state/
 epyc/__pycache__/

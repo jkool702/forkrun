@@ -45,6 +45,93 @@ at the first stage without a `.done` marker.
 
 ---
 
+## Publishing results as they land
+
+The harness commits and pushes results to a **dedicated `epyc-rental-results`
+branch** automatically, after every stage that produces them — plus after
+`10_setup` (which writes the integrity manifest) and `90_collect` (which writes
+the reports you actually read). A night of metered compute is never sitting
+unbacked-up waiting for a final step.
+
+This is done by `epyc/98_publish.sh`, called from `run_all.sh` — **not** left to
+the agent. Publishing is bookkeeping, and an LLM asked to remember bookkeeping at
+4am is a liability, not a feature. The agent *is* told to run the same script
+after any fix it makes, so a corrected result supersedes the broken one; both
+paths converge on one script, and neither depends on the other.
+
+```bash
+bash epyc/98_publish.sh --label "41_bench_numa5m: re-run after <fix>"   # manual
+bash epyc/98_publish.sh --dry-run                                       # preview
+EPYC_NO_PUBLISH=1 bash epyc/run_all.sh --hours 12                       # disable
+```
+
+### What is safe about it
+
+| property | how |
+|---|---|
+| **Never touches the code branch** | Built with `write-tree`/`commit-tree`/`update-ref` against a throwaway `GIT_INDEX_FILE`. `HEAD` does not move, the working tree is never modified, the real index is never touched. A plain `git push` of the code branch can therefore never carry results. |
+| **Commits only results** | One explicit pathspec for `$EPYC_OUT`. An accidental `git add -A` cannot reach it, and the datasets (56 GB), venv, substrate and machine-local `epyc.env` are not in it. |
+| **Idempotent** | Compares the resulting *tree* against the results branch tip, so re-running with unchanged results is a no-op instead of accumulating empty commits. |
+| **Bounded** | Refuses to stage any file over `EPYC_PUBLISH_MAXFILE_MB` (20 MB) and names what it skipped, so one runaway log cannot wedge the push. |
+| **Provenance on every commit** | Records the code SHA, engine version, topology, and the SHA-256 of `INTEGRITY.sha256`. |
+| **No credential handling** | Auth failure is reported and left to you. The commit is safe locally and on disk; nothing is lost. |
+
+### Why the integrity hash is in every commit
+
+`10_setup` writes `INTEGRITY.sha256` **before any benchmark runs**, and the
+first publish happens immediately afterwards. That first results-branch commit
+is a pre-run anchor: if the agent ever modified a Tier-1 file mid-run, the
+committed manifest is the *pre-modification* hash, so `git log -p` on the
+results branch shows the diff — and the integrity audit in `90_collect` reports
+the violation independently. Two independent records, neither forgeable after
+the fact.
+
+### Setting up git auth on the rental
+
+Do this once, before the run. Either works.
+
+**SSH (recommended — no token to leak):**
+```bash
+ssh-keygen -t ed25519 -C 'epyc-rental' -N '' -f ~/.ssh/id_ed25519_epyc
+cat ~/.ssh/id_ed25519_epyc.pub
+# add that key in GitHub → Settings → SSH and GPG keys
+ssh -T git@github.com                                   # verify
+git remote set-url origin git@github.com:jkool702/forkrun.git
+```
+
+**HTTPS with a PAT:**
+```bash
+# GitHub → Settings → Developer settings → Personal access tokens
+#   scope: 'repo'   (or fine-grained: Contents read+write on jkool702/forkrun)
+printf 'protocol=https\nhost=github.com\nusername=YOUR_USER\npassword=YOUR_PAT\n\n' \
+  | git credential approve
+git config --global credential.helper store    # or 'cache --timeout=28800'
+git remote set-url origin https://github.com/jkool702/forkrun.git
+```
+
+Then confirm the agent can commit at all — `98_publish.sh` needs an identity:
+```bash
+git config user.email "epyc-rental@localhost"
+git config user.name  "EPYC rental agent"
+bash epyc/98_publish.sh --dry-run
+```
+
+Watch it land:
+```bash
+git fetch origin && git log --oneline origin/epyc-rental-results
+```
+
+### What the agent may and may not do with git
+
+`epyc/opencode.json` permits `commit` and `push`, and denies the destructive
+surface: `add -A`, `commit -a`, `reset`, `checkout`, `switch`, `clean`, `rebase`,
+`merge`, `cherry-pick`, `revert`, `tag`, `stash`, `config`, `push --force`, and
+any push to `NEW/*`, `main` or `master`. `AGENT_PROMPT.md` §8 repeats these in
+prose, and tells the agent that a failed push is *your* problem to fix, not
+something to route around.
+
+---
+
 ## The agent supervisor (`55_agent_supervise.sh`)
 
 `run_all.sh` stays the orchestrator. The supervisor does **not** reimplement its
@@ -360,6 +447,10 @@ All optional, set in the environment or override in `epyc/env/epyc.env` after
 | `EPYC_MAX_TRIAGE` | 3 | default total agent consultations per night |
 | `EPYC_AGENT_TIMEOUT` | 1800 | seconds allowed for one agent consultation |
 | `EPYC_AGENT_EVIDENCE_LINES` | 120 | log lines inlined into a triage prompt |
+| `EPYC_RESULTS_BRANCH` | `epyc-rental-results` | branch results are published to |
+| `EPYC_GIT_REMOTE` | `origin` | remote to push results to |
+| `EPYC_PUBLISH_MAXFILE_MB` | 20 | refuse to stage any single file larger than this |
+| `EPYC_NO_PUBLISH` | 0 | 1 = never commit/push results |
 
 ---
 

@@ -367,6 +367,28 @@ for line in "${STAGES[@]}"; do
     fi
 
     run_stage "$name" || warn "stage $name finished non-zero (rc=$?)"
+
+    # Publish results as they land, so a night of metered compute is never lost
+    # to a later failure, a dropped connection, or a forgotten final step. This
+    # is deliberately NOT left to the agent: publishing is bookkeeping, and an
+    # LLM asked to remember bookkeeping at 4am is a liability, not a feature.
+    # The agent is still told to run this itself after any fix it makes.
+    #
+    # 10_setup is in the list on purpose: that is when INTEGRITY.sha256 is
+    # written, so publishing immediately anchors the PRE-RUN hash in git. If the
+    # agent ever modifies a Tier-1 file mid-run, that first results-branch
+    # commit is the evidence, and it is impossible to forge after the fact.
+    # 90_collect is in the list because it writes ENVIRONMENT.md, DEVIATIONS.md
+    # and INTEGRITY_AUDIT.md — the documents a human actually reads.
+    case "$name" in
+        10_setup|30_*|31_*|40_*|41_*|42_*|43_*|44_*|50_*|51_*|60_*|90_collect)
+            if [ -f "$EPYC_DIR/98_publish.sh" ] && [ "${EPYC_NO_PUBLISH:-0}" != "1" ]; then
+                log "publishing results after $name"
+                bash "$EPYC_DIR/98_publish.sh" --label "$name" \
+                    || warn "publish after $name failed (rc=$?) — results are still on disk; retry with epyc/98_publish.sh"
+            fi
+            ;;
+    esac
 done
 
 # Safety net: if we exited the loop with generation still running, let it finish

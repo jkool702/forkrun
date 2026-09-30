@@ -229,7 +229,55 @@ it to yourself.
 
 ---
 
-## 8. Reporting
+## 8. Publishing results
+
+**Your supervisor already publishes automatically.** After every stage that
+produces results — and after `10_setup`, which writes the integrity manifest —
+`run_all.sh` calls `epyc/98_publish.sh`, which commits the results directory to
+the `epyc-rental-results` branch and pushes it. You do not need to remember to
+do this, and you should not duplicate it.
+
+**You DO need to run it yourself in one case:** after you make a fix or re-run a
+stage, so the operator sees the corrected result rather than the broken one.
+
+```bash
+bash epyc/98_publish.sh --label "41_bench_numa5m: re-run after fixing <cause>"
+```
+
+Run it once, after your fix is verified, not once per command you typed.
+
+### What publishing means, so you do not break it
+
+`98_publish.sh` commits **only** `$EPYC_OUT` to a **dedicated results branch**,
+never to the code branch. Each commit records the code SHA that produced it and
+the SHA-256 of `INTEGRITY.sha256` as taken at setup — before any benchmark ran.
+That hash is the tamper-evident anchor: if you ever modified a Tier-1 file
+mid-run, that anchor is in git history and `git log -p` on the results branch
+shows the diff. **This is why you must never modify a Tier-1 file and then
+publish as though nothing happened** — it would be detectable, and attempting it
+is a boundary violation under §3.
+
+### Hard limits on git
+
+`epyc/opencode.json` permits `git commit` and `git push` and denies the
+destructive surface. Specifically denied, and you should not route around them
+by invoking git indirectly:
+
+- `git add -A`, `git add .`, `git commit -a` — sweep in unintended files. Stage
+  explicitly, or just call `98_publish.sh`, which uses an explicit pathspec.
+- `git reset`, `git checkout`, `git switch`, `git clean`, `git rebase`,
+  `git merge`, `git cherry-pick`, `git revert`, `git tag`, `git stash`
+- `git push --force` / `-f`, and pushing to `NEW/*`, `main`, or `master`
+- `git config` of any kind
+
+If a publish fails on **authentication**, that is the operator's to fix, not
+yours. Say so in `AGENT_FINDINGS.md` and move on. The results are safe on disk
+and the commit is safe locally; nothing is lost. Do not try to install
+credentials, switch remotes, or work around a rejected push.
+
+---
+
+## 9. Reporting
 
 Maintain `$EPYC_OUT/AGENT_FINDINGS.md` as you go — append, never rewrite. For
 each entry: timestamp, stage, the exact command, the exact symptom, your
