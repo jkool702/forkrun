@@ -1,0 +1,16 @@
+### canary
+### 2026-09-30T03:49:51Z
+### cmd: make -f Makefile.substrate canary
+
+canary artifact: libforkrun.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, not stripped
+# ARCH ASSERTION uses the compiler's own TARGET TRIPLE, not its NAME:
+# pattern-matching on cc false-REDs on a native aarch64 host running
+# plain `gcc` (the old *gcc* arm grepped for x86-64 and failed a correct
+# artifact). `cc -dumpmachine` is the correct identity source.
+# Arches with no mapping below (ppc64le / s390x / riscv64) get the link
+# check only: on those the canary's job is -Wl,--no-undefined, not an
+# ELF-machine assertion.
+canary compiler: cc -> x86_64-linux-gnu (expecting ELF machine: x86-64)
+canary OK: libforkrun.so links with no undefined symbols
+
+### rc=0  elapsed=0s  finished=2026-09-30T03:49:51Z

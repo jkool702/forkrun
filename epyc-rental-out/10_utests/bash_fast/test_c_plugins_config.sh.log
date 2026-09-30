@@ -1,5 +1,5 @@
 ### test_c_plugins_config.sh
-### 2026-09-30T03:49:46Z
+### 2026-09-30T03:56:07Z
 ### cmd: bash ./test_c_plugins_config.sh
 
 === forkrun v3.5.2 Worker Config Struct Tests (T-CONFIG-1..4) ===
@@ -27,4 +27,4 @@ T-CONFIG-4: config isolation across workers (distinct worker_id)
 ------------------------------------------------------
 === All Worker Config Struct Tests Passed (T-CONFIG-1..4) ===
 
-### rc=0  elapsed=1s  finished=2026-09-30T03:49:47Z
+### rc=0  elapsed=2s  finished=2026-09-30T03:56:09Z

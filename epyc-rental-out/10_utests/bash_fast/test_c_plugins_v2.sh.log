@@ -1,5 +1,5 @@
 ### test_c_plugins_v2.sh
-### 2026-09-30T03:48:59Z
+### 2026-09-30T03:55:20Z
 ### cmd: bash ./test_c_plugins_v2.sh
 
 === forkrun v3.5.0 C Plugin Rigorous Test Suite ===
@@ -17,4 +17,4 @@ TEST 3: Fault Injection & Retry Semantics (-E)
 ------------------------------------------------------
 === All C Plugin Rigorous Tests Completed Successfully ===
 
-### rc=0  elapsed=2s  finished=2026-09-30T03:49:01Z
+### rc=0  elapsed=2s  finished=2026-09-30T03:55:22Z

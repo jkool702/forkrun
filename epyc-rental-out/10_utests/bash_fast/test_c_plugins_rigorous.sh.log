@@ -1,5 +1,5 @@
 ### test_c_plugins_rigorous.sh
-### 2026-09-30T03:49:01Z
+### 2026-09-30T03:55:22Z
 ### cmd: bash ./test_c_plugins_rigorous.sh
 
 === forkrun v3.5.0 C Plugin Rigorous Test Suite ===
@@ -27,4 +27,4 @@ TEST 6: UMA numa_batch_id uniqueness across 2^22 (C2)
 ------------------------------------------------------
 === All C Plugin Rigorous Tests Completed Successfully ===
 
-### rc=0  elapsed=41s  finished=2026-09-30T03:49:42Z
+### rc=0  elapsed=41s  finished=2026-09-30T03:56:03Z
