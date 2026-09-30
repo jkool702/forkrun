@@ -200909,3 +200909,475 @@ test_c_plugins_config.sh           <no tally found>
 2026-09-30T04:07:38Z  ERROR stage 30_utest_bash_fast FAILED rc=1 (110s)
 2026-09-30T04:07:38Z  WARN  stage 30_utest_bash_fast finished non-zero (rc=1)
 2026-09-30T04:07:38Z  publishing results after 30_utest_bash_fast
+2026-09-30T04:07:38Z  [publish] committed 55 file(s) to epyc-rental-results: cc243f0c2 -> 792b2b11f
+2026-09-30T04:07:41Z  [publish] pushed to origin/epyc-rental-results
+2026-09-30T04:07:41Z  [publish]   review with:  git fetch origin && git log --oneline origin/epyc-rental-results
+
+================================================================
+  STAGE 31_utest_python  (est 3600s)
+================================================================
+
+
+================================================================
+  31a substrate canary
+================================================================
+
+2026-09-30T04:07:41Z  START canary
+canary artifact: libforkrun.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, not stripped
+# ARCH ASSERTION uses the compiler's own TARGET TRIPLE, not its NAME:
+# pattern-matching on cc false-REDs on a native aarch64 host running
+# plain `gcc` (the old *gcc* arm grepped for x86-64 and failed a correct
+# artifact). `cc -dumpmachine` is the correct identity source.
+# Arches with no mapping below (ppc64le / s390x / riscv64) get the link
+# check only: on those the canary's job is -Wl,--no-undefined, not an
+# ELF-machine assertion.
+canary compiler: cc -> x86_64-linux-gnu (expecting ELF machine: x86-64)
+canary OK: libforkrun.so links with no undefined symbols
+2026-09-30T04:07:41Z  END   canary rc=0 (0s)
+
+================================================================
+  31b python test suite (65 modules / 644 tests)
+================================================================
+
+
+================================================================
+  31b pass 1/2
+================================================================
+
+2026-09-30T04:07:41Z  START python-suite-pass1
+test_abort_in_flight_excuses (test_abort_reason.TestDispositionTable.test_abort_in_flight_excuses) ... ok
+test_clean_with_eof_records (test_abort_reason.TestDispositionTable.test_clean_with_eof_records) ... ok
+test_no_abort_is_fatal (test_abort_reason.TestDispositionTable.test_no_abort_is_fatal) ... ok
+test_hup_abort_has_no_spurious_index_fatal (test_abort_reason.TestNumaHupSuppression.test_hup_abort_has_no_spurious_index_fatal) ... /opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/opt/forkrun/python/tests/../forkrun/run.py:6283: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  fallow_pid = os.fork()
+/opt/forkrun/python/tests/../forkrun/run.py:6300: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/opt/forkrun/python/tests/../forkrun/run.py:6324: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/opt/forkrun/python/tests/../forkrun/run.py:6346: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  ingest_pid = os.fork()
+ok
+test_missing_symbol_reads_unknown (test_abort_reason.TestReasonAccessor.test_missing_symbol_reads_unknown) ... ok
+test_no_engine_reads_minus_one (test_abort_reason.TestReasonAccessor.test_no_engine_reads_minus_one) ... ok
+test_symbol_present_and_int (test_abort_reason.TestReasonAccessor.test_symbol_present_and_int) ... ok
+test_direct_view_invalidated (test_api_surface.TestBatchLifetime.test_direct_view_invalidated) ... ok
+test_bad_mode (test_api_surface.TestOptionValidation.test_bad_mode) ... ok
+test_bad_order (test_api_surface.TestOptionValidation.test_bad_order) ... ok
+test_lines_bytes_lines_win_with_warning (test_api_surface.TestOptionValidation.test_lines_bytes_lines_win_with_warning) ... ok
+test_nonpositive (test_api_surface.TestOptionValidation.test_nonpositive) ... ok
+test_sink_must_be_callable (test_api_surface.TestOptionValidation.test_sink_must_be_callable) ... ok
+test_v0_mode_gate (test_api_surface.TestOptionValidation.test_v0_mode_gate) ... ok
+test_wrappers_delegate (test_api_surface.TestOptionValidation.test_wrappers_delegate) ... ok
+test_bool_rejected (test_api_surface.TestSourceValidation.test_bool_rejected) ... ok
+test_fd_accepted_shape (test_api_surface.TestSourceValidation.test_fd_accepted_shape) ... ok
+test_generator_rejected (test_api_surface.TestSourceValidation.test_generator_rejected) ... ok
+test_iterable_rejected_with_reason (test_api_surface.TestSourceValidation.test_iterable_rejected_with_reason) ... ok
+test_negative_fd_rejected (test_api_surface.TestSourceValidation.test_negative_fd_rejected) ... ok
+test_path_accepted_shape (test_api_surface.TestSourceValidation.test_path_accepted_shape) ... ok
+test_pipe_accepted_shape (test_api_surface.TestSourceValidation.test_pipe_accepted_shape) ... ok
+test_separate_argv_substitutes (test_bash_gates.TestInsertIdSeparateArgv.test_separate_argv_substitutes) ... ok
+test_reject_bare_and_with_args (test_bash_gates.TestResumeGateBothForms.test_reject_bare_and_with_args) ... ok
+test_context_scale_validation (test_bench.TestHarness.test_context_scale_validation) ... ok
+test_cpu_pct_around_busy_children (test_bench.TestHarness.test_cpu_pct_around_busy_children) ... ok
+test_cpu_pct_around_trivial (test_bench.TestHarness.test_cpu_pct_around_trivial) ... ok
+test_format_cpu (test_bench.TestHarness.test_format_cpu) ... ok
+test_format_rate (test_bench.TestHarness.test_format_rate) ... ok
+test_format_table_aligned (test_bench.TestHarness.test_format_table_aligned) ... ok
+test_format_table_empty (test_bench.TestHarness.test_format_table_empty) ... ok
+test_hardware_disclosure (test_bench.TestHarness.test_hardware_disclosure) ... ok
+test_rss_mb (test_bench.TestHarness.test_rss_mb) ... ok
+test_time_it_median_and_warmup (test_bench.TestHarness.test_time_it_median_and_warmup) ... ok
+test_write_csv_round_trip (test_bench.TestHarness.test_write_csv_round_trip) ... ok
+test_ml_light_heavy_totals (test_benchmark_counts.TestExactTotals.test_ml_light_heavy_totals) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_ml_medium_totals (test_benchmark_counts.TestExactTotals.test_ml_medium_totals) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_tokenize_totals (test_benchmark_counts.TestExactTotals.test_tokenize_totals) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_c_drain_default_is_legacy (test_c_drain.TestCDrainBasic.test_c_drain_default_is_legacy) ... ok
+test_c_drain_empty (test_c_drain.TestCDrainBasic.test_c_drain_empty) ... ok
+test_c_drain_fault (test_c_drain.TestCDrainBasic.test_c_drain_fault) ... forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=18 read=18 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=16 read=16 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [WARN]: 5 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 5 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+=================================================================
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=18 read=18 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=16 read=16 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=18 read=18 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=16 read=16 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [WARN]: 5 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 5 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+=================================================================
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=18 read=18 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=16 read=16 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[2, 3]
+ok
+test_c_drain_map (test_c_drain.TestCDrainBasic.test_c_drain_map) ... forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+ok
+test_c_drain_ordered (test_c_drain.TestCDrainBasic.test_c_drain_ordered) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_c_drain_run_discard (test_c_drain.TestCDrainBasic.test_c_drain_run_discard) ... ok
+test_c_drain_splice (test_c_drain.TestCDrainBasic.test_c_drain_splice) ... ok
+test_c_drain_vs_python_drain (test_c_drain.TestCDrainBasic.test_c_drain_vs_python_drain) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_drain_symbol (test_c_drain.TestCDrainBasic.test_drain_symbol) ... ok
+test_numa_drain_empty (test_c_drain.TestCDrainNUMA.test_numa_drain_empty) ... forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[]
+  node=0 write=1 read=0 finished=1 chunks(head=1 tail=1) tail_empty=1 forked=NO wids=[0, 1]
+  node=1 write=0 read=0 finished=1 chunks(head=0 tail=0) tail_empty=1 forked=NO wids=[2, 3]
+ok
+test_numa_drain_ordered (test_c_drain.TestCDrainNUMA.test_numa_drain_ordered) ... forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=30 read=30 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=21 read=21 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=51 emitted=51 expected=(5,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_numa_drain_parity (test_c_drain.TestCDrainNUMA.test_numa_drain_parity) ... forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+ok
+test_numa_stream_drain_parity (test_c_drain.TestCDrainNUMA.test_numa_stream_drain_parity) ... forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=30 read=30 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=21 read=21 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=30 read=30 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=21 read=21 finished=1 chunks(head=2 tail=2) tail_empty=1 forked=yes wids=[2, 3]
+ok
+test_c_drain_not_slower (test_c_drain.TestCDrainPerformance.test_c_drain_not_slower) ... forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=86 read=86 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=20 read=20 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=86 read=86 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=20 read=20 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=86 read=86 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=20 read=20 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=86 read=86 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=20 read=20 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=86 read=86 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=20 read=20 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=86 read=86 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=20 read=20 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+ok
+test_drain_capability_reported (test_c_drain.TestCDrainPurity.test_drain_capability_reported) ... ok
+test_reactor_drain_parity (test_c_drain.TestCDrainReactor.test_reactor_drain_parity) ... forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=66 emitted=66 expected=(6,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=66 emitted=66 expected=(6,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_reactor_ingest_drain_parity (test_c_drain.TestCDrainReactor.test_reactor_ingest_drain_parity) ... ok
+test_reactor_respawn_with_drain (test_c_drain.TestCDrainReactor.test_reactor_respawn_with_drain) ... forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: 3 worker death(s) recovered via respawn (wid(s) 0,0,0).
+ok
+test_reactor_stream_drain_parity (test_c_drain.TestCDrainReactor.test_reactor_stream_drain_parity) ... forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+ok
+test_c_drain_abandon (test_c_drain.TestCDrainStream.test_c_drain_abandon) ... ok
+test_c_drain_backpressure (test_c_drain.TestCDrainStream.test_c_drain_backpressure) ... ok
+test_c_drain_stream (test_c_drain.TestCDrainStream.test_c_drain_stream) ... forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+ok
+test_c_drain_stream_content (test_c_drain.TestCDrainStream.test_c_drain_stream_content) ... ok
+test_c_drain_stream_incremental (test_c_drain.TestCDrainStream.test_c_drain_stream_incremental) ... forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0]
+  node=0 write=63 read=63 finished=1 chunks(head=1 tail=1) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=1 read=0 finished=1 chunks(head=1 tail=1) tail_empty=1 forked=NO wids=[2, 3]
+ok
+test_c_drain_stream_matches (test_c_drain.TestCDrainStream.test_c_drain_stream_matches) ... forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+ok
+test_c_drain_stream_ordered (test_c_drain.TestCDrainStream.test_c_drain_stream_ordered) ... forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=66 emitted=66 expected=(6,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] stream completion:
+  nodes=2 workers=4 forked=[0, 1]
+  node=0 write=37 read=37 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1]
+  node=1 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[2, 3]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=66 emitted=66 expected=(6,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_bad_c_drain_rejected (test_c_drain.TestCDrainValidation.test_bad_c_drain_rejected) ... ok
+test_bad_c_drain_run_rejected (test_c_drain.TestCDrainValidation.test_bad_c_drain_run_rejected) ... ok
+test_bad_c_drain_stream_rejected (test_c_drain.TestCDrainValidation.test_bad_c_drain_stream_rejected) ... ok
+test_foreign_uid_allowed_with_trust (test_checkpoint_gate.TestCheckpointGate.test_foreign_uid_allowed_with_trust) ... ok
+test_foreign_uid_refused_without_trust (test_checkpoint_gate.TestCheckpointGate.test_foreign_uid_refused_without_trust) ... ok
+test_go_w_allowed_with_trust (test_checkpoint_gate.TestCheckpointGate.test_go_w_allowed_with_trust) ... ok
+test_go_w_refused_without_trust (test_checkpoint_gate.TestCheckpointGate.test_go_w_refused_without_trust) ... ok
+test_resume_begin_gets_past_safety_with_trust (test_checkpoint_gate.TestCheckpointGate.test_resume_begin_gets_past_safety_with_trust) ... forkrun [WARN]: FORKRUN_TRUST_RESUME=1: ownership/permission checks bypassed for /tmp/tmp1e6_34jp.ckpt
+ok
+test_unstatable_fails_closed_even_with_trust (test_checkpoint_gate.TestCheckpointGate.test_unstatable_fails_closed_even_with_trust) ... ok
+test_resume_begin_rejects_absurd_checkpoint (test_checkpoint_gate.TestCheckpointSemantics.test_resume_begin_rejects_absurd_checkpoint) ... ok
+test_semantics_table (test_checkpoint_gate.TestCheckpointSemantics.test_semantics_table) ... ok
+test_map_ordered_parity (test_complete.TestCompleteParity.test_map_ordered_parity) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=64 emitted=64 expected=(64,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_map_unordered_parity (test_complete.TestCompleteParity.test_map_unordered_parity) ... ok
+test_none_and_empty_output_parity (test_complete.TestCompleteParity.test_none_and_empty_output_parity) ... ok
+test_retry_still_poisons (test_complete.TestCompleteParity.test_retry_still_poisons) ... ok
+test_streaming_fallow_parity (test_complete.TestCompleteParity.test_streaming_fallow_parity) ... ok
+test_ack_without_state_is_minus_three (test_complete.TestCompleteReturnCodes.test_ack_without_state_is_minus_three) ... ok
+test_output_failure_is_minus_one (test_complete.TestCompleteReturnCodes.test_output_failure_is_minus_one) ... ok
+test_signal_failure_is_minus_two (test_complete.TestCompleteReturnCodes.test_signal_failure_is_minus_two) ... ok
+test_no_thread_check_in_hot_path (test_complete.TestCompleteSymbols.test_no_thread_check_in_hot_path) ... ok
+test_no_v1_masks_new_paths (test_complete.TestCompleteSymbols.test_no_v1_masks_new_paths) ... ok
+test_symbols_present (test_complete.TestCompleteSymbols.test_symbols_present) ... ok
+test_bad_args (test_complete.TestDescriptorParsing.test_bad_args) ... ok
+test_empty (test_complete.TestDescriptorParsing.test_empty) ... ok
+test_max_bound_truncates_descriptors_not_input (test_complete.TestDescriptorParsing.test_max_bound_truncates_descriptors_not_input) ... ok
+test_parity_basic (test_complete.TestDescriptorParsing.test_parity_basic) ... ok
+test_parity_short_header (test_complete.TestDescriptorParsing.test_parity_short_header) ... ok
+test_parity_truncated_tail (test_complete.TestDescriptorParsing.test_parity_truncated_tail) ... ok
+test_raw_descriptor_boundaries (test_complete.TestDescriptorParsing.test_raw_descriptor_boundaries) ... ok
+test_file_source_parity (test_complete.TestSequentialSpill.test_file_source_parity) ... ok
+test_pipe_source_parity (test_complete.TestSequentialSpill.test_pipe_source_parity) ... ok
+test_two_runs_concurrent_threads (test_concurrent.TestConcurrentInvocations.test_two_runs_concurrent_threads) ... /opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=58 emitted=58 expected=(58,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=76 emitted=76 expected=(76,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_many_runs_fd_stable (test_concurrent.TestSequentialInvocations.test_many_runs_fd_stable) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=39 emitted=39 expected=(39,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_two_runs_same_process (test_concurrent.TestSequentialInvocations.test_two_runs_same_process) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=45 emitted=45 expected=(45,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_definitive_answer_overrides_maps (test_cuda_guard.TestCudaGuardContract.test_definitive_answer_overrides_maps) ... ok
+test_guard_module_imports_clean (test_cuda_guard.TestCudaGuardContract.test_guard_module_imports_clean) ... ok
+test_live_cuda_context_refuses (test_cuda_guard.TestCudaGuardContract.test_live_cuda_context_refuses) ... ok
+test_refusal_message_is_actionable (test_cuda_guard.TestCudaGuardContract.test_refusal_message_is_actionable) ... ok
+test_simulated_hazard_refuses_run (test_cuda_guard.TestCudaGuardContract.test_simulated_hazard_refuses_run) ... ok
+test_torch_import_no_cuda_init_passes (test_cuda_guard.TestCudaGuardContract.test_torch_import_no_cuda_init_passes) ... ok
+test_no_cuda_no_refusal (test_cuda_guard.TestCudaGuardIntegration.test_no_cuda_no_refusal) ... ok
+test_stream_refuses_live_context (test_cuda_guard.TestCudaGuardStreamRefusal.test_stream_refuses_live_context) ... ok
+test_daemon_survives_and_run_returns (test_daemon.TestPayloadForksDaemon.test_daemon_survives_and_run_returns) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=51 emitted=51 expected=(51,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_claim_cuda_refusal (test_doc_accuracy.TestDocAccuracy.test_claim_cuda_refusal) ... ok
+test_claim_drain_guard (test_doc_accuracy.TestDocAccuracy.test_claim_drain_guard) ... forkrun [DIAG-NUMA1] map/run completion:
+  nodes=4 workers=28 forked=[0, 1, 2, 3]
+  node=0 write=100 read=100 finished=1 chunks(head=10 tail=10) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6]
+  node=1 write=101 read=101 finished=1 chunks(head=11 tail=11) tail_empty=1 forked=yes wids=[7, 8, 9, 10, 11, 12, 13]
+  node=2 write=102 read=102 finished=1 chunks(head=12 tail=12) tail_empty=1 forked=yes wids=[14, 15, 16, 17, 18, 19, 20]
+  node=3 write=103 read=103 finished=1 chunks(head=13 tail=13) tail_empty=1 forked=yes wids=[21, 22, 23, 24, 25, 26, 27]
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=4 workers=28 forked=[0, 1, 2, 3]
+  node=0 write=100 read=100 finished=1 chunks(head=10 tail=10) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6]
+  node=1 write=101 read=101 finished=1 chunks(head=11 tail=11) tail_empty=1 forked=yes wids=[7, 8, 9, 10, 11, 12, 13]
+  node=2 write=150 read=100 finished=1 chunks(head=12 tail=12) tail_empty=0 forked=yes wids=[14, 15, 16, 17, 18, 19, 20]
+  node=3 write=103 read=103 finished=1 chunks(head=13 tail=13) tail_empty=1 forked=yes wids=[21, 22, 23, 24, 25, 26, 27]
+ok
+test_claim_insert_id_argv_form (test_doc_accuracy.TestDocAccuracy.test_claim_insert_id_argv_form) ... ok
+test_claim_new_params (test_doc_accuracy.TestDocAccuracy.test_claim_new_params) ... forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+/opt/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/opt/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/opt/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=273356) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=10 emitted=10 expected=(10,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun: checkpoint written to /tmp/tmpn6fe6aje.ckpt (engine committed frontier: 8890 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpn6fe6aje.ckpt'
+ok
+test_claim_numa_coverage (test_doc_accuracy.TestDocAccuracy.test_claim_numa_coverage) ... forkrun [DIAG-NUMA1] map/run completion:
+  nodes=4 workers=4 forked=[0, 1, 2, 3]
+  node=0 write=42 read=42 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[0]
+  node=1 write=6 read=6 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[1]
+  node=2 write=5 read=5 finished=1 chunks(head=4 tail=4) tail_empty=1 forked=yes wids=[2]
+  node=3 write=6 read=6 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[3]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=59 emitted=59 expected=(15,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] orderer done: numa=0 recv=95 emitted=95 expected=(95,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+ok
+test_claim_order_index_buffering (test_doc_accuracy.TestDocAccuracy.test_claim_order_index_buffering) ... ok
+test_claim_payload_at_least_once (test_doc_accuracy.TestDocAccuracy.test_claim_payload_at_least_once) ... forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+ok
+test_claim_plugin_conventions (test_doc_accuracy.TestDocAccuracy.test_claim_plugin_conventions) ... ok
+test_claim_recovery (test_doc_accuracy.TestDocAccuracy.test_claim_recovery) ... forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+ok
+test_claim_resume (test_doc_accuracy.TestDocAccuracy.test_claim_resume) ... forkrun [DIAG-NUMA1] orderer done: numa=0 recv=7 emitted=7 expected=(7,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun: checkpoint written to /tmp/tmpdmg6nvwl.txt.ckpt (engine committed frontier: 19712 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpdmg6nvwl.txt.ckpt'
+ok
+test_claim_resume_gate_both_forms (test_doc_accuracy.TestDocAccuracy.test_claim_resume_gate_both_forms) ... ok
+test_claim_sink_at_least_once (test_doc_accuracy.TestDocAccuracy.test_claim_sink_at_least_once) ... forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+ok
+test_claim_streaming_memory (test_doc_accuracy.TestDocAccuracy.test_claim_streaming_memory) ... ok
+test_claim_taxonomy (test_doc_accuracy.TestDocAccuracy.test_claim_taxonomy) ... ok
+test_registry_well_formed (test_doc_accuracy.TestDocAccuracy.test_registry_well_formed) ... ok
+test_empty (test_edge_degenerate.TestDegenerateInputs.test_empty) ... 

@@ -1,5 +1,5 @@
 ### canary
-### 2026-09-30T03:49:51Z
+### 2026-09-30T04:07:41Z
 ### cmd: make -f Makefile.substrate canary
 
 canary artifact: libforkrun.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, not stripped
@@ -13,4 +13,4 @@ canary artifact: libforkrun.so: ELF 64-bit LSB shared object, x86-64, version 1 
 canary compiler: cc -> x86_64-linux-gnu (expecting ELF machine: x86-64)
 canary OK: libforkrun.so links with no undefined symbols
 
-### rc=0  elapsed=0s  finished=2026-09-30T03:49:51Z
+### rc=0  elapsed=0s  finished=2026-09-30T04:07:41Z

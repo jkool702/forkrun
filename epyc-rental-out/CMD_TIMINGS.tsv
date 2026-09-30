@@ -47,3 +47,4 @@ test_c_plugins_rigorous.sh	0	41
 test_c_plugins_raw.sh	0	2
 test_c_plugins_stdin.sh	1	2
 test_c_plugins_config.sh	0	2
+canary	0	0
