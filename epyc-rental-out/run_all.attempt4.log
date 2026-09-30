@@ -209645,3 +209645,969 @@ quality-gate drop. No silent loss detected.
 2026-09-30T08:59:43Z  csv: /opt/forkrun/epyc-rental-out/20_benchmarks/tokenize/tokenize_2000000.csv
 2026-09-30T08:59:43Z  stage 42_bench_tokenize OK (3956s)
 2026-09-30T08:59:43Z  publishing results after 42_bench_tokenize
+2026-09-30T08:59:44Z  [publish] committed 92 file(s) to epyc-rental-results: b1063261d -> 9bafab008
+2026-09-30T08:59:46Z  [publish] pushed to origin/epyc-rental-results
+2026-09-30T08:59:46Z  [publish]   review with:  git fetch origin && git log --oneline origin/epyc-rental-results
+
+================================================================
+  STAGE 43_bench_ml20m  (est 14400s)
+================================================================
+
+
+================================================================
+  43 ML pipeline @ 20000000 records — forkrun only (Ray/HF blocked)
+================================================================
+
+2026-09-30T08:59:46Z  tmpdir : //ml20
+2026-09-30T08:59:46Z  sweep  : 8,16,32,48,96
+2026-09-30T08:59:46Z  variants: light medium heavy
+
+================================================================
+  43a confirm the block took effect
+================================================================
+
+# expecting ray and datasets to be UNIMPORTABLE in this stage
+[epyc] blocked imports: datasets, ray
+  ray        blocked/absent (No module named 'ray' (blocked by epyc/blockmods/sitecustomize.py; EPYC_BLOCK_MODULES='ray,datasets'))
+  datasets   blocked/absent (No module named 'datasets' (blocked by epyc/blockmods/sitecustomize.py; EPYC_BLOCK_MODULES='ray,datasets'))
+  polars     IMPORTABLE   1.44.2
+  duckdb     IMPORTABLE   1.5.5
+  numpy      IMPORTABLE   2.5.3
+  forkrun    IMPORTABLE   0.16.0
+2026-09-30T08:59:46Z  ok ml_light.jsonl : 20000000 lines, 2.0GiB
+2026-09-30T08:59:47Z  ok ml_medium.jsonl : 20000000 lines, 8.8GiB
+2026-09-30T08:59:50Z  ok ml_heavy.jsonl : 20000000 lines, 26GiB
+2026-09-30T08:59:50Z  MemAvailable: 246GiB
+2026-09-30T08:59:50Z  variant light: rough working-set estimate ~3.2GiB vs 246GiB available (headroom ok)
+2026-09-30T08:59:50Z  variant medium: rough working-set estimate ~14GiB vs 246GiB available (headroom ok)
+2026-09-30T08:59:50Z  variant heavy: rough working-set estimate ~41GiB vs 246GiB available (headroom ok)
+[epyc] blocked imports: datasets, ray
+2026-09-30T08:59:50Z  topology condition: NPS1, 2 node(s) over 2 socket(s)
+2026-09-30T08:59:50Z    F-NUMA1 meta bound: 2048/2 = 1024 chunks/node (fake-4 baselines: 512)
+365m remaining
+
+================================================================
+  43b variant=light @ 20000000 records (forkrun only, Ray/HF blocked)
+================================================================
+
+2026-09-30T08:59:50Z  START ml20m-light
+[epyc] blocked imports: datasets, ray
+forkrun ML pipeline benchmark — 20000000 records/variant
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Versions: {'python': '3.14.4', 'ray': 'missing', 'polars': '1.44.2', 'duckdb': '1.5.5', 'datasets': 'missing', 'pyarrow': '25.0.1', 'forkrun': '0.16.0'}
+Frameworks: {'serial': True, 'pool': True, 'executor': True, 'forkrun': True, 'ray': False, 'polars': True, 'duckdb': True, 'hf_datasets': False}
+Worker sweep: [8, 16, 32, 48, 96] (best reported per system)
+--- light: 20000000 records, 2032.1MB ---
+[epyc] blocked imports: datasets, ray
+[epyc] blocked imports: datasets, ray
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2919 read=2919 finished=1 chunks(head=513 tail=513) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2511 read=2511 finished=1 chunks(head=505 tail=505) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2899 read=2899 finished=1 chunks(head=502 tail=502) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2531 read=2531 finished=1 chunks(head=516 tail=516) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2894 read=2894 finished=1 chunks(head=509 tail=509) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2536 read=2536 finished=1 chunks(head=509 tail=509) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2894 read=2894 finished=1 chunks(head=510 tail=510) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2746 read=2746 finished=1 chunks(head=508 tail=508) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5640 emitted=5640 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2894 read=2894 finished=1 chunks(head=508 tail=508) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2536 read=2536 finished=1 chunks(head=510 tail=510) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2884 read=2884 finished=1 chunks(head=509 tail=509) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2546 read=2546 finished=1 chunks(head=509 tail=509) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2914 read=2914 finished=1 chunks(head=508 tail=508) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2516 read=2516 finished=1 chunks(head=510 tail=510) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2909 read=2909 finished=1 chunks(head=511 tail=511) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2521 read=2521 finished=1 chunks(head=507 tail=507) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2909 read=2909 finished=1 chunks(head=508 tail=508) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2521 read=2521 finished=1 chunks(head=510 tail=510) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=2894 read=2894 finished=1 chunks(head=510 tail=510) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=2536 read=2536 finished=1 chunks(head=508 tail=508) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2899 read=2899 finished=1 chunks(head=505 tail=505) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2531 read=2531 finished=1 chunks(head=513 tail=513) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2894 read=2894 finished=1 chunks(head=507 tail=507) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2536 read=2536 finished=1 chunks(head=511 tail=511) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2889 read=2889 finished=1 chunks(head=512 tail=512) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2541 read=2541 finished=1 chunks(head=506 tail=506) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2894 read=2894 finished=1 chunks(head=504 tail=504) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2536 read=2536 finished=1 chunks(head=514 tail=514) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2904 read=2904 finished=1 chunks(head=513 tail=513) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2526 read=2526 finished=1 chunks(head=505 tail=505) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2954 read=2954 finished=1 chunks(head=519 tail=519) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2476 read=2476 finished=1 chunks(head=499 tail=499) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2919 read=2919 finished=1 chunks(head=509 tail=509) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2511 read=2511 finished=1 chunks(head=509 tail=509) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2969 read=2969 finished=1 chunks(head=526 tail=526) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2461 read=2461 finished=1 chunks(head=492 tail=492) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2944 read=2944 finished=1 chunks(head=514 tail=514) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2486 read=2486 finished=1 chunks(head=504 tail=504) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=2924 read=2924 finished=1 chunks(head=509 tail=509) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=2506 read=2506 finished=1 chunks(head=509 tail=509) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2989 read=2989 finished=1 chunks(head=529 tail=529) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2441 read=2441 finished=1 chunks(head=489 tail=489) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2859 read=2859 finished=1 chunks(head=501 tail=501) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2571 read=2571 finished=1 chunks(head=517 tail=517) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2959 read=2959 finished=1 chunks(head=522 tail=522) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2471 read=2471 finished=1 chunks(head=496 tail=496) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2979 read=2979 finished=1 chunks(head=521 tail=521) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2451 read=2451 finished=1 chunks(head=497 tail=497) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2984 read=2984 finished=1 chunks(head=522 tail=522) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2446 read=2446 finished=1 chunks(head=496 tail=496) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3299 read=3299 finished=1 chunks(head=584 tail=584) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2131 read=2131 finished=1 chunks(head=434 tail=434) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3119 read=3119 finished=1 chunks(head=552 tail=552) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2311 read=2311 finished=1 chunks(head=466 tail=466) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3169 read=3169 finished=1 chunks(head=574 tail=574) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2261 read=2261 finished=1 chunks(head=444 tail=444) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3234 read=3234 finished=1 chunks(head=572 tail=572) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2196 read=2196 finished=1 chunks(head=446 tail=446) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3229 read=3229 finished=1 chunks(head=570 tail=570) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=2201 read=2201 finished=1 chunks(head=448 tail=448) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2574 read=2574 finished=1 chunks(head=458 tail=458) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=2856 read=2856 finished=1 chunks(head=560 tail=560) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2394 read=2394 finished=1 chunks(head=394 tail=394) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=3036 read=3036 finished=1 chunks(head=624 tail=624) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2254 read=2254 finished=1 chunks(head=368 tail=368) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=3176 read=3176 finished=1 chunks(head=650 tail=650) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2279 read=2279 finished=1 chunks(head=376 tail=376) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=3151 read=3151 finished=1 chunks(head=642 tail=642) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=1464 read=1464 finished=1 chunks(head=227 tail=227) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=3966 read=3966 finished=1 chunks(head=791 tail=791) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2464 read=2464 finished=1 chunks(head=405 tail=405) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=2966 read=2966 finished=1 chunks(head=613 tail=613) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2589 read=2589 finished=1 chunks(head=436 tail=436) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=2841 read=2841 finished=1 chunks(head=582 tail=582) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=1589 read=1589 finished=1 chunks(head=244 tail=244) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=3841 read=3841 finished=1 chunks(head=774 tail=774) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2839 read=2839 finished=1 chunks(head=479 tail=479) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=2591 read=2591 finished=1 chunks(head=539 tail=539) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2449 read=2449 finished=1 chunks(head=398 tail=398) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=2981 read=2981 finished=1 chunks(head=620 tail=620) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=674 read=674 finished=1 chunks(head=110 tail=110) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4756 read=4756 finished=1 chunks(head=908 tail=908) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=644 read=644 finished=1 chunks(head=95 tail=95) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4786 read=4786 finished=1 chunks(head=923 tail=923) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=694 read=694 finished=1 chunks(head=102 tail=102) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4736 read=4736 finished=1 chunks(head=916 tail=916) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=634 read=634 finished=1 chunks(head=95 tail=95) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4796 read=4796 finished=1 chunks(head=923 tail=923) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=664 read=664 finished=1 chunks(head=102 tail=102) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4766 read=4766 finished=1 chunks(head=916 tail=916) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1349 read=1349 finished=1 chunks(head=221 tail=221) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4081 read=4081 finished=1 chunks(head=797 tail=797) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1444 read=1444 finished=1 chunks(head=236 tail=236) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=3986 read=3986 finished=1 chunks(head=782 tail=782) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1639 read=1639 finished=1 chunks(head=270 tail=270) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=3791 read=3791 finished=1 chunks(head=748 tail=748) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1419 read=1419 finished=1 chunks(head=232 tail=232) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4011 read=4011 finished=1 chunks(head=786 tail=786) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1354 read=1354 finished=1 chunks(head=221 tail=221) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4076 read=4076 finished=1 chunks(head=797 tail=797) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5430 emitted=5430 expected=(1018,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+--- light results (this variant) ---
++--------------------------+----------+------------+---------+----------+------+--------------------------------------------+
+| Benchmark                | Mode     | Path       | Lines/s | Peak RSS | CPU% | Notes                                      |
++--------------------------+----------+------------+---------+----------+------+--------------------------------------------+
+| serial-light             | serial   | udf        | 133k    | 5498MB   | -    | out=20000000/20000000 records, 2.1GB in    |
+| pool-light-8w            | pool     | udf        | 835k    | 6177MB   | -    | out=20000000/20000000 records              |
+| executor-light-8w        | executor | udf        | 841k    | 6229MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-8w         | forkrun  | udf        | 825k    | 6229MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-8w  | plugin   | c-callback | 2.3M    | 6229MB   | -    | out=20000000/20000000 records, frozen ABI  |
+| pool-light-16w           | pool     | udf        | 1.5M    | 6381MB   | -    | out=20000000/20000000 records              |
+| executor-light-16w       | executor | udf        | 1.5M    | 6381MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-16w        | forkrun  | udf        | 1.4M    | 6381MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-16w | plugin   | c-callback | 2.8M    | 6381MB   | -    | out=20000000/20000000 records, frozen ABI  |
+| pool-light-32w           | pool     | udf        | 2.1M    | 6381MB   | -    | out=20000000/20000000 records              |
+| executor-light-32w       | executor | udf        | 2.1M    | 6440MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-32w        | forkrun  | udf        | 1.9M    | 6440MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-32w | plugin   | c-callback | 3.0M    | 6440MB   | -    | out=20000000/20000000 records, frozen ABI  |
+| pool-light-48w           | pool     | udf        | 2.1M    | 6440MB   | -    | out=20000000/20000000 records              |
+| executor-light-48w       | executor | udf        | 2.2M    | 6440MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-48w        | forkrun  | udf        | 2.0M    | 6440MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-48w | plugin   | c-callback | 3.0M    | 6440MB   | -    | out=20000000/20000000 records, frozen ABI  |
+| pool-light-96w           | pool     | udf        | 2.2M    | 6440MB   | -    | out=20000000/20000000 records              |
+| executor-light-96w       | executor | udf        | 2.5M    | 6440MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-96w        | forkrun  | udf        | 1.6M    | 6440MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-96w | plugin   | c-callback | 2.6M    | 6440MB   | -    | out=20000000/20000000 records, frozen ABI  |
++--------------------------+----------+------------+---------+----------+------+--------------------------------------------+
+
++--------------------------+----------+------------+---------+----------+------+--------------------------------------------+
+| Benchmark                | Mode     | Path       | Lines/s | Peak RSS | CPU% | Notes                                      |
++--------------------------+----------+------------+---------+----------+------+--------------------------------------------+
+| serial-light             | serial   | udf        | 133k    | 5498MB   | -    | out=20000000/20000000 records, 2.1GB in    |
+| pool-light-8w            | pool     | udf        | 835k    | 6177MB   | -    | out=20000000/20000000 records              |
+| executor-light-8w        | executor | udf        | 841k    | 6229MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-8w         | forkrun  | udf        | 825k    | 6229MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-8w  | plugin   | c-callback | 2.3M    | 6229MB   | -    | out=20000000/20000000 records, frozen ABI  |
+| pool-light-16w           | pool     | udf        | 1.5M    | 6381MB   | -    | out=20000000/20000000 records              |
+| executor-light-16w       | executor | udf        | 1.5M    | 6381MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-16w        | forkrun  | udf        | 1.4M    | 6381MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-16w | plugin   | c-callback | 2.8M    | 6381MB   | -    | out=20000000/20000000 records, frozen ABI  |
+| pool-light-32w           | pool     | udf        | 2.1M    | 6381MB   | -    | out=20000000/20000000 records              |
+| executor-light-32w       | executor | udf        | 2.1M    | 6440MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-32w        | forkrun  | udf        | 1.9M    | 6440MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-32w | plugin   | c-callback | 3.0M    | 6440MB   | -    | out=20000000/20000000 records, frozen ABI  |
+| pool-light-48w           | pool     | udf        | 2.1M    | 6440MB   | -    | out=20000000/20000000 records              |
+| executor-light-48w       | executor | udf        | 2.2M    | 6440MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-48w        | forkrun  | udf        | 2.0M    | 6440MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-48w | plugin   | c-callback | 3.0M    | 6440MB   | -    | out=20000000/20000000 records, frozen ABI  |
+| pool-light-96w           | pool     | udf        | 2.2M    | 6440MB   | -    | out=20000000/20000000 records              |
+| executor-light-96w       | executor | udf        | 2.5M    | 6440MB   | -    | out=20000000/20000000 records              |
+| forkrun-light-96w        | forkrun  | udf        | 1.6M    | 6440MB   | -    | out=20000000/20000000 records, order=index |
+| forkrun-plugin-light-96w | plugin   | c-callback | 2.6M    | 6440MB   | -    | out=20000000/20000000 records, frozen ABI  |
++--------------------------+----------+------------+---------+----------+------+--------------------------------------------+
+
+BEST (worker sweep):
+  executor     light     2472054 records/s (296.6 MB/s input)
+  forkrun      light     1996803 records/s (239.6 MB/s input)
+  forkrun-plugin light     3013546 records/s (361.6 MB/s input)
+  pool         light     2224735 records/s (267.0 MB/s input)
+  serial       light      133458 records/s ( 16.0 MB/s input)
+
+NOTES:
+- Worker sweep [8, 16, 32, 48, 96]; each system's best rate shown above.
+- UDF systems run the IDENTICAL Python transformation (ml_payload.py); only batching/transport/scheduling differ.
+- Native systems (Polars/DuckDB) use their own expression language (medium variant only); the heavy UDF cannot be expressed natively, which is the point of the comparison.
+- forkrun uses order=index (validated counts); Pool/Executor chunk into workers*4 line-chunks (pickled); Ray uses pandas batches via read_text; HF Datasets uses from_text + batched map (batch_size=1000, in-memory).
+- Fault injection is crash-once (file markers): first attempt crashes, retry succeeds. forkrun recovers via orchestrator respawn; Pool has no retry (documented).
+- RSS is parent-process peak (ru_maxrss); worker/subprocess memory is not attributed per system.
+CSV: /opt/forkrun/epyc-rental-out/20_benchmarks/ml20m/ml20m_light.csv
+2026-09-30T09:25:17Z  END   ml20m-light rc=0 (1527s)
+2026-09-30T09:25:17Z  variant light done
+340m remaining
+
+================================================================
+  43b variant=medium @ 20000000 records (forkrun only, Ray/HF blocked)
+================================================================
+
+2026-09-30T09:25:17Z  START ml20m-medium
+[epyc] blocked imports: datasets, ray
+forkrun ML pipeline benchmark — 20000000 records/variant
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Versions: {'python': '3.14.4', 'ray': 'missing', 'polars': '1.44.2', 'duckdb': '1.5.5', 'datasets': 'missing', 'pyarrow': '25.0.1', 'forkrun': '0.16.0'}
+Frameworks: {'serial': True, 'pool': True, 'executor': True, 'forkrun': True, 'ray': False, 'polars': True, 'duckdb': True, 'hf_datasets': False}
+Worker sweep: [8, 16, 32, 48, 96] (best reported per system)
+--- medium: 20000000 records, 8954.7MB ---
+[epyc] blocked imports: datasets, ray
+[epyc] blocked imports: datasets, ray
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11617 read=11617 finished=1 chunks(head=2248 tail=2248) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11274 read=11274 finished=1 chunks(head=2231 tail=2231) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11612 read=11612 finished=1 chunks(head=2263 tail=2263) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11279 read=11279 finished=1 chunks(head=2216 tail=2216) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11528 read=11528 finished=1 chunks(head=2233 tail=2233) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11363 read=11363 finished=1 chunks(head=2246 tail=2246) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11522 read=11522 finished=1 chunks(head=2237 tail=2237) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11369 read=11369 finished=1 chunks(head=2242 tail=2242) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11563 read=11563 finished=1 chunks(head=2243 tail=2243) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11328 read=11328 finished=1 chunks(head=2236 tail=2236) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11742 read=11742 finished=1 chunks(head=2287 tail=2287) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11149 read=11149 finished=1 chunks(head=2192 tail=2192) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11708 read=11708 finished=1 chunks(head=2288 tail=2288) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11183 read=11183 finished=1 chunks(head=2191 tail=2191) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11742 read=11742 finished=1 chunks(head=2307 tail=2307) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11149 read=11149 finished=1 chunks(head=2172 tail=2172) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11727 read=11727 finished=1 chunks(head=2284 tail=2284) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11164 read=11164 finished=1 chunks(head=2195 tail=2195) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11743 read=11743 finished=1 chunks(head=2298 tail=2298) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11148 read=11148 finished=1 chunks(head=2181 tail=2181) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11817 read=11817 finished=1 chunks(head=2320 tail=2320) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11074 read=11074 finished=1 chunks(head=2159 tail=2159) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11862 read=11862 finished=1 chunks(head=2318 tail=2318) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11029 read=11029 finished=1 chunks(head=2161 tail=2161) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11742 read=11742 finished=1 chunks(head=2295 tail=2295) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11149 read=11149 finished=1 chunks(head=2184 tail=2184) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=11798 read=11798 finished=1 chunks(head=2299 tail=2299) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=11093 read=11093 finished=1 chunks(head=2180 tail=2180) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=8 forked=[0, 1]
+  node=0 write=12073 read=12073 finished=1 chunks(head=2348 tail=2348) tail_empty=1 forked=yes wids=[0, 1, 2, 3]
+  node=1 write=10818 read=10818 finished=1 chunks(head=2131 tail=2131) tail_empty=1 forked=yes wids=[4, 5, 6, 7]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=5018 read=5018 finished=1 chunks(head=947 tail=947) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=17873 read=17873 finished=1 chunks(head=3532 tail=3532) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=4848 read=4848 finished=1 chunks(head=914 tail=914) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=18043 read=18043 finished=1 chunks(head=3565 tail=3565) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=7388 read=7388 finished=1 chunks(head=1407 tail=1407) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=15503 read=15503 finished=1 chunks(head=3072 tail=3072) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=5508 read=5508 finished=1 chunks(head=1045 tail=1045) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=17383 read=17383 finished=1 chunks(head=3434 tail=3434) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=5208 read=5208 finished=1 chunks(head=991 tail=991) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=17683 read=17683 finished=1 chunks(head=3488 tail=3488) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=6468 read=6468 finished=1 chunks(head=1195 tail=1195) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=16423 read=16423 finished=1 chunks(head=3284 tail=3284) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=5863 read=5863 finished=1 chunks(head=1100 tail=1100) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=17028 read=17028 finished=1 chunks(head=3379 tail=3379) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=5528 read=5528 finished=1 chunks(head=1032 tail=1032) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=17363 read=17363 finished=1 chunks(head=3447 tail=3447) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=5743 read=5743 finished=1 chunks(head=1071 tail=1071) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=17148 read=17148 finished=1 chunks(head=3408 tail=3408) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=5898 read=5898 finished=1 chunks(head=1107 tail=1107) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=16993 read=16993 finished=1 chunks(head=3372 tail=3372) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=7163 read=7163 finished=1 chunks(head=1332 tail=1332) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=15728 read=15728 finished=1 chunks(head=3147 tail=3147) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=7043 read=7043 finished=1 chunks(head=1325 tail=1325) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=15848 read=15848 finished=1 chunks(head=3154 tail=3154) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=7068 read=7068 finished=1 chunks(head=1330 tail=1330) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=15823 read=15823 finished=1 chunks(head=3149 tail=3149) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=8058 read=8058 finished=1 chunks(head=1526 tail=1526) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=14833 read=14833 finished=1 chunks(head=2953 tail=2953) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=16 forked=[0, 1]
+  node=0 write=6933 read=6933 finished=1 chunks(head=1303 tail=1303) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7]
+  node=1 write=15958 read=15958 finished=1 chunks(head=3176 tail=3176) tail_empty=1 forked=yes wids=[8, 9, 10, 11, 12, 13, 14, 15]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=1227 read=1227 finished=1 chunks(head=246 tail=246) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=21664 read=21664 finished=1 chunks(head=4233 tail=4233) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=1297 read=1297 finished=1 chunks(head=242 tail=242) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=21594 read=21594 finished=1 chunks(head=4237 tail=4237) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=1282 read=1282 finished=1 chunks(head=235 tail=235) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=21609 read=21609 finished=1 chunks(head=4244 tail=4244) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=1402 read=1402 finished=1 chunks(head=248 tail=248) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=21489 read=21489 finished=1 chunks(head=4231 tail=4231) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=1147 read=1147 finished=1 chunks(head=205 tail=205) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=21744 read=21744 finished=1 chunks(head=4274 tail=4274) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2222 read=2222 finished=1 chunks(head=399 tail=399) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=20669 read=20669 finished=1 chunks(head=4080 tail=4080) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2757 read=2757 finished=1 chunks(head=512 tail=512) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=20134 read=20134 finished=1 chunks(head=3967 tail=3967) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2862 read=2862 finished=1 chunks(head=522 tail=522) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=20029 read=20029 finished=1 chunks(head=3957 tail=3957) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2312 read=2312 finished=1 chunks(head=416 tail=416) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=20579 read=20579 finished=1 chunks(head=4063 tail=4063) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=2207 read=2207 finished=1 chunks(head=390 tail=390) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=20684 read=20684 finished=1 chunks(head=4089 tail=4089) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3382 read=3382 finished=1 chunks(head=623 tail=623) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=19509 read=19509 finished=1 chunks(head=3856 tail=3856) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3582 read=3582 finished=1 chunks(head=668 tail=668) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=19309 read=19309 finished=1 chunks(head=3811 tail=3811) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3788 read=3788 finished=1 chunks(head=702 tail=702) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=19103 read=19103 finished=1 chunks(head=3777 tail=3777) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3537 read=3537 finished=1 chunks(head=649 tail=649) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=19354 read=19354 finished=1 chunks(head=3830 tail=3830) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=32 forked=[0, 1]
+  node=0 write=3427 read=3427 finished=1 chunks(head=633 tail=633) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  node=1 write=19464 read=19464 finished=1 chunks(head=3846 tail=3846) tail_empty=1 forked=yes wids=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=1497 read=1497 finished=1 chunks(head=290 tail=290) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=21394 read=21394 finished=1 chunks(head=4189 tail=4189) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=1357 read=1357 finished=1 chunks(head=248 tail=248) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=21534 read=21534 finished=1 chunks(head=4231 tail=4231) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=1022 read=1022 finished=1 chunks(head=208 tail=208) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=21869 read=21869 finished=1 chunks(head=4271 tail=4271) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=1032 read=1032 finished=1 chunks(head=183 tail=183) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=21859 read=21859 finished=1 chunks(head=4296 tail=4296) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=1007 read=1007 finished=1 chunks(head=171 tail=171) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=21884 read=21884 finished=1 chunks(head=4308 tail=4308) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2207 read=2207 finished=1 chunks(head=397 tail=397) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=20684 read=20684 finished=1 chunks(head=4082 tail=4082) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2247 read=2247 finished=1 chunks(head=402 tail=402) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=20644 read=20644 finished=1 chunks(head=4077 tail=4077) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=2782 read=2782 finished=1 chunks(head=516 tail=516) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=20109 read=20109 finished=1 chunks(head=3963 tail=3963) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=3258 read=3258 finished=1 chunks(head=673 tail=673) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=19633 read=19633 finished=1 chunks(head=3806 tail=3806) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=3177 read=3177 finished=1 chunks(head=636 tail=636) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=19714 read=19714 finished=1 chunks(head=3843 tail=3843) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=4047 read=4047 finished=1 chunks(head=764 tail=764) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=18844 read=18844 finished=1 chunks(head=3715 tail=3715) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=3512 read=3512 finished=1 chunks(head=648 tail=648) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=19379 read=19379 finished=1 chunks(head=3831 tail=3831) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=4048 read=4048 finished=1 chunks(head=753 tail=753) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=18843 read=18843 finished=1 chunks(head=3726 tail=3726) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=3483 read=3483 finished=1 chunks(head=644 tail=644) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=19408 read=19408 finished=1 chunks(head=3835 tail=3835) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=48 forked=[0, 1]
+  node=0 write=3247 read=3247 finished=1 chunks(head=600 tail=600) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  node=1 write=19644 read=19644 finished=1 chunks(head=3879 tail=3879) tail_empty=1 forked=yes wids=[24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1407 read=1407 finished=1 chunks(head=287 tail=287) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=21484 read=21484 finished=1 chunks(head=4192 tail=4192) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1017 read=1017 finished=1 chunks(head=180 tail=180) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=21874 read=21874 finished=1 chunks(head=4299 tail=4299) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1157 read=1157 finished=1 chunks(head=197 tail=197) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=21734 read=21734 finished=1 chunks(head=4282 tail=4282) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1147 read=1147 finished=1 chunks(head=196 tail=196) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=21744 read=21744 finished=1 chunks(head=4283 tail=4283) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1197 read=1197 finished=1 chunks(head=203 tail=203) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=21694 read=21694 finished=1 chunks(head=4276 tail=4276) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=2822 read=2822 finished=1 chunks(head=515 tail=515) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=20069 read=20069 finished=1 chunks(head=3964 tail=3964) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=2323 read=2323 finished=1 chunks(head=413 tail=413) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=20568 read=20568 finished=1 chunks(head=4066 tail=4066) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=2392 read=2392 finished=1 chunks(head=449 tail=449) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=20499 read=20499 finished=1 chunks(head=4030 tail=4030) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=2497 read=2497 finished=1 chunks(head=473 tail=473) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=20394 read=20394 finished=1 chunks(head=4006 tail=4006) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=2917 read=2917 finished=1 chunks(head=562 tail=562) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=19974 read=19974 finished=1 chunks(head=3917 tail=3917) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=3757 read=3757 finished=1 chunks(head=694 tail=694) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=19134 read=19134 finished=1 chunks(head=3785 tail=3785) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=3512 read=3512 finished=1 chunks(head=652 tail=652) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=19379 read=19379 finished=1 chunks(head=3827 tail=3827) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=3637 read=3637 finished=1 chunks(head=673 tail=673) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=19254 read=19254 finished=1 chunks(head=3806 tail=3806) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=3917 read=3917 finished=1 chunks(head=748 tail=748) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=18974 read=18974 finished=1 chunks(head=3731 tail=3731) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=3632 read=3632 finished=1 chunks(head=672 tail=672) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=19259 read=19259 finished=1 chunks(head=3807 tail=3807) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=22891 emitted=22891 expected=(4479,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+--- medium results (this variant) ---
++---------------------------+----------+-------------------+---------+----------+------+--------------------------------------------+
+| Benchmark                 | Mode     | Path              | Lines/s | Peak RSS | CPU% | Notes                                      |
++---------------------------+----------+-------------------+---------+----------+------+--------------------------------------------+
+| serial-medium             | serial   | udf               | 63k     | 19300MB  | -    | out=19991640/20000000 records, 9.4GB in    |
+| pool-medium-8w            | pool     | udf               | 393k    | 20573MB  | -    | out=19991640/20000000 records              |
+| executor-medium-8w        | executor | udf               | 400k    | 20671MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-8w         | forkrun  | udf               | 384k    | 20671MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-8w  | plugin   | c-callback        | 796k    | 20671MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-8w  | plugin   | c-callback-yyjson | 1.0M    | 20671MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| pool-medium-16w           | pool     | udf               | 698k    | 22772MB  | -    | out=19991640/20000000 records              |
+| executor-medium-16w       | executor | udf               | 715k    | 22772MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-16w        | forkrun  | udf               | 464k    | 22772MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-16w | plugin   | c-callback        | 845k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-16w | plugin   | c-callback-yyjson | 1.1M    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| pool-medium-32w           | pool     | udf               | 783k    | 22772MB  | -    | out=19991640/20000000 records              |
+| executor-medium-32w       | executor | udf               | 833k    | 22772MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-32w        | forkrun  | udf               | 590k    | 22772MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-32w | plugin   | c-callback        | 914k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-32w | plugin   | c-callback-yyjson | 995k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| pool-medium-48w           | pool     | udf               | 738k    | 22772MB  | -    | out=19991640/20000000 records              |
+| executor-medium-48w       | executor | udf               | 777k    | 22772MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-48w        | forkrun  | udf               | 601k    | 22772MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-48w | plugin   | c-callback        | 856k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-48w | plugin   | c-callback-yyjson | 855k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| pool-medium-96w           | pool     | udf               | 997k    | 22772MB  | -    | out=19991640/20000000 records              |
+| executor-medium-96w       | executor | udf               | 1.0M    | 22772MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-96w        | forkrun  | udf               | 486k    | 22772MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-96w | plugin   | c-callback        | 638k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-96w | plugin   | c-callback-yyjson | 583k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| polars-native             | polars   | native            | 3.3M    | 22772MB  | -    | out=19991640 rows, lazy/streaming NDJSON   |
+| duckdb-native             | duckdb   | native            | 431k    | 22772MB  | -    | out=19991640 rows, SQL/JSON                |
++---------------------------+----------+-------------------+---------+----------+------+--------------------------------------------+
+
++---------------------------+----------+-------------------+---------+----------+------+--------------------------------------------+
+| Benchmark                 | Mode     | Path              | Lines/s | Peak RSS | CPU% | Notes                                      |
++---------------------------+----------+-------------------+---------+----------+------+--------------------------------------------+
+| serial-medium             | serial   | udf               | 63k     | 19300MB  | -    | out=19991640/20000000 records, 9.4GB in    |
+| pool-medium-8w            | pool     | udf               | 393k    | 20573MB  | -    | out=19991640/20000000 records              |
+| executor-medium-8w        | executor | udf               | 400k    | 20671MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-8w         | forkrun  | udf               | 384k    | 20671MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-8w  | plugin   | c-callback        | 796k    | 20671MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-8w  | plugin   | c-callback-yyjson | 1.0M    | 20671MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| pool-medium-16w           | pool     | udf               | 698k    | 22772MB  | -    | out=19991640/20000000 records              |
+| executor-medium-16w       | executor | udf               | 715k    | 22772MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-16w        | forkrun  | udf               | 464k    | 22772MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-16w | plugin   | c-callback        | 845k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-16w | plugin   | c-callback-yyjson | 1.1M    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| pool-medium-32w           | pool     | udf               | 783k    | 22772MB  | -    | out=19991640/20000000 records              |
+| executor-medium-32w       | executor | udf               | 833k    | 22772MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-32w        | forkrun  | udf               | 590k    | 22772MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-32w | plugin   | c-callback        | 914k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-32w | plugin   | c-callback-yyjson | 995k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| pool-medium-48w           | pool     | udf               | 738k    | 22772MB  | -    | out=19991640/20000000 records              |
+| executor-medium-48w       | executor | udf               | 777k    | 22772MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-48w        | forkrun  | udf               | 601k    | 22772MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-48w | plugin   | c-callback        | 856k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-48w | plugin   | c-callback-yyjson | 855k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| pool-medium-96w           | pool     | udf               | 997k    | 22772MB  | -    | out=19991640/20000000 records              |
+| executor-medium-96w       | executor | udf               | 1.0M    | 22772MB  | -    | out=19991640/20000000 records              |
+| forkrun-medium-96w        | forkrun  | udf               | 486k    | 22772MB  | -    | out=19991640/20000000 records, order=index |
+| forkrun-plugin-medium-96w | plugin   | c-callback        | 638k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| forkrun-yyjson-medium-96w | plugin   | c-callback-yyjson | 583k    | 22772MB  | -    | out=19991640/20000000 records, frozen ABI  |
+| polars-native             | polars   | native            | 3.3M    | 22772MB  | -    | out=19991640 rows, lazy/streaming NDJSON   |
+| duckdb-native             | duckdb   | native            | 431k    | 22772MB  | -    | out=19991640 rows, SQL/JSON                |
++---------------------------+----------+-------------------+---------+----------+------+--------------------------------------------+
+
+BEST (worker sweep):
+  executor     medium    1022117 records/s (470.2 MB/s input)
+  forkrun      medium     601236 records/s (276.6 MB/s input)
+  forkrun-plugin medium     913897 records/s (420.4 MB/s input)
+  forkrun-yyjson medium    1072190 records/s (493.2 MB/s input)
+  pool         medium     997257 records/s (458.7 MB/s input)
+  serial       medium      62807 records/s ( 28.9 MB/s input)
+
+NOTES:
+- Worker sweep [8, 16, 32, 48, 96]; each system's best rate shown above.
+- UDF systems run the IDENTICAL Python transformation (ml_payload.py); only batching/transport/scheduling differ.
+- Native systems (Polars/DuckDB) use their own expression language (medium variant only); the heavy UDF cannot be expressed natively, which is the point of the comparison.
+- forkrun uses order=index (validated counts); Pool/Executor chunk into workers*4 line-chunks (pickled); Ray uses pandas batches via read_text; HF Datasets uses from_text + batched map (batch_size=1000, in-memory).
+- Fault injection is crash-once (file markers): first attempt crashes, retry succeeds. forkrun recovers via orchestrator respawn; Pool has no retry (documented).
+- RSS is parent-process peak (ru_maxrss); worker/subprocess memory is not attributed per system.
+CSV: /opt/forkrun/epyc-rental-out/20_benchmarks/ml20m/ml20m_medium.csv
+2026-09-30T10:44:24Z  END   ml20m-medium rc=0 (4747s)
+2026-09-30T10:44:24Z  variant medium done
+260m remaining
+
+================================================================
+  43b variant=heavy @ 20000000 records (forkrun only, Ray/HF blocked)
+================================================================
+
+2026-09-30T10:44:24Z  START ml20m-heavy
+[epyc] blocked imports: datasets, ray
+forkrun ML pipeline benchmark — 20000000 records/variant
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Versions: {'python': '3.14.4', 'ray': 'missing', 'polars': '1.44.2', 'duckdb': '1.5.5', 'datasets': 'missing', 'pyarrow': '25.0.1', 'forkrun': '0.16.0'}
+Frameworks: {'serial': True, 'pool': True, 'executor': True, 'forkrun': True, 'ray': False, 'polars': True, 'duckdb': True, 'hf_datasets': False}
+Worker sweep: [8, 16, 32, 48, 96] (best reported per system)
+--- heavy: 20000000 records, 25635.3MB ---
+Done                       "$@" 2>&1 | tee -a "$logfile"
+2026-09-30T12:48:59Z  END   ml20m-heavy rc=143 (7475s)
+2026-09-30T12:48:59Z  ERROR variant heavy FAILED — see /opt/forkrun/epyc-rental-out/20_benchmarks/ml20m/bench_heavy.log
+
+================================================================
+  43c validate — the F-NUMA1 question at 2 nodes and 20M records
+================================================================
+
+[epyc] blocked imports: datasets, ray
+# 43 — ML pipeline @ 20000000 records, forkrun only, 2 NUMA nodes
+
+Topology as measured:
+  nodes online `0-1` (2 nodes, shape NPS1)
+  node->socket: 0:0 1:1
+  SLIT matrix: `0|10 32;1|32 10;`
+  intra-socket distance 32 (steal threshold 4) | cross-socket 32 (threshold 4)
+
+Expected valid counts at 20000000 records (RELEASE_v3.6.0.md §2, exact on both UMA and @4 at 4 nodes):
+light 20000000 | medium 19991640 | heavy 19991658.
+
+F-NUMA1 is the risk: a stalled node's ChunkMeta slot recycled by a meta-ring lap
+makes a run return ~25% of its records with no error. It was found at 4 nodes on
+heavy-20M. This box has 2 nodes, so the meta-lifetime bound is
+1024 chunks/node vs 512 there — the tightest configuration the
+engine has ever run under. Cells reporting no cardinality are failures
+(`--require-counts`): an uncheckable rate is an invalid experiment.
+
+**rows examined: 49** | **cells with real loss: 0** | cells with no cardinality (unvalidated): 0  **(treated as FAILURE)**
+
+## ml20m_light.csv  (21 rows)
+
+| cell | total | valid | expected | rate | verdict |
+|---|---:|---:|---:|---:|---|
+| serial-light | 20,000,000 | 20,000,000 | 20,000,000 | 133,458 | EXACT |
+| pool-light-8w | 20,000,000 | 20,000,000 | 20,000,000 | 835,372 | EXACT |
+| executor-light-8w | 20,000,000 | 20,000,000 | 20,000,000 | 840,826 | EXACT |
+| forkrun-light-8w | 20,000,000 | 20,000,000 | 20,000,000 | 824,659 | EXACT |
+| forkrun-plugin-light-8w | 20,000,000 | 20,000,000 | 20,000,000 | 2,261,409 | EXACT |
+| pool-light-16w | 20,000,000 | 20,000,000 | 20,000,000 | 1,491,085 | EXACT |
+| executor-light-16w | 20,000,000 | 20,000,000 | 20,000,000 | 1,495,528 | EXACT |
+| forkrun-light-16w | 20,000,000 | 20,000,000 | 20,000,000 | 1,355,149 | EXACT |
+| forkrun-plugin-light-16w | 20,000,000 | 20,000,000 | 20,000,000 | 2,799,146 | EXACT |
+| pool-light-32w | 20,000,000 | 20,000,000 | 20,000,000 | 2,077,116 | EXACT |
+| executor-light-32w | 20,000,000 | 20,000,000 | 20,000,000 | 2,147,912 | EXACT |
+| forkrun-light-32w | 20,000,000 | 20,000,000 | 20,000,000 | 1,888,177 | EXACT |
+| forkrun-plugin-light-32w | 20,000,000 | 20,000,000 | 20,000,000 | 3,013,546 | EXACT |
+| pool-light-48w | 20,000,000 | 20,000,000 | 20,000,000 | 2,124,567 | EXACT |
+| executor-light-48w | 20,000,000 | 20,000,000 | 20,000,000 | 2,166,157 | EXACT |
+| forkrun-light-48w | 20,000,000 | 20,000,000 | 20,000,000 | 1,996,803 | EXACT |
+| forkrun-plugin-light-48w | 20,000,000 | 20,000,000 | 20,000,000 | 2,950,928 | EXACT |
+| pool-light-96w | 20,000,000 | 20,000,000 | 20,000,000 | 2,224,735 | EXACT |
+| executor-light-96w | 20,000,000 | 20,000,000 | 20,000,000 | 2,472,054 | EXACT |
+| forkrun-light-96w | 20,000,000 | 20,000,000 | 20,000,000 | 1,643,871 | EXACT |
+| forkrun-plugin-light-96w | 20,000,000 | 20,000,000 | 20,000,000 | 2,613,929 | EXACT |
+
+## ml20m_medium.csv  (28 rows)
+
+| cell | total | valid | expected | rate | verdict |
+|---|---:|---:|---:|---:|---|
+| serial-medium | 20,000,000 | 19,991,640 | 19,991,568 | 62,807 | ok(gate,-8360) |
+| pool-medium-8w | 20,000,000 | 19,991,640 | 19,991,568 | 392,904 | ok(gate,-8360) |
+| executor-medium-8w | 20,000,000 | 19,991,640 | 19,991,568 | 399,954 | ok(gate,-8360) |
+| forkrun-medium-8w | 20,000,000 | 19,991,640 | 19,991,568 | 384,398 | ok(gate,-8360) |
+| forkrun-plugin-medium-8w | 20,000,000 | 19,991,640 | 19,991,568 | 796,358 | ok(gate,-8360) |
+| forkrun-yyjson-medium-8w | 20,000,000 | 19,991,640 | 19,991,568 | 1,033,192 | ok(gate,-8360) |
+| pool-medium-16w | 20,000,000 | 19,991,640 | 19,991,568 | 698,102 | ok(gate,-8360) |
+| executor-medium-16w | 20,000,000 | 19,991,640 | 19,991,568 | 715,018 | ok(gate,-8360) |
+| forkrun-medium-16w | 20,000,000 | 19,991,640 | 19,991,568 | 464,053 | ok(gate,-8360) |
+| forkrun-plugin-medium-16w | 20,000,000 | 19,991,640 | 19,991,568 | 844,600 | ok(gate,-8360) |
+| forkrun-yyjson-medium-16w | 20,000,000 | 19,991,640 | 19,991,568 | 1,072,190 | ok(gate,-8360) |
+| pool-medium-32w | 20,000,000 | 19,991,640 | 19,991,568 | 783,319 | ok(gate,-8360) |
+| executor-medium-32w | 20,000,000 | 19,991,640 | 19,991,568 | 832,768 | ok(gate,-8360) |
+| forkrun-medium-32w | 20,000,000 | 19,991,640 | 19,991,568 | 589,670 | ok(gate,-8360) |
+| forkrun-plugin-medium-32w | 20,000,000 | 19,991,640 | 19,991,568 | 913,897 | ok(gate,-8360) |
+| forkrun-yyjson-medium-32w | 20,000,000 | 19,991,640 | 19,991,568 | 995,397 | ok(gate,-8360) |
+| pool-medium-48w | 20,000,000 | 19,991,640 | 19,991,568 | 738,387 | ok(gate,-8360) |
+| executor-medium-48w | 20,000,000 | 19,991,640 | 19,991,568 | 776,604 | ok(gate,-8360) |
+| forkrun-medium-48w | 20,000,000 | 19,991,640 | 19,991,568 | 601,236 | ok(gate,-8360) |
+| forkrun-plugin-medium-48w | 20,000,000 | 19,991,640 | 19,991,568 | 856,186 | ok(gate,-8360) |
+| forkrun-yyjson-medium-48w | 20,000,000 | 19,991,640 | 19,991,568 | 854,908 | ok(gate,-8360) |
+| pool-medium-96w | 20,000,000 | 19,991,640 | 19,991,568 | 997,257 | ok(gate,-8360) |
+| executor-medium-96w | 20,000,000 | 19,991,640 | 19,991,568 | 1,022,117 | ok(gate,-8360) |
+| forkrun-medium-96w | 20,000,000 | 19,991,640 | 19,991,568 | 485,940 | ok(gate,-8360) |
+| forkrun-plugin-medium-96w | 20,000,000 | 19,991,640 | 19,991,568 | 638,450 | ok(gate,-8360) |
+| forkrun-yyjson-medium-96w | 20,000,000 | 19,991,640 | 19,991,568 | 583,030 | ok(gate,-8360) |
+| polars-native | 20,000,000 | 19,991,640 | 20,000,000 | 3,333,774 | ok(gate,-8360) |
+| duckdb-native | 20,000,000 | 19,991,640 | 20,000,000 | 430,938 | ok(gate,-8360) |
+
+All cells with reported counts returned within the documented
+quality-gate drop. No silent loss detected.
+
+2026-09-30T12:48:59Z  no cell lost records at 2 nodes / 20000000 records
+
+================================================================
+  43 ml20m COMPLETE
+================================================================
+
+2026-09-30T12:48:59Z  CSVs in /opt/forkrun/epyc-rental-out/20_benchmarks/ml20m ; audit: /opt/forkrun/epyc-rental-out/20_benchmarks/ml20m/validation.md
+2026-09-30T12:48:59Z  ERROR stage 43_bench_ml20m FAILED rc=1 (13753s)
+2026-09-30T12:48:59Z  WARN  stage 43_bench_ml20m finished non-zero (rc=1)
+2026-09-30T12:48:59Z  publishing results after 43_bench_ml20m

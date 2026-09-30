@@ -1,0 +1,7 @@
+# expecting ray and datasets to be UNIMPORTABLE in this stage
+  ray        blocked/absent (No module named 'ray' (blocked by epyc/blockmods/sitecustomize.py; EPYC_BLOCK_MODULES='ray,datasets'))
+  datasets   blocked/absent (No module named 'datasets' (blocked by epyc/blockmods/sitecustomize.py; EPYC_BLOCK_MODULES='ray,datasets'))
+  polars     IMPORTABLE   1.44.2
+  duckdb     IMPORTABLE   1.5.5
+  numpy      IMPORTABLE   2.5.3
+  forkrun    IMPORTABLE   0.16.0

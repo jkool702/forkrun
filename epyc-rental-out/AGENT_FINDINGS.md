@@ -391,3 +391,24 @@ This is the most important entry of the night, and it inverts the alarm.
 - confidence: **high.** Root cause read from source and from the literal stderr;
   fix verified by `bash -n` and by re-running the unmodified validator the fixed
   way, which now completes and produces a real table for the first time.
+
+#### Finding 6 addendum — control experiment confirms the diagnosis (2026-09-30T09:40Z)
+
+`42_bench_tokenize` calls the same validator with a **fully-quoted** single path
+(`--csv "$OUTD/tokenize_${DOCS}.csv"`, 42_bench_tokenize.sh:107) — no glob, so
+nothing to mis-expand. It ran, wrote its report, and passed:
+
+    42c validate
+    **rows examined: 27** | **cells with real loss: 0** | cells with no
+    cardinality (unvalidated): 0
+    validation.md written (2581 B) — "No silent loss detected."
+    2026-09-30T08:59:43Z  validation clean        -> stage 42 rc=0
+
+So the validator itself is sound and needs no change; the unquoted aggregate
+glob was the sole cause of the phantom loss verdicts in 40 and 41. This is a
+natural control (same validator, same run, same box, only the quoting differs)
+and it is why I am calling Finding 6 closed at high confidence. It also means
+the three files I edited are the complete set of affected call sites.
+
+Stage 42 is additionally the first benchmark stage to pass cleanly end to end:
+27 tokenize cells, zero loss, zero unvalidated.

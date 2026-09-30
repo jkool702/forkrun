@@ -66,3 +66,6 @@ numa5m-part-c-medium	0	66
 numa5m-part-c-heavy	0	167
 numa5m-part-d	0	13
 tokenize-2000000	0	3954
+ml20m-light	0	1527
+ml20m-medium	0	4747
+ml20m-heavy	143	7475
