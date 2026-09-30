@@ -18,12 +18,26 @@
 #     ~25%-silent-loss bug at 4 nodes on heavy-20M. That cell is the single
 #     most interesting thing this rental can produce, either way.
 #
-#  2. DISTANCE. Cross-socket distance 32 (not 10 as under numa=fake), so the
-#     base steal threshold is 1+32/10 = 4, twice the fake-4 value. Intra-socket
-#     under NPS4 is 12 -> threshold 2. The "fake-NUMA is a worst case" claim in
-#     README.md line 9 therefore does not transfer: fake-4's uniform distance-10
-#     topology was pessimistic for cross-socket stealing and optimistic for
-#     intra-socket stealing simultaneously. We measure instead of assuming.
+#  2. DISTANCE. There is no single "the" distance: forkrun charges a steal
+#     threshold per (src,dst) node PAIR, thresh = 1 + dist/10, floored at 2
+#     (forkrun_ring.c:2711-2717). On 2-socket NPS4 that is 2 for a sibling CCD
+#     on the same socket (distance 12) and 4 across the socket link (32). So
+#     "fake-NUMA is a worst case" does not transfer cleanly: fake-4's uniform
+#     distance 10 charged every pair the same 2, which is pessimistic for
+#     cross-socket stealing and optimistic for intra-socket stealing at the
+#     same time. We measure the matrix instead of assuming a verdict.
+#
+# --nodes semantics, which are easy to misread (_numa.py:95-136):
+#   1        -> UMA (one logical node, no pinning)
+#   @N       -> N LOGICAL nodes cycling the physicals: picked =
+#               [online[i % len(online)] for i in range(N)]. On an 8-node NPS4
+#               box, @2 = physicals {0,1} and @4 = {0,1,2,3} — which, under
+#               Linux's socket-ordered node ids, are BOTH WITHIN SOCKET 0.
+#   auto     -> every online physical node, i.e. all 8, spanning both sockets.
+# So this is NOT "1 node vs 2 nodes vs 4 nodes vs 8 nodes"; it is a locality
+# ladder: UMA -> intra-socket-2 -> intra-socket-4 -> both sockets. The
+# interesting result is where the curve bends, i.e. how much of the locality
+# benefit is intra-socket and how much needs the socket hop.
 #
 # --nodes uses @N (forced logical) and never a bare int > 1: _numa.py:109
 # raises ValueError for an int above the online count ("silently running UMA
@@ -45,16 +59,22 @@ DOCS="${EPYC_TOKENIZE_DOCS:-2000000}"
 
 # Topology variants. On 8 nodes these are eight distinct real subsets, which is
 # exactly the axis fake-4 could not resolve. "@2" and "auto" coincide on a
-# 2-node box; on 8 they do not.
+# 2-node box; on 8 they do not. See the header note for what @2/@4 actually
+# select (under NPS4 they are BOTH intra-socket, not a socket count).
 NODES="1,@2,@4,auto"
 
 mkdir -p "$OUTD"
 cd "$EPYC_ROOT" || die "no repo root"
 
 banner "41 bench_numa_5m — real multi-socket NUMA"
-log "nodes online   : $EPYC_NODES_ONLINE ($EPYC_NODES nodes)"
-log "cross distance : $EPYC_XNODE_DIST -> base steal threshold $(( 1 + EPYC_XNODE_DIST / 10 ))"
+log "nodes online   : $EPYC_NODES_ONLINE ($EPYC_NODES nodes, shape $EPYC_NUMA_SHAPE)"
+log "node->socket   : $EPYC_NODE_SOCKETS"
+log "distance matrix: $(printf '%s' "${EPYC_DIST_MATRIX:-<unreadable>}" | tr ';' '\n' | head -1 | sed 's/^/  /') ..."
+log "  nearest other node  : ${EPYC_DIST_MIN_REMOTE:-?}  -> steal threshold ${EPYC_THRESH_MIN_REMOTE:-?} (sibling CCD)"
+log "  nearest CROSS-socket: ${EPYC_DIST_MIN_CROSS:-?}  -> steal threshold ${EPYC_THRESH_MIN_CROSS:-?} (socket hop)"
+log "  max distance        : ${EPYC_DIST_MAX:-?}  -> steal threshold ${EPYC_THRESH_MAX:-?}"
 log "node variants  : $NODES"
+log "  ^ ladder: UMA -> 2 intra-socket nodes -> 4 intra-socket -> all $EPYC_NODES across both sockets"
 log "cell workers   : $WMAX"
 log "scaling sweep  : $SWEEP   (min >= $EPYC_NODES: below that, a node's ring is never claimed)"
 log "tmpdir         : $NUMA5"
@@ -65,6 +85,27 @@ if [ "$EPYC_NODES" -lt 2 ]; then
     err "Nothing in this stage would tell you anything. Skipping deliberately."
     stage_skip "41_bench_numa5m" "box is UMA ($EPYC_NODES node)"
     exit 0
+fi
+
+# Topology acknowledgment gate (set by 00_preflight). The sanity check there
+# flagged this machine as not matching the expected 2S/NPS4 shape. A weaker
+# topology still yields a real measurement, but it is NOT the experiment the
+# tables claim, so it must be an explicit decision rather than a surprise
+# discovered in the write-up eight hours later.
+if [ "${EPYC_NUMA_ACK:-0}" != "1" ]; then
+    if [ "${EPYC_TOPOLOGY_OK:-1}" != "1" ] 2>/dev/null; then
+        banner "41 REFUSING — topology does not match the expected 2S/NPS4 shape"
+        err "00_preflight.sh recorded shape=$EPYC_NUMA_SHAPE with $EPYC_NODES node(s)"
+        err "across $EPYC_SOCKETS socket(s), cross-socket distance ${EPYC_DIST_MIN_CROSS:-none}."
+        err ""
+        err "Stage 43 (the 20M F-NUMA1 probe) has the same guard and will also refuse."
+        err "Options:"
+        err "  a) reboot into the expected NPS mode, then re-run 00_preflight.sh"
+        err "  b) accept this topology:  EPYC_NUMA_ACK=1 bash epyc/run_all.sh ..."
+        err "     (it will be recorded in ENVIRONMENT.md as a stated limitation)"
+        err "  c) skip this stage:     --skip 41_bench_numa5m,43_bench_ml20m"
+        exit 1
+    fi
 fi
 
 # Guard the dataset.
@@ -191,14 +232,26 @@ AUDIT="$EPYC_OUT/20_benchmarks/F_NUMA1_AUDIT.md"
 if python3 "$EPYC_DIR/validate_cells.py" \
         --csv "$OUTD"/numa5m_*.csv \
         --records "$RECORDS" \
+        --require-counts \
         --title "F-NUMA1 audit — real ${EPYC_NODES}-node topology" \
-        --context "Nodes online: \`$EPYC_NODES_ONLINE\` (${EPYC_NODES} nodes).
-META_RING_SIZE=4096 -> ingest meta-lifetime bound 2048/${EPYC_NODES} = $(( 2048 / EPYC_NODES )) chunks/node.
+        --context "Topology as measured:
+  nodes online \`$EPYC_NODES_ONLINE\` (${EPYC_NODES} nodes, shape $EPYC_NUMA_SHAPE)
+  node->socket: $EPYC_NODE_SOCKETS
+  SLIT matrix (node|distances): \`$EPYC_DIST_MATRIX\`
+  self ${EPYC_DIST_SELF} | nearest other node ${EPYC_DIST_MIN_REMOTE} (steal threshold ${EPYC_THRESH_MIN_REMOTE}) | nearest cross-socket ${EPYC_DIST_MIN_CROSS:-n/a} (steal threshold ${EPYC_THRESH_MIN_CROSS}) | max ${EPYC_DIST_MAX} (threshold ${EPYC_THRESH_MAX})
+  META_RING_SIZE=4096 -> ingest meta-lifetime bound 2048/${EPYC_NODES} = $(( 2048 / EPYC_NODES )) chunks/node
+
+forkrun charges a steal threshold per (src,dst) node PAIR (forkrun_ring.c:2711),
+so the intra- and cross-socket figures differ rather than collapsing to one
+value the way they do on the reference box's uniform distance-10 fake topology.
 
 **A row that is short is DATA LOSS, not a slow run.** Under a healthy run
 \`valid\` equals \`total\` except for the medium/heavy quality gate (2108 / 2018
 records at 5M, by design). F-NUMA1 surfaced at 4 nodes on heavy-20M as a run
-that returned ~25% of its records with no error at all." \
+that returned ~25% of its records with no error at all.
+Cells with no cardinality at all are treated as FAILURE here (\`--require-counts\`):
+for the NUMA experiment, a throughput number nothing can check is an invalid
+experiment, not a passing one." \
         --out "$AUDIT"; then
     log "F-NUMA1 audit clean: no cell lost records"
 else

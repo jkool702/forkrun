@@ -85,18 +85,123 @@ NODES=${NODES:-1}
 say "numa online     : $NODES_ONLINE  (parsed node count: $NODES)"
 
 saygap
-say "== numa distances (drives forkrun's steal threshold: 1 + dist/10) =="
+say "== NUMA distance matrix (drives forkrun's per-node-pair steal threshold) =="
+# forkrun_ring.c:2711-2717 builds a threshold for EVERY (source,dest) node pair:
+#     thresh = 1 + dist/10, floored at 2
+# So there is no single "the" distance. On a 2-socket NPS4 EPYC the matrix is
+# typically
+#     10 12 12 12 32 32 32 32
+#     12 10 12 12 32 32 32 32
+#     ...
+# i.e. 10 self, 12 to a sibling CCD on the same socket, 32 across sockets. The
+# threshold is therefore 2 within a socket and 4 across it, and cross-socket
+# stealing is charged double intra-socket stealing. Report the whole matrix and
+# derive the interesting values from it, rather than picking one column and
+# calling it "the" cross-node distance.
+DIST_MATRIX=""
+DIST_MIN_REMOTE=0      # nearest DISTINCT node (could be same socket)
+DIST_MIN_CROSS=0       # nearest node on a DIFFERENT socket
+DIST_MAX=0
+NODE_SOCKETS=""        # "0:0 1:0 2:0 3:0 4:1 ..."
+NODE_IDS=""
+
 for f in /sys/devices/system/node/node*/distance; do
     [ -e "$f" ] || continue
-    nd=$(basename "$(dirname "$f")")
-    say "  $nd: $(cat "$f")"
+    nd=$(basename "$(dirname "$f")" | sed 's/^node//')
+    NODE_IDS="$NODE_IDS $nd"
+    row=$(tr -s ' ' <"$f")
+    DIST_MATRIX="$DIST_MATRIX$nd|$row
+"
+    say "  node$nd: $row"
 done
-XNODE_DIST=$(cat /sys/devices/system/node/node0/distance 2>/dev/null | awk '{print $2}')
-XNODE_DIST=${XNODE_DIST:-0}
-say "  -> cross-node distance = $XNODE_DIST ; forkrun base steal threshold = $(( 1 + XNODE_DIST / 10 ))"
-if [ "$XNODE_DIST" -eq 0 ]; then
-    warn "could not read node0/distance — engine would fall back to 20 (threshold 3)"
+# Normalise to single-space-separated. `tr -d ' '` would collapse "0 1 2 3" into
+# the single token "0123" and every per-node lookup would then miss.
+NODE_IDS=$(printf '%s\n' $NODE_IDS | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+
+# Map each NUMA node to its physical socket by reading the first CPU in its
+# cpulist and asking sysfs which package that CPU is on. Pure sysfs, so it does
+# not depend on the lscpu version's --extended support. This is what lets us
+# separate "sibling CCD, same socket" from "other socket".
+first_cpu_of_node() { # <node>
+    tr ',' '\n' <"/sys/devices/system/node/node$1/cpulist" 2>/dev/null \
+        | head -1 | sed 's/-.*//'
+}
+for nd in $NODE_IDS; do
+    cpu=$(first_cpu_of_node "$nd")
+    sock=$(cat "/sys/devices/system/cpu/cpu${cpu}/topology/physical_package_id" 2>/dev/null)
+    NODE_SOCKETS="$NODE_SOCKETS${NODE_SOCKETS:+ }$nd:${sock:-?}"
+done
+say "  node->socket: $NODE_SOCKETS"
+
+# Derive the interesting distances by walking node0's row.
+sock_of() { echo "$NODE_SOCKETS" | tr ' ' '\n' | awk -v n="$1" -F: '$1==n{print $2}'; }
+N0_SOCK=$(sock_of "${NODE_IDS%% *}")
+NODE0_ROW=$(echo "$DIST_MATRIX" | awk -F'|' -v n="${NODE_IDS%% *}" '$1==n{print $2}')
+for nd in $NODE_IDS; do
+    [ "$nd" = "${NODE_IDS%% *}" ] && continue
+    # Column k in node0's distance row corresponds to the k-th node in
+    # NODE_IDS (1-based), because SLIT rows are ordered by node id. Do NOT
+    # subtract one: on a uniform matrix (numa=fake=4, every distance 10) the
+    # off-by-one is invisible, and only a mixed matrix like 2S/NPS4
+    # (10 12 12 12 32 32 32 32) exposes it.
+    k=$(printf '%s\n' $NODE_IDS | grep -n "^$nd$" | cut -d: -f1)
+    d=$(printf '%s' "$NODE0_ROW" | awk -v k="$k" '{print $k}')
+    [ -n "$d" ] || continue
+    [ "$d" -gt "$DIST_MAX" ] && DIST_MAX=$d
+    if [ "$DIST_MIN_REMOTE" -eq 0 ] || [ "$d" -lt "$DIST_MIN_REMOTE" ]; then
+        DIST_MIN_REMOTE=$d
+    fi
+    nd_sock=$(sock_of "$nd")
+    if [ -n "$nd_sock" ] && [ "$nd_sock" != "$N0_SOCK" ]; then
+        if [ "$DIST_MIN_CROSS" -eq 0 ] || [ "$d" -lt "$DIST_MIN_CROSS" ]; then
+            DIST_MIN_CROSS=$d
+        fi
+    fi
+done
+[ "$DIST_MAX" -eq 0 ] && DIST_MAX=$DIST_MIN_REMOTE
+
+thr() { # 1 + d/10, floored at 2, exactly as forkrun_ring.c computes it
+    local t=$(( 1 + ${1:-0} / 10 ))
+    [ "$t" -lt 2 ] && t=2
+    printf '%s' "$t"
+}
+
+SOCKETS_SEEN=$(echo "$NODE_SOCKETS" | tr ' ' '\n' | cut -d: -f2 | sort -u | grep -c .)
+if [ "$NODES" -le 1 ]; then
+    DIST_MIN_REMOTE=0; DIST_MIN_CROSS=0; DIST_MAX=0
 fi
+NUMA_SHAPE="UMA"
+if [ "$NODES" -gt 1 ]; then
+    if [ "$SOCKETS_SEEN" -le 1 ]; then
+        NUMA_SHAPE="SINGLE-SOCKET-${NODES}NODE"
+    elif [ "$NODES" -eq "$SOCKETS_SEEN" ]; then
+        NUMA_SHAPE="NPS1"
+    elif [ $(( NODES / SOCKETS_SEEN )) -eq 2 ]; then
+        NUMA_SHAPE="NPS2"
+    elif [ $(( NODES / SOCKETS_SEEN )) -eq 4 ]; then
+        NUMA_SHAPE="NPS4"
+    elif [ $(( NODES / SOCKETS_SEEN )) -eq 8 ]; then
+        NUMA_SHAPE="NPS8"
+    else
+        NUMA_SHAPE="OTHER"
+    fi
+fi
+
+say ""
+say "  sockets seen         : $SOCKETS_SEEN"
+say "  topology shape       : $NUMA_SHAPE"
+say "  self distance        : 10"
+say "  nearest other node   : ${DIST_MIN_REMOTE:-n/a}  -> base steal threshold $(thr "$DIST_MIN_REMOTE")"
+say "  nearest CROSS-socket : ${DIST_MIN_CROSS:-n/a}  -> base steal threshold $(thr "$DIST_MIN_CROSS")"
+say "  maximum distance     : ${DIST_MAX:-n/a}  -> base steal threshold $(thr "$DIST_MAX")"
+say ""
+say "  NOTE: forkrun builds a threshold for EVERY (src,dst) node pair, not one"
+say "  global value. On this box a worker on node0 charges threshold"
+say "  $(thr "$DIST_MIN_REMOTE") to steal from a same-socket node and $(thr "$DIST_MIN_CROSS") from a node on the other socket."
+say "  Compare against the reference box's uniform distance 10 (numa=fake=4), where"
+say "  EVERY pair was charged 2 — so fake-4 measurements are pessimistic for"
+say "  cross-socket stealing and optimistic for intra-socket stealing at the same time."
+
 CMDLINE_DIST=$(tr ' ' '\n' </proc/cmdline | grep -i '^numa=' || true)
 say "  -> kernel numa= parameter: ${CMDLINE_DIST:-<none>}"
 
@@ -199,19 +304,50 @@ case "$(uname -m)" in
     *) gate_fatal "only x86_64 is supported (frun.bash ships x86-64 loadables); found $(uname -m)" ;;
 esac
 
-VIRT=$(systemd-detect-virt 2>/dev/null || echo none)
+VIRT=$(systemd-detect-virt 2>/dev/null)
+# systemd-detect-virt prints "none" AND exits 1 on bare metal — that non-zero
+# exit is not an error, it is how it says "no hypervisor". `|| echo unknown`
+# would append to the real value, producing the two-line string "none\nunknown",
+# which matches neither branch of the case below and aborts the run on the very
+# bare-metal box this harness is for. Take the first line and treat an empty
+# result as "could not determine", not as "virtual".
+VIRT=$(printf '%s' "$VIRT" | head -1 | tr -d '[:space:]')
+[ -n "$VIRT" ] || VIRT="undetermined"
 case "$VIRT" in
-    none|unknown) : ;;
-    *) gate_fatal "running under a hypervisor ('$VIRT') — NUMA topology would be virtual. Benchmarking a VM is a benchmarking lie." ;;
+    none) : ;;
+    undetermined)
+        gate_warn "systemd-detect-virt returned nothing; could not confirm this is bare metal."
+        gate_warn "  Confirm by hand: lscpu | grep -i hypervisor  (an empty result is what you want)"
+        ;;
+    *)
+        gate_fatal "running under hypervisor '$VIRT' — NUMA topology would be virtual. Benchmarking a VM is a benchmarking lie."
+        ;;
 esac
+# Second opinion, from a source that does not depend on systemd.
+HYP=$(grep -m1 -i '^hypervisor vendor' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')
+if [ -n "$HYP" ]; then
+    gate_fatal "/proc/cpuinfo reports 'hypervisor vendor: $HYP' — this is a guest VM."
+fi
 
 if [ -n "$CMDLINE_DIST" ]; then
     gate_fatal "kernel booted with '$CMDLINE_DIST' — this is a FAKE topology box, not real NUMA. Reboot without it."
 fi
 
-GLIBC_MAJ=$(getconf GNU_LIBC_VERSION 2>/dev/null | grep -oE '[0-9]+' | head -1)
-if [ -n "$GLIBC_MAJ" ] && [ "$GLIBC_MAJ" -lt 38 ]; then
-    gate_fatal "glibc $GLIBC_MAJ < 2.38 — the shipped x86-64 loadables will not load"
+# glibc floor is 2.38 (the shipped x86-64 loadables max out at GLIBC_2.38 after
+# the D-TLS rebuild; Ubuntu 24.04's 2.39 is the first distro above it).
+#
+# `getconf GNU_LIBC_VERSION` prints "glibc 2.43" — TWO numbers separated by a
+# dot. `grep -oE '[0-9]+' | head -1` returns the FIRST one, "2", so a naive
+# `[ "$x" -lt 38 ]` fires on glibc 2.43 and aborts the run on the very platform
+# it was written for. Compare as a version, using dpkg's real comparator when
+# available and an explicit major/minor split otherwise.
+GLIBC_VER=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+if [ -z "$GLIBC_VER" ]; then
+    gate_warn "could not determine the glibc version from getconf; skipping the 2.38 floor check"
+elif command -v dpkg >/dev/null 2>&1 && dpkg --compare-versions "$GLIBC_VER" lt 2.38 2>/dev/null; then
+    gate_fatal "glibc $GLIBC_VER < 2.38 — the shipped x86-64 loadables will not load"
+else
+    log "glibc $GLIBC_VER >= 2.38 (loadable floor OK)"
 fi
 BASH_MAJ=${BASH_VERSION%%.*}
 BASH_MIN=$(echo "$BASH_VERSION" | cut -d. -f2)
@@ -229,16 +365,65 @@ if [ ! -f "$EPYC_ROOT/frun.bash" ]; then
 fi
 
 # --- topology expectations (warnings, not fatal: a 2-node box is still real) --
+saygap
+say "== NUMA TOPOLOGY SANITY CHECK =="
+# The whole point of the rental is a real multi-node measurement. Discovering
+# that Cherry booted the box in NPS1 (2 nodes) instead of NPS4 (8) after eight
+# hours of benchmarking would waste the run, so make the topology an EXPLICIT,
+# RECORDED experimental condition rather than something you notice afterwards.
+#
+# Expected 2-socket NPS4 EPYC (Milan/Zen3, 4 CCDs per socket):
+#   sockets = 2, nodes = 8, self = 10, intra-socket = 12, cross-socket >= 30
+# Nothing here is fatal by default. Set EPYC_NUMA_ACK=1 to acknowledge an
+# unexpected topology and let stage 41 proceed; without it, stage 41 refuses.
+TOPO_OK=0
+TOPO_REASONS=""
+expect() { # <label> <actual> <expected-desc> <test-rc>
+    if [ "$4" -eq 0 ]; then
+        say "  [ OK ] $1: $2"
+    else
+        say "  [!! ] $1: $2   (expected: $3)"
+        TOPO_REASONS="$TOPO_REASONS
+     - $1 is $2, expected $3"
+    fi
+}
+say "  shape: $NUMA_SHAPE   sockets: $SOCKETS_SEEN   nodes: $NODES"
+[ "$NODES" -ge 4 ];                                        expect "node count" "$NODES" ">= 4 (2S/NPS4 = 8)" $?
+[ "$SOCKETS_SEEN" -ge 2 ];                                expect "socket count" "$SOCKETS_SEEN" ">= 2" $?
+[ "$NUMA_SHAPE" = "NPS4" ];                                expect "topology shape" "$NUMA_SHAPE" "NPS4 (4 CCDs/socket)" $?
+[ "${DIST_MIN_REMOTE:-0}" -ge 10 ];                        expect "self/remote distance" "${DIST_MIN_REMOTE:-0}" ">= 10" $?
+{ [ "${DIST_MIN_CROSS:-0}" -ge 30 ] || [ "$NODES" -le 1 ]; }; expect "cross-socket distance" "${DIST_MIN_CROSS:-n/a}" ">= 30 (32 on Milan)" $?
+if [ -z "$TOPO_REASONS" ]; then
+    TOPO_OK=1
+    say ""
+    say "  TOPOLOGY MATCHES the expected 2S/NPS4 EPYC shape: YES"
+    say "  The real-NUMA experiment (stages 41/43) is meaningful as designed."
+else
+    say ""
+    say "  TOPOLOGY MATCHES the expected 2S/NPS4 EPYC shape: NO"
+    say "  Deviations:$TOPO_REASONS"
+    say ""
+    if [ "${EPYC_NUMA_ACK:-0}" = "1" ]; then
+        say "  EPYC_NUMA_ACK=1 set — proceeding with the unexpected topology."
+        say "  This WILL be recorded in ENVIRONMENT.md as an experimental condition."
+    else
+        say "  Stages 41 and 43 (the real-NUMA experiment) will REFUSE to run."
+        say "  Either:"
+        say "    a) reboot into the expected NPS mode and re-run preflight, or"
+        say "    b) acknowledge this topology and re-run with EPYC_NUMA_ACK=1, or"
+        say "    c) leave it — a 2-node box is still real multi-socket NUMA, just a"
+        say "       weaker version of the experiment. Everything else still runs."
+        say "  The exact topology above is recorded in ENVIRONMENT.md regardless."
+    fi
+fi
+
 if [ "$NODES" -ge 4 ]; then
-    log "OK: $NODES NUMA nodes online — this is a genuine multi-node experiment."
-elif [ "$NODES" -ge 2 ]; then
+    log "OK: $NODES NUMA nodes online — a genuine multi-node experiment."
+else
     gate_warn "only $NODES NUMA node(s) online (expected 8 for 2-socket NPS4)."
     gate_warn "  Real 2-socket NUMA is still measured, but NPS4 (4 CCDs/socket) would give"
     gate_warn "  8 nodes and a much stronger born-local test. If you can reach the BIOS"
     gate_warn "  over IPMI/IP-KVM, enable NPS4/CcxAsNumaDomain and re-run 41_bench_numa5m.sh."
-else
-    gate_warn "only $NODES NUMA node(s) online — this box is effectively UMA. The NUMA"
-    gate_warn "  experiment (stages 41/43) will be vacuous; everything else is still valid."
 fi
 
 if [ "$NODES" -ge 4 ]; then
@@ -320,7 +505,22 @@ EPYC_PHYS=$PHYS
 EPYC_SOCKETS=$SOCKETS
 EPYC_NODES=$NODES
 EPYC_NODES_ONLINE="$NODES_ONLINE"
-EPYC_XNODE_DIST=$XNODE_DIST
+# Full SLIT matrix + the derived values. There is deliberately no single
+# "XNODE_DIST": forkrun charges a threshold per (src,dst) node PAIR, and on a
+# 2-socket NPS4 box that is 2 within a socket and 4 across it.
+EPYC_DIST_MATRIX="$(printf '%s' "$DIST_MATRIX" | tr '\n' ';')"
+EPYC_NODE_SOCKETS="$NODE_SOCKETS"
+EPYC_NUMA_SHAPE="$NUMA_SHAPE"
+EPYC_DIST_SELF=10
+EPYC_DIST_MIN_REMOTE=${DIST_MIN_REMOTE:-0}
+EPYC_DIST_MIN_CROSS=${DIST_MIN_CROSS:-0}
+EPYC_DIST_MAX=${DIST_MAX:-0}
+EPYC_THRESH_MIN_REMOTE=$(thr "$DIST_MIN_REMOTE")
+EPYC_THRESH_MIN_CROSS=$(thr "$DIST_MIN_CROSS")
+EPYC_THRESH_MAX=$(thr "$DIST_MAX")
+EPYC_TOPOLOGY_OK=$TOPO_OK
+EPYC_TOPOLOGY_REASONS="$(printf '%s' "$TOPO_REASONS" | tr '\n' ';')"
+EPYC_TOPOLOGY_EXPECTED="${EPYC_TOPOLOGY_EXPECTED:-2S/NPS4}"
 EPYC_WORKERS_MAX=$WORKERS_MAX
 EPYC_SWEEP_FAST="$SWEEP_FAST"
 EPYC_SWEEP_FULL="$SWEEP_FULL"

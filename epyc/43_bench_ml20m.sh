@@ -78,23 +78,40 @@ for v in $VARIANTS; do
     log "ok $(basename "$f") : $n lines, $(human "$(stat -c %s "$f")")"
 done
 
-# RAM headroom for the forkrun legs: input memfd ~= file size, plus collected
-# output in the parent. heavy-20M is ~27 GB in + ~6 GB out.
+# Heuristic working-set check. This is an ORDER-OF-MAGNITUDE WARNING, not a
+# capacity guarantee: the real peak also includes ring/indexer state, page-cache
+# effects, collected output, Python interpreter overhead, helper processes and
+# allocator fragmentation, none of which this number models. It exists to catch
+# the "the box cannot possibly hold this" case cheaply, not to predict a peak.
+# With 256 GB and a ~27 GB heavy input the margin is roughly an order of
+# magnitude, so treat a trip here as a real signal rather than a near-miss.
 MEMAVAIL=$(awk '/^MemAvailable:/{print $2*1024}' /proc/meminfo)
 log "MemAvailable: $(human "$MEMAVAIL")"
 for v in $VARIANTS; do
     sz=$(stat -c %s "$ML20/ml_${v}.jsonl")
-    # ~1.6x file size is a safe peak estimate (memfd + output + indexer read-ahead)
-    need=$(( sz * 16 / 10 ))
+    need=$(( sz * 16 / 10 ))   # input memfd + collected output, ~1.6x file size
     if [ "$MEMAVAIL" -lt "$need" ]; then
-        err "variant $v may OOM: needs ~$(human "$need"), have $(human "$MEMAVAIL")"
+        err "variant $v: rough working-set estimate ~$(human "$need") vs MemAvailable $(human "$MEMAVAIL")"
+        err "  (heuristic, ignores fragmentation/overhead — but if this fires, the leg will likely OOM)"
     else
-        log "variant $v headroom ok: needs ~$(human "$need")"
+        log "variant $v: rough working-set estimate ~$(human "$need") vs $(human "$MEMAVAIL") available (headroom ok)"
     fi
 done
 
 python3 -c "import forkrun,sys; sys.exit(0 if forkrun.__engine_version__!='unknown' else 1)" \
     || die "forkrun engine not loaded — run epyc/10_setup.sh"
+
+# Topology acknowledgment gate, identical to stage 41. This stage carries the
+# heaviest 8-node F-NUMA1 probe, so running it on a topology we did not expect
+# is the worst possible place to discover the difference late.
+if [ "${EPYC_NUMA_ACK:-0}" != "1" ] && [ "${EPYC_TOPOLOGY_OK:-1}" != "1" ]; then
+    banner "43 REFUSING — topology does not match the expected 2S/NPS4 shape"
+    err "00_preflight.sh recorded shape=$EPYC_NUMA_SHAPE, $EPYC_NODES node(s),"
+    err "cross-socket distance ${EPYC_DIST_MIN_CROSS:-none}."
+    err "Re-run with EPYC_NUMA_ACK=1 to accept it (recorded as a limitation),"
+    err "or --skip 41_bench_numa5m,43_bench_ml20m."
+    exit 1
+fi
 
 # --------------------------------------------------------------------- run ----
 RC=0
@@ -137,14 +154,22 @@ if python3 "$EPYC_DIR/validate_cells.py" \
         --csv "$OUTD"/ml20m_*.csv \
         --records "$RECORDS" \
         --title "43 — ML pipeline @ ${RECORDS} records, forkrun only, $EPYC_NODES NUMA nodes" \
-        --context "Expected valid counts at ${RECORDS} records (RELEASE_v3.6.0.md §2, exact on both UMA and @4 at 4 nodes):
+        --require-counts \
+        --context "Topology as measured:
+  nodes online \`$EPYC_NODES_ONLINE\` (${EPYC_NODES} nodes, shape $EPYC_NUMA_SHAPE)
+  node->socket: $EPYC_NODE_SOCKETS
+  SLIT matrix: \`$EPYC_DIST_MATRIX\`
+  intra-socket distance ${EPYC_DIST_MIN_REMOTE} (steal threshold ${EPYC_THRESH_MIN_REMOTE}) | cross-socket ${EPYC_DIST_MIN_CROSS:-n/a} (threshold ${EPYC_THRESH_MIN_CROSS})
+
+Expected valid counts at ${RECORDS} records (RELEASE_v3.6.0.md §2, exact on both UMA and @4 at 4 nodes):
 light 20000000 | medium 19991640 | heavy 19991658.
 
 F-NUMA1 is the risk: a stalled node's ChunkMeta slot recycled by a meta-ring lap
 makes a run return ~25% of its records with no error. It was found at 4 nodes on
 heavy-20M. This box has $EPYC_NODES nodes, so the meta-lifetime bound is
 $(( 2048 / EPYC_NODES )) chunks/node vs 512 there — the tightest configuration the
-engine has ever run under." \
+engine has ever run under. Cells reporting no cardinality are failures
+(\`--require-counts\`): an uncheckable rate is an invalid experiment." \
         --out "$AUDIT"; then
     log "no cell lost records at $EPYC_NODES nodes / $RECORDS records"
 else

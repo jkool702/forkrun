@@ -192,6 +192,14 @@ def main() -> int:
                     help="extra markdown paragraph printed above the table")
     ap.add_argument("--fail-on-loss", action="store_true", default=True)
     ap.add_argument("--no-fail-on-loss", dest="fail_on_loss", action="store_false")
+    ap.add_argument("--require-counts", action="store_true",
+                    help="treat a row with no input/output cardinality as a "
+                         "FAILURE, not merely 'unknown'. Use for the NUMA "
+                         "experiment: a throughput cell that cannot be "
+                         "independently checked for record conservation is an "
+                         "invalid experiment, not a passing one. The repo's own "
+                         "rule applies — a validator that cannot fail is worse "
+                         "than no validator.")
     args = ap.parse_args()
 
     paths: list[str] = []
@@ -203,6 +211,7 @@ def main() -> int:
     n_loss = 0
     n_nocount = 0
     losses: list[tuple[str, str, str]] = []
+    unvalidated: list[tuple[str, str]] = []
 
     for path in paths:
         if not os.path.exists(path):
@@ -227,7 +236,9 @@ def main() -> int:
             if total is None or valid is None:
                 n_nocount += 1
                 why = "no count reported" if total is None else "count but no total (pass --records)"
-                lines.append(f"| {name} | ? | ? | ? | {rate_of(r)} | ({why}) |")
+                unvalidated.append((base, f"{name} ({why})"))
+                verdict = f"**UNVALIDATED ({why})**" if args.require_counts else f"({why})"
+                lines.append(f"| {name} | ? | ? | ? | {rate_of(r)} | {verdict} |")
                 continue
             verdict, is_loss = classify(variant, total, valid)
             if is_loss:
@@ -242,7 +253,8 @@ def main() -> int:
     hdr += [
         f"**rows examined: {n_rows}** | "
         f"**cells with real loss: {n_loss}** | "
-        f"rows without a count: {n_nocount}",
+        f"cells with no cardinality (unvalidated): {n_nocount}"
+        + ("  **(treated as FAILURE)**" if args.require_counts else ""),
         "",
     ]
     body = "\n".join(lines)
@@ -257,6 +269,14 @@ def main() -> int:
             + "\n".join(f"> - `{b}` / `{n}`: {v}" for b, n, v in losses)
             + "\n"
         )
+    elif unvalidated:
+        tail = (
+            f"\n\nNo cell lost records, but **{n_nocount} cell(s) reported no input/output "
+            "cardinality** and therefore could not be checked for conservation:\n"
+            + "\n".join(f"> - `{b}` / `{n}`" for b, n in unvalidated)
+            + "\n\nTheir throughput numbers are UNVALIDATED: nothing rules out a silent\n"
+            "> record loss in them. Run the cell again in a mode that reports counts.\n"
+        )
     else:
         tail = (
             "\n\nAll cells with reported counts returned within the documented\n"
@@ -269,7 +289,9 @@ def main() -> int:
         with open(args.out, "w") as fh:
             fh.write(report)
     print(report)
-    return 1 if (n_loss and args.fail_on_loss) else 0
+
+    failed = (n_loss and args.fail_on_loss) or (n_nocount and args.require_counts)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

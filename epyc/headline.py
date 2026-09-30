@@ -179,14 +179,20 @@ def run_cell(variant, kind, cfg_label, orchestrator, order, workers, nodes,
         return forkrun.map(payload, path, mode=mode, workers=workers,
                            order=order, orchestrator=orchestrator, nodes=nodes)
 
-    # warmup — the first call pays fork costs, and the reference methodology is
+    # Warmup. The first call pays fork costs, and the reference methodology is
     # "median-of-3 + warmup", so the warm call is deliberate and untimed.
-    try:
-        warm = once()
-        total, valid = count_valid(warm)
-    except Exception as e:  # noqa: BLE001
-        return dict(median_s="", rate_rec_s="", total="", valid="",
-                    verdict=f"WARMUP-ERROR:{type(e).__name__}:{str(e)[:120]}")
+    # --warmup N is honoured for real: benchmark scripts get reused months
+    # later with assumptions baked into their CLI, and a flag that silently
+    # ignores its own argument is worse than no flag.
+    warm_total = warm_valid = 0
+    for i in range(max(0, warmup)):
+        try:
+            warm_total, warm_valid = count_valid(once())
+        except Exception as e:  # noqa: BLE001
+            return dict(median_s="", rate_rec_s="", total="", valid="",
+                        verdict=f"WARMUP-{i + 1}-ERROR:{type(e).__name__}:{str(e)[:120]}")
+    if warmup > 0:
+        total, valid = warm_total, warm_valid
 
     times = []
     for _ in range(max(1, trials)):
@@ -214,7 +220,9 @@ def main() -> int:
                     help="comma list: 1 (UMA), auto (boot topology), @N (forced logical)")
     ap.add_argument("--workers", type=int, default=0, help="0 = os.cpu_count()")
     ap.add_argument("--trials", type=int, default=3)
-    ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument("--warmup", type=int, default=1,
+                    help="untimed warmup passes per cell before the timed ones "
+                         "(default 1, matching the reference methodology)")
     ap.add_argument("--tmpdir", required=True)
     ap.add_argument("--csv", required=True)
     args = ap.parse_args()

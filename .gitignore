@@ -79,7 +79,12 @@ epyc/env/epyc.env
 epyc/state/
 epyc/__pycache__/
 epyc/blockmods/__pycache__/
-# Generated C plugins from epyc/headline.py (-march=native, machine-specific)
+# Generated C plugins from epyc/headline.py and the stage scripts
+# (-march=native, so they are machine-specific build output, never source).
+# Broad on purpose: narrow per-name patterns silently stop matching the moment a
+# stage builds a plugin under a new name, and a binary .so committed by accident
+# is a landmine in a diff.
+epyc/**/*.so
+epyc/**/headline_plugins/
 epyc/**/ml_plugin_*.so
 epyc/**/tokenize_plugin.so
-epyc/**/headline_plugins/

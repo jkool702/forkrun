@@ -32,8 +32,31 @@ Collected $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 | physical cores | $EPYC_PHYS |
 | logical CPUs (nproc) | $EPYC_NPROC |
 | NUMA nodes online | \`$EPYC_NODES_ONLINE\` ($EPYC_NODES nodes) |
-| cross-node distance | $EPYC_XNODE_DIST |
-| forkrun base steal threshold | $(( 1 + EPYC_XNODE_DIST / 10 )) |
+| topology shape | $EPYC_NUMA_SHAPE (expected: $EPYC_TOPOLOGY_EXPECTED) |
+| topology matches expected | **$( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] && echo YES || echo "NO" )** |
+| node -> socket | \`$EPYC_NODE_SOCKETS\` |
+
+### NUMA distance matrix (SLIT)
+
+| measurement | value | forkrun base steal threshold \`1 + d/10\` |
+|---|---|---|
+| self | $EPYC_DIST_SELF | — |
+| nearest other node | ${EPYC_DIST_MIN_REMOTE:-n/a} | ${EPYC_THRESH_MIN_REMOTE:-n/a} |
+| nearest cross-socket | ${EPYC_DIST_MIN_CROSS:-n/a} | ${EPYC_THRESH_MIN_CROSS:-n/a} |
+| maximum | ${EPYC_DIST_MAX:-n/a} | ${EPYC_THRESH_MAX:-n/a} |
+
+\`\`\`
+$(printf '%s' "${EPYC_DIST_MATRIX:-<unreadable>}" | tr ';' '\n' | sed 's/^/  node /')
+\`\`\`
+
+forkrun builds a threshold for **every (src,dst) node pair**
+(\`forkrun_ring.c:2711\`, \`thresh = 1 + dist/10\`, floored at 2), so there is no
+single "the" distance. The reference box's \`numa=fake=4\` had a uniform distance
+of 10, charging every pair 2; a real 2-socket NPS4 box charges 2 within a socket
+and 4 across the socket link. The "fake-NUMA is a worst case" claim therefore
+does not transfer cleanly in either direction.
+
+$( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] || printf '**Topology deviations from the expected %s shape:**\n%s\n' "$EPYC_TOPOLOGY_EXPECTED" "${EPYC_TOPOLOGY_REASONS:-  (unrecorded)}" )
 
 ## System
 
@@ -87,20 +110,39 @@ cat >"$EPYC_OUT/DEVIATIONS.md" <<EOF
 Fedora, glibc 2.43, Python 3.14.7, gcc 16.2, kernel 7.1.x, THP
 \`enabled=always\` + \`shmem_enabled=always\`.
 
-This rental differs on nine axes at once. **No percentage in these results is a
+This rental differs on ten axes at once. **No percentage in these results is a
 regression measurement**; each is a new hardware data point.
 
 | # | axis | reference | this box | effect |
 |---|---|---|---|---|
 | 1 | sockets | 1 | $EPYC_SOCKETS | the whole point of the run |
 | 2 | NUMA nodes | 1 | $EPYC_NODES | \`nodes=auto\` resolves to $EPYC_NODES here, 1 there |
-| 3 | node distance | 10 | $EPYC_XNODE_DIST | base steal threshold $(( 1 + 10 / 10 )) = 2 -> $(( 1 + EPYC_XNODE_DIST / 10 )) = $(( 1 + EPYC_XNODE_DIST / 10 )) |
+| 3 | SLIT distance | uniform 10 | ${EPYC_DIST_MIN_REMOTE:-?}/${EPYC_DIST_MIN_CROSS:-?} (intra/cross) | reference charged every pair threshold 2; here it is ${EPYC_THRESH_MIN_REMOTE} intra-socket and ${EPYC_THRESH_MIN_CROSS} cross-socket, so "fake-4 is a worst case" does not transfer cleanly |
 | 4 | physical cores | 14 | $EPYC_PHYS | memory bandwidth and L3 scale together |
 | 5 | logical CPUs | 28 | $EPYC_NPROC | worker sweeps are on a different curve |
 | 6 | worker count | 28 | $EPYC_WORKERS_MAX | per-worker share of the machine differs |
-| 7 | userland | Fedora (glibc 2.43 / py 3.14.7 / gcc 16.2) | $EPYC_DISTRO_ID (glibc $EPYC_GLIBC_VERSION / py $EPYC_PYTHON_VERSION / gcc $EPYC_GCC_VERSION) | libjson/glibc memcpy, allocator, compiler codegen |
+| 7 | userland | Fedora (glibc 2.43 / py 3.14.7 / gcc 16.2) | $EPYC_DISTRO_ID (glibc $EPYC_GLIBC_VERSION / py $EPYC_PYTHON_VERSION / gcc $EPYC_GCC_VERSION) | libc memcpy, allocator, compiler codegen |
 | 8 | compiler | gcc 16.2 | gcc $EPYC_GCC_VERSION | plugin codegen (\`-march=native\` on Zen3 vs Skylake-X) |
 | 9 | 20M competitor coverage | n/a | Ray + HF omitted at 20M | intentional; repo convention is competitors-at-5M |
+| 10 | topology shape | n/a (single node) | $EPYC_NUMA_SHAPE | expected $EPYC_TOPOLOGY_EXPECTED; match: $( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] && echo YES || echo "NO" ) |
+
+## Reading the node variants
+
+\`nodes=1,@2,@4,auto\` is **not** "1 vs 2 vs 4 vs 8 nodes". \`_numa.py:119-136\`
+maps \`@N\` to \`[online[i % len(online)] for i in range(N)]\`, so under Linux's
+socket-ordered node ids on a 2-socket NPS4 box:
+
+| spec | selects | locality level |
+|---|---|---|
+| \`1\` | one logical node | UMA — no NUMA pipeline at all |
+| \`@2\` | physicals 0,1 | **both inside socket 0** |
+| \`@4\` | physicals 0,1,2,3 | **all four CCDs of socket 0, still one socket** |
+| \`auto\` | physicals 0-7 | spans both sockets |
+
+So the ladder is UMA -> 2 intra-socket nodes -> 4 intra-socket nodes -> both
+sockets. The informative result is **where the curve bends**: how much locality
+benefit is available without paying the socket hop. Read \`@2\`/\`@4\` as
+"intra-socket", never as a socket count.
 
 ## Deliberate methodology decisions
 
@@ -191,7 +233,8 @@ banner "90 collection summary"
     echo
     echo "  KEY FILES"
     for f in ENVIRONMENT.md DEVIATIONS.md RUN_REPORT.txt TEST_TALLIES.txt \
-             20_benchmarks/F_NUMA1_AUDIT.md; do
+             20_benchmarks/F_NUMA1_AUDIT.md INTEGRITY_AUDIT.md \
+             INTEGRITY.sha256 AGENT_FINDINGS.md 05_agent/agent.log; do
         [ -f "$EPYC_OUT/$f" ] && echo "    $f"
     done
     for f in 20_benchmarks/headline/headline_*.csv \
@@ -210,6 +253,114 @@ banner "90 collection summary"
     done
     echo
 } | tee "$EPYC_OUT/00_environment/COLLECTION_SUMMARY.txt"
+
+# ---------------------------------------------------------- integrity audit --
+# The agent's authority is declared in three places: the prompt it reads, the
+# opencode permission config, and this SHA-256 manifest. The first two are
+# advisory — a prompt can be ignored and a config can be edited. This is the
+# mechanical one: if an integrity-critical file changed during the run, that is
+# a finding about the run itself, and it is reported here whether or not anyone
+# was watching.
+banner "90 integrity audit"
+INTEG="${EPYC_INTEGRITY_MANIFEST:-$EPYC_OUT/INTEGRITY.sha256}"
+AUDIT="$EPYC_OUT/INTEGRITY_AUDIT.md"
+if [ -f "$INTEG" ]; then
+    {
+        echo "# Integrity audit — $(date -u '+%FT%TZ')"
+        echo
+        echo "Verifying the manifest written by \`epyc/10_setup.sh\` at harness start."
+        echo "Tier 1 = product under test + benchmark sources + validator. Any change"
+        echo "here invalidates the run and is reported as a boundary violation."
+        echo "Tier 2 = the harness's own stage scripts. The agent is permitted to edit"
+        echo "these, so a change is reported as 'agent-modified harness' — which is"
+        echo "information the operator wants, not a violation."
+        echo
+    } >"$AUDIT"
+
+    TIER1=$(sed -n '/## TIER1/,/## TIER2/p' "$INTEG" | grep '^[0-9a-f]\{64\}')
+    TIER2=$(sed -n '/## TIER2/,/## TIER3/p' "$INTEG" | grep '^[0-9a-f]\{64\}')
+    TIER3=$(sed -n '/## TIER3/,$p' "$INTEG" | grep '^[0-9a-f]\{64\}')
+
+    check_tier() { # <label> <hashes> <severity>
+        local label="$1" hashes="$2" sev="$3"
+        local total=0 bad=0 badlist=""
+        [ -z "$hashes" ] && return 0
+        while read -r want path; do
+            [ -n "$path" ] || continue
+            total=$((total + 1))
+            if [ ! -f "$path" ]; then
+                bad=$((bad + 1)); badlist="$badlist
+      MISSING  $path"
+                continue
+            fi
+            local got
+            got=$(sha256sum "$path" 2>/dev/null | cut -d' ' -f1)
+            if [ "$got" != "$want" ]; then
+                bad=$((bad + 1)); badlist="$badlist
+      CHANGED  $path"
+            fi
+        done <<<"$hashes"
+        if [ "$bad" -eq 0 ]; then
+            printf '## %s — **CLEAN** (%d files unchanged)\n\n' "$label" "$total" >>"$AUDIT"
+            return 0
+        fi
+        {
+            printf '## %s — **%d of %d files changed** (%s)\n\n' "$label" "$bad" "$total" "$sev"
+            printf '%s\n' "$badlist"
+            if [ "$sev" = "VIOLATION" ]; then
+                cat <<'EOF'
+
+> ## These results are not trustworthy as published
+>
+> A file that the supervising agent was explicitly forbidden to modify has
+> changed during the run. The run may still be internally consistent, but it is
+> no longer a measurement of unmodified forkrun.
+>
+> Do not quote any number from this run without first establishing what changed
+> and why. Re-run the affected stages on a clean checkout.
+EOF
+            fi
+            echo
+        } >>"$AUDIT"
+        return 1
+    }
+
+    V1=0; V2=0; V3=0
+    check_tier "Tier 1 — product, benchmarks, validator" "$TIER1" "VIOLATION" || V1=1
+    check_tier "Tier 2 — harness stage scripts" "$TIER2" "agent-modified harness" || V2=1
+    check_tier "Tier 3 — agent control plane" "$TIER3" "VIOLATION" || V3=1
+
+    {
+        echo "---"
+        echo
+        if [ "$V1" -eq 0 ] && [ "$V3" -eq 0 ]; then
+            echo "**Verdict: the run measured unmodified forkrun.**"
+            [ "$V2" -eq 1 ] && echo "The agent did modify harness scripts; see Tier 2 above. The benchmark sources and the validator are untouched, so the measurements stand, but the harness that produced them was changed — check the Tier 2 list before re-running anything."
+        else
+            echo "**Verdict: INTEGRITY VIOLATION.** Tier 1 or Tier 3 changed during the run."
+            echo "Numbers from this run must not be published without a full re-run on a"
+            echo "clean checkout."
+        fi
+    } >>"$AUDIT"
+
+    if [ "$V1" -ne 0 ] || [ "$V3" -ne 0 ]; then
+        err "INTEGRITY VIOLATION — see $AUDIT"
+        INTEG_RC=1
+    elif [ "$V2" -ne 0 ]; then
+        warn "Tier 2 (harness scripts) were modified by the agent; measurements are unaffected"
+    else
+        log "integrity audit clean: no integrity-critical file was modified"
+    fi
+else
+    {
+        echo "# Integrity audit"
+        echo
+        echo "**No manifest found** at \`$INTEG\`."
+        echo "Either \`epyc/10_setup.sh\` was not run, or it ran before this collection."
+        echo "Without it, agent boundary violations cannot be detected automatically."
+    } >"$AUDIT"
+    warn "no integrity manifest — agent boundary violations cannot be verified"
+fi
 
 banner "collect COMPLETE"
 echo

@@ -80,7 +80,14 @@ log "engine reports: $RING_V / $FRUN_V (META says ${META_V:-?})"
     cat "$EPYC_OUT/TEST_TALLIES.txt" 2>/dev/null
 } | tee -a "$OUTD/summary.txt"
 
-FAILED_SUITES=$(grep -c 'FAILED' "$OUTD/summary.txt" 2>/dev/null || echo 0)
+# Count failing suites. `grep -c` PRINTS the count but EXITS 1 when there are
+# no matches, so the `$(grep -c ... || echo 0)` idiom emits two lines ("0" and
+# "0") and poisons any arithmetic on the result. Inside a command substitution
+# the non-zero exit is harmless — just do not append a fallback.
+FAILED_SUITES=$(grep -c 'FAILED' "$OUTD/summary.txt" 2>/dev/null)
+FAILED_SUITES=${FAILED_SUITES:-0}
+case "$FAILED_SUITES" in (*[!0-9]*|"") FAILED_SUITES=0 ;; esac
+log "suites reporting a failure: $FAILED_SUITES"
 if [ "$RC" -ne 0 ]; then
     banner "30 bash suites COMPLETED WITH FAILURES (rc=$RC)"
     err "grep for '✗' / 'FAILED' in $OUTD/*.log"

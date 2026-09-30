@@ -318,6 +318,143 @@ log "patched ${#PATCHED[@]} file(s): ${PATCHED[*]:-none}"
 export FORKRUN_BENCH_WORKERS_MAX="$EPYC_WORKERS_MAX"
 echo "export FORKRUN_BENCH_WORKERS_MAX=$EPYC_WORKERS_MAX" >>"$EPYC_ENV_FILE"
 
+# ------------------------------------------------- opencode supervisor ------
+# An overnight run should not need a human for a missing package or a wiped
+# substrate build. epyc/55_agent_supervise.sh drives the same harness under an
+# opencode instance that triages stage failures. This block makes opencode
+# available and verifies it can actually be used — the last thing you want is to
+# discover at 3am that it was never authenticated.
+banner "10g opencode agent supervisor (optional)"
+
+AGENT_MODEL="${EPYC_AGENT_MODEL:-opencode/space-bunny-free}"
+OC_PROMPT="$EPYC_DIR/AGENT_PROMPT.md"
+OC_CONFIG="$EPYC_DIR/opencode.json"
+AGENT_OK=0
+
+if [ -n "${EPYC_SKIP_AGENT:-}" ]; then
+    warn "EPYC_SKIP_AGENT set — not installing opencode"
+else
+    if ! command -v opencode >/dev/null 2>&1; then
+        log "installing opencode (official installer)"
+        if curl -fsSL https://opencode.ai/install | bash >"$EPYC_OUT/00_environment/opencode_install.log" 2>&1; then
+            export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+            hash -r 2>/dev/null || true
+        fi
+    fi
+    if ! command -v opencode >/dev/null 2>&1 && [ -x "$HOME/.opencode/bin/opencode" ]; then
+        export PATH="$HOME/.opencode/bin:$PATH"
+    fi
+fi
+
+if command -v opencode >/dev/null 2>&1; then
+    OC_VER=$(opencode --version 2>/dev/null)
+    log "opencode: $OC_VER"
+
+    if opencode auth list >/dev/null 2>&1; then
+        log "opencode is authenticated"
+        if opencode models 2>/dev/null | grep -qxF "$AGENT_MODEL"; then
+            log "agent model '$AGENT_MODEL' is available"
+            AGENT_OK=1
+        else
+            warn "agent model '$AGENT_MODEL' is NOT in the opencode catalogue."
+            warn "  space/bunny models that ARE available:"
+            opencode models 2>/dev/null | grep -iE 'space|bunny' | sed 's/^/    /' >&2
+            warn "  set EPYC_AGENT_MODEL=opencode/<id> and re-run, or continue with"
+            warn "  EPYC_SKIP_AGENT=1 to run the harness unattended instead."
+        fi
+    else
+        warn "opencode is installed but NOT authenticated — the agent cannot run."
+        warn "  Authenticate interactively with:  opencode auth login"
+        warn "  The harness still runs fine unattended; it just will not self-triage."
+    fi
+
+    for f in "$OC_PROMPT" "$OC_CONFIG"; do
+        [ -f "$f" ] || warn "MISSING agent control file: $f (55_agent_supervise.sh will refuse to consult the agent)"
+    done
+    # Validate the config against opencode's own resolver so a syntax error is
+    # found now rather than at the first triage attempt.
+    if [ -f "$OC_CONFIG" ]; then
+        if ( cd "$EPYC_ROOT" && opencode debug config >/dev/null 2>&1 ); then
+            log "opencode.json resolves cleanly"
+        else
+            warn "opencode.json did not resolve (opencode debug config failed) — agent triage will not work"
+        fi
+    fi
+else
+    warn "opencode is not available. 55_agent_supervise.sh will run the harness"
+    warn "  unattended instead of supervising it. Everything else is unaffected."
+fi
+
+{
+    echo "opencode binary   : $(command -v opencode 2>/dev/null || echo '<not installed>')"
+    echo "opencode version  : ${OC_VER:-n/a}"
+    echo "agent model       : $AGENT_MODEL"
+    echo "agent available   : $([ "$AGENT_OK" -eq 1 ] && echo yes || echo NO)"
+    echo "agent prompt      : $OC_PROMPT"
+    echo "agent config      : $OC_CONFIG"
+    echo "supervisor script : $EPYC_DIR/55_agent_supervise.sh"
+} >"$EPYC_OUT/00_environment/AGENT.txt"
+cat "$EPYC_OUT/00_environment/AGENT.txt" | tee -a "$EPYC_OUT/00_environment/PYTHON_STACK.txt"
+echo "EPYC_AGENT_MODEL=$AGENT_MODEL" >>"$EPYC_ENV_FILE"
+
+# ------------------------------------------------- integrity manifest ------
+# The agent's authority is declared in three independent places: the prompt it
+# reads, the opencode permission config, and this manifest. The prompt can be
+# ignored; the permission config can be edited; but a modified integrity-critical
+# file is detected here and reported by 90_collect.sh. That redundancy is the
+# point — a single layer of "please don't" is not a control.
+banner "10h integrity manifest (tamper evidence for the agent's boundaries)"
+INTEG="$EPYC_OUT/INTEGRITY.sha256"
+{
+    echo "# forkrun EPYC rental — integrity manifest"
+    echo "# written by epyc/10_setup.sh at $(date -u '+%FT%TZ')"
+    echo "#"
+    echo "# Tier 1: the product under test, the benchmark sources, and the validator."
+    echo "# The opencode agent is denied write access to all of these AND their"
+    echo "# hashes are recorded here. epyc/90_collect.sh re-verifies every line and"
+    echo "# reports any mismatch as a finding about the run, so a boundary violation"
+    echo "# cannot pass silently even if the permission config was edited."
+    echo "#"
+    echo "# Tier 2: the harness's own stage scripts. The agent MAY edit these (a bug"
+    echo "# in the harness is exactly the kind of shallow problem it should fix), so"
+    echo "# they are hashed separately and reported as 'agent-modified harness' rather"
+    echo "# than as tampering."
+    echo
+    echo "## TIER1 product+benchmark+validator"
+    find "$EPYC_ROOT" -maxdepth 1 -type f \
+        \( -name 'forkrun_ring.c' -o -name 'frun.bash' -o -name 'META' \
+           -o -name 'forkrun_substrate.h' -o -name 'forkrun_shim.h' \
+           -o -name 'forkrun_callschema.h' -o -name 'substratestubs.c' \
+           -o -name 'Makefile.substrate' \) -print0 2>/dev/null \
+        | sort -z | xargs -0 -r sha256sum
+    find "$EPYC_ROOT/ring_loadables" -type f -name '*.h' -print0 2>/dev/null \
+        | sort -z | xargs -0 -r sha256sum
+    find "$EPYC_ROOT/python/forkrun" -type f -name '*.py' -print0 2>/dev/null \
+        | sort -z | xargs -0 -r sha256sum
+    find "$EPYC_ROOT/python/benchmarks" -type f \( -name '*.py' -o -name '*.c' -o -name '*.h' -o -name '*.sh' \) -print0 2>/dev/null \
+        | sort -z | xargs -0 -r sha256sum
+    for f in "$EPYC_ROOT/BENCHMARKS"/*.bash "$EPYC_ROOT/UNIT_TESTS"/test_*.sh; do
+        [ -f "$f" ] && sha256sum "$f"
+    done
+    sha256sum "$EPYC_DIR/validate_cells.py"
+    echo
+    echo "## TIER2 harness stage scripts (agent-editable, changes reported)"
+    sha256sum "$EPYC_DIR"/*.sh "$EPYC_DIR"/*.py 2>/dev/null
+    echo
+    echo "## TIER3 agent control plane (must never change)"
+    sha256sum "$OC_PROMPT" "$OC_CONFIG" 2>/dev/null
+} >"$INTEG" 2>/dev/null
+
+TIER1_N=$(sed -n '/## TIER1/,/## TIER2/p' "$INTEG" | grep -c '^[0-9a-f]\{64\}')
+TIER2_N=$(sed -n '/## TIER2/,/## TIER3/p' "$INTEG" | grep -c '^[0-9a-f]\{64\}')
+log "integrity manifest: $TIER1_N Tier-1 files, $TIER2_N Tier-2 files -> $INTEG"
+if [ "$TIER1_N" -lt 10 ]; then
+    warn "only $TIER1_N Tier-1 files were hashed — expected many more."
+    warn "  The manifest may be too weak to detect boundary violations."
+fi
+export FORKRUN_INTEGRITY_MANIFEST="$INTEG"
+echo "EPYC_INTEGRITY_MANIFEST=\"$INTEG\"" >>"$EPYC_ENV_FILE"
+
 banner "10 setup COMPLETE"
 cat <<EOF
   bash   : $(bash --version | head -1)
@@ -325,7 +462,12 @@ cat <<EOF
   engine : $(grep -E '^VERSION' "$EPYC_ROOT/META" | cut -d' ' -f2)
   data   : $EPYC_DATA
   out    : $EPYC_OUT
+  agent  : $([ "${AGENT_OK:-0}" = 1 ] && echo "opencode $OC_VER ready ($AGENT_MODEL)" || echo 'DISABLED (unattended run)')
 
-Next:  bash epyc/run_all.sh --hours 12
+Next (unattended, harness only):
+  bash epyc/run_all.sh --hours 12
+
+Next (overnight, agent supervises and self-triages stage failures):
+  nohup bash epyc/55_agent_supervise.sh --hours 12 > /var/log/epyc-agent.log 2>&1 &
 EOF
 exit 0

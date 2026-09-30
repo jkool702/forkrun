@@ -87,6 +87,24 @@ load_env() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# load_env_if_present — for components that run BEFORE the harness has created
+# epyc.env. 55_agent_supervise.sh needs $EPYC_OUT/$EPYC_STATE for its own
+# bookkeeping at startup, but on a fresh box 00_preflight.sh has not run yet, so
+# a hard load_env would abort it and the whole run would never start. Bootstrap
+# the locations, skip everything that needs the venv, and let the caller re-load
+# later (load_env is idempotent).
+load_env_if_present() {
+    mkdir -p "$EPYC_OUT" "$EPYC_STATE" 2>/dev/null || true
+    if [ -f "$EPYC_ENV_FILE" ]; then
+        load_env
+    else
+        log "epyc.env not present yet (preflight has not run); using bootstrap paths"
+        log "  EPYC_OUT=$EPYC_OUT"
+        log "  The harness will create it at stage 00_preflight."
+    fi
+    return 0
+}
+
 # --------------------------------------------------------------- running ----
 # Return 0 if the caller had errexit on, 1 otherwise. Every stage script here
 # runs with `set -uo pipefail` and deliberately WITHOUT -e (a failing benchmark

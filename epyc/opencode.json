@@ -1,0 +1,51 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "model": "opencode/space-bunny-free",
+  "small_model": "opencode/space-bunny-free",
+
+  "permission": {
+    "read": "allow",
+    "grep": "allow",
+    "glob": "allow",
+    "list": "allow",
+    "webfetch": "deny",
+    "task": "deny",
+
+    "edit": {
+      "forkrun_ring.c": "deny",
+      "frun.bash": "deny",
+      "META": "deny",
+      "ring_loadables/*": "deny",
+      "python/forkrun/*": "deny",
+      "python/benchmarks/*": "deny",
+      "python/tests/*": "deny",
+      "epyc/validate_cells.py": "deny",
+      "epyc/AGENT_PROMPT.md": "deny",
+      "epyc/opencode.json": "deny",
+      "epyc/state/*": "deny",
+      "*": "allow"
+    },
+
+    "bash": {
+      "*": "allow",
+      "rm *epyc-rental-out*": "deny",
+      "rm *EPYC_OUT*": "deny",
+      "rm *validate_cells*": "deny",
+      "rm *forkrun_ring*": "deny",
+      "rm *frun.bash*": "deny",
+      "rm *python/benchmarks*": "deny",
+      "git push*": "deny",
+      "git reset --hard*": "deny",
+      "git checkout*": "deny",
+      "curl*": "deny",
+      "wget*": "deny",
+      "ssh*": "deny",
+      "scp*": "deny"
+    },
+
+    "external_directory": "deny"
+  },
+
+  "instructions": ["epyc/AGENT_PROMPT.md"]
+}
