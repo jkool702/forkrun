@@ -101,17 +101,20 @@ done
 python3 -c "import forkrun,sys; sys.exit(0 if forkrun.__engine_version__!='unknown' else 1)" \
     || die "forkrun engine not loaded — run epyc/10_setup.sh"
 
-# Topology acknowledgment gate, identical to stage 41. This stage carries the
-# heaviest 8-node F-NUMA1 probe, so running it on a topology we did not expect
-# is the worst possible place to discover the difference late.
+# Topology acknowledgment gate, identical to stage 41. This only fires when the
+# box is not genuine multi-socket hardware. NPS1 (2 nodes) passes on its own
+# merits. This stage carries the heaviest F-NUMA1 probe, so running it on a
+# topology we did not expect is the worst possible place to discover the
+# difference late.
 if [ "${EPYC_NUMA_ACK:-0}" != "1" ] && [ "${EPYC_TOPOLOGY_OK:-1}" != "1" ]; then
-    banner "43 REFUSING — topology does not match the expected 2S/NPS4 shape"
-    err "00_preflight.sh recorded shape=$EPYC_NUMA_SHAPE, $EPYC_NODES node(s),"
-    err "cross-socket distance ${EPYC_DIST_MIN_CROSS:-none}."
-    err "Re-run with EPYC_NUMA_ACK=1 to accept it (recorded as a limitation),"
-    err "or --skip 41_bench_numa5m,43_bench_ml20m."
+    banner "43 REFUSING — this is not real multi-socket hardware"
+    err "00_preflight.sh recorded shape=$EPYC_NUMA_SHAPE, $EPYC_SOCKETS socket(s),"
+    err "$EPYC_NODES node(s), cross-socket distance ${EPYC_DIST_MIN_CROSS:-none}."
+    err "Re-run with EPYC_NUMA_ACK=1 to accept it, or --skip 41_bench_numa5m,43_bench_ml20m."
     exit 1
 fi
+log "topology condition: $EPYC_NUMA_SHAPE, ${EPYC_NODES} node(s) over ${EPYC_SOCKETS} socket(s)"
+log "  F-NUMA1 meta bound: 2048/$EPYC_NODES = $(( 2048 / EPYC_NODES )) chunks/node (fake-4 baselines: 512)"
 
 # --------------------------------------------------------------------- run ----
 RC=0

@@ -33,11 +33,21 @@
 #               [online[i % len(online)] for i in range(N)]. On an 8-node NPS4
 #               box, @2 = physicals {0,1} and @4 = {0,1,2,3} — which, under
 #               Linux's socket-ordered node ids, are BOTH WITHIN SOCKET 0.
-#   auto     -> every online physical node, i.e. all 8, spanning both sockets.
-# So this is NOT "1 node vs 2 nodes vs 4 nodes vs 8 nodes"; it is a locality
-# ladder: UMA -> intra-socket-2 -> intra-socket-4 -> both sockets. The
-# interesting result is where the curve bends, i.e. how much of the locality
-# benefit is intra-socket and how much needs the socket hop.
+#   auto     -> every online physical node.
+#
+# ON A 2-NODE BOX (NPS1) THE LADDER COLLAPSES. With online = [0,1]:
+#   @2  -> [0,1]      == auto (both physicals)   -- redundant, kept for parity
+#   @4  -> [0,1,0,1]  4 logical nodes, 2 per socket -- tests per-node ring
+#                                                     overhead at double the
+#                                                     node count
+# So the distinct topologies measured on NPS1 are:
+#   1        UMA, no NUMA pipeline
+#   @2/auto  one node per socket  <-- the primary experiment: born-local
+#                                     placement across the real socket link
+#   @4       2 logical nodes per socket
+# On NPS2 (4 nodes) or NPS4 (8) the intra-socket rungs become distinct again and
+# the ladder is a genuine locality curve. Read the actual node count for this
+# run from epyc.env rather than assuming 8.
 #
 # --nodes uses @N (forced logical) and never a bare int > 1: _numa.py:109
 # raises ValueError for an int above the online count ("silently running UMA
@@ -87,26 +97,29 @@ if [ "$EPYC_NODES" -lt 2 ]; then
     exit 0
 fi
 
-# Topology acknowledgment gate (set by 00_preflight). The sanity check there
-# flagged this machine as not matching the expected 2S/NPS4 shape. A weaker
-# topology still yields a real measurement, but it is NOT the experiment the
-# tables claim, so it must be an explicit decision rather than a surprise
-# discovered in the write-up eight hours later.
-if [ "${EPYC_NUMA_ACK:-0}" != "1" ]; then
-    if [ "${EPYC_TOPOLOGY_OK:-1}" != "1" ] 2>/dev/null; then
-        banner "41 REFUSING — topology does not match the expected 2S/NPS4 shape"
-        err "00_preflight.sh recorded shape=$EPYC_NUMA_SHAPE with $EPYC_NODES node(s)"
-        err "across $EPYC_SOCKETS socket(s), cross-socket distance ${EPYC_DIST_MIN_CROSS:-none}."
-        err ""
-        err "Stage 43 (the 20M F-NUMA1 probe) has the same guard and will also refuse."
-        err "Options:"
-        err "  a) reboot into the expected NPS mode, then re-run 00_preflight.sh"
-        err "  b) accept this topology:  EPYC_NUMA_ACK=1 bash epyc/run_all.sh ..."
-        err "     (it will be recorded in ENVIRONMENT.md as a stated limitation)"
-        err "  c) skip this stage:     --skip 41_bench_numa5m,43_bench_ml20m"
-        exit 1
-    fi
+# Topology acknowledgment gate (set by 00_preflight). Only fires when the box
+# is NOT genuine multi-socket hardware. NPS1 (2 nodes) passes the gate on its
+# own merits — it is a real 2-socket topology and it answers the primary
+# question — so this box needs no EPYC_NUMA_ACK.
+if [ "${EPYC_NUMA_ACK:-0}" != "1" ] && [ "${EPYC_TOPOLOGY_OK:-1}" != "1" ]; then
+    banner "41 REFUSING — this is not real multi-socket hardware"
+    err "00_preflight.sh recorded shape=$EPYC_NUMA_SHAPE, $EPYC_SOCKETS socket(s),"
+    err "$EPYC_NODES node(s), cross-socket distance ${EPYC_DIST_MIN_CROSS:-none}."
+    err "Deviations:${EPYC_TOPOLOGY_REASONS:- (unrecorded)}"
+    err ""
+    err "Stage 43 (the 20M F-NUMA1 probe) has the same guard and will also refuse."
+    err "  a) fix the topology, then re-run 00_preflight.sh"
+    err "  b) EPYC_NUMA_ACK=1 bash epyc/run_all.sh ...  (recorded as a limitation)"
+    err "  c) --skip 41_bench_numa5m,43_bench_ml20m"
+    exit 1
 fi
+
+# Record the topology as an experimental condition, since it materially changes
+# how the numbers may be read.
+log "topology condition: $EPYC_NUMA_SHAPE, ${EPYC_NODES} node(s) over ${EPYC_SOCKETS} socket(s)"
+log "  F-NUMA1 meta bound: 2048/$EPYC_NODES = $(( 2048 / EPYC_NODES )) chunks/node (fake-4 baselines: 512)"
+[ -n "${EPYC_TOPOLOGY_NOTE:-}" ] && { printf '%s\n' "$EPYC_TOPOLOGY_NOTE" | sed 's/^/  | /' >&2; }
+true
 
 # Guard the dataset.
 for v in light medium heavy; do

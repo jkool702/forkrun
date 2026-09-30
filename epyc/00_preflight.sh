@@ -364,20 +364,23 @@ if [ ! -f "$EPYC_ROOT/frun.bash" ]; then
     gate_fatal "frun.bash not found at $EPYC_ROOT — is this the forkrun checkout?"
 fi
 
-# --- topology expectations (warnings, not fatal: a 2-node box is still real) --
+# --- topology expectations --------------------------------------------------
+# The question this rental answers is "is forkrun correct on REAL MULTI-SOCKET
+# NUMA". That is a property of the SOCKET topology, not of how many NUMA nodes
+# the BIOS chose to expose. NPS1 (1 node/socket, 2 nodes total) is a perfectly
+# good answer to it; NPS4 (4 nodes/socket, 8 total) is a stricter one.
+#
+# So the gate checks for a genuine multi-socket machine with a real cross-socket
+# link, and REPORTS the node count as an experimental condition rather than
+# demanding a particular NPS mode. Hardcoding "NPS4" here would have blocked the
+# exact configuration Cherry shipped, which is a real 2-socket box that answers
+# the primary question.
 saygap
 say "== NUMA TOPOLOGY SANITY CHECK =="
-# The whole point of the rental is a real multi-node measurement. Discovering
-# that Cherry booted the box in NPS1 (2 nodes) instead of NPS4 (8) after eight
-# hours of benchmarking would waste the run, so make the topology an EXPLICIT,
-# RECORDED experimental condition rather than something you notice afterwards.
-#
-# Expected 2-socket NPS4 EPYC (Milan/Zen3, 4 CCDs per socket):
-#   sockets = 2, nodes = 8, self = 10, intra-socket = 12, cross-socket >= 30
-# Nothing here is fatal by default. Set EPYC_NUMA_ACK=1 to acknowledge an
-# unexpected topology and let stage 41 proceed; without it, stage 41 refuses.
 TOPO_OK=0
 TOPO_REASONS=""
+TOPO_NOTE=""
+
 expect() { # <label> <actual> <expected-desc> <test-rc>
     if [ "$4" -eq 0 ]; then
         say "  [ OK ] $1: $2"
@@ -388,42 +391,56 @@ expect() { # <label> <actual> <expected-desc> <test-rc>
     fi
 }
 say "  shape: $NUMA_SHAPE   sockets: $SOCKETS_SEEN   nodes: $NODES"
-[ "$NODES" -ge 4 ];                                        expect "node count" "$NODES" ">= 4 (2S/NPS4 = 8)" $?
-[ "$SOCKETS_SEEN" -ge 2 ];                                expect "socket count" "$SOCKETS_SEEN" ">= 2" $?
-[ "$NUMA_SHAPE" = "NPS4" ];                                expect "topology shape" "$NUMA_SHAPE" "NPS4 (4 CCDs/socket)" $?
-[ "${DIST_MIN_REMOTE:-0}" -ge 10 ];                        expect "self/remote distance" "${DIST_MIN_REMOTE:-0}" ">= 10" $?
-{ [ "${DIST_MIN_CROSS:-0}" -ge 30 ] || [ "$NODES" -le 1 ]; }; expect "cross-socket distance" "${DIST_MIN_CROSS:-n/a}" ">= 30 (32 on Milan)" $?
+say "  F-NUMA1 meta-lifetime bound: 2048/$NODES = $(( 2048 / NODES )) chunks/node"
+say "     (fake-4 baselines: 512. Fewer nodes = LOOSER bound = lower silent-loss risk.)"
+
+# The gates that actually matter: is this real multi-socket hardware?
+[ "$SOCKETS_SEEN" -ge 2 ];            expect "socket count" "$SOCKETS_SEEN" ">= 2 (a real multi-socket box)" $?
+[ "$NODES" -ge 2 ];                   expect "NUMA node count" "$NODES" ">= 2 (a real NUMA pipeline)" $?
+{ [ "${DIST_MIN_CROSS:-0}" -ge 20 ] || [ "$SOCKETS_SEEN" -lt 2 ]; }
+                                       expect "cross-socket distance" "${DIST_MIN_CROSS:-n/a}" ">= 20 (32 on Milan)" $?
+{ [ -z "$CMDLINE_DIST" ]; };          expect "kernel topology" "${CMDLINE_DIST:-real}" "not numa=fake=*" $?
+
 if [ -z "$TOPO_REASONS" ]; then
     TOPO_OK=1
     say ""
-    say "  TOPOLOGY MATCHES the expected 2S/NPS4 EPYC shape: YES"
+    say "  REAL MULTI-SOCKET NUMA: YES  (${SOCKETS_SEEN} socket(s), ${NODES} node(s))"
     say "  The real-NUMA experiment (stages 41/43) is meaningful as designed."
+    if [ "$NUMA_SHAPE" = "NPS1" ]; then
+        TOPO_NOTE="NPS1 (1 NUMA node per socket). This is a genuine 2-socket topology and it
+answers the primary question. Two consequences worth recording:
+  * 'nodes=auto' selects one node per socket, so the UMA-vs-NUMA contrast is
+    a clean socket-to-socket comparison.
+  * It is a LOOSER F-NUMA1 configuration than the fake-4 baselines
+    (2048/2 = 1024 chunks/node vs 512). A clean result here does NOT rule out
+    F-NUMA1 at higher node counts; if a reboot into NPS2/NPS4 is ever possible,
+    re-run stages 41 and 43 on it."
+    say ""
+    say "  Note: NPS1. Fewer nodes than the fake-4 baselines, so a lower chance of"
+        say "  surfacing F-NUMA1 — but a clean 2-socket A/B, which is the primary question."
+    elif [ "$NUMA_SHAPE" = "NPS2" ]; then
+        TOPO_NOTE="NPS2 (2 NUMA nodes per socket, 4 total). This matches the fake-4 baseline
+node count exactly, so results are directly comparable to every published
+fake-4 number, while being real hardware with a real cross-socket distance
+(32, not the fake-4 uniform 10)."
+        say "  Note: NPS2 — node count matches the fake-4 baselines, so directly comparable."
+    elif [ "$NUMA_SHAPE" = "NPS4" ]; then
+        TOPO_NOTE="NPS4 (4 NUMA nodes per socket, 8 total). This is the tightest
+F-NUMA1 configuration available (2048/8 = 256 chunks/node vs 512 under
+numa=fake=4), and the one most likely to surface a stalled-node silent-loss
+bug. Note it is NOT node-count-comparable to the fake-4 baselines."
+        say "  Note: NPS4 — tightest F-NUMA1 configuration (256 chunks/node)."
+    fi
 else
     say ""
-    say "  TOPOLOGY MATCHES the expected 2S/NPS4 EPYC shape: NO"
+    say "  REAL MULTI-SOCKET NUMA: NO"
     say "  Deviations:$TOPO_REASONS"
     say ""
-    if [ "${EPYC_NUMA_ACK:-0}" = "1" ]; then
-        say "  EPYC_NUMA_ACK=1 set — proceeding with the unexpected topology."
-        say "  This WILL be recorded in ENVIRONMENT.md as an experimental condition."
-    else
-        say "  Stages 41 and 43 (the real-NUMA experiment) will REFUSE to run."
-        say "  Either:"
-        say "    a) reboot into the expected NPS mode and re-run preflight, or"
-        say "    b) acknowledge this topology and re-run with EPYC_NUMA_ACK=1, or"
-        say "    c) leave it — a 2-node box is still real multi-socket NUMA, just a"
-        say "       weaker version of the experiment. Everything else still runs."
-        say "  The exact topology above is recorded in ENVIRONMENT.md regardless."
-    fi
-fi
-
-if [ "$NODES" -ge 4 ]; then
-    log "OK: $NODES NUMA nodes online — a genuine multi-node experiment."
-else
-    gate_warn "only $NODES NUMA node(s) online (expected 8 for 2-socket NPS4)."
-    gate_warn "  Real 2-socket NUMA is still measured, but NPS4 (4 CCDs/socket) would give"
-    gate_warn "  8 nodes and a much stronger born-local test. If you can reach the BIOS"
-    gate_warn "  over IPMI/IP-KVM, enable NPS4/CcxAsNumaDomain and re-run 41_bench_numa5m.sh."
+    say "  Stages 41 and 43 (the real-NUMA experiment) will REFUSE to run."
+    say "  Options:"
+    say "    a) fix the topology and re-run preflight, or"
+    say "    b) accept it and run with EPYC_NUMA_ACK=1 (recorded as a limitation), or"
+    say "    c) --skip 41_bench_numa5m,43_bench_ml20m and keep everything else."
 fi
 
 if [ "$NODES" -ge 4 ]; then
@@ -520,7 +537,8 @@ EPYC_THRESH_MIN_CROSS=$(thr "$DIST_MIN_CROSS")
 EPYC_THRESH_MAX=$(thr "$DIST_MAX")
 EPYC_TOPOLOGY_OK=$TOPO_OK
 EPYC_TOPOLOGY_REASONS="$(printf '%s' "$TOPO_REASONS" | tr '\n' ';')"
-EPYC_TOPOLOGY_EXPECTED="${EPYC_TOPOLOGY_EXPECTED:-2S/NPS4}"
+EPYC_TOPOLOGY_NOTE="$(printf '%s' "$TOPO_NOTE")"
+EPYC_TOPOLOGY_EXPECTED="real multi-socket (>=2 sockets, >=2 nodes, real cross-socket link)"
 EPYC_WORKERS_MAX=$WORKERS_MAX
 EPYC_SWEEP_FAST="$SWEEP_FAST"
 EPYC_SWEEP_FULL="$SWEEP_FULL"

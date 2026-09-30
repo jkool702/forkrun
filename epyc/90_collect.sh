@@ -32,8 +32,9 @@ Collected $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 | physical cores | $EPYC_PHYS |
 | logical CPUs (nproc) | $EPYC_NPROC |
 | NUMA nodes online | \`$EPYC_NODES_ONLINE\` ($EPYC_NODES nodes) |
-| topology shape | $EPYC_NUMA_SHAPE (expected: $EPYC_TOPOLOGY_EXPECTED) |
-| topology matches expected | **$( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] && echo YES || echo "NO" )** |
+| topology shape | $EPYC_NUMA_SHAPE |
+| real multi-socket? | **$( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] && echo "YES" || echo "NO" )** |
+| F-NUMA1 meta bound | 2048/$EPYC_NODES = $(( 2048 / EPYC_NODES )) chunks/node (fake-4 baselines: 512) |
 | node -> socket | \`$EPYC_NODE_SOCKETS\` |
 
 ### NUMA distance matrix (SLIT)
@@ -56,7 +57,9 @@ of 10, charging every pair 2; a real 2-socket NPS4 box charges 2 within a socket
 and 4 across the socket link. The "fake-NUMA is a worst case" claim therefore
 does not transfer cleanly in either direction.
 
-$( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] || printf '**Topology deviations from the expected %s shape:**\n%s\n' "$EPYC_TOPOLOGY_EXPECTED" "${EPYC_TOPOLOGY_REASONS:-  (unrecorded)}" )
+$( [ -n "${EPYC_TOPOLOGY_NOTE:-}" ] && printf '**Topology as an experimental condition:**\n\n%s\n' "$EPYC_TOPOLOGY_NOTE" )
+
+$( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] || printf '**Deviations from the real-multi-socket requirement:**\n%s\n' "${EPYC_TOPOLOGY_REASONS:-  (unrecorded)}" )
 
 ## System
 
@@ -116,7 +119,7 @@ regression measurement**; each is a new hardware data point.
 | # | axis | reference | this box | effect |
 |---|---|---|---|---|
 | 1 | sockets | 1 | $EPYC_SOCKETS | the whole point of the run |
-| 2 | NUMA nodes | 1 | $EPYC_NODES | \`nodes=auto\` resolves to $EPYC_NODES here, 1 there |
+| 2 | NUMA nodes | 1 | $EPYC_NODES | \`nodes=auto\` resolves to $EPYC_NODES here, 1 there. Shape: $EPYC_NUMA_SHAPE. Meta-ring bound 2048/$EPYC_NODES = $(( 2048 / EPYC_NODES )) chunks/node vs 512 under fake-4 — **a clean result here does not rule out F-NUMA1 at higher node counts** |
 | 3 | SLIT distance | uniform 10 | ${EPYC_DIST_MIN_REMOTE:-?}/${EPYC_DIST_MIN_CROSS:-?} (intra/cross) | reference charged every pair threshold 2; here it is ${EPYC_THRESH_MIN_REMOTE} intra-socket and ${EPYC_THRESH_MIN_CROSS} cross-socket, so "fake-4 is a worst case" does not transfer cleanly |
 | 4 | physical cores | 14 | $EPYC_PHYS | memory bandwidth and L3 scale together |
 | 5 | logical CPUs | 28 | $EPYC_NPROC | worker sweeps are on a different curve |
@@ -124,25 +127,39 @@ regression measurement**; each is a new hardware data point.
 | 7 | userland | Fedora (glibc 2.43 / py 3.14.7 / gcc 16.2) | $EPYC_DISTRO_ID (glibc $EPYC_GLIBC_VERSION / py $EPYC_PYTHON_VERSION / gcc $EPYC_GCC_VERSION) | libc memcpy, allocator, compiler codegen |
 | 8 | compiler | gcc 16.2 | gcc $EPYC_GCC_VERSION | plugin codegen (\`-march=native\` on Zen3 vs Skylake-X) |
 | 9 | 20M competitor coverage | n/a | Ray + HF omitted at 20M | intentional; repo convention is competitors-at-5M |
-| 10 | topology shape | n/a (single node) | $EPYC_NUMA_SHAPE | expected $EPYC_TOPOLOGY_EXPECTED; match: $( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] && echo YES || echo "NO" ) |
+| 10 | topology shape | n/a (single node) | $EPYC_NUMA_SHAPE | real multi-socket: $( [ "${EPYC_TOPOLOGY_OK:-0}" = 1 ] && echo YES || echo "NO" ) |
 
 ## Reading the node variants
 
-\`nodes=1,@2,@4,auto\` is **not** "1 vs 2 vs 4 vs 8 nodes". \`_numa.py:119-136\`
-maps \`@N\` to \`[online[i % len(online)] for i in range(N)]\`, so under Linux's
-socket-ordered node ids on a 2-socket NPS4 box:
+\`nodes=1,@2,@4,auto\` resolves through \`_numa.py:119-136\`, which maps \`@N\` to
+\`[online[i % len(online)] for i in range(N)]\`. What the rungs MEAN depends on
+this box's node count, so read it from the table above rather than assuming:
+
+**On NPS2/NPS4 (>= 4 nodes)** — a genuine locality ladder, because Linux numbers
+nodes socket-first:
 
 | spec | selects | locality level |
 |---|---|---|
 | \`1\` | one logical node | UMA — no NUMA pipeline at all |
 | \`@2\` | physicals 0,1 | **both inside socket 0** |
 | \`@4\` | physicals 0,1,2,3 | **all four CCDs of socket 0, still one socket** |
-| \`auto\` | physicals 0-7 | spans both sockets |
+| \`auto\` | every physical | spans both sockets |
 
-So the ladder is UMA -> 2 intra-socket nodes -> 4 intra-socket nodes -> both
-sockets. The informative result is **where the curve bends**: how much locality
-benefit is available without paying the socket hop. Read \`@2\`/\`@4\` as
-"intra-socket", never as a socket count.
+Read \`@2\`/\`@4\` there as *intra-socket*, never as a socket count.
+
+**On NPS1 (2 nodes)** — the ladder collapses, because there is only one node per
+socket to divide up:
+
+| spec | selects | locality level |
+|---|---|---|
+| \`1\` | one logical node | UMA |
+| \`@2\` | physicals 0,1 | == \`auto\` (both sockets); redundant, kept for parity |
+| \`@4\` | 2 logical nodes per socket | tests per-node ring overhead at 2x the node count |
+| \`auto\` | physicals 0,1 | **one node per socket — the primary experiment** |
+
+So the primary contrast on an NPS1 box is UMA vs \`auto\`: born-local placement
+across a real socket link at distance $EPYC_DIST_MIN_CROSS. That is the cleanest
+possible form of the question.
 
 ## Deliberate methodology decisions
 

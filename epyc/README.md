@@ -214,49 +214,73 @@ because nothing would rule out a silent loss inside it.
 
 ## Reading the NUMA node variants
 
-`41_bench_numa5m` sweeps `--nodes 1,@2,@4,auto`. This is **not** "1 vs 2 vs 4 vs
-8 nodes" — `_numa.py:119-136` maps `@N` to `[online[i % len(online)] for i in
-range(N)]`, so under Linux's socket-ordered node ids on a 2-socket NPS4 box:
+`41_bench_numa5m` sweeps `--nodes 1,@2,@4,auto`. What each rung *means* depends
+on how many nodes the BIOS exposed, so read the node count from
+`ENVIRONMENT.md` rather than assuming 8.
+
+**If the box booted NPS1 (2 nodes, one per socket)** — the default on most
+rental providers:
 
 | spec | selects | locality level |
 |---|---|---|
 | `1` | one logical node | UMA — no NUMA pipeline at all |
-| `@2` | physicals 0,1 | **both inside socket 0** |
-| `@4` | physicals 0,1,2,3 | **all four CCDs of socket 0, still one socket** |
-| `auto` | physicals 0–7 | spans both sockets |
+| `@2` | physicals 0,1 | **same as `auto`** — both sockets, one node each |
+| `@4` | 2 logical nodes per socket | per-node ring overhead at 2× the node count |
+| `auto` | physicals 0,1 | **one node per socket — the primary experiment** |
 
-The ladder is therefore UMA → 2 intra-socket nodes → 4 intra-socket nodes → both
-sockets, and the informative result is **where the curve bends**: how much
-locality benefit exists before you pay the socket hop. Read `@2`/`@4` as
-*intra-socket*, never as a socket count.
+The primary contrast is therefore **UMA vs `auto`**: born-local placement across
+a real socket link (distance 32, steal threshold 4). That is the cleanest form
+of the question, and it is a real multi-socket measurement.
+
+**If the box booted NPS2 (4) or NPS4 (8)** — a genuine locality ladder, because
+Linux numbers nodes socket-first: `@2` and `@4` are then *intra-socket* rungs
+(all CCDs of socket 0) and `auto` is the first rung to cross the socket link. Read
+`@2`/`@4` there as intra-socket, never as a socket count.
 
 ### Distance is a matrix, not a number
 
 forkrun charges a steal threshold for **every (source, dest) node pair**
-(`forkrun_ring.c:2711`, `thresh = 1 + dist/10`, floored at 2). On 2-socket NPS4
-that means:
+(`forkrun_ring.c:2711`, `thresh = 1 + dist/10`, floored at 2). On NPS1 the
+matrix is 10 self / 32 cross-socket:
 
 | pair | SLIT distance | steal threshold |
 |---|---|---|
 | self | 10 | — |
-| sibling CCD, same socket | 12 | 2 |
 | other socket | 32 | 4 |
 
 The reference box's `numa=fake=4` had a **uniform** distance of 10, charging
 every pair 2. So the README's "fake-NUMA is a worst case" claim does not transfer
 cleanly: fake-4 was pessimistic for cross-socket stealing *and* optimistic for
 intra-socket stealing at the same time. The harness records the full SLIT matrix
-in `ENVIRONMENT.md` and reports intra/cross separately rather than collapsing
-them into one number.
+in `ENVIRONMENT.md` and reports intra/cross separately.
+
+### Node count, and what a clean result does and does not prove
+
+`META_RING_SIZE` is 4096, so the ingest meta-lifetime bound (INVARIANTS §17) is
+`2048 / nodes` chunks per node. F-NUMA1 surfaced at 4 nodes — 512 chunks/node.
+
+| topology | chunks/node | F-NUMA1 risk vs where the bug was found |
+|---|---|---|
+| lab reference (1 node) | 2048 | no NUMA ring at all |
+| **NPS1 (2 nodes)** | **1024** | **2× looser** — clean result does not rule it out |
+| NPS2 (4 nodes) | 512 | identical to fake-4 — directly comparable |
+| NPS4 (8 nodes) | 256 | 2× tighter — most likely to surface it |
+
+This is the main caveat on a 2-node box, and it is recorded automatically in
+`ENVIRONMENT.md` and `DEVIATIONS.md`. The honest statement is: **a clean run at
+2 nodes shows forkrun is correct on real 2-socket NUMA; it does not prove the
+higher-node-count regime is clean.** If a reboot into NPS2/NPS4 ever becomes
+practical, re-running stages 41 and 43 is the experiment to run — the harness is
+resumable and those two stages are independent of everything else.
 
 ### Topology sanity gate
 
-`00_preflight.sh` records the topology as an explicit experimental condition and
-prints a pass/fail against the expected `2S/NPS4` shape (2+ sockets, ≥4 nodes,
-cross-socket distance ≥30). It is not fatal — a 2-node box is still real
-multi-socket NUMA, just a weaker version of the experiment — but stages **41 and
-43 refuse to run** on an unexpected topology unless you set `EPYC_NUMA_ACK=1`.
-Better to decide that in minute one than to discover it in the write-up.
+`00_preflight.sh` gates on **real multi-socket hardware** — ≥2 sockets, ≥2
+nodes, a real cross-socket distance, and no `numa=fake=` on the kernel cmdline.
+It deliberately does *not* demand a particular NPS mode, because the question is
+a property of the socket topology, not of how many NUMA nodes the BIOS chose to
+expose. It blocks stages **41 and 43** only if the box is not genuinely
+multi-socket, or if you override with `EPYC_NUMA_ACK=1`.
 
 ---
 
@@ -330,7 +354,7 @@ All optional, set in the environment or override in `epyc/env/epyc.env` after
 | `EPYC_BASH_BENCH_REDUCED` | 0 | 1 = 33-shape bash matrix (396 cases, matches the committed reference) |
 | `EPYC_BENCH_WORKERS_MAX` | `= nproc` | the patched benchmark worker cap |
 | `EPYC_NUMA_ACK` | 0 | 1 = run stages 41/43 even if the topology isn't the expected 2S/NPS4 shape |
-| `EPYC_TOPOLOGY_EXPECTED` | `2S/NPS4` | what the sanity gate checks the box against |
+| `EPYC_TOPOLOGY_EXPECTED` | real multi-socket | descriptive label for the gate (NPS mode is reported, not required) |
 | `EPYC_AGENT_MODEL` | `opencode/space-bunny-free` | model for the overnight supervisor |
 | `EPYC_SKIP_AGENT` | 0 | 1 = do not install/configure opencode at all |
 | `EPYC_MAX_TRIAGE` | 3 | default total agent consultations per night |
