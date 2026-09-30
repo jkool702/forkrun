@@ -46,6 +46,20 @@ dividend mixes scales; Python-UDF rows untouched by this control; 25.7 GB
 heavy parent peak is `map`-iterator output buffering (documented, no swap
 pressure, trials ±0.4%).
 
+## Addendum (same day): setup-inclusive correction
+
+Review question: was the range pre-computation inside the timed region? No —
+untimed setup (0.7s / 0.9s / 7.9s in-session) while forkrun's scan runs timed.
+Corrected effective rates: light **3.67M/s**, medium **2.03M/s**, heavy-20M
+**735k/s** (arithmetic on recorded numbers, no re-measurement; setup
+re-measured post-hoc warm-cache at 0.655/0.895/5.475s as sensitivity bound).
+Revised verdict: forkrun-C(max) leads light (1.83×) and medium (1.15×);
+Executor leads heavy narrowly (~0.94× inverted); vs (†): 1.47× / 0.94× /
+~0.87×. The table, footnote, results file (§3/§4/§6/§7), and CSV twin
+(`setup_s` + `eff_rate_rec_s` columns, blank on frozen rows) all carry the
+correction. Note: my first pass at the two coarse CSV values was arithmetically
+wrong (caught by recomputation before commit: 3842725.0 / 1696473.7).
+
 ## Files
 
 - `python/benchmarks/ml/bench_exectypes.py` (harness, `--sanity` green:

@@ -47,7 +47,7 @@ first. Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 
 | **★ forkrun Python UDF (†)**        | **1.56M rec/s (167 MB/s)** |  **672k rec/s (315 MB/s)**   |  **90k rec/s (121 MB/s)**  |
 | **★ forkrun Python UDF (max)**      | **1.65M rec/s (175 MB/s)** |  **720k rec/s (338 MB/s)**   |  **91k rec/s (122 MB/s)**  |
 | ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s) |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
-| ProcessPoolExecutor + C (ctypes) ‡ | **7.54M rec/s (804 MB/s)** | **3.20M rec/s (1,502 MB/s)** | **1.04M rec/s (1,392 MB/s)** § |
+| ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
 | multiprocessing.Pool                | 1.60M rec/s (170 MB/s) |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
 | DuckDB native (SQL/JSON)            |           —            |  189k rec/s (89 MB/s)   |          —             |
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
@@ -55,7 +55,7 @@ first. Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
 | **forkrun C vs Executor**           | **3.3× (†) · 4.1× (max)** | **2.4× (†) · 2.9× (max)** | **6.7× (†) · 7.4× (max)** |
 | **forkrun C vs Polars**             |           —              | **0.87× (†) · 1.06× (max)** |            —             |
-| forkrun C(max) vs Executor+C        | 0.89× | 0.73× | ~0.66× § |
+| forkrun C(max) vs Executor+C        | 1.83× | 1.15× | ~0.94× § |
 
 **(†) Tested worker-failure recovery:** the (†) forkrun rows run the reactor default and
 automatically recover from unhandled worker
@@ -76,9 +76,15 @@ payload as forkrun's plugin rows (yyjson single-pass on medium, scalar on light/
 fresh builds, byte-identity vs the forkrun plugin path verified on 2.8 MB); workers `pread`
 assigned ~4k-line byte ranges (no input pickling — only offsets/lengths cross); plugin
 loaded post-fork per worker (python 3.14 forkserver); ctypes call overhead ~1.7µs (FFI
-spike figure). Decomposition: payload dividend (Exec-C ÷ Exec-Py) 4.6× / 4.0× / ~11×;
-architecture dividend (forkrun-C(max) ÷ Exec-C) 0.89× / 0.73× / ~0.66× — Executor wins all
-three primary cells at matched granularity, reported as measured, no re-rolls. Coarse
+spike figure). **Effective rates (quoted): timed executor.map phase PLUS the one-time
+in-session line-range pre-computation** (mmap scan: 0.7s light / 0.9s medium / 7.9s heavy —
+forkrun's scan runs inside its timed region, so parity requires it here too). Timed-only
+ceilings retained in the results file (7.54M / 3.20M / 1.04M). Decomposition on effective
+rates: payload dividend (Exec-C ÷ Exec-Py) ~2.2× / ~2.5× / ~7.8×; architecture dividend
+(forkrun-C(max) ÷ Exec-C) 1.83× / 1.15× / ~0.94× — forkrun leads light and medium once
+indexing is counted, Executor still leads heavy-20M narrowly; vs (†) the legs read 1.47× /
+0.94× / ~0.87×. Setup amortizes to zero over repeat runs on the same file (ranges are
+cacheable; forkrun re-scans every run), so ceiling and effective bracket the truth. Coarse
 (~100k-line) sensitivity recorded in the results file (fine wins both: no flip). § Heavy
 cell measured at 20M/26.9 GB (pre-generated) vs the column's 5M/6.72 GB — steady-state
 rate; nearest same-scale forkrun-C references are 0.69M (§2) / 0.64M (spotcheck §3).

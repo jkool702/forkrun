@@ -55,13 +55,23 @@ ranges. Range pre-computation (mmap scan) is setup, untimed, reported below.
 
 ## 3. Cells (all totals exact)
 
-| Cell | Scale | Granularity | Median (trials) | Rate | Total | Setup | Peak RSS |
-|---|---|---|---|---|---|---|---|
-| EXECTYPES-LIGHT | 5M light (533 MB) | fine, 1221 ranges | 0.663s (0.688, 0.623, 0.663) | **7.54M/s** (804 MB/s) | 5000000/5000000 | 0.7s | 529 MB |
-| EXECTYPES-LIGHT-COARSE | same | coarse, 50 ranges | 0.701s (0.670, 0.702, 0.701) | 7.13M/s | 5000000/5000000 | 0.6s | 533 MB |
-| EXECTYPES-MEDIUM | 5M medium (2.35 GB) | fine, 1221 ranges | 1.563s (1.600, 1.525, 1.563) | **3.20M/s** (1502 MB/s) | 5000000/5000000 | 0.9s | 2.26 GB |
-| EXECTYPES-MEDIUM-COARSE | same | coarse, 50 ranges | 2.047s (2.041, 2.082, 2.047) | 2.44M/s | 5000000/5000000 | 0.9s | 2.27 GB |
-| EXECTYPES-HEAVY | 20M heavy (26.9 GB) | fine, 4883 ranges | 19.312s (19.429, 19.312, 19.281) | **1.04M/s** (1392 MB/s) | 20000000/20000000 | 7.9s | 25.7 GB |
+| Cell | Scale | Granularity | Median (trials) | Timed rate | **Effective rate** (incl. setup) | Total | Setup | Peak RSS |
+|---|---|---|---|---|---|---|---|---|
+| EXECTYPES-LIGHT | 5M light (533 MB) | fine, 1221 ranges | 0.663s (0.688, 0.623, 0.663) | 7.54M/s (804 MB/s) | **3.67M/s** (391 MB/s) | 5000000/5000000 | 0.7s | 529 MB |
+| EXECTYPES-LIGHT-COARSE | same | coarse, 50 ranges | 0.701s (0.670, 0.702, 0.701) | 7.13M/s | 3.84M/s | 5000000/5000000 | 0.6s | 533 MB |
+| EXECTYPES-MEDIUM | 5M medium (2.35 GB) | fine, 1221 ranges | 1.563s (1.600, 1.525, 1.563) | 3.20M/s (1502 MB/s) | **2.03M/s** (953 MB/s) | 5000000/5000000 | 0.9s | 2.26 GB |
+| EXECTYPES-MEDIUM-COARSE | same | coarse, 50 ranges | 2.047s (2.041, 2.082, 2.047) | 2.44M/s | 1.69M/s | 5000000/5000000 | 0.9s | 2.27 GB |
+| EXECTYPES-HEAVY | 20M heavy (26.9 GB) | fine, 4883 ranges | 19.312s (19.429, 19.312, 19.281) | 1.04M/s (1392 MB/s) | **735k/s** (988 MB/s) | 20000000/20000000 | 7.9s | 25.7 GB |
+
+Effective = records ÷ (timed median + in-session setup). The setup is the
+harness's line-range pre-computation (mmap scan); forkrun's scan runs inside
+its timed region, so the effective column is the fair single-run comparison
+(correction 2026-09-30 — see §7). A post-hoc setup re-measurement (warm
+cache: 0.655s / 0.895s / 5.475s) bounds the cache sensitivity; the in-session
+(colder-cache, paired-with-trials) values above are the conservative choice.
+The headline table quotes the effective column; timed-only ceilings retained
+here for the amortization bracket (setup → 0 over repeat runs on cacheable
+ranges; forkrun re-scans every run).
 
 Frozen forkrun references (cited, not re-measured): C(max) light 6.70M,
 medium 2.34M (`headline_2026-09-29.csv`); C(†) light 5.38M, medium 1.91M
@@ -77,25 +87,24 @@ pressure, trials tight (±0.4%).
 
 ## 4. Decomposition (the analysis this row exists for)
 
-| Workload | Payload dividend (Exec-C ÷ Exec-Py) | Architecture dividend (forkrun-C(max) ÷ Exec-C) |
+| Workload | Payload dividend (Exec-C ÷ Exec-Py, effective) | Architecture dividend (forkrun-C(max) ÷ Exec-C, effective) |
 |---|---|---|
-| Light | 7.54 ÷ 1.64 = **4.6×** | 6.70 ÷ 7.54 = **0.89×** (Executor wins) |
-| Medium | 3.20 ÷ 0.797 = **4.0×** | 2.34 ÷ 3.20 = **0.73×** (Executor wins) |
-| Heavy | 1.04 ÷ 0.094 = **~11×** (scale-mismatched: Py row at 5M, C row at 20M — steady-state rates, read with care) | 0.69 ÷ 1.04 = **~0.66×** (Executor wins; vs 0.64 spotcheck leg 0.62×) |
+| Light | 3.67 ÷ 1.64 = **~2.2×** | 6.70 ÷ 3.67 = **1.83×** (forkrun wins) |
+| Medium | 2.03 ÷ 0.797 = **~2.5×** | 2.34 ÷ 2.03 = **1.15×** (forkrun wins) |
+| Heavy | 0.735 ÷ 0.094 = **~7.8×** (scale-mismatched: Py row at 5M, C row at 20M — steady-state rates, read with care) | 0.69 ÷ 0.735 = **~0.94×** (Executor wins; vs 0.64 spotcheck leg 0.87×) |
 
-Against the (†) reactor rows the architecture leg reads 0.71× / 0.60× /
-~0.62× — same direction, wider (the C-orderer transit is paid only on the
-forkrun side, as documented).
+Against the (†) reactor rows the architecture leg reads 1.47× / 0.94× /
+~0.87×.
 
-**Pre-registered-outcome honesty note:** the order expected Exec-C "likely
+**Pre-registered-outcome honesty note (revised §7):** the order expected Exec-C "likely
 between Executor-Python and forkrun-C on light" with "a real chance it wins
-the light cell". It won **all three** primary cells at matched granularity —
-light by 13% over (max), medium by 37%, heavy-20M by ~50% over the closest
-same-scale forkrun-C reference. No re-rolls were performed; the table ships
-these numbers. The coarse-sensitivity guess also resolved opposite to the
-pre-registration: fine beats coarse on both workloads (light 7.54 vs 7.13,
-medium 3.20 vs 2.44) — no flip; 50 coarse tasks over 28 workers leave a
-28+22 wave with tail-straggler loss, which swamps any dispatch amortization.
+the light cell". On timed-only rates it won all three cells — but that
+accounting excluded the range pre-computation forkrun pays inside its timed
+region. On effective (setup-inclusive) rates, the corrected verdict is:
+forkrun-C(max) leads light (1.83×) and medium (1.15×); Executor leads
+heavy-20M narrowly (~0.94× inverted, i.e. +7%). The coarse-sensitivity guess
+also resolved opposite to the pre-registration: fine beats coarse on both
+workloads (no flip). No re-rolls; the table ships the effective numbers.
 
 Reading: at 4k-line granularity with a C payload, per-unit orchestration
 cost decides the race, and `executor.map`'s per-future dispatch is cheaper
@@ -128,6 +137,17 @@ those are exercised by this control, by design.
   a third speedup row "forkrun C(max) vs Executor+C: 0.89× · 0.73× · ~0.66×".
 - `results/headline_2026-09-30.csv`: successor twin — the frozen 12
   qualifier rows verbatim + 5 `EXEC-C-*` rows (`orchestrator`/`order` blank:
-  not applicable to the Executor path). Supersession line in §0.
+  not applicable to the Executor path; `setup_s`/`eff_rate_rec_s` carry the
+  range-scan setup and the effective rate, blank on frozen rows).
 - Full per-trial logs: `/tmp/exectypes/light_medium.log`,
   `/tmp/exectypes/heavy.log` (box-local; numbers transcribed above).
+
+## 7. Correction (same day): setup-inclusive effective rates
+
+Review question: was the range pre-computation inside the timed region? No —
+`compute_ranges` ran as untimed setup while forkrun's scan runs timed. The
+table initially quoted timed-only ceilings (7.54M / 3.20M / 1.04M); all
+artifacts now quote effective rates (3.67M / 2.03M / 735k) with ceilings
+retained here as the amortization bracket. No re-measurement was involved
+(arithmetic on recorded medians + in-session setups); the §4 verdict above
+is the corrected one.
