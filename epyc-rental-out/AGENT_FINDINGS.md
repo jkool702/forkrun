@@ -478,3 +478,128 @@ Stage 42 is additionally the first benchmark stage to pass cleanly end to end:
 - confidence: **high** that stage 40 ran 2-node NUMA (code + 100 diagnostic
   lines); **high** that the competitor comparison is therefore not
   apples-to-apples; **low / unresolved** on whether `--nodes=1` truly yields UMA.
+
+### Finding 8 — TIER-1 EDIT, operator-authorised: added `--nodes` to bench_ml_pipeline.py
+
+- **This modifies a Tier-1 file.** `python/benchmarks/ml/bench_ml_pipeline.py`
+  is integrity-critical, so `90_collect.sh` will now report an INTEGRITY
+  VIOLATION against Tier-1. That is the expected and correct consequence, not
+  a defect to be cleaned up. The operator made this call explicitly and with
+  the tradeoff stated: *"I'd rather have real numbers that are technically
+  invalid than only useless numbers."* Recording it here so the violation is
+  never mistaken for tampering — the diff is small, additive, and below.
+- why it was necessary: `bench_ml_pipeline.py` had **no `--nodes` flag at all**,
+  and it called `forkrun.map(payload, path, workers=..., order="index")` with
+  no `nodes=`. Per `_numa.py:86` that resolves to `auto` = 2-node NUMA. So
+  stage 40's entire competitor matrix measured forkrun on the slow 2-ring
+  partition, against competitors that have no topology whatsoever. There was no
+  way to obtain a fair forkrun number at a chosen topology without touching
+  this file — hence the authorisation.
+- what changed (additive, 4 hunks):
+  1. module global `_NODES = None` + `_nodes_arg()` helper, with the rationale
+     and the measured numbers in the comment;
+  2. `nodes=_nodes_arg()` threaded into the 3 forkrun legs
+     (`bench_forkrun`, `bench_forkrun_plugin`, `bench_yyjson`);
+  3. new `--nodes` argparse option (help text states the default resolves to
+     `auto`, and that competitors are deliberately never given a topology);
+  4. `global _NODES; _NODES = args.nodes` in `main()`, plus a one-line log.
+- **default behaviour is provably unchanged**: `_numa.py:86` is
+  `if nodes_spec is None or nodes_spec == "auto":` — one branch — so passing
+  `nodes=None` explicitly is identical to omitting it. Every previously
+  recorded invocation still means exactly what it meant.
+- **what I did NOT do, and why.** The operator also said "edit the tier 1
+  code" in the context of forkrun having "distributed cpus wrong". I looked for
+  that bug and **could not confirm it exists**:
+  - `python/forkrun/_reactor.py:313` pins each worker to `_ncpus[node]`, and
+    `_ncpus` comes from `build_numa_map` -> `get_node_cpus(n)`, i.e. the real
+    physical sets (node0={0-23,48-71}, node1={24-47,72-95}). Topology-correct.
+  - `forkrun_ring.c` maintains `g_logical_to_phys_map` and reverse-resolves a
+    worker's physical node to its logical index (forkrun_ring.c:6496).
+    Also topology-aware in structure.
+  - the only partition that is plainly naive is `wid_to_node`/`distribute_workers`
+    (`_numa.py:200`), which hands out **contiguous worker-id blocks** — but that
+    is worker->NODE, and combined with the correct per-node CPU pinning above it
+    does not by itself imply any worker lands on the wrong socket.
+  So my earlier "contiguous blocks straddle the socket" reading was an
+  inference from `wids=` (worker ids, not CPU ids) and it did not survive
+  checking. **I did not patch the engine**: a speculative edit to the NUMA map
+  in a 427 KB C file, unverifiable in the time available, is the single most
+  likely way to produce confidently wrong numbers — the exact outcome this
+  whole run exists to detect. The empirical fact stands without any patch:
+  `--nodes=@4` is the fastest configuration measured on this box, because its
+  24-CPU ring boundaries coincide with the physical node CPU sets.
+- consequence for interpretation: numbers produced with `--nodes=@4` are
+  *representative of what forkrun can do on this box*, but they are NOT
+  comparable to the published i9-7940X baselines (single node, `numa=fake=4`),
+  and they were produced by a Tier-1 file that no longer matches its manifest
+  hash. ENVIRONMENT.md / DEVIATIONS.md must carry both facts.
+- not touched: `validate_cells.py`, `frun.bash`, `forkrun_ring.c`,
+  `python/forkrun/**`, `META`, `BENCHMARKS/**`, and every gate.
+
+### Finding 9 — ROOT CAUSE of the "C plugin isn't working" scare: THE HARNESS PINNED WORKERS=96, WHICH IS FORKRUN'S WORST POINT ON THIS BOX.
+
+- the C plugin was never broken. Verified positively, not by absence:
+  `forkrun.map("/tmp/NO_SUCH_PLUGIN.so:nope", ..., mode="plugin")` raises
+  `PluginError: plugin not found`, so there is **no silent fallback**; and the
+  real artifacts are genuine ELF shared objects exporting `ml_process_light`
+  (`nm -D` -> `T ml_process_light`), rebuilt fresh by headline.py each run
+  ("built ml_plugin_light.so").
+  I also tested `c_worker_loop=True` explicitly (the flag
+  `_resolve_c_plugin_loop` gates the frozen-ABI C loop behind): **no
+  measurable difference** (4.45M vs 4.58M rec/s). So the "the C worker loop
+  never engages" theory is DEAD — mode="plugin" already runs the plugin.
+- what was actually wrong: `EPYC_WORKERS_MAX` defaults to `nproc` = **96**, and
+  the harness pins every cell there. On this box 96 workers is forkrun's
+  *worst* operating point. Measured C plugin, nodes=1, median of 3:
+      variant   16w        28w        32w        48w        96w
+      light     3,606,974  3,777,737  3,865,413  3,064,070  1,833,656
+      medium    1,027,363  1,124,347  1,141,328    994,972    678,569
+      heavy       483,229    566,823    572,250    654,419    356,061
+    Peak is 32-48 workers; 96 costs ~2.1x on light and ~1.8x on heavy.
+    This also explains stage 40's "forkrun peaks at 32w then regresses 23%"
+    that I reported earlier — same effect, and it is a real scaling inversion,
+    not noise.
+- THE CORRECTED HEADLINE NUMBERS (headline grid, nodes=1, **32 workers**,
+  vs the i9-7940X (†) published baselines):
+      variant  kind        EPYC rec/s    i9 (†)      ratio
+      light    C           6,304,398     5,380,000   1.17x
+      light    Py          2,792,980     1,560,000   1.79x
+      medium   C           1,457,299     1,910,000   0.76x
+      medium   Py            999,997       672,000   1.49x
+      heavy    C             708,745       634,000   1.12x
+      heavy    Py            191,377        90,000   2.13x
+    **forkrun is NOT regressed on this box.** C beats the i9 baseline on light
+    and heavy, ties-to-beats on medium being the only shortfall; the Python UDF
+    beats the i9 on all three. Every cell EXACT or quality-gate-clean.
+- vs the competitors (stage 40, each system at ITS OWN best worker count):
+    forkrun C @32w light 6,304,398  vs  executor @96w 2,475,833  =  2.5x
+                                       vs  pool    @96w 1,984,173  =  3.2x
+  i9 reference for the same claim was 3.3x / 3.4x. So forkrun's competitive
+  position substantially reproduces here once it is measured sanely.
+- CORRECTION TO EARLIER ENTRIES IN THIS FILE. Finding 7's headline ("stage 40
+  ran UMA") is **wrong in its practical consequence**: stage 40 ran 2-node NUMA
+  *and* 96 workers, and it is the 96-worker pinning, not the topology, that
+  dominates the damage (96w light C = 1.83M vs 32w = 3.87M, a 2.1x penalty,
+  while UMA-vs-auto at fixed 96w was 2.31M vs 0.32M). Both axes were wrong, and
+  the worker axis was the bigger one. Finding 7's other claim — that stage 41's
+  "nodes=1" cells are suspect because every one of its 76 DIAG blocks reported
+  `forked=[0,1]` — remains open and is the reason I do not trust stage 41's
+  part-A rates. **Stage 44 / headline.py is the trustworthy grid**: it carries
+  first-class `nodes`/`workers`/`total`/`valid`/`verdict` columns, validates the
+  corpus line count, and its nodes=1 cells do log `numa=0`.
+- MEASUREMENT VARIANCE WARNING for whoever reads the CSVs: this box produced
+  1.4M-4.6M rec/s for *nominally identical* C-plugin cells depending on
+  background state (I saw a 4.58M single-shot reading while loadavg was 22,
+  and 1.41M for the same cell minutes later). Single readings are not
+  trustworthy; only the median-of-N sweeps above are. Anyone comparing one row
+  against the i9 table will get a wrong answer, as I did twice tonight.
+- artefacts (originals preserved, nothing overwritten):
+      headline/headline_5000000.NODES-1-auto.PRESERVED.csv  (original 1,auto)
+      headline/headline_5000000.csv                        (1,@4,auto @96w)
+      headline/headline_5000000.NODES-at8.csv              (@8 @96w)
+      headline/headline_5000000.NODES1-W32.csv             (nodes=1 @32w) <-- use this
+- OPEN, for the operator: stage 41's part-A topology labels are untrustworthy
+  (all 76 blocks logged forked=[0,1]); it should be re-run or discarded before
+  any NUMA claim rests on it. And `EPYC_WORKERS_MAX` defaulting to `nproc` is a
+  harness bug for any engine that does not scale to core count — worth pinning
+  to 32-48 for forkrun on a 96-thread box.

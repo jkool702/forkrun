@@ -1,0 +1,13 @@
+cell,variant,kind,orchestrator,order,nodes,workers,median_s,rate_rec_s,input_bytes,total,valid,verdict
+C-true-idx-light,light,C,True,index,1,32,1.29469,3861916.0,532711015,5000000,5000000,EXACT
+Py-true-idx-light,light,Py,True,index,1,32,2.28530,2187892.4,532711015,5000000,5000000,EXACT
+C-false-none-light,light,C,False,none,1,32,0.79310,6304398.1,532711015,5000000,5000000,EXACT
+Py-false-none-light,light,Py,False,none,1,32,1.79020,2792980.3,532711015,5000000,5000000,EXACT
+C-true-idx-medium,medium,C,True,index,1,32,4.32462,1156172.0,2347403909,5000000,4997892,"ok(quality-gate,-2108)"
+Py-true-idx-medium,medium,Py,True,index,1,32,6.02534,829828.5,2347403909,5000000,4997892,"ok(quality-gate,-2108)"
+C-false-none-medium,medium,C,False,none,1,32,3.43101,1457298.7,2347403909,5000000,4997892,"ok(quality-gate,-2108)"
+Py-false-none-medium,medium,Py,False,none,1,32,5.00001,999997.1,2347403909,5000000,4997892,"ok(quality-gate,-2108)"
+C-true-idx-heavy,heavy,C,True,index,1,32,8.52184,586727.5,6720381299,5000000,4997982,"ok(quality-gate,-2018)"
+Py-true-idx-heavy,heavy,Py,True,index,1,32,27.29818,183162.4,6720381299,5000000,4997982,"ok(quality-gate,-2018)"
+C-false-none-heavy,heavy,C,False,none,1,32,7.05473,708744.7,6720381299,5000000,4997982,"ok(quality-gate,-2018)"
+Py-false-none-heavy,heavy,Py,False,none,1,32,26.12646,191376.9,6720381299,5000000,4997982,"ok(quality-gate,-2018)"

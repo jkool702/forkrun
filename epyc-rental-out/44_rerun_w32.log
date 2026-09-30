@@ -1,0 +1,45 @@
+# headline grid — 5000000 records, 32 workers, nodes=['1'], trials=3+1 warmup
+# forkrun 0.16.0 engine v3.6.0
+# python 3.14.4
+# online NUMA nodes: [0, 1]
+  C-true-idx-light  nodes=1
+    -> EXACT  3861916.0 rec/s (7.6s wall)
+  Py-true-idx-light  nodes=1
+    -> EXACT  2187892.4 rec/s (11.1s wall)
+  C-false-none-light  nodes=1
+    -> EXACT  6304398.1 rec/s (5.8s wall)
+  Py-false-none-light  nodes=1
+    -> EXACT  2792980.3 rec/s (9.7s wall)
+  C-true-idx-medium  nodes=1
+    -> ok(quality-gate,-2108)  1156172.0 rec/s (21.1s wall)
+  Py-true-idx-medium  nodes=1
+    -> ok(quality-gate,-2108)  829828.5 rec/s (27.5s wall)
+  C-false-none-medium  nodes=1
+    -> ok(quality-gate,-2108)  1457298.7 rec/s (16.9s wall)
+  Py-false-none-medium  nodes=1
+    -> ok(quality-gate,-2108)  999997.1 rec/s (24.5s wall)
+  C-true-idx-heavy  nodes=1
+    -> ok(quality-gate,-2018)  586727.5 rec/s (38.7s wall)
+  Py-true-idx-heavy  nodes=1
+    -> ok(quality-gate,-2018)  183162.4 rec/s (114.1s wall)
+  C-false-none-heavy  nodes=1
+    -> ok(quality-gate,-2018)  708744.7 rec/s (33.2s wall)
+  Py-false-none-heavy  nodes=1
+    -> ok(quality-gate,-2018)  191376.9 rec/s (109.2s wall)
+
+wrote epyc-rental-out/20_benchmarks/headline/headline_5000000.NODES1-W32.csv (12 cells)
+
+cell                        nodes    median_s   M rec/s  verdict
+------------------------------------------------------------------------------
+C-true-idx-light            1         1.29469      3.86  EXACT
+Py-true-idx-light           1         2.28530      2.19  EXACT
+C-false-none-light          1         0.79310      6.30  EXACT
+Py-false-none-light         1         1.79020      2.79  EXACT
+C-true-idx-medium           1         4.32462      1.16  ok(quality-gate,-2108)
+Py-true-idx-medium          1         6.02534      0.83  ok(quality-gate,-2108)
+C-false-none-medium         1         3.43101      1.46  ok(quality-gate,-2108)
+Py-false-none-medium        1         5.00001      1.00  ok(quality-gate,-2108)
+C-true-idx-heavy            1         8.52184      0.59  ok(quality-gate,-2018)
+Py-true-idx-heavy           1        27.29818      0.18  ok(quality-gate,-2018)
+C-false-none-heavy          1         7.05473      0.71  ok(quality-gate,-2018)
+Py-false-none-heavy         1        26.12646      0.19  ok(quality-gate,-2018)

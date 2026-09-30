@@ -211091,3 +211091,72 @@ Any row whose verdict is not EXACT/ok(quality-gate) is a correctness finding, no
 
 2026-09-30T13:15:23Z  stage 90_collect OK (2s)
 2026-09-30T13:15:23Z  publishing results after 90_collect
+2026-09-30T13:15:23Z  [publish] committed 108 file(s) to epyc-rental-results: 68de56d38 -> cf573cd55
+2026-09-30T13:15:25Z  [publish] pushed to origin/epyc-rental-results
+2026-09-30T13:15:25Z  [publish]   review with:  git fetch origin && git log --oneline origin/epyc-rental-results
+
+================================================================
+  RUN COMPLETE
+================================================================
+
+2026-09-30T13:15:25Z  total wall clock: 550 minutes
+
+# stage outcomes
+
+  PASS  00_preflight
+  PASS  10_setup
+  PASS  20_datagen
+  PASS  42_bench_tokenize
+  PASS  44_bench_headline
+  FAIL  30_utest_bash_fast
+  FAIL  31_utest_python
+  FAIL  40_bench_ml5m
+  FAIL  41_bench_numa5m
+  FAIL  43_bench_ml20m
+  SKIP  50_bench_bash                deadline: estimate 10800s > remaining 6606s
+  SKIP  51_bench_core                deadline: estimate 7200s > remaining 6603s
+  SKIP  60_utest_bash_full           deadline: estimate 10800s > remaining 6601s
+
+# stage wall-clock
+  stage                              rc   sec
+  43_bench_ml20m                     1    13753
+  40_bench_ml5m                      1    11391
+  42_bench_tokenize                  0    3956
+  44_bench_headline                  0    1569
+  20_datagen                         0    1198
+  41_bench_numa5m                    1    1086
+  31_utest_python                    1    423
+  30_utest_bash_fast                 1    110
+  30_utest_bash_fast                 1    110
+  10_setup                           0    46
+  10_setup                           0    30
+  10_setup                           0    19
+  10_setup                           0    18
+  00_preflight                       0    2
+
+# longest individual commands
+  command                            rc   sec
+  ml5m-heavy                         0    7911
+  ml20m-heavy                        143  7475
+  ml20m-medium                       0    4747
+  tokenize-2000000                   0    3954
+  ml5m-medium                        0    2216
+  headline-5000000                   0    1569
+  ml20m-light                        0    1527
+  ml5m-light                         0    1090
+  numa5m-part-a                      0    795
+  python-suite-pass2                 1    212
+  python-suite-pass1                 1    210
+  ml5m-fault                         0    169
+  numa5m-part-c-heavy                0    167
+  numa5m-part-c-medium               0    66
+  test_c_plugins_rigorous.sh         0    41
+  test_c_plugins_rigorous.sh         0    41
+  test_c_plugins_rigorous.sh         0    41
+  test_frun.sh                       0    36
+  test_frun.sh                       0    35
+  test_frun.sh                       0    35
+
+  Results: /opt/forkrun/epyc-rental-out
+  Summary: /opt/forkrun/epyc-rental-out/00_environment/COLLECTION_SUMMARY.txt
+
