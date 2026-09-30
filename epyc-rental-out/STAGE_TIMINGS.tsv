@@ -11,3 +11,4 @@
 41_bench_numa5m	1	1086
 42_bench_tokenize	0	3956
 43_bench_ml20m	1	13753
+44_bench_headline	0	1569

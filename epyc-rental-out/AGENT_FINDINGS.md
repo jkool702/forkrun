@@ -412,3 +412,69 @@ the three files I edited are the complete set of affected call sites.
 
 Stage 42 is additionally the first benchmark stage to pass cleanly end to end:
 27 tokenize cells, zero loss, zero unvalidated.
+
+### Finding 7 — `nodes` omitted from the Python binding means AUTO (2-node NUMA), NOT UMA. My earlier "stage 40 ran UMA" claim was WRONG.
+
+- what I got wrong: I told the operator that stage 40's competitor matrix ran
+  forkrun in UMA because `40_bench_ml5m.sh` and `bench_ml_pipeline.py` never
+  pass `--nodes`, and the documented default is 1. **That inference was false.**
+- root cause (python/forkrun/_numa.py:86-91):
+      if nodes_spec is None or nodes_spec == "auto":
+          online = detect_numa_nodes()
+          if len(online) <= 1: return "", 1, [get_node_cpus(online[0])]
+          return (",".join(str(n) for n in online), len(online), [...])
+  Omitting `nodes` is **the same branch as `nodes="auto"`**, not as `nodes=1`.
+  This box has 2 online NUMA nodes, so every forkrun call in stage 40 that did
+  not pass `nodes` engaged **real 2-node NUMA**.
+- empirical confirmation from stage 40's own diagnostics (bench_light.log):
+      50 occurrences of  nodes=2
+      50 occurrences of  numa=1
+      nodes=2 workers=8 forked=[0, 1]
+      node=0 write=301 read=301 ... wids=[0..3]
+      node=1 write=1216 read=1216 ... wids=[4..7]
+  i.e. a genuine 2-node split with per-node worker ids. forkrun's NUMA ring was
+  live throughout stage 40.
+- consequence — the headline comparison is NOT apples-to-apples:
+  `40_bench_ml5m` measured **forkrun-under-2-node-NUMA** against **pool /
+  executor / hf_datasets, which are pure Python and have no NUMA topology at
+  all** (and, per Finding 6's addendum, part C of stage 41 also never threads
+  `nodes` into `bench_competitor`, so those baselines are likewise whatever the
+  default is). So the "~3x behind pool/executor" figure is
+  forkrun-with-NUMA vs competitors-without, and must not be quoted as forkrun's
+  standalone competitiveness. **This materially changes the conclusion and is
+  the single most important caveat on the benchmark numbers in this run.**
+- the three numbers that are now reconciled:
+      stage 40 forkrun-light-96w          635,822 l/s   (nodes omitted -> AUTO/2-node)
+      stage 41 numa-py-light-auto-96w   1,346,734 l/s   (explicit auto, same intent)
+      stage 41 numa-py-light-1-96w      2,861,204 l/s   (explicit nodes=1)
+  Identical payload (`FORKRUN_PAYLOADS`, imported by both modules —
+  bench_numa_5m.py:54), identical corpus bytes (hardlinked), identical
+  `order="index"`, and mode is a red herring: `run.py:989` is
+  `mode = kwargs.get("mode", "python")`, so stage 40's omitted mode already
+  *was* "python". The whole gap is the nodes topology. The residual 2.1x
+  between the two "auto" cells is unexplained and I am not going to guess at it.
+- **OPEN QUESTION I could not settle, and it undercuts my NUMA claim too:**
+  `41_bench_numa5m` part A emits `forked=[0, 1]` for **all 76** diagnostic
+  blocks and `forked=[0]` for **zero** — including the cells the CSV labels
+  `nodes=1`. So the DIAG never shows a single-node run, yet the four labelled
+  cells differ hugely (light: 1 -> 4,277,328; @2 -> 1,627,138; @4 -> 4,565,969;
+  auto -> 1,620,720 l/s). Either the DIAG prints the *machine's* node count
+  rather than the selected topology, or `--nodes=1` is being upgraded to 2 and
+  the spread comes from CPU-subset/worker-assignment differences. **Until that
+  is settled, "UMA beats auto by 2.6x" is not a safe claim** — I am recording
+  my earlier confident statement as unverified.
+- cheapest decisive test (~30 s, needs an idle box; NOT run by me because the
+  operator asked for no further benchmarks):
+      FORKRUN_DIAG_NUMA1=1 /venv/bin/python -c "
+      import forkrun
+      p='//ml5/ml_light.jsonl'
+      for n in (1,'auto'):
+          out=forkrun.map(lambda b:b,p,workers=96,order='index',nodes=n)
+          print(n, len(out))"
+  and read the `nodes=` / `forked=` line for each. If `nodes=1` prints
+  `forked=[0]` then stage 41's ladder is sound and the NUMA penalty is real; if
+  it still prints `forked=[0, 1]` then `--nodes=1` is not being honoured and
+  every "UMA" number in this run is actually 2-node NUMA.
+- confidence: **high** that stage 40 ran 2-node NUMA (code + 100 diagnostic
+  lines); **high** that the competitor comparison is therefore not
+  apples-to-apples; **low / unresolved** on whether `--nodes=1` truly yields UMA.
