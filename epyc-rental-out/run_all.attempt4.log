@@ -211027,3 +211027,67 @@ Any row whose verdict is not EXACT/ok(quality-gate) is a correctness finding, no
 2026-09-30T13:15:17Z  [publish]   review with:  git fetch origin && git log --oneline origin/epyc-rental-results
 2026-09-30T13:15:18Z  WARN  stage 60_utest_bash_full SKIPPED (deadline: estimate 10800s > remaining 6601s)
 2026-09-30T13:15:18Z  publishing results after 60_utest_bash_full
+2026-09-30T13:15:18Z  [publish] committed 102 file(s) to epyc-rental-results: 6d6e33569 -> 68de56d38
+2026-09-30T13:15:21Z  [publish] pushed to origin/epyc-rental-results
+2026-09-30T13:15:21Z  [publish]   review with:  git fetch origin && git log --oneline origin/epyc-rental-results
+
+================================================================
+  STAGE 90_collect  (est 600s)
+================================================================
+
+
+================================================================
+  90 collect
+================================================================
+
+
+================================================================
+  90 collection summary
+================================================================
+
+
+  output dir : /opt/forkrun/epyc-rental-out
+  size       : 41M
+  files      : 107
+
+  KEY FILES
+    ENVIRONMENT.md
+    DEVIATIONS.md
+    RUN_REPORT.txt
+    TEST_TALLIES.txt
+    20_benchmarks/F_NUMA1_AUDIT.md
+    INTEGRITY.sha256
+    AGENT_FINDINGS.md
+    20_benchmarks/headline/headline_5000000.csv
+    20_benchmarks/ml5m/ml5m_fault.csv
+    20_benchmarks/ml5m/ml5m_heavy.csv
+    20_benchmarks/ml5m/ml5m_light.csv
+    20_benchmarks/ml5m/ml5m_medium.csv
+    20_benchmarks/ml20m/ml20m_light.csv
+    20_benchmarks/ml20m/ml20m_medium.csv
+    20_benchmarks/tokenize/tokenize_2000000.csv
+    20_benchmarks/numa5m/numa5m_part_a.csv
+    20_benchmarks/numa5m/numa5m_part_c_heavy.csv
+    20_benchmarks/numa5m/numa5m_part_c_light.csv
+    20_benchmarks/numa5m/numa5m_part_c_medium.csv
+    20_benchmarks/numa5m/numa5m_part_d.csv
+
+
+================================================================
+  90 integrity audit
+================================================================
+
+2026-09-30T13:15:23Z  WARN  Tier 2 (harness scripts) were modified by the agent; measurements are unaffected
+
+================================================================
+  collect COMPLETE
+================================================================
+
+
+  Grab it with:
+    rsync -avz root@<rental>:/opt/forkrun/epyc-rental-out ./epyc-results
+  or archive in place:
+    tar -C /opt/forkrun -czf forkrun-epyc-results.tar.gz epyc-rental-out
+
+2026-09-30T13:15:23Z  stage 90_collect OK (2s)
+2026-09-30T13:15:23Z  publishing results after 90_collect
