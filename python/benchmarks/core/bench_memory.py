@@ -127,7 +127,7 @@ def bench_rss_in_process(ctx):
 
     path = ctx.input_path()
     out = forkrun.map(lambda b: bytes(b.data), path,
-                      workers=min(8, os.cpu_count() or 4), order="index")
+                      workers=min(int(os.environ.get("FORKRUN_BENCH_WORKERS_MAX", "8")), os.cpu_count() or 4), order="index")
     assert sum(map(len, out)) == os.path.getsize(path)
     ctx.record("RSS in-process (map)", "python", "map", 0, rss_mb(),
                "%d batches exact; rate in throughput suite" % len(out))

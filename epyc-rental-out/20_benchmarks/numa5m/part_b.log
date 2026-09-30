@@ -1,0 +1,20 @@
+### numa5m-part-b
+### 2026-09-30T07:48:55Z
+### cmd: python3 python/benchmarks/ml/bench_numa_5m.py --records 5000000 --workers 96 --docs 2000000 --nodes 1,@2,@4,auto --parts b --tmpdir //numa5 --csv /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_b.csv
+
+forkrun NUMA steady-state: 5000000 records/variant, workers=[96]
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Nodes under test: [1, '@2', '@4', 'auto']
+NUMA online: 0-1
+reusing //numa5/ml_light_5000000.jsonl (0.5GB)
+reusing //numa5/ml_medium_5000000.jsonl (2.2GB)
+reusing //numa5/ml_heavy_5000000.jsonl (6.3GB)
+Traceback (most recent call last):
+  File "/opt/forkrun/python/benchmarks/ml/bench_numa_5m.py", line 472, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/opt/forkrun/python/benchmarks/ml/bench_numa_5m.py", line 372, in main
+    from tokenize_data_gen import generate_corpus
+ModuleNotFoundError: No module named 'tokenize_data_gen'
+
+### rc=1  elapsed=12s  finished=2026-09-30T07:49:07Z

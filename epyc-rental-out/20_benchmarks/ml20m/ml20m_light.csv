@@ -1,0 +1,22 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+serial-light,serial,udf,133457.74216992132,5498.04296875,-1.0,"out=20000000/20000000 records, 2.1GB in",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-light-8w,pool,udf,835371.7714000333,6176.69140625,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-light-8w,executor,udf,840826.3321779886,6228.76953125,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-light-8w,forkrun,udf,824658.689852182,6228.76953125,-1.0,"out=20000000/20000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-light-8w,plugin,c-callback,2261409.023867831,6228.76953125,-1.0,"out=20000000/20000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-light-16w,pool,udf,1491085.1340480952,6380.50390625,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-light-16w,executor,udf,1495528.269973323,6380.50390625,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-light-16w,forkrun,udf,1355148.5418436236,6380.50390625,-1.0,"out=20000000/20000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-light-16w,plugin,c-callback,2799146.4034952987,6380.50390625,-1.0,"out=20000000/20000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-light-32w,pool,udf,2077116.1913685251,6380.50390625,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-light-32w,executor,udf,2147912.435043717,6439.79296875,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-light-32w,forkrun,udf,1888176.7409292124,6439.79296875,-1.0,"out=20000000/20000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-light-32w,plugin,c-callback,3013545.5214258353,6439.79296875,-1.0,"out=20000000/20000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-light-48w,pool,udf,2124567.283060729,6439.79296875,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-light-48w,executor,udf,2166156.666758665,6439.79296875,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-light-48w,forkrun,udf,1996802.5251085113,6439.79296875,-1.0,"out=20000000/20000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-light-48w,plugin,c-callback,2950927.8193780524,6439.79296875,-1.0,"out=20000000/20000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-light-96w,pool,udf,2224735.0228575994,6439.79296875,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+executor-light-96w,executor,udf,2472054.362036859,6439.79296875,-1.0,out=20000000/20000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-light-96w,forkrun,udf,1643870.5177463163,6439.79296875,-1.0,"out=20000000/20000000 records, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+forkrun-plugin-light-96w,plugin,c-callback,2613929.4224767685,6439.79296875,-1.0,"out=20000000/20000000 records, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic

@@ -197,6 +197,27 @@ POOL_PAYLOADS = {"light": _pool_chunk_light, "medium": _pool_chunk_medium,
 FORKRUN_PAYLOADS = {"light": _forkrun_light, "medium": _forkrun_medium,
                     "heavy": _forkrun_heavy}
 
+# EPYC-AGENT (Tier-1, operator-authorised): explicit topology override.
+# Set from --nodes. The previous code called forkrun.map() with no `nodes=`
+# at all, and python/forkrun/_numa.py:86 treats None as "auto" -- so every
+# forkrun leg in this pipeline silently ran 2-node NUMA on a 2-socket box.
+# Measured on this box (stage 41 part A, 5M light, 96w): the 2-ring "auto"
+# partition is ~2.6x slower than nodes=1, while --nodes=@4 (four rings whose
+# 24-CPU boundaries coincide with this box's physical node CPU sets,
+# node0={0-23,48-71} node1={24-47,72-95}) is the FASTEST configuration
+# measured, beating even UMA.
+#
+# Default None preserves the previous behaviour exactly: _numa.py maps None
+# and "auto" to the same branch, so passing nodes=None is a no-op. Competitor
+# legs (pool/executor/hf_datasets) are pure Python with no topology, so they
+# are deliberately NOT parameterised -- the comparison stays "forkrun on a
+# chosen topology vs competitors on none".
+_NODES = None
+
+
+def _nodes_arg():
+    return _NODES
+
 
 def chunk_lines(lines, n_chunks):
     """Split decoded lines into ~n_chunks contiguous chunks."""
@@ -271,7 +292,7 @@ def bench_forkrun(ctx, path, n_records, input_bytes, variant, workers,
 
     def run():
         return forkrun.map(payload, path, workers=workers,
-                           order="index")
+                           order="index", nodes=_nodes_arg())
 
     t, _ = time_it(run, trials=trials, warmup=1)
     n_out = count_results(run())
@@ -345,7 +366,8 @@ def bench_forkrun_yyjson(ctx, path, n_records, input_bytes, variant,
 
     def run():
         return forkrun.map(payload, path, mode="plugin",
-                           workers=workers, order="index")
+                           workers=workers, order="index",
+                           nodes=_nodes_arg())
 
     t, _ = time_it(run, trials=trials, warmup=1)
     n_out = count_results(run())
@@ -369,7 +391,8 @@ def bench_forkrun_plugin(ctx, path, n_records, input_bytes, variant,
 
     def run():
         return forkrun.map(payload, path, mode="plugin",
-                           workers=workers, order="index")
+                           workers=workers, order="index",
+                           nodes=_nodes_arg())
 
     t, _ = time_it(run, trials=trials, warmup=1)
     n_out = count_results(run())
@@ -747,13 +770,17 @@ def bench_pool_fault(ctx, path, n_records, workers, variant="medium"):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="forkrun ML pipeline benchmark (best-of-the-best)")
-    parser.add_argument("--records", type=int, default=50000,
-                        help="input records per variant (default 50000)")
+    parser.add_argument("--records", type=int, default=50000,                        help="input records per variant (default 50000)")
     parser.add_argument("--variants", default="light,medium,heavy",
                         help="comma list from light,medium,heavy")
     parser.add_argument("--workers", default="1,2,4,8,14,28",
                         help="worker sweep (default full sweep)")
     parser.add_argument("--trials", type=int, default=3)
+    parser.add_argument("--nodes", default=None,
+                        help="explicit NUMA topology for the forkrun legs "
+                             "(1, auto, @2, @4). Default None = previous "
+                             "behaviour, which the binding resolves to 'auto'. "
+                             "Competitors are never given a topology.")
     parser.add_argument("--malformed", type=float, default=0.0,
                         help="malformed %% for throughput files")
     parser.add_argument("--no-fault", action="store_true")
@@ -788,6 +815,11 @@ def main(argv=None):
 
     tmpdir = args.tmpdir or tempfile.mkdtemp(prefix="fr_mlbench_")
     os.makedirs(tmpdir, exist_ok=True)
+    global _NODES
+    _NODES = args.nodes
+    if _NODES is not None:
+        print("forkrun legs pinned to --nodes=%s (competitors unpinned)" % _NODES,
+              flush=True)
     ctx = BenchContext(scale="small", trials=args.trials)
     best = {}
 

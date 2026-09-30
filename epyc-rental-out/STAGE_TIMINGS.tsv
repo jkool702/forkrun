@@ -1,0 +1,15 @@
+00_preflight	0	2
+10_setup	0	18
+10_setup	0	19
+10_setup	0	46
+30_utest_bash_fast	1	110
+10_setup	0	30
+30_utest_bash_fast	1	110
+31_utest_python	1	423
+20_datagen	0	1198
+40_bench_ml5m	1	11391
+41_bench_numa5m	1	1086
+42_bench_tokenize	0	3956
+43_bench_ml20m	1	13753
+44_bench_headline	0	1569
+90_collect	0	2

@@ -1,0 +1,5 @@
+/dev/md0        878G   12G  822G   2% /
+/dev/md0        878G   19G  815G   3% /
+/dev/md0        878G   29G  806G   4% /
+/dev/md0        878G   30G  805G   4% /
+/dev/md0        878G   65G  769G   8% /

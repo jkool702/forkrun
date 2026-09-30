@@ -1,0 +1,30 @@
+### test_c_plugins_config.sh
+### 2026-09-30T04:07:36Z
+### cmd: bash ./test_c_plugins_config.sh
+
+=== forkrun v3.5.2 Worker Config Struct Tests (T-CONFIG-1..4) ===
+Compiling CONFIG plugins...
+✓ CONFIG plugins compiled successfully.
+Generating test inputs...
+------------------------------------------------------
+T-CONFIG-1: ctx worker_id/incarn through the struct (ordered, byte-exact)
+✓ Passed: plugin ctx identity sane (wid in range, incarn 0), output exact
+------------------------------------------------------
+T-CONFIG-2a: retry limit override via struct (FORKRUN_RETRY_LIMIT=2)
+✓ Passed: struct carried the limit-2 override (poisoned after 2 kills)
+------------------------------------------------------
+T-CONFIG-2b: retry limit zero poisons on first failure (FORKRUN_RETRY_LIMIT=0)
+✓ Passed: limit-0 override honored (poisoned on first failure)
+------------------------------------------------------
+T-CONFIG-2c: default limit still 3 (control — no override)
+✓ Passed: unset limit keeps the historical default-3 behavior
+------------------------------------------------------
+T-CONFIG-3: ordered-mode ack through the struct (byte-exact, -k)
+✓ Passed: order-pipe fd from struct, output exactly-once in order
+------------------------------------------------------
+T-CONFIG-4: config isolation across workers (distinct worker_id)
+✓ Passed: 4 distinct worker_id values — struct is worker-local
+------------------------------------------------------
+=== All Worker Config Struct Tests Passed (T-CONFIG-1..4) ===
+
+### rc=0  elapsed=2s  finished=2026-09-30T04:07:38Z

@@ -1,0 +1,14 @@
+### python-bootstrap
+### 2026-09-30T04:05:41Z
+### cmd: env -C /opt/forkrun PYTHONPATH=/opt/forkrun/python FORKRUN_LIB=/opt/forkrun/python/forkrun/libforkrun_python.so /venv/bin/python -
+
+forkrun.__version__      = 0.16.0
+forkrun.__engine_version__= v3.6.0
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=29 read=29 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=23 read=23 finished=1 chunks(head=3 tail=3) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=52 emitted=52 expected=(6,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+PYTHON-ROUNDTRIP-OK  workers=96 nodes=auto out_lines=200000
+
+### rc=0  elapsed=0s  finished=2026-09-30T04:05:41Z

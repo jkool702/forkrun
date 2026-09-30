@@ -130,7 +130,7 @@ banner "40d validate totals"
 # epyc/validate_cells.py so all four benchmark stages agree on the threshold.
 VAL="$OUTD/validation.md"
 if python3 "$EPYC_DIR/validate_cells.py" \
-        --csv "$OUTD"/ml5m_*.csv \
+        --csv "$OUTD/ml5m_*.csv" \
         --records "$RECORDS" \
         --title "40 — ML pipeline @ ${RECORDS} records, all competitors" \
         --context "Expected valid counts at ${RECORDS} records (RELEASE_v3.6.0.md §0):

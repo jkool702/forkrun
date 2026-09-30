@@ -1,0 +1,25 @@
+### tools/test_idl.py
+### 2026-09-30T04:14:43Z
+### cmd: python3 tools/test_idl.py -v
+
+test_imports_and_covers_schema (__main__.TestCtypesMirror.test_imports_and_covers_schema) ... ok
+test_usage_table_parses (__main__.TestCtypesMirror.test_usage_table_parses) ... ok
+test_check_passes (__main__.TestGeneratorFreshness.test_check_passes) ... ok
+test_after_system_headers (__main__.TestSchemaCompiles.test_after_system_headers)
+Order-independent: compiles after libc headers. ... ok
+test_standalone (__main__.TestSchemaCompiles.test_standalone)
+Self-contained: compiles with no prior includes. ... ok
+test_all_argc_argv_in_v352 (__main__.TestSchemaCoverage.test_all_argc_argv_in_v352)
+Annotation-only: no THUNK flips in v3.5.2 (Stage 3's commits). ... ok
+test_every_loadable_has_schema_entry (__main__.TestSchemaCoverage.test_every_loadable_has_schema_entry) ... ok
+test_field_vocab (__main__.TestSchemaCoverage.test_field_vocab) ... ok
+test_migration_order_present (__main__.TestSchemaCoverage.test_migration_order_present) ... ok
+test_usage_doc_match_engine_exactly (__main__.TestUsageEquality.test_usage_doc_match_engine_exactly)
+Generated usage output matches current strings exactly. ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.094s
+
+OK
+
+### rc=0  elapsed=1s  finished=2026-09-30T04:14:44Z

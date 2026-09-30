@@ -1,0 +1,30 @@
+### numa5m-part-c-medium
+### 2026-09-30T07:49:39Z
+### cmd: python3 python/benchmarks/ml/bench_numa_5m.py --records 5000000 --variants medium --workers 96 --nodes 1,@2,@4,auto --parts c --tmpdir //numa5 --csv /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_c_medium.csv
+
+forkrun NUMA steady-state: 5000000 records/variant, workers=[96]
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Nodes under test: [1, '@2', '@4', 'auto']
+NUMA online: 0-1
+reusing //numa5/ml_medium_5000000.jsonl (2.2GB)
+--- C: Pool/Executor same boot ---
++---------------------+----------+------+---------+----------+------+-----------------------------+
+| Benchmark           | Mode     | Path | Lines/s | Peak RSS | CPU% | Notes                       |
++---------------------+----------+------+---------+----------+------+-----------------------------+
+| executor-medium-96w | executor | udf  | 1.1M    | 5137MB   | -    | out=4997892/5000000 records |
+| pool-medium-96w     | pool     | udf  | 968k    | 5139MB   | -    | out=4997892/5000000 records |
++---------------------+----------+------+---------+----------+------+-----------------------------+
+
++---------------------+----------+------+---------+----------+------+-----------------------------+
+| Benchmark           | Mode     | Path | Lines/s | Peak RSS | CPU% | Notes                       |
++---------------------+----------+------+---------+----------+------+-----------------------------+
+| executor-medium-96w | executor | udf  | 1.1M    | 5137MB   | -    | out=4997892/5000000 records |
+| pool-medium-96w     | pool     | udf  | 968k    | 5139MB   | -    | out=4997892/5000000 records |
++---------------------+----------+------+---------+----------+------+-----------------------------+
+
+MEDIANS:
+  executor-medium-96w               1143897 records/s
+  pool-medium-96w                    967614 records/s
+CSV: /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_c_medium.csv
+
+### rc=0  elapsed=66s  finished=2026-09-30T07:50:45Z

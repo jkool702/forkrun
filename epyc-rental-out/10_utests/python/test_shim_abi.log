@@ -1,0 +1,16 @@
+### test_shim_abi.py
+### 2026-09-30T04:14:44Z
+### cmd: python3 python/tests/test_shim_abi.py -v
+
+test_gen_shim_check (__main__.TestShimArtifactsFresh.test_gen_shim_check) ... ok
+test_header_lists_all_externs (__main__.TestShimArtifactsFresh.test_header_lists_all_externs) ... ok
+test_bindings_cover_externs (__main__.TestShimBindings.test_bindings_cover_externs) ... ok
+test_no_order_regression (__main__.TestShimBindings.test_no_order_regression) ... ok
+test_exports_match_table (__main__.TestShimExports.test_exports_match_table) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.060s
+
+OK
+
+### rc=0  elapsed=0s  finished=2026-09-30T04:14:44Z

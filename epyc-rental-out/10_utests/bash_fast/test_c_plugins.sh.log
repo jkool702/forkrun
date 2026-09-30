@@ -1,0 +1,71 @@
+### test_c_plugins.sh
+### 2026-09-30T04:06:45Z
+### cmd: bash ./test_c_plugins.sh
+
+=== forkrun v3.5.0 C Plugin Test Suite ===
+UNIT_TESTS_DIR : /opt/forkrun/UNIT_TESTS
+FRUN_SCRIPT    : /opt/forkrun/UNIT_TESTS/frun.bash
+Sourcing frun.bash...
+Copying header...
+✓ Header copied successfully.
+✓ Plugins compiled successfully.
+Generating test inputs...
+Generating variable-length input (~3M lines)...
+Only 102675 lines found. Duplicating...
+✓ Generated 3000000 lines.
+
+=== Running C Plugin Tests ===
+
+────────────────────────────────────
+TEST: Basic Plugin (1M)
+Cmd : frun -C ./test_basic.so:test_basic < input_1M.txt
+
+real	0m0.181s
+user	0m0.140s
+sys	0m0.243s
+✓ Passed
+────────────────────────────────────
+TEST: Context Header (1M)
+Cmd : frun -C ./test_ctx_header.so:test_ctx_header < input_1M.txt
+
+real	0m0.182s
+user	0m0.147s
+sys	0m0.237s
+✓ Passed
+────────────────────────────────────
+TEST: Context Naked (1M)
+Cmd : frun -C ./test_ctx_naked.so:test_ctx_naked < input_1M.txt
+
+real	0m0.183s
+user	0m0.141s
+sys	0m0.245s
+✓ Passed
+────────────────────────────────────
+TEST: High Batch Size (5M)
+Cmd : frun -l 1:65535 -C ./test_ctx_header.so:test_ctx_header < input_5M.txt
+
+real	0m0.186s
+user	0m0.195s
+sys	0m0.261s
+✓ Passed
+────────────────────────────────────
+TEST: Variable Length Lines
+Cmd : frun -C ./test_ctx_naked.so:test_ctx_naked < input_var_3M.txt
+
+real	0m0.174s
+user	0m0.219s
+sys	0m1.045s
+✓ Passed
+────────────────────────────────────
+TEST: Ordered Output (-k)
+Cmd : frun -k -C ./test_basic.so:test_basic < input_1M.txt
+
+real	0m0.185s
+user	0m0.138s
+sys	0m0.254s
+✓ Passed
+
+=== All C Plugin Tests Completed Successfully ===
+
+
+### rc=0  elapsed=4s  finished=2026-09-30T04:06:49Z

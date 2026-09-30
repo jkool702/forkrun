@@ -60,6 +60,49 @@ if ! echo "$THPS" | grep -q '\[always\]'; then
     warn "published baseline. FAKE4_REVERIFY.md: 'No data taken under madvise.'"
 fi
 
+# ---------------------------------------------- 50z bash NUMA A/B (explicit) --
+# WHY THIS EXISTS. The Python benchmarks call forkrun.map() with no `nodes=`,
+# and python/forkrun/_numa.py:86 treats None as "auto" -- i.e. they have been
+# silently running 2-node NUMA on this box. The bash wrapper does NOT: with no
+# --nodes, _forkrun_build_numa_map("") falls through to "Standard Count mode"
+# with an empty count and lands on map=(0), i.e. UMA (frun.bash:1376-1381).
+# So "the benchmark as it stands" means something different on each side, and
+# the headline Python numbers were taken on the slow partition.
+#
+# This section runs the SAME workload through the SAME C/bash engine with
+# --nodes=1 and --nodes=@4 explicitly, and checks record conservation on both.
+# It does not touch BENCHMARKS/run_benchmark.bash (Tier-1).
+banner "50z bash NUMA A/B — explicit --nodes=1 vs --nodes=@4"
+AB="$OUTD/numa_ab"
+AB_LINES="${EPYC_BASH_AB_LINES:-5000000}"
+if deadline_ok 2400; then
+    mkdir -p "$AB"
+    ABSRC="$AB/f2_${AB_LINES}.txt"
+    if [ ! -f "$ABSRC" ]; then
+        log "slicing $AB_LINES lines from f2 for the A/B"
+        head -n "$AB_LINES" "$B/f2" >"$ABSRC"
+    fi
+    {
+        printf '# bash NUMA A/B — frun, identical flags, explicit topology\n'
+        printf '# input: %s lines (%s)\n' "$AB_LINES" "$ABSRC"
+        printf '# flags: -k -l 1 -b 524288 (keep-order, line batch) + passthrough\n'
+        printf '# %-10s %12s %12s %12s %10s\n' topology wall_s lines_out lines_per_s conserved
+        for N in 1 @4; do
+            T0=$(date +%s%N)
+            OUT_LINES=$( cat "$ABSRC" | ( cd "$EPYC_ROOT" && . ./frun.bash && frun --nodes="$N" -k -l 1 -b 524288 ) | wc -l )
+            RC_FR=$?
+            T1=$(date +%s%N)
+            MS=$(( (T1 - T0) / 1000000 ))
+            RATE=$(awk -v o="$OUT_LINES" -v ms="$MS" 'BEGIN{ if (ms>0) printf "%.0f", o*1000/ms; else print 0 }')
+            if [ "$OUT_LINES" = "$AB_LINES" ]; then CONS="yes"; else CONS="**NO**"; fi
+            printf '%-10s %12s %12s %12s %10s\n' "--nodes=$N" "${MS}ms" "$OUT_LINES" "$RATE" "$CONS"
+        done
+    } 2>&1 | tee "$AB/bash_numa_ab.txt"
+    log "A/B written to $AB/bash_numa_ab.txt"
+else
+    stage_skip "50_bench_bash_zab" "deadline"
+fi
+
 # ------------------------------------------------------- the main matrix -----
 banner "50a run_benchmark.bash (the main frun matrix)"
 if deadline_ok 10800; then

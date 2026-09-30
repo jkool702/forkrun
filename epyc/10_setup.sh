@@ -137,6 +137,27 @@ fi
 PY="$EPYC_VENV/bin/python"
 PIP="$EPYC_VENV/bin/pip"
 
+# The venv above is created only when bin/python is missing, so it is NOT
+# re-created on a re-run — but `python3 -m venv` on some images (observed on
+# Ubuntu 26.04 / Python 3.14.4 here) yields a venv with NO pip at all, and
+# ensurepip installs only the versioned console scripts (pip3, pip3.14), never
+# the unversioned `pip` that PIP below names. Every install in this section
+# then fails with "No such file or directory" and the competitor legs are
+# silently lost -- the run still reports throughput, just against nothing.
+# Bootstrap it, and fail LOUDLY rather than warning, because a missing
+# competitor invalidates the headline comparison table.
+if [ ! -x "$PIP" ]; then
+    log "no $PIP — bootstrapping pip into the venv"
+    "$PY" -m ensurepip --upgrade >>"$EPYC_OUT/00_environment/venv.log" 2>&1 || true
+    [ -x "$PIP" ] || ln -sf pip3 "$PIP" 2>/dev/null || true
+fi
+if [ ! -x "$PIP" ]; then
+    die "cannot provide pip in $EPYC_VENV — competitor benchmarks (Ray, Polars,
+  DuckDB, HF Datasets) would be silently absent from every comparison table.
+  Fix with:  $PY -m ensurepip --upgrade && ln -sf pip3 $PIP"
+fi
+log "pip: $("$PIP" --version 2>&1)"
+
 # Fail loudly and early if a derived path is malformed. NOTE: "/" is a VALID
 # data directory — it is the largest real filesystem on a normal single-volume
 # box, and preflight legitimately picks it. An earlier version of this guard
@@ -337,25 +358,36 @@ grep -q 'PYTHON-ROUNDTRIP-OK' "$EPYC_OUT/02_build/python_bootstrap.log" \
 
 # ------------------------------------------------------- worker-cap patch ----
 banner "10f raise the benchmark worker cap (min(8, ...) -> min(\$EPYC_WORKERS_MAX, ...))"
-# Ten benchmark modules hardcode `return min(8, os.cpu_count() or 4)`. On a
+# Ten benchmark modules hardcode `min(8, os.cpu_count() or 4)`. On a
 # 96-thread box that silently measures 8-way parallelism. _nworkers() is called
 # at runtime, so rewriting the literal is sufficient. This is a deliberate,
 # recorded deviation from the i9-7940X baselines (which ran these at 8 on a
 # 28-thread box — i.e. their 8 WAS the cap; ours must not be).
+#
+# The matcher keys on the INNER expression, not on a leading `return `. An
+# earlier version required the `return ` prefix, which structurally could not
+# match the inline keyword-argument form `workers=min(8, os.cpu_count() or 4)`
+# used by core/bench_memory.py — so that module, and the five `rss_*` legs
+# stage 51 runs from it, silently stayed at 8 workers while the deviation
+# record claimed the patch was applied. Match the expression wherever it occurs.
 PATCHED=()
 while IFS= read -r f; do
-    if grep -q 'return min(8, os\.cpu_count() or 4)' "$f"; then
-        sed -i 's/return min(8, os\.cpu_count() or 4)/return min(int(os.environ.get("FORKRUN_BENCH_WORKERS_MAX", "8")), os.cpu_count() or 4)/' "$f"
+    if grep -q 'min(8, os\.cpu_count() or 4)' "$f"; then
+        sed -i 's/min(8, os\.cpu_count() or 4)/min(int(os.environ.get("FORKRUN_BENCH_WORKERS_MAX", "8")), os.cpu_count() or 4)/g' "$f"
         PATCHED+=("${f#"$EPYC_ROOT"/}")
     fi
-done < <(grep -rl 'return min(8, os\.cpu_count() or 4)' "$EPYC_ROOT/python/benchmarks" 2>/dev/null)
+done < <(grep -rl 'min(8, os\.cpu_count() or 4)' "$EPYC_ROOT/python/benchmarks" 2>/dev/null)
 {
     echo "Benchmark worker-cap patch applied by epyc/10_setup.sh"
     echo "  reason: core/ + ml/ benchmark modules hardcode min(8, cpu_count)."
     echo "          On this box that would measure 8 workers on $EPYC_NPROC threads."
     echo "  change: min(8, ...) -> min(\$FORKRUN_BENCH_WORKERS_MAX, ...), default 8."
     echo "  files:"
-    for f in "${PATCHED[@]:-}"; do [ -n "$f" ] && echo "    $f"; done
+    # "${PATCHED[@]:-}" expands to nothing once the array is empty, which is
+    # exactly the re-run case — so the one document whose job is to make this
+    # deviation auditable listed no files at all. Plain "${PATCHED[@]}" is safe
+    # on an empty array under `set -u` from bash 4.4 on (this box: 5.3.9).
+    for f in ${PATCHED[@]+"${PATCHED[@]}"}; do echo "    $f"; done
 } >"$EPYC_OUT/DEVIATIONS_worker_cap.txt"
 log "patched ${#PATCHED[@]} file(s): ${PATCHED[*]:-none}"
 export FORKRUN_BENCH_WORKERS_MAX="$EPYC_WORKERS_MAX"

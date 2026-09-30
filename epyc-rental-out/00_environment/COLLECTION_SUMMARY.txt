@@ -1,0 +1,31 @@
+
+  output dir : /opt/forkrun/epyc-rental-out
+  size       : 41M
+  files      : 117
+
+  KEY FILES
+    ENVIRONMENT.md
+    DEVIATIONS.md
+    RUN_REPORT.txt
+    TEST_TALLIES.txt
+    20_benchmarks/F_NUMA1_AUDIT.md
+    INTEGRITY_AUDIT.md
+    INTEGRITY.sha256
+    AGENT_FINDINGS.md
+    20_benchmarks/headline/headline_5000000.NODES-1-auto.PRESERVED.csv
+    20_benchmarks/headline/headline_5000000.NODES-at8.csv
+    20_benchmarks/headline/headline_5000000.NODES1-W32.csv
+    20_benchmarks/headline/headline_5000000.csv
+    20_benchmarks/ml5m/ml5m_fault.csv
+    20_benchmarks/ml5m/ml5m_heavy.csv
+    20_benchmarks/ml5m/ml5m_light.csv
+    20_benchmarks/ml5m/ml5m_medium.csv
+    20_benchmarks/ml20m/ml20m_light.csv
+    20_benchmarks/ml20m/ml20m_medium.csv
+    20_benchmarks/tokenize/tokenize_2000000.csv
+    20_benchmarks/numa5m/numa5m_part_a.csv
+    20_benchmarks/numa5m/numa5m_part_c_heavy.csv
+    20_benchmarks/numa5m/numa5m_part_c_light.csv
+    20_benchmarks/numa5m/numa5m_part_c_medium.csv
+    20_benchmarks/numa5m/numa5m_part_d.csv
+

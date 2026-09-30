@@ -1,0 +1,4 @@
+polars	1.44.2 (pinned)
+duckdb	1.5.5 (pinned)
+datasets	5.0.1 (pinned)
+ray	2.58.0 (pinned)

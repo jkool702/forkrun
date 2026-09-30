@@ -154,7 +154,7 @@ banner "43c validate — the F-NUMA1 question at $EPYC_NODES nodes and 20M recor
 # FRACTION of the corpus, not a count, so this is correct at any --records.
 AUDIT="$OUTD/validation.md"
 if python3 "$EPYC_DIR/validate_cells.py" \
-        --csv "$OUTD"/ml20m_*.csv \
+        --csv "$OUTD/ml20m_*.csv" \
         --records "$RECORDS" \
         --title "43 — ML pipeline @ ${RECORDS} records, forkrun only, $EPYC_NODES NUMA nodes" \
         --require-counts \

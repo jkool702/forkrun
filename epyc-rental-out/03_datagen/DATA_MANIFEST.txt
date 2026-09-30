@@ -1,0 +1,27 @@
+# forkrun EPYC rental — generated dataset manifest
+# generated: 2026-09-30T04:24:01Z
+# determinism: ml_data_gen.SEED=42  tokenize_data_gen.SEED=2024  stage0.SEED=20260919
+
+dir                       bytes          lines  file
+ml5                   532711015        5000000  ml_light.jsonl  sha256:4bc579697fd85a57
+ml5                  2347403909        5000000  ml_medium.jsonl  sha256:271daa156401caf3
+ml5                  6720381299        5000000  ml_heavy.jsonl  sha256:1091515f2ab7bcf9
+ml5                  2293073051        5000000  ml_fault.jsonl  sha256:5bc4021b4cf430e8
+ml20                 2130842196       20000000  ml_light.jsonl  sha256:afed3863ad2c85b9
+ml20                 9389638455       20000000  ml_medium.jsonl  sha256:0cc000b666508c5e
+ml20                26880545542       20000000  ml_heavy.jsonl  sha256:8522432b67c382ec
+tok2M                3949703647        2000000  tok_corpus.jsonl  sha256:51e5e9d1a41abdaf
+tok2M                    438648          29999  tok_corpus.jsonl.vocab  sha256:1ba2804cdd5820f2
+numa5                 532711015        5000000  ml_light_5000000.jsonl  sha256:4bc579697fd85a57
+numa5                2347403909        5000000  ml_medium_5000000.jsonl  sha256:271daa156401caf3
+numa5                6720381299        5000000  ml_heavy_5000000.jsonl  sha256:1091515f2ab7bcf9
+numa5                 469482093        1000000  ml_medium_1M.jsonl  sha256:ecc094d7a2ffa354
+numa5                 469482093        1000000  spawn_1M.jsonl  sha256:ecc094d7a2ffa354
+numa5                3949703647        2000000  tok_2000000.jsonl  sha256:51e5e9d1a41abdaf
+inputs                128888890       10000000  transform_10M.txt  sha256:0df986db9dfc4cf6
+BENCHMARKS            100000000      100000000  f1  sha256:090db94863f83d62
+BENCHMARKS            888888898      100000000  f2  sha256:5df5b83dc6116d5f
+BENCHMARKS              5280424          90973  f3  sha256:e9a295832596c005
+
+totals:
+  /dev/md0        878G   67G  767G   8% /

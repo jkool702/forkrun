@@ -1,0 +1,6 @@
+# competitor framework probe (recorded 2026-09-30T04:25:47Z)
+  ray          PRESENT  2.58.0
+  polars       PRESENT  1.44.2
+  duckdb       PRESENT  1.5.5
+  hf_datasets  PRESENT  5.0.1
+  pandas       PRESENT  3.0.6

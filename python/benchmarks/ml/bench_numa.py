@@ -21,7 +21,7 @@ from forkrun._numa import detect_numa_nodes  # noqa: E402
 
 
 def _nworkers():
-    return min(8, os.cpu_count() or 4)
+    return min(int(os.environ.get("FORKRUN_BENCH_WORKERS_MAX", "8")), os.cpu_count() or 4)
 
 
 def _map_upper_nodes(path, nodes):

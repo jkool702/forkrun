@@ -1,0 +1,3 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+executor-heavy-96w,executor,udf,302216.3671790222,15123.39453125,-1.0,out=4997982/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+pool-heavy-96w,pool,udf,301013.08018289384,19751.8515625,-1.0,out=4997982/5000000 records,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic

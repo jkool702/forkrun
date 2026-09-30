@@ -1,0 +1,13 @@
+### ml20m-heavy
+### 2026-09-30T10:44:24Z
+### cmd: python3 python/benchmarks/ml/bench_ml_pipeline.py --records 20000000 --variants heavy --workers 8,16,32,48,96 --trials 3 --no-fault --tmpdir //ml20 --csv /opt/forkrun/epyc-rental-out/20_benchmarks/ml20m/ml20m_heavy.csv
+
+[epyc] blocked imports: datasets, ray
+forkrun ML pipeline benchmark — 20000000 records/variant
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Versions: {'python': '3.14.4', 'ray': 'missing', 'polars': '1.44.2', 'duckdb': '1.5.5', 'datasets': 'missing', 'pyarrow': '25.0.1', 'forkrun': '0.16.0'}
+Frameworks: {'serial': True, 'pool': True, 'executor': True, 'forkrun': True, 'ray': False, 'polars': True, 'duckdb': True, 'hf_datasets': False}
+Worker sweep: [8, 16, 32, 48, 96] (best reported per system)
+--- heavy: 20000000 records, 25635.3MB ---
+
+### rc=143  elapsed=7475s  finished=2026-09-30T12:48:59Z

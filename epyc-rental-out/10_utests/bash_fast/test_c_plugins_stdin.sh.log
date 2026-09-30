@@ -1,0 +1,45 @@
+### test_c_plugins_stdin.sh
+### 2026-09-30T04:07:34Z
+### cmd: bash ./test_c_plugins_stdin.sh
+
+=== forkrun v3.5.2 C Plugin Stdin Delivery Tests (T-STDIN-1..9) ===
+Compiling stdin plugins...
+In file included from /usr/include/features.h:539,
+                 from /usr/include/x86_64-linux-gnu/bits/libc-header-start.h:33,
+                 from /usr/include/stdint.h:26,
+                 from /usr/lib/gcc/x86_64-linux-gnu/15/include/stdint.h:11,
+                 from plugin_stdin_partial.c:1:
+In function ‘read’,
+    inlined from ‘plugin_stdin_partial’ at plugin_stdin_partial.c:14:21:
+/usr/include/x86_64-linux-gnu/bits/unistd.h:32:10: warning: ‘__read_alias’ specified size between 18446744073709551518 and 18446744073709551615 exceeds maximum object size 9223372036854775807 [-Wstringop-overflow=]
+   32 |   return __glibc_fortify (read, __nbytes, sizeof (char),
+      |          ^~~~~~~~~~~~~~~
+plugin_stdin_partial.c: In function ‘plugin_stdin_partial’:
+plugin_stdin_partial.c:12:10: note: destination object allocated here
+   12 |     char buf[100];
+      |          ^~~
+/usr/include/x86_64-linux-gnu/bits/unistd-decl.h:29:16: note: in a call to function ‘__read_alias’ declared with attribute ‘access (write_only, 2, 3)’
+   29 | extern ssize_t __REDIRECT_FORTIFY (__read_alias, (int __fd, void *__buf,
+      |                ^~~~~~~~~~~~~~~~~~
+✓ Stdin plugins compiled successfully.
+Generating test inputs...
+------------------------------------------------------
+T-STDIN-1: read-to-EOF conformance, v1 2-arg plugin (10k lines)
+✓ Passed: pipe delivery + EOF framing, no argv data
+------------------------------------------------------
+T-STDIN-2: length-bounded read, v2 plugin (10k lines)
+✓ Passed: ctx batch_byte_length accurate in stdin mode
+------------------------------------------------------
+T-STDIN-3a: partial consumption, line mode (-l 200, 20k lines)
+✓ Passed: unconsumed remainder discarded, no drift
+------------------------------------------------------
+T-STDIN-3b: partial consumption, large-tier discard (-b 2M, 12MB)
+✓ Passed: forked-feeder EPIPE discard, batch completes rc 0
+------------------------------------------------------
+T-STDIN-4: large batch concurrent feed (-b 4M, ~13MB)
+✓ Passed: forked feed + SIGCHLD shield, feed/read overlap exact
+------------------------------------------------------
+T-STDIN-5: feeder SIGKILL mid-feed -> escrow -> retry (-E -b 4M)
+✗ FAILED: no RETRY marker — fault never landed, test vacuous (T-STDIN-5)
+
+### rc=1  elapsed=2s  finished=2026-09-30T04:07:36Z

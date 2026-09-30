@@ -1,0 +1,1 @@
+Error: Command '['//venv/bin/python3', '-m', 'ensurepip', '--upgrade', '--default-pip']' returned non-zero exit status 1.

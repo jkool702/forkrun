@@ -27,7 +27,7 @@ ML5="$EPYC_DATA/ml5"
 RECORDS="${EPYC_HEADLINE_RECORDS:-5000000}"
 WMAX="$EPYC_WORKERS_MAX"
 TRIALS="${EPYC_TRIALS:-3}"
-NODES="1,auto"
+NODES="1,@4,auto"
 
 mkdir -p "$OUTD"
 cd "$EPYC_ROOT" || die "no repo root"

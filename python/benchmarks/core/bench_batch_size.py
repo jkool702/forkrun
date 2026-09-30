@@ -33,7 +33,7 @@ BATCH_SIZES = [None, 100, 500, 1000, 5000, 10000, 50000, 100000]
 
 
 def _nworkers():
-    return min(8, os.cpu_count() or 4)
+    return min(int(os.environ.get("FORKRUN_BENCH_WORKERS_MAX", "8")), os.cpu_count() or 4)
 
 
 def _label(lines):

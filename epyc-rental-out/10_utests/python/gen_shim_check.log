@@ -1,0 +1,8 @@
+### gen_shim--check
+### 2026-09-30T04:14:43Z
+### cmd: python3 tools/gen_shim.py --check
+
+OK forkrun_shim.h
+OK tools/generated/shim_signatures.json
+
+### rc=0  elapsed=0s  finished=2026-09-30T04:14:43Z

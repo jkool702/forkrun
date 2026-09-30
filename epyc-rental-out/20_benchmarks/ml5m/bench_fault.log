@@ -1,0 +1,45 @@
+### ml5m-fault
+### 2026-09-30T07:32:47Z
+### cmd: python3 python/benchmarks/ml/bench_ml_pipeline.py --records 5000000 --fault-only --fault-workers 96 --tmpdir //ml5 --csv /opt/forkrun/epyc-rental-out/20_benchmarks/ml5m/ml5m_fault.csv
+
+forkrun ML pipeline benchmark — 5000000 records/variant
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Versions: {'python': '3.14.4', 'ray': '2.58.0', 'polars': '1.44.2', 'duckdb': '1.5.5', 'datasets': '5.0.1', 'pyarrow': '25.0.1', 'forkrun': '0.16.0'}
+Frameworks: {'serial': True, 'pool': True, 'executor': True, 'forkrun': True, 'ray': True, 'polars': True, 'duckdb': True, 'hf_datasets': True}
+Worker sweep: [1, 2, 4, 8, 14, 28] (best reported per system)
+--- fault injection (crash-once) ---
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=823 read=823 finished=1 chunks(head=105 tail=105) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=5148 read=5148 finished=1 chunks(head=990 tail=990) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5971 emitted=5971 expected=(1095,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+2026-09-30 07:35:22,333	INFO worker.py:2024 -- Started a local Ray instance.
+forkrun [DIAG-NUMA1] map/run completion:
+  nodes=2 workers=96 forked=[0, 1]
+  node=0 write=1013 read=1013 finished=1 chunks(head=161 tail=161) tail_empty=1 forked=yes wids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+  node=1 write=4958 read=4958 finished=1 chunks(head=934 tail=934) tail_empty=1 forked=yes wids=[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+forkrun [DIAG-NUMA1] orderer done: numa=1 recv=5971 emitted=5971 expected=(1095,0) heap_left=0 head_key=18446744073709551615 stdout_broken=0
+forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+
++-------------------+---------+-------+---------+----------+------+---------------------------------------------------------------------------------------------------------------------------------+
+| Benchmark         | Mode    | Path  | Lines/s | Peak RSS | CPU% | Notes                                                                                                                           |
++-------------------+---------+-------+---------+----------+------+---------------------------------------------------------------------------------------------------------------------------------+
+| forkrun-fault-96w | forkrun | fault | -       | 2260MB   | -    | survived, out=4771285 records; crash-once SIGSEGV@idx5 + transient x5 all fired; orchestrator respawn; output truncated at hole |
+| pool-fault-96w    | pool    | fault | -       | 2260MB   | -    | survived=False; POOL-DIED TimeoutError                                                                                          |
+| ray-fault-96w     | ray     | fault | -       | 2260MB   | -    | died, count=0; died: ml5/ml_fault.jsonl                                                                                         |
+| plugin-fault-96w  | plugin  | fault | -       | 2281MB   | -    | survived, out=4771285 records; crash-once SIGSEGV@idx5 fired; orchestrator respawn; output truncated at hole                    |
++-------------------+---------+-------+---------+----------+------+---------------------------------------------------------------------------------------------------------------------------------+
+
+BEST (worker sweep):
+
+NOTES:
+- Worker sweep [1, 2, 4, 8, 14, 28]; each system's best rate shown above.
+- UDF systems run the IDENTICAL Python transformation (ml_payload.py); only batching/transport/scheduling differ.
+- Native systems (Polars/DuckDB) use their own expression language (medium variant only); the heavy UDF cannot be expressed natively, which is the point of the comparison.
+- forkrun uses order=index (validated counts); Pool/Executor chunk into workers*4 line-chunks (pickled); Ray uses pandas batches via read_text; HF Datasets uses from_text + batched map (batch_size=1000, in-memory).
+- Fault injection is crash-once (file markers): first attempt crashes, retry succeeds. forkrun recovers via orchestrator respawn; Pool has no retry (documented).
+- RSS is parent-process peak (ru_maxrss); worker/subprocess memory is not attributed per system.
+CSV: /opt/forkrun/epyc-rental-out/20_benchmarks/ml5m/ml5m_fault.csv
+
+### rc=0  elapsed=169s  finished=2026-09-30T07:35:36Z

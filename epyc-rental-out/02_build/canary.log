@@ -1,0 +1,57 @@
+### make-canary
+### 2026-09-30T04:05:32Z
+### cmd: make -C /opt/forkrun -f Makefile.substrate canary
+
+make: Entering directory '/opt/forkrun'
+# NOTE: no -D_GNU_SOURCE here — the TU must set its own FTMs (before any
+# libc include). A CLI define would mask exactly the include-order bug
+# class the canary exists to catch.
+cc -O1 -fPIC -Wall -Wextra -ffile-prefix-map=/opt/forkrun=. -Wno-builtin-macro-redefined '-D__DATE__="Sep  1 2026"' '-D__TIME__="00:00:00"' -DSHELL -DHAVE_CONFIG_H -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins -c forkrun_ring.c -o forkrun_ring_canary.o
+forkrun_ring.c: In function ‘ring_recover_worker_core’:
+forkrun_ring.c:7014:19: warning: ignoring return value of ‘ftruncate’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+ 7014 |             (void)ftruncate(output_fd, (off_t)txn->output_start);
+      |                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+forkrun_ring.c: In function ‘ring_tui_main’:
+forkrun_ring.c:10068:57: warning: ‘ Freed’ directive output may be truncated writing 6 bytes into a region of size between 1 and 32 [-Wformat-truncation=]
+10068 |         snprintf(str_fallowed, sizeof(str_fallowed), "%s Freed", b_f);
+      |                                                         ^~~~~~
+In file included from /usr/include/stdio.h:974,
+                 from forkrun_ring.c:60:
+In function ‘snprintf’,
+    inlined from ‘ring_tui_main’ at forkrun_ring.c:10068:9:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:68:10: note: ‘__builtin___snprintf_chk’ output between 7 and 38 bytes into a destination of size 32
+   68 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   69 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   70 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+forkrun_ring.c: In function ‘ring_tui_main’:
+forkrun_ring.c:10073:38: warning: ‘%s’ directive output may be truncated writing up to 31 bytes into a region of size between 19 and 81 [-Wformat-truncation=]
+10073 |                  "%s In Use (%s Act, %s Wait)", b_inuse, b_a, b_w);
+      |                                      ^~                       ~~~
+In function ‘snprintf’,
+    inlined from ‘ring_tui_main’ at forkrun_ring.c:10072:9:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:68:10: note: ‘__builtin___snprintf_chk’ output between 22 and 115 bytes into a destination of size 96
+   68 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   69 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   70 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+cc -O1 -fPIC -Wall -Wextra -ffile-prefix-map=/opt/forkrun=. -Wno-builtin-macro-redefined '-D__DATE__="Sep  1 2026"' '-D__TIME__="00:00:00"' -c substratestubs.c -o substratestubs.o
+cc -shared -o libforkrun.so forkrun_ring_canary.o substratestubs.o \
+	-Wl,--no-undefined -ldl -lrt -Wl,--build-id=none
+canary artifact: libforkrun.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, not stripped
+# ARCH ASSERTION uses the compiler's own TARGET TRIPLE, not its NAME:
+# pattern-matching on cc false-REDs on a native aarch64 host running
+# plain `gcc` (the old *gcc* arm grepped for x86-64 and failed a correct
+# artifact). `cc -dumpmachine` is the correct identity source.
+# Arches with no mapping below (ppc64le / s390x / riscv64) get the link
+# check only: on those the canary's job is -Wl,--no-undefined, not an
+# ELF-machine assertion.
+canary compiler: cc -> x86_64-linux-gnu (expecting ELF machine: x86-64)
+canary OK: libforkrun.so links with no undefined symbols
+make: Leaving directory '/opt/forkrun'
+
+### rc=0  elapsed=4s  finished=2026-09-30T04:05:36Z

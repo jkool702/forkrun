@@ -57,6 +57,8 @@
             }
             #getCPU() { :; }
 
+	    NN=0
+
             sleep 0.1s
             declare -i K=0
             ## RUN BENCHMARK
@@ -69,25 +71,25 @@
                     ((K++))
                     echo
                     echo "($K): time { frun $GCk <$Fk >/dev/null; }"
-                    { time { frun --stats $GCk <$Fk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+                    { time { frun --nodes=${NN} --stats $GCk <$Fk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
                     getCPU
 
                     ((K++))
                     echo
                     echo "($K): time { frun $GCk <$Fk | wc -l; }"
-                    { time { frun --stats $GCk <$Fk 2>&$fd2 | wc -l; } 1>&$fd1; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+                    { time { frun --nodes=@${NN} --stats $GCk <$Fk 2>&$fd2 | wc -l; } 1>&$fd1; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
                     getCPU
 
                     ((K++))
                     echo
                     echo "($K): time { cat $Fk | frun $GCk >/dev/null; }"
-                    { time { cat $Fk | frun --stats $GCk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+                    { time { cat $Fk | frun --nodes=@${NN} --stats $GCk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
                     getCPU
 
                     ((K++))
                     echo
                     echo "($K): time { cat $Fk | frun $GCk | wc -l; }"
-                    { time { cat $Fk | frun --stats $GCk 2>&$fd2 | wc -l; } 1>&$fd1; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+                    { time { cat $Fk | frun --nodes=@${NN} --stats $GCk 2>&$fd2 | wc -l; } 1>&$fd1; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
                     getCPU
 
 		    read -r -u ${fd_sleep} -t 1

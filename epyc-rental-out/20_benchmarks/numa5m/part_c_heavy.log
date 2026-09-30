@@ -1,0 +1,30 @@
+### numa5m-part-c-heavy
+### 2026-09-30T07:50:45Z
+### cmd: python3 python/benchmarks/ml/bench_numa_5m.py --records 5000000 --variants heavy --workers 96 --nodes 1,@2,@4,auto --parts c --tmpdir //numa5 --csv /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_c_heavy.csv
+
+forkrun NUMA steady-state: 5000000 records/variant, workers=[96]
+Hardware: 96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+Nodes under test: [1, '@2', '@4', 'auto']
+NUMA online: 0-1
+reusing //numa5/ml_heavy_5000000.jsonl (6.3GB)
+--- C: Pool/Executor same boot ---
++--------------------+----------+------+---------+----------+------+-----------------------------+
+| Benchmark          | Mode     | Path | Lines/s | Peak RSS | CPU% | Notes                       |
++--------------------+----------+------+---------+----------+------+-----------------------------+
+| executor-heavy-96w | executor | udf  | 302k    | 15123MB  | -    | out=4997982/5000000 records |
+| pool-heavy-96w     | pool     | udf  | 301k    | 19752MB  | -    | out=4997982/5000000 records |
++--------------------+----------+------+---------+----------+------+-----------------------------+
+
++--------------------+----------+------+---------+----------+------+-----------------------------+
+| Benchmark          | Mode     | Path | Lines/s | Peak RSS | CPU% | Notes                       |
++--------------------+----------+------+---------+----------+------+-----------------------------+
+| executor-heavy-96w | executor | udf  | 302k    | 15123MB  | -    | out=4997982/5000000 records |
+| pool-heavy-96w     | pool     | udf  | 301k    | 19752MB  | -    | out=4997982/5000000 records |
++--------------------+----------+------+---------+----------+------+-----------------------------+
+
+MEDIANS:
+  executor-heavy-96w                 302216 records/s
+  pool-heavy-96w                     301013 records/s
+CSV: /opt/forkrun/epyc-rental-out/20_benchmarks/numa5m/numa5m_part_c_heavy.csv
+
+### rc=0  elapsed=167s  finished=2026-09-30T07:53:32Z

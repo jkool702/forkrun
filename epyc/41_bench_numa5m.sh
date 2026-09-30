@@ -243,7 +243,7 @@ banner "41e F-NUMA1 audit — the question this rental exists to answer"
 # Loss arithmetic is shared with the other stages via epyc/validate_cells.py.
 AUDIT="$EPYC_OUT/20_benchmarks/F_NUMA1_AUDIT.md"
 if python3 "$EPYC_DIR/validate_cells.py" \
-        --csv "$OUTD"/numa5m_*.csv \
+        --csv "$OUTD/numa5m_*.csv" \
         --records "$RECORDS" \
         --require-counts \
         --title "F-NUMA1 audit — real ${EPYC_NODES}-node topology" \

@@ -1,0 +1,16 @@
+### check_canary_versions
+### 2026-09-30T04:14:44Z
+### cmd: python3 tools/check_canary_versions.py
+
+note: also checking local build python/forkrun/libforkrun_python.so
+OK ring_loadables/forkrun-libs/forkrun_ring.aarch64.so (109 undefined, 11 stub-matched)
+OK ring_loadables/forkrun-libs/forkrun_ring.ppc64le.so (109 undefined, 11 stub-matched)
+OK ring_loadables/forkrun-libs/forkrun_ring.riscv64.so (107 undefined, 11 stub-matched)
+OK ring_loadables/forkrun-libs/forkrun_ring.s390x.so (106 undefined, 11 stub-matched)
+OK ring_loadables/forkrun-libs/forkrun_ring.x86-64-v2.so (109 undefined, 11 stub-matched)
+OK ring_loadables/forkrun-libs/forkrun_ring.x86-64-v3.so (109 undefined, 11 stub-matched)
+OK ring_loadables/forkrun-libs/forkrun_ring.x86-64-v4.so (109 undefined, 11 stub-matched)
+OK python/forkrun/libforkrun_python.so (109 undefined, 0 stub-matched)
+CANARY-VERSIONS green: floor 4.4 over 8 artifact(s)
+
+### rc=0  elapsed=0s  finished=2026-09-30T04:14:44Z
