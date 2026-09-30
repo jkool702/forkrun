@@ -1,0 +1,133 @@
+### test_frun_security.sh
+### 2026-09-30T03:48:33Z
+### cmd: bash ./test_frun_security.sh
+
+[1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1;36m[1m  FORKRUN SECURITY + INPUT-GATE SUITE (W-REL6)[0m
+[1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1;34m[1m▶ S1: bare --resume on world-writable checkpoint is rejected (x10)[0m
+  [0;32m✓[0m S1[1]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[2]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[3]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[4]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[5]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[6]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[7]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[8]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[9]: bare world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S1[10]: bare world-writable rejected rc=1 SECURITY
+[1;34m[1m▶ S2: --resume + args on world-writable checkpoint is rejected (x10)[0m
+  [0;32m✓[0m S2[1]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[2]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[3]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[4]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[5]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[6]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[7]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[8]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[9]: with-args world-writable rejected rc=1 SECURITY
+  [0;32m✓[0m S2[10]: with-args world-writable rejected rc=1 SECURITY
+[1;34m[1m▶ S3: --resume + args on owned checkpoint runs correctly (x10)[0m
+  [0;32m✓[0m S3[1]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[2]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[3]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[4]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[5]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[6]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[7]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[8]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[9]: with-args owned checkpoint accepted, output exact
+  [0;32m✓[0m S3[10]: with-args owned checkpoint accepted, output exact
+[1;34m[1m▶ S4: FORKRUN_TRUST_RESUME=1 overrides the with-args gate (x10)[0m
+  [0;32m✓[0m S4[1]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[2]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[3]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[4]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[5]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[6]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[7]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[8]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[9]: TRUST=1 with-args override runs rc=0
+  [0;32m✓[0m S4[10]: TRUST=1 with-args override runs rc=0
+[1;34m[1m▶ S5: bare --resume on owned checkpoint passes the gate (x10)[0m
+  [0;32m✓[0m S5[1]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[2]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[3]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[4]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[5]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[6]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[7]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[8]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[9]: bare owned checkpoint passes gate rc=0
+  [0;32m✓[0m S5[10]: bare owned checkpoint passes gate rc=0
+[1;34m[1m▶ S6: FORKRUN_TRUST_RESUME=1 overrides the bare gate (x10)[0m
+  [0;32m✓[0m S6[1]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[2]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[3]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[4]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[5]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[6]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[7]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[8]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[9]: TRUST=1 bare override runs rc=0
+  [0;32m✓[0m S6[10]: TRUST=1 bare override runs rc=0
+[1;34m[1m▶ S7: bare --resume on world-writable checkpoint w/ ORIG_ARGS is rejected (x10)[0m
+  [0;32m✓[0m S7[1]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[2]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[3]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[4]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[5]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[6]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[7]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[8]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[9]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+  [0;32m✓[0m S7[10]: bare world-writable w/ ORIG_ARGS rejected rc=1 SECURITY
+[1;34m[1m▶ O: leading-zero numerics fail closed with a clear error (x5 each)[0m
+  [0;32m✓[0m O1[1]: '-j 00' refused rc=1, no output
+  [0;32m✓[0m O1[2]: '-j 00' refused rc=1, no output
+  [0;32m✓[0m O1[3]: '-j 00' refused rc=1, no output
+  [0;32m✓[0m O1[4]: '-j 00' refused rc=1, no output
+  [0;32m✓[0m O1[5]: '-j 00' refused rc=1, no output
+  [0;32m✓[0m O2[1]: '-j 000' refused rc=1, no output
+  [0;32m✓[0m O2[2]: '-j 000' refused rc=1, no output
+  [0;32m✓[0m O2[3]: '-j 000' refused rc=1, no output
+  [0;32m✓[0m O2[4]: '-j 000' refused rc=1, no output
+  [0;32m✓[0m O2[5]: '-j 000' refused rc=1, no output
+  [0;32m✓[0m O3[1]: '-j 010' refused rc=1, no output
+  [0;32m✓[0m O3[2]: '-j 010' refused rc=1, no output
+  [0;32m✓[0m O3[3]: '-j 010' refused rc=1, no output
+  [0;32m✓[0m O3[4]: '-j 010' refused rc=1, no output
+  [0;32m✓[0m O3[5]: '-j 010' refused rc=1, no output
+  [0;32m✓[0m O4[1]: '-j 08' refused rc=1, no output
+  [0;32m✓[0m O4[2]: '-j 08' refused rc=1, no output
+  [0;32m✓[0m O4[3]: '-j 08' refused rc=1, no output
+  [0;32m✓[0m O4[4]: '-j 08' refused rc=1, no output
+  [0;32m✓[0m O4[5]: '-j 08' refused rc=1, no output
+  [0;32m✓[0m O5[1]: '-l 08' refused rc=1, no output
+  [0;32m✓[0m O5[2]: '-l 08' refused rc=1, no output
+  [0;32m✓[0m O5[3]: '-l 08' refused rc=1, no output
+  [0;32m✓[0m O5[4]: '-l 08' refused rc=1, no output
+  [0;32m✓[0m O5[5]: '-l 08' refused rc=1, no output
+[1;34m[1m▶ R: no RETURN-trap leak after frun exits (x5)[0m
+  [0;32m✓[0m R[1]: trap clean, sourcing under set -u survives, output exact
+  [0;32m✓[0m R[2]: trap clean, sourcing under set -u survives, output exact
+  [0;32m✓[0m R[3]: trap clean, sourcing under set -u survives, output exact
+  [0;32m✓[0m R[4]: trap clean, sourcing under set -u survives, output exact
+  [0;32m✓[0m R[5]: trap clean, sourcing under set -u survives, output exact
+[1;34m[1m▶ C: crash message instruction, followed verbatim, resumes exactly (x1)[0m
+  [0;31m✗[0m C[1]: verbatim hint resumes to byte-exact output[0;31m crash produced no checkpoint[0m
+[1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1mTEST SUMMARY[0m
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Total:  101
+Passed: 100
+Failed:   1
+
+[0;31m[1mFAILED TESTS:[0m
+  - C[1]: verbatim hint resumes to byte-exact output: crash produced no checkpoint
+
+[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;31mOVERALL: 1 FAILURE(S)[0m
+[0;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+### rc=1  elapsed=22s  finished=2026-09-30T03:48:55Z

@@ -1,0 +1,18 @@
+
+=== bash fast-suite tallies ===
+test_frun.sh                       ALL TESTS PASSED! 
+test_frun_security.sh              OVERALL: 1 FAILURE 
+test_c_plugins.sh                  <no tally found>
+test_c_plugins_v2.sh               <no tally found>
+test_frun.sh                       ALL TESTS PASSED! 
+test_frun_security.sh              OVERALL: 1 FAILURE 
+test_c_plugins.sh                  <no tally found>
+test_c_plugins_v2.sh               <no tally found>
+test_frun.sh                       ALL TESTS PASSED! 
+test_frun_security.sh              OVERALL: 1 FAILURE 
+test_c_plugins.sh                  <no tally found>
+test_c_plugins_v2.sh               <no tally found>
+test_c_plugins_rigorous.sh         <no tally found>
+test_c_plugins_raw.sh              <no tally found>
+test_c_plugins_stdin.sh            <no tally found>
+test_c_plugins_config.sh           <no tally found>

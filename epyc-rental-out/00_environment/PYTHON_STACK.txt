@@ -1,0 +1,35 @@
+python:  Python 3.14.4
+pip:     pip 26.2.1 from /venv/lib/python3.14/site-packages/pip (python 3.14)
+mp start: forkserver
+          (python>=3.14 defaults to forkserver on Linux; the lab box runs
+           3.14 so the baselines already have this. A bare top-level
+           Pool() with no __main__ guard WILL fail — see
+           python/benchmarks/README_misc.md)
+
+REFERENCE BOX (every published number): 28c Intel i9-7940X, single socket,
+  bash 5.3.9 / glibc 2.43 / Python 3.14.7 / gcc 16.2.1 / kernel 7.1.x,
+  28 workers, NUMA distance 10, THP enabled+shmem always.
+
+REQUESTED COMPETITOR VERSIONS (tokenize_study.md / ml_pipeline_study.md):
+  Ray 2.58.0 | Polars 1.44.2 | DuckDB 1.5.5 | HF datasets 5.0.1 | pyarrow 25.0.1
+
+ACTUALLY INSTALLED:
+polars	1.44.2 (pinned)
+duckdb	1.5.5 (pinned)
+datasets	5.0.1 (pinned)
+ray	2.58.0 (pinned)
+  import numpy      OK   2.5.3
+  import pandas     OK   3.0.6
+  import polars     OK   1.44.2
+  import duckdb     OK   1.5.5
+  import datasets   OK   5.0.1
+  import ray        OK   2.58.0
+  import pyarrow    OK   25.0.1
+/opt/forkrun/python/forkrun/libforkrun_python.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, not stripped
+opencode binary   : /root/.opencode/bin/opencode
+opencode version  : 1.18.33
+agent model       : opencode/space-bunny-free
+agent available   : yes
+agent prompt      : /opt/forkrun/epyc/AGENT_PROMPT.md
+agent config      : /opt/forkrun/epyc/opencode.json
+supervisor script : /opt/forkrun/epyc/55_agent_supervise.sh

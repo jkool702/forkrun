@@ -1,0 +1,38 @@
+### test_c_plugins_raw.sh
+### 2026-09-30T03:49:42Z
+### cmd: bash ./test_c_plugins_raw.sh
+
+=== forkrun v3.5.2 C Plugin RAW Window Delivery Tests (T-RAW-1..7) ===
+Compiling RAW plugins...
+✓ RAW plugins compiled successfully.
+Generating test inputs...
+------------------------------------------------------
+T-RAW-1: basic window read (10k lines, byte-exact)
+✓ Passed: grant negotiation + window population + pointer/length correct
+------------------------------------------------------
+T-RAW-2a: v2 plugin with argv fallback takes the raw path
+✓ Passed: raw path taken when granted
+------------------------------------------------------
+T-RAW-2b: unknown-flag fallback takes the argv path
+✓ Passed: argv fallback byte-exact when flag ungranted
+------------------------------------------------------
+T-RAW-3: batch_lines and delimiter metadata in ctx
+✓ Passed: delimiter scan matches batch_lines in every batch
+------------------------------------------------------
+T-RAW-4: fixed args preserved (--mode fast + window)
+✓ Passed: argv has fixed args only, batch arrives via window
+------------------------------------------------------
+T-RAW-5: multi-batch window advancement (200k lines)
+✓ Passed: mapping grows via mremap without mid-callback invalidation
+------------------------------------------------------
+T-RAW-6: v1 + RAW request warns and falls back to argv
+✓ Passed: dlopen warning emitted, argv delivery correct
+------------------------------------------------------
+T-RAW-7: RAW overrides -s (window, not stdin feed)
+✓ Passed: -s does not divert or break raw window delivery
+  (precedence lock-in: RAW wins over the W-STDIN stdin feed.
+   W-STDIN must keep this test green unchanged.)
+------------------------------------------------------
+=== All RAW Window Delivery Tests Passed (T-RAW-1..7) ===
+
+### rc=0  elapsed=2s  finished=2026-09-30T03:49:44Z

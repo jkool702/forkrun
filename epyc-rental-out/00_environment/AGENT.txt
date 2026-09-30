@@ -1,0 +1,7 @@
+opencode binary   : /root/.opencode/bin/opencode
+opencode version  : 1.18.33
+agent model       : opencode/space-bunny-free
+agent available   : yes
+agent prompt      : /opt/forkrun/epyc/AGENT_PROMPT.md
+agent config      : /opt/forkrun/epyc/opencode.json
+supervisor script : /opt/forkrun/epyc/55_agent_supervise.sh

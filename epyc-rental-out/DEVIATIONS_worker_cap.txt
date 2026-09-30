@@ -1,0 +1,5 @@
+Benchmark worker-cap patch applied by epyc/10_setup.sh
+  reason: core/ + ml/ benchmark modules hardcode min(8, cpu_count).
+          On this box that would measure 8 workers on 96 threads.
+  change: min(8, ...) -> min($FORKRUN_BENCH_WORKERS_MAX, ...), default 8.
+  files:
