@@ -211012,3 +211012,8 @@ Any row whose verdict is not EXACT/ok(quality-gate) is a correctness finding, no
 2026-09-30T13:15:10Z  comparison: /opt/forkrun/epyc-rental-out/20_benchmarks/headline/VS_REFERENCE.md
 2026-09-30T13:15:10Z  stage 44_bench_headline OK (1569s)
 2026-09-30T13:15:10Z  publishing results after 44_bench_headline
+2026-09-30T13:15:10Z  [publish] committed 102 file(s) to epyc-rental-results: b9fcc24a4 -> cc76d7d3c
+2026-09-30T13:15:12Z  [publish] pushed to origin/epyc-rental-results
+2026-09-30T13:15:12Z  [publish]   review with:  git fetch origin && git log --oneline origin/epyc-rental-results
+2026-09-30T13:15:12Z  WARN  stage 50_bench_bash SKIPPED (deadline: estimate 10800s > remaining 6606s)
+2026-09-30T13:15:12Z  publishing results after 50_bench_bash
