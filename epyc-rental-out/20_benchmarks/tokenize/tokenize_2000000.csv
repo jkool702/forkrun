@@ -1,0 +1,28 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+tok-serial,serial,tokenize,12641.93868386289,8100.45703125,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-pool-8w,pool,tokenize,79764.68462772464,17505.9921875,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-executor-8w,executor,tokenize,80363.12457474535,17505.9921875,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-hf-8w,hf_datasets,tokenize,36283.40215539983,17505.9921875,-1.0,"out=2000000/2000000 docs, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-forkrun-8w,forkrun,tokenize,41460.47437566903,17505.9921875,-1.0,"out=2000000/2000000 docs, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-plugin-8w,plugin,tokenize,83099.60790588938,17505.9921875,-1.0,"out=2000000/2000000 docs, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-pool-16w,pool,tokenize,142776.20971395407,19466.7265625,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-executor-16w,executor,tokenize,140394.09673240103,21297.6484375,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-hf-16w,hf_datasets,tokenize,37165.98192119079,21297.6484375,-1.0,"out=2000000/2000000 docs, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-forkrun-16w,forkrun,tokenize,61174.2430641997,21297.6484375,-1.0,"out=2000000/2000000 docs, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-plugin-16w,plugin,tokenize,98613.33959583085,21297.6484375,-1.0,"out=2000000/2000000 docs, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-pool-32w,pool,tokenize,221133.3976136097,21297.6484375,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-executor-32w,executor,tokenize,279569.97187700216,21399.25390625,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-hf-32w,hf_datasets,tokenize,34659.22530682406,21399.25390625,-1.0,"out=2000000/2000000 docs, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-forkrun-32w,forkrun,tokenize,69903.22930199181,21399.25390625,-1.0,"out=2000000/2000000 docs, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-plugin-32w,plugin,tokenize,89252.900269667,21399.25390625,-1.0,"out=2000000/2000000 docs, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-pool-48w,pool,tokenize,240533.3612730305,21399.25390625,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-executor-48w,executor,tokenize,297141.6321042189,21399.25390625,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-hf-48w,hf_datasets,tokenize,35352.098476955995,21399.25390625,-1.0,"out=2000000/2000000 docs, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-forkrun-48w,forkrun,tokenize,78744.52570886892,21399.25390625,-1.0,"out=2000000/2000000 docs, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-plugin-48w,plugin,tokenize,93738.35774137572,21399.25390625,-1.0,"out=2000000/2000000 docs, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-pool-96w,pool,tokenize,271913.5203607863,21399.25390625,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-executor-96w,executor,tokenize,357868.5935620387,21399.25390625,-1.0,out=2000000/2000000 docs,96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-hf-96w,hf_datasets,tokenize,22732.180280286633,21399.25390625,-1.0,"out=2000000/2000000 docs, batched=1000",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-forkrun-96w,forkrun,tokenize,37783.5200654788,21399.25390625,-1.0,"out=2000000/2000000 docs, order=index",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-plugin-96w,plugin,tokenize,36304.32267742259,21399.25390625,-1.0,"out=2000000/2000000 docs, frozen ABI",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic
+tok-polars,polars,tokenize-udf,14275.17360285609,29068.48828125,-1.0,"out=2000000 docs, map_batches (serial UDF)",96c/AMD EPYC 7443 24-Core Processor Linux 7.0.0-31-generic

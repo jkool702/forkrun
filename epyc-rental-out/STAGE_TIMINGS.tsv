@@ -9,3 +9,4 @@
 20_datagen	0	1198
 40_bench_ml5m	1	11391
 41_bench_numa5m	1	1086
+42_bench_tokenize	0	3956
