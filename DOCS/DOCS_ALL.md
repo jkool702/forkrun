@@ -231,7 +231,7 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
-## v3.6.0 (unreleased)
+## v3.6.0 — 2026-09-30
 
 ### Second-review remediation, six waves (W-REL6)
 
