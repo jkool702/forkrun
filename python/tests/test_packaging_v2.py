@@ -50,9 +50,47 @@ def _build_wheel(workdir):
     return wheels[0]
 
 
+_MANYLINUX_TAG_RE = re.compile(r"^manylinux_(\d+)_(\d+)_(x86_64|aarch64|i686)$")
+
+
+def _host_glibc():
+    """(major, minor) of the build host's glibc, or None on musl."""
+    try:
+        confstr = os.confstr("CS_GNU_LIBC_VERSION")
+    except (AttributeError, ValueError, OSError):
+        return None
+    m = re.search(r"(\d+)\.(\d+)", confstr or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def assert_manylinux_tag(case, tag, machine):
+    """Tag must be PEP 600 manylinux and must not over-promise.
+
+    Deliberately does NOT reuse setup.py's policy table: this asserts
+    the two properties that were actually violated before — a bare
+    `linux_x86_64` tag (PyPI rejects it), and a floor newer than the
+    libc the binary was linked against.
+    """
+    m = _MANYLINUX_TAG_RE.match(tag)
+    case.assertIsNotNone(
+        m, "not a PEP 600 manylinux_<maj>_<min>_<arch> tag (PyPI rejects "
+           "bare linux_* with 'unsupported platform tag'): %r" % tag)
+    case.assertTrue(
+        tag.endswith("_" + machine),
+        "tag %r is not for this architecture %r" % (tag, machine))
+    host = _host_glibc()
+    if host is not None:
+        claimed = (int(m.group(1)), int(m.group(2)))
+        case.assertLessEqual(
+            claimed, host,
+            "tag promises glibc %d.%d but the build host only has %d.%d — "
+            "the binary cannot have been compiled there"
+            % (claimed + host))
+
+
 class TestWheelPlatform(unittest.TestCase):
     def test_platform_tag_helpers(self):
-        """get_platform_tag: this platform tagged, others refused."""
+        """get_platform_tag: manylinux tag from host glibc, others refused."""
         # Importing setup.py executes setup() at module level — stub
         # it out; we only want get_platform_tag().
         from unittest import mock
@@ -66,8 +104,9 @@ class TestWheelPlatform(unittest.TestCase):
             sys.path.remove(REPO_ROOT)
         this_machine = platform.machine()
         if this_machine in ("x86_64", "aarch64"):
-            self.assertEqual(_setup_mod.get_platform_tag(),
-                             "linux_%s" % this_machine)
+            # W-REL: never a bare linux_* tag — PyPI 400s on those.
+            assert_manylinux_tag(self, _setup_mod.get_platform_tag(),
+                                 this_machine)
         real_system, real_machine = platform.system, platform.machine
         try:
             platform.system = lambda: "Darwin"
@@ -78,8 +117,15 @@ class TestWheelPlatform(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 _setup_mod.get_platform_tag()
             platform.machine = lambda: "aarch64"
-            self.assertEqual(_setup_mod.get_platform_tag(),
-                             "linux_aarch64")
+            assert_manylinux_tag(self, _setup_mod.get_platform_tag(),
+                                 "aarch64")
+            # musl has no manylinux floor; a musllinux build is a
+            # separate piece of work, so refuse loudly rather than
+            # emitting a tag that misstates the libc.
+            with mock.patch.object(_setup_mod, "_glibc_version",
+                                   return_value=None):
+                with self.assertRaises(RuntimeError):
+                    _setup_mod.get_platform_tag()
         finally:
             platform.system, platform.machine = real_system, real_machine
 
@@ -91,8 +137,8 @@ class TestWheelPlatform(unittest.TestCase):
         workdir = tempfile.mkdtemp(prefix="forkrun_wheel_")
         try:
             name = os.path.basename(_build_wheel(workdir))
-            self.assertIn("linux_", name,
-                          "wheel lacks platform tag: %s" % name)
+            plat = name[:-len(".whl")].rsplit("-", 1)[-1]
+            assert_manylinux_tag(self, plat, platform.machine())
             self.assertNotIn("none-any", name,
                              "wheel wrongly pure-Python tagged: %s"
                              % name)

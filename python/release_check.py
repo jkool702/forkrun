@@ -298,17 +298,64 @@ def check_reproducible():
     return True
 
 
-@check("Wheel: builds with a platform tag (not py3-none-any)")
+def _wheel_glibc_floor(wheel):
+    """Highest GLIBC_x.y the wheel's .so references, or None.
+
+    The manylinux tag in a wheel filename is a claim about the libc the
+    binary needs. It is metadata — nothing validates it at build time —
+    so the release gate re-derives the floor from the ELF. Returns None
+    when the toolchain to do so (binutils) is unavailable, so the gate
+    degrades to tag-shape validation rather than failing spuriously.
+    """
+    import zipfile
+    try:
+        with zipfile.ZipFile(wheel) as zf:
+            names = [n for n in zf.namelist() if n.endswith(".so")]
+            if not names:
+                return None
+            blob = zf.read(names[0])
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+    proc = subprocess.run(["objdump", "-T", "-"], input=blob,
+                          capture_output=True)
+    if proc.returncode != 0:
+        return None
+    vers = {(int(a), int(b)) for a, b in
+            re.findall(r"GLIBC_(\d+)\.(\d+)", proc.stdout.decode(
+                "utf-8", "replace"))}
+    return max(vers) if vers else None
+
+
+@check("Wheel: PEP 600 manylinux tag that the binary actually honors")
 def check_wheel():
     # W-REL5-F (F6.4): reads the single shared build (see
     # _ensure_artifacts), not a private pip invocation.
+    #
+    # W-REL: the old assertion was `"linux_" in name`. That was two
+    # bugs at once — it passed for `manylinux_2_28_x86_64` purely as a
+    # substring ("many|linux_"), and it would have passed for the bare
+    # `linux_x86_64` tag that PyPI rejects outright ("unsupported
+    # platform tag"). Assert the tag's SHAPE, and that the binary's
+    # glibc floor does not exceed what the tag promises.
     wheel, _ = _ensure_artifacts()
     name = os.path.basename(wheel)
-    assert "linux_" in name, "wheel lacks platform tag: %s" % name
-    assert "none-any" not in name, \
-        "wheel wrongly tagged py3-none-any: %s" % name
-    assert PY_VERSION in name, \
-        "wheel version mismatch: %s" % name
+    plat = name[:-len(".whl")].rsplit("-", 1)[-1]
+    assert plat != "any", "wheel wrongly tagged py3-none-any: %s" % name
+    m = re.match(r"^manylinux_(\d+)_(\d+)_(x86_64|aarch64|i686)$", plat)
+    assert m, (
+        "wheel platform tag must be PEP 600 manylinux_<maj>_<min>_<arch> "
+        "(PyPI rejects a bare linux_* tag); got %r from %s. "
+        "Release wheels come from tools/build_wheel.sh." % (plat, name))
+    claimed = (int(m.group(1)), int(m.group(2)))
+    assert PY_VERSION in name, "wheel version mismatch: %s" % name
+
+    need = _wheel_glibc_floor(wheel)
+    if need is not None:
+        assert need <= claimed, (
+            "wheel is tagged manylinux_%d_%d but the embedded .so "
+            "references GLIBC_%d.%d — the tag is a promise pip trusts "
+            "and the loader enforces. Build inside the manylinux "
+            "container (tools/build_wheel.sh)." % (claimed + need))
     return True
 
 

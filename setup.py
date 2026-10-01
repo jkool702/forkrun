@@ -26,6 +26,38 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG_DIR = os.path.join(REPO_ROOT, "python", "forkrun")
 SO_NAME = "libforkrun_python.so"
 
+# W-PY23/REL: PEP 600 manylinux policy floors, oldest first. A wheel
+# built against glibc G may claim the highest policy floor <= G:
+# claiming a floor ABOVE the symbols the binary actually needs is
+# merely conservative (a glibc-F host still runs it); claiming one
+# BELOW them is a lie that pip cannot detect but the loader can.
+#
+# The build host's glibc is the ceiling, NOT the floor: building on
+# Fedora (glibc 2.43) yields a binary needing 2.38 (see __isoc23_*
+# below), so 2_39 is the honest tag there. Building inside the
+# manylinux_2_28 image yields 2_28. tools/build_wheel.sh does the
+# latter and lets auditwheel confirm.
+_MANYLINUX_POLICIES = ((2, 5), (2, 12), (2, 17), (2, 28), (2, 31),
+                       (2, 34), (2, 35), (2, 39))
+
+
+def _glibc_version():
+    """(major, minor) of the build host's glibc; None on musl/other libc.
+
+    os.confstr is the only reliable probe: platform.libc_ver() returns
+    ("", "") for glibc under CPython. A musl host returns None here and
+    is rejected below — musl needs a musllinux tag, which we do not
+    build (forkrun's engine is glibc-tuned).
+    """
+    try:
+        confstr = os.confstr("CS_GNU_LIBC_VERSION")
+    except (AttributeError, ValueError, OSError):
+        return None
+    if not confstr:
+        return None
+    m = re.search(r"(\d+)\.(\d+)", confstr)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
 
 def get_platform_tag():
     """W-PY23: correct platform tag for the wheel (fail-fast off-Linux).
@@ -34,6 +66,12 @@ def get_platform_tag():
     works — only the platform matters). A py3-none-any tag would let
     pip install it on ARM/macOS where the .so cannot load; the
     platform tag makes that a clean refusal instead.
+
+    W-REL: PyPI rejects a bare `linux_x86_64` platform tag outright
+    ("unsupported platform tag") — only PEP 600 manylinux/musllinux
+    tags are accepted for Linux wheels. So the tag must name the glibc
+    floor, which is why this reads the build host's libc instead of
+    hardcoding a string.
     """
     system = platform.system()
     if system != "Linux":
@@ -42,13 +80,23 @@ def get_platform_tag():
             "Linux-specific syscalls (memfd_create, splice, "
             "fallocate)." % system)
     machine = platform.machine()
-    if machine == "x86_64":
-        return "linux_x86_64"
-    if machine == "aarch64":
-        return "linux_aarch64"
-    raise RuntimeError(
-        "unsupported architecture %r (supported: x86_64, aarch64)"
-        % machine)
+    if machine not in ("x86_64", "aarch64"):
+        raise RuntimeError(
+            "unsupported architecture %r (supported: x86_64, aarch64)"
+            % machine)
+    glibc = _glibc_version()
+    if glibc is None:
+        raise RuntimeError(
+            "no glibc detected on this build host (musl?). forkrun's "
+            "engine links against glibc; build the wheel inside a "
+            "manylinux container (tools/build_wheel.sh) or on glibc.")
+    eligible = [p for p in _MANYLINUX_POLICIES if p <= glibc]
+    if not eligible:
+        raise RuntimeError(
+            "glibc %d.%d predates every supported manylinux policy"
+            % glibc)
+    floor = eligible[-1]
+    return "manylinux_%d_%d_%s" % (floor[0], floor[1], machine)
 
 
 PLATFORM_TAG = get_platform_tag()
@@ -150,7 +198,10 @@ setup(
     package_data={"forkrun": [SO_NAME, "py.typed"]},
     cmdclass={"build_py": BuildSubstratePy},
     # The wheel carries a compiled .so: tag it for this platform so
-    # pip refuses it elsewhere (never py3-none-any).
+    # pip refuses it elsewhere (never py3-none-any). The tag is a
+    # PEP 600 manylinux floor derived from the BUILD HOST's glibc —
+    # see get_platform_tag(). Build inside the manylinux container to
+    # get a floor below your distro's glibc (tools/build_wheel.sh).
     options={"bdist_wheel": {"plat_name": PLATFORM_TAG}},
     python_requires=">=3.10",
     install_requires=[],
