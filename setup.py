@@ -170,7 +170,7 @@ setup(
         # version-matrix job); the floor stays 3.10 (python_requires).
         "Programming Language :: Python :: 3.13",
         "Topic :: System :: Distributed Computing",
-        "Topic :: System :: Parallel Processing",
+        "Topic :: System",
         "Topic :: Scientific/Engineering",
         "Topic :: Utilities",
     ],
