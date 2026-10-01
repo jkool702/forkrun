@@ -1,0 +1,17 @@
+BITE2 start
+BITE2 scanner_pid=1895167 parent=1895165
+Current thread 0x00007f6f73f00bc0 [python3] (most recent call first):
+  File "/mnt/ramdisk/forkrun/python/benchmarks/ml/ml_payload.py", line 132 in _tokenize_and_hash
+  File "/mnt/ramdisk/forkrun/python/benchmarks/ml/ml_payload.py", line 163 in process_event_heavy
+  File "/mnt/ramdisk/forkrun/python/benchmarks/ml/ml_payload.py", line 195 in _forkrun_batch
+  File "/mnt/ramdisk/forkrun/python/benchmarks/ml/ml_payload.py", line 216 in forkrun_payload_heavy
+  File "/mnt/ramdisk/forkrun/python/benchmarks/ml/bench_ml_pipeline.py", line 192 in _forkrun_heavy
+  File "/mnt/ramdisk/forkrun/python/forkrun/_worker.py", line 665 in _run
+  File "/mnt/ramdisk/forkrun/python/forkrun/_worker.py", line 221 in worker_main
+  File "/mnt/ramdisk/forkrun/python/forkrun/_executor_core.py", line 195 in fork_workers
+  File "/mnt/ramdisk/forkrun/python/forkrun/run.py", line 3237 in _execute_locked
+  File "/mnt/ramdisk/forkrun/python/forkrun/run.py", line 3141 in _execute
+  File "/mnt/ramdisk/forkrun/python/forkrun/run.py", line 1179 in map
+  File "/tmp/bite2.py", line 18 in <module>
+forkrun [WARN]: helper 'scanner' (pid 1895167) did not exit within 90.0s (SIGKILL issued); continuing.
+BITE2 FAIL RuntimeError: forkrun: scan failed (status 9)

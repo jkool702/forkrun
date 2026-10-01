@@ -1,0 +1,40 @@
+name: shim-check
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "python/forkrun/_shim.c"
+      - "forkrun_shim.h"
+      - "python/forkrun/_bindings.py"
+      - "tools/gen_shim.py"
+      - "tools/generated/shim_signatures.json"
+      - "python/tests/test_shim_abi.py"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "python/forkrun/_shim.c"
+      - "forkrun_shim.h"
+      - "python/forkrun/_bindings.py"
+      - "tools/gen_shim.py"
+      - "tools/generated/shim_signatures.json"
+      - "python/tests/test_shim_abi.py"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shim-check:
+    # W-DEDUP R-D8 ABI gate: the generated shim header + signature table
+    # must match the C source, the .so exports must match the table, and
+    # the ctypes bindings must cover every extern with matching arity.
+    # Signatures only — no semantics (invariant gate's territory).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
+      - name: Generator freshness (committed == generated)
+        run: python3 tools/gen_shim.py --check
+      - name: ABI tests (exports, bindings, order)
+        run: python3 python/tests/test_shim_abi.py -v

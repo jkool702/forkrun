@@ -66,6 +66,7 @@ typedef enum fr_convention {
     X(ring_order, FR_CONV_ARGC_ARGV) \
     X(ring_pipe, FR_CONV_ARGC_ARGV) \
     X(ring_poll, FR_CONV_ARGC_ARGV) \
+    X(ring_recover_worker, FR_CONV_ARGC_ARGV) \
     X(ring_revert_output, FR_CONV_ARGC_ARGV) \
     X(ring_scanner, FR_CONV_ARGC_ARGV) \
     X(ring_seal, FR_CONV_ARGC_ARGV) \
@@ -106,14 +107,14 @@ typedef enum fr_convention {
     FR_F(OUT, U64, RING_BATCH_IDX, 0) \
     FR_F(LOCAL, U64, FRUN_CLAIM_BYTES, 0)
 
-/* ring_poll ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack] [indexer_arr] */
+/* ring_poll ring_poll <spawn_fd> <scan_pairs> <work_pairs> [timer] [trap_ack] [indexer_pairs] */
 #define FR_NFIELDS_ring_poll 6
 #define FR_FIELDS_ring_poll \
     FR_F(IN, I32, spawn_fd, 0) \
-    FR_F(IN, STR, scan_arr, 0) \
-    FR_F(IN, STR, work_arr, 0) \
+    FR_F(IN, STR, scan_pairs, 0) \
+    FR_F(IN, STR, work_pairs, 0) \
     FR_F(IN, I32, timer, 1) \
     FR_F(IN, I32, trap_ack, 1) \
-    FR_F(IN, STR, indexer_arr, 1)
+    FR_F(IN, STR, indexer_pairs, 1)
 
 #endif /* FORKRUN_CALLSCHEMA_H */

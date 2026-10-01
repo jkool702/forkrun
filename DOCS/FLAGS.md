@@ -5,13 +5,13 @@
 - `<default>`                 : Pass arguments fully quoted via cmdline (`"${A[@]}"`). (no flag needed)
 - `-U`, `--unsafe`            : Pass arguments unquoted via cmdline (`${A[*]}`). *(WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the ultra-fast C-level vfork engine!)*
 - `-s`, `--stdin`             : Pass data to the worker via its `stdin` (instead of via cmdline arguments).
-- `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`).
+- `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`). Chunks split at arbitrary byte boundaries, mid-line by design — payloads must be byte-safe (not line-oriented) with `-b` in streaming mode (`-s`).
 - `-z`, `--null`              : Use NULL (`\0`) as the record delimiter instead of newline.
 - `-d`, `--delim <char>`      : Use a custom single-character record delimiter.
 
 ### EXECUTION BACKENDS
 
-- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. Implemented via `posix_spawnp` — on glibc this uses `CLONE_VFORK` internally, so 'vfork engine' and 'posix_spawnp' describe the same fast path. *(NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).*
+- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. Implemented via `posix_spawnp` — on glibc this uses `CLONE_VFORK` internally, so 'vfork engine' and 'posix_spawnp' describe the same fast path. *(NOTE: If -U or -i are used, the ultra-fast-path is disabled, and this flag has no effect; -I stays on the fast path).*
 - `-C`, `--plugin <so:fn>`    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. See [`C_PLUGIN.md`](C_PLUGIN.md) for additional info.
 
 ### OUTPUT MODES
@@ -50,7 +50,7 @@
   - `0,1`: Explicitly bind to physical NUMA nodes 0 and 1.
   - `0:3`: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
 - `-N`, `--dry-run`           : Dry run. Print the generated command strings instead of executing them.
-- `-v`, `--verbose`           : Increase verbosity (prints timing and flag summaries to `stderr`). Implies --stats.
+- `-v`, `--verbose`           : Increase verbosity (prints the worker-spawn summary, plugin-compile notes, and NUMA stats to `stderr`). Implies --stats.
 - `+v`, `--no-verbose`        : Decrease verbosity. Disables --stats.
 - `-V`, `--version`           : Prints forkrun version number
 -  `--stats`                  : Prints NUMA statistics to stderr (currently ignored for UMA)
@@ -113,3 +113,10 @@
   - `auto` (default): Automatically detects SLURM environment via `SLURM_JOB_ID`.
   - `0` / `false`: Disable preemption handling entirely.
   - `1` / `true`: Force-enable preemption handling. When enabled, forkrun catches `SIGTERM` (scancel/preemption) and `SIGUSR1` (SLURM `--signal=B:USR1@<time>`) to instantly freeze the pipeline and generate a checkpoint for perfect resume capability.
+- `FORKRUN_DEBUG`: Engine diagnostics flag (read by the C substrate; forwarded into the cleanroom). Off by default.
+- `FORKRUN_TRUST_RESUME`: `=1` bypasses the interactive resume consent gate for unattended resumption (see `--resume` above). Prefer confirming.
+- `FORKRUN_C_STDIN`: Internal ambient mode flag for `-C` with `-s`/`-b` (plugin reads its batch from fd 0). Managed by the wrapper.
+- `FORKRUN_SWEEP_ARGS`: Internal sweep plumbing (serialized sweep dimensions). Managed by the wrapper.
+- `FORKRUN_TMPDIR`: Bootstrap override: preferred directory for the transient `.so` extraction (ahead of the XDG/runtime/shm/tmp fallbacks).
+- `FORKRUN_NUM_NODES`: Nodes in play, computed by the wrapper from `--nodes`/`--numa` (default 1). Read-only signal, not a knob — presetting it has no effect.
+- `FORKRUN_TEST_FALLOW_PIDFILE` / `FORKRUN_TEST_INDEXER_PIDFILE` / `FORKRUN_TEST_CLEANROOM_PIDFILE`: Test-only hooks (pidfile targeting for signal/chaos tests). No effect on production runs.

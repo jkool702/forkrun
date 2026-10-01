@@ -5,9 +5,8 @@
 **forkrun is a self-tuning, drop-in replacement for GNU Parallel and `xargs -P` that accelerates shell-based data preparation by 50×–400× for typical shell builtins (up to ~3300× for external-binary no-op microbenchmarks) on modern CPUs and scales linearly on NUMA architectures.**
 
 **forkrun achieves:**
-- **200,000+ batch dispatches/sec** (vs ~500 for GNU Parallel)
 - **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across 396 mixed benchmarks, lower for sub-second or byte-mode jobs by design
-- **Born-local NUMA placement**: file ingest measures 0.0–0.2% cross-socket chunks. Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
+- **Born-local NUMA placement**: file ingest measures a median of 0.0% cross-socket chunks (tail up to ~20% on small-chunk and byte-mode runs). Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **Automatic recovery and retry** when a worker unexpectedly dies processing a batch (v3.1.0+)
 
 forkrun is built for high-frequency, low-latency workloads on deep NUMA hardware — a regime where existing tools leave most cores idle due to IPC overhead and cross-socket data migration.
@@ -34,7 +33,7 @@ Once sourced, `frun` acts as a drop-in parallelizer:
 frun my_bash_func < inputs.txt             # parallelize custom bash functions natively!
 cat file_list | frun -k sed 's/old/new/'   # pipe-based input, ordered output
 frun -k -s sort < records.tsv              # stdin-passthrough, ordered output
-frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
+frun -s -I bash -c 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
 ```
 
 **Auditable Builds**: the embedded C extension is compiled and injected by a public GitHub Actions workflow; the git history of the base64 blob traces every byte to a specific CI run of `forkrun_ring.c`. (Reproducible builds with published checksums are on the roadmap and would upgrade this to cryptographic attestation.)
@@ -60,6 +59,49 @@ frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output na
 - **forkrun:** ~90% aggregate (27.1 / 28 cores in steady-state default mode = 97%; 27.6/28 = 98.6% for default-mode sustained runs at ≥1B-line scale (100M-scale measures 24.5–25.5/28 for default -X); `-U` unsafe runs hit 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28) — *No centralized dispatcher; all cores do actual work when work exists.*
 - **GNU Parallel:** 9.6% total (2.68 / 28 cores), 6% useful work (1.68 / 28) — *1 full core used strictly for dispatching work; 1.68 cores doing actual work.*
 
+### Python Frontend (forkrun 0.16.0 — `python/`)
+
+*10M lines (large), median of 5, same i9-7940X class hardware. Method: `python/benchmarks/` (`run_all.py --scale large`). CPU% = attributable process-tree CPU (self + reaped children) over wall × cores — not system-wide. Full record: `python/benchmarks/results/large.md` + `large.csv`.*
+
+| Workload | forkrun Python | Baseline | Speedup | CPU% | Notes |
+|----------|---------------|----------|---------|------|-------|
+| Python no-op (map) | **182 M lines/s** | — | — | 6% | claim/ack via ctypes; overhead-bound at 10M, not compute-bound |
+| Python transform (upper) | **63 M lines/s** | 9.8 M/s serial | **6.4×** | 7% | `bytes(batch.data).upper()`; parent collect is the serial bottleneck |
+| Python compute (sum) | **53 M lines/s** | — | — | 21% | `sum(memoryview)` |
+| C plugin callback | **54 M lines/s** | — | — | 11% | ctypes → C function |
+| Spawn external (`cat`) | **15.1 M lines/s** | — | — | 12% | subprocess amortized by batching |
+| JSONL ingestion | **3.6 M records/s** | — | — | 27% | `json.loads` per record; highest CPU (payload-bound) |
+| Filter + transform | **31 M lines/s** | — | — | — | grep-like + upper |
+| Aggregation (sum) | **50 M lines/s** | — | — | — | int parse + sum |
+
+*Unmeasured cells show "—" (pool baselines are small-scale-only by design; per-row CPU was sampled on headline rows). No-op/upper/sum hold or improve from 1M (102→182M), i.e. fixed bring-up amortizes.*
+
+| Scenario | Input | Output | Peak RSS | Notes |
+|----------|-------|--------|----------|-------|
+| No output (discard) | 1→8MB | 0 | **+0MB** | perfectly flat, both scales |
+| map (collect-all) | 1→8MB | 1→8MB | **output-sized** | v0.5 design |
+| stream, slow consumer | 10MB | 50MB | **~40–175MB peak** | bounded by window, not stream; spread across runs under investigation (see `large.md`) |
+| stream, 5× amplification | 2MB | 10MB | **bounded** | backpressure active |
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| stream() vs map() | **1.8× faster** | drain overlaps produce (no collect); 1.4× at 1M |
+| ordered vs unordered | **1.34×** | reassembly cost grows with batch count (1.01× at 1M) |
+| First yield latency | **~7ms** | on a 0.5s job |
+
+> New to the Python frontend? Start at [`python/docs/QUICKSTART.md`](python/docs/QUICKSTART.md) — full guides (API, modes, fault tolerance, NUMA, streaming, examples, plugins, performance, troubleshooting, migration) live in [`python/docs/`](python/docs/).
+
+### What These Benchmarks Do NOT Measure
+
+- **NUMA multi-node scaling** — single-node only; NUMA is Stage 5 P5.
+- **TB-scale streaming** — v0 materializes input; streaming ingest is v1.
+- **aarch64** — x86_64 only; ARM legs are run manually on hardware.
+- **GPU workloads** — workers are CPU-only by design; GPU work belongs in the parent.
+- **Sub-100k-line jobs** — fixed ~30ms bring-up dominates; use serial Python.
+- **Spawn vs bash `-X`** — Python `subprocess` (~1–5ms/batch) vs `posix_spawnp` (~10µs); bash wins for external binaries by design.
+- **Cold I/O** — inputs are page-cached/tmpfs; cold disk adds a floor both sides.
+- **Pool baselines at scale** — `multiprocessing.Pool` rows are small-scale only (per-line pickling would blow the budget proving nothing new).
+
 ---
 
 ## 🧠 How It Works: The Physics of forkrun
@@ -78,7 +120,29 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 ## 🛠 Requirements & Dependencies
 
 forkrun is designed to run anywhere with zero friction:
-*   **Required:** Bash ≥ 4.0 (Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
+*   **Required:** Bash ≥ 4.4 (`mapfile -d` needs 4.4; Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`), GNU coreutils (`sed -z`, `base64 -w 0`, `truncate --size=` are GNU-only — no busybox support). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
+
+**Supported bash versions** (v3.6.0 verification status — bootstrap = source + load + `ring_version`; suites = 96 + 264):
+
+> **Two-axis reality (read both):** the *bash* axis below was verified on
+> new-glibc iron. Independently, the shipped x86-64 loadables carry **no**
+> `GLIBC_ABI_GNU2_TLS` requirement (D-TLS: rebuilt with
+> `-mtls-dialect=gnu`, dropping the gcc-16 TLSDESC codegen; verified
+> zero references, max `GLIBC_2.38` across all shipped blobs). So glibc
+> ≥2.38 loads (Ubuntu 24.04's 2.39 OK); Debian 12 (2.36) and RHEL ≤9
+> remain below the floor. Non-x86 blobs never carried the requirement.
+> Pure-shell parsing works everywhere regardless, but that is not a
+> usable state without the engine.
+
+| Bash | Bootstrap + smoke ×10 | Full suites | Status (on new glibc) |
+|------|----------------------|-------------|----------------------|
+| 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; RHEL8 glibc (2.28) still below the 2.38 floor |
+| 5.0 | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable |
+| 5.1 | ✅ 10/10 incl. round-trips (D-SEGFIX, source-built 5.1.0 + extracted 5.1.16, byte-exact) | — (suites run on 5.2/5.3 only) | ✅ usable |
+| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+| 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+
+> **Effective floor (W-REL5-D): bash ≥4.4.** D-SEGFIX landed (worker segfault root-caused to the engine's `ARRAY`-struct walk + fixed via pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in the v3.6.0 blob cycle. glibc ≥2.38 (D-TLS rebuild, this cycle).
 
 ---
 

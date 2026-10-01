@@ -1,0 +1,16 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+executor-heavy-28w,executor,udf,92825.87922732855,15230.69140625,-1.0,out=4997982/5000000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+executor-light-28w,executor,udf,1653562.38457706,1588.24609375,-1.0,out=5000000/5000000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+executor-medium-28w,executor,udf,754923.8997905494,5169.85546875,-1.0,out=4997892/5000000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+numa-py-tok-1-28w,forkrun-numa,python,140178.17903382608,501.35546875,-1.0,out=500000/500000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+numa-py-tok-auto-28w,forkrun-numa,python,148419.67314497282,946.37890625,-1.0,out=500000/500000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+numa-tok-1-28w,forkrun-numa,plugin,317492.0728163571,501.35546875,-1.0,out=500000/500000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+numa-tok-auto-28w,forkrun-numa,plugin,341917.477858893,946.375,-1.0,out=500000/500000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+pool-heavy-28w,pool,udf,92058.32433520182,19793.9140625,-1.0,out=4997982/5000000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+pool-light-28w,pool,udf,1537589.5191660563,1602.62890625,-1.0,out=5000000/5000000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+pool-medium-28w,pool,udf,757102.8750202556,5196.05859375,-1.0,out=4997892/5000000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+spawn-cloop-1-28w,forkrun-numa,spawn,1538517.776011283,946.37890625,-1.0,out=1000000/1000000 lines,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+spawn-cloop-auto-28w,forkrun-numa,spawn,0.0,946.37890625,-1.0,gate: c_spawn_loop=True is UMA-only in W-PY33 (multi-node is future work) — use c_spawn_loop=False,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+spawn-pyloop-1-28w,forkrun-numa,spawn,1453846.0837392402,946.37890625,-1.0,out=1000000/1000000 lines,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+spawn-pyloop-auto-28w,forkrun-numa,spawn,1167550.4192416102,946.37890625,-1.0,out=1000000/1000000 lines,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+stream-numa-mem,forkrun-numa,stream,0,946.37890625,-1.0,batches=51 lines=1000000/1000000 rss-delta=0MB,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64

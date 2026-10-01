@@ -1,0 +1,29 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+numa-yyjson-medium-1-28w,forkrun-numa,plugin,2287608.223311116,1111.3671875,-1.0,"out=4995158/5000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+numa-yyjson-medium-auto-28w,forkrun-numa,plugin,2070954.160333756,2122.91015625,-1.0,"out=4993666/5000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+numa-py-medium-1-28w,forkrun-numa,python,702667.7159196127,2122.91015625,-1.0,"out=4995239/5000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+numa-py-medium-auto-28w,forkrun-numa,python,685436.7230260174,2138.4921875,-1.0,"out=4993666/5000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-1-1w,forkrun-numa,plugin,358981.06360032177,2138.4921875,-1.0,"out=998925/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-1-1w,forkrun-numa,python,62231.2873598568,2138.4921875,-1.0,"out=998843/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-1-2w,forkrun-numa,plugin,668781.9704058608,2138.4921875,-1.0,"out=998925/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-1-2w,forkrun-numa,python,123141.37580842497,2138.4921875,-1.0,"out=998843/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-1-4w,forkrun-numa,plugin,1151631.2613096156,2138.4921875,-1.0,"out=999007/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-1-4w,forkrun-numa,python,253055.20630216302,2138.4921875,-1.0,"out=999007/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-1-8w,forkrun-numa,plugin,1790353.691552829,2138.4921875,-1.0,"out=999007/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-1-8w,forkrun-numa,python,461014.2478515746,2138.4921875,-1.0,"out=999007/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-1-14w,forkrun-numa,plugin,2164872.5239887824,2138.4921875,-1.0,"out=999007/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-1-14w,forkrun-numa,python,682053.9173378664,2138.4921875,-1.0,"out=999007/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-1-28w,forkrun-numa,plugin,2336746.3594392207,2138.4921875,-1.0,"out=999007/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-1-28w,forkrun-numa,python,718434.649107608,2138.4921875,-1.0,"out=998767/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-auto-1w,forkrun-numa,plugin,9047.105053444679,2138.4921875,-1.0,"out=4315/1000000 INCOMPLETE, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-auto-1w,forkrun-numa,python,0.0,2138.4921875,-1.0,"out=0/1000000 INCOMPLETE, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-auto-2w,forkrun-numa,plugin,15932.227170121145,2138.4921875,-1.0,"out=8632/1000000 INCOMPLETE, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-auto-2w,forkrun-numa,python,0.0,2138.4921875,-1.0,"out=0/1000000 INCOMPLETE, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-auto-4w,forkrun-numa,plugin,1014269.6535583495,2138.4921875,-1.0,"out=998087/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-auto-4w,forkrun-numa,python,242167.6088376178,2138.4921875,-1.0,"out=998087/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-auto-8w,forkrun-numa,plugin,1467298.0784917304,2138.4921875,-1.0,"out=998087/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-auto-8w,forkrun-numa,python,418382.320522247,2138.4921875,-1.0,"out=998087/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-auto-14w,forkrun-numa,plugin,1385148.230443213,2138.4921875,-1.0,"out=998087/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-auto-14w,forkrun-numa,python,417932.06125092134,2138.4921875,-1.0,"out=998087/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-yyjson-med-auto-28w,forkrun-numa,plugin,1693527.7060861168,2138.4921875,-1.0,"out=998087/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+sweep-py-med-auto-28w,forkrun-numa,python,619324.1304360247,2138.4921875,-1.0,"out=998087/1000000, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64

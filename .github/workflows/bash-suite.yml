@@ -1,0 +1,58 @@
+name: bash-suite
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "frun.bash"
+      - "ring_loadables/frun.nob64.bash"
+      - "UNIT_TESTS/test_frun*.sh"
+      - ".github/workflows/bash-suite.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "frun.bash"
+      - "ring_loadables/frun.nob64.bash"
+      - "UNIT_TESTS/test_frun*.sh"
+      - ".github/workflows/bash-suite.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # W-REL6-1.6: the bash suites run in ZERO CI workflows before this
+  # wave (only a twin-cmp existed). The basic suite + the security /
+  # input-gate suite are binding: a red here blocks the tag. The
+  # comprehensive suite runs as a separate advisory job — it covers
+  # timing-sensitive signal/chaos paths with documented known-flakes
+  # (C-drain framing, reactor-ingest multiset, T10b, M8 HUP-window),
+  # so a red there is triaged, not tag-blocking, until the flake
+  # registry is empty.
+  # Both suites run in the FOREGROUND (M1a): a backgrounded shell
+  # starts with SIGINT ignored, bash cannot un-ignore an
+  # entry-ignored signal, and the ignore inherits down to frun — so
+  # backgrounded signal tests no-op instead of testing.
+  bash-basic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v3
+      - name: Basic suite (foreground) + security suite
+        run: |
+          set -euo pipefail
+          cd UNIT_TESTS
+          ./test_frun.sh
+          ./test_frun_security.sh
+
+  bash-comprehensive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v3
+      - name: Comprehensive suite (foreground, advisory)
+        run: |
+          set -euo pipefail
+          cd UNIT_TESTS
+          ./test_frun_comprehensive.sh

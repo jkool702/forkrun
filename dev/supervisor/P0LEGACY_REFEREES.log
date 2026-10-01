@@ -1,0 +1,134 @@
+............forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 1).
+.....forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+/mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=1931945) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=1931945) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=1931945) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+forkrun: checkpoint written to /tmp/tmpmb0xl1sh.ckpt (engine committed frontier: 8890 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpmb0xl1sh.ckpt'
+...forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+..forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.forkrun: checkpoint written to /tmp/tmp5nbci2k6.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp5nbci2k6.txt.ckpt'
+..forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+..Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/usr/lib64/python3.14/unittest/__main__.py", line 18, in <module>
+    main(module=None)
+    ~~~~^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/main.py", line 104, in __init__
+    self.runTests()
+    ~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/unittest/main.py", line 270, in runTests
+    self.result = testRunner.run(self.test)
+                  ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/runner.py", line 257, in run
+    test(result)
+    ~~~~^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+           ~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/suite.py", line 122, in run
+    test(result)
+    ~~~~^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+           ~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/suite.py", line 122, in run
+    test(result)
+    ~~~~^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/suite.py", line 84, in __call__
+    return self.run(*args, **kwds)
+           ~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/suite.py", line 122, in run
+    test(result)
+    ~~~~^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/case.py", line 725, in __call__
+    return self.run(*args, **kwds)
+           ~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/case.py", line 669, in run
+    self._callTestMethod(testMethod)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/case.py", line 615, in _callTestMethod
+    result = method()
+  File "/mnt/ramdisk/forkrun/python/tests/../tests/../tests/test_doc_accuracy.py", line 292, in test_claim_taxonomy
+    self.assertEqual(_check_entry(DOC_CLAIMS[8]), [])
+                     ~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/mnt/ramdisk/forkrun/python/tests/../tests/../tests/test_doc_accuracy.py", line 247, in _check_entry
+    suite.run(result)
+    ~~~~~~~~~^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/suite.py", line 122, in run
+    test(result)
+    ~~~~^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/case.py", line 725, in __call__
+    return self.run(*args, **kwds)
+           ~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/case.py", line 669, in run
+    self._callTestMethod(testMethod)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/unittest/case.py", line 615, in _callTestMethod
+    result = method()
+  File "/mnt/ramdisk/forkrun/python/tests/test_taxonomy.py", line 76, in test_death_cause_mapping
+    os.kill(os.getpid(), sig)
+    ~~~~~~~^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+.......
+----------------------------------------------------------------------
+Ran 34 tests in 10.809s
+
+OK

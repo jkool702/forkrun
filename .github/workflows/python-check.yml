@@ -1,0 +1,175 @@
+name: python-v0
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "python/**"
+      - "forkrun_ring.c"
+      - "forkrun_substrate.h"
+      - "substratestubs.c"
+      - "ring_loadables/forkrun_plugin.h"
+      - "Makefile.substrate"
+      - "pyproject.toml"
+      - "setup.py"
+      - ".github/workflows/python-check.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "python/**"
+      - "forkrun_ring.c"
+      - "forkrun_substrate.h"
+      - "substratestubs.c"
+      - "ring_loadables/forkrun_plugin.h"
+      - "Makefile.substrate"
+      - "pyproject.toml"
+      - "setup.py"
+      - ".github/workflows/python-check.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-v0:
+    # W-PY1 Stage 4 Phase 1 (+W-PY10 packaging): build the Python-facing
+    # substrate and run the full python suite (incl. the pip-install
+    # cycle test, which needs the pip toolchain). Fedora for everything
+    # (bash-devel exists there; ubuntu runners carry no bash headers
+    # package) — same rule as the canary step in forkrun_release.yml.
+    # Build artifacts are gitignored, so the workspace stays PR-clean.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build Python substrate + run v0 tests
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c 'dnf install -y git bash-devel gcc make file diffutils python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
+
+  sanitizer-asan-ubsan:    # W-REL1/R6: ASan+UBSan legs — ADVISORY for v3.6.0
+    # (continue-on-error: red here never blocks the tag) flipping to
+    # blocking for v3.6.1. triage findings as issues labeled
+    # `advisory-pending-triage` (report, don't panic-fix).
+    # TSan is INTENTIONALLY deferred, with rationale: forkrun's
+    # coordination is cross-process on shared MAP_SHARED (fork, not
+    # threads) — TSan observes races within a single process only
+    # and produces known noise on this architecture; the
+    # cross-process ordering protocol is guaranteed by
+    # INVARIANTS.md and exercised by the stress matrix (same scope
+    # note as the release runbook's sanitizer section). Re-evaluate
+    # post-v3.6.0.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v3
+      - name: ASan+UBSan canary + substrate + smoke (advisory)
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file diffutils python3 libasan libubsan && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print \$NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
+
+  build-wheel:
+    # W-REL5-F (F2): single Fedora wheel build feeding the version
+    # cells below. bash-devel exists only on Fedora (same rule as the
+    # canary step); the wheel carries a py3-none platform .so
+    # (ctypes-loaded, version-agnostic by construction), so one wheel
+    # serves every interpreter cell. Runs on ubuntu-latest: binutils
+    # preinstalled, no container.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build substrate + wheel in Fedora
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && mkdir -p /src/wheelhouse && python3 -m pip wheel . --no-deps -w /tmp/wheelhouse && ls /tmp/wheelhouse/*.whl && cp /tmp/wheelhouse/*.whl /src/wheelhouse/'
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: forkrun-wheel
+          path: wheelhouse/*.whl
+
+  version-matrix:
+    # W-REL5-F (F2): interpreter compatibility over the settled floor
+    # (3.10; E2 verified, not re-litigated). Ubuntu cells (mainstream
+    # coverage): 3.10 system on 22.04, 3.11 via deadsnakes, 3.12
+    # system on 24.04, 3.13 via deadsnakes. Each cell installs the
+    # Fedora-built wheel (FORKRUN_LIB points at its .so — the tree is
+    # never compiled here, bash-devel doesn't exist on Ubuntu) and
+    # runs the full suite. Packaging tests are EXCLUDED per cell
+    # (they compile the substrate = need bash headers; covered by
+    # the Fedora source cell + release_check, not version-gated).
+    # A version-conditional skip differing across cells is a FINDING.
+    # The 3.13 cell is the genuinely-unknown one: a real failure
+    # there halts (named) instead of trimming the matrix.
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - py: "3.10"
+            image: ubuntu:22.04
+            setup: system
+          - py: "3.11"
+            image: ubuntu:22.04
+            setup: deadsnakes
+          - py: "3.12"
+            image: ubuntu:24.04
+            setup: system
+          - py: "3.13"
+            image: ubuntu:24.04
+            setup: deadsnakes
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: forkrun-wheel
+          path: wheelhouse
+      - name: Suite on Python ${{ matrix.py }} (${{ matrix.image }})
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            -e PYVER=${{ matrix.py }} \
+            -e PYSETUP=${{ matrix.setup }} \
+            ${{ matrix.image }} \
+            bash -c '
+              set -euo pipefail
+              apt-get update
+              if [ "$PYSETUP" = "system" ]; then
+                apt-get install -y "python$PYVER" "python$PYVER-venv" gcc file
+                PYBIN="python$PYVER"
+              else
+                apt-get install -y software-properties-common gcc file
+                add-apt-repository -y ppa:deadsnakes/ppa
+                apt-get update
+                apt-get install -y "python$PYVER" "python$PYVER-venv"
+                PYBIN="python$PYVER"
+              fi
+              $PYBIN --version
+              # Loud substrate assertion (a missing .so would pass
+              # vacuously via skipUnless — never silently).
+              WHL=$(ls wheelhouse/*.whl | head -1)
+              test -f "$WHL"
+              $PYBIN -m venv /tmp/venv
+              /tmp/venv/bin/pip install -q "$WHL"
+              /tmp/venv/bin/python -c "import forkrun; print(forkrun.__version__, forkrun.__engine_version__)"
+              export FORKRUN_LIB=$(/tmp/venv/bin/python -c "import forkrun, os; print(os.path.join(os.path.dirname(forkrun.__file__), \"libforkrun_python.so\"))")
+              test -f "$FORKRUN_LIB"
+              cd python/tests
+              MODS=$(ls test_*.py | grep -v "^test_packaging" | sed "s/\.py$//")
+              /tmp/venv/bin/python -m unittest $MODS
+            '

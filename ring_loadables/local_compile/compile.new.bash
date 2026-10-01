@@ -114,11 +114,47 @@ for f in forkrun_ring.*.so; do
     b64[${key}]="$(_forkrun_file_to_base64 "$f")"
 done
   
-# Write new file
+# Write new file: header + function through marker, chunked payload,
+# then the existing file tail verbatim (nounset save/restore +
+# bootstrap invocation live after the payload — dropping them breaks
+# sourcing). Payload shape mirrors _forkrun_b64_emit_chunked.
 {
     printf '%s\n%s' "$a0" "$a1"
-    declare -p b64
-    printf '\n\n_forkrun_bootstrap_setup --force\n\n'
+    echo
+    echo '# W-BASHCOMPAT-BC1: chunked b64 payload, 32KiB %q appends (see _forkrun_b64_emit_chunked; regenerated region, do not hand-edit).'
+    echo 'declare -A b64=()'
+    while IFS= read -r _bck; do
+        [[ -n ${_bck} ]] || continue
+        if [[ -z ${b64[${_bck}]} ]]; then
+            printf 'b64[%q]+=%q\n' "${_bck}" ""
+            continue
+        fi
+        # NOTE: no herestring (<<< appends \n); printf %s adds nothing.
+        # Plain read (not fold — read strips newline delimiters, so
+        # folded output cannot reassemble exactly).
+        while IFS= read -r -N 32768 _bcp || [[ -n ${_bcp} ]]; do
+            case ${_bcp} in
+                *[!A-Za-z0-9+,/=]*)
+                    printf 'b64[%q]+=%q\n' "${_bck}" "${_bcp}" ;;
+                *)
+                    printf 'b64[%s]+=%s\n' "${_bck}" "${_bcp}" ;;
+            esac
+        done < <(printf '%s' "${b64[${_bck}]}")
+    done < <(printf '%s\n' "${!b64[@]}" | LC_ALL=C sort)
+    echo '# <@@@@@< _BASE64_END_ >@@@@@> #'
+    _past_payload=false
+    while IFS= read -r a || [[ -n $a ]]; do
+        if ! $_past_payload; then
+            [[ -z ${a} ]] && continue
+            [[ "${a}" == 'declare -A b64='* ]] && continue
+            [[ "${a}" == 'b64['*']+='* ]] && continue
+            [[ "${a}" == '# W-BASHCOMPAT-BC1'* ]] && continue
+            [[ "${a}" == '# <@@@@@<'* ]] && continue
+            _past_payload=true
+            echo
+        fi
+        echo "$a"
+    done < <(awk 'f{print} /# <@@@@@< _BASE64_START_ >@@@@@> #/{f=1}' ./frun.bash | tail -n +2)
 } >./frun.new.bash
 
 chmod +x ./frun.new.bash

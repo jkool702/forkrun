@@ -51,8 +51,8 @@ fi
 
 # Sourced after FRUN_SOURCE validation:
 FRUN_VER="$(bash -c "source '$FRUN_SOURCE' && frun -V" 2>/dev/null || echo 'unknown')"
-if [[ "$FRUN_VER" != "forkrun v3.5.2" ]]; then
-    echo "FATAL: Test runner requires 'forkrun v3.5.2', got '$FRUN_VER'" >&2
+if [[ "$FRUN_VER" != "forkrun v3.6.0" ]]; then
+    echo "FATAL: Test runner requires 'forkrun v3.6.0', got '$FRUN_VER'" >&2
     exit 1
 fi
 echo "==================================================================" >&2
@@ -391,6 +391,25 @@ run_test "Fixed batch size (-l 2)" \
 run_test "Batch size range (-l 1:5)" \
   "cat '$LINE_INPUT' | frun -l 1:5 printf \"%s\\n\"" \
   "$(cat "$LINE_INPUT")"
+
+# Sentinels (FLAGS.md: 0 = default max, -1 = maximum max). Regression
+# lock-in: W-REL5-A10's fail-closed _expand_unit briefly refused -1
+# (and -0/+0) before it ever reached the engine's nibble machine.
+run_test "Batch max sentinel (-l 1:-1 runs, max-max)" \
+  "cat '$LINE_INPUT' | frun -l 1:-1 printf \"%s\\n\"" \
+  "$(cat "$LINE_INPUT")"
+
+run_test "Batch max sentinel (-l 1:0 runs, default max)" \
+  "cat '$LINE_INPUT' | frun -l 1:0 printf \"%s\\n\"" \
+  "$(cat "$LINE_INPUT")"
+
+run_test "Worker max sentinel (-j -1 runs)" \
+  "cat '$LINE_INPUT' | frun -j -1 printf \"%s\\n\"" \
+  "$(cat "$LINE_INPUT")"
+
+run_test "Non-sentinel negative still refused (-l -2)" \
+  "cat '$LINE_INPUT' | frun -l -2 printf \"%s\\n\"" \
+  "" 1
 
 run_test "Exact lines (-L 3)" \
   "cat '$LINE_INPUT' | frun -L 3 printf \"%s\\n\"" \
@@ -932,6 +951,82 @@ run_test "Timeout flush: 50ms timeout delivers trickle input" \
 "{ echo 'a'; sleep 0.1; echo 'b'; } | frun --timeout 50000 -l 100 -k -s cat" \
 "a
 b"
+
+# 6. CALLER IFS ROBUSTNESS (S2)
+# A hostile/inherited IFS=: must not break frun: the wrapper scans
+# argv for function names, then splits ${FORKRUN_EXTRA_FUNCS}
+# unquoted at build time (pre-fix: " mydouble" never splits under
+# IFS=:, declare misses, zero output, exit 0). Entry normalization
+# + RETURN-trap restore covers it. NOTE: FORKRUN_EXTRA_FUNCS must
+# NOT be pre-set here — the explicit single-word form needs no
+# splitting and would pass even pre-fix (vacuous).
+# 10 iterations in one test (fast: -l 1 exact batches, 5 lines each).
+run_test "Caller IFS=: full output x10 (S2)" \
+"for _i in {1..10}; do IFS=:; mydouble() { echo \$((\$1 * 2)); }; export -f mydouble 2>/dev/null; seq 5 | frun -k -l 1 mydouble || exit 1; done" \
+"2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10"
+
+# 7. MISSING COMMAND (S4)
+# Nonexistent command: every batch exits 127, workers exit 127 at
+# EOF with zero successes -> run-fatal rc=127 + notice (pre-fix:
+# rc=0 silent). Mixed 127+success still completes (transient-127
+# preserved, second test).
+run_test "Missing command fails loud rc=127 (S4)" \
+"seq 10 | frun nosuchcmd_xyz" \
+"" \
+127
+run_test "Mixed 127+success completes (S4/transient-127)" \
+"printf 'a\nbad\nc\n' | frun -k -l 1 sh -c 'if [ \"\$1\" = bad ]; then exit 127; fi; echo \"\$1\"' sh" \
+"a
+c"
 
 
 

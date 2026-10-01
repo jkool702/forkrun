@@ -12,18 +12,47 @@ and `sink=` plumb — or it validates an API that won't ship.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union, cast
 import io
 import os
 
-Mode = Literal["python", "spawn", "plugin"]
+from forkrun._cuda_guard import check_cuda_hazard
+
+Mode = Literal["python", "spawn", "plugin", "splice"]
 Order = Literal["none", "index"]
 OnError = Literal["retry", "fail-fast", "skip"]
-Nodes = Union[int, Literal["auto"]]
+# W-PY21: "auto"/None (detect), 1 (UMA), N (first N physicals),
+# "0,1" (explicit physicals), "@N" (forced logical nodes).
+Nodes = Union[int, str, None]
 
-_VALID_MODES = ("python", "spawn", "plugin")
+_VALID_MODES = ("python", "spawn", "plugin", "splice")
 _VALID_ORDERS = ("none", "index")
 _VALID_ON_ERROR = ("retry", "fail-fast", "skip")
+
+# Bash parity default: the engine's poison threshold (F-PORT1). The
+# Bash frontend reads FORKRUN_RETRY_LIMIT at worker init
+# (ring_worker inc → g_fr_config.retry_limit); the Python port
+# hardcoded 3 at every init site, making 0/<0/custom unreachable
+# despite CONFIGURATION.md/FAULT_TOLERANCE.md documenting the env.
+DEFAULT_RETRY_LIMIT = 3
+
+
+def _resolve_retry_limit():
+    """Poison threshold for worker init (F-PORT1).
+
+    Reads FORKRUN_RETRY_LIMIT (int; default 3). Semantics match the
+    engine: <0 never poisons, 0 poisons on first failure
+    (exactly-once), N poisons after N total executions. Unparseable
+    values raise ValueError fail-closed (never silently 3).
+    """
+    raw = os.environ.get("FORKRUN_RETRY_LIMIT", None)
+    if raw is None or raw == "":
+        return DEFAULT_RETRY_LIMIT
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "FORKRUN_RETRY_LIMIT must be an integer, got %r" % (raw,))
 
 
 def _reject_iterable_source(source: Any) -> None:
@@ -77,15 +106,63 @@ class RunConfig:
     sink: Optional[Callable[..., Any]] = None
     order: Order = "none"
     lines: Optional[int] = None
+    # W-REL5-E5: field name shadows the builtin (kept — renaming to
+    # bytes_per_batch would churn _validate's constructor keyword
+    # and the test seam's cfg.bytes assertions for zero function;
+    # the shadowing is contained: _validate takes bytes_ and maps
+    # it here, so no caller ever writes bytes= at a call site).
     bytes: Optional[int] = None
     workers: Optional[int] = None
     nodes: Nodes = "auto"
     on_error: OnError = "retry"
+    streaming: Optional[bool] = None
+    # D-PORT3: opt-in strict poison (Bash exit-3 cause fidelity).
+    # Default False preserves warn-and-return-partial (Bash -E
+    # continuation); True raises ForkrunPoisonSkip carrying the
+    # engine's poisoned count instead of returning partial output.
+    strict_poison: bool = False
+    # D-PORT1: opt-in parent signal policy. Default "default"
+    # installs nothing (library non-invasive); "checkpoint"
+    # installs HUP/TERM (+USR1 under FORKRUN_PREEMPT_MODE=1)
+    # handlers for the run, restoring afterwards.
+    # W-REL5-E5: real type (was Any) — the D-PORT1 ratified str
+    # union; None rides validate_signal_policy to default.
+    signal_policy: Optional[str] = "default"
+    # W-PY22 resume: checkpoint file to resume FROM (byte coordinates)
+    # and/or checkpoint file to publish TO on abort. Path gating
+    # (C-orderer executors only) happens in run.py — here only the
+    # shape is validated (str/PathLike or None; resume must exist).
+    resume: Optional[Any] = None
+    checkpoint_file: Optional[Any] = None
+
+
+def _validate_resume_path(name: str, value: Any, must_exist: bool) -> Any:
+    """Validate a resume/checkpoint file path (W-PY22).
+
+    Returns the path as str. must_exist (resume=) raises
+    FileNotFoundError eagerly; checkpoint_file= may not exist yet
+    (created atomically on abort).
+    """
+    if isinstance(value, os.PathLike):
+        value = os.fspath(value)
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{name} must be a file path (str), got "
+            f"{type(value).__name__}")
+    if not value:
+        raise ValueError(f"{name} must be a non-empty path")
+    if must_exist and not os.path.exists(value):
+        raise FileNotFoundError(
+            f"checkpoint file not found: {value!r}")
+    return value
 
 
 def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
               order: str, lines: Any, bytes_: Any, workers: Any,
-              nodes: Any, on_error: str) -> RunConfig:
+              nodes: Any, on_error: str, streaming: Any = None,
+              resume: Any = None, checkpoint_file: Any = None,
+              strict_poison: Any = False,
+              signal_policy: Any = "default") -> RunConfig:
     if mode not in _VALID_MODES:
         raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
     if order not in _VALID_ORDERS:
@@ -93,17 +170,78 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     if on_error not in _VALID_ON_ERROR:
         raise ValueError(f"on_error must be one of {_VALID_ON_ERROR}, got {on_error!r}")
     if lines is not None and bytes_ is not None:
-        raise ValueError("lines= and bytes= are mutually exclusive (-l / -b analogues)")
+        # F-PORT3: Bash exact-lines-overrides-byte-mode parity — line
+        # mode wins with a warning (stdin delivery preserved), not a
+        # hard error. Ranges are structurally unrepresentable here
+        # (lines: int|None — no N:M string form).
+        import warnings as _warnings
+        _warnings.warn(
+            "forkrun [WARNING]: lines= overrides bytes= (line mode "
+            "wins, stdin delivery preserved)",
+            UserWarning, stacklevel=3)
+        bytes_ = None
     for name, val in (("lines", lines), ("bytes", bytes_), ("workers", workers)):
         if val is not None and (not isinstance(val, int) or val <= 0):
             raise ValueError(f"{name} must be a positive int, got {val!r}")
-    if not (nodes == "auto" or (isinstance(nodes, int) and nodes >= 1)):
-        raise ValueError(f'nodes must be "auto" or a positive int, got {nodes!r}')
+    # W-PY21 NUMA node specs: None/"auto" (detect), 1/"1" (UMA),
+    # N (first N physicals), "0,1" (explicit), "@N" (forced logical).
+    # Full resolution lives in _numa.build_numa_map; validated here
+    # so run/map/stream all fail eagerly on bad specs.
+    try:
+        from forkrun._numa import build_numa_map as _build_map
+        _build_map(nodes)
+    except ValueError as exc:
+        raise ValueError(f"nodes: {exc}")
     if sink is not None and not callable(sink):
         raise TypeError(f"sink must be None or callable on_batch(batch_meta, result), got {type(sink).__name__}")
-    if payload is None:
+    if streaming is not None and not isinstance(streaming, bool):
+        raise TypeError(f"streaming must be None, True, or False, got {streaming!r}")
+    if not isinstance(strict_poison, bool):
+        raise TypeError(
+            f"strict_poison must be bool, got {type(strict_poison).__name__}")
+    from forkrun._signals import validate_signal_policy as _vsp
+    signal_policy = _vsp(signal_policy)
+    if mode == "splice":
+        # Passthrough has no payload hook: payload must be absent (an
+        # ignored payload would silently drop user code — reject the
+        # contradiction instead), no sink (nothing calls it), and byte
+        # batching only (lines= are boundaries the loop never detects).
+        if payload is not None:
+            raise ValueError(
+                "mode='splice' takes no payload (passthrough) — got %r; "
+                "pass payload=None" % (payload,))
+        if sink is not None:
+            raise ValueError(
+                "mode='splice' takes no sink (no per-batch Python hook)")
+        if lines is not None:
+            raise ValueError(
+                "mode='splice' requires bytes=N (byte batches), not "
+                "lines=N (line boundaries are never detected)")
+    elif payload is None:
         raise ValueError("payload is required: 'pkg.mod:func' | callable | 'plugin.so:fn'")
     _reject_iterable_source(source)
-    return RunConfig(payload=payload, source=source, mode=mode, sink=sink,
-                     order=order, lines=lines, bytes=bytes_, workers=workers,
-                     nodes=nodes, on_error=on_error)
+    resume_path = (None if resume is None
+                   else _validate_resume_path("resume", resume, True))
+    checkpoint_path = (None if checkpoint_file is None
+                       else _validate_resume_path(
+                           "checkpoint_file", checkpoint_file, False))
+    # W-REL2/R9: CUDA-fork hazard guard lives HERE — the single
+    # public-API entry covering every downstream path (run/map/
+    # stream, reactor, streaming, NUMA — exactly where torch/JAX
+    # users live). Runs in the PARENT after validation (bad args
+    # still report as validation errors) and before any engine
+    # contact or forking. Fail fast — never fork under a live
+    # context. Per-path calls were deleted as redundant.
+    hazard, message = check_cuda_hazard()
+    if hazard:
+        raise RuntimeError(message)
+    # W-REL6-3.5: mode/order/on_error were validated against their
+    # literal sets above -- cast (not re-check) into RunConfig.
+    return RunConfig(payload=payload, source=source,
+                     mode=cast(Mode, mode), sink=sink,
+                     order=cast(Order, order), lines=lines, bytes=bytes_,
+                     workers=workers, nodes=nodes,
+                     on_error=cast(OnError, on_error), streaming=streaming,
+                     resume=resume_path, checkpoint_file=checkpoint_path,
+                     strict_poison=strict_poison,
+                     signal_policy=signal_policy)

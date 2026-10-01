@@ -8,6 +8,7 @@
 #   make -f Makefile.substrate canary   # link check only
 #   make -f Makefile.substrate check    # canary + Stage-0 python tests
 #   make -f Makefile.substrate canary CC=aarch64-linux-gnu-gcc OUT=libforkrun.aarch64.so
+#   make -f Makefile.substrate python-substrate   # libforkrun_python.so for ctypes
 #
 # FALSE-GREEN GUARD: make tracks timestamps, not command lines, so switching CC
 # between invocations used to leave the previous arch's objects AND output in
@@ -20,6 +21,22 @@ CC      ?= gcc
 CFLAGS  ?= -O1 -fPIC -Wall -Wextra
 INCLUDES = -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins
 
+# W-PY23 reproducible builds: same source + same compiler must yield
+# byte-identical outputs. Three inputs defeat that by default:
+#  - __FILE__ embeds the compile-time path (varies with the checkout
+#    directory) -> -ffile-prefix-map pins it to ".".
+#  - __DATE__/__TIME__ in forkrun_ring.c (version/debug output, engine
+#    frozen — cannot remove) embed the wall clock -> predefined-macro
+#    override pins them (standard reproducible-builds practice; no
+#    source change, the strings are informational only).
+#  - the GNU build-id hashes link inputs incl. the above -> none.
+# These append (never replace) so a CC/CFLAGS override keeps working;
+# setup.py's fallback gcc line mirrors them (kept in sync by
+# inspection, same rule as the INCLUDES above).
+CFLAGS += -ffile-prefix-map=$(CURDIR)=.
+CFLAGS += -Wno-builtin-macro-redefined '-D__DATE__="Sep  1 2026"' '-D__TIME__="00:00:00"'
+LDFLAGS_REPRO = -Wl,--build-id=none
+
 OUT     ?= libforkrun.so
 CCSTAMP  = .canary-cc
 
@@ -28,9 +45,17 @@ ALLOWED_DEPS = -ldl -lrt
 
 CANARY_STUBS = substratestubs.o
 
+# W-PY1 Python frontend substrate (Stage 4 Phase 1): python/forkrun/_shim.c
+# textually includes forkrun_ring.c (same TU, so the engine's statics and
+# TLS are visible) and ADDS non-static fr_py_* entry points for ctypes.
+# forkrun_ring.c itself is unmodified. Same flags/hygiene as the canary:
+# no -D_GNU_SOURCE on the CLI (the TU sets its own FTMs first).
+PY_OUT ?= python/forkrun/libforkrun_python.so
+PY_SHIM_OBJ = forkrun_python_shim.o
+
 all: canary
 
-.PHONY: all canary check clean FORCE
+.PHONY: all canary canary-versions check clean python-substrate FORCE bench bench-small bench-large bench-csv reproducibility-check clean-python
 
 # Rewritten only when the compiler identity/options actually change, so its
 # mtime bumps exactly when dependent objects must rebuild.
@@ -51,7 +76,55 @@ forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h $(CCSTAMP)
 
 $(OUT): forkrun_ring_canary.o $(CANARY_STUBS)
 	$(CC) -shared -o $@ forkrun_ring_canary.o $(CANARY_STUBS) \
-		-Wl,--no-undefined $(ALLOWED_DEPS)
+		-Wl,--no-undefined $(ALLOWED_DEPS) $(LDFLAGS_REPRO)
+
+forkrun_python_shim.o: python/forkrun/_shim.c forkrun_ring.c forkrun_substrate.h ring_loadables/forkrun_plugin.h $(CCSTAMP)
+	# NOTE: same FTM hygiene as the canary — no -D_GNU_SOURCE on the CLI.
+	# _shim.c's first directive includes forkrun_ring.c, so the engine's
+	# FTM block still precedes the first libc include in this TU.
+	$(CC) $(CFLAGS) -DSHELL -DHAVE_CONFIG_H $(INCLUDES) -c python/forkrun/_shim.c -o $@
+
+$(PY_OUT): $(PY_SHIM_OBJ) $(CANARY_STUBS)
+	$(CC) -shared -o $@ $(PY_SHIM_OBJ) $(CANARY_STUBS) \
+		-Wl,--no-undefined $(ALLOWED_DEPS) $(LDFLAGS_REPRO)
+
+python-substrate: $(PY_OUT)
+	@file $(PY_OUT) | sed 's/^/python substrate artifact: /'
+	@echo "python-substrate OK: $(PY_OUT)"
+
+# W-PY23: two consecutive builds must be byte-identical (same
+# source + same compiler). Touches the shim so both builds
+# recompile+relink fully (make would otherwise no-op the second).
+reproducibility-check: python-substrate
+	@echo "=== Reproducibility check ($(PY_OUT)) ==="
+	@sha256sum $(PY_OUT) > /tmp/fr_build1.sha
+	@touch python/forkrun/_shim.c
+	@$(MAKE) -f Makefile.substrate python-substrate > /dev/null
+	@sha256sum $(PY_OUT) > /tmp/fr_build2.sha
+	@if diff /tmp/fr_build1.sha /tmp/fr_build2.sha > /dev/null 2>&1; then \
+		echo "REPRODUCIBLE: consecutive $(PY_OUT) builds are byte-identical"; \
+	else \
+		echo "NOT REPRODUCIBLE: builds differ:"; \
+		cat /tmp/fr_build1.sha /tmp/fr_build2.sha; \
+		exit 1; \
+	fi
+	@rm -f /tmp/fr_build1.sha /tmp/fr_build2.sha
+
+clean-python:
+	rm -f $(PY_SHIM_OBJ) $(PY_OUT) $(CCSTAMP)
+
+bench: python-substrate
+	python3 python/benchmarks/run_all.py --scale medium --trials 3
+
+bench-small: python-substrate
+	python3 python/benchmarks/run_all.py --scale small --trials 2
+
+bench-large: python-substrate
+	python3 python/benchmarks/run_all.py --scale large --trials 5
+
+bench-csv: python-substrate
+	python3 python/benchmarks/run_all.py --scale medium --trials 5 \
+		--csv python/benchmarks/results/pybench.csv
 
 canary: $(OUT)
 	@file $(OUT) | sed 's/^/canary artifact: /'
@@ -75,8 +148,16 @@ canary: $(OUT)
 	fi
 	@echo "canary OK: $(OUT) links with no undefined symbols"
 
+# W-BASHCOMPAT-BC5: version-floor gate over the canary closure. Every
+# bash-internal stub carries its first-export version (or an explicit
+# unexported marker); the checker fails on missing annotations,
+# post-floor versions, and stub-matched undefined symbols above the
+# floor in the shipped prebuilts. Run wherever the canary runs.
+canary-versions:
+	python3 tools/check_canary_versions.py
+
 check: canary
 	python3 -m unittest discover -s python/tests
 
 clean:
-	rm -f *.o *.so $(CCSTAMP)
+	rm -f *.o *.so $(CCSTAMP) $(PY_SHIM_OBJ) $(PY_OUT)

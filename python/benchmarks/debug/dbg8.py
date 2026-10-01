@@ -1,0 +1,45 @@
+import os, ctypes, time, sys
+sys.path.insert(0, 'python')
+from forkrun._bindings import load, FrPyBatch
+from forkrun.run import _close_all_except
+lib = load()
+lib.fr_py_init(0, 0)
+memfd = os.memfd_create('dbg')
+os.lseek(memfd, 0, 0)
+fr, fw = os.pipe()
+fpid = os.fork()
+if fpid == 0:
+    _close_all_except({fr, memfd})
+    rc = lib.fr_py_fallow_loop(fr, memfd)
+    os._exit(0 if rc == 0 else 6)
+spid = os.fork()
+if spid == 0:
+    _close_all_except({memfd})
+    rc = lib.fr_py_scan(memfd)
+    os._exit(0 if rc == 0 else 5)
+os.close(fr)
+wpid = os.fork()
+if wpid == 0:
+    _close_all_except({memfd, fw})
+    lib.fr_py_worker_init(0, 0, 0, 3, 0)
+    import mmap as _mmap
+    c = FrPyBatch(); r = lib.fr_py_claim(ctypes.byref(c))
+    sys.stderr.write('claim %d idx %d len %d\n' % (r, c.batch_idx, c.length))
+    if r == 0 and c.length > 0:
+        mm = _mmap.mmap(memfd, c.offset + c.length, access=_mmap.ACCESS_READ)
+        sys.stderr.write('mapped ok, data=%r\n' % bytes(memoryview(mm)[c.offset:c.offset+c.length]))
+        a = lib.fr_py_ack(fw, -1)
+        sys.stderr.write('ack %d\n' % a)
+    c2 = FrPyBatch(); r2 = lib.fr_py_claim(ctypes.byref(c2))
+    sys.stderr.write('claim2 %d idx %d len %d\n' % (r2, c2.batch_idx, c2.length))
+    os._exit(0)
+time.sleep(0.3)
+os.write(memfd, b'a\nb\nc\n')
+lib.fr_py_ingest_done()
+_, st = os.waitpid(wpid, 0)
+print('worker exit:', os.WEXITSTATUS(st) if os.WIFEXITED(st) else st, flush=True)
+os.close(fw)
+_, fst = os.waitpid(fpid, 0)
+print('fallow exit:', os.WEXITSTATUS(fst) if os.WIFEXITED(fst) else fst, flush=True)
+_, sst = os.waitpid(spid, 0)
+print('scanner exit:', os.WEXITSTATUS(sst) if os.WIFEXITED(sst) else sst, flush=True)

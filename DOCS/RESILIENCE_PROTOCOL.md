@@ -21,24 +21,66 @@ This guarantees absolute, immediate failure detection without requiring the orch
 
 ---
 
-## §2. Transient Failure: Graceful Recovery & Self-Healing
+## §2. Transient Failure: Parent-Side Transaction Recovery (W-PY29)
 
-When a worker dies gracefully (e.g., a command returns a non-zero exit code while `-E` is active), the worker's `EXIT` trap executes a multi-step rollback and recovery protocol.
+Every batch runs inside a per-worker transaction record (`WorkerTxn`,
+one 128B cache line per worker in MAP_SHARED `GlobalState`). The
+worker publishes at claim and clears at ack; the PARENT recovers on
+any death. The worker's EXIT trap is cleanup-only (it must never
+escrow — that would double-deposit).
 
-### 2.1 Output Reversion (Transaction Rollback)
-To preserve Exactly-Once semantics, any partial data the failing worker wrote to its output buffer must be erased before the batch is retried. 
-The worker calls `ring_revert_output`, which uses `ftruncate` and `lseek` to roll the worker's output `memfd` back to the exact byte offset recorded prior to the batch starting. 
+### 2.1 The 4-State Machine
 
-### 2.2 The Escrow Deposit
-The worker calls `ring_escrow_put`, dropping the metadata for the failed batch (byte offset, number of lines) into the lock-free Escrow side-channel. Crucially, it increments the `num_kills` counter for this specific batch.
+```
+                    claim
+IDLE ─────────────→ CLAIMING ────── claim failed (EOF/abort) ─────→ IDLE
+                       │                      (only legal backward edge)
+                       │ successful publication (release store, LAST)
+                       ▼
+                    CLAIMED
+                       │
+                       │ begin ack side effects
+                       ▼
+                 COMMITTING
+                       │
+                       │ all ack side effects complete
+                       ▼
+                     IDLE
+```
 
-### 2.3 The `TRAP_ACK` Handshake
-The dying worker sends its `wID` down the `TRAP_ACK` pipe to the parent orchestrator, signaling: *"I have safely rolled back my state and secured the data."* The worker then exits.
+Happy-path cost is four cache-local release stores (~2ns total). No
+CAS, no fences beyond the publish/clear release-acquire pair, no
+syscalls on the claim path.
 
-### 2.4 The Orchestrator Respawn
-The `ring_poll` reactor observes the `WORKER_DEATH` event. Because the exit was non-zero, it instantly spawns a replacement worker on the same NUMA node to maintain pipeline capacity. Due to the **Escrow Priority Inversion** rule, the first thing the new (or any idle) worker does is check the Escrow pipe, claim the abandoned batch, and execute it. 
+### 2.2 Output Rollback Without lseek
 
-If the failure was transient, the replacement worker succeeds, and the pipeline continues with zero data loss and zero sequence corruption.
+Each worker holds a TLS `worker_output_end` cursor: the byte position
+right after the most recently completed batch. It is initialized once
+per worker (fresh or respawned) from the output fd's live position
+(the only cursor `lseek`), snapshotted as `output_start` at claim,
+and advanced only after a COMPLETE emit succeeds — never during
+partial emission. Recovery truncates regular files to `output_start`
+(`ftruncate` + `lseek`); pipes are at-least-once (guarded by
+`S_ISREG`, never grown).
+
+### 2.3 The Escrow Deposit (Parent-Side)
+
+Recovery deposits the orphan batch metadata into the lock-free Escrow
+side-channel with `num_kills + 1`, routed to the dead worker's NUMA
+node (locality survives death). The first idle worker re-claims it
+(Escrow Priority Inversion); the poison threshold converts loops
+into skips (§3). Both reactors call recovery for EVERY death,
+including exit 0 — the C state machine classifies:
+
+| State + death | Decision |
+|---|---|
+| `IDLE` + exit 0, or error at EOF | NORMAL_EXIT (free slot) |
+| `IDLE` + error mid-stream | NO_BATCH (respawn, nothing lost) |
+| `CLAIMING` + any death | RACE → abort/resume (ticket unattributable) |
+| `CLAIMED`, already committed | ALREADY_DONE (clear, respawn/free) |
+| `CLAIMED`, orphan, error exit | RECOVERED (revert + escrow + respawn) |
+| `CLAIMED`, orphan, exit 0 | FATAL (worker bug — abort) |
+| `COMMITTING` + any death | RACE → abort/resume (commit ambiguous) |
 
 ---
 
@@ -51,15 +93,38 @@ If a specific batch of data is fundamentally malformed, it will persistently kil
 3. **The Safe Skip:** The worker skips processing the batch entirely. It acknowledges (`ring_ack`) the batch to ensure global pipeline ordering continues, prints a warning to `stderr`, and alerts the orchestrator.
 4. **The Global State:** The orchestrator records the poisoned batch index and alters the final pipeline exit code to `3` to explicitly notify the user of partial data loss. 
 
+### 3.1 Final-Attempt Coredumps (W-PY30)
+
+Coredumps are disabled by default on every worker (soft
+`RLIMIT_CORE` 0 at startup; the generous hard limit is preserved so
+re-enabling needs no privilege). They are armed for exactly one
+batch execution: the final allowed escrow attempt — the running
+attempt with `num_kills + 1 == RETRY_LIMIT`, whose failure poisons
+the batch. Success, poison-skip, and soft-fail (escrow deposit)
+paths disarm, so the enabled limit never leaks into later batches.
+A death in the armed window produces exactly one core per poisoned
+batch; batches the auto-retry saves never dump. `coredump_filter`
+is pinned to `0x31` (anonymous-private + ELF headers + hugetlb-private) so the dump
+excludes the multi-GB shared ingress arenas. Accepted cost: the
+dump delays death-pipe visibility on final-attempt crashes — but
+that batch is being poisoned regardless, so the latency never
+delays a save. 
+
 ---
 
-## §4. Catastrophic Failure: The Seqlock Ledger & Checkpoints
+## §4. Catastrophic Failure: Conservative Abort + Seqlock Ledger
 
-If a worker suffers a catastrophic death (e.g., `SIGKILL`), it cannot execute its `EXIT` trap. It cannot revert its output, and it cannot deposit the batch into Escrow.
+A `CLAIMING` or `COMMITTING` death (§2.3, RACE) cannot be recovered
+locally: the ticket is unattributable (claim race) or the commit is
+ambiguous (ack race — re-execution could double-emit). The reactor
+aborts the run and the Seqlock ledger below carries the resume.
 
-### 4.1 The 3-Second Grace Period
-When the `ring_poll` reactor catches a `WORKER_DEATH` event, it increments a `trap_ack_pending` counter for that `wID`. If a corresponding `TRAP_ACK` arrives, the counter decrements to 0. 
-If the counter is > 0, an asynchronous 3,000-millisecond countdown begins. If the timer expires and the counter is still > 0, the orchestrator declares a **Catastrophic Failure** and triggers a global `ring_abort`. 
+### 4.1 No Grace Period
+
+There is no trap-ACK wait and no timeout: recovery runs
+synchronously in the death handler (revert + escrow deposit are a few
+microseconds), so every death is classified the moment the death pipe
+fires. `TRAP_ACK` carries poison-skip notices only.
 
 ### 4.2 The Seqlock Ledger
 The `ring_order` thread acts as a deterministic observer. As batches successfully complete, `ring_order` merges them. Because batches finish out of order, the leading edge of completed work is "jagged." 
@@ -93,7 +158,11 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
 *Preconditions:* output must go to a seekable file (truncation is impossible on pipes/terminals — those downgrade to at-least-once); the user must truncate to the byte count in the crash message before resuming; and the orchestrator must survive long enough to write the checkpoint (SIGKILL to `frun` itself yields no checkpoint — SIGTERM/SIGINT/SIGHUP and SLURM USR1 with `FORKRUN_PREEMPT_MODE` are trapped and checkpointed).
 
 * **Ordered (`-k`) & Buffered (`--buffered`) Modes: EXACTLY-ONCE DELIVERY.**
-  Because partial output is physically reverted (`ftruncate`) inside the per-worker `memfd` upon a graceful crash, and because catastrophic crashes trigger a mathematically absolute byte-coordinate resumption, surviving data is guaranteed to be committed to the final output stream exactly once. 
+  Because partial output is physically reverted (`ftruncate` to the
+  transaction cursor) by parent-side recovery on any crash, and
+  because ambiguous-window crashes abort into a mathematically
+  absolute byte-coordinate resumption, surviving data is guaranteed
+  to be committed to the final output stream exactly once. 
 * **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
   Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
 
@@ -108,4 +177,85 @@ Because resume files dictate commands and environment restoration, `forkrun` enf
 3. **Layer 3 (Authorization Decision Gate):** Double-token frame split; custom setup commands and functions are evaluated only after interactive user authorization.
 
 See [`SECURITY.md`](SECURITY.md) for the complete security specification.
+
+---
+
+## §7. Verified Envelopes: Streaming + NUMA Tier-3 Recovery (W-PY34)
+
+§2–§4 describe the mechanism. This section records where recovery
+is *verified by test* (not just designed), and the topology
+preconditions the verification rests on. Verification order: no
+engine or recovery-code changes were needed — the WorkerTxn
+architecture covered streaming and multi-node NUMA as designed.
+
+### 7.1 Streaming recovery (UMA) — `python/tests/test_streaming_recovery.py`
+
+Worker death DURING an active `stream()` drain recovers exactly
+like death during `map()`: the reactor's death-pipe handler calls
+`fr_py_recover_worker()` synchronously inside `reactor_loop`
+(between drain bursts — `DRAIN_BURST` bounds detection latency),
+the orphan batch is reverted + escrowed, the respawned generation
+re-processes it, and the drain loop yields it. The other workers
+never pause. Verified (all with `orchestrator=True`, `nodes=1`):
+
+- SIGSEGV / SIGKILL mid-stream, `order="none"` and
+  `order="index"`: stream continues, output complete, recovered
+  batch exactly once (Counter equality, plus a blob-uniqueness
+  gate against double-emit).
+- Two simultaneous deaths at different batches: both recovered.
+- Ordered streaming: the reassembly buffer holds the gap; the
+  late batch lands in its correct position (byte-exact
+  reconstruction).
+- Slow consumer + crash: recovery completes with bounded parent
+  memory (streaming holds only the in-flight window).
+
+### 7.2 NUMA recovery (`nodes="@2"`) — `python/tests/test_numa_recovery.py`
+
+Cross-node recovery works because every routing decision keys off
+the dead worker's node (`txn->node`), never the parent's:
+
+- Crash under `@2`: parent on node 0 reads `WorkerTxn[wid]` from
+  MAP_SHARED `GlobalState`, deposits to `fd_escrow_w[1]`, respawns
+  pinned to node 1 (`fr_py_worker_init(wid, node, ...)`); the new
+  generation claims from node 1's escrow. Output byte-exact vs a
+  healthy `@2` run (SIGSEGV and SIGKILL, map and stream).
+- Respawn node stability is structural: `wid_to_node` assigns
+  contiguous per-node blocks once per run, so a respawned wid
+  reuses its node's memfd, ring, and escrow pipe (locked in by
+  unit test).
+- Combined streaming + NUMA + crash (both orders): stream
+  continues, complete output, exact order for `order="index"`.
+
+### 7.3 Topology preconditions (read before operating NUMA)
+
+1. **Workers cover every node — enforced, not advised**
+   (W-NUMA2). On multi-node topologies the parent raises the
+   effective worker count to at least the node count
+   (`workers < nodes` → bumped to `nodes`, one `UserWarning`
+   stating requested vs effective). The underlying fact stands:
+   rings are born-local and workers claim locally only
+   (stealing is scanner-side); without the guarantee, a node
+   with no worker would never have its ring claimed. The F-NUMA1
+   drain guard remains as the backstop for genuine runtime
+   anomalies (fork failures, respawn exhaustion), not config.
+2. **`nodes="auto"` follows the boot topology.** Booted with
+   `numa=fake=N`, auto resolves to N nodes and every call takes
+   the NUMA pipeline. Single-node-authored tests and scripts
+   (workers < N, UMA batching assumptions) must pass `nodes=1`
+   explicitly under fake NUMA. This is an operating fact, not a
+   recovery bug: the W-PY34 suites pin `nodes=1` (streaming) and
+   `nodes="@2"` (NUMA) for exactly this reason.
+3. **NUMA batch granularity varies run to run** (per-node rings
+   batch independently, and a crash shifts timing). Correctness
+   comparisons across NUMA runs must be over line multisets or
+   joined bytes — never over blob identity. (UMA batching is
+   deterministic: single ring, pre-fork scan.)
+
+### 7.4 Explicitly NOT covered
+
+- Recovery in `mode="spawn"` / `mode="plugin"` streaming
+  executors (same WorkerTxn mechanism, no Tier-3 tests written).
+- Realtime (`-u`) delivery (at-least-once by physics, §5.2).
+- Scheduling work onto unworked nodes (see 7.3.1 — documented
+  constraint, not a tested path).
 

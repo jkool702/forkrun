@@ -1,0 +1,282 @@
+{
+  "fr_py_abort": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_abort_reason": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_ack": {
+    "args": "int fallow_fd, int target_fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_ack_core": {
+    "args": "int fallow_fd, int target_fd",
+    "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_ack_direct": {
+    "args": "int fallow_fd, int target_fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_ack_init": {
+    "args": "int fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_cap_rewind": {
+    "args": "int *slot, const char *name",
+    "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_claim": {
+    "args": "fr_py_batch_t *out",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_complete": {
+    "args": "int signal_fd, uint64_t wid, uint64_t batch_idx, int fallow_fd, int out_fd, const char *data, uint64_t data_len",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_copy_range": {
+    "args": "int src_fd, uint64_t src_off, int dst_fd, uint64_t dst_off, uint64_t length",
+    "linkage": "extern",
+    "return": "int64_t"
+  },
+  "fr_py_data_hwm_reset": {
+    "args": "void",
+    "linkage": "static",
+    "return": "void"
+  },
+  "fr_py_data_ready": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "uint64_t"
+  },
+  "fr_py_data_ready_node": {
+    "args": "int node",
+    "linkage": "extern",
+    "return": "uint64_t"
+  },
+  "fr_py_destroy": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_diag_node": {
+    "args": "int node, uint64_t *out",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_drain_loop": {
+    "args": "int signal_r, const int *out_fds, int num_workers, int results_fd, int drain_mode",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_emit": {
+    "args": "int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx, const char *data, uint64_t data_len",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_emit_record": {
+    "args": "int out_fd, uint64_t batch_idx, int src_fd, uint64_t src_off, uint64_t src_len",
+    "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_escrow_deposit": {
+    "args": "unsigned int kills",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_exec_spawn": {
+    "args": "char **argv, int argc, uint64_t in_off, uint64_t in_len, int ingress_fd, int out_fd, uint64_t batch_idx",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_fallow_loop": {
+    "args": "int pipe_r, int memfd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_fallow_phys": {
+    "args": "int fd_in, int fd_file",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_get_raw_window": {
+    "args": "int fd, uint64_t offset, uint64_t length",
+    "linkage": "extern",
+    "return": "void *"
+  },
+  "fr_py_indexer_numa": {
+    "args": "int memfd, int node_id",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_ingest_done": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_ingest_eof_posted": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_init": {
+    "args": "int lines, int bytes",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_init_numa": {
+    "args": "int lines, int bytes, int num_nodes, const char *numa_map",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_is_resume_mode": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_nonblock": {
+    "args": "int fd",
+    "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_numa_ingest": {
+    "args": "int infd, int outfd, int num_nodes",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_numa_scanner": {
+    "args": "int memfd, int node_id, int fd_spawn, int num_nodes",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_orderer": {
+    "args": "int order_pipe_r, int output_fd, int unordered_mode, int numa_mode",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_output_advanced": {
+    "args": "uint64_t nbytes",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_parse_descriptors": {
+    "args": "const char *input, uint64_t input_len, struct fr_py_record_desc *descriptors, uint64_t max_descriptors",
+    "linkage": "extern",
+    "return": "int64_t"
+  },
+  "fr_py_plugin_cache_reset": {
+    "args": "void",
+    "linkage": "static",
+    "return": "void"
+  },
+  "fr_py_plugin_call": {
+    "args": "const char *path, const char *func_name, int ingress_fd, int out_fd, uint64_t batch_off, uint64_t batch_len, uint64_t batch_idx, uint32_t line_count, uint32_t num_kills, int wid, int wincarn",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_plugin_ensure": {
+    "args": "const char *path, const char *func_name",
+    "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_plugin_invoke": {
+    "args": "int ingress_fd, int out_fd, uint64_t batch_off, uint64_t batch_len, uint64_t batch_idx, uint32_t line_count, uint32_t num_kills, int wid, int wincarn",
+    "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_poisoned_count": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "unsigned int"
+  },
+  "fr_py_read_full": {
+    "args": "int fd, void *buf, size_t count",
+    "linkage": "static",
+    "return": "ssize_t"
+  },
+  "fr_py_recover_worker": {
+    "args": "int wid, int incarnation, int output_fd, int exit_code",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_resume_snapshot": {
+    "args": "uint64_t *horizon, uint64_t *stdout_bytes, struct FrPyInterval *jagged, uint32_t *count_out, uint32_t max_jagged",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_scan": {
+    "args": "int fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_scan_with_spawn": {
+    "args": "int fd, int spawn_w",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_set_order_pipe": {
+    "args": "int fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_set_output_fd": {
+    "args": "int fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_set_resume_state": {
+    "args": "uint64_t horizon, uint64_t stdout_bytes, const struct FrPyInterval *jagged, uint32_t jagged_count",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_spill_sequential": {
+    "args": "int src_fd, int dst_fd, uint64_t max_bytes",
+    "linkage": "extern",
+    "return": "int64_t"
+  },
+  "fr_py_version": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "const char *"
+  },
+  "fr_py_worker_init": {
+    "args": "int wid, int node_id, int wincarn, int retry_limit, int debug",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_worker_plugin_loop": {
+    "args": "int wid, const char *path, const char *func_name, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_worker_spawn_loop": {
+    "args": "int wid, char **argv, int argc, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_worker_splice_loop": {
+    "args": "int wid, int ingress_fd, int out_fd, int signal_fd, int fallow_fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_write_all": {
+    "args": "int fd, const void *buf, size_t count",
+    "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_write_full": {
+    "args": "int fd, const void *buf, size_t count",
+    "linkage": "static",
+    "return": "int"
+  }
+}

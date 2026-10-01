@@ -1,4 +1,10 @@
-"""Stage 0 API-surface tests (validation only — engine lands in Stage 4)."""
+"""Stage 0 API-surface tests (validation only — engine lands in Stage 4).
+
+Validation-shape tests assert against _validate_config directly (engine-free:
+they pass with or without libforkrun_python.so). Rejection tests go through
+forkrun.run (validation raises before any engine contact). Engine behavior
+lives in test_v0.py.
+"""
 
 import os
 import sys
@@ -9,6 +15,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import forkrun  # noqa: E402
 from forkrun._batch import Batch  # noqa: E402
+
+_DEFAULTS = dict(mode="python", sink=None, order="none", lines=None,
+                 bytes_=None, workers=None, nodes="auto", on_error="retry")
 
 
 class TestSourceValidation(unittest.TestCase):
@@ -21,19 +30,21 @@ class TestSourceValidation(unittest.TestCase):
             forkrun.run("pkg.mod:func", source=(x for x in range(3)))
 
     def test_path_accepted_shape(self):
-        with self.assertRaises(NotImplementedError):
-            forkrun.run("pkg.mod:func", source="/tmp/in.txt")
+        cfg = forkrun._validate_config("pkg.mod:func", "/tmp/in.txt",
+                                       **_DEFAULTS)
+        self.assertEqual(cfg.source, "/tmp/in.txt")
 
     def test_fd_accepted_shape(self):
-        with self.assertRaises(NotImplementedError):
-            forkrun.run("pkg.mod:func", source=0)
+        cfg = forkrun._validate_config("pkg.mod:func", 0, **_DEFAULTS)
+        self.assertEqual(cfg.source, 0)
 
     def test_pipe_accepted_shape(self):
         r, w = os.pipe()
         try:
             with os.fdopen(r, "rb") as reader:
-                with self.assertRaises(NotImplementedError):
-                    forkrun.run("pkg.mod:func", source=reader)
+                cfg = forkrun._validate_config("pkg.mod:func", reader,
+                                               **_DEFAULTS)
+                self.assertIs(cfg.source, reader)
         finally:
             os.close(w)
 
@@ -58,9 +69,23 @@ class TestOptionValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             forkrun.run("p:m", source="f", order="sorted")
 
-    def test_lines_bytes_exclusive(self):
+    def test_lines_bytes_lines_win_with_warning(self):
+        # F-PORT3: Bash -L+-b parity — lines= wins with one UserWarning
+        # (not a hard error); the effective config keeps lines.
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", UserWarning)
+            cfg = forkrun._validate_config("p:m", "f", lines=10, bytes_=10,
+                                           mode="python", sink=None,
+                                           order="none", workers=None,
+                                           nodes="auto", on_error="retry")
+        self.assertEqual(cfg.lines, 10)
+        self.assertIsNone(cfg.bytes)
+        self.assertTrue(any("lines= overrides bytes=" in str(w.message)
+                            for w in caught))
+        # Zero/negative still rejected:
         with self.assertRaises(ValueError):
-            forkrun.run("p:m", source="f", lines=10, bytes=10)
+            forkrun.run("p:m", source="f", lines=0)
 
     def test_nonpositive(self):
         with self.assertRaises(ValueError):
@@ -71,10 +96,23 @@ class TestOptionValidation(unittest.TestCase):
             forkrun.run("p:m", source="f", sink="not-callable")
 
     def test_wrappers_delegate(self):
-        with self.assertRaises(NotImplementedError):
-            forkrun.map("p:m", source="f")
-        with self.assertRaises(NotImplementedError):
-            forkrun.stream("p:m", source="f")
+        # Delegation proven engine-free: invalid options raise through the
+        # wrappers' shared validation path (map/stream validate like run).
+        with self.assertRaises(ValueError):
+            forkrun.map("p:m", source="f", mode="bogus")
+        with self.assertRaises(ValueError):
+            forkrun.stream("p:m", source="f", order="sorted")
+
+    def test_v0_mode_gate(self):
+        # All three modes dispatch (plugin loads eagerly and fails here
+        # on the bogus path — still before any engine contact).
+        from forkrun._plugin import PluginError  # noqa: PLC0415
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt") as fh:
+            fh.write("a\n")
+            fh.flush()
+            with self.assertRaises(PluginError):
+                forkrun.run("p:m", source=fh.name, mode="plugin")
 
 
 class TestBatchLifetime(unittest.TestCase):

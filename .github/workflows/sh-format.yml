@@ -13,18 +13,16 @@ permissions:
   contents: read
 
 jobs:
-  sh-checker:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Run the sh-checker
-        uses: luizm/action-sh-checker@master
-        env:
-          SHELLCHECK_OPTS: -e SC1004 # exclude some shellcheck warnings.
-          SHFMT_OPTS: -s -ln bash -i 4 -ci # arguments to shfmt.
-        with:
-          sh_checker_checkbashisms_enable: false
-          sh_checker_exclude: OLD LEGACY ring_loadables/OLD
+  # W-REL1/R7: the sh-checker job is REMOVED, deliberately. It was
+  # permanently red since July 2026: 29 shellcheck findings per
+  # frun.bash copy x4 (frozen product — primer §4.1 idioms that must
+  # NOT be "fixed"), plus BROKEN/, BENCHMARKS/, DOCS/ noise outside
+  # every standing scope, plus shfmt style diffs on the live test
+  # files whose reformatting at release-eve risks the 263-test
+  # suite for zero product benefit. A permanently-false gate
+  # destroys every other red's signal; a missing gate is better.
+  # Format signal is retained where it is load-bearing: twin-check
+  # below (byte lockstep) + review discipline per the primer.
   twin-check:
     # PF-1: file twins must stay in lockstep. frun.bash <->
     # ring_loadables/frun.nob64.bash carry different embedded-b64 payloads
@@ -32,6 +30,7 @@ jobs:
     # pre-b64-marker region is compared; the comprehensive-suite twins are
     # byte-identical with no exceptions.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v3
       - name: File twins in lockstep

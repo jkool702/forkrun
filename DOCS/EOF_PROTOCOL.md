@@ -4,7 +4,7 @@
 
 This document defines the formal protocol by which forkrun detects end-of-input and guarantees clean termination without lost wakeups, premature exits, or deadlocks. This protocol is a first-principles design, not derived from existing systems.
 
-> **Scope:** This protocol governs the Scanner→Worker boundary (`ring_claim`, `core_scanner_loop`). The Ingest→Scanner boundary uses a simplified 2-condition variant of the same rules.
+> **Scope:** This protocol governs the Scanner→Worker boundary (`ring_claim`, `core_scanner_loop`). The Ingest→Scanner boundary uses a simplified 2-condition variant of the same rules. §7 governs the Parent→Caller boundary (per-node drain verification before declaring NUMA completion).
 
 ---
 
@@ -202,7 +202,43 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 ---
 
-## §7. Relationship to Other Documents
+## §7. Parent-Side Completion (NUMA; F-NUMA1)
+
+§§1–6 govern the Scanner→Worker boundary. The Parent→Caller
+boundary needs its own rule, because worker liveness alone cannot
+prove completeness: the reactor returns when no spawned worker is
+alive, but a node that never got workers (fork-gate miss) or whose
+batches were never claimed leaves no trace in worker statuses —
+the parent would parse a short output and return success.
+
+**Rule.** Before declaring NUMA completion (blocking or
+streaming), the parent must verify per-node drain: every published
+slot claimed (`read_idx >= write_idx`) on every node. A node whose
+unclaimed tail is entirely empty (EOF sentinel / zero-length
+tail: never counted by the fork gate, never claimed, contributes
+no output) is vacuous. Any other `read_idx < write_idx` is a
+violation with a coverage-dependent disposition: with full worker
+coverage (workers >= num_nodes) it raises `RuntimeError` naming
+the node and indices — silent partial completion becomes
+impossible-or-loud (the W-PY22 doctrine: refused instead of
+silent loss). With under-coverage (workers < num_nodes — the
+documented RESILIENCE §7.3.1 topology constraint, deliberately
+probed by benchmark sweeps) it emits one stderr warning and
+returns the partial output. (`read_idx > write_idx` is benign
+claim overshoot — stragglers' FAA tickets past the final publish
+exit via EOF without ack — and never fires.)
+
+**Scope note.** This rule verifies *drain*, not *publication*:
+a node whose ring drained exactly (`read == write`, including
+via the vacuous empty tail) passes even if its share looks small
+— publication completeness (every input byte assigned and
+published) is enforced separately by the pipeline's own EOF
+machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
+(INVARIANTS §17), not by this check.
+
+---
+
+## §8. Relationship to Other Documents
 
 | Document | Relationship |
 |---|---|

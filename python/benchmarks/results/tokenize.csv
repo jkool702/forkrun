@@ -1,0 +1,39 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+tok-serial,serial,tokenize,12220.810930462796,298.53515625,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-pool-1w,pool,tokenize,11976.39891311528,407.37109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-executor-1w,executor,tokenize,11887.461056721393,407.37109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-hf-1w,hf_datasets,tokenize,11977.622531387742,479.0078125,-1.0,"out=20000/20000 docs, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-forkrun-1w,forkrun,tokenize,11691.82867840744,479.0078125,-1.0,"out=20000/20000 docs, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-plugin-1w,plugin,tokenize,34078.88714506979,479.0078125,-1.0,"out=20000/20000 docs, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-pool-2w,pool,tokenize,21013.80218702362,479.0078125,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-executor-2w,executor,tokenize,23124.155151111565,516.3359375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-hf-2w,hf_datasets,tokenize,19898.760538514536,518.6875,-1.0,"out=20000/20000 docs, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-forkrun-2w,forkrun,tokenize,22239.53253574756,521.21484375,-1.0,"out=20000/20000 docs, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-plugin-2w,plugin,tokenize,58506.56407712958,521.21484375,-1.0,"out=20000/20000 docs, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-pool-4w,pool,tokenize,40399.19609105167,521.21484375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-executor-4w,executor,tokenize,45090.95180008203,555.12109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-hf-4w,hf_datasets,tokenize,27314.694388407606,555.12109375,-1.0,"out=20000/20000 docs, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-forkrun-4w,forkrun,tokenize,40273.803630265225,555.12109375,-1.0,"out=20000/20000 docs, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-plugin-4w,plugin,tokenize,95065.13961176756,555.12109375,-1.0,"out=20000/20000 docs, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-pool-8w,pool,tokenize,72308.35858974082,555.12109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-executor-8w,executor,tokenize,77534.69505051468,555.12109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-hf-8w,hf_datasets,tokenize,32010.613950763873,555.12109375,-1.0,"out=20000/20000 docs, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-forkrun-8w,forkrun,tokenize,64147.544694022865,555.12109375,-1.0,"out=20000/20000 docs, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-plugin-8w,plugin,tokenize,126939.48378346581,555.12109375,-1.0,"out=20000/20000 docs, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-pool-14w,pool,tokenize,110274.69532427848,555.12109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-executor-14w,executor,tokenize,117920.01453680688,555.12109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-hf-14w,hf_datasets,tokenize,31038.16168507846,555.12109375,-1.0,"out=20000/20000 docs, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-forkrun-14w,forkrun,tokenize,78272.5783531774,555.12109375,-1.0,"out=20000/20000 docs, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-plugin-14w,plugin,tokenize,124203.65893011059,555.12109375,-1.0,"out=20000/20000 docs, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-pool-28w,pool,tokenize,110079.70827768388,555.12109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-executor-28w,executor,tokenize,115067.23318195387,555.12109375,-1.0,out=20000/20000 docs,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-hf-28w,hf_datasets,tokenize,24882.20657637307,555.12109375,-1.0,"out=20000/20000 docs, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-forkrun-28w,forkrun,tokenize,65316.690212828435,555.12109375,-1.0,"out=20000/20000 docs, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-plugin-28w,plugin,tokenize,78465.01649976632,555.12109375,-1.0,"out=20000/20000 docs, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-ray-1w,ray,tokenize,3965.317231501013,555.12109375,-1.0,"count=20000/20000 rows, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-ray-2w,ray,tokenize,4826.854053888334,555.12109375,-1.0,"count=20000/20000 rows, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-ray-4w,ray,tokenize,6258.337313969894,555.12109375,-1.0,"count=20000/20000 rows, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-ray-8w,ray,tokenize,11927.899274480438,555.12109375,-1.0,"count=20000/20000 rows, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-ray-14w,ray,tokenize,11901.788448420879,555.12109375,-1.0,"count=20000/20000 rows, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-ray-28w,ray,tokenize,13104.747905823466,555.12109375,-1.0,"count=20000/20000 rows, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+tok-polars,polars,tokenize-udf,14814.046251286582,751.6484375,-1.0,"out=20000 docs, map_batches (serial UDF)",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64

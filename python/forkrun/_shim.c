@@ -1,0 +1,2840 @@
+/* python/forkrun/_shim.c — Python-facing substrate shim (W-PY1, Stage 4 Phase 1).
+ *
+ * Textually includes ../../forkrun_ring.c so this TU sees the engine's
+ * static state (g_state/state, g_fr_config, my_numa_node, worker_last_*,
+ * tls_batch_*, escrow pipes) and static helpers (do_lockfree_claim,
+ * ring_init_main, ring_ack_main, ring_destroy_main, core_scanner_loop,
+ * ring_call_ensure_ingress_map, pull_fire_alarm, robust_pipe_write).
+ * forkrun_ring.c itself is UNMODIFIED — this file only ADDS new non-static
+ * fr_py_* entry points that ctypes can dlsym. No bash in the path: callers
+ * pass plain ints/fds, never WORD_LISTs or shell variables.
+ *
+ * Canonical order is preserved: this #include is the FIRST directive in the
+ * TU (before any system/libc header of our own) so the engine's FTM block
+ * (_GNU_SOURCE et al) still precedes the first libc include. Do not add
+ * #includes above it.
+ *
+ * v0 scope: single-node UMA only (node 0). NUMA/multi-node, ordered output,
+ * resume, and the C emitter are Stage 5/6. ack(-1,-1) is a deliberate
+ * no-op disarm (no fallow/order pipes in v0): it computes the input window
+ * from TLS and clears worker_last_cnt.
+ */
+
+#include "../../forkrun_ring.c"
+
+/* W-PY14: <sys/uio.h> for writev (fr_py_emit). Included AFTER the engine
+ * (the FIRST-directive rule above is preserved): the engine's FTM block
+ * already ran, and writev is POSIX — no feature-test dependency. */
+#include <sys/uio.h>
+
+/* Forward: publish-mark epoch reset (defined with the marks below). */
+static void fr_py_data_hwm_reset(void);
+
+/* Python-facing claim out-param. Identity fields mirror fr_state_t /
+ * WorkerBatchState widths (batch_idx u64, major u64, minor/slots/num_kills/
+ * poisoned u32); offset/length/lines carry the payload byte window which
+ * fr_state_t deliberately excludes. Keep field order stable — ctypes binds
+ * positionally. */
+typedef struct fr_py_batch {
+    uint64_t batch_idx;
+    uint32_t slots;
+    uint32_t lines;
+    uint32_t num_kills;
+    uint32_t poisoned;
+    uint64_t offset;
+    uint64_t length;
+    uint64_t major;
+    uint32_t minor;
+} fr_py_batch_t;
+
+/* Version string for the ctypes smoke check. FORKRUN_RING_VERSION has static
+ * storage duration (string literal) — safe to return the pointer. */
+const char *fr_py_version(void) {
+    return FORKRUN_RING_VERSION;
+}
+
+/* W-PY28: worker-local output fd for transaction publication.
+ * W-PY29: publication now snapshots the TLS worker_output_end cursor
+ * (initialized by fr_py_ack_init), so this naming is vestigial — kept
+ * for API compatibility (workers still set it; nothing reads it).
+ * Declared here (before first use in fr_py_worker_init) because C
+ * demands it. */
+static __thread int fr_py_txn_out_fd = -1;
+
+/* Set the worker-local output fd for W-PY28 transaction records.
+ * Call once post-fork, post-init (idempotent; -1 disarms). */
+int fr_py_set_output_fd(int fd) {
+    fr_py_txn_out_fd = fd;
+    return 0;
+}
+
+/* W-PY28: sync the ack offset for a (possibly respawned) worker.
+ * ring_ack_init_main's shim twin: last_ack_offset = SEEK_CUR so the
+ * next OrderPacket spans only this generation's appends. Without it
+ * a respawned ordered worker's first packet would cover the whole
+ * file (TLS starts 0), duplicating everything downstream. Fresh
+ * workers are a no-op (fresh memfd offset is already 0). Assigns
+ * only on lseek success (a pipe fd must never install -1).
+ * W-REL5-D (D2 coherence): adopt the fd + mode too -- the ack core
+ * resets the offset on fd change, so an init-sync that leaves the
+ * cached fd behind manufactures a spurious change and zeroes the
+ * just-synced offset (test_invariant_gate §6/§9 caught it).
+  * W-PY29: also initializes the output cursor (one lseek per worker,
+  * shared with the offset sync above — no extra syscall). */
+int fr_py_ack_init(int fd) {
+    if (fd >= 0) {
+        off_t pos = lseek(fd, 0, SEEK_CUR);
+        if (pos != (off_t)-1)
+            last_ack_offset = pos;
+        ack_cached_target_fd = fd;
+        struct stat st;
+        ack_cached_mode =
+            (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
+    }
+    worker_txn_init_output_cursor(fd);
+    return 0;
+}
+
+/* W-PY29: manual output-cursor advance for emit paths that bypass
+ * fr_py_emit (Python v0 direct-write path in _worker.py). The caller
+ * passes the TOTAL record bytes just made durable (framing +
+ * payload); the cursor moves only on complete emits. Best-effort,
+ * never fails (returns 0 always so workers never branch on it). */
+int fr_py_output_advanced(uint64_t nbytes) {
+    worker_output_end += (off_t)nbytes;
+    return 0;
+}
+
+/* Initialize the substrate for one UMA node. lines/bytes are mutually
+ * exclusive (0 = default adaptive). Returns the engine rc (0 ok, 1 fail). */
+int fr_py_init(int lines, int bytes) {
+    char a0[] = "ring_init";
+    if (lines < 0 || bytes < 0)
+        return 1;
+    if (lines > 0 && bytes > 0)
+        return 1;
+    /* New epoch for the publish high-water marks (W-PY21). */
+    fr_py_data_hwm_reset();
+    char a1[64];
+    char *argv[3];
+    int argc = 1;
+    argv[0] = a0;
+    if (lines > 0) {
+        snprintf(a1, sizeof(a1), "--lines=%d", lines);
+        argv[argc++] = a1;
+    } else if (bytes > 0) {
+        snprintf(a1, sizeof(a1), "--bytes=%d", bytes);
+        argv[argc++] = a1;
+    }
+    return ring_init_main(argc, argv);
+}
+
+/* Tear down substrate state (parent only; children os._exit without this). */
+int fr_py_destroy(void) {
+    char a0[] = "ring_destroy";
+    char *argv[1];
+    argv[0] = a0;
+    return ring_destroy_main(1, argv);
+}
+
+/* Synchronously scan fd (memfd with input bytes, offset at 0) on node 0.
+ * Publishes all slots and sets scanner_finished. Caller lseeks fd to 0
+ * first AND calls fr_py_ingest_done() after the last byte is written:
+ * the scanner treats ingest_complete as its EOF gate (pread returning 0
+ * with ingest_complete clear means "wait for more", not EOF).
+ * Returns engine rc. */
+int fr_py_scan(int fd) {
+    return core_scanner_loop(fd, 0, -1, 1, false);
+}
+
+/* Signal end of input (UMA): the scanner's EOF gate. Call after writing
+ * the last byte to the ingress memfd and before fr_py_scan(). Mirrors
+ * ring_ingest (which the bash pipeline calls when its copy finishes). */
+int fr_py_ingest_done(void) {
+    if (!state)
+        return 1;
+    __atomic_store_n(&state[0].ingest_complete, 1, __ATOMIC_RELEASE);
+    return 0;
+}
+
+/* Initialize worker-local state in the CALLING process (call post-fork).
+ * Fills g_fr_config directly — no env vars, no bash. Mirrors the
+ * ring_worker inc fill point plus node resolution and active_workers
+ * accounting. wid: worker slot id; node_id: -1 = auto (UMA: 0);
+ * wincarn: respawn generation (v0: 0); retry_limit: poison threshold
+ * (v0: 3, <0 = infinite); debug: 0/1. Returns 0 ok, 1 fail. */
+int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
+                      int debug) {
+    if (!state || !g_state)
+        return 1;
+    g_fr_config.ring_wid = wid;
+    if (node_id >= 0 && node_id < (int)global_num_nodes)
+        g_fr_config.ring_node_id = node_id;
+    else
+        g_fr_config.ring_node_id = -1;
+    g_fr_config.ring_wincarn = wincarn;
+    g_fr_config.fd_order_pipe = -1;
+    g_fr_config.retry_limit = retry_limit;
+    g_fr_config.debug = debug ? 1 : 0;
+    g_fr_config.trap_ack_grace_ms = FR_TRAP_ACK_GRACE_MS_DEFAULT;
+    g_fr_config.respawn_cap = -1;
+    g_fr_config.spawn_ceiling = -1;
+    g_fr_config_filled = true;
+    g_debug = g_fr_config.debug;
+    /* W-PY28: fresh generation — drop any inherited output-fd naming
+     * (fork inherits the value; the worker re-arms it explicitly via
+     * fr_py_set_output_fd or the C loops below). */
+    fr_py_txn_out_fd = -1;
+    /* W-PY30: per-worker coredump defaults (dumps off; generous hard
+     * preserved for final-attempt arming; small-dump filter). */
+    worker_coredump_startup();
+
+    if (g_fr_config.ring_node_id >= 0)
+        my_numa_node = g_fr_config.ring_node_id;
+    else
+        my_numa_node = 0;
+    if (my_numa_node >= (int)global_num_nodes)
+        my_numa_node = 0;
+    /* W-PY21: worker self-pinning (mirrors ring_worker inc exactly:
+     * pin when multi-node OR explicit map, via the engine's own
+     * logical→physical map; best-effort, never fatal — UMA paths
+     * never reach here, so UMA behavior is unchanged). */
+    if ((global_num_nodes > 1 || g_explicit_pinning) &&
+        g_logical_to_phys_map)
+        pin_to_numa_node(
+            g_logical_to_phys_map[my_numa_node]);
+    __atomic_fetch_add(&state[my_numa_node].active_workers, 1,
+                       __ATOMIC_SEQ_CST);
+    return 0;
+}
+
+/* Claim one batch (blocking). Publishes TLS (worker_last_*, tls_batch_*)
+ * exactly like ring_claim_main, decides poisoned from g_fr_config.retry_limit
+ * (incl. the once-only poisoned_count increment and halt checks), fills
+ * *out. Returns 0 success, 2 EOF, 1 failure/abort. Never touches bash
+ * variables. */
+
+int fr_py_claim(fr_py_batch_t *out) {
+    struct WorkerBatchState batch;
+    int rc;
+
+    if (!out)
+        return 1;
+    if (my_numa_node == -1) {
+        my_numa_node = 0;
+        if (my_numa_node >= (int)global_num_nodes)
+            my_numa_node = 0;
+    }
+    /* W-PY29: IDLE → CLAIMING before the ticket is issued
+     * (do_lockfree_claim is untouched — the hook only brackets it). */
+    worker_txn_begin_claim(g_fr_config.ring_wid);
+    /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_CLAIM=1 makes
+     * the worker SIGKILL itself inside the claim-without-publish
+     * window (deterministic race injection). Inert unless the env var
+     * is set. Deliberately uncached: the value is read fresh so
+     * forked children observe the post-fork environment (a cached
+     * "unset" inherited across fork would disarm the hook) and
+     * set/del cycles across tests behave. Cost is one getenv per
+     * claim (~tens of ns, invisible next to batch work). */
+    if (getenv("FORKRUN_TEST_DIE_AT_CLAIM") != NULL)
+        raise(SIGKILL);
+    rc = do_lockfree_claim(&batch, true);
+    if (rc != 0) {
+        /* EOF/abort: no batch acquired — CLAIMING → IDLE. */
+        worker_txn_abort_claim(g_fr_config.ring_wid);
+        return rc;
+    }
+
+    worker_last_idx = batch.batch_idx;
+    worker_last_cnt = batch.slots;
+    worker_last_num_kills = batch.num_kills;
+    worker_last_major = batch.major;
+    worker_last_minor = batch.minor;
+    tls_batch_lines = batch.lines;
+    tls_batch_offset = (off_t)batch.offset;
+
+    {
+        uint32_t poisoned = 0;
+        if (batch.num_kills > 0) {
+            int limit = g_fr_config.retry_limit;
+            if (limit >= 0 && batch.num_kills >= (uint32_t)limit) {
+                uint32_t poison_threshold =
+                    (limit > 0) ? (uint32_t)limit : 1;
+                poisoned = 1;
+                if (batch.num_kills == poison_threshold && g_state) {
+                    uint32_t total_poisoned = __atomic_add_fetch(
+                        &g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+                    uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
+                    uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;
+                    if (h_cnt > 0 && total_poisoned >= h_cnt) {
+                        fprintf(stderr,
+                                "forkrun [ABORT]: Halt condition met (%u failed batches). Triggering emergency abort.\n",
+                                total_poisoned);
+                        pull_fire_alarm();
+                    }
+                    if (h_pct > 0) {
+                        uint64_t total_unique_batches = 0;
+                        for (uint32_t i = 0; i < global_num_nodes; i++) {
+                            total_unique_batches +=
+                                __atomic_load_n(&state[i].read_idx,
+                                                __ATOMIC_RELAXED);
+                        }
+                        if (total_unique_batches >= 100) {
+                            uint32_t current_pct =
+                                (uint32_t)(((uint64_t)total_poisoned * 100) /
+                                           total_unique_batches);
+                            if (current_pct >= h_pct) {
+                                fprintf(stderr,
+                                        "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n",
+                                        h_pct);
+                                pull_fire_alarm();
+                            }
+                        } else {
+                            if (total_poisoned >= h_pct) {
+                                fprintf(stderr,
+                                        "forkrun [ABORT]: Halt condition met (%u failed batches early in run). Triggering emergency abort.\n",
+                                        total_poisoned);
+                                pull_fire_alarm();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out->batch_idx = batch.batch_idx;
+        out->slots = batch.slots;
+        out->lines = batch.lines;
+        out->num_kills = batch.num_kills;
+        out->poisoned = poisoned;
+        out->offset = batch.offset;
+        out->length = batch.length;
+        out->major = batch.major;
+        out->minor = batch.minor;
+        /* W-PY30: arm coredumps iff this is the final allowed attempt
+         * (same condition as ring_claim_main — poisoned/fresh/limit<0
+         * return inside with no syscall). */
+        worker_coredump_arm_if_final(batch.num_kills, poisoned,
+                                     g_fr_config.retry_limit);
+    }
+    /* W-PY29: CLAIMING → CLAIMED first-thing after the claim lands
+     * (same placement rule as ring_claim_main — every instruction
+     * before the publish widens the claim-without-publish race).
+     * Python workers bypass ring_claim_main, so the shim publishes
+     * here; the poison accounting above is part of the claim (not
+     * "before" it) — the record carries the final num_kills the
+     * parent must increment from. Syscall-free (TLS cursor). */
+    worker_txn_publish(g_fr_config.ring_wid, &batch);
+    return 0;
+}
+
+/* Ack the in-flight batch (uses the TLS published by fr_py_claim).
+ * v0 calls fr_py_ack(-1, -1): skips fallow/order writes, disarms
+ * worker_last_cnt. Returns engine rc. */
+int fr_py_ack(int fallow_fd, int target_fd) {
+    char a0[] = "ring_ack";
+    char a1[32];
+    char a2[32];
+    char *argv[3];
+    snprintf(a1, sizeof(a1), "%d", fallow_fd);
+    snprintf(a2, sizeof(a2), "%d", target_fd);
+    argv[0] = a0;
+    argv[1] = a1;
+    argv[2] = a2;
+    return ring_ack_main(3, argv);
+}
+
+/* Deposit the in-flight batch into escrow with kill count kills
+ * (caller passes claimed num_kills + 1, matching the bash EXIT-trap
+ * RING_NUM_KILLS++ convention). No-op when nothing is in flight.
+ * Returns 0 ok, 1 pipe failure. */
+int fr_py_escrow_deposit(unsigned int kills) {
+    int node;
+    struct EscrowPacket ep;
+
+    /* W-PY30: this batch's execution is over (soft failure → retry
+     * via escrow) — disarm a final-attempt coredump so it cannot leak
+     * into the worker's subsequent batches. No-op unless armed. */
+    worker_coredump_disarm();
+    if (worker_last_cnt == 0)
+        return 0;
+    node = my_numa_node;
+    if (node < 0 || node >= (int)global_num_nodes)
+        node = 0;
+    ep.idx = worker_last_idx;
+    ep.cnt = worker_last_cnt;
+    ep.num_kills = (uint32_t)kills;
+    ep._pad = 0;
+    if (fd_escrow_w && fd_escrow_w[node] >= 0) {
+        if (robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep)) ==
+            (ssize_t)sizeof(ep)) {
+            __atomic_store_n(&state[node].escrow_pending, 1,
+                             __ATOMIC_RELEASE);
+            /* W-REL2/R14b: clear on successful deposit, mirroring
+             * ring_ack_main's worker_last_cnt = 0. Without this a
+             * second deposit without an intervening claim re-sends
+             * the same batch (double-deposit → duplicate output);
+             * the engine side never had this bug. */
+            worker_last_cnt = 0;
+            return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* Raise the global emergency abort (fail-fast path). Workers blocked in
+ * claim observe EXECUTION_FAILURE via the eof blast. */
+int fr_py_abort(void) {
+    pull_fire_alarm();
+    return 0;
+}
+
+/* Read-only abort-reason accessor (D-PORT2): the exact byte
+ * ring_abort_reason_main exposes to Bash (0 unset, 1 downstream
+ * SIGPIPE/close, 2 internal fault), via the same ACQUIRE load.
+ * Additive surface only — no engine logic touched (W-PY22
+ * fr_py_resume_snapshot precedent: shim reads, engine frozen).
+ * Returns -1 with no live engine (distinguishes "no engine" from
+ * "no abort", which Bash reports as EXECUTION_FAILURE). */
+int fr_py_abort_reason(void) {
+    if (!g_state)
+        return -1;
+    return (int)__atomic_load_n(&g_state->abort_reason, __ATOMIC_ACQUIRE);
+}
+
+/* Number of batches that crossed the poison threshold (parent-side
+ * diagnostic: g_state is MAP_SHARED, so the parent observes worker
+ * increments without IPC). */
+unsigned int fr_py_poisoned_count(void) {
+    if (!g_state)
+        return 0;
+    return __atomic_load_n(&g_state->poisoned_count, __ATOMIC_RELAXED);
+}
+
+/* =====================================================================
+ * W-PY13 v1 fast paths: C-level spawn & plugin dispatch.
+ *
+ * Both wrap engine machinery visible in this TU (posix_spawnp/splice
+ * patterns from ring_exec_splice_main, dlopen/negotiation + RAW window
+ * delivery from ring_call_main). No engine code is modified.
+ *
+ * DESIGN NOTES (where this deviates from the W-PY13 sketches — the
+ * sketches simplified; this follows the frozen sources):
+ * - Plugin callback signature is the REAL one from forkrun_ring.c:
+ *   int (*)(int argc, char **argv, const struct forkrun_ctx *ctx)
+ *   (legacy: int (*)(int argc, char **argv)). There is no out_fd or
+ *   dialect field — output is captured stdout, negotiation rides
+ *   forkrun_use_ctx / version / flags_granted per
+ *   ring_loadables/forkrun_plugin.h (128B struct forkrun_ctx).
+ * - The ctx is filled exactly like ring_call_main fills tls_fctx
+ *   (worker identity from g_fr_config, UMA numa_batch_id derivation,
+ *   RAW window via ring_call_ensure_ingress_map, reserved zeroing).
+ * - Spawn pumps stdin/stdout CONCURRENTLY under poll() (a filter that
+ *   writes stdout before consuming all stdin would deadlock a
+ *   write-then-read sequence). SIGPIPE is ignored around the pump
+ *   (the ring_exec_splice pattern: early-child-exit reads as EPIPE).
+ * - Record framing ([batch_idx u64][len u64] + body, the v0.5 emitter
+ *   contract in run.py:_HDR) happens HERE so the Python worker never
+ *   needs the output length up front. Spawn streams the body with a
+ *   placeholder header + backfill (single-owner fd: worker i writes
+ *   fd i only — no concurrent appenders). Plugin output is captured
+ *   to a memfd first (in-process stdout redirect must be deadlock-free
+ *   for outputs larger than any pipe), then emitted with one helper.
+ *
+ * Return conventions:
+ *   spawn:  0 ok | >0 command exit code (retryable via escrow) |
+ *           128+sig (shell convention, mirrors ring_exec) | <0 infra
+ *           (-1 pipe/setup, -2 spawn, -3 wait/output failure).
+ *   plugin: 0 ok | >0 plugin return code truncated like ring_call
+ *           (retryable) | <0 infra (-1 setup/capture, -2 dlopen/dlsym,
+ *           -3 tokenize/map failure).
+ * ===================================================================== */
+
+/* Little-endian 16-byte emitter header shared with run.py:_HDR. */
+struct fr_py_record_hdr {
+    uint64_t batch_idx;
+    uint64_t len;
+};
+
+/* Full-write loop (regular files / memfds: no SIGPIPE, short writes only
+ * on EINTR/error). Returns 0 ok, -1 on failure. */
+static int fr_py_write_all(int fd, const void *buf, size_t count) {
+    const char *p = (const char *)buf;
+    size_t left = count;
+    while (left > 0) {
+        ssize_t n = write(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            return -1;
+        p += n;
+        left -= (size_t)n;
+    }
+    return 0;
+}
+
+/* Append one framed record copying [src_off, src_off+src_len) from a
+ * memfd/file into the worker-owned out_fd. Returns 0 ok, -1 on failure. */
+static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
+                             uint64_t src_off, uint64_t src_len) {
+    struct fr_py_record_hdr hdr;
+    char buf[1 << 20];
+    uint64_t left;
+    off_t woff;
+
+    if (src_len == 0)
+        return 0; /* v0 parity: empty output emits no record (None). */
+    woff = lseek(out_fd, 0, SEEK_END);
+    if (woff == (off_t)-1)
+        return -1;
+    hdr.batch_idx = batch_idx;
+    hdr.len = src_len;
+    if (fr_py_write_all(out_fd, &hdr, sizeof(hdr)) != 0)
+        return -1;
+    left = src_len;
+    while (left > 0) {
+        size_t want = left > sizeof(buf) ? sizeof(buf) : (size_t)left;
+        ssize_t n = pread(src_fd, buf, want, (off_t)(src_off + src_len - left));
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (fr_py_write_all(out_fd, buf, (size_t)n) != 0)
+            return -1;
+        left -= (uint64_t)n;
+    }
+    return 0;
+}
+
+/* Set a fd nonblocking. Returns 0 ok, -1 on failure. */
+static int fr_py_nonblock(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0)
+        return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+/* Per-worker capture-memfd reuse (spawn + plugin stdout staging).
+ * One memfd per purpose, truncated+rewound per batch: saves a
+ * memfd_create/close pair per batch (~1us) with no lifetime risk (the
+ * fd never leaves this worker; contents are emitted before reuse). */
+static int fr_py_spawn_cap = -1;
+static int fr_py_plugin_cap = -1;
+
+static int fr_py_cap_rewind(int *slot, const char *name) {
+    if (*slot < 0) {
+        *slot = memfd_create(name, MFD_CLOEXEC);
+        if (*slot < 0)
+            return -1;
+    } else if (ftruncate(*slot, 0) != 0 || lseek(*slot, 0, SEEK_SET) != 0) {
+        close(*slot);
+        *slot = -1;
+        return -1;
+    }
+    return *slot;
+}
+
+/* W-PY13.a: C-level spawn fast path (posix_spawnp + concurrent pump).
+ *
+ * argv: NULL-terminated arg vector (argv[0] is the command); argc is a
+ *   redundancy check (argv[argc] must be NULL). in_off/in_len name the
+ *   input window in ingress_fd (zero-copy splice source). The command's
+ *   stdout is framed into out_fd tagged with batch_idx.
+ */
+int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len,
+                     int ingress_fd, int out_fd, uint64_t batch_idx) {
+    int stdin_pipe[2] = {-1, -1};
+    int stdout_pipe[2] = {-1, -1};
+    posix_spawn_file_actions_t actions;
+    sigset_t block, old;
+    struct sigaction sa_ign, sa_oldpipe;
+    int have_oldpipe = 0;
+    pid_t pid;
+    int spawn_rc;
+    int cap_fd = -1;
+    off_t splice_off;
+    uint64_t in_left;
+    int stdin_closed = 0;
+    int stdout_eof = 0;
+    int feed_eof = 0; /* child stopped reading (EPIPE): stop feeding */
+    int status = 0;
+    pid_t waited = -1;
+
+    if (!argv || argc <= 0 || !argv[0] || ingress_fd < 0 || out_fd < 0)
+        return -1;
+    if (argv[argc] != NULL)
+        return -1;
+
+#if defined(O_CLOEXEC)
+    if (pipe2(stdin_pipe, O_CLOEXEC) != 0)
+        return -1;
+    if (pipe2(stdout_pipe, O_CLOEXEC) != 0) {
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+        return -1;
+    }
+#else
+    if (pipe(stdin_pipe) != 0)
+        return -1;
+    if (pipe(stdout_pipe) != 0) {
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+        return -1;
+    }
+    fcntl(stdin_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(stdin_pipe[1], F_SETFD, FD_CLOEXEC);
+    fcntl(stdout_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(stdout_pipe[1], F_SETFD, FD_CLOEXEC);
+#endif
+    /* Best-effort 1MB pipe buffers (the ring_exec_splice pattern). */
+    fcntl(stdin_pipe[1], F_SETPIPE_SZ, 1048576);
+    fcntl(stdout_pipe[1], F_SETPIPE_SZ, 1048576);
+
+    if (fr_py_nonblock(stdin_pipe[1]) != 0 || fr_py_nonblock(stdout_pipe[0]) != 0) {
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        return -1;
+    }
+
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, stdin_pipe[0], STDIN_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, stdout_pipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, stdin_pipe[1]);
+    posix_spawn_file_actions_addclose(&actions, stdout_pipe[0]);
+    if (ingress_fd > 2)
+        posix_spawn_file_actions_addclose(&actions, ingress_fd);
+    if (out_fd > 2 && out_fd != ingress_fd)
+        posix_spawn_file_actions_addclose(&actions, out_fd);
+
+    /* Shield against a SIGCHLD reaper (the ring_exec pattern verbatim:
+     * block around fork, own waitpid, restore after). */
+    sigemptyset(&block);
+    sigaddset(&block, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &block, &old);
+
+    spawn_rc = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+
+    posix_spawn_file_actions_destroy(&actions);
+
+    /* Parent owns: stdin_w (feed), stdout_r (drain). */
+    close(stdin_pipe[0]);
+    close(stdout_pipe[1]);
+    stdin_pipe[0] = -1;
+    stdout_pipe[1] = -1;
+
+    if (spawn_rc != 0) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
+        /* Shell conventions, retryable (bash -E parity): the command spec
+         * is user payload, not infrastructure — "not found / not usable"
+         * poisons through escrow like any nonzero exit (v0 parity: v0's
+         * FileNotFoundError rode retry-then-poison). Anything else
+         * (EAGAIN/ENOMEM-class resource failure inside spawn itself) is
+         * infrastructure: fatal. */
+        if (spawn_rc == ENOENT || spawn_rc == ENOTDIR)
+            return 127;
+        if (spawn_rc == EACCES || spawn_rc == ELOOP)
+            return 126;
+        return -2;
+    }
+
+    /* Stage stdout in a per-batch capture memfd, then frame once with
+     * fr_py_emit_record. NEVER append a partial record to out_fd: the v1
+     * streaming parent preads these memfds CONCURRENTLY, and every byte
+     * visible there must be final — an in-place placeholder + backfill
+     * loses whole batches (the parent may already have consumed the
+     * placeholder header into its split tail; the backfilled length never
+     * reaches it, so the record is held "incomplete" until EOF and
+     * silently dropped). Header-then-body, true length up front, one
+     * append: parseable at every prefix, by construction. Failed batches
+     * leave zero trace (no truncation bookkeeping at all). */
+    cap_fd = fr_py_cap_rewind(&fr_py_spawn_cap, "forkrun_spawnout");
+    if (cap_fd < 0) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
+        return -1;
+    }
+
+    /* Ignore SIGPIPE around the pump (early child exit reads as EPIPE,
+     * never as a signal — the ring_exec_splice rule). */
+    memset(&sa_ign, 0, sizeof(sa_ign));
+    sa_ign.sa_handler = SIG_IGN;
+    sigemptyset(&sa_ign.sa_mask);
+    if (sigaction(SIGPIPE, &sa_ign, &sa_oldpipe) == 0)
+        have_oldpipe = 1;
+
+    splice_off = (off_t)in_off;
+    in_left = in_len;
+    if (in_left == 0) {
+        close(stdin_pipe[1]);
+        stdin_pipe[1] = -1;
+        stdin_closed = 1;
+    }
+    while (!stdout_eof) {
+        struct pollfd pfds[2];
+        int nfds = 0;
+        int pr;
+        if (!stdin_closed) {
+            pfds[nfds].fd = stdin_pipe[1];
+            pfds[nfds].events = POLLOUT;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
+        pfds[nfds].fd = stdout_pipe[0];
+        pfds[nfds].events = POLLIN;
+        pfds[nfds].revents = 0;
+        nfds++;
+        pr = poll(pfds, (nfds_t)nfds, -1);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        /* Drain stdout first (frees pipe capacity for the child) —
+         * into the capture memfd (never out_fd directly: see above). */
+        {
+            short rev = 0;
+            int i;
+            for (i = 0; i < nfds; i++) {
+                if (pfds[i].fd == stdout_pipe[0])
+                    rev = pfds[i].revents;
+            }
+            if (rev & (POLLIN | POLLHUP)) {
+                while (1) {
+                    /* NOTE (W-REL1/R4): SPLICE_F_MOVE here is NOT the
+                     * ingress hazard removed below — the source is a
+                     * PIPE (no page cache, nothing fallow punches),
+                     * and cap_fd is never hole-punched. Only
+                     * memfd-source splices race PUNCH_HOLE. */
+                    ssize_t n = splice(stdout_pipe[0], NULL, cap_fd, NULL,
+                                       1 << 20, SPLICE_F_MOVE);
+                    if (n < 0) {
+                        if (errno == EINTR)
+                            continue;
+                        if (errno == EAGAIN)
+                            break;
+                        break; /* error: stop draining; wait+status decides */
+                    }
+                    if (n == 0) {
+                        stdout_eof = 1;
+                        break;
+                    }
+                }
+            } else if (rev & (POLLERR | POLLNVAL)) {
+                stdout_eof = 1;
+            }
+        }
+        /* Feed stdin (zero-copy splice from the ingress memfd). */
+        if (!stdin_closed && in_left > 0 && !feed_eof) {
+            short rev = 0;
+            int i;
+            for (i = 0; i < nfds; i++) {
+                if (pfds[i].fd == stdin_pipe[1])
+                    rev = pfds[i].revents;
+            }
+            if (rev & POLLOUT) {
+                while (in_left > 0) {
+                    size_t want = in_left > (1 << 20) ? (1 << 20) : (size_t)in_left;
+                    /* NO SPLICE_F_MOVE here, ever (W-REL1/R4): it asks
+                     * the kernel to detach pages from the tmpfs page
+                     * cache, and when the fallow reaper concurrently
+                     * calls fallocate(PUNCH_HOLE) on this same ingress
+                     * memfd the two paths deadlock in a kernel-level
+                     * lock inversion on the inode/page locks. The
+                     * engine removed both splice flags at
+                     * forkrun_ring.c:~7800 with exactly this
+                     * post-mortem; flags=0 copies pages instead of
+                     * moving them (noise at 1MB batches — the spawn
+                     * benchmark cannot tell). Do not re-add without
+                     * re-reading that post-mortem. */
+                    ssize_t n = splice(ingress_fd, &splice_off, stdin_pipe[1],
+                                       NULL, want, 0);
+                    if (n < 0) {
+                        if (errno == EINTR)
+                            continue;
+                        if (errno == EAGAIN)
+                            break;
+                        /* EPIPE (child exited early) or hard error: stop
+                         * feeding for good (no spin), keep draining. */
+                        feed_eof = 1;
+                        break;
+                    }
+                    if (n == 0) {
+                        /* Past memfd EOF: infra fault, stop feeding. */
+                        feed_eof = 1;
+                        break;
+                    }
+                    in_left -= (uint64_t)n;
+                    if (n < (ssize_t)want)
+                        break; /* pipe full: repoll */
+                }
+                if (in_left == 0 || feed_eof) {
+                    close(stdin_pipe[1]);
+                    stdin_pipe[1] = -1;
+                    stdin_closed = 1;
+                }
+            } else if (rev & (POLLERR | POLLNVAL | POLLHUP)) {
+                /* Child gone: EOF it, keep draining stdout. */
+                close(stdin_pipe[1]);
+                stdin_pipe[1] = -1;
+                stdin_closed = 1;
+            }
+        }
+        /* Both directions settled but no EOF yet: keep polling stdout
+         * only — the loop exits on stdout_eof. */
+    }
+    if (stdin_pipe[1] >= 0) {
+        close(stdin_pipe[1]);
+        stdin_pipe[1] = -1;
+    }
+    if (stdout_pipe[0] >= 0) {
+        close(stdout_pipe[0]);
+        stdout_pipe[0] = -1;
+    }
+    if (have_oldpipe)
+        sigaction(SIGPIPE, &sa_oldpipe, NULL);
+
+    while ((waited = waitpid(pid, &status, 0)) == -1) {
+        if (errno == EINTR)
+            continue;
+        /* ECHILD or other non-EINTR failure: the child is lost (never
+         * kill — PID-reuse hazard, the ring_exec rule). */
+        break;
+    }
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    if (waited != pid) {
+        return -3;
+    }
+
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0) {
+            struct stat st;
+            uint64_t cap_len = 0;
+            int erc = 0;
+            if (fstat(cap_fd, &st) == 0 && st.st_size > 0)
+                cap_len = (uint64_t)st.st_size;
+            /* fr_py_emit_record with len 0 emits nothing (v0 parity:
+             * empty output is no record, not an empty record). */
+            if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0)
+                erc = -3;
+            else if (cap_len > 0)
+                /* W-PY29: complete record durable — advance frontier. */
+                worker_txn_advance_output(-1, 16 + cap_len);
+            return erc;
+        }
+        return code; /* retryable command failure */
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return -3;
+}
+
+/* W-PY13.b: per-worker plugin handle cache (shim-private — deliberately
+ * NOT the engine's tls_dl_handle/tls_callback set, which is coupled to
+ * ring_call_main's argv/STDIN-tier lifecycle; Python workers never run
+ * ring_call_main, so sharing that state would entangle two lifecycles). */
+static void *fr_py_plugin_handle = NULL;
+static forkrun_cb_ctx_t fr_py_plugin_ctx_fn = NULL;
+static forkrun_cb_t fr_py_plugin_legacy_fn = NULL;
+static int fr_py_plugin_use_ctx = 0;
+static unsigned fr_py_plugin_flags = 0;
+static char fr_py_plugin_path[4096] = {0};
+static char fr_py_plugin_func[1024] = {0};
+
+static void fr_py_plugin_cache_reset(void) {
+    if (fr_py_plugin_handle) {
+        dlclose(fr_py_plugin_handle);
+        fr_py_plugin_handle = NULL;
+    }
+    fr_py_plugin_ctx_fn = NULL;
+    fr_py_plugin_legacy_fn = NULL;
+    fr_py_plugin_use_ctx = 0;
+    fr_py_plugin_flags = 0;
+    fr_py_plugin_path[0] = '\0';
+    fr_py_plugin_func[0] = '\0';
+}
+
+/* Bind (path, func): dlopen + forkrun_use_ctx negotiation, mirroring
+ * ring_call_main §1 (dialect 1/2 → ctx dispatch; else legacy 2-arg).
+ * Returns 0 bound, -2 on load/symbol failure. */
+static int fr_py_plugin_ensure(const char *path, const char *func_name) {
+    void *h;
+    int *has_ctx;
+    unsigned req = 0, ver = 0;
+
+    if (!path || !path[0] || !func_name || !func_name[0])
+        return -2;
+    if (fr_py_plugin_handle && strcmp(fr_py_plugin_path, path) == 0 &&
+        strcmp(fr_py_plugin_func, func_name) == 0)
+        return 0;
+    fr_py_plugin_cache_reset();
+    h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!h)
+        return -2;
+    has_ctx = (int *)dlsym(h, "forkrun_use_ctx");
+    if (has_ctx)
+        req = (unsigned)*has_ctx;
+    ver = req & FORKRUN_CTX_VERSION_MASK;
+    if (ver == 1 || ver == 2) {
+        forkrun_cb_ctx_t fn = (forkrun_cb_ctx_t)dlsym(h, func_name);
+        if (!fn) {
+            dlclose(h);
+            return -2;
+        }
+        fr_py_plugin_ctx_fn = fn;
+        fr_py_plugin_use_ctx = (int)ver;
+        if (ver >= 2)
+            fr_py_plugin_flags = req & ENGINE_KNOWN_FLAGS;
+        else
+            fr_py_plugin_flags = 0;
+    } else {
+        forkrun_cb_t fn = (forkrun_cb_t)dlsym(h, func_name);
+        if (!fn) {
+            dlclose(h);
+            return -2;
+        }
+        fr_py_plugin_legacy_fn = fn;
+        fr_py_plugin_use_ctx = 0;
+        fr_py_plugin_flags = 0;
+    }
+    fr_py_plugin_handle = h;
+    snprintf(fr_py_plugin_path, sizeof(fr_py_plugin_path), "%s", path);
+    snprintf(fr_py_plugin_func, sizeof(fr_py_plugin_func), "%s", func_name);
+    return 0;
+}
+
+/* W-PY13.b: C-level plugin fast path through the frozen ABI.
+ *
+ * Fills struct forkrun_ctx exactly like ring_call_main fills tls_fctx,
+ * captures the plugin's stdout into a memfd (deadlock-free for outputs
+ * larger than any pipe), and frames it into out_fd tagged with batch_idx.
+ * Input is zero-copy: RAW plugins read the borrowed window
+ * (reserved[0]); all plugins can pread fd_in at batch_offset.
+ *
+ * W-PY26: the body lives in fr_py_plugin_invoke (static, no dlopen)
+ * so the C worker loop reuses it per batch without duplicating the
+ * ctx/capture/emit logic. fr_py_plugin_call is ensure + invoke.
+ */
+static int fr_py_plugin_invoke(int ingress_fd, int out_fd,
+                               uint64_t batch_off, uint64_t batch_len,
+                               uint64_t batch_idx, uint32_t line_count,
+                               uint32_t num_kills, int wid, int wincarn) {
+    int rc;
+    int is_raw;
+    struct forkrun_ctx ctx;
+    size_t batch_argc = 0;
+    int cap_fd = -1;
+    int saved_stdout = -1;
+    int cb_ret = 0;
+    struct stat st;
+    uint64_t cap_len = 0;
+
+    if (ingress_fd < 0 || out_fd < 0)
+        return -1;
+    if (!fr_py_plugin_handle)
+        return -2;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.version = (uint32_t)fr_py_plugin_use_ctx;
+    ctx.struct_size = (uint32_t)sizeof(struct forkrun_ctx);
+    ctx.worker_id = (uint32_t)(wid >= 0 ? wid : 0);
+    ctx.worker_incarn = (uint32_t)(wincarn >= 0 ? wincarn : 0);
+    ctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
+    ctx.fd_in = ingress_fd;
+    ctx.delimiter = '\n';
+    ctx.cfg_state[0] = (uint8_t)(cfg_state & 0xFF);
+    ctx.cfg_state[1] = (uint8_t)((cfg_state >> 8) & 0xFF);
+    ctx.cfg_state[2] = (uint8_t)((cfg_state >> 16) & 0xFF);
+    ctx.cfg_state[3] = (uint8_t)((cfg_state >> 24) & 0xFF);
+    ctx.batch_index = batch_idx;
+    ctx.batch_offset = batch_off;
+    ctx.batch_byte_length = batch_len;
+    ctx.batch_lines = line_count;
+    ctx.num_kills = num_kills;
+    /* UMA v0 derivation (the ring_call_main UMA branch): pack the 64-bit
+     * claim index into (major, minor) the way the engine does. */
+    ctx.numa_batch_id =
+        FR_PACK_KEY(batch_idx >> FR_MINOR_BITS, batch_idx & FR_MINOR_MASK);
+    ctx.flags_granted =
+        (fr_py_plugin_use_ctx >= 2) ? fr_py_plugin_flags : 0;
+
+    is_raw = (fr_py_plugin_use_ctx >= 2) &&
+             ((fr_py_plugin_flags & FORKRUN_CTX_FLAG_RAW) != 0);
+
+    /* Build argv for non-RAW delivery (tokenize into tls_argv exactly
+     * like ring_call_main; RAW skips tokenization entirely). */
+    if (fr_py_plugin_ctx_fn && !is_raw) {
+        off_t saved_off = tls_batch_offset;
+        tls_batch_offset = (off_t)batch_off;
+        if (tls_argv_cap < 1024) {
+            tls_argv_cap = 1024;
+            tls_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+            if (!tls_argv) {
+                tls_argv_cap = 0;
+                tls_batch_offset = saved_off;
+                return -3;
+            }
+        }
+        rc = do_tokenize(ingress_fd, (size_t)batch_len, (off_t)batch_off,
+                         '\n', NULL, 0, &batch_argc);
+        tls_batch_offset = saved_off;
+        if (rc != 0)
+            return -3;
+        tls_argv[batch_argc] = NULL;
+    } else if (fr_py_plugin_legacy_fn) {
+        off_t saved_off = tls_batch_offset;
+        tls_batch_offset = (off_t)batch_off;
+        if (tls_argv_cap < 1024) {
+            tls_argv_cap = 1024;
+            tls_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+            if (!tls_argv) {
+                tls_argv_cap = 0;
+                tls_batch_offset = saved_off;
+                return -3;
+            }
+        }
+        rc = do_tokenize(ingress_fd, (size_t)batch_len, (off_t)batch_off,
+                         '\n', NULL, 0, &batch_argc);
+        tls_batch_offset = saved_off;
+        if (rc != 0)
+            return -3;
+        tls_argv[batch_argc] = NULL;
+    }
+    if (is_raw) {
+        if (batch_len == 0) {
+            ctx.reserved[0] = 0;
+        } else {
+            rc = ring_call_ensure_ingress_map(ingress_fd, batch_off,
+                                              (size_t)batch_len);
+            if (rc != 0)
+                return -3;
+            ctx.reserved[0] =
+                (uint64_t)(uintptr_t)((const char *)tls_ingress_map +
+                                      batch_off);
+        }
+    }
+
+    /* Capture stdout into the reused memfd (grows without bound: no
+     * pipe deadlock for large plugin outputs). */
+    cap_fd = fr_py_cap_rewind(&fr_py_plugin_cap, "forkrun_plugout");
+    if (cap_fd < 0)
+        return -1;
+    fflush(NULL); /* keep earlier C-stdio out of the capture */
+    saved_stdout = dup(STDOUT_FILENO);
+    if (saved_stdout < 0) {
+        return -1;
+    }
+    if (dup2(cap_fd, STDOUT_FILENO) < 0) {
+        close(saved_stdout);
+        return -1;
+    }
+    if (fr_py_plugin_ctx_fn)
+        cb_ret = fr_py_plugin_ctx_fn((int)batch_argc, tls_argv, &ctx);
+    else
+        cb_ret = fr_py_plugin_legacy_fn((int)batch_argc, tls_argv);
+    fflush(NULL); /* push the plugin's stdio into the capture */
+    dup2(saved_stdout, STDOUT_FILENO);
+    close(saved_stdout);
+    saved_stdout = -1;
+
+    if (fstat(cap_fd, &st) == 0 && st.st_size > 0)
+        cap_len = (uint64_t)st.st_size;
+    if (cb_ret == 0 && cap_len > 0) {
+        if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0) {
+            return -1;
+        }
+        /* W-PY29: complete record durable — advance frontier. */
+        worker_txn_advance_output(wid, 16 + cap_len);
+    }
+
+    /* ring_call truncation rule: nonzero → &0xFF, never silent 0. */
+    if (cb_ret == 0)
+        return 0;
+    {
+        int truncated = cb_ret & 0xFF;
+        return (truncated == 0) ? 1 : truncated;
+    }
+}
+
+int fr_py_plugin_call(const char *path, const char *func_name,
+                      int ingress_fd, int out_fd, uint64_t batch_off,
+                      uint64_t batch_len, uint64_t batch_idx,
+                      uint32_t line_count, uint32_t num_kills, int wid,
+                      int wincarn) {
+    int rc;
+
+    if (!path || !func_name || ingress_fd < 0 || out_fd < 0)
+        return -1;
+    rc = fr_py_plugin_ensure(path, func_name);
+    if (rc != 0)
+        return -2;
+    return fr_py_plugin_invoke(ingress_fd, out_fd, batch_off, batch_len,
+                               batch_idx, line_count, num_kills,
+                               wid, wincarn);
+}
+
+/* =====================================================================
+ * W-PY16: streaming ingest support — fallow reaper entry point.
+ *
+ * Two deliberate NON-additions (documented so nobody "completes" them):
+ *
+ * 1. There is deliberately NO fr_py_ingest_begin/chunk/end API. The
+ *    scanner (core_scanner_loop) keeps its publish state in stack
+ *    locals and RESETS write_idx/read_idx per invocation — calling it
+ *    once per chunk would republish every batch from zero and corrupt
+ *    the claim plane. The correct topology is the bash one: fork ONE
+ *    long-lived scanner child running the EXISTING fr_py_scan
+ *    concurrently with the parent's spill. The loop already handles
+ *    incremental arrival (pread returns 0 with ingest_complete clear
+ *    means "wait for more", not EOF — the usleep(100) path), and
+ *    batching adapts to whatever prefix is available. No new scanner
+ *    API exists or is needed.
+ *
+ * 2. Concurrency alone does NOT bound memory: without hole-punching
+ *    the ingress memfd grows to the full input size no matter how
+ *    incrementally it is written. Boundedness comes from fallow —
+ *    punching holes behind the contiguous acked prefix — which the
+ *    Python path has always disarmed (ack(-1,-1)). This function
+ *    enables it: a fallow child runs the engine's OWN ring_fallow_main
+ *    (logical/IndexPacket UMA arm — the exact packet shape the UMA
+ *    ack path writes via robust_pipe_write), tracking the contiguous
+ *    prefix with its interval heap and punching via end_ring. Direct
+ *    call, same TU, zero engine changes.
+ *
+ * Parent orchestration (run.py): create fallow pipe pre-fork → fork
+ * fallow child (this function, exits 0 at pipe EOF) → fork scanner
+ * child (fr_py_scan, exits at ingest gate) → fork workers (ack with
+ * the fallow write end) → spill chunks → fr_py_ingest_done → drain →
+ * close fallow_w (reaper EOF) → reap all. Workers acking into a dead
+ * reaper get EPIPE → fire alarm → worker exit 1 (bash A2 semantics).
+ * ===================================================================== */
+
+/* Run the fallow reaper: read IndexPackets from pipe_r, punch holes in
+ * memfd behind the contiguous acked prefix. Blocks until pipe EOF (all
+ * worker write ends + the parent's copy closed), then returns the
+ * engine rc (0 clean). Never returns on success to a caller that
+ * should continue — the fallow child calls this then os._exit(rc). */
+int fr_py_fallow_loop(int pipe_r, int memfd) {
+    char a0[] = "ring_fallow";
+    char a1[32];
+    char a2[32];
+    char *argv[3];
+
+    if (pipe_r < 0 || memfd < 0)
+        return 1;
+    snprintf(a1, sizeof(a1), "%d", pipe_r);
+    snprintf(a2, sizeof(a2), "%d", memfd);
+    argv[0] = a0;
+    argv[1] = a1;
+    argv[2] = a2;
+    return ring_fallow_main(3, argv);
+}
+
+/* W-PY16/W-PY21: published-DATA-batch high-water marks (worker
+ * fork timing). File-static so both init entry points can reset
+ * them: a new init is a new epoch (see fr_py_data_hwm_reset).
+ * The w<hwm self-reset at poll time stays as a second defense. */
+static uint64_t fr_py_data_hwm = 0;
+static uint64_t fr_py_data_hwm_node[512] = {0};
+
+/* The publish marks are per-RUN state. Resetting them at init —
+ * not only on the w<hwm heuristic at poll time — is load-bearing:
+ * a fast pipeline can publish its whole run before the parent's
+ * first poll, and a stale mark would then swallow every publish
+ * into its shadow (zero observed forever → workers never fork →
+ * publish anomaly). Both init entry points call this. */
+static void fr_py_data_hwm_reset(void) {
+    int i;
+    fr_py_data_hwm = 0;
+    for (i = 0; i < 512; i++)
+        fr_py_data_hwm_node[i] = 0;
+}
+
+/* W-PY16: count of published DATA batches (for worker fork timing).
+ *
+ * The scanner's pre-flight BAILS when a worker is already waiting
+ * (active_waiters > 0 → CASE B → phase 1), and entering phase 1 with
+ * already-complete input publishes nothing (workers then see instant
+ * EOF: silent data loss). So the parent must not fork workers during
+ * pre-flight. Pre-flight completion is unobservable directly, but
+ * publishing only happens in the main loop (post-pre-flight) — hence
+ * this query: cumulative DATA batches published (a batch counts when
+ * lines>0, or byte-length>0 for byte-mode's 0-means-undefined).
+ * The zero-length EOF sentinel never counts. A high-water mark makes
+ * repeated polls amortized O(total).
+ *
+ * Python must read this ONLY through here (never raw MAP_SHARED
+ * coordination words — the fences live in C).
+ */
+
+uint64_t fr_py_data_ready(void) {
+    uint64_t found = 0;
+    uint64_t w;
+
+    if (!state)
+        return 0;
+    w = __atomic_load_n(&state[0].write_idx, __ATOMIC_ACQUIRE);
+    if (w < fr_py_data_hwm)
+        fr_py_data_hwm = 0; /* new run: scanner reset the indices */
+    while (fr_py_data_hwm < w) {
+        uint64_t slot = fr_py_data_hwm & RING_MASK;
+        uint32_t lines = state[0].lines_ring[slot];
+        uint64_t off = state[0].offset_ring[slot];
+        uint64_t end = state[0].end_ring[slot];
+        if (lines > 0 || end > off)
+            found++;
+        fr_py_data_hwm++;
+    }
+    return found;
+}
+
+/* =====================================================================
+ * W-PY14: C-level output emit (fr_py_emit).
+ *
+ * Replaces four Python operations per batch (coerce + header write +
+ * data write + signal write) with one ctypes call: writev() puts the
+ * 16-byte [batch_idx u64][length u64] header and the payload bytes into
+ * the worker-owned output memfd in ONE syscall (scatter/gather, no
+ * copy), then a single 16-byte (wid, batch_idx) signal goes to the pipe.
+ *
+ * Semantics (v0 parity, verified by test_v1_emit.py):
+ * - data == NULL → no record (payload returned None), signal only.
+ * - data != NULL, len == 0 → header with len 0 IS written (payload
+ *   returned b"" — v0 emits an empty record; None-vs-b"" preserved).
+ * - out_fd < 0 → output skipped (discard mode), signal still honored.
+ * - signal_fd < 0 → signal skipped (map/run: parent reads post-waitpid;
+ *   saves the signal syscall on the most common path).
+ * - Every byte appended is final (the W-PY13 append-once rule: the
+ *   concurrent streaming reader must never observe mutable framing).
+ *
+ * Returns 0 ok, -1 output write failure, -2 signal write failure
+ * (EPIPE = parent abandoned the stream → fatal worker exit, v0 parity).
+ * ===================================================================== */
+int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
+               const char *data, uint64_t data_len) {
+    struct fr_py_record_hdr hdr;
+    struct iovec iov[2];
+    int niov;
+    uint64_t sig[2];
+    const char *sp;
+    size_t sleft;
+
+    if (data != NULL && out_fd >= 0) {
+        hdr.batch_idx = batch_idx;
+        hdr.len = data_len;
+        iov[0].iov_base = &hdr;
+        iov[0].iov_len = sizeof(hdr);
+        niov = 1;
+        if (data_len > 0) {
+            iov[1].iov_base = (void *)data; /* writev takes void* */
+            iov[1].iov_len = (size_t)data_len;
+            niov = 2;
+        }
+        /* Full-write loop (memfd writes are effectively whole; the loop
+         * is free insurance — same shape as fr_py_write_all). */
+        while (niov > 0) {
+            ssize_t n = writev(out_fd, iov, niov);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                return -1;
+            }
+            if (n == 0)
+                return -1;
+            {
+                ssize_t left = n;
+                int i;
+                for (i = 0; i < niov && left > 0; i++) {
+                    if ((size_t)left >= iov[i].iov_len) {
+                        left -= (ssize_t)iov[i].iov_len;
+                        iov[i].iov_len = 0;
+                    } else {
+                        iov[i].iov_base = (char *)iov[i].iov_base + left;
+                        iov[i].iov_len -= (size_t)left;
+                        left = 0;
+                    }
+                }
+                while (niov > 0 && iov[0].iov_len == 0) {
+                    /* W-REL5-D (D4): with niov == 1 (header-only emit)
+                     * there is no iov[1] -- copying it reads
+                     * uninitialized stack on every zero-length emit.
+                     * Mark done instead. (A bare `break` here would
+                     * leave niov == 1 with len 0, and the outer loop
+                     * would writev a zero-length iovec, observe n == 0
+                     * and wrongly return -1 for a successful b""
+                     * emit -- test_v1_emit pins the None-vs-b""
+                     * distinction.) */
+                    if (niov == 1) {
+                        niov = 0;
+                        break;
+                    }
+                    iov[0] = iov[1];
+                    niov--;
+                }
+            }
+        }
+        /* W-PY29: the COMPLETE record (16B framing + payload) is
+         * durable — advance the rollback frontier. Partial writes
+         * return -1 above before reaching here. */
+        worker_txn_advance_output((int)wid, 16 + data_len);
+    }
+
+    if (signal_fd < 0)
+        return 0;
+    sig[0] = wid;
+    sig[1] = batch_idx;
+    sp = (const char *)sig;
+    sleft = sizeof(sig);
+    while (sleft > 0) {
+        ssize_t n = write(signal_fd, sp, sleft);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -2;
+        }
+        if (n == 0)
+            return -2;
+        sp += n;
+        sleft -= (size_t)n;
+    }
+    return 0;
+}
+
+/* Flush C stdio before ack/deposit points in the splice loop (it has
+ * no Python streams of its own; fflush(NULL) also protects buffered
+ * output from any plugin sharing the worker). */
+static void _flush_for_splice(void) {
+    fflush(NULL);
+}
+
+/* =====================================================================
+ * W-PY18: C splice worker loop — bash -b/-s parity (no payload case).
+ *
+ * Runs the WHOLE worker loop in C: claim → move bytes ingress→output
+ * → signal → ack, until EOF. Zero Python objects, zero ctypes calls,
+ * zero Python function calls per batch. The "payload" is kernel data
+ * movement (passthrough), which is what makes this mode fast.
+ *
+ * Built ONLY on tested primitives (deviations from the W-PY18 sketch,
+ * whose do_ack_current_batch/do_ack_with_fallow don't exist):
+ * - fr_py_claim (TLS publishing, poison detection + counting),
+ * - fr_py_ack (fallow/disarm) and fr_py_escrow_deposit (retry).
+ * Error semantics mirror _worker.py: poisoned → warn + ack + skip;
+ * output failure → escrow (kills+1, retry) like a payload error;
+ * signal EPIPE → fatal (infrastructure); claim abort → fatal.
+ * on_error policies are NOT consulted (retry-always, documented).
+ *
+ * Body movement is sendfile(out, ingress, &off, len) — kernel-level,
+ * file→file, no pipe staging (the sketch's splice(2) needs an
+ * intermediate pipe per batch; sendfile doesn't). Falls back to
+ * fr_py_emit_record's pread/write copy when sendfile is unavailable.
+ * Framing is identical to the v0 emitter ([idx][len][bytes]) so the
+ * parent parses untouched. Every byte appended is final (W-PY13
+ * append-once rule for the concurrent streaming reader): on ANY
+ * output failure the partial record is truncated before escrow.
+ *
+ * Returns 0 drained-to-EOF, 1 claim failure/abort, 2 signal failure.
+ * The Python child maps nonzero → worker exit 1 → parent RuntimeError.
+ * ===================================================================== */
+int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
+                             int signal_fd, int fallow_fd) {
+    fr_py_batch_t claimed;
+    int rc;
+
+    if (ingress_fd < 0 || out_fd < 0)
+        return 1;
+    /* W-PY28: name the output fd for transaction publication + sync
+     * the ack offset (respawned generations append to a reused fd). */
+    fr_py_txn_out_fd = out_fd;
+    fr_py_ack_init(out_fd);
+    while (1) {
+        off_t end = (off_t)-1;
+        off_t woff;
+        uint64_t left;
+
+        rc = fr_py_claim(&claimed);
+        if (rc == 2)
+            return 0; /* EOF: drained */
+        if (rc != 0)
+            return 1; /* abort/failure */
+
+        if (claimed.poisoned) {
+            fprintf(stderr,
+                    "forkrun [WARN]: Skipping poisoned batch %llu "
+                    "(killed %u times).\n",
+                    (unsigned long long)claimed.batch_idx,
+                    claimed.num_kills);
+            if (fr_py_ack(fallow_fd, -1) != 0)
+                return 1;
+            continue;
+        }
+
+        if (claimed.length == 0) {
+            /* EOF sentinel slot: ack but never emit (bash REPLY rule). */
+            if (fr_py_ack(fallow_fd, -1) != 0)
+                return 1;
+            continue;
+        }
+
+        /* Frame + move the body: header first (true length up front
+         * — parseable at every prefix), then sendfile streaming at
+         * the end, then signal ("record bytes are visible"), then
+         * ack (releases the batch). */
+        {
+            struct fr_py_record_hdr hdr;
+            hdr.batch_idx = claimed.batch_idx;
+            hdr.len = claimed.length;
+            end = lseek(out_fd, 0, SEEK_END);
+            if (end == (off_t)-1)
+                goto payload_error;
+            if (fr_py_write_all(out_fd, &hdr, sizeof(hdr)) != 0)
+                goto payload_error;
+            woff = (off_t)claimed.offset;
+            left = claimed.length;
+            while (left > 0) {
+                size_t want =
+                    left > (1 << 20) ? (1 << 20) : (size_t)left;
+                ssize_t n = sendfile(out_fd, ingress_fd, &woff, want);
+                if (n < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    /* sendfile unavailable for this pair — rewind
+                     * past the header and use the whole-record copy
+                     * helper instead. */
+                    if (ftruncate(out_fd, end) != 0)
+                        goto payload_error;
+                    if (fr_py_emit_record(out_fd, claimed.batch_idx,
+                                          ingress_fd, claimed.offset,
+                                          claimed.length) != 0)
+                        goto payload_error;
+                    break;
+                }
+                if (n == 0)
+                    goto payload_error; /* short: retry, don't emit */
+                left -= (uint64_t)n;
+            }
+            /* W-PY29: header + full body durable (both the sendfile
+             * and the emit_record-fallback sub-paths converge here on
+             * success) — advance the rollback frontier once. */
+            worker_txn_advance_output(wid, 16 + claimed.length);
+        }
+
+        if (signal_fd >= 0) {
+            uint64_t sig[2];
+            const char *sp;
+            size_t sleft;
+            sig[0] = (uint64_t)wid;
+            sig[1] = claimed.batch_idx;
+            sp = (const char *)sig;
+            sleft = sizeof(sig);
+            while (sleft > 0) {
+                ssize_t n = write(signal_fd, sp, sleft);
+                if (n < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    return 2; /* EPIPE: parent gone — fatal */
+                }
+                if (n == 0)
+                    return 2;
+                sp += n;
+                sleft -= (size_t)n;
+            }
+        }
+
+        if (fr_py_ack(fallow_fd, -1) != 0)
+            return 1;
+        continue;
+
+    payload_error:
+        /* Output failure rides escrow like a payload error (bash -E):
+         * truncate any partial record (append-once rule), no ack (the
+         * deposit arms the retry), same-process retry on re-claim. */
+        if (end != (off_t)-1)
+            (void)ftruncate(out_fd, end);
+        _flush_for_splice();
+        fr_py_escrow_deposit(claimed.num_kills + 1);
+        continue;
+    }
+}
+
+/* =====================================================================
+ * W-PY18 addendum: zero-copy ingest + raw window.
+ *
+ * fr_py_copy_range: single-shot kernel copy src[src_off, +len) to
+ *   dst[dst_off, +len) — copy_file_range, then sendfile, else -1 so
+ *   the caller falls back to a pread/pwrite loop. EXPLICIT offsets
+ *   both sides (never touches fd positions: the W-PY16 lesson — the
+ *   scanner seeds its base from the shared SEEK_CUR). Returns bytes
+ *   copied (>0, possibly short), 0 for len==0 / EOF at src_off, -1
+ *   on any failure (caller retries via userspace copy). Same
+ *   method order as the engine's ingest probe (copy_file_range →
+ *   sendfile → read/write), minus its bounce buffer (the Python
+ *   fallback owns its chunk).
+ *
+ * fr_py_get_raw_window: borrowed pointer into the ingress memfd for
+ *   [offset, offset+length) via the engine's TLS-cached MAP_SHARED
+ *   mapping (the same ring_call FLAG_RAW mechanism the v1 plugin
+ *   path uses internally — this only EXPOSES the pointer to Python).
+ *   NULL on failure. Lifetime: valid until the worker's next remap
+ *   (streaming growth) or exit; unacked windows are never punched.
+ *   Materialized workers map once, so the window is stable for the run
+ *   there.
+ *   W-REL5-D (D14): the old trailing clause here ("hole reads
+ *   zero-fill regardless") was TRUE for read()/pread and FALSE for
+ *   this MAP_SHARED window (and the plugin RAW window): accessing a
+ *   punched range through a live mapping faults SIGBUS instead of
+ *   returning zeroes. The safety argument is therefore
+ *   invariant-based, not mechanical: fallow punches only behind the
+ *   acked contiguous prefix, so a live (unacked) window's pages are
+ *   intact -- the same guarantee the C RAW tier documents -- plus the
+ *   standing rule that views die at payload return (batch.copy() to
+ *   persist). No mechanical re-validation is attempted: mincore races
+ *   the punch (TOCTOU), mlock does not pin punched pages, and a
+ *   SIGBUS-handler/longjmp recovery is too risky inside workers.
+ *   A use-after-ack/punch window access is a contract violation, not
+ *   a handled error.
+ * ===================================================================== */
+int64_t fr_py_copy_range(int src_fd, uint64_t src_off, int dst_fd,
+                         uint64_t dst_off, uint64_t length) {
+    loff_t in_off;
+    loff_t out_off;
+    size_t want;
+    ssize_t n;
+
+    if (src_fd < 0 || dst_fd < 0)
+        return -1;
+    if (length == 0)
+        return 0;
+    want = (size_t)(length > (1 << 20) ? (1 << 20) : length);
+    in_off = (loff_t)src_off;
+    out_off = (loff_t)dst_off;
+    n = copy_file_range(src_fd, &in_off, dst_fd, &out_off, want, 0);
+    if (n > 0)
+        return (int64_t)n;
+    if (n == 0)
+        return 0; /* EOF at src_off */
+    if (errno != EINTR) {
+        /* Unsupported pair (EXDEV/EINVAL/ENOSYS/EPERM...) or hard
+         * error: one sendfile attempt, then punt to userspace. */
+        in_off = (loff_t)src_off;
+        n = sendfile(dst_fd, src_fd, &in_off, want);
+        if (n > 0)
+            return (int64_t)n;
+        if (n == 0)
+            return 0;
+        return -1;
+    }
+    return -1; /* EINTR with zero progress: caller retries/loops */
+}
+
+void *fr_py_get_raw_window(int fd, uint64_t offset, uint64_t length) {
+    if (fd < 0 || length == 0)
+        return NULL;
+    if (ring_call_ensure_ingress_map(fd, offset, (size_t)length) != 0)
+        return NULL;
+    if (tls_ingress_map == NULL)
+        return NULL;
+    return (char *)tls_ingress_map + offset;
+}
+
+/* =====================================================================
+ * W-PY19: reactor orchestration support — orderer, order-pipe setup,
+ * and spawn-aware scan. Engine frozen: these only CALL existing
+ * engine entry points (ring_order_main, core_scanner_loop) or fill
+ * g_fr_config, exactly like the existing fr_py_* wrappers above.
+ * ===================================================================== */
+
+/* Set the worker-local order-pipe fd for ordered acks (W-PY19).
+ *
+ * fr_py_worker_init hardcodes fd_order_pipe=-1 (unordered default).
+ * The reactor's C-orderer path sets it post-fork, pre-claim: the
+ * worker's first fr_py_ack(target_fd) then emits an OrderPacket to
+ * this pipe (the engine's ack_cached_order_pipe picks it up from
+ * g_fr_config on first use — TLS cache starts -1 in the forked
+ * child, so setting the config before the first ack is sufficient).
+ * Returns 0 ok, 1 when no substrate state exists. */
+int fr_py_set_order_pipe(int fd) {
+    if (!state || !g_state)
+        return 1;
+    g_fr_config.fd_order_pipe = fd;
+    return 0;
+}
+
+/* Spawn-aware scan (W-PY19 dynamic scaling).
+ *
+ * Same as fr_py_scan but forwards the scanner's spawn requests
+ * ("count\n" UMA / "node:count\n" NUMA, one per line) to spawn_w:
+ * the reactor's spawn pipe. Pass -1 to disarm (plain fr_py_scan
+ * behavior). Returns the engine rc. Runs in a forked scanner child
+ * (blocking), never in the reactor parent thread. */
+int fr_py_scan_with_spawn(int fd, int spawn_w) {
+    return core_scanner_loop(fd, 0, spawn_w, 1, false);
+}
+
+/* C-level orderer (W-PY19, bash ring_order subshell equivalent).
+ *
+ * Runs the engine's ring_order_main in the CALLING process — fork an
+ * orderer child first, then call this there and os._exit(rc):
+ *   reads OrderPackets from order_pipe_r until EOF (every worker
+ *   write end + the parent's copy closed), reorders via min-heap,
+ *   emits ordered bytes to stdout (dup2'd to output_fd when it
+ *   differs from 1), then returns the engine rc (0 clean).
+ *
+ * Transport contract (bash memfd mode): workers append keyed records
+ * ([batch_idx u64][len u64][bytes], the v0.5 emitter framing) to
+ * their own parent-created output memfds and ack with
+ * fr_py_ack(fallow_w, out_fd) so each ack's OrderPacket names the
+ * record's (fd, off, len); the orderer emits records in batch_idx
+ * order, so the parent parses its stdout exactly like today — only
+ * the ORDERING moved from Python reassembly into C. unordered != 0
+ * selects pass-through mode; numa is accepted and forwarded but v0
+ * runs UMA (0). output_fd < 0 leaves stdout untouched.
+ * Returns the engine rc (0 clean, 1 failure/abort). */
+int fr_py_orderer(int order_pipe_r, int output_fd,
+                  int unordered_mode, int numa_mode) {
+    char a0[] = "ring_order";
+    char a1[32];
+    char a2[] = "memfd";
+    char a3[] = "unordered";
+    char a4[] = "numa";
+    char *argv[6];
+    int argc = 0;
+
+    if (order_pipe_r < 0)
+        return 1;
+    argv[argc++] = a0;
+    snprintf(a1, sizeof(a1), "%d", order_pipe_r);
+    argv[argc++] = a1;
+    argv[argc++] = a2;
+    if (unordered_mode)
+        argv[argc++] = a3;
+    if (numa_mode)
+        argv[argc++] = a4;
+    argv[argc] = NULL;
+
+    if (output_fd >= 0 && output_fd != 1) {
+        if (dup2(output_fd, 1) < 0)
+            return 1;
+        if (output_fd != 1)
+            close(output_fd);
+    }
+    return ring_order_main(argc, argv);
+}
+
+/* =====================================================================
+ * W-PY21: NUMA multi-node pipeline. Engine frozen: these only CALL
+ * existing engine entry points with argv vectors, exactly like the
+ * fr_py_* wrappers above. All run in forked children (blocking),
+ * never in the reactor parent.
+ * ===================================================================== */
+
+/* NUMA-aware init (W-PY21). Same lines/bytes contract as fr_py_init,
+ * plus the logical topology: num_nodes > 1 forwards --numa-map
+ * (comma-separated physical IDs, e.g. "0,1") to ring_init_main,
+ * which creates per-node rings, eventfds, escrow pipes and steal
+ * thresholds. num_nodes <= 1 (or empty/NULL map) behaves exactly
+ * like fr_py_init. Caps at the engine's 512 meta_ring ceiling.
+ * Returns the engine rc (0 ok, 1 fail). */
+int fr_py_init_numa(int lines, int bytes, int num_nodes,
+                    const char *numa_map) {
+    char a0[] = "ring_init";
+    char a1[64];
+    char a2[4096];
+    char *argv[4];
+    int argc = 0;
+
+    if (lines < 0 || bytes < 0)
+        return 1;
+    if (lines > 0 && bytes > 0)
+        return 1;
+    if (num_nodes < 1 || num_nodes > 512)
+        return 1;
+    /* New epoch for the publish high-water marks (W-PY21). */
+    fr_py_data_hwm_reset();
+    argv[argc++] = a0;
+    if (lines > 0) {
+        snprintf(a1, sizeof(a1), "--lines=%d", lines);
+        argv[argc++] = a1;
+    } else if (bytes > 0) {
+        snprintf(a1, sizeof(a1), "--bytes=%d", bytes);
+        argv[argc++] = a1;
+    }
+    if (num_nodes > 1 && numa_map && numa_map[0]) {
+        snprintf(a2, sizeof(a2), "--numa-map=%s", numa_map);
+        argv[argc++] = a2;
+    }
+    argv[argc] = NULL;
+    return ring_init_main(argc, argv);
+}
+
+/* NUMA ingest (W-PY21): born-local data distributor.
+ * ring_numa_ingest <infd> <outfd> <nodes>: reads the SOURCE (not a
+ * pre-spill — placement happens here, per chunk, via MPOL_BIND),
+ * writes the shared ingress memfd, publishes ChunkMeta and signals
+ * per-node indexers; EOF propagates internally via ingest_eof
+ * (no fr_py_ingest_done gate needed). The usage string's 4th
+ * [ordered] slot is vestigial (the engine never reads argv[4]).
+ * Returns the engine rc. */
+int fr_py_numa_ingest(int infd, int outfd, int num_nodes) {
+    char a0[] = "ring_numa_ingest";
+    char a1[32], a2[32], a3[32];
+    char *argv[5];
+
+    if (infd < 0 || outfd < 0 || num_nodes < 1 || num_nodes > 512)
+        return 1;
+    argv[0] = a0;
+    snprintf(a1, sizeof(a1), "%d", infd);
+    argv[1] = a1;
+    snprintf(a2, sizeof(a2), "%d", outfd);
+    argv[2] = a2;
+    snprintf(a3, sizeof(a3), "%d", num_nodes);
+    argv[3] = a3;
+    argv[4] = NULL;
+    return ring_numa_ingest_main(4, argv);
+}
+
+/* Per-node NUMA indexer (W-PY21): ring_indexer_numa <memfd> <node>.
+ * Self-pins to the node's physical CPUs inside the engine.
+ * Returns the engine rc. */
+int fr_py_indexer_numa(int memfd, int node_id) {
+    char a0[] = "ring_indexer_numa";
+    char a1[32], a2[32];
+    char *argv[3];
+
+    /* W-REL5-D (D12): node_id indexes state[]/evfd (512 ceiling, like
+     * fr_py_init_numa's num_nodes bound) -- the old < 0-only check let
+     * huge ids through to engine-side indexing. */
+    if (memfd < 0 || node_id < 0 || node_id >= 512)
+        return 1;
+    argv[0] = a0;
+    snprintf(a1, sizeof(a1), "%d", memfd);
+    argv[1] = a1;
+    snprintf(a2, sizeof(a2), "%d", node_id);
+    argv[2] = a2;
+    return ring_indexer_numa_main(3, argv);
+}
+
+/* Per-node NUMA scanner (W-PY21):
+ * ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>.
+ * Distance-charged stealing when starved; spawn_fd -1 disarms
+ * spawn requests (the Python ingest keeps publish-gated fork
+ * timing — pre-flight bail avoidance, same rule as W-PY19).
+ * Returns the engine rc. */
+int fr_py_numa_scanner(int memfd, int node_id, int fd_spawn,
+                       int num_nodes) {
+    char a0[] = "ring_numa_scanner";
+    char a1[32], a2[32], a3[32], a4[32];
+    char *argv[6];
+
+    /* W-REL5-D (D12): same 512 ceiling as the indexer/init sites. */
+    if (memfd < 0 || node_id < 0 || node_id >= 512 || num_nodes < 1 ||
+        num_nodes > 512)
+        return 1;
+    argv[0] = a0;
+    snprintf(a1, sizeof(a1), "%d", memfd);
+    argv[1] = a1;
+    snprintf(a2, sizeof(a2), "%d", node_id);
+    argv[2] = a2;
+    snprintf(a3, sizeof(a3), "%d", fd_spawn);
+    argv[3] = a3;
+    snprintf(a4, sizeof(a4), "%d", num_nodes);
+    argv[4] = a4;
+    argv[5] = NULL;
+    return ring_numa_scanner_main(6, argv);
+}
+
+/* Physical fallow, NUMA mode (W-PY21): ring_fallow_phys <PIPE> <FILE>.
+ * Reads PhysPackets {off, len} (NUMA ack path writes physical
+ * offsets, not IndexPackets). One process for all nodes.
+ * Returns the engine rc (0 clean at pipe EOF). */
+int fr_py_fallow_phys(int fd_in, int fd_file) {
+    char a0[] = "ring_fallow_phys";
+    char a1[32], a2[32];
+    char *argv[3];
+
+    if (fd_in < 0 || fd_file < 0)
+        return 1;
+    argv[0] = a0;
+    snprintf(a1, sizeof(a1), "%d", fd_in);
+    argv[1] = a1;
+    snprintf(a2, sizeof(a2), "%d", fd_file);
+    argv[2] = a2;
+    return ring_fallow_phys_main(3, argv);
+}
+
+/* Per-node published-DATA-batch count (W-PY21 fork timing). Same contract as fr_py_data_ready but for one NUMA node's ring:
+ * cumulative DATA batches (lines>0, or byte-length>0 for byte
+ * mode's 0-means-undefined); the zero-length EOF sentinel never
+ * counts. Python reads coordination words ONLY through here. */
+uint64_t fr_py_data_ready_node(int node) {
+    uint64_t found = 0;
+    uint64_t w;
+
+    if (!state || node < 0 || node >= 512 ||
+        node >= (int)global_num_nodes)
+        return 0;
+    w = __atomic_load_n(&state[node].write_idx, __ATOMIC_ACQUIRE);
+    if (w < fr_py_data_hwm_node[node])
+        fr_py_data_hwm_node[node] = 0; /* second defense (see above) */
+    while (fr_py_data_hwm_node[node] < w) {
+        uint64_t slot = fr_py_data_hwm_node[node] & RING_MASK;
+        uint32_t lines = state[node].lines_ring[slot];
+        uint64_t off = state[node].offset_ring[slot];
+        uint64_t end = state[node].end_ring[slot];
+        if (lines > 0 || end > off)
+            found++;
+        fr_py_data_hwm_node[node]++;
+    }
+    return found;
+}
+
+/* NUMA ingest-EOF-posted query (W-PY21 helper classification).
+ *
+ * Returns 1 once the ingest published end-of-input
+ * (g_state->ingest_eof_idx != ~0, the same sentinel the indexers
+ * themselves watch), else 0. Monotonic within a run; reset by
+ * init (see ring_init_main). Lets the parent tell "pipeline
+ * helper exited before EOF was even posted" (tail-loss anomaly —
+ * fatal) from "helper exited after EOF posted while the ingest
+ * process is still flushing" (normal teardown ordering — the
+ * ingest waits for chunk_done before exiting, so it is routinely
+ * the LAST to be reaped). Process-exit ordering alone cannot
+ * distinguish the two. Python reads this ONLY through here. */
+int fr_py_ingest_eof_posted(void) {
+    if (!g_state)
+        return 0;
+    return __atomic_load_n(&g_state->ingest_eof_idx,
+                           __ATOMIC_ACQUIRE) != ~(uint64_t)0 ? 1 : 0;
+}
+
+/* F-NUMA1 diagnostic snapshot (env-gated consumer in run.py; read-only).
+ *
+ * Per-node completion state for the NUMA drain-verification audit:
+ * out[0] = write_idx (published slots, acquire), out[1] = read_idx
+ * (claimed slots, acquire), out[2] = scanner_finished (acquire),
+ * out[3] = chunk_queue_head (relaxed: chunks published by ingest),
+ * out[4] = chunk_queue_tail (relaxed: chunks consumed by indexer).
+ * Returns 0 ok, -1 bad node or no engine state. Pure loads — no
+ * mutation, no fences touched, no publish path altered. The Python
+ * parent calls this AFTER reactor_run (workers done) and BEFORE
+ * teardown destroys the engine; indices are monotonic and finished
+ * is sticky, so the window is stable. Never on a hot path (once per
+ * node per run, behind FORKRUN_DIAG_NUMA1=1 or the drain guard). */
+int fr_py_diag_node(int node, uint64_t *out) {
+    if (!out || !state || !g_state || node < 0 ||
+        node >= (int)global_num_nodes)
+        return -1;
+    out[0] = __atomic_load_n(&state[node].write_idx, __ATOMIC_ACQUIRE);
+    out[1] = __atomic_load_n(&state[node].read_idx, __ATOMIC_ACQUIRE);
+    out[2] = __atomic_load_n(&state[node].scanner_finished,
+                             __ATOMIC_ACQUIRE);
+    out[3] = __atomic_load_n(&state[node].chunk_queue_head,
+                             __ATOMIC_RELAXED);
+    out[4] = __atomic_load_n(&state[node].chunk_queue_tail,
+                             __ATOMIC_RELAXED);
+    /* out[5]: tail-emptiness for the F-NUMA1 drain guard. 1 when every
+     * slot in [read_idx, write_idx) is empty (lines==0 and end==off —
+     * the EOF sentinel / zero-length tail the claim loop ack-silents
+     * and the fork gate never counts in data_ready). 0 when any slot
+     * carries payload bytes. A node whose only unclaimed work is an
+     * empty tail lost nothing: small-scale nodes that receive no DATA
+     * (sentinel-only) never fork workers (helpers-done exits before
+     * the stall fallback) with complete output. The guard treats
+     * tail_all_empty as vacuous, never a violation. Bounded scan:
+     * the range cannot exceed the ring shield (RING_SIZE/2) plus the
+     * in-flight publish window; abort-open (0) on absurd ranges. */
+    {
+        uint64_t r = out[1], w = out[0];
+        int all_empty = 1;
+        if (w < r || w - r > (RING_SIZE / 2 + 1024))
+            all_empty = 0;
+        else {
+            uint64_t i;
+            for (i = r; i < w; i++) {
+                uint64_t slot = i & RING_MASK;
+                uint32_t lines = state[node].lines_ring[slot];
+                uint64_t off = state[node].offset_ring[slot];
+                uint64_t end = state[node].end_ring[slot];
+                if (lines > 0 || end > off) {
+                    all_empty = 0;
+                    break;
+                }
+            }
+        }
+        out[5] = (uint64_t)all_empty;
+    }
+    return 0;
+}
+
+/* =====================================================================
+ * W-PY21-A: C drain process — data/control path separation.
+ *
+ * Runs in a forked child (never in the reactor parent). Replaces the
+ * Python parent's per-result drain work (select + signal unpack +
+ * pread + parse) with a tight C loop: blocking 16-byte signal reads
+ * ((wid, batch_idx), indices only — the W-PY6 signal contract),
+ * pread of newly arrived bytes from that worker's output memfd
+ * (pread, never read/lseek — the fd description is SHARED with the
+ * writing worker), and append of those bytes VERBATIM to the results
+ * destination. Framing is untouched (keyed [idx][len][bytes] records
+ * pass through opaquely), so the parent parses exactly as before —
+ * only the byte movement moved into C.
+ *
+ * Per-worker offsets are monotonic append cursors: a respawned wid
+ * reuses the same memfd and only appends, so generation changes
+ * need no handling. A worker that dies mid-record leaves a short
+ * tail the parent drops at parse (same rule as the Python drain).
+ *
+ * Two destinations selected by drain_mode:
+ *   0 = results memfd (map/run: parent reads once at end).
+ *   1 = pipe write end (stream: parent reads incrementally; a full
+ *       pipe blocks the drain → workers block on signal write →
+ *       claims stop — the hydraulic backpressure loop extended
+ *       through the drain).
+ *
+ * Returns 0 drained-to-EOF, 1 bad arguments/allocation failure,
+ * 2 signal-pipe read error, 3 short signal (framing), 4 results
+ * write failure, 5 EPIPE on the results pipe (parent abandoned the
+ * stream — the child exits; the parent reaps it in teardown).
+ * ===================================================================== */
+
+static ssize_t fr_py_read_full(int fd, void *buf, size_t count) {
+    char *p = (char *)buf;
+    size_t left = count;
+    while (left > 0) {
+        ssize_t n = read(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            return (ssize_t)(count - left); /* EOF: partial count */
+        p += n;
+        left -= (size_t)n;
+    }
+    return (ssize_t)count;
+}
+
+static int fr_py_write_full(int fd, const void *buf, size_t count) {
+    const char *p = (const char *)buf;
+    size_t left = count;
+    while (left > 0) {
+        ssize_t n = write(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1; /* caller maps EPIPE vs other errno */
+        }
+        if (n == 0)
+            return -1;
+        p += n;
+        left -= (size_t)n;
+    }
+    return 0;
+}
+
+int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
+                     int results_fd, int drain_mode) {
+    uint64_t *offsets;
+    int rc = 0;
+
+    if (signal_r < 0 || !out_fds || num_workers <= 0 ||
+        num_workers > 4096 || results_fd < 0 ||
+        (drain_mode != 0 && drain_mode != 1))
+        return 1;
+    offsets = (uint64_t *)calloc((size_t)num_workers, sizeof(uint64_t));
+    if (!offsets)
+        return 1;
+
+    while (1) {
+        uint64_t sig[2];
+        ssize_t n;
+        uint64_t wid;
+        struct stat st;
+        uint64_t size, offset, remaining;
+        char buf[65536];
+
+        /* 1. Signal heartbeat (blocking): one keyed record's worth
+         * of new bytes is visible in out_fds[wid] when this returns. */
+        n = fr_py_read_full(signal_r, sig, sizeof(sig));
+        if (n == 0)
+            break; /* EOF: every write end closed — drained */
+        if (n < 0) {
+            rc = 2;
+            break;
+        }
+        if (n != (ssize_t)sizeof(sig)) {
+            rc = 3; /* short signal: never from a 16B atomic write */
+            break;
+        }
+        wid = sig[0]; /* sig[1] (batch_idx) is transport-opaque here */
+        if (wid >= (uint64_t)num_workers)
+            continue; /* defensive: our own workers never send this */
+
+        /* 2. New bytes in this worker's memfd (fstat size vs cursor). */
+        if (fstat(out_fds[wid], &st) != 0)
+            continue; /* memfd went away: nothing to move, keep going */
+        size = (uint64_t)st.st_size;
+        offset = offsets[wid];
+        if (size <= offset)
+            continue; /* duplicate/empty wakeup: next signal */
+        remaining = size - offset;
+
+        /* 3. Move them verbatim (bounded 64KB chunks — the drain's
+         * own RSS stays flat no matter how far behind it gets). */
+        while (remaining > 0) {
+            size_t want = remaining > sizeof(buf) ? sizeof(buf)
+                                                  : (size_t)remaining;
+            ssize_t r = pread(out_fds[wid], buf, want, (off_t)offset);
+            if (r < 0) {
+                if (errno == EINTR)
+                    continue;
+                break; /* transient: next signal re-drives us */
+            }
+            if (r == 0)
+                break; /* raced the writer: next signal re-drives us */
+            if (fr_py_write_full(results_fd, buf, (size_t)r) != 0) {
+                if (drain_mode == 1 && errno == EPIPE)
+                    rc = 5; /* abandoned stream: parent went away */
+                else
+                    rc = 4;
+                goto drain_done;
+            }
+            offset += (uint64_t)r;
+            remaining -= (uint64_t)r;
+        }
+        offsets[wid] = offset;
+    }
+
+drain_done:
+    free(offsets);
+    return rc;
+}
+
+/* =====================================================================
+ * W-PY21-B: frontend datapath consolidation — batch commit primitive,
+ * C-level sequential spill, and C-level descriptor parsing. Engine
+ * frozen: these only ADD new fr_py_* entry points. fr_py_ack_core is
+ * a verbatim port of ring_ack_main's body with direct int parameters
+ * (no argc/argv, no snprintf, no atoi); behavior is identical,
+ * including the worker_last_cnt == 0 bash-env fallback branch.
+ * fr_py_complete composes fr_py_emit + fr_py_ack_direct (no logic
+ * duplicated). fr_py_spill_sequential covers the non-seekable
+ * sources copy_file_range cannot. fr_py_parse_descriptors produces
+ * a descriptor table (Python still materializes result objects).
+ * ===================================================================== */
+
+/* Shared ack core: fallow packet + order packet + worker_last_cnt
+ * reset, with SIGPIPE shielding. Returns EXECUTION_SUCCESS (0) or
+ * EXECUTION_FAILURE (1) — same codes as ring_ack_main. */
+static int fr_py_ack_core(int fallow_fd, int target_fd) {
+    struct sigaction sa_ign, sa_old;
+    struct OrderPacket op = {0};
+    struct SharedState *local_state;
+    uint64_t my_idx;
+
+    if (!state || !g_state)
+        return EXECUTION_FAILURE;
+    /* W-PY30: batch execution is over — disarm a final-attempt
+     * coredump (no-op unless armed). */
+    worker_coredump_disarm();
+    /* W-PY29: CLAIMED → COMMITTING before any ack side effect
+     * (fallow/order packets) goes out — pairs with worker_txn_clear
+     * below. Defensive: no-ops when no transaction is active. */
+    worker_txn_begin_commit(g_fr_config.ring_wid);
+    /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_COMMIT=1 makes
+     * the worker SIGKILL itself inside the ack→clear window
+     * (deterministic race injection). Inert unless set; read fresh
+     * per ack (see DIE_AT_CLAIM note on fork inheritance). */
+    if (getenv("FORKRUN_TEST_DIE_AT_COMMIT") != NULL)
+        raise(SIGKILL);
+    sa_ign.sa_handler = SIG_IGN;
+    sigemptyset(&sa_ign.sa_mask);
+    sa_ign.sa_flags = 0;
+    sigaction(SIGPIPE, &sa_ign, &sa_old);
+
+    local_state = (my_numa_node != -1 &&
+                   my_numa_node < (int)global_num_nodes)
+                      ? &state[my_numa_node]
+                      : &state[0];
+
+    if (worker_last_cnt > 0) {
+        my_idx = worker_last_idx;
+        if (local_state && local_state->numa_enabled) {
+            op.major_idx = worker_last_major;
+            op.minor_idx = worker_last_minor;
+            op.cnt = worker_last_cnt;
+        } else {
+            op.major_idx = worker_last_idx;
+            op.minor_idx = 0;
+            op.cnt = worker_last_cnt;
+        }
+    } else {
+        const char *s_slots = get_string_value("RING_BATCH_SLOTS");
+        const char *s_batch_idx = get_string_value("RING_BATCH_IDX");
+        if (!s_slots || !s_batch_idx) {
+            sigaction(SIGPIPE, &sa_old, NULL);
+            return EXECUTION_FAILURE;
+        }
+        op.cnt = (uint32_t)atoi(s_slots);
+        if (local_state && local_state->numa_enabled) {
+            const char *s_maj = get_string_value("RING_MAJOR");
+            const char *s_min = get_string_value("RING_MINOR");
+            if (!s_maj || !s_min) {
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+            op.major_idx = (uint64_t)strtoull(s_maj, NULL, 10);
+            op.minor_idx = (uint32_t)atoi(s_min);
+            my_idx = (uint64_t)atoll(s_batch_idx);
+        } else {
+            op.major_idx = (uint64_t)strtoull(s_batch_idx, NULL, 10);
+            op.minor_idx = 0;
+            my_idx = op.major_idx;
+        }
+    }
+
+    if (fallow_fd > 0) {
+        if (local_state && local_state->numa_enabled) {
+            uint64_t start =
+                local_state->offset_ring[my_idx & RING_MASK];
+            uint64_t end =
+                local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
+            struct PhysPacket pp = {.off = start, .len = end - start};
+            if (robust_pipe_write(fallow_fd, &pp, sizeof(pp)) < 0) {
+                pull_fire_alarm_reason(2);
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+        } else {
+            struct IndexPacket ip = {.idx = op.major_idx, .cnt = op.cnt};
+            if (robust_pipe_write(fallow_fd, &ip, sizeof(ip)) < 0) {
+                pull_fire_alarm_reason(2);
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+        }
+    }
+
+    {
+        uint64_t in_start = local_state->offset_ring[my_idx & RING_MASK];
+        uint64_t in_end =
+            local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
+        op.in_off = in_start;
+        op.in_len = in_end - in_start;
+    }
+
+    if (target_fd > 0) {
+        if (target_fd != ack_cached_target_fd) {
+            ack_cached_target_fd = target_fd;
+            /* W-REL5-D (D2 twin): reset the offset with the mode (see
+             * forkrun_ring.c) -- otherwise a cross-file curr can wrap
+             * the sendfile length. Coherent with fr_py_ack_init
+             * adopting the trio: a proper init-sync never trips this. */
+            last_ack_offset = 0;
+            struct stat st;
+            ack_cached_mode =
+                (fstat(target_fd, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
+        }
+        if (ack_cached_mode == 1) {
+            if (ack_cached_order_pipe < 0) {
+                if (g_fr_config.fd_order_pipe >= 0)
+                    ack_cached_order_pipe = g_fr_config.fd_order_pipe;
+            }
+            if (ack_cached_order_pipe < 0) {
+                builtin_error(
+                    "forkrun: FD_ORDER_PIPE unset during ordered ack");
+                pull_fire_alarm_reason(2);
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+            if (ack_cached_order_pipe >= 0) {
+                int fd_pipe = ack_cached_order_pipe;
+                off_t curr = lseek(target_fd, 0, SEEK_CUR);
+                if (curr == (off_t)-1) {
+                    sigaction(SIGPIPE, &sa_old, NULL);
+                    return EXECUTION_FAILURE;
+                }
+                op.fd = target_fd;
+                op.off = (uint64_t)last_ack_offset;
+                op.len = (uint64_t)(curr - last_ack_offset);
+                if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
+                    pull_fire_alarm_reason(2);
+                    sigaction(SIGPIPE, &sa_old, NULL);
+                    return EXECUTION_FAILURE;
+                }
+                last_ack_offset = curr;
+                /* W-PY29: reuse curr for the rollback frontier (zero
+                 * new syscalls). Self-healing: corrects any drift
+                 * between emit-time advances and the live end. */
+                worker_output_end = curr;
+            }
+        } else {
+            if (robust_pipe_write(target_fd, &op, sizeof(op)) < 0) {
+                pull_fire_alarm_reason(2);
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+        }
+    }
+
+    worker_last_cnt = 0;
+
+    /* W-PY29: COMMITTING → IDLE (pairs with the begin_commit above).
+     * Runs after every ack side effect is on its pipe, so TXN_IDLE
+     * means fully committed. */
+    worker_txn_clear(g_fr_config.ring_wid);
+
+    sigaction(SIGPIPE, &sa_old, NULL);
+    return EXECUTION_SUCCESS;
+}
+
+/* W-PY21-B.a: direct ack — identical to fr_py_ack (ring_ack_main)
+ * minus the snprintf/argv/atoi round-trip. Saves ~150ns per batch
+ * (measured, no-state short-circuit). */
+int fr_py_ack_direct(int fallow_fd, int target_fd) {
+    return fr_py_ack_core(fallow_fd, target_fd);
+}
+
+/* W-PY21-B.b: batch commit primitive — a thin composition of two
+ * already-tested primitives (NOT a duplication of their logic):
+ *   fr_py_emit (output writev + 16B signal) + fr_py_ack_direct
+ *   (fallow packet + order packet + worker_last_cnt reset).
+ *
+ * Ordering invariants (identical to the old emit-then-ack path):
+ *   1. output (header + data) to out_fd      [fr_py_emit]
+ *   2. signal (wid + batch_idx) to signal_fd [fr_py_emit]
+ *   3. fallow packet + 4. order packet + 5. worker_last_cnt reset
+ *      [fr_py_ack_direct]
+ *
+ * The ack TARGET is derived exactly like the worker's old order_tgt:
+ * target = out_fd when ordered (g_fr_config.fd_order_pipe >= 0, set
+ * at worker init via fr_py_set_order_pipe), else -1 (disarm). There
+ * is deliberately NO order-fd parameter — the order pipe lives in
+ * the worker config, and the output memfd names the OrderPacket's
+ * (fd, off, len), same as fr_py_ack(fallow_w, out_fd) always did.
+ *
+ * Output semantics are fr_py_emit's exactly (data == NULL or
+ * out_fd < 0 means no output). The caller flushes Python-level
+ * buffered streams BEFORE this call (flush-before-ack invariant);
+ * C stdio is covered by fr_py_emit's path (fflush at the call
+ * sites that redirect fd 1).
+ *
+ * Returns fr_py_emit's code (0 ok, -1 output failure, -2 signal
+ * failure: EPIPE = parent abandoned the stream -> fatal, v0
+ * parity) or -3 on ack failure. On output/signal failure the ack
+ * is skipped (failure rides escrow, never ack — v0 parity).
+ */
+int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx,
+                   int fallow_fd, int out_fd,
+                   const char *data, uint64_t data_len) {
+    int rc;
+    int target;
+
+    rc = fr_py_emit(out_fd, signal_fd, wid, batch_idx, data, data_len);
+    if (rc != 0)
+        return rc;
+    target = (g_fr_config.fd_order_pipe >= 0 && out_fd >= 0) ? out_fd : -1;
+    if (fr_py_ack_direct(fallow_fd, target) != EXECUTION_SUCCESS)
+        return -3;
+    return 0;
+}
+
+/* W-PY21-B.d: C sequential copy for non-seekable sources.
+ *
+ * For pipes and sockets copy_file_range may not work (the existing
+ * fr_py_copy_range covers seekable sources and the parent tries it
+ * first). This is the fallback: C read -> C write instead of
+ * Python os.read -> Python os.write per chunk. Bytes are identical;
+ * only the per-chunk interpreter overhead moves into C.
+ * max_bytes == 0 means no limit. Returns bytes copied, or -1
+ * (errno preserved) on read/write failure. */
+int64_t fr_py_spill_sequential(int src_fd, int dst_fd,
+                               uint64_t max_bytes) {
+    char buf[65536];
+    uint64_t total = 0;
+
+    if (src_fd < 0 || dst_fd < 0)
+        return -1;
+    while (max_bytes == 0 || total < max_bytes) {
+        size_t to_read = sizeof(buf);
+        ssize_t r;
+
+        if (max_bytes != 0 && max_bytes - total < to_read)
+            to_read = (size_t)(max_bytes - total);
+        r = read(src_fd, buf, to_read);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (r == 0)
+            break; /* EOF */
+        {
+            size_t written = 0;
+            while (written < (size_t)r) {
+                ssize_t w = write(dst_fd, buf + written,
+                                  (size_t)r - written);
+                if (w < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        struct pollfd pfd;
+                        pfd.fd = dst_fd;
+                        pfd.events = POLLOUT;
+                        poll(&pfd, 1, -1);
+                        continue;
+                    }
+                    return -1;
+                }
+                written += (size_t)w;
+            }
+        }
+        total += (uint64_t)r;
+    }
+    return (int64_t)total;
+}
+
+/* W-PY21-B.e: C-level record parsing -> descriptor table.
+ *
+ * Input framing (v0 emitter, shared with run.py:_HDR "<QQ"):
+ *   [batch_idx u64 LE][len u64 LE][len data bytes] x N.
+ * A short header or short body ends the parse (a worker that died
+ * mid-record leaves a truncated tail — dropped by the caller, the
+ * same rule as _parse_records).
+ *
+ * This produces a descriptor table, NOT Python objects: C parses
+ * the framing (unpack + bounds checks + offset arithmetic per
+ * record), and the Python parent materializes result objects by
+ * slicing input[off:off+len] from the known boundaries. The input
+ * buffer is NOT copied — descriptors reference into it.
+ *
+ * Returns the number of descriptors written, or -1 on bad
+ * arguments. Stops at max_descriptors (the caller grows the array
+ * and retries — records are >= 16 bytes, so len/16 always bounds
+ * the count and the retry terminates).
+ */
+struct fr_py_record_desc {
+    uint64_t batch_idx;
+    uint64_t offset; /* byte offset of the data in the input buffer */
+    uint64_t length; /* length of the data */
+};
+
+int64_t fr_py_parse_descriptors(const char *input, uint64_t input_len,
+                                struct fr_py_record_desc *descriptors,
+                                uint64_t max_descriptors) {
+    uint64_t off = 0;
+    uint64_t count = 0;
+
+    if (!input && input_len > 0)
+        return -1;
+    if (!descriptors && max_descriptors > 0)
+        return -1;
+    /* W-REL5-D (D5): off/data_len are framing-controlled u64s -- `off +
+     * data_len > input_len` wraps on huge data_len and skips the
+     * truncation break (bogus giant descriptor -> caller-side OOB).
+     * Subtraction form cannot wrap (off <= input_len is the loop
+     * invariant: 0 at entry, off+16+data_len <= input_len preserved). */
+    while (count < max_descriptors && off <= input_len &&
+           input_len - off >= 16) {
+        uint64_t batch_idx, data_len;
+
+        memcpy(&batch_idx, input + off, 8);
+        memcpy(&data_len, input + off + 8, 8);
+        off += 16;
+        if (data_len > input_len - off)
+            break; /* truncated record — stop here */
+        descriptors[count].batch_idx = batch_idx;
+        descriptors[count].offset = off;
+        descriptors[count].length = data_len;
+        count++;
+        off += data_len;
+    }
+    return (int64_t)count;
+}
+
+/* =====================================================================
+ * W-PY22: engine-committed output recovery — structured resume
+ * snapshot without stdout redirection. Engine frozen: these only ADD
+ * new fr_py_* entry points that read/write the existing resume
+ * ledger (g_state resume_* fields, written by TRACK_COMPLETED_BATCH
+ * in ring_order_main, read by the scanner's is_resume block and
+ * ring_dump_resume_main). All coordinates are BYTES on the Universal
+ * Coordinate Plane (horizon = contiguous committed input offset;
+ * jagged = out-of-order committed intervals beyond it) — never
+ * batch numbers.
+ * ===================================================================== */
+
+/* Caller-provided interval (layout-identical to the engine's struct
+ * IntervalNode {uint64_t s; uint64_t e;} — 16 bytes, same order;
+ * ctypes binds positionally, so field order is load-bearing). */
+struct FrPyInterval {
+    uint64_t start;
+    uint64_t end;
+};
+
+/* Snapshot the engine's resume ledger via out-parameters.
+ *
+ * Takes the same seqlock-protected snapshot ring_dump_resume_main
+ * takes internally. The reader protocol is copied EXACTLY:
+ *   ACQUIRE seq1 -> RELAXED data -> fence(ACQUIRE) -> ACQUIRE seq2,
+ *   retry while odd or mismatched.
+ * The ACQUIRE fence before seq2 is LOAD-BEARING (closes window c:
+ * without it seq2 may be satisfied before the data loads and a torn
+ * snapshot is accepted — x86-TSO hides this; ARM does not). Do NOT
+ * simplify or weaken any of these orderings.
+ *
+ * Caller provides the jagged array (avoids malloc ownership across
+ * the ctypes boundary); max_jagged == 0 is a count query (no array
+ * needed, *count_out receives the true ledger count). Otherwise
+ * *count_out receives the actual interval count clamped to
+ * max_jagged (caller grows the array and retries when clamped).
+ * The horizon-0 fallow fallback mirrors ring_dump_resume_main
+ * (bash-checkpoint interchangeability).
+ *
+ * Returns 0 ok, -1 engine not initialized, -2 bad out-pointers.
+ */
+int fr_py_resume_snapshot(uint64_t *horizon, uint64_t *stdout_bytes,
+                          struct FrPyInterval *jagged,
+                          uint32_t *count_out, uint32_t max_jagged) {
+    uint32_t seq1, seq2;
+    uint64_t snap_horizon, snap_bytes;
+    uint32_t snap_count, n, i;
+    struct IntervalNode snap_jagged[1024];
+
+    if (!g_state)
+        return -1;
+    if (!horizon || !stdout_bytes || !count_out)
+        return -2;
+    if (max_jagged > 0 && !jagged)
+        return -2;
+
+    do {
+        seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+        snap_horizon = __atomic_load_n(&g_state->resume_horizon,
+                                       __ATOMIC_RELAXED);
+        snap_bytes = __atomic_load_n(&g_state->resume_stdout_bytes,
+                                     __ATOMIC_RELAXED);
+        snap_count = __atomic_load_n(&g_state->resume_jagged_count,
+                                     __ATOMIC_RELAXED);
+        if (snap_count > 1024)
+            snap_count = 1024;
+        for (i = 0; i < snap_count; i++) {
+            snap_jagged[i].s = __atomic_load_n(
+                &g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
+            snap_jagged[i].e = __atomic_load_n(
+                &g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
+        }
+        /* LoadLoad: pin the RELAXED data loads above this fence
+         * (reader-pair window c). Load-bearing — do not delete. */
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+    } while (seq1 != seq2 || (seq1 & 1));
+
+    if (snap_horizon == 0) {
+        /* ring_dump_resume_main fallback for -u mode: the fallow
+         * reaper's contiguous prefix when the orderer ledger has
+         * nothing (a C-orderer path never lands here with real
+         * progress, but bash-format checkpoints must round-trip). */
+        uint64_t fh = __atomic_load_n(&g_state->fallow_horizon_bytes,
+                                      __ATOMIC_RELAXED);
+        if (fh > 0)
+            snap_horizon = fh;
+    }
+
+    *horizon = snap_horizon;
+    *stdout_bytes = snap_bytes;
+    if (max_jagged == 0) {
+        /* Count query (no array): report the true ledger count so
+         * the caller can size one exact array. */
+        *count_out = snap_count;
+        return 0;
+    }
+    n = (snap_count < max_jagged) ? snap_count : max_jagged;
+    for (i = 0; i < n; i++) {
+        jagged[i].start = snap_jagged[i].s;
+        jagged[i].end = snap_jagged[i].e;
+    }
+    *count_out = n;
+    return 0;
+}
+
+/* Set resume state for a new run (call after fr_py_init, before the
+ * scan/worker forks). The scanner suppresses already-committed byte
+ * intervals; the C orderer bootstraps its tracker from this state
+ * (multi-resume is cumulative, not delta). Plain stores + qsort —
+ * identical to ring_set_resume_main minus the argv parsing (same
+ * e > s filter, same cmp_interval order).
+ *
+ * Returns 0 ok, -1 engine not initialized, -2 count > 1024.
+ */
+int fr_py_set_resume_state(uint64_t horizon, uint64_t stdout_bytes,
+                           const struct FrPyInterval *jagged,
+                           uint32_t jagged_count) {
+    uint32_t n = 0;
+    uint32_t i;
+
+    if (!g_state)
+        return -1;
+    if (jagged_count > 1024)
+        return -2;
+    if (jagged_count > 0 && !jagged)
+        return -2;
+
+    g_state->is_resume_mode = 1;
+    g_state->resume_horizon = horizon;
+    g_state->resume_stdout_bytes = stdout_bytes;
+    for (i = 0; i < jagged_count; i++) {
+        /* e > s filter (ring_set_resume_main parity — degenerate
+         * intervals never enter the ledger). */
+        if (jagged[i].end > jagged[i].start) {
+            g_state->resume_jagged[n].s = jagged[i].start;
+            g_state->resume_jagged[n].e = jagged[i].end;
+            n++;
+        }
+    }
+    g_state->resume_jagged_count = n;
+    /* Scanner expects sorted (ring_set_resume_main parity). */
+    qsort(g_state->resume_jagged, n, sizeof(struct IntervalNode),
+          cmp_interval);
+    return 0;
+}
+
+/* Resume-mode query (1 active, 0 otherwise, incl. no engine). */
+int fr_py_is_resume_mode(void) {
+    if (!g_state)
+        return 0;
+    return g_state->is_resume_mode ? 1 : 0;
+}
+
+/* =====================================================================
+ * W-PY28: parent-side universal recovery — typed wrapper over the
+ * engine core (no argv marshalling). The reactor calls this when ANY
+ * worker dies for ANY reason; return codes are the core's 0..5
+ * (RECOVERED / NO_BATCH / NORMAL_EXIT / ALREADY_DONE / RACE /
+ * FATAL). The core is static to the shared TU, so this thin
+ * non-static wrapper is what ctypes binds. Direct call, zero
+ * marshalling overhead.
+ * ===================================================================== */
+int fr_py_recover_worker(int wid, int incarnation, int output_fd,
+                         int exit_code) {
+    return ring_recover_worker_core(wid, incarnation, output_fd,
+                                    exit_code);
+}
+
+/* =====================================================================
+ * W-PY26: C worker loop for plugin mode — zero Python per batch.
+ *
+ * The plugin equivalent of fr_py_worker_splice_loop: owns the ENTIRE
+ * batch lifecycle in C (claim → plugin → signal → ack). No ctypes,
+ * no GIL, no Python objects per batch. Matches bash's architecture
+ * (C worker, C callback, C loop).
+ *
+ * Built ONLY on tested primitives (same doctrine as the splice
+ * loop — deviations from the W-PY26 sketch, whose fixed_argv /
+ * raw-funcptr / hand-rolled mmap bypass the frozen ABI):
+ * - fr_py_claim (TLS publishing, poison detection + counting),
+ * - fr_py_plugin_invoke (the exact ctx/capture/emit body
+ *   fr_py_plugin_call uses — tokenized argv via do_tokenize, RAW
+ *   window via ring_call_ensure_ingress_map, stdout capture into
+ *   the reused memfd, framing via fr_py_emit_record),
+ * - fr_py_complete (signal + fallow + order + ack in one call),
+ * - fr_py_escrow_deposit (retry), fr_py_abort (fail-fast).
+ *
+ * Sketch deviations (deliberate, frozen-ABI-driven):
+ * - (path, func_name) strings, NOT a raw function pointer: the
+ *   child dlopens itself post-fork via fr_py_plugin_ensure (same
+ *   fork-safety rule as _plugin.load_plugin — dlopen without
+ *   calling is fork-safe; a parent-handle pointer would dangle on
+ *   dlclose and entangle refcounts across fork).
+ * - No fixed_argv: argv comes from do_tokenize inside the invoke
+ *   helper, exactly like ring_call_main (fixed args would bypass
+ *   batch delivery for non-RAW plugins).
+ * - No hand-rolled ingress mmap: the invoke helper uses the
+ *   engine's TLS-cached mapping (RAW) / pread fallback (fd_in).
+ * - on_error is honored (0 retry / 1 skip / 2 fail-fast), mirroring
+ *   _worker.py; the splice loop's retry-always rule does NOT apply
+ *   here because plugin failures are payload errors.
+ *
+ * Params:
+ *   wid/ingress_fd/out_fd/signal_fd/fallow_fd as in the splice loop.
+ *   order_fd: order-pipe write end (-1 disarms; when >= 0 acks
+ *     target out_fd so the C orderer gets contiguous packets).
+ *   trap_ack_fd: poison "P:idx:kills" lines (-1 disarms).
+ *   wincarn: respawn generation for fr_py_worker_init lineage.
+ *   retry_limit: poison threshold (mirrors engine default 3).
+ *   on_error: 0 retry (escrow) / 1 skip (ack) / 2 fail-fast (abort).
+ *
+ * Returns 0 drained-to-EOF, 1 claim/ack failure or fail-fast abort,
+ * 2 signal failure (EPIPE = parent gone — fatal, v0 parity). The
+ * Python child maps nonzero → worker exit 1 → parent RuntimeError.
+ * Poisoned batches warn + notify + ack-silent (never escrowed);
+ * zero-length sentinels ack-silent (M1 invariant, never executed).
+ * ===================================================================== */
+int fr_py_worker_plugin_loop(int wid, const char *path,
+                             const char *func_name, int ingress_fd,
+                             int out_fd, int signal_fd, int fallow_fd,
+                             int order_fd, int trap_ack_fd, int wincarn,
+                             int retry_limit, int on_error) {
+    fr_py_batch_t claimed;
+    int rc;
+
+    if (!path || !func_name || ingress_fd < 0 || out_fd < 0)
+        return 1;
+    if (on_error < 0 || on_error > 2)
+        return 1;
+    if (fr_py_worker_init(wid, 0, wincarn, retry_limit, 0) != 0)
+        return 1;
+    if (order_fd >= 0)
+        g_fr_config.fd_order_pipe = order_fd;
+    /* W-PY28: name the output fd for transaction publication + sync
+     * the ack offset (respawned generations append to a reused fd). */
+    fr_py_txn_out_fd = out_fd;
+    fr_py_ack_init(out_fd);
+    if (fr_py_plugin_ensure(path, func_name) != 0)
+        return 1;
+
+    while (1) {
+        rc = fr_py_claim(&claimed);
+        if (rc == 2)
+            return 0; /* EOF: drained */
+        if (rc != 0)
+            return 1; /* abort/failure */
+
+        if (claimed.poisoned) {
+            char pbuf[64];
+            int plen;
+            fprintf(stderr,
+                    "forkrun [WARN]: Skipping poisoned batch %llu "
+                    "(killed %u times).\n",
+                    (unsigned long long)claimed.batch_idx,
+                    claimed.num_kills);
+            if (trap_ack_fd >= 0) {
+                plen = snprintf(pbuf, sizeof(pbuf), "P:%llu:%u\n",
+                                (unsigned long long)claimed.batch_idx,
+                                claimed.num_kills);
+                if (plen > 0)
+                    (void)robust_pipe_write(trap_ack_fd, pbuf,
+                                            (size_t)plen);
+            }
+            /* Ack-silent (no signal — v0 parity) but ordered: the
+             * C orderer still expects its contiguous packet. */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        if (claimed.length == 0) {
+            /* EOF sentinel slot: ack but never emit (bash REPLY rule). */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        rc = fr_py_plugin_invoke(ingress_fd, out_fd, claimed.offset,
+                                 claimed.length, claimed.batch_idx,
+                                 claimed.lines, claimed.num_kills,
+                                 wid, wincarn);
+        if (rc == 0) {
+            /* Success: record already framed by the invoke — signal
+             * + fallow + order + ack in one call (no output: data
+             * NULL skips the writev, signal still honored). */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid,
+                                claimed.batch_idx, fallow_fd, out_fd,
+                                NULL, 0);
+            if (rc == 0)
+                continue;
+            if (rc == -2)
+                return 2; /* signal EPIPE: parent gone — fatal */
+            return 1; /* -1 output (unreachable: no output) / -3 ack */
+        }
+
+        /* --- failure path (bash -E analogue, _worker.py parity) --- */
+        if (on_error == 1) {
+            /* skip: ack-silent like poison (no signal — nothing emitted). */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+        if (on_error == 2) {
+            fflush(NULL);
+            fr_py_abort();
+            return 1;
+        }
+        /* Default retry: escrow with kills+1, no ack (the next claim
+         * overwrites the armed TLS). Same-process retry on re-claim;
+         * poison threshold converts loops into skips above. */
+        fflush(NULL);
+        fr_py_escrow_deposit(claimed.num_kills + 1);
+        continue;
+    }
+}
+
+/* =====================================================================
+ * W-PY33: C worker loop for spawn mode — zero Python per batch.
+ *
+ * The spawn analogue of fr_py_worker_plugin_loop: owns the ENTIRE
+ * batch lifecycle in C (claim → posix_spawnp → signal → ack). Built
+ * only on tested primitives:
+ * - fr_py_claim (TLS publishing, poison detection + counting),
+ * - fr_py_exec_spawn (concurrent stdin/stdout pump, capture-memfd
+ *   staging, framed emit — the exact body the Python worker loop
+ *   calls per batch),
+ * - fr_py_complete (signal + fallow + order + ack in one call),
+ * - fr_py_escrow_deposit (retry), fr_py_abort (fail-fast).
+ *
+ * Sketch deviations (deliberate, frozen-ABI-driven):
+ * - Output is CAPTURED then framed (fr_py_exec_spawn's capture
+ *   memfd + fr_py_emit_record), NOT written direct-to-out_fd: the
+ *   v0 emitter contract needs [idx][len] framing with the true
+ *   length up front, which is unknowable until the child exits.
+ *   Direct append would emit unparseable bytes (and the old
+ *   placeholder-backfill race the capture design fixed). The
+ *   deadlock the sketch fears does not exist here: stdout staging
+ *   is a memfd (never blocks), and stdin/stdout pump concurrently
+ *   under poll() inside fr_py_exec_spawn.
+ * - Claims go through fr_py_claim (NOT raw do_lockfree_claim): the
+ *   W-PY29 TXN hooks, poison counting, and halt checks live there.
+ *   No static output buffer (that would cap batch size).
+ * - Order target is derived (fr_py_complete), not forced: unordered
+ *   runs disarm the target exactly like the Python worker loop.
+ * - Poison batches warn + trap-notify + ack-silent, on_error is
+ *   honored (0 retry / 1 skip / 2 fail-fast), wincarn/node lineage
+ *   preserved — all mirroring _worker.py and the plugin loop.
+ *
+ * Params:
+ *   wid/ingress_fd/out_fd/signal_fd/fallow_fd as in the other loops.
+ *   argv/argc: command vector (argv[argc] must be NULL — enforced
+ *     by fr_py_exec_spawn; the caller marshals fork-inherited
+ *     strings into a pointer array, same rule as _worker's argv_c).
+ *   order_fd: order-pipe write end (-1 disarms).
+ *   trap_ack_fd: poison "P:idx:kills" lines (-1 disarms).
+ *   wincarn: respawn generation for fr_py_worker_init lineage.
+ *   retry_limit: poison threshold (mirrors engine default 3).
+ *   on_error: 0 retry (escrow) / 1 skip (ack) / 2 fail-fast (abort).
+ *
+ * Returns 0 drained-to-EOF, 1 claim/ack failure or fail-fast abort,
+ * 2 signal failure (EPIPE = parent gone — fatal, v0 parity). The
+ * Python child maps nonzero → worker exit 1 → parent RuntimeError.
+ * Poisoned batches warn + notify + ack-silent (never escrowed);
+ * zero-length sentinels ack-silent (M1 invariant, never executed).
+ * ===================================================================== */
+int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
+                            int ingress_fd, int out_fd, int signal_fd,
+                            int fallow_fd, int order_fd, int trap_ack_fd,
+                            int wincarn, int retry_limit, int on_error) {
+    fr_py_batch_t claimed;
+    int rc;
+
+    if (!argv || argc <= 0 || ingress_fd < 0 || out_fd < 0)
+        return 1;
+    if (on_error < 0 || on_error > 2)
+        return 1;
+    if (fr_py_worker_init(wid, 0, wincarn, retry_limit, 0) != 0)
+        return 1;
+    if (order_fd >= 0)
+        g_fr_config.fd_order_pipe = order_fd;
+    /* W-PY28: name the output fd for transaction publication + sync
+     * the ack offset (respawned generations append to a reused fd). */
+    fr_py_txn_out_fd = out_fd;
+    fr_py_ack_init(out_fd);
+
+    while (1) {
+        rc = fr_py_claim(&claimed);
+        if (rc == 2)
+            return 0; /* EOF: drained */
+        if (rc != 0)
+            return 1; /* abort/failure */
+
+        if (claimed.poisoned) {
+            char pbuf[64];
+            int plen;
+            fprintf(stderr,
+                    "forkrun [WARN]: Skipping poisoned batch %llu "
+                    "(killed %u times).\n",
+                    (unsigned long long)claimed.batch_idx,
+                    claimed.num_kills);
+            if (trap_ack_fd >= 0) {
+                plen = snprintf(pbuf, sizeof(pbuf), "P:%llu:%u\n",
+                                (unsigned long long)claimed.batch_idx,
+                                claimed.num_kills);
+                if (plen > 0)
+                    (void)robust_pipe_write(trap_ack_fd, pbuf,
+                                            (size_t)plen);
+            }
+            /* Ack-silent (no signal — v0 parity) but ordered: the
+             * C orderer still expects its contiguous packet. */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        if (claimed.length == 0) {
+            /* EOF sentinel slot: ack but never emit (bash REPLY rule). */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        rc = fr_py_exec_spawn(argv, argc, claimed.offset,
+                              claimed.length, ingress_fd, out_fd,
+                              claimed.batch_idx);
+        if (rc == 0) {
+            /* Success: record already framed by the exec — signal
+             * + fallow + order + ack in one call (no output: data
+             * NULL skips the writev, signal still honored). */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid,
+                                claimed.batch_idx, fallow_fd, out_fd,
+                                NULL, 0);
+            if (rc == 0)
+                continue;
+            if (rc == -2)
+                return 2; /* signal EPIPE: parent gone — fatal */
+            return 1; /* -1 output (unreachable: no output) / -3 ack */
+        }
+        if (rc < 0)
+            return 1; /* pipe/spawn/wait/output infra failure */
+
+        /* --- failure path (command exit code; _worker.py parity) --- */
+        if (on_error == 1) {
+            /* skip: ack (order target derived, no signal — v0 parity). */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+        if (on_error == 2) {
+            fflush(NULL);
+            fr_py_abort();
+            return 1;
+        }
+        /* Default retry: escrow with kills+1, no ack (the next claim
+         * overwrites the armed TLS). Same-process retry on re-claim;
+         * poison threshold converts loops into skips above. */
+        fflush(NULL);
+        fr_py_escrow_deposit(claimed.num_kills + 1);
+        continue;
+    }
+}

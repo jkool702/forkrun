@@ -279,9 +279,287 @@ permanent runtime tripwire.
 
 ---
 
-## 16. Checklist Summary
+## 16. Scanner Base Determinism (F-PY-UMA1)
 
-If sections §1–16 above remain true, **forkrun is correct** — regardless of:
+**Invariant**
+The scanner's coordinate base (`buf_base_offset`, hence the first
+published window) must be deterministic — byte 0 — regardless of
+the fork-shared file offset it inherits.
+
+**Origin**
+The UMA scanner seeded its base from `lseek(SEEK_CUR)` on the
+fork-shared ingress memfd. Under sequential in-process runs that
+offset was observed nonzero (72–10120 in 15 caught instances),
+silently dropping the `[0, K)` head with torn seams — while the
+parent had verified offset 0 pre-fork. Forcing the base to 0
+eliminated all failures (0/48 forensic iters, 9–10/10 gates).
+
+**Enforced by**
+Explicit `lseek(fd, 0, SEEK_SET)` + `buf_base_offset = 0` at
+scanner entry (NUMA already hardcoded 0). All callers start at
+byte 0 by contract (materialized callers lseek first; streaming
+helpers fork pre-spill), so the reset changes no legitimate path.
+
+**Audit Rule**
+❌ Any coordinate seed read from shared mutable file state
+(SEEK_CUR, unanchored offsets) instead of an explicit reset.
+The query-then-trust pattern is the violation, however small
+the window between query and use.
+
+---
+
+## 17. NUMA ChunkMeta Lifetime (F-NUMA1)
+
+**Invariant**
+A `ChunkMeta` slot must not be recycled (overwritten by chunk
+`major + META_RING_SIZE`) while any indexer or scanner can still
+read it. Concretely: the ingest publish frontier stays within
+`META_RING_SIZE/2` of the oldest unread chunk on any node with
+unfinished work, and every scanner reads a chunk's descriptor
+exactly once (snapshot at claim+ready) and never re-dereferences
+`meta->` for the same chunk.
+
+**Origin**
+Heavy-20M C-plugin runs under forced-logical `@4` completed
+cleanly (exit 0, no warnings) with ~22–31% of records missing —
+almost always a whole orderer-key suffix from one gap major. Key
+forensics: every failing run showed ack keys duplicated at exactly
+`gap + META_RING_SIZE` (ten events across runs, plus hidden
+downstream gaps at the same offset), each dup pair spanning two
+nodes. A stalled node's claimed-but-unread chunks let the global
+publish frontier lap it by a full meta ring: its slot (same slot
+mod 4096) was recycled before it was read, so batches were stamped
+with a future major. The dup keys sat in the C orderer's heap
+behind the gap; at pipe EOF the leftovers were freed with rc 0 —
+silent tail loss. Per-node queue caps cannot prevent this (they
+bound unclaimed depth, not claimed-unread lag, and the indexer can
+race thousands of chunks ahead of its shield-stalled scanner).
+Reproducer shape: sequential in-process maps (or one map from a
+~20GB parent — retained output slows helper startup into the same
+skew), never fresh-small processes.
+
+**Enforced by**
+(1) `indexer_major` + `scan_claim_major` per-node progress
+markers (relaxed stores; published per consumed chunk / per
+successful claim) and the ingest lifetime bound
+(`ring_numa_ingest_main`): stall publish while
+`frontier - min(marker) >= META_RING_SIZE/2` over nodes with
+`head > ready`. Indexer progress alone is insufficient (observed:
+nine consecutive +4096-stale first-reads on a node whose indexer
+had moved on) — the scanner marker is load-bearing. Nodes with
+empty queues don't pin; EOF bypasses; staleness stalls more, never
+less. (2) Per-chunk meta snapshot in indexer and scanner: copy
+`(major_id, raw_offset, raw_length[, target_node])` to stack
+locals at the gated point and use locals thereafter. Publication
+writes (`actual_end`, `cum_lines`) still go through `meta` (own
+slot, indexer-pinned while unread).
+
+**Audit Rule**
+❌ Any `meta->` read past the claim+ready snapshot point for the
+same chunk (per-flush `major_id`, search-window bounds,
+EOF-sentinel range). ❌ Any publish path that lets the global
+major frontier exceed the oldest unread chunk's generation window.
+New readers of `ChunkMeta` must either snapshot or prove their
+window is pinned by the lifetime bound.
+
+---
+
+## 18. Per-Node Worker Coverage (F-NUMA2)
+
+**Invariant**
+On multi-node topologies the parent must guarantee ≥ 1 worker
+per node before ingest begins; worker counts below the node
+count are raised, not honored.
+
+**Origin**
+User-supplied `workers < nodes` left born-local rings permanently
+unworked (workers claim locally only; stealing covers orphans,
+not healthy-but-unassigned rings). The F-NUMA1 drain guard made
+the resulting shortfall loud (RuntimeError at completion), but
+loud failure is still failure for a configuration the parent
+could have satisfied. Correctness of exactly-once delivery
+dominates the user's worker-count lower bound: nobody asks for
+fewer workers *because* they want stranded data.
+
+**Enforced by**
+Single normalization point
+(`_resolve_workers_numa(workers, num_nodes)`): `max(workers,
+num_nodes)` on multi-node topologies with one `UserWarning`
+(requested vs effective); UMA exempt; idempotent (effective
+counts pass through silently, so downstream re-resolution never
+double-warns). Per-node distribution is round-robin from node 0,
+so `workers >= nodes` covers all nodes by construction. The
+F-NUMA1 drain guard stays as the backstop for genuine runtime
+anomalies.
+
+**Audit Rule**
+❌ Any NUMA executor path that forks workers from a raw user
+count without passing through the normalization point. ❌ Any
+conditional bump (input-size heuristics, "looks unneeded") —
+the invariant is unconditional on multi-node topologies.
+
+---
+
+## 19. Frontend Port Guarantees (W-PORTAUDIT)
+
+The Bash and Python frontends share the engine (one TU) but not
+the orchestration layer. Every parent-side guarantee below was
+once Bash-only, lost or thinned in the Python port, and is now
+locked in Python by the differential audit (`dev/supervisor/
+PORT_AUDIT.md`: 32 items, 11 PORTED / 8 EQUIVALENT /
+7 N/A-BY-DESIGN / 6 fixed / 3 deferred). The audit's standing
+rule: **F-NUMA2 was also "different architecture" until it
+wasn't** — N/A claims require a named structural reason, never
+a vibe.
+
+**Invariant (drain-before-complete)**
+Before declaring NUMA completion the parent verifies per-node
+drain (`read_idx >= write_idx` on every node); with full worker
+coverage any other unclaimed tail raises `RuntimeError` naming
+node and indices, with under-coverage it warns once and returns
+the partial output. `read_idx > write_idx` (claim overshoot) is
+benign and never fires. (EOF_PROTOCOL §7; F-NUMA1 parent half.)
+
+**Invariant (poison-threshold fidelity)**
+The engine's poison threshold is whatever `FORKRUN_RETRY_LIMIT`
+says: `<0` never poisons, `0` poisons on first failure
+(exactly-once), `N` poisons after `N` executions (default 3).
+The Python parent passes the resolved value at every worker-init
+site through the single point `_resolve_retry_limit()` — never a
+hardcoded constant. Unparseable values fail closed (`ValueError`).
+(F-PORT1.)
+
+**Invariant (checkpoint ownership gate)**
+A checkpoint from a foreign UID is never resumed silently; a
+group/world-writable checkpoint is never resumed silently (the
+Bash soft-reject is fail-closed in Python: there is no
+interactive preview surface, so the TTY-less rule applies
+always). `FORKRUN_TRUST_RESUME=1` bypasses both with a recorded
+warning — same name/semantics as Bash. Parsing stays strict
+regardless: the typed byte-coordinate ledger carries no code, so
+there is no consent-gate surface to port (P15 N/A-BY-DESIGN).
+(F-PORT2.)
+
+**Invariant (batch-size line-wins)**
+`lines=` + `bytes=` warns once (`UserWarning`) and line mode
+wins with stdin delivery preserved (Bash `-L`-overrides-`-b`
+parity) — never a silent pick, never a hard error. Zero/negative
+values stay rejected. (F-PORT3.)
+
+**Invariant (execution-environment pinning)**
+Spawned commands are resolved at build time against the *system*
+default `PATH` (`os.defpath`), never the caller's inherited
+`PATH` — a CWD-planted binary must not execute (D10-class).
+Unresolvable bare names keep their spelling so missing commands
+still fail lazily at payload time (`SpawnError` → escrow →
+poison). Slash-paths are realpath-normalized, never PATH-searched.
+Plugin paths must contain `/` (absolute or explicit relative;
+bare filenames resolve via CWD/`LD_LIBRARY_PATH`) and are
+realpath-normalized. (F-PORT4.)
+
+**Invariant (release version coherence)**
+`release_check.py` verifies the *engine*, not just the package:
+`META` names the release, the tree-built substrate reports it
+(stale/unbuilt `"unknown"` fails), and the wheel-embedded `.so`
+reports it by the same read path. (F-PORT5.)
+
+**Standing guarantees (re-verified, no change needed)**
+fd hygiene at every fork site (blanket `scrub_fds` + targeted
+closes; fd 2 never redirected/closed — P5/P6); EOF 3-condition
+order (`C1→C2→C3`, `continue`-not-`break`) on every completion
+path (P21); PID-recycling no-kill (`ECHILD` ⇒ no `kill` — P23);
+order/ack backpressure preserved with the signal pipe as a
+separate wakeup channel (P11); empty input never forks a worker
+(P19); degenerate edges byte-exact (empty/single/no-trailing-NL/
+NUL/huge-line — F-PORT6); stale-horizon resume fails loud and
+complete-stream resume is a clean no-op (P16).
+
+**Structural N/A (named reasons, not gaps)**
+No JIT/codegen surface (`NO-CODEGEN-IN-PYTHON`); no realtime
+`-u` path (`framed-transport-invariant` — workers never write
+stdout directly); exit codes are exceptions, not process exits
+(`PYTHON-IS-IMPORTABLE-LIBRARY` — full taxonomy parity deferred
+as D-PORT3); checkpoint filenames need no quoting layer
+(`no-shell-interpolation`); non-NUMA paths have no indexer
+process (`no-indexer-process`); materialized inputs need no
+fallow (bounded by contract).
+
+**Resolved by W-PORTDEFER (no deferred items remain)**
+D-PORT3 cause-fidelity taxonomy (`exceptions.py`: signal classes
+with `signo`/`bash_code`, opt-in `strict_poison` for exit-3
+fidelity, 128+signo worker-death transport, mapping table in
+TROUBLESHOOTING.md); D-PORT1 opt-in `signal_policy="checkpoint"`
+(HUP/TERM + USR1-iff-PREEMPT for one run, restoration invariant,
+Bash signal-wins precedence); D-PORT2 `fr_py_abort_reason()`
+shim accessor (sanctioned additive read-only entry — engine
+still frozen) with record/excuse/fatal wiring in all NUMA
+watches, UMA scanner watches, and NUMA joins.
+
+**Audit Rule**
+❌ Any new worker-init call site that passes a literal retry
+limit instead of `_resolve_retry_limit()`. ❌ Any resume path
+that stats-or-parses before the ownership gate, or honors a new
+bypass env name beside `FORKRUN_TRUST_RESUME`. ❌ Any executor
+lookup (`spawn`/`plugin`/future) that searches the caller's
+`PATH`/CWD. ❌ Any "different architecture" N/A without a named
+structural reason and a PORT_AUDIT entry.
+
+---
+
+## 20. Ingress Memfd Position Is Undefined (F-PY-UMA1b)
+
+**Invariant**
+The file offset of the ingress memfd is not maintained by any
+forkrun contract and must never be read or relied upon. All
+access uses explicit offsets (`pread`/`pwrite`, offset-bearing
+`sendfile`/`splice`/`copy_file_range`, `mmap` windows). Any new
+code touching the ingress fd must follow this discipline —
+positional `read`/`write`/offset-less syscalls on it are a
+contract violation even when they appear to work.
+
+**Origin**
+F-PY-UMA1: the UMA scanner seeded its coordinate base from
+`lseek(SEEK_CUR)` on the fork-shared ingress memfd and silently
+dropped `[0, K)` whenever the position was nonzero (fixed by
+unconditional base 0). W-MOVER then proved a live offset-mover
+still exists on the current tree: 8-byte positional reads on the
+shared ingress from `do_lockfree_claim`'s eventfd-drain path
+(`sys_read(evfd_data_arr[my_numa_node], &v, 8)`), traced via
+LD_PRELOAD (40K–1.5M per suite run, mostly EOF-spin, some
+advancing), return-PC resolved into `do_lockfree_claim`,
+per-event array capture showing the slot naming the ingress fd.
+Parent-side sentry (1000+ samples): pre-fork always 0, movement
+in worker-fork through teardown windows, always multiples of 8.
+Harmless post-F-PY-UMA1 (nothing reads position; stray packets
+are validated away; suite green) but real — and a latent hazard
+to any future positional consumer. The fd-aliasing origin
+(slot↔ingress number collision in forked children while the
+parent layout verifies pristine) is carried as an explicit
+residual; the engine-side hardening (fd-identity validation in
+the claim path) needs engine changes and is halted per red
+lines for owner decision. The scanner-side contract — never
+read the position — holds regardless of what moves it.
+
+**Enforced by**
+Scanner base hardcoded 0 (`core_scanner_loop` entry re-establishes
+it instead of querying); pre-fork `lseek(0)` at every materialized
+spill site; the spill/chunk/scan/emit/plugin/tokenize paths all
+use explicit offsets (audited); lock-in `test_mover.py`
+(position-independence under a deliberately dirtied offset +
+ten-sequential-maps head exactness).
+
+**Audit Rule**
+❌ Any `read`/`write`/`sendfile`/`splice` on the ingress fd
+without an explicit offset argument. ❌ Any `lseek(SEEK_CUR)`
+query of the ingress offset outside narrowly-scoped,
+env-gated diagnostics. ❌ Any new consumer of ingress bytes
+that is not `pread`/explicit-offset/`mmap`-window based.
+
+---
+
+## 21. Checklist Summary
+
+If sections §1–21 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
