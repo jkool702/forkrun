@@ -1,6 +1,6 @@
 # forkrun Changelog
 
-## v3.6.0 (unreleased)
+## v3.6.0 — 2026-09-30
 
 ### Second-review remediation, six waves (W-REL6)
 
