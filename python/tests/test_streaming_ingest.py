@@ -192,6 +192,85 @@ class TestStreamingIngest(unittest.TestCase):
         finally:
             os.close(r)
 
+    def test_reactor_stream_does_not_sleep_per_chunk(self):
+        """A streamed reactor run must WAIT on the source, not pace.
+
+        Regression: the reactor ingest drained to EAGAIN then slept a
+        flat 20 ms, once per chunk, because the reader outruns the
+        writer. 645 sleeps on light-5M -- 12.9 s of a 14.65 s wall, 88%
+        of the run. It now select()s on the source fd.
+
+        Asserts the mechanism (the pacing sleep does not fire per
+        chunk) rather than wall time, so it is not a benchmark: it
+        fails on the old code and passes on the new in well under a
+        second either way.
+        """
+        import collections
+        import time as _t
+        real_sleep = _t.sleep
+        seen = collections.Counter()
+
+        def counting(d):
+            seen[round(d, 4)] += 1
+            real_sleep(d)
+
+        # The writer must be SLOWER than the reader, or the reader
+        # never sees EAGAIN and the bug never fires. A memory-speed
+        # writer pushing 64 KB chunks keeps the pipe permanently full:
+        # this test passed against the reverted fix until the writer
+        # was made to pull from a file, which is the real condition
+        # (and the one the benchmark hit at 645 sleeps).
+        src_path = os.path.join(tempfile.gettempdir(),
+                                "forkrun_ingest_wait_src.bin")
+        n_chunks = 16
+        with open(src_path, "wb") as fh:
+            for _ in range(n_chunks):
+                fh.write(b"y" * (1 << 20))
+
+        r, w = os.pipe()
+        try:
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    os.close(r)
+                    with open(src_path, "rb") as s, os.fdopen(w, "wb") as d:
+                        while True:
+                            b = s.read(1 << 20)
+                            if not b:
+                                break
+                            d.write(b)
+                finally:
+                    os._exit(0)
+            os.close(w)
+            _t.sleep = counting
+            try:
+                out = forkrun.map(lambda b: b.data, r, workers=4, nodes=1,
+                                  orchestrator=True, output="bytes")
+                n = len(out)
+                del out
+            finally:
+                _t.sleep = real_sleep
+                os.close(r)
+                os.waitpid(pid, 0)
+        finally:
+            try:
+                os.close(w)
+            except OSError:
+                pass
+            try:
+                os.unlink(src_path)
+            except OSError:
+                pass
+
+        self.assertGreater(n, 0)
+        # Before the fix this fired ~n_chunks times; the wait is now a
+        # select() that returns as soon as the writer lands a chunk.
+        self.assertLess(
+            seen[0.02], n_chunks // 4,
+            "20 ms pacing sleep fired %d times for %d chunks -- the "
+            "streamed reactor path is pacing instead of waiting"
+            % (seen[0.02], n_chunks))
+
     def test_memory_bounded(self):
         # 256MB through a pipe: parent growth must stay far below input
         # size (fallow punches acked prefixes). The headline 1GB run
