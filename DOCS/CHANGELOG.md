@@ -1,5 +1,86 @@
 # forkrun Changelog
 
+## v3.6.1 — unreleased
+
+### Python frontend: parent-side collect and fork-gate throughput
+
+Measured on an i9-7940X (14c/28t, 4 logical nodes on one socket),
+5M records / 386 MB, echo payload so the numbers isolate movement
+rather than UDF speed, `min` of 4. Paired A/B against v3.6.0.
+
+Two independent defects, both in the single-threaded parent.
+
+- **The ordered collect copied the whole result stream twice.**
+  `_read_fd_all()` accumulated every chunk in a list and then
+  `b"".join`'d them -- a second full copy of the entire ordered
+  result stream -- before parsing a single record. Profiling the
+  parent put the join alone at 155 ms of a 638 ms run (24%), with
+  `_split_records` at a further 160 ms, and the peak holding ~2x the
+  stream before parsing began. Replaced the eight buffer-then-parse
+  collect sites with `_iter_records()`, which reads a chunk, parses
+  the complete records in it, and carries only the straddling tail.
+  `_iter_records()` then maps the collection file instead of reading
+  it, parsing straight out of the mapping (each record wrapped
+  individually), which removes the kernel copy as well.
+  `map(order="index")` on this workload: **0.667 s -> 0.318 s
+  (2.1x)**; `map(order="none")` 0.358 s -> 0.305 s.
+
+  Byte-identical output: the ordered digest is unchanged, and the
+  unordered stream matches on an order-independent digest (its order
+  is nondeterministic at v3.6.0 too -- three consecutive runs give
+  three digests).
+
+- **The NUMA fork gate slept a fixed 50 ms on every run.** The gate
+  forks workers on publish and then slept 50 ms unconditionally, so
+  every multi-node run paid a full quantum even when the publish
+  landed in the first millisecond -- measured at 50.00 ms of a
+  137 ms run (24-37% of wall). Readiness is now polled on a short
+  doubling ramp. Supervision (`_watch_pipeline` +
+  `reactor_poll_once`'s O(N) waitpid sweep) deliberately stays on the
+  original 50 ms cadence; running it on every fast poll made high
+  worker counts slower (+8.8% at 48w, +24% at 96w) while the same
+  ramp won -20.8% at 8w.
+
+  A flat ramp still regressed at 96w (+34%), because forking the
+  whole `-j` complement against a barely-filled ring starts every
+  worker spinning (`forkrun_ring.c:6121` `cpu_relax` x100) and
+  steals the cores the ingest threads need. At the measured
+  ~13 batches/ms publish rate a first-publish gate saw 46 batches of
+  backlog at 96w (0.5/worker). The gate now waits for a per-worker
+  backlog floor: **-26% at 8w, -5.5% at 28w, -3.0% at 48w, neutral
+  at 96w.**
+
+  That floor needs a level gauge, and `fr_py_data_ready_node` cannot
+  supply one: it is consume-once, walking `write_idx` forward from a
+  private high-water mark, so a poll below the floor has already
+  burned the evidence and the floor becomes unreachable. (This
+  deadlocked the gate into a false "no published batches" error
+  before it was caught.) Added **`fr_py_backlog_node`**, a
+  non-destructive `write_idx - read_idx` read. Read-only and
+  additive -- no existing signature or struct layout moved, so the
+  ABI stays backward compatible for already-built consumers. A
+  substrate predating the symbol degrades to the old first-publish
+  gate rather than hard-failing, and a node still holding unclaimed
+  batches when the pipeline quiesces always forks, so the floor can
+  never drop work.
+
+Net effect on the bash gap at this workload: `map(order="index")`
+2.90x -> **1.39x**, `map(order="none")` 1.56x -> **1.33x**.
+
+The remaining collect cost is the irreducible per-record `bytes`
+copy (386 MB at ~2.5 GB/s), which is what separates a
+discrete-`bytes`-objects API from bash's byte-stream emit.
+
+Also measured and deliberately NOT changed: the 20 ms streaming
+backpressure sleep is genuine rate-limiting, not a defect -- it fired
+zero times on a healthy pipeline (file or pipe source). The
+`_time.sleep(0.005)` death-confirm spin and the
+`os.fork()`-per-worker cost (315 us at 28w, 974 us at 96w, fully
+serial in the parent, vs 61 us for bash's clone) remain open.
+
+Tests: 644 run, 1 failure -- `test_release_check_passes`, which
+requires a clean tree and was already failing before these changes.
+
 ## v3.6.0 — 2026-09-30
 
 ### Second-review remediation, six waves (W-REL6)
