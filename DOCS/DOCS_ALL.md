@@ -427,6 +427,25 @@ buffer protocol use need no change. `memoryview` has no `.split` and
 `in` raises `NotImplementedError` for any `memoryview` -- both are
 CPython's, not ours.
 
+**The unordered fail-fast ceiling no longer exists.** The v3.6.0
+release benchmark carried a `(max)` row (`orchestrator=False`,
+`order="none"`) because disabling recovery and ordering was worth 24% on
+the light 5M corpus. Re-measured 2026-10-02 across 12 cells it is worth
+nothing: the two configurations differ by -1.8% to +7.9% with no
+consistent direction, and `(max)` is the slower of the pair in 7 of 12.
+Ordering and crash recovery are now effectively free, because the
+C-orderer transit they used to pay has been removed. The release table
+now carries only default-configuration rows, split by output
+representation; the `(max)` measurements are kept so the claim is
+checkable rather than asserted.
+
+The same re-measurement bounds what the zero-copy change is worth on
+real UDF workloads: **1.01x-1.45x**, not the 2.0-2.3x a pure-echo
+payload reaches. These payloads parse, extract and filter per record, so
+result collection is a smaller share of wall. The C plugin gains more
+(1.11-1.45x) than the Python UDF (1.01-1.09x) for the same reason. All
+24 cells exactness-checked against the release table's record totals.
+
 Tests: 656 run. Coverage added: 12 tests in `test_output_mode.py`
 (both representations, byte-identity, invalid values, lifetime, fd
 hygiene, degenerate shapes). The pre-existing content tests were moved
