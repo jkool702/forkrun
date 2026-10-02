@@ -132,8 +132,17 @@ on a bigger corpus before believing it.
 - **`fr_py_data_ready`/`FORKRUN_C_PARSE=1`/`c_drain=True` are not wins
   here** — all within noise. `c_drain` is disabled for `order="index"`
   anyway (`use_drain = ... and not use_orderer`).
-- **The 20 ms streaming backpressure sleep is NOT a bug** — fired 0
-  times on a healthy pipeline (file or pipe). Genuine rate-limiting.
+- ~~**The 20 ms streaming backpressure sleep is NOT a bug** — fired 0
+  times on a healthy pipeline (file or pipe). Genuine rate-limiting.~~
+  **WRONG, and expensive.** It fires roughly once per chunk on a
+  streamed source under the reactor (`orchestrator=True`): 645 sleeps on
+  light-5M = 12.9 s of a 14.65 s wall, 88% of the run. The reader is
+  genuinely faster than the writer, so the wait is real — the error was
+  not waiting on the fd that signals it. Now a `select()` on the source
+  fd with the same 0.02 s timeout: 14.16 s -> 0.74 s. **A "fired zero
+  times" claim is only worth as much as the configuration it was
+  measured in** — I had checked files and a couple of pipe paths and
+  generalised. Check the worst configuration, not a sample.
 - **Box is single-socket.** Anything about memory-bandwidth contention
   must be re-measured on the EPYC before shipping.
 - **Forcing big batches hurts** — `bytes=1M/4M/16M` all slower than
