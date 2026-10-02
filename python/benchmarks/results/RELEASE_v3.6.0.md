@@ -32,9 +32,25 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 ### 5M-Record Steady-State Benchmark — 28 Workers, UMA (`nodes=1`)
 
 All systems process the same 5,000,000-record input on the same 28-thread Intel i9-7940X.
-forkrun rows re-measured 2026-10-02 (v3.6.1 parent-side work, `ce17b0a4`;
-median-of-3 + warmup, exact totals verified on every cell: light 5000000,
-medium 4997892, heavy 4997982 — 24/24 cells exact).
+forkrun rows re-measured on a **UMA-only boot** (single NUMA node; no
+`numa=fake=4`) after a reboot, on regenerated corpora that reproduce the
+column sizes exactly (0.533 / 2.347 / 6.720 GB, 5,000,000 lines each —
+`ml_data_gen.py` is seeded, SEED=42). Median-of-3 + warmup; exact totals
+verified on every cell (light 5000000, medium 4997892, heavy 4997982) —
+**24/24 cells exact.**
+
+> **THP confound — read before quoting the C plugin rows.**
+> `/sys/kernel/mm/transparent_hugepage/shmem_enabled` is **`never`** on
+> this boot, and forkrun's own startup notice states that memfd-backed
+> I/O needs `always` for the large gain, "most notably in `-C` mode" —
+> which is exactly what the C plugin rows measure. The C plugin rows
+> read **~17% lower than the previous fake-4 measurement** (light
+> 8.54M vs 10.28M rec/s). The previous boot's THP state was not
+> recorded, so the gap cannot be attributed: it is consistent with a
+> THP regression across the reboot, and this boot cannot set the knob
+> (not root). **Re-measure with `shmem_enabled=always` before treating
+> 8.54M as forkrun's C plugin ceiling.** The Python UDF rows are
+> compute-bound and move only ~2%, consistent with noise.
 Every forkrun row is the **reactor default** (`orchestrator=True`, `order="index"`):
 crash recovery and input-batch ordering both active. Rows are split by output
 representation, which is the only axis that still separates them.
@@ -47,11 +63,11 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 
 | System                              | Light (533 MB)          | Medium (2.35 GB)        | Heavy (6.72 GB)        |
 |-------------------------------------|-------------------------|-------------------------|------------------------|
-| **★ forkrun C plugin (memoryview)**  | **10.28M rec/s (1,095 MB/s)** | **2.52M rec/s (1,182 MB/s)** | **778k rec/s (1,046 MB/s)** |
-| **★ forkrun C plugin (bytes)**       | **7.08M rec/s (755 MB/s)** | **1.85M rec/s (869 MB/s)** | **700k rec/s (942 MB/s)** |
+| **★ forkrun C plugin (memoryview)**  | **8.54M rec/s (910 MB/s)** | **2.16M rec/s (1,013 MB/s)** | **711k rec/s (955 MB/s)** |
+| **★ forkrun C plugin (bytes)**       | **6.64M rec/s (707 MB/s)** | **1.75M rec/s (820 MB/s)** | **659k rec/s (886 MB/s)** |
 | Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
-| **★ forkrun Python UDF (memoryview)** | **1.83M rec/s (195 MB/s)** |  **799k rec/s (375 MB/s)**   |  **94k rec/s (126 MB/s)**  |
-| **★ forkrun Python UDF (bytes)**     | **1.68M rec/s (179 MB/s)** |  **732k rec/s (344 MB/s)**   |  **93k rec/s (125 MB/s)**  |
+| **★ forkrun Python UDF (memoryview)** | **1.80M rec/s (192 MB/s)** |  **774k rec/s (364 MB/s)**   |  **94k rec/s (126 MB/s)**  |
+| **★ forkrun Python UDF (bytes)**     | **1.70M rec/s (182 MB/s)** |  **726k rec/s (341 MB/s)**   |  **93k rec/s (125 MB/s)**  |
 | ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s) |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
 | ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
 | multiprocessing.Pool                | 1.60M rec/s (170 MB/s) |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
@@ -59,13 +75,15 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
-| **forkrun C vs Executor**           | **6.27×** | **3.16×** | **8.28×** |
-| **forkrun C vs Polars**             |           —              | **1.14×** |            —             |
-| forkrun C vs Executor+C             | 2.80× | 1.24× | 1.06× § |
+| **forkrun C vs Executor**           | **5.21×** | **2.71×** | **7.56×** |
+| **forkrun C vs Polars**             |           —              | **0.98×** |            —             |
+| forkrun C vs Executor+C             | 2.33× | 1.06× | 0.97× § |
 
 Ratio rows use the **memoryview** rows (forkrun's default representation since
-0.17.0). Zero-copy output is worth 1.01×–1.45× over per-record `bytes` on these
-workloads — less than the 2.0–2.3× it reaches on a pure-echo workload, because
+0.17.0). Zero-copy output is worth 1.10–1.37× over per-record `bytes` here
+(workload-dependent; the `nodes="auto"` copy below reads 1.01–1.45×, and a
+pure-echo payload reaches 2.0–2.3× — these payloads do real per-record work,
+so result collection is a smaller share of wall) — less than the 2.0–2.3× it reaches on a pure-echo workload, because
 these payloads do real per-record work (parse, extract, filter) so result
 collection is a smaller share of wall. The C plugin gains more than the Python
 UDF (1.11–1.45× vs 1.01–1.09×) for the same reason. See
