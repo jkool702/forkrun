@@ -155,6 +155,21 @@ on a bigger corpus before believing it.
   and looked right. Audit *callee signatures*, not call sites — an AST
   pass comparing every kwarg against the callee's signature catches all
   of it at once.
+  **Fixed structurally, not just patched.** `map()`/`run()` dispatched at
+  14 sites re-typing 159 shared keywords; they now build one `base` dict
+  per entry point and splat it (159 -> 55 hand-written). The failure mode
+  inverts: a forgotten site now raises `TypeError` instead of silently
+  taking the callee's default. Pinned by
+  `tests/test_dispatch_single_source.py`. **When adding a parameter,
+  edit the bundle — never a site.**
+- **A guard test that only understands one spelling of the thing it
+  guards is not a guard.** The dispatch-invariant detector first matched
+  only dict literals (`base = {...}`), not `dict(...)` calls — so the
+  day I wrote the bundle as `dict(...)`, the test quietly stopped
+  checking anything and still passed. It also first compared every site
+  against *every* bundle in the function, which false-positived on keys
+  that exist only in a variant. Write the detector to survive the
+  reformatting you will inevitably do next.
 - **`stream()` cannot be zero-copy.** It drains records live out of a
   results pipe / worker memfd, so there is no finished collection file to
   map. It yields `bytes` and always did. Do not try to force views here;
