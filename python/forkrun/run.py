@@ -737,21 +737,30 @@ def _iter_records(lib, fd, _chunk=_CHUNK, views=False):
     short tail means an internal inconsistency, not user data -- waitpid
     failure raises before this point).
     """
-    if views:
-        # Map the whole stream: zero kernel->user copies, so slicing is
-        # genuinely free. Falls back to one pread (one copy) if the fd
-        # is not mappable.
-        try:
-            size = os.fstat(fd).st_size
-        except OSError:
-            size = 0
-        if size > 0:
-            mv = _map_collect(lib, fd, size) if lib is not None else None
-            if mv is not None:
-                recs, _tail = _split_records_views(mv)
-                for rec in recs:
-                    yield rec
-                return
+    # Map the whole stream when we can, in BOTH modes. For views this
+    # is the whole point: zero kernel->user copies, so slicing is free.
+    # For output="bytes" it still saves one full pass -- the old bytes
+    # path pread the entire stream into a buffer (kernel->user) and
+    # THEN copied each record out of it, i.e. two passes over the data
+    # where one will do. Mapping and copying per record is one.
+    #
+    # Falls back to a pread of the whole stream, then to chunked reads,
+    # so the result type never depends on whether the fd turned out to
+    # be mappable.
+    try:
+        size = os.fstat(fd).st_size
+    except OSError:
+        size = 0
+    if size > 0:
+        mv = _map_collect(lib, fd, size) if lib is not None else None
+        if mv is not None:
+            recs, _tail = _split_records_views(mv)
+            for idx, rec in recs:
+                # recs are (batch_idx, payload); only the payload differs
+                # between modes.
+                yield (idx, rec) if views else (idx, bytes(rec))
+            return
+        if views:
             data = b""
             got = 0
             while got < size:
