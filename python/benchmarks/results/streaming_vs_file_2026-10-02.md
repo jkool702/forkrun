@@ -50,16 +50,23 @@ same configuration reading from a **file**.
 | C plugin | `default` | bytes | 0.583 s / 8.58M rec/s (+5%) | 2.147 s / 2.33M rec/s (+8%) | 5.596 s / 893k rec/s (−7%) |
 | C plugin | `max` | view | 0.421 s / 11.9M rec/s (+4%) | 1.673 s / 2.99M rec/s (+9%) | 4.810 s / 1.04M rec/s (+3%) |
 | C plugin | `max` | bytes | 0.655 s / 7.64M rec/s (−5%) | 2.249 s / 2.22M rec/s (−4%) | 5.838 s / 856k rec/s (+5%) |
-| Python UDF | `default` | view | 2.608 s / 1.92M rec/s (+0%) | 6.087 s / 821k rec/s (+3%) | _(pending)_ |
-| Python UDF | `default` | bytes | 2.754 s / 1.82M rec/s (+0%) | 6.394 s / 782k rec/s (+1%) | _(pending)_ |
-| Python UDF | `max` | view | 2.597 s / 1.93M rec/s (−0%) | 5.960 s / 839k rec/s (+2%) | _(pending)_ |
-| Python UDF | `max` | bytes | 3.266 s / 1.53M rec/s (+19%) | 6.578 s / 760k rec/s (−4%) | _(pending)_ |
+| Python UDF | `default` | view | 2.608 s / 1.92M rec/s (+0%) | 6.087 s / 821k rec/s (+3%) | 51.801 s / 97k rec/s (+0%) |
+| Python UDF | `default` | bytes | 2.754 s / 1.82M rec/s (+0%) | 6.394 s / 782k rec/s (+1%) | 53.371 s / 94k rec/s (+1%) |
+| Python UDF | `max` | view | 2.597 s / 1.93M rec/s (−0%) | 5.960 s / 839k rec/s (+2%) | 52.630 s / 95k rec/s (−3%) |
+| Python UDF | `max` | bytes | 3.266 s / 1.53M rec/s (+19%) | 6.578 s / 760k rec/s (−4%) | 53.737 s / 93k rec/s (−1%) |
 
 **Streaming costs 0–17% on the default configuration**, and four of the
 eight rows are faster over a pipe than from a file. `default` and `max`
 are indistinguishable here, as they are on files.
 
+All 48 cells complete, 48/48 exact against the release record totals.
+
 ## Table B — `nodes=1` (UMA) — PROVISIONAL, UMA-boot numbers pending
+
+Complete except the four heavy-Python-UDF cells, which were still running
+when this run was stopped; they are `_`not_ missing by accident and will
+be filled by the UMA-boot re-measurement along with the rest of this
+table.
 
 | payload | config | output | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
 |---|---|---|---|---|---|
@@ -125,5 +132,14 @@ bottleneck, is the only configuration where the input shape shows.
 ## Reproducing
 
 `stream_cells.py` (one cell per process) and `stream_driver.sh` (the
-grid) are in this directory. Raw per-cell rows: `stream_rows.json`.
-Plot/render helper: `stream_render.py`.
+grid) are in this directory.
+
+- `stream_cells_auto.log` — raw `RESULT` lines, `nodes="auto"`, 48/48
+  cells, all exact.
+- `stream_cells_uma.log` — raw `RESULT` lines, `nodes=1`, 41/48 (the
+  four heavy-UDF pipe/file cells were still running when it was
+  stopped).
+- `stream_rows.json` — both runs parsed to one record per cell.
+- `stream_render.py` — turns the raw logs into these tables. Handles
+  both the 9-field and 10-field `RESULT` formats, because the two runs
+  predate and postdate the `nodes` column.
