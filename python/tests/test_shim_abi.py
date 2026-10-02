@@ -139,12 +139,21 @@ class TestShimBindings(unittest.TestCase):
         table = _load_table()
         names = list(table.keys())
         self.assertEqual(len(names), len(set(names)), "duplicate entries")
-        # 45 extern + 11 static = 56 (guard against silent truncation).
+        # 46 extern + 11 static = 57 (guard against silent truncation).
+        # W-PYFORKGATE added fr_py_backlog_node: a read-only,
+        # non-destructive per-node backlog accessor. It is additive — no
+        # existing signature changed, no struct layout changed, and
+        # nothing was removed — so the ABI stays backward compatible for
+        # already-built consumers. The reason it could not be done in
+        # Python: fr_py_data_ready_node is consume-once (it walks
+        # write_idx forward from a private hwm), so the fork gate cannot
+        # read a LEVEL with it. Behavior delta is confined to the NUMA
+        # fork gate's fork timing; see the gate loop in run.py.
         n_ext = sum(1 for v in table.values()
                     if v["linkage"] == "extern")
         n_st = sum(1 for v in table.values()
                    if v["linkage"] == "static")
-        self.assertEqual((n_ext, n_st), (45, 11),
+        self.assertEqual((n_ext, n_st), (46, 11),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

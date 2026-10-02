@@ -29,6 +29,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_backlog_node": {
+    "args": "int node",
+    "linkage": "extern",
+    "return": "uint64_t"
+  },
   "fr_py_cap_rewind": {
     "args": "int *slot, const char *name",
     "linkage": "static",

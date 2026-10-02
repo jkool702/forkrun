@@ -1772,6 +1772,34 @@ int fr_py_fallow_phys(int fd_in, int fd_file) {
     return ring_fallow_phys_main(3, argv);
 }
 
+/* W-PYFORKGATE: NON-DESTRUCTIVE published-minus-consumed backlog for one
+ * NUMA node's DATA ring.
+ *
+ * fr_py_data_ready_node above is deliberately consume-once: it walks
+ * write_idx forward from a private high-water mark and returns only the
+ * batches NEW since the previous call, because the fork gate uses it as a
+ * one-shot "did anything publish yet" edge. That makes it unusable as a
+ * level gauge — a caller that reads it and then decides its threshold was
+ * not met has already discarded the evidence, and can never satisfy the
+ * threshold on a later call.
+ *
+ * The fork gate needs a level: it must hold workers back until each node
+ * has published enough backlog to keep them fed (see the gate loop in
+ * run.py). This reads the two indices directly and never mutates them, so
+ * it can be polled as often as the caller likes. write_idx only advances
+ * over real DATA slots (the scanner publishes the zero-length EOF
+ * sentinel separately), so no zero-length filtering is needed here. */
+uint64_t fr_py_backlog_node(int node) {
+    uint64_t w, r;
+
+    if (!state || node < 0 || node >= 512 ||
+        node >= (int)global_num_nodes)
+        return 0;
+    w = __atomic_load_n(&state[node].write_idx, __ATOMIC_ACQUIRE);
+    r = __atomic_load_n(&state[node].read_idx, __ATOMIC_ACQUIRE);
+    return (w > r) ? (w - r) : 0;
+}
+
 /* Per-node published-DATA-batch count (W-PY21 fork timing). Same contract as fr_py_data_ready but for one NUMA node's ring:
  * cumulative DATA batches (lines>0, or byte-length>0 for byte
  * mode's 0-means-undefined); the zero-length EOF sentinel never

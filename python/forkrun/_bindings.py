@@ -245,6 +245,15 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # W-PYFORKGATE: non-destructive per-node backlog level, for the
+        # NUMA fork gate's "enough published work to feed this node's
+        # workers" test. Distinct from fr_py_data_ready_node above, which
+        # is consume-once.
+        lib.fr_py_backlog_node.argtypes = [ctypes.c_int]
+        lib.fr_py_backlog_node.restype = ctypes.c_uint64
+    except AttributeError:
+        pass
+    try:
         # W-PY21: NUMA ingest-EOF-posted query (helper classification).
         lib.fr_py_ingest_eof_posted.argtypes = []
         lib.fr_py_ingest_eof_posted.restype = ctypes.c_int

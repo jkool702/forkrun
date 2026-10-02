@@ -98,6 +98,27 @@ STALL_FORK_AFTER = 2.0
 # land before phase-1 entry (entry follows the bail within ms).
 POST_FORK_GATE_GRACE = 2.0
 
+# W-PYFORKGATE: NUMA fork-gate readiness cadence. The gate waits for the
+# first DATA publish before forking workers (see STALL_FORK_AFTER above).
+# Readiness is polled on a short doubling ramp from _GATE_POLL_MIN_S up to
+# _GATE_POLL_MAX_S so normal startup tracks publish latency rather than a
+# fixed sleep quantum; every _GATE_SUPERVISE_EVERY rounds the loop takes
+# the full _GATE_WAIT_FULL_S cadence instead, which keeps the supervision
+# sweep (helper deaths + reactor_poll_once's O(N) waitpid sweep) at exactly
+# the pre-change rate. On a genuine stall the ramp saturates and the
+# supervise tick restores the original flat 50ms loop, so the stall
+# fallback and its timings are bit-for-bit unchanged.
+_GATE_POLL_MIN_S = 0.0005
+_GATE_POLL_MAX_S = 0.004
+_GATE_WAIT_FULL_S = 0.05
+_GATE_SUPERVISE_EVERY = 10
+# Backlog floor: a node forks once it has published this many DATA batches
+# per worker it needs (_GATE_MIN_BATCHES is the floor-of-one for small
+# inputs, where any publish is enough). See the gate loop for why
+# first-publish gating stampedes at high worker counts.
+_GATE_BATCHES_PER_WORKER = 4
+_GATE_MIN_BATCHES = 4
+
 _CHUNK = 1 << 20
 
 # W-PY19: default per-slot respawn bound for reactor runs. Crash-loop
@@ -566,6 +587,49 @@ def _read_fd_all(fd) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _iter_records(fd, _chunk=_CHUNK):
+    """Yield (batch_idx, payload) from a framed stream, incrementally.
+
+    W-PYCOLLECT: equivalent to iterating
+    ``_parse_records(_read_fd_all(fd))`` but without materialising the
+    stream twice. The collect paths used to buffer every chunk in a list
+    and then b"".join them -- a second full copy of the entire result
+    stream -- before parsing anything. On a 386MB in / 386MB out ordered
+    run that join alone measured 155ms of a 646ms run (24%), and the
+    peak held ~2x the stream size before the parse even started.
+
+    Records that straddle a chunk boundary are carried in ``tail``, so
+    the yield sequence is identical to the buffer-then-parse form. A
+    trailing partial record is dropped, matching _parse_records (a short
+    tail means an internal inconsistency, not user data -- waitpid
+    failure raises before this point).
+
+    ``_chunk`` grows to fit a single record that exceeds it, so a
+    record larger than the chunk is read once rather than re-parsed on
+    every subsequent read (which would be quadratic).
+    """
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        pass
+    tail = b""
+    while True:
+        try:
+            chunk = os.read(fd, _chunk)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf = tail + chunk if tail else chunk
+        records, tail = _split_records(buf)
+        for rec in records:
+            yield rec
+        if tail and len(tail) >= _chunk:
+            # One record is bigger than the read size: grow to hold it
+            # whole so the next pass can complete it in a single parse.
+            _chunk = len(tail) + _CHUNK
 
 
 def _split_records(blob: bytes) -> tuple:
@@ -4146,7 +4210,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         if use_orderer:
-            records = _parse_records(_read_fd_all(coll_fd))
+            records = list(_iter_records(coll_fd))
             # Already batch_idx-ordered by the C orderer; prepend any
             # sidecar output from previously aborted run(s), then sort
             # (committed ranges are jagged — the union of two ordered
@@ -4162,12 +4226,12 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # empty input (no workers ever existed) — vacuously
             # no records. Materialized paths always fork workers,
             # so their drain always exists here.
-            records = (_parse_records(_read_fd_all(results_fd))
+            records = (list(_iter_records(results_fd))
                        if results_fd is not None else [])
         else:
             records = []
             for fd in out_fds:
-                records.extend(_parse_records(_read_fd_all(fd)))
+                records.extend(_iter_records(fd))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
@@ -5365,7 +5429,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if not collect:
             return None
         if use_orderer:
-            records = _parse_records(_read_fd_all(coll_fd))
+            records = list(_iter_records(coll_fd))
             # Already batch_idx-ordered by the C orderer; prepend any
             # sidecar output from previously aborted run(s), then sort
             # (committed ranges are jagged). Reads the sidecar
@@ -5378,12 +5442,12 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             # empty input (no workers ever existed) — vacuously
             # no records. Materialized paths always fork workers,
             # so their drain always exists here.
-            records = (_parse_records(_read_fd_all(results_fd))
+            records = (list(_iter_records(results_fd))
                        if results_fd is not None else [])
         else:
             records = []
             for fd in out_fds:
-                records.extend(_parse_records(_read_fd_all(fd)))
+                records.extend(_iter_records(fd))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
@@ -6689,23 +6753,114 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     state.spawn_worker(wid=wid, node=node)
             forked.add(node)
 
-        # Fork-timing loop: per-node publish gating + global stall
+        # Workers a node's workers-block needs, and the published-batch
+        # floor its fork is gated on (see the loop comment below).
+        _node_need = {}
+        for _wid, _nd in enumerate(wid_node):
+            _node_need[_nd] = _node_need.get(_nd, 0) + 1
+        # A substrate predating fr_py_backlog_node has no level gauge, so
+        # the floor degrades to 1 — i.e. today's first-publish gate — and
+        # the rest of this change (the poll ramp) still applies. Keeps an
+        # un-rebuilt .so working rather than hard-failing the NUMA path.
+        _have_backlog = hasattr(lib, "fr_py_backlog_node")
+        _node_floor = {
+            n: (max(_GATE_MIN_BATCHES, c * _GATE_BATCHES_PER_WORKER)
+                if _have_backlog else 1)
+            for n, c in _node_need.items()
+        }
+
+        def _node_ready(node):
+            """Level (not edge) published backlog for one node.
+
+            fr_py_data_ready_node is consume-once — it returns only what
+            published SINCE the previous call — so it cannot express a
+            floor: a poll whose value is below the floor has already
+            burned that evidence and the floor becomes unreachable. Use
+            the non-destructive backlog instead; _ready_all() below is
+            retained for the stall/diagnostic path that wants the edge.
+            """
+            if not _have_backlog:
+                try:
+                    return lib.fr_py_data_ready_node(node)
+                except Exception:
+                    return 0
+            try:
+                return lib.fr_py_backlog_node(node)
+            except Exception:
+                return 0
+
+# Fork-timing loop: per-node publish gating + global stall
         # fallback. Ends when every node forked, or when the whole
         # pipeline is done (ingest + all indexers + all scanners
-        # clean — then fstat below separates empty input from a
-        # publish anomaly). Fork-on-publish precedes the done-check
+        # clean — then fstat below separates empty input from a publish
+        # anomaly). Fork-on-publish precedes the done-check
         # each round so a publish coinciding with pipeline EOF still
         # forks before the loop can exit.
+        #
+        # W-PYFORKGATE: readiness is polled on a short ramp instead of a
+        # flat 50ms sleep. The sleep used to be unconditional, so every
+        # multi-node run paid a full 50ms quantum even when the first
+        # publish landed a millisecond in — measured at 24-37% of total
+        # wall on a 5M-record input (50.00ms of a 137ms run). The
+        # publish latency is the real bound, so ramp toward it.
+        #
+        # The two polls are deliberately decoupled. _ready_all() is
+        # cheap (one ctypes call per node), but _watch_pipeline() +
+        # reactor_poll_once() are not: the latter runs an O(N) waitpid
+        # sweep over every live worker slot, so running it on every fast
+        # readiness poll made high worker counts measurably SLOWER
+        # (+8.8% at 48w, +24% at 96w in paired A/B) while the same ramp
+        # won -20.8% at 8w. Supervision therefore keeps the original
+        # 50ms cadence (_GATE_SUPERVISE_EVERY fast rounds between
+        # sweeps); only readiness accelerates. On a long stall the ramp
+        # saturates at _GATE_POLL_MAX_S and the supervise tick restores
+        # the exact pre-change 50ms cadence, so the stall fallback
+        # (STALL_FORK_AFTER) and its helper-death detection are
+        # unchanged.
         stalled = False
+        _gate_wait = _GATE_POLL_MIN_S
+        _gate_tick = 0
         while len(forked) < num_nodes:
-            _watch_pipeline()
-            reactor_poll_once(state)
-            for node, ready in enumerate(_ready_all()):
-                if ready > 0 and node not in forked:
+            if _gate_tick == 0:
+                _watch_pipeline()
+                reactor_poll_once(state)
+            _gate_tick += 1
+            for node in range(num_nodes):
+                if node in forked:
+                    continue
+                # Fork on BACKLOG, not on first publish. bash's scanner
+                # only requests workers once scan_idx - read_idx exceeds
+                # the live count (forkrun_ring.c:3925-3942); this path
+                # used to fork the entire -j complement on the first
+                # publish of any size, which starts every worker against
+                # a ring that has barely been filled. Each idle worker
+                # then spins (forkrun_ring.c:6121, cpu_relax x100) and
+                # steals the cores the ingest threads need to fill that
+                # ring — the pipeline and the workers starve each other.
+                # Measured publish rate here is ~13 batches/ms, so at
+                # 96 workers a first-publish gate saw 46 batches of
+                # backlog (0.5/worker) and cost +34% wall versus
+                # waiting for ~700 (7/worker). Gating on a per-worker
+                # backlog floor makes the fork point independent of how
+                # many workers were asked for.
+                if _node_ready(node) >= _node_floor[node]:
                     _fork_node(node)
             if len(forked) >= num_nodes:
                 break
             if _pipeline_quiescent(helpers, num_nodes):
+                # The pipeline finished. A node still holding unclaimed
+                # batches MUST get its workers even though its backlog
+                # never reached _GATE_BATCHES_PER_WORKER — a small input
+                # can publish fewer batches in total than the floor asks
+                # for. The floor is a startup throttle, not a permission
+                # to drop work: skipping these nodes left published
+                # batches unclaimed and tripped the drain audit
+                # ("NUMA drain incomplete ... hold unclaimed published
+                # batches"). Fork-on-any-backlog here, matching the
+                # pre-change first-publish gate.
+                for node in range(num_nodes):
+                    if node not in forked and _node_ready(node) > 0:
+                        _fork_node(node)
                 break
             if not stalled and (
                     _time.monotonic() - t_start) >= STALL_FORK_AFTER:
@@ -6713,7 +6868,13 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 for node in range(num_nodes):
                     if node not in forked:
                         _fork_node(node)
-            _time.sleep(0.05)
+            if _gate_tick >= _GATE_SUPERVISE_EVERY:
+                _time.sleep(_GATE_WAIT_FULL_S)
+                _gate_tick = 0
+                _gate_wait = _GATE_POLL_MIN_S
+            else:
+                _time.sleep(_gate_wait)
+                _gate_wait = min(_gate_wait * 2, _GATE_POLL_MAX_S)
 
         if not forked:
             # Nothing published and ingest is done: empty input
@@ -6879,19 +7040,18 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         if use_orderer:
-            records = _parse_records(_read_fd_all(coll_fd))
-            return [blob for _, blob in records]
+            return [blob for _, blob in _iter_records(coll_fd)]
         if use_drain:
             # Dynamic-fork paths (ingest/NUMA) fork no drain on
             # empty input (no workers ever existed) — vacuously
             # no records. Materialized paths always fork workers,
             # so their drain always exists here.
-            records = (_parse_records(_read_fd_all(results_fd))
+            records = (list(_iter_records(results_fd))
                        if results_fd is not None else [])
         else:
             records = []
             for fd in out_fds:
-                records.extend(_parse_records(_read_fd_all(fd)))
+                records.extend(_iter_records(fd))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
