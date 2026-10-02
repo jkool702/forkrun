@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import struct
 import mmap as _mmap_mod
+from collections import deque as _deque
 import sys
 
 from ._api import Mode, Nodes, OnError, Order, _validate
@@ -1614,9 +1615,28 @@ def _splice_ingest_stream_reactor_gen(source, *, bytes_, workers,
 def _drain_worker_memfd(fd, state) -> list:
     """Incrementally pread new bytes from one worker memfd.
 
-    state is [read_offset, tail]; pread (never read/lseek — the fd's open
+    state is [read_offset, tail]; pread (never read/lseek -- the fd's open
     description is SHARED with the writing child). Returns complete
     [(batch_idx, payload)] records; the incomplete tail stays buffered.
+
+    W-PYKEEPFSTAT: the fstat-then-pread-the-delta form was measured
+    against two cheaper-looking alternatives and WON both, so it stays:
+
+    - Dropping the fstat for a fixed-size pread, looping until a short
+      read (W-PYNOFSTAT, attempted and reverted): fewer syscalls per
+      CALL, but MORE per run. The fstat is a cheap early-out -- a worker
+      that signalled before its bytes were visible costs one fstat
+      instead of a pread -- and the loop's extra iterations came to 160
+      preads where this form does 28 on a 1293-signal run. Measured
+      -4% to -9% on stream() (paired, 30 rounds) and worse still at one
+      line per batch.
+    - A fixed cap with no loop strands whatever exceeds it once the
+      signal stream runs dry before the memfd does, and the drain then
+      never completes: it hung test_c_drain and test_numa_bump.
+
+    The change that DID pay here is upstream, in _parse_drain_quantum:
+    drain each worker at most once per quantum rather than once per
+    signal (W-PYONCEDRAIN).
     """
     try:
         size = os.fstat(fd).st_size
@@ -1687,9 +1707,13 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
                     sig_eof = True
                 else:
                     sig_buf += chunk
-        while len(sig_buf) >= _sig.size:
-            wid, _idx = _sig.unpack_from(sig_buf[:_sig.size])
-            sig_buf = sig_buf[_sig.size:]
+        # W-PYSIGCURSOR: cursor, not a reslice per signal. The old
+        # `sig_buf = sig_buf[_sig.size:]` recopied the whole remaining
+        # buffer per signal, which is quadratic in signals-per-read.
+        _sp = 0
+        while len(sig_buf) - _sp >= _sig.size:
+            wid, _idx = _sig.unpack_from(sig_buf, _sp)
+            _sp += _sig.size
             if 0 <= wid:
                 while len(per_worker) <= wid:
                     per_worker.append([0, b""])
@@ -1701,6 +1725,8 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
                         reassembly.add(_bidx, blob)
                         for _, ordered in reassembly.drain():
                             yield ordered
+        if _sp:
+            sig_buf = sig_buf[_sp:]
         alive.update(pids)
         for pid in list(alive):
             try:
@@ -1767,7 +1793,7 @@ def _make_results_pump(results_r, order="none", stats=None):
     """
     import select as _select
 
-    st = {"tail": b"", "eof": False, "pending": [],
+    st = {"tail": b"", "eof": False, "pending": _deque(),
           "reassembly": (ReassemblyBuffer() if order == "index"
                          else None)}
 
@@ -1798,7 +1824,7 @@ def _make_results_pump(results_r, order="none", stats=None):
                 else:
                     _ingest(chunk)
         if st["pending"]:
-            return st["pending"].pop(0)
+            return st["pending"].popleft()
         if not alive and st["eof"]:
             if st["reassembly"] is not None:
                 for _, ordered in st["reassembly"].final_drain():
@@ -1807,7 +1833,7 @@ def _make_results_pump(results_r, order="none", stats=None):
                     stats["reassembly_max"] = (
                         st["reassembly"].max_size)
                 if st["pending"]:
-                    return st["pending"].pop(0)
+                    return st["pending"].popleft()
             raise StopIteration
         return None
 
@@ -4425,28 +4451,81 @@ def _parse_drain_quantum(drain, coll_fd, use_orderer, out_fds, per_worker,
                     drain["pending"].extend(
                         blob for _, blob in recs)
                     got = True
-        while len(drain["sig_buf"]) >= sig_struct.size:
-            drain["sig_buf"] = drain["sig_buf"][sig_struct.size:]
+        _consume_sig_wakeups(drain, sig_struct)
     else:
-        while len(drain["sig_buf"]) >= sig_struct.size:
+        # W-PYONCEDRAIN: drain each worker at most ONCE per quantum,
+        # whatever the number of its signals in this read. Draining per
+        # signal is pure redundancy -- a worker that emitted 10 signals
+        # between two reactor rounds has 10 wakeups but one contiguous
+        # region of new bytes in its memfd, and 9 of those 10 preads
+        # return nothing. On a 1293-signal / 1292-record stream run that
+        # was 1411 preads where draining per worker needs ~28. Same
+        # records, same order, far fewer syscalls.
+        _seen = None
+        _sigpos = drain["sig_pos"]
+        while len(drain["sig_buf"]) - _sigpos >= sig_struct.size:
             wid, _idx = sig_struct.unpack_from(
-                drain["sig_buf"][:sig_struct.size])
-            drain["sig_buf"] = drain["sig_buf"][sig_struct.size:]
-            if 0 <= wid:
+                drain["sig_buf"], _sigpos)
+            _sigpos += sig_struct.size
+            if 0 <= wid and wid < len(out_fds):
+                if _seen is None:
+                    _seen = set()
+                _seen.add(wid)
+        drain["sig_pos"] = _sigpos
+        if _seen:
+            for wid in _seen:
                 while len(per_worker) <= wid:
                     per_worker.append([0, b""])
-                if wid < len(out_fds):
-                    for _bidx, blob in _drain_worker_memfd(
-                            out_fds[wid], per_worker[wid]):
-                        if drain["reassembly"] is None:
-                            drain["pending"].append(blob)
-                        else:
-                            drain["reassembly"].add(_bidx, blob)
-                            for _, ordered in drain[
-                                    "reassembly"].drain():
-                                drain["pending"].append(ordered)
-                        got = True
+                for _bidx, blob in _drain_worker_memfd(
+                        out_fds[wid], per_worker[wid]):
+                    if drain["reassembly"] is None:
+                        drain["pending"].append(blob)
+                    else:
+                        drain["reassembly"].add(_bidx, blob)
+                        for _, ordered in drain["reassembly"].drain():
+                            drain["pending"].append(ordered)
+                    got = True
+    # Compact the consumed prefix once per quantum, not once per signal
+    # (see _consume_sig_wakeups).
+    if drain["sig_pos"]:
+        drain["sig_buf"] = drain["sig_buf"][drain["sig_pos"]:]
+        drain["sig_pos"] = 0
     return got
+
+
+def _consume_sig_wakeups(drain, sig_struct):
+    """Drop consumed signal bytes from an orderer-path drain.
+
+    W-PYSIGCURSOR: the signal pipe carries wakeups only (16 bytes each:
+    worker id + batch index) when the orderer owns ordering, so the
+    content is ignored here -- but the bytes still have to GO. Every
+    quantum used to drop them one at a time with
+    ``buf = buf[sig_struct.size:]``, which recopies the ENTIRE
+    remaining buffer per signal. With one signal per batch that is
+    quadratic in signals-per-read: a 60MB input at one line per batch is
+    ~700k signals, and stream() stopped completing at all (measured
+    >120s against bash's 1.22s for the same input).
+
+    Trim to the last whole signal in one slice. A torn trailing signal
+    (1-15 bytes, the writer died mid-write) is deliberately KEPT so the
+    caller's existing torn-signal handling still sees it -- and because
+    signals are single 16-byte writes they are atomic, so a clean EOF
+    leaves no remainder and the buffer drains to empty.
+
+    The buffer must actually reach empty: the stream's StopIteration is
+    anchored on ``sig_eof AND not sig_buf``. Leaving the signals in
+    place hangs the stream forever (which is what the first cut of this
+    change did -- test_c_drain_stream_ordered hung in reactor_loop's
+    select).
+    """
+    buf = drain["sig_buf"]
+    if not buf:
+        return
+    size = sig_struct.size
+    keep = len(buf) % size
+    pos = len(buf) - keep
+    if pos:
+        drain["sig_buf"] = buf[pos:]
 
 
 def _poll_ingest_once(lib, helpers, pipe):
@@ -4692,6 +4771,11 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             drain_state = None
         per_worker = [[0, b""] for _ in range(workers)]
         sig_buf = b""
+        # W-PYSIGCURSOR: consumed-signal cursor into sig_buf. A list so
+        # the nested drain generator can rebind sig_buf (a local) while
+        # the offset stays reachable. Compacted once per quantum, never
+        # per signal.
+        sig_pos = [0]
         sig_eof = False
         if order == "index" and not use_orderer:
             reassembly = ReassemblyBuffer()
@@ -4747,13 +4831,20 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                             _pending.extend(
                                 blob for _, blob in recs)
                 # Consume signals (wakeups only — content ignored).
-                while len(sig_buf) >= _sig.size:
-                    sig_buf = sig_buf[_sig.size:]
+                # W-PYSIGCURSOR: cursor, not a reslice per signal — the
+                # per-signal copy is quadratic in signals-per-read.
+                _sp = sig_pos[0]
+                while len(sig_buf) - _sp >= _sig.size:
+                    _sp += _sig.size
+                sig_pos[0] = _sp
+                if _sp:
+                    sig_buf = sig_buf[_sp:]
+                    sig_pos[0] = 0
             else:
-                while len(sig_buf) >= _sig.size:
-                    wid, _idx = _sig.unpack_from(
-                        sig_buf[:_sig.size])
-                    sig_buf = sig_buf[_sig.size:]
+                _sp = sig_pos[0]
+                while len(sig_buf) - _sp >= _sig.size:
+                    wid, _idx = _sig.unpack_from(sig_buf, _sp)
+                    _sp += _sig.size
                     if 0 <= wid:
                         while len(per_worker) <= wid:
                             per_worker.append([0, b""])
@@ -4766,8 +4857,11 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                                     reassembly.add(_bidx, blob)
                                     for _, ordered in reassembly.drain():
                                         _pending.append(ordered)
+                if _sp:
+                    sig_buf = sig_buf[_sp:]
+                    sig_pos[0] = 0
             if _pending:
-                return _pending.pop(0)
+                return _pending.popleft()
             # Exhausted for now: StopIteration only when the reactor
             # has no live workers AND the signal pipe hit EOF (same
             # EOF-anchored rule as _drain_records). A torn trailing
@@ -4785,11 +4879,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     except OSError:
                         pass
                     sig_buf = b""
+                    sig_pos[0] = 0
                 if reassembly is not None:
                     for _, ordered in reassembly.final_drain():
                         _pending.append(ordered)
                     if _pending:
-                        return _pending.pop(0)
+                        return _pending.popleft()
                 # Safety sweep before giving up (short final writes).
                 if use_orderer:
                     try:
@@ -4811,7 +4906,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                             _pending.extend(
                                 blob for _, blob in recs)
                             if _pending:
-                                return _pending.pop(0)
+                                return _pending.popleft()
                 else:
                     for _wid in range(len(per_worker)):
                         if _wid >= len(out_fds):
@@ -4825,11 +4920,17 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                                 for _, ordered in reassembly.drain():
                                     _pending.append(ordered)
                     if _pending:
-                        return _pending.pop(0)
+                        return _pending.popleft()
                 raise StopIteration
             return None
 
-        _pending: list = []
+        # W-PYPENDING: deque, not list. These were popped with
+        # pop(0), which shifts every remaining element -- quadratic
+        # in the backlog. At 79k batches that single call site was
+        # 0.35s of a 1.8s streaming run; with the input at one line
+        # per batch the same shape stopped stream() completing at
+        # all. popleft() is O(1).
+        _pending: list = _deque()
         _stream_ok = False
 
         def _watch_scanner():
@@ -5818,8 +5919,9 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         # Drain state (same two shapes as _execute_streaming_reactor).
         _sig = struct.Struct("<QQ")
+        # W-PYPENDING: deque -- popleft() is O(1); pop(0) is O(n).
         drain = {"coll_off": 0, "coll_tail": b"", "sig_buf": b"",
-                 "sig_eof": False, "pending": [],
+                 "sig_pos": 0, "sig_eof": False, "pending": _deque(),
                  "reassembly": None}
         if order == "index" and not use_orderer:
             drain["reassembly"] = ReassemblyBuffer()
@@ -5957,7 +6059,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             _parse_drain_quantum(drain, coll_fd, use_orderer,
                                  out_fds, per_worker, _sig)
             if drain["pending"]:
-                return drain["pending"].pop(0)
+                return drain["pending"].popleft()
             if (fstate["pump_done"]
                     and not any(s.alive
                                 for s in state.workers.values())
@@ -5966,7 +6068,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     for _, ordered in drain["reassembly"].final_drain():
                         drain["pending"].append(ordered)
                     if drain["pending"]:
-                        return drain["pending"].pop(0)
+                        return drain["pending"].popleft()
                 if use_orderer:
                     try:
                         _sz = os.fstat(coll_fd).st_size
@@ -5987,7 +6089,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                             drain["pending"].extend(
                                 blob for _, blob in recs)
                             if drain["pending"]:
-                                return drain["pending"].pop(0)
+                                return drain["pending"].popleft()
                 else:
                     for _wid in range(len(per_worker)):
                         if _wid >= len(out_fds):
@@ -6002,7 +6104,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                                         "reassembly"].drain():
                                     drain["pending"].append(ordered)
                     if drain["pending"]:
-                        return drain["pending"].pop(0)
+                        return drain["pending"].popleft()
                 raise StopIteration
             return None
 
@@ -6370,18 +6472,25 @@ def _pump_debug_tick():
     """Env-gated pump diagnostic throttle (W-PY21-A debugging).
 
     Returns True ~once/sec when FORKRUN_DEBUG_PUMP is set, else
-    False. Zero overhead otherwise (one getenv per call — the
-    callers already do costlier work per round; never enabled in
-    tests or benchmarks).
+    False.
+
+    W-PYENVGATE: this used to read the environment on every call, on
+    the assumption that "the callers already do costlier work per
+    round". At 79k batches that is one pump round per batch, and
+    os.environ.get costs ~1.6us (dict lookup + encode + abc dispatch)
+    -- 79500 of them were 0.13s, about 11% of the run, to test a flag
+    nobody had set. Throttle on the monotonic clock FIRST and consult
+    the environment at most once a second. A flag set mid-run is now
+    noticed within a second rather than on the next round, which is the
+    right trade for a debug gate.
     """
     import time as _t
     now = _t.monotonic()
     global _pump_debug_last
-    last = _pump_debug_last
-    if os.environ.get("FORKRUN_DEBUG_PUMP") and now - last >= 1.0:
-        _pump_debug_last = now
-        return True
-    return False
+    if now - _pump_debug_last < 1.0:
+        return False
+    _pump_debug_last = now
+    return bool(os.environ.get("FORKRUN_DEBUG_PUMP"))
 
 
 def _pump_debug_log(msg):
@@ -7429,8 +7538,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 return None
 
         _sig = struct.Struct("<QQ")
+        # W-PYPENDING: deque -- popleft() is O(1); pop(0) is O(n).
         drain = {"coll_off": 0, "coll_tail": b"", "sig_buf": b"",
-                 "sig_eof": False, "pending": [],
+                 "sig_pos": 0, "sig_eof": False, "pending": _deque(),
                  "reassembly": None}
         if order == "index" and not use_orderer:
             drain["reassembly"] = ReassemblyBuffer()
@@ -7536,14 +7646,14 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             _parse_drain_quantum(drain, coll_fd, use_orderer,
                                  out_fds, per_worker, _sig)
             if drain["pending"]:
-                return drain["pending"].pop(0)
+                return drain["pending"].popleft()
             if (pump_state["done"]
                     and not any(s.alive
                                 for s in state.workers.values())
                     and drain["sig_eof"] and not drain["sig_buf"]):
                 _sweep_memfds()
                 if drain["pending"]:
-                    return drain["pending"].pop(0)
+                    return drain["pending"].popleft()
                 raise StopIteration
             return None
 

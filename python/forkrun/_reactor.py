@@ -68,6 +68,17 @@ RESPAWN_SIGKILL_BACKOFF_MAX_S = 0.2
 
 # Per-round drain burst cap (see reactor_loop §4).
 DRAIN_BURST = 64
+# W-PYREAPSWEEP: minimum interval between the out-of-band reap backstop
+# sweeps. The death pipe is the primary death detector and is in the
+# reactor's watch set, so this only bounds how long an UNFLAGGED exit
+# can go unnoticed; teardown reaps definitively regardless.
+#
+# Kept small deliberately: the sweep is N waitpid syscalls, so the win
+# is in the COUNT, not the interval. At 2ms a 79k-batch run does ~150
+# sweeps instead of 79500 -- a ~500x cut -- while the worst-case
+# end-of-run latency stays inside measurement noise. A 20ms version
+# cost stream() ~6% purely in wind-down latency.
+_REAP_SWEEP_INTERVAL_S = 0.002
 
 # W-REL6-3.1: per-worker startup deadline. A child forked from a
 # threaded host can deadlock before signaling readiness (frozen
@@ -146,6 +157,8 @@ class ReactorState:
                  spawn_ceiling=-1, trap_ack_grace=TRAP_ACK_GRACE_S,
                  startup_deadline=None):
         self.workers = {}  # wid -> WorkerSlot
+        # W-PYREAPSWEEP: last out-of-band reap backstop sweep (monotonic).
+        self._reap_last = 0.0
         self.max_workers = max_workers
         self.num_nodes = max(1, num_nodes)
         self.respawn_cap = respawn_cap
@@ -624,13 +637,43 @@ class ReactorState:
             else:
                 self.startup_kills.append(wid)
 
-    def reap_clean_exits(self):
+    def reap_clean_exits(self, force=False):
         """WNOHANG sweep for exits the death pipe hasn't flagged yet.
 
         The death pipe is the primary detector; this catches exits
         observed out-of-band. Reaped exits are classified immediately
         (respawn included) via note_exit — never blocks.
+
+        W-PYREAPSWEEP: the death pipe is already in the reactor's watch
+        set and is what normally reports a death (POLLHUP/POLLIN, and
+        a death needs zero read syscalls), so this sweep is only a
+        backstop. It was running on EVERY round with one waitpid per
+        live worker — O(N) syscalls per round, regardless of how many
+        records were flowing. bash's ring_poll has no equivalent: it
+        builds its pollfd array once and lets poll() report liveness
+        (forkrun_ring.c:8815), so the orchestrator does no reaping in
+        its loop at all.
+
+        At 79k batches that was 79554 waitpid calls, 0.06s, plus a
+        list() copy of the workers dict per round. Throttle it: the
+        death pipe still reports immediately, and _teardown_reactor
+        does its own definitive per-slot reap, so nothing can be lost
+        by sampling the backstop periodically instead of every round.
+        ``force=True`` bypasses the throttle for callers that need an
+        immediate answer.
         """
+        if not force:
+            # When nothing is alive the sweep is free (every slot is
+            # skipped), and it is exactly the state a run winds down in --
+            # so never throttle it, or the last round pays the full
+            # interval as end-of-run latency for no saving.
+            if not any(slot.alive for slot in self.workers.values()):
+                pass
+            else:
+                now = _time.monotonic()
+                if now - self._reap_last < _REAP_SWEEP_INTERVAL_S:
+                    return
+                self._reap_last = now
         for wid, slot in list(self.workers.items()):
             if not slot.alive:
                 continue
