@@ -1119,6 +1119,17 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
         raise NotImplementedError(
             "unknown mode %r" % (mode,))
     numa_map_str, num_nodes, node_cpus = _resolve_numa(nodes)
+
+    # Single source of truth for the 4 UMA dispatch sites below; same
+    # reasoning as map()'s bundle. run() differs from map() in exactly
+    # two entries -- sink=sink and collect=False. order/mode are filled
+    # in after the branch's _coerce_payload, which can change both.
+    base = dict(
+        sink=sink,
+        workers=_resolve_workers_numa(workers, num_nodes),
+        on_error=on_error, strict_poison=strict_poison,
+        collect=False, c_drain=c_drain, views=output)
+
     if num_nodes > 1:
         # NUMA pipeline (ingest owns the source — files and pipes
         # uniformly; no materialized/streaming split here).
@@ -1128,16 +1139,13 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
             raise ValueError(
                 "mode='splice' produces output records — use map() or "
                 "stream() (payload=None, bytes=N).")
+        numa = dict(base, order=order, mode=mode,
+                    numa_map=numa_map_str, num_nodes=num_nodes,
+                    node_cpus=node_cpus)
         with _signal_guard(signal_policy) as _sg:
             with _RUN_LOCK:
                 _execute_numa_locked(
-                    payload, source, sink=sink, lines=lines, bytes_=bytes,
-                    workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
-                    strict_poison=strict_poison,
-                    collect=False, order=order, mode=mode,
-                    numa_map=numa_map_str, num_nodes=num_nodes,
-                    node_cpus=node_cpus, c_drain=c_drain,
-                    views=output)
+                    payload, source, lines=lines, bytes_=bytes, **numa)
             _sg.check()
         return None
     nodes = 1
@@ -1146,45 +1154,33 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
         raise ValueError(
             "mode='splice' produces output records — use map() or "
             "stream() (payload=None, bytes=N).")
+    base["order"] = order
+    base["mode"] = mode
+
     if _detect_streaming(source, streaming):
         if orchestrator:
             with _signal_guard(signal_policy) as _sg:
                 with _RUN_LOCK:
                     _execute_ingest_reactor_locked(
-                        payload, source, sink=sink, lines=lines,
-                        bytes_=bytes, workers=_resolve_workers_numa(workers, num_nodes),
-                        on_error=on_error, strict_poison=strict_poison,
-                        collect=False, order=order,
-                        mode=mode, nodes=nodes, c_drain=c_drain,
-                        views=output)
+                        payload, source, lines=lines, bytes_=bytes,
+                        nodes=nodes, **base)
                 _sg.check()
             return None
         with _signal_guard(signal_policy) as _sg:
-            _execute_ingest(payload, source, sink=sink, lines=lines,
-                            bytes_=bytes, workers=_resolve_workers_numa(workers, num_nodes),
-                            on_error=on_error, strict_poison=strict_poison,
-                            collect=False, order=order,
-                            mode=mode, nodes=nodes, c_drain=c_drain,
-                            views=output)
+            _execute_ingest(payload, source, lines=lines, bytes_=bytes,
+                            nodes=nodes, **base)
             _sg.check()
         return None
     if orchestrator:
         with _signal_guard(signal_policy) as _sg:
             with _RUN_LOCK:
                 _execute_reactor_locked(
-                    payload, source, sink=sink, lines=lines, bytes_=bytes,
-                    workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
-                    strict_poison=strict_poison,
-                    collect=False, order=order, mode=mode, nodes=nodes,
-                    c_drain=c_drain,
-                    views=output)
+                    payload, source, lines=lines, bytes_=bytes,
+                    nodes=nodes, **base)
             _sg.check()
         return None
     with _signal_guard(signal_policy) as _sg:
-        _execute(payload, source, sink=sink, lines=lines, bytes_=bytes,
-                 workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
-                 strict_poison=strict_poison,
-                 collect=False, order=order, c_drain=c_drain, views=output)
+        _execute(payload, source, lines=lines, bytes_=bytes, **base)
         _sg.check()
     return None
 
@@ -1288,6 +1284,28 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         require_resume_path("map()", order=kwargs.get("order", "none"),
              orchestrator=orchestrator, mode=mode, collect=True,
              splice=False, num_nodes=num_nodes)
+    # Single source of truth for the 8 UMA executor dispatch sites below
+    # (W-PYDISPATCH), plus the NUMA variant. They used to re-type the
+    # same keywords by hand -- 99 hand-maintained keyword arguments in
+    # one function. That is why output= had to be threaded by hand and
+    # was silently dropped on the paths I missed: a forgotten site just
+    # takes the callee's default and returns the wrong thing, no error.
+    #
+    # With **base, adding a parameter is ONE edit here, and a parameter
+    # an executor does not accept raises TypeError at that site rather
+    # than being silently defaulted. Only genuinely per-path arguments
+    # (lines/bytes_, splice, and the plugin/spawn/resume extras) stay
+    # spelled out at the site.
+    #
+    # order/mode are set after the branch's _coerce_payload, which can
+    # change both, so they are not baked in here.
+    base = dict(
+        sink=None,
+        workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
+        on_error=kwargs.get("on_error", "retry"),
+        strict_poison=kwargs.get("strict_poison", False),
+        collect=True, c_drain=c_drain, views=output)
+
     if num_nodes > 1:
         _require_numa_symbol()
         payload, mode = _coerce_payload(payload, mode)
@@ -1297,24 +1315,25 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             b = kwargs.get("bytes") or _SPLICE_DEFAULT_BYTES
         else:
             b = kwargs.get("bytes")
+        # Same bundle as the UMA sites, plus the three NUMA-only keys
+        # (and without `nodes`, which the NUMA executor does not take).
+        numa = dict(base, order=order, mode=mode,
+                    numa_map=numa_map_str, num_nodes=num_nodes,
+                    node_cpus=node_cpus, splice=(mode == "splice"))
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
             with _RUN_LOCK:
                 out = _execute_numa_locked(
-                    payload, source, sink=None,
-                    lines=kwargs.get("lines"), bytes_=b,
-                    workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                    on_error=kwargs.get("on_error", "retry"),
-                    strict_poison=kwargs.get("strict_poison", False),
-                    collect=True, order=order, mode=mode,
-                    numa_map=numa_map_str, num_nodes=num_nodes,
-                    node_cpus=node_cpus,
-                    splice=(mode == "splice"), c_drain=c_drain,
-                    views=output)
+                    payload, source,
+                    lines=kwargs.get("lines"), bytes_=b, **numa)
             _sg.check()
             return _map_return(out, return_stats)
     nodes = 1
     payload, mode = _coerce_payload(payload, mode)
     order = kwargs.get("order", "none")
+
+    base["order"] = order
+    base["mode"] = mode
+
     if mode == "splice":
         _require_splice_symbol()
         b = kwargs.get("bytes") or _SPLICE_DEFAULT_BYTES
@@ -1323,46 +1342,32 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
                     with _RUN_LOCK:
                         out = _execute_ingest_reactor_locked(
-                            None, source, sink=None, lines=None, bytes_=b,
-                            workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                            on_error=kwargs.get("on_error", "retry"),
-                            strict_poison=kwargs.get("strict_poison", False),
-                            collect=True, order=order, mode=mode,
-                            nodes=nodes, splice=True, c_drain=c_drain,
-                            views=output)
+                            None, source,
+                            lines=None, bytes_=b, nodes=nodes, splice=True,
+                            **base)
                     _sg.check()
                     return _map_return(out, return_stats)
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
                 out = _execute_ingest(
-                    None, source, sink=None, lines=None, bytes_=b,
-                    workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                    on_error=kwargs.get("on_error", "retry"),
-                    strict_poison=kwargs.get("strict_poison", False),
-                    collect=True, order=order, mode=mode, nodes=nodes,
-                    splice=True, c_drain=c_drain, views=output)
+                    None, source,
+                    lines=None, bytes_=b, nodes=nodes, splice=True,
+                    **base)
                 _sg.check()
                 return _map_return(out, return_stats)
         if orchestrator:
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
                 with _RUN_LOCK:
                     out = _execute_reactor_locked(
-                        None, source, sink=None, lines=None, bytes_=b,
-                        workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                        on_error=kwargs.get("on_error", "retry"),
-                        strict_poison=kwargs.get("strict_poison", False),
-                        collect=True, order=order, mode=mode, nodes=nodes,
-                        splice=True, c_drain=c_drain,
-                        views=output)
+                        None, source,
+                        lines=None, bytes_=b, nodes=nodes, splice=True,
+                        **base)
                 _sg.check()
                 return _map_return(out, return_stats)
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
             out = _execute(
-                None, source, sink=None, lines=None, bytes_=b,
-                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                on_error=kwargs.get("on_error", "retry"),
-                strict_poison=kwargs.get("strict_poison", False),
-                collect=True, order=order, mode=mode, nodes=nodes,
-                splice=True, c_drain=c_drain, views=output)
+                None, source,
+                lines=None, bytes_=b, nodes=nodes, splice=True,
+                **base)
             _sg.check()
             return _map_return(out, return_stats)
     if _detect_streaming(source, kwargs.get("streaming")):
@@ -1380,28 +1385,20 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
                 with _RUN_LOCK:
                     out = _execute_ingest_reactor_locked(
-                        payload, source, sink=None,
+                        payload, source,
                         lines=kwargs.get("lines"),
-                        bytes_=kwargs.get("bytes"),
-                        workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                        on_error=kwargs.get("on_error", "retry"),
-                        strict_poison=kwargs.get("strict_poison", False),
-                        collect=True, order=order, mode=mode, nodes=nodes,
-                    c_drain=c_drain,
-                    resume=kwargs.get("resume"),
-                    checkpoint_file=kwargs.get("checkpoint_file"),
-                    views=output)
+                        bytes_=kwargs.get("bytes"), nodes=nodes,
+                        resume=kwargs.get("resume"),
+                        checkpoint_file=kwargs.get("checkpoint_file"),
+                        **base)
                 _sg.check()
                 return _map_return(out, return_stats)
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
             out = _execute_ingest(
-                payload, source, sink=None, lines=kwargs.get("lines"),
-                bytes_=kwargs.get("bytes"),
-                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                on_error=kwargs.get("on_error", "retry"),
-                strict_poison=kwargs.get("strict_poison", False),
-                collect=True, order=order, mode=mode, nodes=nodes,
-                c_drain=c_drain, views=output)
+                payload, source,
+                lines=kwargs.get("lines"),
+                bytes_=kwargs.get("bytes"), nodes=nodes,
+                **base)
             _sg.check()
             return _map_return(out, return_stats)
     plugin_spec = None
@@ -1429,34 +1426,28 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
             with _RUN_LOCK:
                 out = _execute_reactor_locked(
-                    payload, source, sink=None,
+                    payload, source,
                     lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-                    workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                    on_error=kwargs.get("on_error", "retry"),
-                    strict_poison=kwargs.get("strict_poison", False),
-                    collect=True, order=order, mode=mode, nodes=nodes,
-                    c_drain=c_drain,
+                    nodes=nodes,
                     resume=kwargs.get("resume"),
                     checkpoint_file=kwargs.get("checkpoint_file"),
                     c_worker_loop=c_worker_loop,
                     plugin_spec=plugin_spec,
                     c_spawn_loop=c_spawn_loop,
                     spawn_argv=spawn_argv,
-                    views=output)
+                    **base)
             _sg.check()
             return _map_return(out, return_stats)
     with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
-        results = _execute(payload, source, sink=None,
-                           lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-                           workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                           on_error=kwargs.get("on_error", "retry"),
-                           strict_poison=kwargs.get("strict_poison", False),
-                           collect=True, order=order,
-                           mode=mode, nodes=nodes, c_drain=c_drain,
-                           c_worker_loop=c_worker_loop,
-                           plugin_spec=plugin_spec,
-                           c_spawn_loop=c_spawn_loop,
-                           spawn_argv=spawn_argv, views=output)
+        results = _execute(
+            payload, source,
+            lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
+            nodes=nodes,
+            c_worker_loop=c_worker_loop,
+            plugin_spec=plugin_spec,
+            c_spawn_loop=c_spawn_loop,
+            spawn_argv=spawn_argv,
+            **base)
         _sg.check()
     return _map_return(results, return_stats)
 
