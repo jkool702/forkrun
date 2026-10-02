@@ -5559,7 +5559,26 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 _maybe_fork_workers()
                 reactor_poll_once(state)
                 if not drained:
-                    _time.sleep(0.02)
+                    # W-PYINGESTWAIT: wait for the source to become
+                    # readable instead of guessing a fixed quantum.
+                    # A flat 20 ms sleep fired once per chunk on a
+                    # streamed source -- 645 sleeps = 12.9 s of a
+                    # 14.65 s light run, 88% of wall -- because the
+                    # reader outran the writer and then slept the full
+                    # quantum no matter how soon data actually landed.
+                    # The reader IS faster than the writer here, so the
+                    # wait is real; the only error was not waiting on
+                    # the fd that signals it. Timeout is unchanged, so
+                    # worst-case reactor latency is unchanged too --
+                    # this returns early when data is ready and is
+                    # strictly better when it is not.
+                    try:
+                        import select as _select
+                        _select.select([src_fd], [], [], 0.02)
+                    except (OSError, ValueError):
+                        # fd closed under us, or select refused it:
+                        # fall back to the old pacing rather than spin.
+                        _time.sleep(0.02)
         except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
             raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
