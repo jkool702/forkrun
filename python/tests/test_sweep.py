@@ -141,10 +141,10 @@ class TestSweepExecution(unittest.TestCase):
                     b.metadata[0],
                     bytes(b.data).decode().strip().splitlines()[0]
                 )).encode(),
-                source=path, args=[["p1", "p2"]], nodes=1)
+                source=path, args=[["p1", "p2"]], nodes=1, output="bytes")
             # Each of the 2 combos processes the whole source.
             self.assertEqual(len(res), 2 * len(
-                forkrun.map(lambda b: bytes(b.data), path, nodes=1)))
+                forkrun.map(lambda b: bytes(b.data), path, nodes=1, output="bytes")))
             self.assertTrue(all(r.startswith(b"p1:") or
                                 r.startswith(b"p2:") for r in res))
         finally:
@@ -158,7 +158,7 @@ class TestSweepExecution(unittest.TestCase):
             res = forkrun.sweep(
                 lambda b: (b.metadata[0].encode() + b":" +
                            bytes(b.data).strip()),
-                source=fd, args=[["q1", "q2"]], nodes=1)
+                source=fd, args=[["q1", "q2"]], nodes=1, output="bytes")
             self.assertEqual(sorted(res),
                              [b"q1:hello", b"q2:hello"])
         finally:
@@ -186,7 +186,7 @@ class TestSweepExecution(unittest.TestCase):
             res = forkrun.sweep(
                 lambda b: ("%s/%s" % (b.metadata[0],
                                       b.metadata[1])).encode(),
-                args_from=[f1, f2], nodes=1)
+                args_from=[f1, f2], nodes=1, output="bytes")
             self.assertEqual(sorted(res), [b"m1/n1", b"m2/n1"])
         finally:
             import shutil as _shutil
@@ -226,7 +226,7 @@ class TestSweepExecution(unittest.TestCase):
     def test_sweep_orchestrator_passthrough(self):
         res = forkrun.sweep(
             lambda b: b.metadata[0].encode(),
-            args=[["a", "b", "c"]], orchestrator=True, nodes=1)
+            args=[["a", "b", "c"]], orchestrator=True, nodes=1, output="bytes")
         self.assertEqual(sorted(res), [b"a", b"b", b"c"])
 
     def test_metadata_default_none(self):

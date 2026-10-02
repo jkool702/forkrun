@@ -3,7 +3,7 @@
 Extends test_packaging.py (install cycle) with release-gate checks:
 the wheel must be platform-tagged (never py3-none-any), METADATA
 complete, the sdist self-contained (builds + installs from source),
-and versions coherent (0.16.0 everywhere, v3.6.0 in the changelog).
+and versions coherent (0.17.0 everywhere, v3.6.0 in the changelog).
 The full release_check.py gate runs only on committed trees (it
 asserts a clean tree, which a working tree cannot satisfy — it
 skips there and runs on CI release branches).
@@ -266,14 +266,14 @@ class TestSdist(unittest.TestCase):
 
 class TestVersionCoherence(unittest.TestCase):
     def test_version_is_0_16_0(self):
-        self.assertEqual(forkrun.__version__, "0.16.0")
+        self.assertEqual(forkrun.__version__, "0.17.0")
 
     def test_changelog_has_v3_6_0(self):
         with open(os.path.join(REPO_ROOT, "DOCS",
                                "CHANGELOG.md")) as fh:
             content = fh.read()
         self.assertIn("v3.6.0", content)
-        self.assertIn("0.16.0", content)
+        self.assertIn("0.17.0", content)
 
     def test_readme_matches_version(self):
         with open(os.path.join(REPO_ROOT, "python",

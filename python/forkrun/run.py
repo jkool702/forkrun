@@ -142,12 +142,12 @@ _CHUNK = 1 << 20
 #   mmap  + bytes()   0.0346 s  (10.9 GB/s)
 #   mmap  + memoryview 0.0017 s (217 GB/s)   <- 48x, the copy disappears
 #
-# A memoryview is a buffer, not a sequence: len(), slicing, iteration,
+# A memoryview is a buffer, not a sequence. len(), slicing, iteration,
 # .tobytes(), .hex(), comparison against bytes, and write() to a file
-# object all work unchanged, but .split(), .decode(), .startswith() and
-# `x in blob` DO NOT, and isinstance(blob, bytes) is False. Hence it is
-# opt-in per call (zero_copy=True) rather than the default. Callers that
-# want bytes back use forkrun.materialize().
+# object all work unchanged; .split(), .decode(), .startswith() and
+# `x in blob` do NOT, and isinstance(blob, bytes) is False. That is why
+# output="bytes" exists as the escape hatch, and why forkrun.materialize()
+# is exported for converting one record at a time.
 
 # W-PY19: default per-slot respawn bound for reactor runs. Crash-loop
 # workers (death on every generation) must terminate: the trap-ACK
@@ -194,6 +194,33 @@ def _require_drain_symbol():
             "c_drain=True needs fr_py_drain_loop — rebuild "
             "the substrate ('make -f Makefile.substrate "
             "python-substrate')")
+
+
+def _resolve_output(output) -> bool:
+    """output="view"|"bytes" -> whether records are returned zero-copy.
+
+    W-PYZEROCOPY. "view" (default) hands back memoryview slices over a
+    read-only mapping of the result stream -- the in-process equivalent
+    of what bash's orderer does, passing the consumer a coordinate
+    (fd, offset, len) and letting the kernel move bytes only if the
+    consumer reads them (forkrun_ring.c:7520). "bytes" copies every
+    record, costing one extra memcpy per record on the parent's single
+    thread; measured 1.5-2.6x slower end to end.
+
+    A string rather than a boolean so the representation can grow
+    without another API break. One name across run/map/stream.
+    """
+    if output is None:
+        return True
+    if output == "view":
+        return True
+    if output == "bytes":
+        return False
+    raise ValueError(
+        "output must be 'view' or 'bytes' (got %r). 'view' returns "
+        "memoryview records that avoid a per-record copy; 'bytes' "
+        "returns bytes objects. Use forkrun.materialize() to convert "
+        "individually if you need one or the other." % (output,))
 
 
 def _validate_c_drain(c_drain):
@@ -324,7 +351,7 @@ def _validate_orchestrator(orchestrator):
 _MAP_STREAM_KWARGS = frozenset((
     "mode", "nodes", "order", "lines", "bytes", "workers",
     "on_error", "streaming", "orchestrator", "c_drain", "resume",
-    "zero_copy",
+    "output",
     "checkpoint_file", "strict_poison", "signal_policy",
     "c_worker_loop", "c_spawn_loop",
 ))
@@ -640,7 +667,14 @@ def _map_collect(lib, fd, size):
     if rc != 0 or not addr.value:
         return None
     try:
-        arr = (ctypes.c_char * int(size)).from_address(addr.value)
+        # c_ubyte, NOT c_char: c_char yields a memoryview of format
+        # '<c', and CPython refuses to compare that against bytes
+        # (`view == b"..."` is False). c_ubyte gives format 'B', which
+        # compares equal in both directions -- found by writing the
+        # buffer-operation tests, not by reading the docs. `in` still
+        # raises NotImplementedError for any memoryview; that one is
+        # CPython's and callers use forkrun.materialize().
+        arr = (ctypes.c_ubyte * int(size)).from_address(addr.value)
     except BaseException:                                # noqa: BLE001
         try:
             lib.fr_py_unmap(addr.value, size)
@@ -672,18 +706,28 @@ def _iter_records(lib, fd, _chunk=_CHUNK, views=False):
     ``views=True`` returns memoryview slices instead of bytes
     (W-PYZEROCOPY), which removes the remaining per-record copy.
 
-    Why ONE big pread rather than mmap for views: mmap was measured
-    faster still (0.0017s vs 0.0346s for 386MB) but it is not usable
-    here. ``mmap.mmap(fd, ...)`` dups the descriptor, and that dup is
-    released only when the mmap is collected -- which, with views
-    outstanding, is whenever the CALLER drops the records. Holding a
-    result list therefore holds an extra fd for the life of the list,
-    which is exactly what test_concurrent's fd-stability gate (and
-    test_v1_fast's child fd hygiene) forbid. So views come from a single
-    pread of the whole stream into one bytes object, sliced for free.
-    That is one kernel copy instead of one-per-record, with no fd, no
-    mapping lifetime, and no SIGBUS exposure if the file is ever
-    truncated underneath us.
+    Why a mapping made in C rather than ``mmap.mmap(fd, ...)``:
+    ``mmap.mmap`` dups the descriptor, and that dup is released only
+    when the mmap is collected -- which, with views outstanding, is
+    whenever the CALLER drops the records. Holding a result list
+    therefore holds an extra fd for the life of the list, which is
+    exactly what test_concurrent's fd-stability gate (and test_v1_fast's
+    child fd hygiene) forbid. ``_map_collect`` calls mmap in the shim
+    and keeps no descriptor at all, so a view costs zero fds.
+
+    Three tiers, in order: a ``PROT_READ``/``MAP_SHARED`` mapping (no
+    kernel copy, slicing is free); failing that, one pread of the whole
+    stream into a single bytes object, sliced (one kernel copy for the
+    whole run instead of one per record); failing that, the chunked
+    read below, which also yields views so the result TYPE never depends
+    on whether the stream happened to be mappable. Measured at 10 GB /
+    7.44M records, views are 2.0-2.3x faster than bytes end to end.
+
+    Lifetime: the mapping is unmapped by a ``weakref.finalize`` attached
+    to the ctypes array each memoryview references, so the mapping
+    cannot be torn down while any view is reachable. That also means the
+    mapped file must not be truncated underneath us; SIGBUS on
+    truncation is documented, not handled.
 
     ``_chunk`` grows to fit a single record that exceeds it, so a record
     larger than the chunk is read once rather than re-parsed on every
@@ -995,7 +1039,7 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
         checkpoint_file: Optional[Any] = None,
         c_worker_loop: Optional[bool] = None, strict_poison: bool = False,
         signal_policy: Optional[str] = "default",
-        zero_copy: bool = False) -> None:
+        output: str = "view") -> None:
     """Run payload over source in parallel. See module docstring for v0 scope.
 
     mode="python": payload is "pkg.mod:func" | callable (Batch -> bytes).
@@ -1084,7 +1128,7 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
                     collect=False, order=order, mode=mode,
                     numa_map=numa_map_str, num_nodes=num_nodes,
                     node_cpus=node_cpus, c_drain=c_drain,
-                    zero_copy=zero_copy)
+                    views=output)
             _sg.check()
         return None
     nodes = 1
@@ -1103,7 +1147,7 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
                         on_error=on_error, strict_poison=strict_poison,
                         collect=False, order=order,
                         mode=mode, nodes=nodes, c_drain=c_drain,
-                    zero_copy=zero_copy)
+                        views=output)
                 _sg.check()
             return None
         with _signal_guard(signal_policy) as _sg:
@@ -1111,7 +1155,8 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
                             bytes_=bytes, workers=_resolve_workers_numa(workers, num_nodes),
                             on_error=on_error, strict_poison=strict_poison,
                             collect=False, order=order,
-                            mode=mode, nodes=nodes, c_drain=c_drain)
+                            mode=mode, nodes=nodes, c_drain=c_drain,
+                            views=output)
             _sg.check()
         return None
     if orchestrator:
@@ -1123,14 +1168,14 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
                     strict_poison=strict_poison,
                     collect=False, order=order, mode=mode, nodes=nodes,
                     c_drain=c_drain,
-                    zero_copy=zero_copy)
+                    views=output)
             _sg.check()
         return None
     with _signal_guard(signal_policy) as _sg:
         _execute(payload, source, sink=sink, lines=lines, bytes_=bytes,
                  workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
                  strict_poison=strict_poison,
-                 collect=False, order=order, c_drain=c_drain)
+                 collect=False, order=order, c_drain=c_drain, views=output)
         _sg.check()
     return None
 
@@ -1212,7 +1257,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         # W-REL1/R1 (ratified Option A): recovery is the default.
         orchestrator = True
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
-    zero_copy = bool(kwargs.get("zero_copy"))
+    output = _resolve_output(kwargs.get("output"))
     numa_map_str, num_nodes, node_cpus = _resolve_numa(nodes)
     # W-PY26: gate the C worker loop to its envelope (mode/plugin +
     # UMA + symbol). Spec extraction (dialect check) happens after
@@ -1255,7 +1300,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     numa_map=numa_map_str, num_nodes=num_nodes,
                     node_cpus=node_cpus,
                     splice=(mode == "splice"), c_drain=c_drain,
-                    zero_copy=zero_copy)
+                    views=output)
             _sg.check()
             return _map_return(out, return_stats)
     nodes = 1
@@ -1275,7 +1320,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                             strict_poison=kwargs.get("strict_poison", False),
                             collect=True, order=order, mode=mode,
                             nodes=nodes, splice=True, c_drain=c_drain,
-                    zero_copy=zero_copy)
+                            views=output)
                     _sg.check()
                     return _map_return(out, return_stats)
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
@@ -1285,7 +1330,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     on_error=kwargs.get("on_error", "retry"),
                     strict_poison=kwargs.get("strict_poison", False),
                     collect=True, order=order, mode=mode, nodes=nodes,
-                    splice=True, c_drain=c_drain)
+                    splice=True, c_drain=c_drain, views=output)
                 _sg.check()
                 return _map_return(out, return_stats)
         if orchestrator:
@@ -1298,7 +1343,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                         strict_poison=kwargs.get("strict_poison", False),
                         collect=True, order=order, mode=mode, nodes=nodes,
                         splice=True, c_drain=c_drain,
-                    zero_copy=zero_copy)
+                        views=output)
                 _sg.check()
                 return _map_return(out, return_stats)
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
@@ -1308,7 +1353,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 on_error=kwargs.get("on_error", "retry"),
                 strict_poison=kwargs.get("strict_poison", False),
                 collect=True, order=order, mode=mode, nodes=nodes,
-                splice=True, c_drain=c_drain)
+                splice=True, c_drain=c_drain, views=output)
             _sg.check()
             return _map_return(out, return_stats)
     if _detect_streaming(source, kwargs.get("streaming")):
@@ -1335,7 +1380,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                         collect=True, order=order, mode=mode, nodes=nodes,
                     c_drain=c_drain,
                     resume=kwargs.get("resume"),
-                    checkpoint_file=kwargs.get("checkpoint_file"))
+                    checkpoint_file=kwargs.get("checkpoint_file"),
+                    views=output)
                 _sg.check()
                 return _map_return(out, return_stats)
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
@@ -1346,7 +1392,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 on_error=kwargs.get("on_error", "retry"),
                 strict_poison=kwargs.get("strict_poison", False),
                 collect=True, order=order, mode=mode, nodes=nodes,
-                c_drain=c_drain)
+                c_drain=c_drain, views=output)
             _sg.check()
             return _map_return(out, return_stats)
     plugin_spec = None
@@ -1387,7 +1433,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     plugin_spec=plugin_spec,
                     c_spawn_loop=c_spawn_loop,
                     spawn_argv=spawn_argv,
-                    zero_copy=zero_copy)
+                    views=output)
             _sg.check()
             return _map_return(out, return_stats)
     with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
@@ -1401,7 +1447,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                            c_worker_loop=c_worker_loop,
                            plugin_spec=plugin_spec,
                            c_spawn_loop=c_spawn_loop,
-                           spawn_argv=spawn_argv)
+                           spawn_argv=spawn_argv, views=output)
         _sg.check()
     return _map_return(results, return_stats)
 
@@ -1413,6 +1459,13 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
     order="index": batch_idx sequence via parent-side reassembly (bounded
       out-of-order buffer; holes from poisoned batches flush sorted at
       EOF — brief head-of-line blocking behind a hole is inherent).
+
+    Records are always bytes, even with output="view" (the map() and
+    run() default): stream() drains records live from a results pipe or
+    worker memfd as they arrive, so there is no finished collection file
+    to map. Zero-copy is a map()-only property. output= is still
+    accepted and validated so map/run/stream share one surface; it does
+    not change what stream() yields.
 
     Validates eagerly (raises on call, before the first next()).
 
@@ -1467,7 +1520,11 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
         # W-REL1/R1 (ratified Option A): recovery is the default.
         orchestrator = True
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
-    zero_copy = bool(kwargs.get("zero_copy"))
+    # Validated for a consistent surface, but stream() yields bytes:
+    # it drains records live out of a results pipe / worker memfd as
+    # they arrive, and there is no collection file to map. Zero-copy
+    # is a map()-only property (see _iter_records(views=True)).
+    output = _resolve_output(kwargs.get("output"))
     if _validate_c_worker_loop(kwargs.get("c_worker_loop")):
         raise RuntimeError(
             "stream(): c_worker_loop=True is map()-only in W-PY26 "
@@ -2887,7 +2944,7 @@ def _new_ingress_memfd():
 
 def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
                     on_error, strict_poison=False, collect, order, mode="python", nodes="auto",
-                    splice=False, c_drain=True):
+                    splice=False, c_drain=True, views=True):
     """Streaming-ingest entry for map/run (blocking, like _execute)."""
     if mode not in ("python", "splice"):
         raise NotImplementedError(
@@ -2900,7 +2957,7 @@ def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
             payload, source, sink=sink, lines=lines, bytes_=bytes_,
             workers=workers, on_error=on_error, strict_poison=strict_poison,
             collect=collect,
-            order=order, splice=splice, c_drain=c_drain)
+            order=order, splice=splice, c_drain=c_drain, views=views)
 
 
 def _fork_materialized_scanner(lib, memfd, engine_fds):
@@ -2966,7 +3023,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
 
 def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                            workers, on_error, strict_poison=False, collect, order,
-                           splice=False, c_drain=True):
+                           splice=False, c_drain=True, views=True):
     """map/run over a streaming source (W-PY16, collect/discard).
 
     Pipeline: init → ingress memfd → output memfds → fallow pipe →
@@ -3288,7 +3345,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         return _core_collect(results_fd=results_fd,
-                             out_fds=out_fds, spec=_spec)
+                             out_fds=out_fds, spec=_spec,
+                             lib=lib, views=views)
     finally:
         if drain_pid is not None:
             # Stray drain (exception path): SIGKILL + reap.
@@ -3371,7 +3429,7 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
                strict_poison=False,
                collect, order, mode="python", nodes="auto", splice=False,
                c_drain=True, c_worker_loop=False, plugin_spec=None,
-               c_spawn_loop=False, spawn_argv=None):
+               c_spawn_loop=False, spawn_argv=None, views=True):
     if mode not in ("python", "splice"):
         raise NotImplementedError(
             "v0 supports mode='python' only (spawn/plugin are Stage 5)")
@@ -3388,13 +3446,13 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
                                c_worker_loop=c_worker_loop,
                                plugin_spec=plugin_spec,
                                c_spawn_loop=c_spawn_loop,
-                               spawn_argv=spawn_argv)
+                               spawn_argv=spawn_argv, views=views)
 
 
 def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                     on_error, strict_poison=False, collect, order, splice=False,
                     c_drain=True, c_worker_loop=False, plugin_spec=None,
-                    c_spawn_loop=False, spawn_argv=None):
+                    c_spawn_loop=False, spawn_argv=None, views=True):
     # W-PY21-A: c_drain moves result byte movement (signal consume +
     # memfd pread) from the parent into a forked C loop. Framing and
     # parsing are untouched: the drain copies framed records
@@ -3612,7 +3670,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
         if not collect:
             return None
         return _core_collect(results_fd=results_fd,
-                             out_fds=out_fds, spec=_spec)
+                             out_fds=out_fds, spec=_spec,
+                             lib=lib, views=views)
     finally:
         if scan_pid is not None:
             # Stray scanner (exception path): SIGKILL + reap so no
@@ -4062,7 +4121,7 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
 
 
 def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
-                            workers, on_error, zero_copy=False, strict_poison=False, collect, order,
+                            workers, on_error, views=True, strict_poison=False, collect, order,
                             mode="python", nodes="auto", splice=False,
                             c_drain=True, resume=None,
                             checkpoint_file=None, c_worker_loop=False,
@@ -4172,7 +4231,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # W-PY22: pre-try defaults so the abort handler below never
     # NameErrors on early failures (spill/scan, before assignment).
     use_orderer = False
-    _zc = bool(zero_copy)
+    _zc = bool(views)
     try:
         memfd, size = _spill_to_memfd(src_fd)
         try:
@@ -5184,7 +5243,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
 
 
 def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
-                                   bytes_, workers, on_error, zero_copy=False,
+                                   bytes_, workers, on_error, views=True,
                                    strict_poison=False, collect,
                                    order, mode="python", nodes="auto",
                                    splice=False, c_drain=True, resume=None,
@@ -5248,7 +5307,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
-    _zc = bool(zero_copy)
+    _zc = bool(views)
     use_orderer = False
 
     src_fd, must_close = _open_source(source)
@@ -6838,7 +6897,7 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
 
 
 def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
-                         workers, on_error, zero_copy=False, strict_poison=False, collect, order,
+                         workers, on_error, views=True, strict_poison=False, collect, order,
                          mode="python", numa_map="", num_nodes=2,
                          node_cpus=None, splice=False, c_drain=True):
     """Blocking map/run over the NUMA pipeline (W-PY21).
@@ -6870,7 +6929,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                          supervision="reactor", shape="blocking",
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order)
-    _zc = bool(zero_copy)
+    _zc = bool(views)
     pre_fds = snapshot_fds()
     lib = load()
     _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,

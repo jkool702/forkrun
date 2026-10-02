@@ -50,7 +50,7 @@ def _map_warn(payload, path, **kw):
     """forkrun.map capturing UserWarnings (returns (out, warns))."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", UserWarning)
-        out = forkrun.map(payload, path, **kw)
+        out = forkrun.map(payload, path, output="bytes", **kw)
     warns = [w for w in caught
              if issubclass(w.category, UserWarning)
              and "raised to" in str(w.message)]

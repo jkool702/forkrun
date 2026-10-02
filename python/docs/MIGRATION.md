@@ -60,3 +60,37 @@ results = forkrun.map(myfunc, "input.txt",
 with open("out.txt", "wb") as f:
     f.write(b"".join(results))
 ```
+
+## Python 0.16 → 0.17
+
+One breaking change: **`map()` results are `memoryview` instead of
+`bytes`.** Nothing else about the API moved.
+
+```python
+# 0.16 — worked
+for rec in forkrun.map(f, src):
+    if rec.startswith(b"ERROR"): ...
+
+# 0.17 — AttributeError: 'memoryview' object has no attribute 'startswith'
+for rec in forkrun.map(f, src):
+    if bytes(rec).startswith(b"ERROR"): ...
+
+# 0.17 — or keep the old objects
+for rec in forkrun.map(f, src, output="bytes"):
+    if rec.startswith(b"ERROR"): ...
+```
+
+Unaffected: `len()`, slicing, `==` against `bytes`, `.tobytes()`,
+`.hex()`, `b"".join(results)`, `f.write(...)`, and any socket/file
+`send`/`write`. Those all accept a buffer.
+
+Affected: `.split`, `.splitlines`, `.decode`, `.startswith`, `in`,
+`sorted()`, and arithmetic. Fix with `forkrun.materialize(rec)` or
+`bytes(rec)` on the affected record, or `output="bytes"` on the call.
+
+Two things that did **not** change:
+
+- `stream()` still yields `bytes`. It drains records live, so there is
+  no finished file to map.
+- Payload-side `Batch.data` was already a borrowed `memoryview` and is
+  unaffected.

@@ -2,15 +2,22 @@
 
 ## Status (2026-10-02)
 
-Branch `NEW/REFACTOR3.0`. Two commits on top of `b52dd2da`:
+Branch `NEW/REFACTOR3.2`, built on `NEW/REFACTOR3.0` + `3.1`:
 
 - `68566efd` incremental collect + backlog-gated NUMA fork gate (−42%)
 - `f8f21a92` mmap the collect stream (−10% more)
+- `da1755a8` drain: no `pop(0)`, per-signal reslicing, per-quantum env
+  lookup, throttled reap sweep. `stream(lines=1)` >120 s → 3.35 s
+- `23254ae0` scanner `spawn_r`/`spawn_w` wiring (needed a `wid_node`
+  invariant fix — scanner requests must allocate from the *requested*
+  node's block)
+- `3dc2dc68` C-side zero-copy mapping; the default representation is now
+  `memoryview` and the frontend version is 0.17.0 (**unreleased** — not
+  published until the optimization list is done)
 
-Test baseline to compare against: **644 tests, 1 failure** —
-`test_release_check_passes`, which requires a clean git tree.
-`tools/build_wheel.sh` was already dirty at session start (not mine);
-that is what makes it red.
+Test baseline: **656 tests**. The pre-existing
+`test_release_check_passes` failure is the dirty `tools/build_wheel.sh`
+(not mine; not committed).
 
 ## The measurement that matters
 
@@ -21,12 +28,58 @@ payload (`return batch.data`) so numbers isolate movement not UDF.
 opencode processes at ~60% CPU; use paired/interleaved A/B or medians
 flip sign.
 
-| cell | bash | HEAD | NEW | gap was → now |
-|---|---|---|---|---|
-| `map(order=index)` nodes=auto | 0.23 s | 0.667 s | **0.318 s** | 2.90× → **1.39×** |
-| `map(order=none)` nodes=auto | 0.23 s | 0.358 s | **0.305 s** | 1.56× → **1.33×** |
+### Running the bash reference
+
+`. /mnt/ramdisk/forkrun/frun.bash` **once, outside the timed region**,
+then time only the `frun` call. Two ways to get this wrong, both of
+which I did:
+
+- `bash frun.bash -j 28 …` does not run anything — the file only
+  *defines* `frun`. It "completes" in 0.08 s and the number is
+  meaningless.
+- `bash -c ". frun.bash; frun …"` does not inherit the function unless
+  `export -f`d, and the `0.00 s` it reports is a command-not-found.
+
+The payload must match the Python side. `f(){ :; }` emits nothing while
+`batch.data` echoes 386 MB, so it is not a comparison; `f(){ cat; }`
+forks `cat` per batch, so bash pays a cost Python does not.
+
+### Results (min of 3, interleaved, `-j 28`, **10 GB / 7.44M records**)
+
+Benchmark at **≥2 s per run**. See the trap below for why 386 MB is not
+enough.
+
+| path | ordered | unordered |
+|---|---|---|
+| bash (`-k` / `-u`, `-b 4M`, `f(){cat;}`) | **3.91 s** (2556 MB/s) | **3.55 s** (2817 MB/s) |
+| Python 0.17.0 `output="view"` (default) | 5.12 s (1955 MB/s) | **3.73 s** (2681 MB/s) |
+| Python 0.17.0 `output="bytes"` | 10.16 s (984 MB/s) | 8.46 s (1183 MB/s) |
+
+Zero-copy is worth **2.0–2.3×** over the bytes representation. Against
+bash: unordered is at parity (1.05×), ordered is 1.31×.
+
+`orchestrator=False` reaches the same speed (3.96 s unordered) only
+because its collect was rerouted through the mapping — it has its own
+parse and was a second place `output=` was ignored.
+
+Earlier entries in this file quote bash at 0.23 s and Python at
+0.318 s. Those were 386 MB runs; do not mix them with the 10 GB table.
 
 `map()`'s DEFAULT is `order="none"`, not `"index"` — benchmark both.
+
+### Benchmark size is not a detail
+
+At **386 MB** this same comparison said Python *beat* bash
+(0.148 s vs 0.181 s). At **10 GB** it does not (3.73 s vs 3.55 s
+unordered; 5.12 s vs 3.91 s ordered). The short run flattered Python and
+the long one did not.
+
+The mechanism is fixed cost: engine init, forking 28 workers, and
+mapping setup are a constant that is a large fraction of a 150 ms run
+and ~1% of a 4 s run. Short runs therefore measure startup, and they
+happened to favour the side with the cheaper startup. Aim for **≥2 s
+per measurement**; if a change claims a speedup below that, re-measure
+on a bigger corpus before believing it.
 
 ## What was actually wrong (both in the single-threaded parent)
 
@@ -89,6 +142,32 @@ flip sign.
   `cd python && python3 -m unittest discover -s tests -p "test_*.py"`.
   Running `python3 -m unittest test_streaming...` from `python/` gives a
   bogus ModuleNotFoundError that looks like a regression.
+- **`ctypes.c_char` gives a `memoryview` of format `<c`, and CPython
+  refuses to compare that against `bytes`** — `view == b"..."` is
+  silently `False`. `c_ubyte` gives `<B` and compares equal both ways.
+  Found by writing a test that compares a record to an expected value,
+  not by reading the docs. A wrong answer, not an error.
+- **A keyword flag threaded through N dispatch sites is only correct at
+  the ones you edited.** `output="bytes"` was silently ignored on every
+  streaming-ingest (pipe) path: the flag reached the call, and four
+  executors (`_execute`, `_execute_locked`, `_execute_ingest`,
+  `_execute_ingest_locked`) had no parameter to receive it. It typechecked
+  and looked right. Audit *callee signatures*, not call sites — an AST
+  pass comparing every kwarg against the callee's signature catches all
+  of it at once.
+- **`stream()` cannot be zero-copy.** It drains records live out of a
+  results pipe / worker memfd, so there is no finished collection file to
+  map. It yields `bytes` and always did. Do not try to force views here;
+  document it instead.
+- **A hardcoded version literal in a check will rot silently.**
+  `release_check.PY_VERSION` stayed `0.16.0` after the bump, so the wheel
+  built as 0.17.0 while every artifact glob looked for 0.16.0 and the gate
+  reported `expected exactly one fresh wheel, found []` — a symptom three
+  steps from the cause. It is single-sourced now, with a test pinning it.
+- **A benchmark under ~2 s measures startup, not work.** See "Benchmark
+  size is not a detail" above. This one produced a confidently wrong
+  conclusion in both directions on this project: a 386 MB run said Python
+  beat bash, the 10 GB run said it does not.
 
 ## Rule I broke, and the correction
 

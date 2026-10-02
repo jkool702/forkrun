@@ -53,7 +53,26 @@ class TestPackaging(unittest.TestCase):
             capture_output=True, text=True, timeout=120, cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), forkrun.__version__)
-        self.assertEqual(forkrun.__version__, "0.16.0")
+        self.assertEqual(forkrun.__version__, "0.17.0")
+
+    def test_release_check_version_not_hardcoded(self):
+        """release_check must not carry its own version literal.
+
+        It did, and rotted: the wheel built as 0.17.0 while every
+        artifact glob still looked for 0.16.0, so the release gate
+        failed with "expected exactly one fresh wheel, found []" --
+        a symptom three steps removed from the actual cause. Pin it to
+        __version__ so a version bump cannot desync it.
+        """
+        import release_check
+        self.assertEqual(release_check.PY_VERSION, forkrun.__version__)
+        src_path = os.path.join(os.path.dirname(os.path.abspath(
+            __file__)), "..", "release_check.py")
+        with open(src_path) as fh:
+            src = fh.read()
+        self.assertNotRegex(
+            src, r'^PY_VERSION\s*=\s*"',
+            "release_check.PY_VERSION is a hardcoded literal again")
 
     def test_so_present_in_place(self):
         pkg_dir = os.path.dirname(os.path.abspath(forkrun.__file__))

@@ -309,8 +309,131 @@ zero times on a healthy pipeline (file or pipe source). The
 `os.fork()`-per-worker cost (315 us at 28w, 974 us at 96w, fully
 serial in the parent, vs 61 us for bash's clone) remain open.
 
-Tests: 644 run, 1 failure -- `test_release_check_passes`, which
-requires a clean tree and was already failing before these changes.
+### Python frontend: zero-copy result records, default `output="view"`
+
+**This changes the default result representation. Python frontend
+version 0.16.0 -> 0.17.0.** Migration notes at the end of this
+section; `output="bytes"` is a complete escape hatch.
+
+The previous section closed most of the bash gap but named what was
+left: "the remaining collect cost is the irreducible per-record
+`bytes` copy (386 MB at ~2.5 GB/s)". It was irreducible *given a
+discrete-`bytes`-objects API*. It is not irreducible given a mapping.
+
+- **The result stream is now mapped, and records are views into it.**
+  Added `fr_py_map_readonly` / `fr_py_unmap` to the shim: the parent
+  maps the collection file `PROT_READ`/`MAP_SHARED` and `_iter_records`
+  yields `memoryview` slices over it instead of `bytes` copies. Each
+  `bytes` record cost a `pread` plus an allocation plus a copy; a view
+  costs a slice. Measured on this workload: **order="none" 0.318 s ->
+  0.125 s, order="index" 0.343 s -> 0.148 s (2.5x / 2.3x).**
+
+  `madvise(MADV_POPULATE_READ)` is load-bearing, not a nicety: without
+  the prefault the mapping takes a fault per page during the first
+  pass over the records and gives most of the win back. `MADV_HUGEPAGE`
+  is set too, for the same reason.
+
+  `mmap.mmap(fd, ...)` was rejected for this: it dups the descriptor
+  and releases it only when the mapping is collected, and these
+  mappings are held by live records. Mapping in C keeps the descriptor
+  out of it entirely -- `test_no_fd_leak_from_mappings` asserts the fd
+  count is unchanged while results are held.
+
+  Lifetime is structural, not conventional. The `memoryview` references
+  a ctypes array that owns the address, and a `weakref.finalize` on
+  that array unmaps. Every slice keeps the array alive, so the mapping
+  cannot be torn down while any view is reachable -- there is no window
+  in which a stale view would fault. `test_view_survives_run_and_source_teardown`
+  reads a record after the run is gone *and* the source file is
+  unlinked; it was written to catch the failure mode that mattered
+  (a silently zeroed or recycled region), and it passes.
+
+- **Two bugs the migration surfaced, both now fixed.** Both were found
+  by writing tests, not by reading code:
+
+  - `c_char` gives a `memoryview` of format `<c`, and CPython refuses
+    to compare that against bytes -- `view == b"..."` was silently
+    **False**. Switched the backing array to `c_ubyte` (format `<B`),
+    which compares equal in both directions. A user comparing a result
+    to an expected `bytes` would have gotten a wrong answer, not an
+    error.
+
+  - `output="bytes"` was silently ignored on every streaming-ingest
+    path (pipe sources). The flag was threaded to 13 dispatch sites;
+    `_execute`, `_execute_locked`, `_execute_ingest` and
+    `_execute_ingest_locked` had no parameter to receive it, so those
+    runs returned views regardless of what was asked for. `map()` over a
+    pipe with `output="bytes"` now returns `bytes`.
+
+- **`stream()` is unchanged and still yields `bytes`.** It drains
+  records live from a results pipe or worker memfd as they arrive, so
+  there is no finished collection file to map; zero-copy is a
+  `map()`-only property. `output=` is still accepted and validated on
+  `stream()` so the three entry points share one surface, but it does
+  not change what is yielded. Documented rather than faked.
+
+- **Also in this wave:** the ordered collect no longer `pop(0)`s off a
+  list (quadratic); buffers are resliced per signal instead of
+  reallocated; the environment is read per quantum instead of per
+  batch; and the reactor's reap sweep is throttled rather than O(N)
+  per poll. `stream(lines=1)` went from not completing in 120 s to
+  3.35 s. Scanner `spawn_r`/`spawn_w` are wired, which needed a
+  `wid_node` invariant fix: scanner requests must allocate wids from the
+  *requested* node's block, or multi-node spawn silently shares one.
+
+Measured against bash on the same box at **10 GB / 7.44M records**, so no
+measurement is in the startup-dominated regime: same `-j 28`, matched
+echo payloads (bash `f(){ cat; }`, Python `batch.data`), `-b 4M`,
+`min` of 3, interleaved, `frun.bash` sourced outside the timed region.
+Every row is byte-verified against the input size.
+
+| path | ordered | unordered |
+| --- | --- | --- |
+| bash (`-k` / `-u`) | **3.91 s** (2556 MB/s) | **3.55 s** (2817 MB/s) |
+| Python 0.17.0 `output="view"` | 5.12 s (1955 MB/s) | 3.73 s (2681 MB/s) |
+| Python 0.17.0 `output="bytes"` | 10.16 s (984 MB/s) | 8.46 s (1183 MB/s) |
+
+Zero-copy is worth **2.0–2.3×** over the bytes representation, and it
+closes most of the remaining gap: unordered is at parity (1.05×), ordered
+is 1.31×.
+
+Two measurement notes, both of which changed a conclusion here:
+
+- **At 386 MB the same comparison said Python *beat* bash** (0.148 s vs
+  0.181 s). At 10 GB it does not. The short run flattered Python and the
+  larger one did not, so the earlier reading was a size artifact, not a
+  result. Short runs stay in the regime where fixed costs — engine init,
+  forking 28 workers, mapping setup — are a visible fraction of wall.
+- **`orchestrator=False` gets the same win** (3.96 s vs 3.73 s
+  unordered) only because its collect was rerouted through the mapping;
+  it has its own parse and was the second place `output=` was ignored.
+
+Caveat on the bash row: its echo payload is a shell function that forks
+`cat` per batch, so bash carries a per-batch fork Python does not. The
+comparison is fair in output volume, not in UDF mechanics.
+
+**Migration.** Code that treats results as `bytes` and uses `.split`,
+`.splitlines`, `.decode`, `.startswith`, `b"x" in rec`, sorting, or
+arithmetic needs one of:
+
+```python
+rec = forkrun.materialize(rec)   # explicit, and the escape hatch is public
+records = [bytes(r) for r in forkrun.map(...)]   # or opt out per call
+records = forkrun.map(..., output="bytes")       # or per call
+```
+
+`len()`, slicing, `==` against bytes, `.tobytes()`, `.hex()` and
+buffer protocol use need no change. `memoryview` has no `.split` and
+`in` raises `NotImplementedError` for any `memoryview` -- both are
+CPython's, not ours.
+
+Tests: 656 run. Coverage added: 12 tests in `test_output_mode.py`
+(both representations, byte-identity, invalid values, lifetime, fd
+hygiene, degenerate shapes). The pre-existing content tests were moved
+to `output="bytes"` so they keep testing the bytes contract, with
+`test_output_mode.py` taking the view side. Remaining failures are the
+packaging/release gates (wheel rebuild and the dirty-tree release
+checklist), both pre-existing.
 
 ## v3.6.0 — 2026-09-30
 

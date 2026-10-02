@@ -210,7 +210,7 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
 # ---------------------------------------------------------------------------
 
 def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
-                      spec=None):
+                      spec=None, lib=None, views=False):
     """Parse collected output memfds into ordered blobs. Single site.
 
     Branches: drain-vs-direct (1), order-index-vs-none (1). Byte-identical
@@ -219,6 +219,14 @@ def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
 
     W-REL6-5: ``use_drain``/``order`` default from ``spec``
     (``use_drain = spec.c_drain and spec.collect``).
+
+    W-PYZEROCOPY: ``views=True`` with a ``lib`` routes the parse through
+    ``_iter_records`` so records are memoryview slices over a mapping of
+    the stream instead of per-record copies. Without it this stayed on
+    ``_read_fd_all`` + ``_parse_records``, which meant the fail-fast
+    (``orchestrator=False``) path silently returned ``bytes`` even when
+    the caller asked for ``output="view"``. Framing, record boundaries
+    and ordering are ``_iter_records``' contract and are unchanged.
     """
     if spec is not None:
         if use_drain is None:
@@ -233,15 +241,19 @@ def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
     import sys as _sys
     _run_mod = _sys.modules["forkrun.run"]
 
+    def _records_from(fd):
+        if fd is None:
+            return []
+        if views and lib is not None:
+            return list(_run_mod._iter_records(lib, fd, views=True))
+        return _run_mod._parse_records(_run_mod._read_fd_all(fd))
+
     if use_drain:
-        records = (_run_mod._parse_records(
-            _run_mod._read_fd_all(results_fd))
-            if results_fd is not None else [])
+        records = _records_from(results_fd)
     else:
         records = []
         for fd in out_fds:
-            records.extend(_run_mod._parse_records(
-                _run_mod._read_fd_all(fd)))
+            records.extend(_records_from(fd))
     if order == "index":
         records.sort(key=lambda kv: kv[0])
     return [blob for _, blob in records]

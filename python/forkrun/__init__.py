@@ -52,7 +52,11 @@ from forkrun.exceptions import (BASH_CODE_MAP, ForkrunInterrupted,  # noqa: F401
 from forkrun.run import map, run, stream, sweep  # noqa: F401
 from forkrun.run import last_run_stats  # noqa: F401
 
-__version__ = "0.16.0"
+# 0.17.0: result records default to memoryview (output="view"); the
+# copy-per-record representation moves to the explicit output="bytes".
+# Bumped rather than reused so a 0.16.0 wheel and a 0.17.0 wheel never
+# claim the same version while behaving differently.
+__version__ = "0.17.0"
 
 
 def materialize(blob):

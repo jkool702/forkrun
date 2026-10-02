@@ -27,7 +27,26 @@ import sys
 import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PY_VERSION = "0.16.0"
+
+
+def _read_py_version():
+    """Single-source the Python version from forkrun.__version__.
+
+    This was a hardcoded literal and silently rotted: the wheel built
+    as 0.17.0 while every artifact glob still looked for 0.16.0, so
+    _ensure_artifacts() found nothing and the release gate failed with
+    a misleading "found []" instead of a version mismatch. setup.py
+    already reads the same field; read it the same way.
+    """
+    src = os.path.join(REPO_ROOT, "python", "forkrun", "__init__.py")
+    with open(src) as fh:
+        m = re.search(r'^__version__\s*=\s*"([^"]+)"', fh.read(), re.M)
+    if not m:
+        raise RuntimeError("could not find __version__ in %s" % src)
+    return m.group(1)
+
+
+PY_VERSION = _read_py_version()
 PROJECT_VERSION = "v3.6.0"
 FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
 

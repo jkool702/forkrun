@@ -94,6 +94,13 @@ def count_results(results):
     """
     if results is None:
         return 0
+    # map() results are memoryview views by default since 0.17.0. Count
+    # them as blobs: the `else: total += 1` branch below treats a
+    # non-bytes element as ONE nested record, so a view slipped through
+    # there and reported 5,000 batches where the answer is 5,000,000
+    # newline-terminated records.
+    if isinstance(results, memoryview):
+        results = results.tobytes()
     if isinstance(results, bytes):
         return sum(1 for line in results.split(b"\n") if line.strip())
     if isinstance(results, (str,)):
@@ -103,7 +110,7 @@ def count_results(results):
         for chunk in results:
             if chunk is None:
                 continue
-            if isinstance(chunk, (bytes, str)):
+            if isinstance(chunk, (bytes, bytearray, memoryview, str)):
                 total += count_results(chunk)
             elif isinstance(chunk, (list, tuple)):
                 total += sum(1 for r in chunk if r)
@@ -128,6 +135,10 @@ def count_total(results):
     """
     if results is None:
         return 0
+    # Views count as blobs (see count_results) -- normalize up front so
+    # the framing rule below applies instead of the +1-per-element path.
+    if isinstance(results, memoryview):
+        results = results.tobytes()
     if isinstance(results, (bytes, bytearray)):
         text = bytes(results)
         if len(text) == 0:
@@ -146,7 +157,7 @@ def count_total(results):
                 continue
             if isinstance(chunk, (list, tuple)):
                 total += count_total(chunk)
-            elif isinstance(chunk, (bytes, bytearray)):
+            elif isinstance(chunk, (bytes, bytearray, memoryview)):
                 # A map() blob: apply the framing rule.
                 total += count_total(chunk)
             else:

@@ -188,7 +188,7 @@ class TestBatchSemantics(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 100)
-            out = forkrun.map(probe, path, workers=1, order="index", nodes=1)
+            out = forkrun.map(probe, path, workers=1, order="index", nodes=1, output="bytes")
             with open(path, "rb") as fh:
                 raw = fh.read()
             pos = 0
@@ -470,7 +470,7 @@ class TestWPY2(unittest.TestCase):
             os.unlink(path)
 
     def test_version(self):
-        self.assertEqual(forkrun.__version__, "0.16.0")
+        self.assertEqual(forkrun.__version__, "0.17.0")
         self.assertIn("Batch", forkrun.__all__)
         self.assertEqual(forkrun.__engine_version__, "v3.6.0")
 
@@ -537,14 +537,14 @@ class TestEmitter(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 3000)
-            out = forkrun.map(marked, path, workers=4, order="index", nodes=1)
+            out = forkrun.map(marked, path, workers=4, order="index", nodes=1, output="bytes")
             idxs = [int(rec.split(b":", 1)[0]) for rec in out]
             self.assertEqual(idxs, sorted(idxs))
             self.assertEqual(len(set(idxs)), len(idxs))
             # ...and unordered delivery still carries every line exactly once
             # (compare line multisets — batches and lines differ in
             # granularity, so sort lines, not blobs).
-            out2 = forkrun.map(_identity, path, workers=4, nodes=1)
+            out2 = forkrun.map(_identity, path, workers=4, nodes=1, output="bytes")
             with open(path, "rb") as fh:
                 raw = fh.read()
             self.assertEqual(sorted(b"".join(out2).splitlines()),
@@ -630,7 +630,7 @@ class TestEmitter(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 1500)
-            out = forkrun.map(marked, path, workers=3, order="index", nodes=1)
+            out = forkrun.map(marked, path, workers=3, order="index", nodes=1, output="bytes")
             body = {}
             for rec in out:
                 idx = int(rec.split(b":", 1)[0])
@@ -656,7 +656,7 @@ class TestEmitter(unittest.TestCase):
             def amplify(batch):
                 return bytes(batch.data) * 4
 
-            out = forkrun.map(amplify, path, workers=4, order="index", nodes=1)
+            out = forkrun.map(amplify, path, workers=4, order="index", nodes=1, output="bytes")
             joined = b"".join(out)
             self.assertEqual(len(joined), 4 * len(raw))
             # Each batch blob is its raw span repeated 4x: the first

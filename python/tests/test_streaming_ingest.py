@@ -101,7 +101,7 @@ class TestStreamingIngest(unittest.TestCase):
         r, pid = _pipe_with_lines(1000)
         try:
             out = forkrun.map(lambda b: bytes(b.data).upper(), r,
-                              workers=2, order="index", nodes=1)
+                              workers=2, order="index", nodes=1, output="bytes")
             self.assertEqual(len(out) > 0, True)
             got = sorted(b for blob in out for b in blob.splitlines())
             exp = sorted(("line %d" % i).upper().encode()

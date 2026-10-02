@@ -218,9 +218,9 @@ class TestCWorkerLoopParity(unittest.TestCase):
         path = _make_input(n=100)
         try:
             a = forkrun.map(V1_IDENT, path, mode="plugin", workers=2,
-                            nodes=1)
+                            nodes=1, output="bytes")
             b = forkrun.map(V1_IDENT, path, mode="plugin", workers=2,
-                            c_worker_loop=True, nodes=1)
+                            c_worker_loop=True, nodes=1, output="bytes")
             # Batch counts legitimately differ run to run (pre-flight
             # race sets L), so compare identity SEMANTICS, not idx
             # values: every batch reports kills=0 and each run's idx
