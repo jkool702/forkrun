@@ -1193,6 +1193,28 @@ def reactor_run(state, poll_timeout=0.1, service=None):
             "poisoned": list(state.poisoned_batches)}
 
 
+def reactor_watch_fds(state, spawn=True):
+    """Descriptors reactor_poll_once() selects on.
+
+    Factored out so a caller that is waiting on something ELSE -- the
+    ingest source, say -- can wait on the source and every reactor
+    notification in ONE select instead of blocking on the source alone
+    and leaving worker deaths unserviced for the length of the wait
+    (W-PYINGESTWAIT). Single source of truth: the list here and the
+    dispatch inside reactor_poll_once must agree, and two copies of it
+    would drift exactly the way duplicated flag lists do.
+    """
+    watch = []
+    for slot in state.workers.values():
+        if slot.alive and slot.death_r is not None and slot.death_r >= 0:
+            watch.append(slot.death_r)
+    if spawn and state.spawn_r is not None and state.spawn_r >= 0:
+        watch.append(state.spawn_r)
+    if state.trap_ack_r is not None and state.trap_ack_r >= 0:
+        watch.append(state.trap_ack_r)
+    return watch
+
+
 def reactor_poll_once(state, poll_timeout=0.0, spawn=True):
     """Service one nonblocking event round (spill-loop interleaving).
 
@@ -1220,16 +1242,10 @@ def reactor_poll_once(state, poll_timeout=0.0, spawn=True):
     # W-REL6-3.1: startup deadline also bounds spill-loop supervision
     # (a hung child would otherwise stall the spill, not just the run).
     state.check_startup_timeouts()
-    watch = []
-    death_of = {}
-    for slot in state.workers.values():
-        if slot.alive and slot.death_r is not None and slot.death_r >= 0:
-            watch.append(slot.death_r)
-            death_of[slot.death_r] = slot.wid
-    if spawn and state.spawn_r is not None and state.spawn_r >= 0:
-        watch.append(state.spawn_r)
-    if state.trap_ack_r is not None and state.trap_ack_r >= 0:
-        watch.append(state.trap_ack_r)
+    watch = reactor_watch_fds(state, spawn=spawn)
+    death_of = {slot.death_r: slot.wid for slot in state.workers.values()
+                if slot.alive and slot.death_r is not None
+                and slot.death_r >= 0}
     if watch:
         try:
             readable, _, _ = _select.select(watch, [], [], poll_timeout)

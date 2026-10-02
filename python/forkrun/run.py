@@ -5264,6 +5264,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                            check_scanner_death,
                            fork_scanner_with_death_pipe,
                            reactor_poll_once, reactor_run,
+                           reactor_watch_fds,
                            spawn_orderer)
     import fcntl as _fcntl
 
@@ -5559,26 +5560,40 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 _maybe_fork_workers()
                 reactor_poll_once(state)
                 if not drained:
-                    # W-PYINGESTWAIT: wait for the source to become
-                    # readable instead of guessing a fixed quantum.
+                    # W-PYINGESTWAIT: wait on the source AND every reactor
+                    # notification in one select.
+                    #
                     # A flat 20 ms sleep fired once per chunk on a
-                    # streamed source -- 645 sleeps = 12.9 s of a
-                    # 14.65 s light run, 88% of wall -- because the
-                    # reader outran the writer and then slept the full
-                    # quantum no matter how soon data actually landed.
-                    # The reader IS faster than the writer here, so the
-                    # wait is real; the only error was not waiting on
-                    # the fd that signals it. Timeout is unchanged, so
-                    # worst-case reactor latency is unchanged too --
-                    # this returns early when data is ready and is
-                    # strictly better when it is not.
+                    # streamed source -- 645 sleeps = 12.9 s of a 14.65 s
+                    # light run, 88% of wall -- because the reader outran
+                    # the writer and then slept the full quantum no
+                    # matter how soon data landed.
+                    #
+                    # Selecting on src_fd alone fixed that but left a
+                    # second problem: during the wait nothing was
+                    # servicing worker deaths, so an idle source stalled
+                    # recovery for up to a full quantum. Watching the
+                    # reactor fds in the SAME select means a death wakes
+                    # us immediately instead of at the next quantum.
+                    #
+                    # Timeout is unchanged at 0.02 s, so worst-case
+                    # latency is unchanged; this returns early when data
+                    # or a death is ready, which is the common case.
                     try:
                         import select as _select
-                        _select.select([src_fd], [], [], 0.02)
+                        watch = [src_fd] + reactor_watch_fds(state)
+                        readable, _, _ = _select.select(watch, [], [], 0.02)
                     except (OSError, ValueError):
                         # fd closed under us, or select refused it:
                         # fall back to the old pacing rather than spin.
                         _time.sleep(0.02)
+                    else:
+                        # A reactor fd fired while we waited: drain it
+                        # now instead of after the next read attempt.
+                        if any(fd != src_fd for fd in readable):
+                            reactor_poll_once(state)
+                            _watch_helpers()
+                            _maybe_fork_workers()
         except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
             raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
