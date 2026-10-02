@@ -149,6 +149,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_map_readonly": {
+    "args": "int fd, uint64_t length, uint64_t *out_addr",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_nonblock": {
     "args": "int fd",
     "linkage": "static",
@@ -248,6 +253,11 @@
     "args": "int src_fd, int dst_fd, uint64_t max_bytes",
     "linkage": "extern",
     "return": "int64_t"
+  },
+  "fr_py_unmap": {
+    "args": "uint64_t addr, uint64_t length",
+    "linkage": "extern",
+    "return": "void"
   },
   "fr_py_version": {
     "args": "void",

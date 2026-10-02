@@ -55,6 +55,28 @@ from forkrun.run import last_run_stats  # noqa: F401
 __version__ = "0.16.0"
 
 
+def materialize(blob):
+    """Return a real ``bytes`` from a result record.
+
+    Records come back as ``memoryview`` slices over the mapped
+    collection file rather than copies -- the same hand-a-reference
+    approach bash's orderer takes with (fd, offset, len), and ~48x
+    cheaper on the collect path (W-PYZEROCOPY). That is a buffer, not a
+    sequence: ``len()``, slicing, iteration, ``.tobytes()``, ``.hex()``,
+    comparison against ``bytes`` and writing to a file object all work
+    unchanged, but ``x in blob`` does not, and ``isinstance(blob,
+    bytes)`` is False.
+
+    Call this when you need true bytes (hashing, a regex, a library
+    that type-checks, a comparison by containment). It copies, so use
+    it once at the boundary rather than per record. Alternatively set
+    ``FORKRUN_ZERO_COPY=0`` before importing forkrun to get ``bytes``
+    back everywhere, at the old cost.
+    """
+    return blob if isinstance(blob, bytes) else bytes(blob)
+
+
+
 def _query_engine_version() -> str:
     """Read ring_version() from the built substrate (W-PY2 API polish)."""
     from forkrun._bindings import find_substrate, load  # noqa: PLC0415
@@ -71,7 +93,7 @@ except Exception:  # noqa: BLE001
     __engine_version__ = "unknown"
 
 __all__ = ["run", "map", "stream", "sweep", "Batch",
-            "last_run_stats",
+            "last_run_stats", "materialize",
             "ForkrunSignalError", "ForkrunInterrupted", "ForkrunPreempted",
             "ForkrunTerminated", "ForkrunPoisonSkip", "ForkrunWorkerFailure",
             "BASH_CODE_MAP", "__version__", "__engine_version__"]

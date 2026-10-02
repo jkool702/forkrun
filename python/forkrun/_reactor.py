@@ -155,8 +155,17 @@ class ReactorState:
 
     def __init__(self, max_workers, num_nodes=1, respawn_cap=-1,
                  spawn_ceiling=-1, trap_ack_grace=TRAP_ACK_GRACE_S,
-                 startup_deadline=None):
+                 startup_deadline=None, wid_node=None):
         self.workers = {}  # wid -> WorkerSlot
+        # W-PYSPAWNWIRE: stable wid -> node assignment, mirroring the
+        # orchestrator's wid_to_node(). The scanner's spawn requests name
+        # a node, so the wid chosen for one MUST belong to that node's
+        # block; picking min(wid_free) regardless would put a worker in a
+        # ring that disagrees with wid_node, which is the mapping the
+        # NUMA drain audit verifies against (it reported a covered node
+        # with published-but-unclaimed batches). None means UMA, where
+        # every wid is node 0 and the default is already correct.
+        self.wid_node = list(wid_node) if wid_node else None
         # W-PYREAPSWEEP: last out-of-band reap backstop sweep (monotonic).
         self._reap_last = 0.0
         self.max_workers = max_workers
@@ -956,6 +965,21 @@ def handle_spawn_bytes(state, data):
         node_cur = state.node_workers.get(node, 0)
         if node_cur + count > state.node_worker_max:
             count = state.node_worker_max - node_cur
+        # W-PYSPAWNWIRE: hand each worker a wid that belongs to the
+        # requested node, so wid_node stays authoritative (see
+        # ReactorState.wid_node).
+        if state.wid_node:
+            # wid_free spans max_workers + num_nodes (spare capacity for
+            # respawn/bump headroom) while wid_node only covers
+            # max_workers, so bound the lookup: an unassigned spare wid
+            # belongs to no node's block and must not be handed out here.
+            _n = len(state.wid_node)
+            _want = [w for w in sorted(state.wid_free)
+                     if 0 <= w < _n and state.wid_node[w] == node]
+            for _w in _want[:max(0, count)]:
+                if state.spawn_worker(wid=_w, node=node) is None:
+                    break
+            return
         for _ in range(max(0, count)):
             if state.spawn_worker(node=node) is None:
                 break

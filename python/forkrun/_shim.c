@@ -1772,6 +1772,67 @@ int fr_py_fallow_phys(int fd_in, int fd_file) {
     return ring_fallow_phys_main(3, argv);
 }
 
+/* W-PYZEROCOPY: read-only mapping of a whole result stream, for the
+ * parent-side collect.
+ *
+ * The collect is the parent's serial tail: every result byte has to
+ * reach the orchestrator, and doing that with bytes objects means one
+ * kernel->user copy for the stream PLUS one memcpy per record. Handing
+ * the caller memoryview slices over a mapping removes the second copy
+ * entirely, which is the same hand-a-reference shape bash's orderer uses
+ * (it passes (fd, offset, len) and lets the kernel move bytes only if
+ * the consumer reads them -- forkrun_ring.c:7520).
+ *
+ * Why this is in C and not Python's mmap: mmap.mmap(fd, ...) dups the
+ * descriptor, and that dup is released only when the mmap object is
+ * collected -- i.e. when the CALLER drops the records. Holding a result
+ * list would hold an extra descriptor for the life of the list, which
+ * is what test_concurrent's fd-stability gate and test_v1_fast's child
+ * fd hygiene forbid. A mapping made here holds the file, not a
+ * descriptor number, so nothing extra shows up in /proc/self/fd.
+ *
+ * Lifetime is the caller's problem and is delicate: the address is raw,
+ * so the Python side wraps it in a ctypes array and attaches a
+ * weakref.finalize that calls fr_py_unmap. Every memoryview slice
+ * references that array, so the mapping cannot be torn down while a
+ * record is alive -- touching a record after munmap is SIGSEGV, not an
+ * exception. fr_py_unmap is idempotent-safe to call only once, which is
+ * what finalize guarantees.
+ *
+ * PROT_READ only: a write through the mapping faults rather than
+ * corrupting another record's bytes. */
+/* MADV_POPULATE_READ landed in Linux 5.14; fall back to the older
+ * WILLNEED hint where the build host's headers predate it. Both are
+ * advisory -- correctness never depends on either. */
+#ifndef MADV_POPULATE_READ
+#define MADV_POPULATE_READ MADV_WILLNEED
+#endif
+
+int fr_py_map_readonly(int fd, uint64_t length, uint64_t *out_addr) {
+    if (fd < 0 || length == 0 || !out_addr)
+        return EINVAL;
+    void *p = mmap(NULL, (size_t)length, PROT_READ, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED)
+        return errno ? errno : ENOMEM;
+    /* Prefault. Without this the copy cost does not go away, it just
+     * moves from the kernel's bulk copy into per-page faults paid
+     * lazily by the parent's own loop -- measured SLOWER than a plain
+     * pread for the 28 per-worker memfds (~98k faults for 386MB), and
+     * slower still than pread even for the single orderer file. Populate
+     * up front, in the kernel, where transparent huge pages can batch
+     * it. Both hints are advisory: if neither is supported we simply
+     * fault in on demand, which is correct, only slower. */
+    (void)madvise(p, (size_t)length, MADV_POPULATE_READ);
+    (void)madvise(p, (size_t)length, MADV_HUGEPAGE);
+    *out_addr = (uint64_t)(uintptr_t)p;
+    return 0;
+}
+
+void fr_py_unmap(uint64_t addr, uint64_t length) {
+    if (addr && length)
+        munmap((void *)(uintptr_t)addr, (size_t)length);
+}
+
 /* W-PYFORKGATE: NON-DESTRUCTIVE published-minus-consumed backlog for one
  * NUMA node's DATA ring.
  *

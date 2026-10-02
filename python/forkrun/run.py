@@ -42,6 +42,8 @@ from __future__ import annotations
 import os
 import struct
 import mmap as _mmap_mod
+import ctypes
+import weakref
 from collections import deque as _deque
 import sys
 
@@ -122,6 +124,30 @@ _GATE_BATCHES_PER_WORKER = 4
 _GATE_MIN_BATCHES = 4
 
 _CHUNK = 1 << 20
+
+# W-PYZEROCOPY: return result records as memoryview slices over the
+# collection mapping instead of bytes objects.
+#
+# This is the same move bash makes, not a workaround for a slow path.
+# bash's orderer never parses results at all: it hands the consumer a
+# coordinate (fd, offset, len) and the kernel moves bytes only if the
+# consumer actually reads them (forkrun_ring.c:7520 ->
+# forkrun_emit_with_fallback -> robust_sendfile). A memoryview over the
+# mapped collection file is the in-process equivalent -- a reference,
+# not a copy. Producing bytes instead forces a memcpy of the entire
+# result stream on the parent's single thread, which was measured as
+# the floor of the whole ordered path:
+#
+#   pread + bytes()   0.0813 s  (4.6 GB/s)   <- before
+#   mmap  + bytes()   0.0346 s  (10.9 GB/s)
+#   mmap  + memoryview 0.0017 s (217 GB/s)   <- 48x, the copy disappears
+#
+# A memoryview is a buffer, not a sequence: len(), slicing, iteration,
+# .tobytes(), .hex(), comparison against bytes, and write() to a file
+# object all work unchanged, but .split(), .decode(), .startswith() and
+# `x in blob` DO NOT, and isinstance(blob, bytes) is False. Hence it is
+# opt-in per call (zero_copy=True) rather than the default. Callers that
+# want bytes back use forkrun.materialize().
 
 # W-PY19: default per-slot respawn bound for reactor runs. Crash-loop
 # workers (death on every generation) must terminate: the trap-ACK
@@ -298,6 +324,7 @@ def _validate_orchestrator(orchestrator):
 _MAP_STREAM_KWARGS = frozenset((
     "mode", "nodes", "order", "lines", "bytes", "workers",
     "on_error", "streaming", "orchestrator", "c_drain", "resume",
+    "zero_copy",
     "checkpoint_file", "strict_poison", "signal_policy",
     "c_worker_loop", "c_spawn_loop",
 ))
@@ -591,7 +618,48 @@ def _read_fd_all(fd) -> bytes:
     return b"".join(chunks)
 
 
-def _iter_records(fd, _chunk=_CHUNK, _mmap=True):
+def _map_collect(lib, fd, size):
+    """memoryview over a read-only mapping of a whole result stream.
+
+    W-PYZEROCOPY. Returns None if the stream cannot be mapped, so the
+    caller can fall back to reading it.
+
+    The mapping is owned by a ctypes array wrapped in weakref.finalize:
+    every memoryview slice references the array, and the finalizer
+    unmaps when the array dies. That ordering is the whole safety
+    argument -- reading a record after munmap is SIGSEGV, not an
+    exception, so the unmap must be strictly later than every slice.
+    The finalizer's arguments are addresses and a length only; nothing
+    in them can keep the array alive.
+    """
+    addr = ctypes.c_uint64(0)
+    try:
+        rc = lib.fr_py_map_readonly(fd, size, ctypes.byref(addr))
+    except Exception:                                    # noqa: BLE001
+        return None
+    if rc != 0 or not addr.value:
+        return None
+    try:
+        arr = (ctypes.c_char * int(size)).from_address(addr.value)
+    except BaseException:                                # noqa: BLE001
+        try:
+            lib.fr_py_unmap(addr.value, size)
+        except Exception:                                # noqa: BLE001
+            pass
+        raise
+    try:
+        weakref.finalize(arr, lib.fr_py_unmap, addr.value, size)
+    except BaseException:                                # noqa: BLE001
+        # No finalizer available: unmap eagerly rather than leak.
+        try:
+            lib.fr_py_unmap(addr.value, size)
+        except Exception:                                # noqa: BLE001
+            pass
+        return None
+    return memoryview(arr)
+
+
+def _iter_records(lib, fd, _chunk=_CHUNK, views=False):
     """Yield (batch_idx, payload) from a framed stream, incrementally.
 
     W-PYCOLLECT: equivalent to iterating
@@ -599,87 +667,65 @@ def _iter_records(fd, _chunk=_CHUNK, _mmap=True):
     stream twice. The collect paths used to buffer every chunk in a list
     and then b"".join them -- a second full copy of the entire result
     stream -- before parsing anything. On a 386MB in / 386MB out ordered
-    run that join alone measured 155ms of a 646ms run (24%), and the
-    peak held ~2x the stream size before parsing began.
+    run that join alone measured 155ms of a 638ms run (24%).
 
-    Records that straddle a chunk boundary are carried in ``tail``, so
-    the yield sequence is identical to the buffer-then-parse form. A
-    trailing partial record is dropped, matching _parse_records (a short
-    tail means an internal inconsistency, not user data -- waitpid
+    ``views=True`` returns memoryview slices instead of bytes
+    (W-PYZEROCOPY), which removes the remaining per-record copy.
+
+    Why ONE big pread rather than mmap for views: mmap was measured
+    faster still (0.0017s vs 0.0346s for 386MB) but it is not usable
+    here. ``mmap.mmap(fd, ...)`` dups the descriptor, and that dup is
+    released only when the mmap is collected -- which, with views
+    outstanding, is whenever the CALLER drops the records. Holding a
+    result list therefore holds an extra fd for the life of the list,
+    which is exactly what test_concurrent's fd-stability gate (and
+    test_v1_fast's child fd hygiene) forbid. So views come from a single
+    pread of the whole stream into one bytes object, sliced for free.
+    That is one kernel copy instead of one-per-record, with no fd, no
+    mapping lifetime, and no SIGBUS exposure if the file is ever
+    truncated underneath us.
+
+    ``_chunk`` grows to fit a single record that exceeds it, so a record
+    larger than the chunk is read once rather than re-parsed on every
+    subsequent read.
+
+    A trailing partial record is dropped, matching _parse_records (a
+    short tail means an internal inconsistency, not user data -- waitpid
     failure raises before this point).
-
-    ``_chunk`` grows to fit a single record that exceeds it, so a
-    record larger than the chunk is read once rather than re-parsed on
-    every subsequent read (which would be quadratic).
-
-    W-PYCOLLECT3 (``_mmap``, default on): when the fd is a seekable
-    regular file, map it once and parse straight out of the mapping
-    instead of reading it. Reading copies the whole stream into Python
-    and the per-record slices then copy it a second time; mmap removes
-    the first copy. Measured on a 386MB framed stream: 0.086s -> 0.037s
-    (4.5 -> 10.4 GB/s).
-
-    Every caller collects AFTER waitpid/reactor_run, so the size is
-    final by then -- but growth is still handled rather than assumed: a
-    file that grew while mapped simply leaves a short tail, and the
-    remainder is picked up by the chunked-read tail below. (Shrinking
-    cannot happen: these fds are memfds the engine only appends to, and
-    shrinking one is the recovery path's own ftruncate, which runs before
-    any collect.) mmap on a non-seekable fd (pipe/socket) fails and the
-    chunked-read path runs unchanged.
     """
-    if _mmap:
+    if views:
+        # Map the whole stream: zero kernel->user copies, so slicing is
+        # genuinely free. Falls back to one pread (one copy) if the fd
+        # is not mappable.
         try:
-            sz = os.fstat(fd).st_size
+            size = os.fstat(fd).st_size
         except OSError:
-            sz = 0
-        if sz > 0:
-            mm = None
-            try:
-                mm = _mmap_mod.mmap(fd, sz, prot=_mmap_mod.PROT_READ)
-            except (OSError, ValueError):
-                mm = None
-            if mm is not None:
-                mv = memoryview(mm)
+            size = 0
+        if size > 0:
+            mv = _map_collect(lib, fd, size) if lib is not None else None
+            if mv is not None:
+                recs, _tail = _split_records_views(mv)
+                for rec in recs:
+                    yield rec
+                return
+            data = b""
+            got = 0
+            while got < size:
                 try:
-                    # Parse straight out of the mapping: _split_records
-                    # would hand back memoryview slices, and bytes() of
-                    # the WHOLE mapping first would just re-introduce the
-                    # copy this path exists to avoid. Each record is
-                    # wrapped individually -- the only copy we make.
-                    off = 0
-                    n = sz
-                    while True:
-                        if off + _HDR.size > n:
-                            break
-                        idx, ln = _HDR.unpack_from(mv, off)
-                        off += _HDR.size
-                        if off + ln > n:
-                            break
-                        yield (idx, bytes(mv[off:off + ln]))
-                        off += ln
-                finally:
-                    mv.release()
-                # Appended past the mapped size? Read the remainder.
-                try:
-                    grown = os.fstat(fd).st_size
+                    chunk = os.pread(fd, size - got, got)
                 except OSError:
-                    grown = sz
-                if grown <= sz:
-                    return
-                sz = grown
-                mm.close()
-                mm = None
-                fd_off = sz
-            else:
-                fd_off = 0
-        else:
-            fd_off = 0
-    else:
-        fd_off = 0
-
+                    break
+                if not chunk:
+                    break
+                data += chunk
+                got += len(chunk)
+            if data:
+                records, _ = _split_records_views(data)
+                for rec in records:
+                    yield rec
+            return
     try:
-        os.lseek(fd, fd_off, os.SEEK_SET)
+        os.lseek(fd, 0, os.SEEK_SET)
     except OSError:
         pass
     tail = b""
@@ -691,13 +737,41 @@ def _iter_records(fd, _chunk=_CHUNK, _mmap=True):
         if not chunk:
             break
         buf = tail + chunk if tail else chunk
-        records, tail = _split_records(buf)
+        records, tail = (_split_records_views(buf) if views
+                         else _split_records(buf))
         for rec in records:
             yield rec
         if tail and len(tail) >= _chunk:
             # One record is bigger than the read size: grow to hold it
             # whole so the next pass can complete it in a single parse.
             _chunk = len(tail) + _CHUNK
+
+
+def _split_records_views(blob):
+    """_split_records, yielding memoryview slices instead of bytes.
+
+    Identical framing walk and identical record boundaries; only the
+    payload object differs. Used on the chunked-read fallback so the
+    result type does not depend on whether the stream turned out to be
+    mappable (W-PYZEROCOPY).
+    """
+    records = []
+    off = 0
+    n = len(blob)
+    view = blob if isinstance(blob, memoryview) else memoryview(blob)
+    while True:
+        rec_start = off
+        if off + _HDR.size > n:
+            break
+        idx, ln = _HDR.unpack_from(view, off)
+        off += _HDR.size
+        if off + ln > n:
+            off = rec_start
+            break
+        records.append((idx, view[off:off + ln]))
+        off += ln
+    tail = view[off:]
+    return records, (bytes(tail) if isinstance(blob, bytes) else tail)
 
 
 def _split_records(blob: bytes) -> tuple:
@@ -920,7 +994,8 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
         resume: Optional[Any] = None,
         checkpoint_file: Optional[Any] = None,
         c_worker_loop: Optional[bool] = None, strict_poison: bool = False,
-        signal_policy: Optional[str] = "default") -> None:
+        signal_policy: Optional[str] = "default",
+        zero_copy: bool = False) -> None:
     """Run payload over source in parallel. See module docstring for v0 scope.
 
     mode="python": payload is "pkg.mod:func" | callable (Batch -> bytes).
@@ -1008,7 +1083,8 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
                     strict_poison=strict_poison,
                     collect=False, order=order, mode=mode,
                     numa_map=numa_map_str, num_nodes=num_nodes,
-                    node_cpus=node_cpus, c_drain=c_drain)
+                    node_cpus=node_cpus, c_drain=c_drain,
+                    zero_copy=zero_copy)
             _sg.check()
         return None
     nodes = 1
@@ -1026,7 +1102,8 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
                         bytes_=bytes, workers=_resolve_workers_numa(workers, num_nodes),
                         on_error=on_error, strict_poison=strict_poison,
                         collect=False, order=order,
-                        mode=mode, nodes=nodes, c_drain=c_drain)
+                        mode=mode, nodes=nodes, c_drain=c_drain,
+                    zero_copy=zero_copy)
                 _sg.check()
             return None
         with _signal_guard(signal_policy) as _sg:
@@ -1045,7 +1122,8 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
                     workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
                     strict_poison=strict_poison,
                     collect=False, order=order, mode=mode, nodes=nodes,
-                    c_drain=c_drain)
+                    c_drain=c_drain,
+                    zero_copy=zero_copy)
             _sg.check()
         return None
     with _signal_guard(signal_policy) as _sg:
@@ -1134,6 +1212,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         # W-REL1/R1 (ratified Option A): recovery is the default.
         orchestrator = True
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
+    zero_copy = bool(kwargs.get("zero_copy"))
     numa_map_str, num_nodes, node_cpus = _resolve_numa(nodes)
     # W-PY26: gate the C worker loop to its envelope (mode/plugin +
     # UMA + symbol). Spec extraction (dialect check) happens after
@@ -1175,7 +1254,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     collect=True, order=order, mode=mode,
                     numa_map=numa_map_str, num_nodes=num_nodes,
                     node_cpus=node_cpus,
-                    splice=(mode == "splice"), c_drain=c_drain)
+                    splice=(mode == "splice"), c_drain=c_drain,
+                    zero_copy=zero_copy)
             _sg.check()
             return _map_return(out, return_stats)
     nodes = 1
@@ -1194,7 +1274,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                             on_error=kwargs.get("on_error", "retry"),
                             strict_poison=kwargs.get("strict_poison", False),
                             collect=True, order=order, mode=mode,
-                            nodes=nodes, splice=True, c_drain=c_drain)
+                            nodes=nodes, splice=True, c_drain=c_drain,
+                    zero_copy=zero_copy)
                     _sg.check()
                     return _map_return(out, return_stats)
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
@@ -1216,7 +1297,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                         on_error=kwargs.get("on_error", "retry"),
                         strict_poison=kwargs.get("strict_poison", False),
                         collect=True, order=order, mode=mode, nodes=nodes,
-                        splice=True, c_drain=c_drain)
+                        splice=True, c_drain=c_drain,
+                    zero_copy=zero_copy)
                 _sg.check()
                 return _map_return(out, return_stats)
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
@@ -1304,7 +1386,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     c_worker_loop=c_worker_loop,
                     plugin_spec=plugin_spec,
                     c_spawn_loop=c_spawn_loop,
-                    spawn_argv=spawn_argv)
+                    spawn_argv=spawn_argv,
+                    zero_copy=zero_copy)
             _sg.check()
             return _map_return(out, return_stats)
     with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
@@ -1323,7 +1406,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     return _map_return(results, return_stats)
 
 
-def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[bytes]:
+def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
     """Yield results as they arrive — TRUE v1 streaming.
 
     order="none" (default): worker-completion order (first-finished first).
@@ -1384,6 +1467,7 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[bytes]:
         # W-REL1/R1 (ratified Option A): recovery is the default.
         orchestrator = True
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
+    zero_copy = bool(kwargs.get("zero_copy"))
     if _validate_c_worker_loop(kwargs.get("c_worker_loop")):
         raise RuntimeError(
             "stream(): c_worker_loop=True is map()-only in W-PY26 "
@@ -3978,7 +4062,7 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
 
 
 def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
-                            workers, on_error, strict_poison=False, collect, order,
+                            workers, on_error, zero_copy=False, strict_poison=False, collect, order,
                             mode="python", nodes="auto", splice=False,
                             c_drain=True, resume=None,
                             checkpoint_file=None, c_worker_loop=False,
@@ -4088,6 +4172,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # W-PY22: pre-try defaults so the abort handler below never
     # NameErrors on early failures (spill/scan, before assignment).
     use_orderer = False
+    _zc = bool(zero_copy)
     try:
         memfd, size = _spill_to_memfd(src_fd)
         try:
@@ -4305,7 +4390,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         if use_orderer:
-            records = list(_iter_records(coll_fd))
+            records = list(_iter_records(lib, coll_fd, views=_zc))
             # Already batch_idx-ordered by the C orderer; prepend any
             # sidecar output from previously aborted run(s), then sort
             # (committed ranges are jagged — the union of two ordered
@@ -4321,12 +4406,12 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # empty input (no workers ever existed) — vacuously
             # no records. Materialized paths always fork workers,
             # so their drain always exists here.
-            records = (list(_iter_records(results_fd))
+            records = (list(_iter_records(lib, results_fd, views=_zc))
                        if results_fd is not None else [])
         else:
             records = []
             for fd in out_fds:
-                records.extend(_iter_records(fd))
+                records.extend(_iter_records(lib, fd, views=_zc))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
@@ -5099,7 +5184,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
 
 
 def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
-                                   bytes_, workers, on_error, strict_poison=False, collect,
+                                   bytes_, workers, on_error, zero_copy=False,
+                                   strict_poison=False, collect,
                                    order, mode="python", nodes="auto",
                                    splice=False, c_drain=True, resume=None,
                                    checkpoint_file=None):
@@ -5162,6 +5248,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
+    _zc = bool(zero_copy)
     use_orderer = False
 
     src_fd, must_close = _open_source(source)
@@ -5599,7 +5686,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if not collect:
             return None
         if use_orderer:
-            records = list(_iter_records(coll_fd))
+            records = list(_iter_records(lib, coll_fd, views=_zc))
             # Already batch_idx-ordered by the C orderer; prepend any
             # sidecar output from previously aborted run(s), then sort
             # (committed ranges are jagged). Reads the sidecar
@@ -5612,12 +5699,12 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             # empty input (no workers ever existed) — vacuously
             # no records. Materialized paths always fork workers,
             # so their drain always exists here.
-            records = (list(_iter_records(results_fd))
+            records = (list(_iter_records(lib, results_fd, views=_zc))
                        if results_fd is not None else [])
         else:
             records = []
             for fd in out_fds:
-                records.extend(_iter_records(fd))
+                records.extend(_iter_records(lib, fd, views=_zc))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
@@ -6751,7 +6838,7 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
 
 
 def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
-                         workers, on_error, strict_poison=False, collect, order,
+                         workers, on_error, zero_copy=False, strict_poison=False, collect, order,
                          mode="python", numa_map="", num_nodes=2,
                          node_cpus=None, splice=False, c_drain=True):
     """Blocking map/run over the NUMA pipeline (W-PY21).
@@ -6783,6 +6870,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                          supervision="reactor", shape="blocking",
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order)
+    _zc = bool(zero_copy)
     pre_fds = snapshot_fds()
     lib = load()
     _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
@@ -6872,7 +6960,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
 
         state = ReactorState(workers, num_nodes=num_nodes,
                              respawn_cap=REACTOR_RESPAWN_CAP,
-                             spawn_ceiling=workers)
+                             spawn_ceiling=workers,
+                             wid_node=wid_node)
         state.configure(payload_spec=payload, sink_spec=sink,
                         memfd=memfd, file_size=-1,
                         out_fds=list(out_fds) if collect else [],
@@ -7259,18 +7348,18 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         if use_orderer:
-            return [blob for _, blob in _iter_records(coll_fd)]
+            return [blob for _, blob in _iter_records(lib, coll_fd, views=_zc)]
         if use_drain:
             # Dynamic-fork paths (ingest/NUMA) fork no drain on
             # empty input (no workers ever existed) — vacuously
             # no records. Materialized paths always fork workers,
             # so their drain always exists here.
-            records = (list(_iter_records(results_fd))
+            records = (list(_iter_records(lib, results_fd, views=_zc))
                        if results_fd is not None else [])
         else:
             records = []
             for fd in out_fds:
-                records.extend(_iter_records(fd))
+                records.extend(_iter_records(lib, fd, views=_zc))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
@@ -7439,7 +7528,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
 
         state = ReactorState(workers, num_nodes=num_nodes,
                              respawn_cap=REACTOR_RESPAWN_CAP,
-                             spawn_ceiling=workers)
+                             spawn_ceiling=workers,
+                             wid_node=stream_wid_node)
         state.configure(payload_spec=payload, sink_spec=None,
                         memfd=memfd, file_size=-1,
                         out_fds=list(out_fds), signal_w=signal_w,

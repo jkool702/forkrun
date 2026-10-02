@@ -245,6 +245,20 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # W-PYZEROCOPY: read-only mapping of a result stream, so the
+        # collect can hand back memoryview slices instead of copying
+        # every record. Paired: the caller wraps the address in a ctypes
+        # array with a weakref.finalize that calls fr_py_unmap, so the
+        # mapping outlives every slice taken from it.
+        lib.fr_py_map_readonly.argtypes = [ctypes.c_int,
+                                          ctypes.c_uint64,
+                                          ctypes.POINTER(ctypes.c_uint64)]
+        lib.fr_py_map_readonly.restype = ctypes.c_int
+        lib.fr_py_unmap.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
+        lib.fr_py_unmap.restype = None
+    except AttributeError:
+        pass
+    try:
         # W-PYFORKGATE: non-destructive per-node backlog level, for the
         # NUMA fork gate's "enough published work to feed this node's
         # workers" test. Distinct from fr_py_data_ready_node above, which

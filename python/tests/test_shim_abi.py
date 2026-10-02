@@ -139,7 +139,7 @@ class TestShimBindings(unittest.TestCase):
         table = _load_table()
         names = list(table.keys())
         self.assertEqual(len(names), len(set(names)), "duplicate entries")
-        # 46 extern + 11 static = 57 (guard against silent truncation).
+        # 48 extern + 11 static = 59 (guard against silent truncation).
         # W-PYFORKGATE added fr_py_backlog_node: a read-only,
         # non-destructive per-node backlog accessor. It is additive — no
         # existing signature changed, no struct layout changed, and
@@ -153,7 +153,7 @@ class TestShimBindings(unittest.TestCase):
                     if v["linkage"] == "extern")
         n_st = sum(1 for v in table.values()
                    if v["linkage"] == "static")
-        self.assertEqual((n_ext, n_st), (46, 11),
+        self.assertEqual((n_ext, n_st), (48, 11),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))
