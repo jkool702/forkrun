@@ -1169,7 +1169,7 @@ def reactor_run(state, poll_timeout=0.1, service=None):
             "poisoned": list(state.poisoned_batches)}
 
 
-def reactor_poll_once(state, poll_timeout=0.0):
+def reactor_poll_once(state, poll_timeout=0.0, spawn=True):
     """Service one nonblocking event round (spill-loop interleaving).
 
     Runs a single select round over death/spawn/trap-ACK pipes plus
@@ -1181,6 +1181,16 @@ def reactor_poll_once(state, poll_timeout=0.0):
     EOF precedes os._exit, so an unreaped child defers to the sweep
     instead of stalling the spill). Raises RuntimeError on
     trap-ACK timeout.
+
+    ``spawn=False`` leaves the scanner's spawn pipe out of the watch
+    set for this round (W-PYSPAWNWIRE). The NUMA fork gate calls this to
+    supervise helpers while it decides its forks, and servicing spawn
+    requests there would fork workers the gate's own ``forked`` set
+    never records -- the gate then exits with ``forked`` empty and the
+    run dies on a false "ingest landed N bytes with no published
+    batches". Suppressing the watch entry (rather than blanking
+    state.spawn_r around the gate) keeps the descriptor parked on state
+    for teardown, so it cannot leak on any early-error path.
     """
     state.check_trap_timeouts()
     # W-REL6-3.1: startup deadline also bounds spill-loop supervision
@@ -1192,7 +1202,7 @@ def reactor_poll_once(state, poll_timeout=0.0):
         if slot.alive and slot.death_r is not None and slot.death_r >= 0:
             watch.append(slot.death_r)
             death_of[slot.death_r] = slot.wid
-    if state.spawn_r is not None and state.spawn_r >= 0:
+    if spawn and state.spawn_r is not None and state.spawn_r >= 0:
         watch.append(state.spawn_r)
     if state.trap_ack_r is not None and state.trap_ack_r >= 0:
         watch.append(state.trap_ack_r)

@@ -90,6 +90,18 @@ flip sign.
   Running `python3 -m unittest test_streaming...` from `python/` gives a
   bogus ModuleNotFoundError that looks like a regression.
 
+## Rule I broke, and the correction
+
+I put "make the `nodes=1` spill cheaper" on the open list. It failed the
+task's own test: the goal is to make the Python front end behave like the
+bash front end, and bash materialises stdin into a memfd exactly the same
+way. Making that change would have moved Python *away* from bash. So:
+
+**A measured cost is not a licence to change behaviour. The test is
+whether bash handles it differently.** Only then is it a divergence.
+Several items here are "Python pays a cost bash does not" and belong on
+the list; "both pay it" does not.
+
 ## Still open (ranked)
 
 1. **`os.fork()` per worker**: 315 µs @28w → 974 µs @96w, fully serial
@@ -97,12 +109,16 @@ flip sign.
    **farm** (fork a few helpers from a small address space, or fork
    from a lean helper process) is the structural fix. bash has no
    equivalent problem.
-2. **`nodes=1` serial spill**: 83 ms, bandwidth-bound (386 MB read +
-   386 MB write ≈ 772 MB traffic). The scanner needs the *complete*
-   memfd, so it cannot start early. Real fix: pass a seekable regular
-   file straight to the scanner instead of copying to a memfd (fallow is
-   only needed for growable sources). ~42 ms of a 349 ms run. Larger
-   change, needs care with recovery/resume which assume memfd.
+2. ~~**`nodes=1` serial spill**~~ — **STRUCK, do not pursue.** I had
+   listed "pass the seekable file straight to the scanner instead of
+   copying to a memfd". Wrong on three counts, corrected by the user:
+   (a) bash does the identical copy — `ring_memfd_create ingress_memfd`
+   (frun.bash:1483) then `ring_copy ${fd_write} ${fd0}` (frun.bash:1705)
+   — so it is PARITY, not a divergence, and the whole task is to reduce
+   divergence; (b) N workers reading disjoint slices of a real file is a
+   terrible access pattern off a ramdisk; (c) the memfd + fallow is what
+   bounds parent memory. Measuring a cost is not grounds for changing
+   behaviour — the test is whether bash does it differently.
 3. **No backlog-driven spawn in the NUMA path.** bash's scanner requests
    workers only when `scan_idx - read_idx` exceeds the live count
    (`forkrun_ring.c:3925-3942`); python forks the whole complement up

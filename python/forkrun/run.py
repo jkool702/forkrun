@@ -3929,6 +3929,7 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
         except AttributeError:
             _ctx = {}
         for fd in (getattr(state, "spawn_r", -1),
+                   _ctx.get("spawn_w", -1),
                    _ctx.get("fallow_w", -1)):
             if fd is None or fd < 0:
                 continue
@@ -3940,11 +3941,12 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
             state.spawn_r = -1
         except AttributeError:
             pass
-        try:
-            if "fallow_w" in _ctx:
-                _ctx["fallow_w"] = -1
-        except TypeError:
-            pass
+        for _k in ("spawn_w", "fallow_w"):
+            try:
+                if _k in _ctx:
+                    _ctx[_k] = -1
+            except TypeError:
+                pass
         # W-REL2/R11: the scanner death-pipe read end (parked by
         # _execute_ingest_reactor_locked; -1/unset elsewhere).
         # Unclassified on abort paths (no clean/error verdict ever
@@ -6557,6 +6559,26 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
         indexer_pids.append(pid)
         indexer_deaths.append(death_r)
 
+    # W-PYSPAWNWIRE: arm the scanner spawn pipe.
+    #
+    # This is the structural difference from bash. bash's scanner asks
+    # the orchestrator for more workers as backlog appears
+    # (forkrun_ring.c:3925-3942: request until live == min(backlog,
+    # W_max)), so workers arrive when there is work for them. The engine
+    # here has supported that all along -- ring_numa_scanner_main takes
+    # fd_spawn and passes it to core_scanner_loop, and the shim exposes
+    # it -- but this call site passed -1, so the request path was
+    # disconnected and the gate had to fork the entire -j complement on
+    # first publish. That is what makes python collapse at high worker
+    # counts where bash does not: every worker is born at once against a
+    # barely-filled ring, spins (forkrun_ring.c:6121 cpu_relax x100),
+    # and steals the cores the ingest threads need.
+    #
+    # The parent keeps spawn_w open as a spare so the read end never
+    # EOFs even if every scanner dies -- otherwise the reactor would
+    # select on a permanently-readable fd.
+    spawn_r, spawn_w = os.pipe()
+
     scanner_pids = []
     scanner_deaths = []
     for node in range(num_nodes):
@@ -6568,8 +6590,8 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
             except OSError:
                 pass
             try:
-                scrub_fds(engine_fds | {memfd, death_w})
-                rc = lib.fr_py_numa_scanner(memfd, node, -1,
+                scrub_fds(engine_fds | {memfd, death_w, spawn_w})
+                rc = lib.fr_py_numa_scanner(memfd, node, spawn_w,
                                             num_nodes)
             except BaseException:
                 rc = 1
@@ -6601,6 +6623,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
         pass
 
     return {"fallow_pid": fallow_pid, "fallow_w": fallow_w,
+            "spawn_r": spawn_r, "spawn_w": spawn_w,
             "indexer_pids": indexer_pids,
             "indexer_deaths": indexer_deaths,
             "scanner_pids": scanner_pids,
@@ -6828,6 +6851,12 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         pipe = _numa_fork_pipeline(lib, memfd, src_fd, num_nodes,
                                    engine_fds)
         fallow_w = pipe["fallow_w"]
+        # W-PYSPAWNWIRE: hand the reactor the scanner's spawn read end and
+        # keep the write end parked as a spare, so the reactor's watch set
+        # includes it and the pipe never EOFs. Teardown already closes
+        # both (it walks state.spawn_r and ctx["spawn_w"]).
+        state_spawn_r = pipe.get("spawn_r", -1)
+        state_spawn_w = pipe.get("spawn_w", -1)
         if must_close:
             try:
                 os.close(src_fd)
@@ -6854,6 +6883,13 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                         engine_fds=engine_fds, splice=splice,
                         node_cpus=node_cpus)
         state.trap_ack_r = trap_r
+        # W-PYSPAWNWIRE: park BOTH spawn ends on state from the start so
+        # teardown owns them on every path, including early errors. The
+        # gate does not SERVICE this pipe -- it passes spawn=False to
+        # reactor_poll_once -- so the scanner's ramp cannot fork workers
+        # the gate's ``forked`` set never records.
+        state.spawn_r = state_spawn_r
+        state.ctx["spawn_w"] = state_spawn_w
 
         def _ready_all():
             try:
@@ -6996,10 +7032,17 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         stalled = False
         _gate_wait = _GATE_POLL_MIN_S
         _gate_tick = 0
+        stalled = False
+        _gate_wait = _GATE_POLL_MIN_S
+        _gate_tick = 0
         while len(forked) < num_nodes:
             if _gate_tick == 0:
                 _watch_pipeline()
-                reactor_poll_once(state)
+                # spawn=False: the gate, not the scanner, owns worker
+                # creation here (W-PYSPAWNWIRE). Serving spawn requests
+                # from inside the gate forks workers its ``forked`` set
+                # never records.
+                reactor_poll_once(state, spawn=False)
             _gate_tick += 1
             for node in range(num_nodes):
                 if node in forked:
@@ -7378,6 +7421,12 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         pipe = _numa_fork_pipeline(lib, memfd, src_fd, num_nodes,
                                    engine_fds)
         fallow_w = pipe["fallow_w"]
+        # W-PYSPAWNWIRE: hand the reactor the scanner's spawn read end and
+        # keep the write end parked as a spare, so the reactor's watch set
+        # includes it and the pipe never EOFs. Teardown already closes
+        # both (it walks state.spawn_r and ctx["spawn_w"]).
+        state_spawn_r = pipe.get("spawn_r", -1)
+        state_spawn_w = pipe.get("spawn_w", -1)
         if must_close:
             try:
                 os.close(src_fd)
@@ -7400,6 +7449,13 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                         engine_fds=engine_fds, splice=splice,
                         node_cpus=node_cpus)
         state.trap_ack_r = trap_r
+        # W-PYSPAWNWIRE: park BOTH spawn ends on state from the start so
+        # teardown owns them on every path, including early errors. The
+        # gate does not SERVICE this pipe -- it passes spawn=False to
+        # reactor_poll_once -- so the scanner's ramp cannot fork workers
+        # the gate's ``forked`` set never records.
+        state.spawn_r = state_spawn_r
+        state.ctx["spawn_w"] = state_spawn_w
         spare_signal_w = os.dup(signal_w)
 
         def _drop_parent_signal():
