@@ -212,7 +212,18 @@ PY
 
 [ "$KEEP_RAW" -eq 1 ] || rm -rf "$OUT_DIR/raw"
 
+# Regenerate checksums.txt rather than leaving whatever was there.
+# TAG_PREP step 7 attaches this to the GitHub release, so a stale copy
+# (e.g. left by release_check.py building a host-glibc wheel into the
+# same directory) would publish hashes for files that are not the ones
+# being released.
+step "checksums"
+( cd "$OUT_DIR" && rm -f checksums.txt && sha256sum "$(basename "$WHEEL")" \
+    "$(basename "${SDISTS[0]}")" > checksums.txt )
+
 step "ok"
-ls -l "$WHEEL" "${SDISTS[0]}"
+ls -l "$WHEEL" "${SDISTS[0]}" "$OUT_DIR/checksums.txt"
+echo
+cat "$OUT_DIR/checksums.txt"
 echo
 echo "next:  twine upload ${WHEEL#"$REPO_ROOT"/} ${SDISTS[0]#"$REPO_ROOT"/}"
