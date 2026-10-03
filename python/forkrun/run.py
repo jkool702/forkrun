@@ -693,6 +693,37 @@ def _map_collect(lib, fd, size):
     return memoryview(arr)
 
 
+def _ingest_copy_loop(src_fd, mem_fd, chunk=_CHUNK):
+    """Copy a source stream into the ingress memfd until EOF.
+
+    The single implementation of "read the source, spill to ingress"
+    for the UMA streaming path. It BLOCKS on the source by design: the
+    caller runs it in a forked ingest child (mirroring bash, which
+    backgrounds `ring_copy ... &` on UMA as well as NUMA) so the parent
+    is free to run the reactor instead of interleaving a copy with it.
+
+    Returns bytes written. Raises RuntimeError on a read or write
+    failure -- the child's exit status is the parent's only signal, so
+    the message has to survive in the status, not just in a traceback.
+    """
+    total = 0
+    while True:
+        try:
+            buf = os.read(src_fd, chunk)
+        except OSError as exc:
+            raise RuntimeError("failed reading source: %s" % (exc,))
+        if not buf:
+            return total
+        view = memoryview(buf)
+        while view:
+            try:
+                n = os.pwrite(mem_fd, view, total)
+            except OSError as exc:
+                raise RuntimeError("failed writing ingress: %s" % (exc,))
+            view = view[n:]
+            total += n
+
+
 def _iter_records(lib, fd, _chunk=_CHUNK, views=False):
     """Yield (batch_idx, payload) from a framed stream, incrementally.
 
@@ -1990,6 +2021,8 @@ def _make_results_pump(results_r, order="none", stats=None):
 # IS the wait); post-abort worker reaps use WORKER_REAP_TIMEOUT
 # (abort already woke them); the orderer uses ORDERER_REAP_TIMEOUT.
 _HELPER_JOIN_TIMEOUT = 10.0
+
+
 
 
 def _join_helper_bounded(pid, name, timeout=_HELPER_JOIN_TIMEOUT):
@@ -4043,6 +4076,7 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
                else [])):
         # W-REL5-B4: bounded (kill already issued above).
         _join_helper_bounded(_pid, _name)
+
     for fd in list(out_fds):
         try:
             os.close(fd)
@@ -5387,6 +5421,9 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             pass
 
         # Fallow reaper child (plain fork: no spawn pipe needed).
+        # Pre-fork default: the finally block reaps ingest_pid even when
+        # the run aborts before the ingest child is forked.
+        ingest_pid = None
         fallow_pid = os.fork()
         if fallow_pid == 0:
             try:
@@ -5509,91 +5546,101 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 return True
             return False
 
-        # W-REL5-B3: nonblocking source for the spill (sibling
-        # pattern of _execute_ingest_stream / _spill_quantum: dup user
-        # fds — never mutate flags on a descriptor we don't own). A
-        # blocking 1MB read leaves worker deaths, helper deaths, and
-        # the stall-fork rule unobserved for the whole stall —
-        # seamless recovery unavailable exactly when the source is
-        # slow. Drain-to-EAGAIN per quantum keeps the reactor
-        # interleaved; the 20ms idle sleep paces empty quanta (the
-        # sibling pumps pace via their drain select).
+        # W-PYINGESTCHILD: the spill runs in a FORKED CHILD, so the
+        # parent does nothing but run the reactor.
+        #
+        # Previously the parent interleaved the copy with the reactor,
+        # one 64KB pipe quantum at a time. A pipe hands over 64KB per
+        # read, so a 533MB stream is ~8,100 quanta, and each one ran
+        # read + pwrite + reactor_poll_once + _watch_helpers +
+        # _maybe_fork_workers on the single thread that also has to
+        # service the drain. Measured cost of that interleaving on UMA
+        # with THP on: reactor default +77% (light) / +93% (medium)
+        # for a pipe, against +15% / +13% for the fail-fast path that
+        # does the same copy without the reactor. NUMA never paid it --
+        # its ingest has its own process.
+        #
+        # This is a parity fix, not just a speed fix: the Bash frontend
+        # backgrounds the UMA spill too -- the same shape it uses for
+        # NUMA, where ingest has its own process. Python was the only
+        # frontend doing this copy inline on the reactor thread.
+        # (Named deliberately, not by path: test_reactor's purity gate
+        # forbids Bash references in the package source.)
+        #
+        # The child BLOCKS on the source, so O_NONBLOCK is neither set
+        # nor needed here; nothing on the parent's side reads src_fd
+        # any more.
         if not must_close:
             src_fd = os.dup(src_fd)
             must_close = True
+        ingest_death_r, ingest_death_w = os.pipe()
+        ingest_pid = os.fork()
+        if ingest_pid == 0:
+            # Child — never returns.
+            rc = 0
+            try:
+                os.close(ingest_death_r)
+                # scrub_fds is module-level (line 52). Importing it here
+                # would make it a LOCAL of this whole function for the
+                # rest of the body -- and the fallow child forked ABOVE
+                # this point references it before any local assignment
+                # runs, so it died with UnboundLocalError. Cheap trap.
+                scrub_fds(engine_fds | {src_fd, memfd, ingest_death_w})
+                _ingest_copy_loop(src_fd, memfd)
+            except BaseException:
+                rc = 1
+            finally:
+                os._exit(rc)
         try:
-            fl = _fcntl.fcntl(src_fd, _fcntl.F_GETFL)
-            _fcntl.fcntl(src_fd, _fcntl.F_SETFL, fl | os.O_NONBLOCK)
+            os.close(ingest_death_w)
         except OSError:
             pass
+        ingest_death_w = None
         try:
-            src_eof = False
-            while not src_eof:
-                drained = False
-                while True:
-                    try:
-                        chunk = os.read(src_fd, _CHUNK)
-                    except BlockingIOError:
-                        break  # EAGAIN: quantum done for now
-                    except OSError as exc:
-                        raise RuntimeError(
-                            "failed reading source: %s" % (exc,))
-                    if not chunk:
-                        src_eof = True
-                        break
-                    view = memoryview(chunk)
-                    while view:
-                        try:
-                            n = os.pwrite(memfd, view, total_written)
-                        except OSError as exc:
-                            raise RuntimeError(
-                                "failed writing ingress: %s" % (exc,))
-                        view = view[n:]
-                        total_written += n
-                    drained = True
-                    _watch_helpers()
-                    _maybe_fork_workers()
-                    reactor_poll_once(state)
-                if src_eof:
-                    break
+            # Parent: service the reactor until the ingest child closes
+            # its death pipe. Blocking here (rather than spinning) is
+            # what lets the copy overlap the run at all -- previously
+            # the parent was the thing doing the copy.
+            ingest_done = False
+            while not ingest_done:
                 _watch_helpers()
                 _maybe_fork_workers()
-                reactor_poll_once(state)
-                if not drained:
-                    # W-PYINGESTWAIT: wait on the source AND every reactor
-                    # notification in one select.
-                    #
-                    # A flat 20 ms sleep fired once per chunk on a
-                    # streamed source -- 645 sleeps = 12.9 s of a 14.65 s
-                    # light run, 88% of wall -- because the reader outran
-                    # the writer and then slept the full quantum no
-                    # matter how soon data landed.
-                    #
-                    # Selecting on src_fd alone fixed that but left a
-                    # second problem: during the wait nothing was
-                    # servicing worker deaths, so an idle source stalled
-                    # recovery for up to a full quantum. Watching the
-                    # reactor fds in the SAME select means a death wakes
-                    # us immediately instead of at the next quantum.
-                    #
-                    # Timeout is unchanged at 0.02 s, so worst-case
-                    # latency is unchanged; this returns early when data
-                    # or a death is ready, which is the common case.
-                    try:
-                        import select as _select
-                        watch = [src_fd] + reactor_watch_fds(state)
-                        readable, _, _ = _select.select(watch, [], [], 0.02)
-                    except (OSError, ValueError):
-                        # fd closed under us, or select refused it:
-                        # fall back to the old pacing rather than spin.
-                        _time.sleep(0.02)
-                    else:
-                        # A reactor fd fired while we waited: drain it
-                        # now instead of after the next read attempt.
-                        if any(fd != src_fd for fd in readable):
-                            reactor_poll_once(state)
-                            _watch_helpers()
-                            _maybe_fork_workers()
+                watch = [ingest_death_r] + reactor_watch_fds(state)
+                try:
+                    import select as _select
+                    readable, _, _ = _select.select(watch, [], [], 0.02)
+                except (OSError, ValueError):
+                    readable = []
+                if ingest_death_r in readable or ingest_death_r < 0:
+                    ingest_done = True
+                elif any(fd != ingest_death_r for fd in readable):
+                    reactor_poll_once(state)
+                    _watch_helpers()
+                    _maybe_fork_workers()
+            # The child's exit status is the only channel it has, and
+            # the spill length is simply the memfd's size -- no IPC.
+            _st = _join_helper_bounded(ingest_pid, "ingest")
+            # Close it HERE, on the joined path -- marking it -1 without
+            # closing leaks the descriptor (the finally's guard would
+            # then skip it). Child exit is the EOF, so the read end is
+            # already dead.
+            try:
+                os.close(ingest_death_r)
+            except OSError:
+                pass
+            ingest_death_r = -1
+            if _st is not None and not (os.WIFEXITED(_st)
+                                        and os.WEXITSTATUS(_st) == 0):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: ingest child failed (status %r)" % (_st,))
+            # Recovered from the memfd rather than accumulated in the
+            # parent: with the copy in a child, the parent no longer
+            # sees every write.
+            try:
+                total_written = os.fstat(memfd).st_size
+            except OSError:
+                total_written = 0
         except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
             raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
@@ -5818,12 +5865,31 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             pass
         raise
     finally:
+        # The ingest death pipe is ours on every exit path, not just
+        # the joined one: a failure before the join would leak both
+        # ends. The child's own copy was closed inside the child.
+        if ingest_death_r is not None and ingest_death_r >= 0:
+            try:
+                os.close(ingest_death_r)
+            except OSError:
+                pass
+            ingest_death_r = -1
         _teardown_reactor(lib, state, out_fds=out_fds,
                           out_hold=out_hold, memfd=memfd,
                           mem_hold=mem_hold, src_fd=src_fd,
                           must_close=must_close,
-                          extra_pids=[p for p in (fallow_pid, scan_pid)
+                          extra_pids=[p for p in (fallow_pid, scan_pid,
+                                                      ingest_pid)
                                       if p is not None],
+                          # W-REL5-B4: orderer_pid/order_r were MISSING
+                          # here. On the success path the orderer is
+                          # joined explicitly above, so the omission was
+                          # invisible; on any ABORT before that join the
+                          # orderer child defaulted to None, was never
+                          # killed or reaped, and became a zombie that
+                          # pinned its pid. Found by forking every site in
+                          # this path and diffing the ledger against what
+                          # teardown was told about.
                           orderer_pid=orderer_pid, order_r=order_r,
                           order_w=order_w, trap_r=trap_r, trap_w=trap_w,
                           coll_fd=coll_fd, coll_hold=coll_hold,
