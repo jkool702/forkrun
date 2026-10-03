@@ -243,6 +243,14 @@ on a bigger corpus before believing it.
   phantom, engine opens 4 and 5, computed engine_fds=[5,6] — 4 dropped.
   **A number that a set-difference uses as an identity must be
   validated, not assumed.** Fixed by re-checking each with fstat.
+- **THE PRE-FLIGHT GRID DOES NOT MEASURE THE PRE-FLIGHT FIX.** Its pipe
+  sources deliver at full speed, so the pre-flight has nothing to wait
+  for and the usleep barely fires; per-cell deltas between grid runs
+  there are noise (the post-fix run swung +7.5pp on light/plugin/
+  default/view while file-source time for that cell did not move). The
+  A/B that means anything is on a deliberately slow producer -- 2500
+  lines at 3ms: 13,222 -> 453 ctxsw, 0.14s -> 0.07s CPU. **Benchmark the
+  case a change targets, not the case that is convenient to run.**
 - **`ctypes.c_char` gives a `memoryview` of format `<c`, and CPython
   refuses to compare that against `bytes`** — `view == b"..."` is
   silently `False`. `c_ubyte` gives `<B` and compares equal both ways.

@@ -233,6 +233,38 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.1 — unreleased
 
+### Python frontend: the pre-flight scan no longer spin-sleeps
+
+The pre-flight scan counts input lines so the geometric ramp can start
+at a batch size that gives every worker at least one equal batch. When
+`pread` returns 0 with ingest not yet complete it means "wait for more",
+and it waited with `usleep(100)` — about 10,000 wakeups in 5 s on a slow
+producer, where the Bash frontend slept 78 times. The engine already
+signals `evfd_ingest_data` when each chunk lands; the pre-flight simply
+never waited on it, and the Python spill never signalled it either.
+
+- The wait now blocks on that eventfd for a bounded 50 ms, then drains
+  it. The bound is load-bearing: one of the three exit conditions (the
+  first worker spawning) is detected by re-reading `active_waiters` at
+  the top of the loop, so an unbounded poll would stop noticing it. The
+  drain is load-bearing too — an eventfd left readable makes the next
+  poll return immediately, rebuilding the spin one level up.
+- The Python spill now signals the eventfd per chunk, at the same point
+  `ring_copy` does for Bash.
+
+Measured on a deliberately slow pipe (2500 lines at 3 ms, 4 workers):
+13,222 → 453 context switches and 0.14 s → 0.07 s CPU, with exact
+record counts both ways.
+
+Semantics are unchanged. The pre-flight still only ever waits for more
+input, still exits only on real EOF / a full ramp's worth of lines /
+the first worker, and `pre_lines` still counts real bytes. The new
+signal deliberately never touches `state[0].ingest_complete` — that flag
+means "the copy loop ended", not "the input drained", and treating it
+as EOF is what an earlier attempt got wrong, silently dropping the
+tail. A new regression test asserts exact record counts from a slow
+pipe, the case the suite had never covered.
+
 ### Python frontend: parent-side collect and fork-gate throughput
 
 Measured on an i9-7940X (14c/28t, 4 logical nodes on one socket),
