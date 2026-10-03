@@ -93,11 +93,38 @@ def verify_scrubbed(keep_fds) -> list:
 
 
 def snapshot_fds() -> set:
-    """Current open-fd set (for engine-fd differencing)."""
+    """Current open-fd set (for engine-fd differencing).
+
+    The listdir is validated, not trusted. ``os.listdir("/proc/self/fd")``
+    opens its own transient directory descriptor, and that descriptor's
+    NUMBER appears in the listing -- so a naive read returns an fd that
+    is already closed by the time we return.
+
+    That is not cosmetic. Callers compute ``engine_fds =
+    snapshot_fds() - pre_fds``: if pre_fds holds a phantom N, and the
+    engine's first descriptor is later allocated as N, the subtraction
+    cancels a REAL engine fd out of the set. Workers then do not scrub
+    it and inherit the engine's memfd/eventfd, where a poll on it never
+    blocks. Measured here: pre_fds=[0,1,2,3,4] with 4 a phantom; engine
+    init then opens 4 and 5; computed engine_fds=[5,6] -- 4 dropped.
+
+    So re-check each number with fstat after the listing closes. A
+    number the kernel has already recycled fails fstat and is dropped,
+    which is exactly the behaviour wanted: it was never ours.
+    """
     try:
-        return {int(n) for n in os.listdir("/proc/self/fd")}
+        names = os.listdir("/proc/self/fd")
     except (OSError, ValueError):
         return set()
+    live = set()
+    for name in names:
+        try:
+            fd = int(name)
+            os.fstat(fd)
+        except (OSError, ValueError):
+            continue          # transient (or already recycled): not ours
+        live.add(fd)
+    return live
 
 
 __all__ = ["scrub_fds", "verify_scrubbed", "snapshot_fds"]
