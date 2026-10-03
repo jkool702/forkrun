@@ -29,6 +29,25 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 
 ## 0. Headline HN Release Table (AI/ML Python Benchmark)
 
+> ### Bottom line
+>
+> **In every case measured here, forkrun matches the best available option —
+> and adds ordered output plus automatic failure recovery on top of it.**
+>
+> **In some cases, especially streaming workloads, forkrun keeps those same
+> benefits and is drastically faster than the next best: up to, and in some
+> cases slightly more than, an order of magnitude.**
+>
+> Concretely, against the strongest competitor in each regime:
+>
+> | | file input | streaming input |
+> |---|---|---|
+> | vs the best option available | 1.08–2.77× | **3.94–10.76×** |
+> | ordered output | included | included |
+> | automatic recovery / bad-batch poisoning | included | included |
+>
+> Neither regime asks you to trade those guarantees for the speed.
+
 ### 5M-Record Steady-State Benchmark — 28 Workers, UMA (`nodes=1`)
 
 All systems process the same 5,000,000-record input on the same 28-thread Intel i9-7940X.
