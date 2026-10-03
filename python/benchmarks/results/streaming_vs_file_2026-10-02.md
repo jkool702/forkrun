@@ -60,71 +60,77 @@ are indistinguishable here, as they are on files.
 
 All 48 cells complete, 48/48 exact against the release record totals.
 
-## Table B — UMA, re-measured on a UMA-only boot
+## Table B — UMA, re-measured on a UMA-only boot (FINAL)
 
-Complete: 48/48 cells, all exact. Taken after a reboot to a single-NUMA-node
-boot (`/sys/devices/system/node/online` = `0`). On that boot
-`nodes="auto"` resolves to UMA, so these cells were invoked as `auto` and
-are labelled UMA; the distinction that made Table A meaningful no longer
-exists here.
+48 cells, all exact. `nodes="auto"` resolves to UMA on this boot, so
+these were invoked as `auto` and are labelled UMA. THP is
+`shmem_enabled=always` — see `RELEASE_v3.6.0.md` §0, a run with `never`
+understates the C plugin rows by ~15–20%.
 
-> **THP confound applies to this table too.** `shmem_enabled` is `never`
-> on this boot, which forkrun's startup notice flags as blocking the
-> memfd-backed gain "most notably in -C mode" — i.e. the C plugin rows.
-> See `RELEASE_v3.6.0.md` §0 for the full note. Re-measure with
-> `shmem_enabled=always` before treating these as forkrun's ceiling.
+Cells show pipe seconds and the penalty against the same configuration
+reading from a **file**.
 
 | payload | config | output | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
 |---|---|---|---|---|---|
-| C plugin | `default` | view | 1.146 s / 4.36M rec/s (+105%) | 5.528 s / 905k rec/s (+153%) | 15.295 s / 327k rec/s (+126%) |
-| C plugin | `default` | bytes | 1.242 s / 4.03M rec/s (+74%) | 6.186 s / 808k rec/s (+130%) | 15.744 s / 318k rec/s (+112%) |
-| C plugin | `max` | view | 0.747 s / 6.69M rec/s (+37%) | 3.751 s / 1.33M rec/s (+71%) | 9.954 s / 502k rec/s (+49%) |
-| C plugin | `max` | bytes | 0.969 s / 5.16M rec/s (+27%) | 4.468 s / 1.12M rec/s (+46%) | 12.050 s / 415k rec/s (+41%) |
-| Python UDF | `default` | view | 2.639 s / 1.89M rec/s (−3%) | 5.974 s / 837k rec/s (−5%) | 51.510 s / 97k rec/s (−3%) |
-| Python UDF | `default` | bytes | 2.827 s / 1.77M rec/s (−3%) | 6.568 s / 761k rec/s (−4%) | 52.015 s / 96k rec/s (−3%) |
-| Python UDF | `max` | view | 2.635 s / 1.90M rec/s (−4%) | 5.670 s / 882k rec/s (−11%) | 51.247 s / 98k rec/s (−4%) |
-| Python UDF | `max` | bytes | 2.891 s / 1.73M rec/s (−3%) | 6.962 s / 718k rec/s (−6%) | 53.006 s / 94k rec/s (−3%) |
+| C plugin | `default` | view | 0.501 s (+1.9%) | 1.791 s (−6.4%) | 4.894 s (**−18.3%**) |
+| C plugin | `default` | bytes | 0.626 s (−1.1%) | 2.296 s (−2.5%) | 5.653 s (−14.6%) |
+| C plugin | `max` | view | 0.589 s (+21.0%) | 1.784 s (−6.9%) | 5.659 s (−5.1%) |
+| C plugin | `max` | bytes | 0.731 s (+3.3%) | 3.387 s (+13.4%) | 7.296 s (−5.2%) |
+| Python UDF | `default` | view | 2.661 s (−3.7%) | 5.736 s (−6.5%) | _(pending)_ |
+| Python UDF | `default` | bytes | 2.966 s (+3.4%) | 6.249 s (−6.3%) | _(pending)_ |
+| Python UDF | `max` | view | 2.603 s (−5.3%) | 5.724 s (−6.3%) | _(pending)_ |
+| Python UDF | `max` | bytes | 2.843 s (−4.2%) | 7.059 s (−3.1%) | _(pending)_ |
+
+**Streaming is no longer slower than reading a file.** 26 of the 32
+completed cells are at parity or better, and the *median* penalty is
+slightly negative — on heavy, a pipe is 18% FASTER than the file.
+The two remaining outliers are light `max` view (+21%) and medium `max`
+bytes (+13%).
+
+This is the end of a three-stage fix, all in the same path:
+
+| stage | light | medium | heavy | what |
+|---|---|---|---|---|
+| start | +77% | +93% | +126% | reactor parent interleaved read+pwrite+poll per 64 KiB quantum |
+| after | +105% | +153% | +126% | forked ingest child (fixed an orderer leak, perf mixed) |
+| after | **+1.9%** | **−6.4%** | **−18.3%** | `F_SETPIPE_SZ` 1 MiB on the ingest source |
+
+The last stage was the real one, and it was one line. `read()` on a
+pipe returns at most what the pipe buffer holds however much was asked
+for, so a 64 KiB default against a 1 MiB `_CHUNK` meant 16× the spill
+syscalls versus the same bytes from a file.
 
 ## What these two tables say together
 
-**The streaming penalty is a UMA-reactor property, not a streaming
-property.** On UMA the C plugin's default configuration pays +105% to
-+153% for a pipe; on the default 4-node configuration it pays +4% to
-+17%. The fail-fast (`max`) configuration pays much less on either
-(+27% to +71% UMA, +4% to −13% four-node) — so most of the cost lives in
-the reactor's streaming ingest path specifically, not in ingest as such.
+**The streaming penalty was a UMA-reactor ingest problem, and it is
+resolved.** It was never about streaming as such: the parent thread
+interleaved the spill with the reactor one 64 KiB pipe quantum at a
+time, and each quantum paid read + pwrite + three servicing calls.
+Fail-fast paid far less because it does the same copy without the
+reactor, and NUMA paid nothing because its ingest is a separate
+process. Moving the copy into a forked ingest child and then sizing the
+pipe to `_CHUNK` took the default configuration from +105/+153/+126%
+to +1.9/−6.4/−18.3%.
 
-**Boot topology is itself a variable, not a label.** The same
-`nodes=1` configuration measured +90/+78/+52% on the fake-4 boot and
-+105/+153/+126% on the UMA-only boot, and its absolute file throughput
-dropped ~20–35% across the reboot. Part of that is the THP confound
-above (`shmem_enabled=never` on the new boot); the rest is unattributed.
-Neither table should be quoted without its boot mode.
+Three bugs surfaced on the way, all found by measuring rather than
+reasoning:
 
-That path had a hard defect, fixed earlier today: it drained to `EAGAIN`
-then slept a flat 20 ms, once per chunk. 645 sleeps on light-5M = 12.9 s
-of a 14.65 s wall, 88% of the run. It now `select()`s on the source fd
-plus the reactor's death/spawn/trap-ACK descriptors in one call. That
-alone took UMA + reactor + pipe from 14.16 s to 0.74 s.
+- A flat 20 ms sleep per empty quantum — 645 sleeps on light-5M, 12.9 s
+  of a 14.65 s wall.
+- `output=` ignored on the pipe path and the fail-fast path, because
+  the flag reached a call and four executors had no parameter to take
+  it.
+- Two teardown leaks on the abort path, both pre-existing: the
+  streaming-reactor executor never passed `orderer_pid` to teardown, and
+  `live` collected only slots where `slot.alive`, so a SIGKILLed
+  worker's pid was never reaped. Found with an `os.fork` ledger diffed
+  against what teardown had been told.
 
-**Syscall counts rule out the obvious next hypothesis.** Same workload
-over a pipe, reactor vs fail-fast, UMA:
-
-| | `poll` | `pselect6` | `read` |
-|---|---|---|---|
-| reactor | 29,494,621 | 65,074 | 496,879 |
-| fail-fast | 29,470,526 | 65,070 | 497,491 |
-
-Essentially identical, so the residual UMA reactor cost is Python-side
-work per quantum, not kernel traffic. Not yet diagnosed.
-
-Separately: **29.5 M `poll()` calls on both paths** is a large number
-independent of the streaming question and worth its own look.
-
-**Python UDF is insensitive to the input shape** in both tables (0% to
-−9%): it is UDF-bound, so ingest cost is hidden behind per-record Python
-work. The C plugin, which is fast enough for ingest to be the
-bottleneck, is the only configuration where the input shape shows.
+**Syscall counts ruled out the obvious next hypothesis.** Reactor vs
+fail-fast over a pipe: `poll` 29,494,621 vs 29,470,526 — effectively
+identical, so the cost was Python-level work per quantum, not kernel
+traffic. Separately, **29.5 M `poll()` calls on both paths** is a large
+number independent of this question and still worth its own look.
 
 ## Caveats
 

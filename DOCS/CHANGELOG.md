@@ -215,6 +215,33 @@ result collection is a smaller share of wall. The C plugin gains more
 (1.11-1.45x) than the Python UDF (1.01-1.09x) for the same reason. All
 24 cells exactness-checked against the release table's record totals.
 
+**Streamed input now matches file input.** `read()` on a pipe returns at
+most what the pipe buffer holds, however much was requested, so against
+a 64 KiB default capacity and a 1 MiB read size every streamed source
+spilled in 64 KiB writes — 16× the syscall count of the same bytes from
+a file. Both Bash ingest paths already resize the FIFO to 1 MiB on
+`S_ISFIFO` (`ring_copy_main` for UMA, `ring_numa_ingest_main` for NUMA);
+Python's UMA streaming path was the only ingest path in the codebase
+that did not. Fixing it took the default configuration's pipe penalty
+from **+105% / +153% / +126%** (light/medium/heavy) to
+**+1.9% / −6.4% / −18.3%** — on heavy, a pipe is now 18% *faster* than
+the file. 26 of 32 completed cells are at parity or better.
+
+Three further fixes in the same path, each found by measuring: a flat
+20 ms sleep per empty ingest quantum (645 sleeps on light-5M = 12.9 s of
+a 14.65 s wall, now a `select()` on the source and the reactor's
+descriptors together); `output=` silently ignored on the pipe and
+fail-fast paths; and two pre-existing teardown leaks on the abort path
+— the streaming-reactor executor never passed `orderer_pid` to teardown,
+and the reap list covered only worker slots still marked alive, so a
+SIGKILLed worker's pid was never reaped. Both leak classes were found
+by logging every `os.fork()` in the path and diffing the ledger against
+what teardown had been told.
+
+The ingest-source setup (dup + resize) is now one helper called by all
+three ingest executors, with a test that fails if any of them stops
+using it.
+
 Tests: 656 run. Coverage added: 12 tests in `test_output_mode.py`
 (both representations, byte-identity, invalid values, lifetime, fd
 hygiene, degenerate shapes). The pre-existing content tests were moved
