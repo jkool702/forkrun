@@ -31,8 +31,9 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 
 > ### Bottom line
 >
-> **In every case measured here, forkrun matches the best available option —
-> and adds ordered output plus automatic failure recovery on top of it.**
+> **In every case measured here, forkrun matches or exceeds the best
+> available option — and adds ordered output plus automatic failure recovery
+> on top of it.**
 >
 > **In some cases, especially streaming workloads, forkrun keeps those same
 > benefits and is drastically faster than the next best: up to, and in some
@@ -42,7 +43,7 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 >
 > | | file input | streaming input |
 > |---|---|---|
-> | vs the best option available | 1.08–2.77× | **3.94–10.76×** |
+> | vs the best option available | 1.08–2.77× (exceeds) | **3.94–10.76×** (exceeds) |
 > | ordered output | included | included |
 > | automatic recovery / bad-batch poisoning | included | included |
 >
