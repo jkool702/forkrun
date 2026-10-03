@@ -2022,6 +2022,11 @@ def _make_results_pump(results_r, order="none", stats=None):
 # (abort already woke them); the orderer uses ORDERER_REAP_TIMEOUT.
 _HELPER_JOIN_TIMEOUT = 10.0
 
+# W-PYINGESTPIPE: ingress pipe capacity for a streamed source. Matched
+# to _CHUNK so one read() yields one spill write. Clamped to
+# fs.pipe-max-size by the kernel; EPERM/EINVAL falls back silently.
+_INGEST_PIPE_SZ = 1 << 20
+
 
 
 
@@ -4025,11 +4030,23 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
         lib.fr_py_abort()
     except Exception:
         pass
+    # EVERY slot's pid must be REAPED, not just the live ones. A slot
+    # the reactor marked dead (worker SIGKILLed mid-run) still owns a
+    # real, unreaped child; filtering on slot.alive left that pid
+    # behind as a zombie. Found with a fork ledger: state.workers held
+    # two slots but teardown was handed one.
+    #
+    # Dead slots are JOIN-ONLY, never SIGKILLed. Their child has already
+    # exited, so there is nothing to kill, and the pid may since have
+    # been recycled to an unrelated process -- killing it would take out
+    # a bystander. Only live slots get the kill+join treatment.
     live = []
+    dead = []
     if state is not None:
         for slot in list(state.workers.values()):
-            if slot.alive:
-                live.append(slot.pid)
+            if not slot.pid or slot.pid <= 0:
+                continue
+            (live if slot.alive else dead).append(slot.pid)
             if slot.death_r is not None and slot.death_r >= 0:
                 try:
                     os.close(slot.death_r)
@@ -4051,6 +4068,9 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
     for pid in live:
         # W-REL5-B4: bounded (kill already issued above).
         _join_helper_bounded(pid, "worker")
+    for pid in dead:
+        # Already exited; reap only. No kill -- see the note above.
+        _join_helper_bounded(pid, "worker-dead")
     for pid in list(extra_pids) + ([orderer_pid]
                                    if orderer_pid is not None else []) + (
                                        [drain_pid]
@@ -5573,6 +5593,18 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if not must_close:
             src_fd = os.dup(src_fd)
             must_close = True
+        # W-PYINGESTPIPE: a read() from a PIPE returns at most what the
+        # pipe buffer holds, no matter how much was asked for. The
+        # default capacity is 64 KiB against a 1 MiB _CHUNK, so a
+        # streamed source spilled in 64 KiB writes -- 16x the syscall
+        # count of the same bytes read from a file, where read() returns
+        # the full request. That is the pipe-vs-file throughput gap.
+        # Same F_SETPIPE_SZ the order pipe already uses; pipe-max-size
+        # is 1 MiB here, so this asks for the maximum we may have.
+        try:
+            _fcntl.fcntl(src_fd, _fcntl.F_SETPIPE_SZ, _INGEST_PIPE_SZ)
+        except OSError:
+            pass          # not a pipe, or refused: sizes stay as they are
         ingest_death_r, ingest_death_w = os.pipe()
         ingest_pid = os.fork()
         if ingest_pid == 0:
