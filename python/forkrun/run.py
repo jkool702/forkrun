@@ -1252,8 +1252,16 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
 
 
 def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
-    """Batch-granular map: payload(Batch) -> result per batch, ordered by
-    batch_index. v0 collects parent-side after workers exit (not streaming).
+    """Batch-granular map: payload(Batch) -> result per batch.
+
+    ORDER: the default is order="none" -- worker-completion order, no
+    reassembly. order="index" restores input order via the C orderer.
+    (The docstring here used to claim results were "ordered by
+    batch_index" unconditionally, which contradicted both the default and
+    docs/API.md. It described the order="index" case as if it were the
+    only one.)
+
+    v0 collects parent-side after workers exit (not streaming).
 
     mode="splice": kernel passthrough (payload must be None) — each
       result blob is one input byte-window (bytes=N, default 512KB).
