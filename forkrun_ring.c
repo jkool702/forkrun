@@ -4483,6 +4483,20 @@ uint64_t chunk_bounds[16] = {0};
 
     if (L > Lmax) L = Lmax;
     if (L < 1)    L = 1;
+    /* W-PREFLIGHT-TRACE: env-gated, so it costs nothing in normal runs.
+     * Reports which of the two cases the pre-flight landed in and the
+     * batch size it committed to. CASE A (pre_lines >= target_pre or
+     * real EOF) skips the geometric ramp entirely and uses
+     * pre_lines/W; CASE B means the pre-flight was cut short because a
+     * worker arrived first, and falls back to the small-size ramp. */
+    if (getenv("FR_PREFLIGHT_TRACE"))
+      fprintf(stderr,
+              "PREFLIGHT case=%s pre_lines=%llu W=%llu target_pre=%llu "
+              "eof=%d waiter=%llu L=%llu\n",
+              (pre_lines >= target_pre || hit_real_eof) ? "A" : "B",
+              (unsigned long long)pre_lines, (unsigned long long)W,
+              (unsigned long long)target_pre, (int)hit_real_eof,
+              (unsigned long long)W, (unsigned long long)L);
   }
   // -----------------------------------------------------------------
 

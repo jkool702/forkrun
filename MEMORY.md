@@ -251,6 +251,25 @@ on a bigger corpus before believing it.
   A/B that means anything is on a deliberately slow producer -- 2500
   lines at 3ms: 13,222 -> 453 ctxsw, 0.14s -> 0.07s CPU. **Benchmark the
   case a change targets, not the case that is convenient to run.**
+- **THE PRE-FLIGHT FIX IS BEHAVIOUR-PRESERVING (measured, not argued).
+  It does NOT pick a smaller initial batch.** Instrumented both engines
+  (FR_PREFLIGHT_TRACE=1) and ran light/plugin/default/view/pipe three
+  times each, interleaved: byte-identical decisions every time --
+  `case=A pre_lines=118089 W=27 target_pre=114688 eof=0 L=4096`.
+  The reason is structural: the wait only happens when pread returns 0,
+  i.e. when no data has landed, which is exactly when no worker can have
+  arrived -- so the `active_waiters > 0` bail cannot fire while the
+  old code was spinning. Same preads, same order, same count.
+- **14 WORKERS BEAT 28 ON THIS BOX.** light/plugin/view/pipe, median of
+  3: 8w 755 MB/s, 14w 1167 MB/s, 28w 1044 MB/s. Per-worker throughput
+  94 -> 83 -> 37 MB/s. 28 is past the knee and is SLOWER than 14.
+  Two candidate causes, not yet separated: SMT (this is 14c/28t, so 28
+  workers is 2 per physical core and the workload is memory-bound) and
+  genuine shared-path contention scaling with worker count. The 2.2x
+  per-worker collapse from 14w to 28w is steeper than SMT alone usually
+  gives, so both may be real. **Worth knowing before publishing a
+  headline table that uses 28 workers** -- though 28 is what the
+  competitors were measured at, so changing it breaks comparability.
 - **W-DRAINHOLE: punching the output memfd is a NO-OP for speed. Do not
   retry.** The idea was sound and the code is bash-parity (ring_order
   holes the output memfd after moving a chunk; the Python drain now does
