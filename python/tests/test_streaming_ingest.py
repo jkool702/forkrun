@@ -271,6 +271,45 @@ class TestStreamingIngest(unittest.TestCase):
             "streamed reactor path is pacing instead of waiting"
             % (seen[0.02], n_chunks))
 
+    def test_pipe_exactness_slow_source(self):
+        """EXACT record count from a slow pipe source.
+
+        W-EXACT: the pre-flight scan counts the input to size its
+        initial batch. If it is told "input complete" before the
+        ingest has actually spilled everything, it stops counting, the
+        scanner treats that as EOF, and the tail is silently DROPPED
+        with no error anywhere -- the run just returns fewer records.
+
+        This is not hypothetical: an earlier attempt at the pre-flight
+        fix lost 9,839 of 5,000,000 records this way and the entire
+        667-test suite passed. So assert the count exactly, and assert
+        it under a SLOW producer, which is the case where the pre-flight
+        spends its time waiting.
+        """
+        n = 4000
+        r, pid = _pipe_with_lines(n, fmt='{"i": %d}\n', delay=0.0005)
+        try:
+            def _count(batch):
+                # one RESULT per batch, so report the record count the
+                # batch carried rather than 1 -- a batch spans many lines
+                return b"%d" % bytes(batch.data).count(b"\n")
+            got = sum(int(v) for v in forkrun.stream(
+                _count, r, workers=4, streaming=True, nodes=1))
+        finally:
+            try:
+                os.close(r)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+        self.assertEqual(
+            got, n,
+            "W-EXACT: lost the tail off a slow pipe -- %d of %d records "
+            "returned. The pre-flight must never treat 'ingest finished' "
+            "as EOF unless the input was genuinely drained." % (got, n))
+
     def test_memory_bounded(self):
         # 256MB through a pipe: parent growth must stay far below input
         # size (fallow punches acked prefixes). The headline 1GB run
