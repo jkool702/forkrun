@@ -2067,6 +2067,7 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
                      int results_fd, int drain_mode) {
     uint64_t *offsets;
     int rc = 0;
+    unsigned punch_streak = 0;
 
     if (signal_r < 0 || !out_fds || num_workers <= 0 ||
         num_workers > 4096 || results_fd < 0 ||
@@ -2132,6 +2133,31 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
             }
             offset += (uint64_t)r;
             remaining -= (uint64_t)r;
+            /* W-DRAINHOLE: bash's ring_order punches a hole in the
+             * per-worker OUTPUT memfd once it has moved a chunk out
+             * (the same fallocate the ingress path uses). Python had
+             * the per-worker output memfds and the moving cursor but
+             * not the punch, so those pages stayed in the working set
+             * and the kernel had to discover they were dead -- 64KB
+             * preads were measuring ~15ms each, which is reclaim cost
+             * and not I/O. Explicit holes remove them from the working
+             * set instead.
+             *
+             * Safe here PRECISELY because this loop COPIES into
+             * results_fd: the consumer holds bytes from a pipe, never a
+             * reference into out_fds[wid], so nothing can be looking at
+             * the range we are about to free. If this loop ever hands
+             * out mappings instead of copying, this punch becomes
+             * use-after-free and MUST go -- same class as the
+             * splice/SPLICE_F_MOVE lock inversion noted above, so read
+             * that post-mortem before changing either side.
+             *
+             * fallocate_punch_checked warns once per failure streak and
+             * never advances past a range it could not free. */
+            (void)fallocate_punch_checked(out_fds[wid],
+                                          (off_t)(offset - (uint64_t)r),
+                                          (off_t)r, &punch_streak,
+                                          "drain-output-memfd");
         }
         offsets[wid] = offset;
     }
