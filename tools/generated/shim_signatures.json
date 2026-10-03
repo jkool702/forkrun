@@ -124,6 +124,16 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_ingest_complete": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_ingest_copy": {
+    "args": "int infd, int outfd",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_ingest_done": {
     "args": "void",
     "linkage": "extern",
