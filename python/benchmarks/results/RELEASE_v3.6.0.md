@@ -161,20 +161,40 @@ Not a shortlist — a measured finding. Every competitor "streaming" API wants a
 They are absent because they cannot be given forkrun's input, not because they
 are slow. Their §0 numbers remain valid for their own regime.
 
-### The two regimes, side by side
+### The two regimes, side by side — and why they are split
 
-| | file input (§0) | streaming (§0b) |
-|---|---|---|
-| vs ProcessPoolExecutor | 1.08–2.77× (C), 0.9–1.4× (UDF) | **3.9–10.8×** (C), 1.0–1.4× (UDF) |
-| strongest competitor | Executor + ctypes | Executor / Pool |
-| forkrun's edge comes from | skipping ingest | ingest overlapped with compute |
+Splitting the table is the point, because the two regimes are not the same
+competition.
+
+**File input has respectable alternatives, and forkrun still wins.** An
+Executor + ctypes + static-partitioning setup is a genuinely good answer to
+"process this JSONL in parallel" — it runs the same C payload, needs no
+orchestration layer, and is what most serious Python pipelines actually do.
+forkrun's margin there is real but modest (1.08–2.77× vs Executor, 1.08–1.40×
+vs Executor + ctypes) precisely *because* the competitor is good.
+
+On top of that speed, every forkrun row in §0 already includes **ordered
+output and automatic failure recovery** — bad-batch poisoning without killing
+the pipeline. The static-partitioning alternative gives you neither.
+
+**Streaming removes most of those alternatives.** A pipe has no seekable
+source, so the thing that made Executor + ctypes strong — handing workers
+byte ranges into a file, with no pickled input — stops being available. That
+row degenerates into ordinary pickled batches. Polars, DuckDB, Ray and HF
+Datasets cannot ingest a pipe at all. What is left is executor/pool with a
+Python UDF, and against that forkrun's C path dominates 3.9–10.8×, still
+including ordering and recovery.
+
+So the summary claim is: **forkrun wins on speed in both regimes, and wins
+by a much wider margin in the streaming regime precisely because that is
+where the strong alternatives stop working** — while carrying ordered output
+and automatic recovery in both, which the alternatives do not.
 
 The Python UDF rows are the honest counterweight: on **heavy**, where per-batch
 Python cost dominates (~52 s regardless of source), forkrun's advantage falls
 to ~1.0×. The 5–11× is the C-plugin path, where forkrun's advantage is real
 and where the transport actually binds. Anyone reading this table should hold
 both facts at once.
-
 
 Ratio rows use the **memoryview** rows (forkrun's default representation since
 0.17.0). Zero-copy output is worth 1.12–1.40× over per-record `bytes` here
