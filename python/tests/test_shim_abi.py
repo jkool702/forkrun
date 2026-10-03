@@ -139,7 +139,16 @@ class TestShimBindings(unittest.TestCase):
         table = _load_table()
         names = list(table.keys())
         self.assertEqual(len(names), len(set(names)), "duplicate entries")
-        # 48 extern + 11 static = 59 (guard against silent truncation).
+        # 49 extern + 11 static = 60 (guard against silent truncation).
+        # W-PREFLIGHT added fr_py_ingest_data_post: an advisory
+        # "more bytes landed in ingress" poke on evfd_ingest_data, so
+        # the pre-flight scan can block on the eventfd instead of
+        # spin-sleeping. It deliberately does NOT touch
+        # state[0].ingest_complete -- that is the scanner's EOF gate and
+        # must only be set on a genuine drain (see the W-GATE2 postmortem
+        # in MEMORY.md, which lost records by trusting it). Additive: no
+        # existing signature changed, no struct layout changed, nothing
+        # removed.
         # W-PYFORKGATE added fr_py_backlog_node: a read-only,
         # non-destructive per-node backlog accessor. It is additive — no
         # existing signature changed, no struct layout changed, and
@@ -153,7 +162,7 @@ class TestShimBindings(unittest.TestCase):
                     if v["linkage"] == "extern")
         n_st = sum(1 for v in table.values()
                    if v["linkage"] == "static")
-        self.assertEqual((n_ext, n_st), (48, 11),
+        self.assertEqual((n_ext, n_st), (49, 11),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

@@ -150,6 +150,36 @@ int fr_py_scan(int fd) {
 /* Signal end of input (UMA): the scanner's EOF gate. Call after writing
  * the last byte to the ingress memfd and before fr_py_scan(). Mirrors
  * ring_ingest (which the bash pipeline calls when its copy finishes). */
+int fr_py_ingest_data_post(void) {
+    /* W-PREFLIGHT: announce "more bytes have landed in the ingress
+     * memfd", and NOTHING more.
+     *
+     * The pre-flight scan (core_scanner_loop, the usleep(100) branch)
+     * waits for the ingest to deliver the next chunk. Bash's
+     * ring_copy_main signals evfd_ingest_data after each chunk
+     * (forkrun_ring.c:8279) so that wait can block instead of spin.
+     * The Python spill was os.read/os.pwrite and never signalled, which
+     * is why Python spun ~10k times in 5 s where Bash slept 78 times.
+     *
+     * DELIBERATELY does NOT touch state[0].ingest_complete. That flag
+     * is the scanner's EOF gate, and a previous attempt (W-GATE2) got
+     * this wrong by letting ring_copy_main own it: ring_copy_main sets
+     * it UNCONDITIONALLY on the way out, including after an early
+     * break, so it means "my loop ended", not "input drained". Trusting
+     * it cost 9,839 records. This function asserts only the one thing
+     * that is unconditionally true at the call site -- bytes were just
+     * written -- so it cannot manufacture a premature EOF.
+     *
+     * Returns 0 on success, 1 if the eventfd is unavailable (caller
+     * keeps working; the pre-flight just falls back to its timeout).
+     */
+    if (evfd_ingest_data < 0)
+        return 1;
+    uint64_t v = 1;
+    ssize_t _w = sys_write(evfd_ingest_data, &v, 8);
+    return (_w == 8) ? 0 : 1;
+}
+
 int fr_py_ingest_done(void) {
     if (!state)
         return 1;

@@ -83,6 +83,10 @@ def _setup_signatures(lib) -> None:
     lib.fr_py_destroy.restype = ctypes.c_int
     lib.fr_py_ingest_done.argtypes = []
     lib.fr_py_ingest_done.restype = ctypes.c_int
+    # "more bytes landed in ingress" signal, so the pre-flight can block
+    # on the eventfd instead of spin-sleeping. Advisory only.
+    lib.fr_py_ingest_data_post.argtypes = []
+    lib.fr_py_ingest_data_post.restype = ctypes.c_int
     lib.fr_py_scan.argtypes = [ctypes.c_int]
     lib.fr_py_scan.restype = ctypes.c_int
     lib.fr_py_worker_init.argtypes = [ctypes.c_int, ctypes.c_int,

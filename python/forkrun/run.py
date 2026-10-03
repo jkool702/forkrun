@@ -728,7 +728,7 @@ def _prepare_ingest_source(src_fd, must_close):
     return src_fd, must_close
 
 
-def _ingest_copy_loop(src_fd, mem_fd, chunk=_CHUNK):
+def _ingest_copy_loop(src_fd, mem_fd, chunk=_CHUNK, lib=None):
     """Copy a source stream into the ingress memfd until EOF.
 
     The single implementation of "read the source, spill to ingress"
@@ -740,6 +740,13 @@ def _ingest_copy_loop(src_fd, mem_fd, chunk=_CHUNK):
     Returns bytes written. Raises RuntimeError on a read or write
     failure -- the child's exit status is the parent's only signal, so
     the message has to survive in the status, not just in a traceback.
+
+    W-PREFLIGHT: after each chunk lands, tell the engine that more
+    bytes are available (``fr_py_ingest_data_post``). The pre-flight
+    scan blocks on that eventfd rather than spin-sleeping while it waits
+    for the ingest to catch up. This mirrors ring_copy_main, which
+    signals evfd_ingest_data per chunk for bash. Best-effort: a missing
+    or failing signal just leaves the pre-flight on its 50 ms timeout.
     """
     total = 0
     while True:
@@ -757,6 +764,11 @@ def _ingest_copy_loop(src_fd, mem_fd, chunk=_CHUNK):
                 raise RuntimeError("failed writing ingress: %s" % (exc,))
             view = view[n:]
             total += n
+        if lib is not None:
+            try:
+                lib.fr_py_ingest_data_post()
+            except Exception:
+                pass  # advisory only; never fail the copy over it
 
 
 def _iter_records(lib, fd, _chunk=_CHUNK, views=False):
@@ -5645,7 +5657,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 # this point references it before any local assignment
                 # runs, so it died with UnboundLocalError. Cheap trap.
                 scrub_fds(engine_fds | {src_fd, memfd, ingest_death_w})
-                _ingest_copy_loop(src_fd, memfd)
+                _ingest_copy_loop(src_fd, memfd, lib=lib)
             except BaseException:
                 rc = 1
             finally:

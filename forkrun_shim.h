@@ -50,6 +50,7 @@ int fr_py_fallow_loop(int pipe_r, int memfd);
 int fr_py_fallow_phys(int fd_in, int fd_file);
 void * fr_py_get_raw_window(int fd, uint64_t offset, uint64_t length);
 int fr_py_indexer_numa(int memfd, int node_id);
+int fr_py_ingest_data_post(void);
 int fr_py_ingest_done(void);
 int fr_py_ingest_eof_posted(void);
 int fr_py_init(int lines, int bytes);

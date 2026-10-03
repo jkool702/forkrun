@@ -4403,7 +4403,50 @@ uint64_t chunk_bounds[16] = {0};
         hit_real_eof = true;
         break; // reached real EOF — pre_lines is the exact total line count
       } else {
-        usleep(100);
+        /* W-PREFLIGHT: pread returning 0 with ingest NOT done means
+         * "wait for more", never EOF. Spin-sleeping here cost ~10k
+         * wakes in 5 s on a slow producer where Bash slept 78 times,
+         * because ring_copy_main signals evfd_ingest_data when each
+         * chunk lands and this branch never waited on it.
+         *
+         * Block on that eventfd instead. Two details make this a pure
+         * latency fix rather than a semantic change:
+         *
+         *  - The timeout is BOUNDED on purpose. One of the three exit
+         *    conditions (the first worker spawning) is detected by
+         *    re-reading active_waiters at the top of this loop. An
+         *    unbounded poll would stop us ever noticing that, so we
+         *    force a re-loop and re-check every 50 ms. At 50 ms this is
+         *    ~100 wakeups in 5 s instead of ~10k, and all three exit
+         *    conditions still fire on the same schedule.
+         *
+         *  - The counter is DRAINED. An eventfd left readable makes the
+         *    next poll return at once, which would rebuild the spin one
+         *    level up. The main ramp drains it the same way (5333).
+         *
+         * Semantics are unchanged: we still only ever wait for more
+         * input, and only ingest_done ends the pre-flight. The exactness
+         * of pre_lines is unaffected -- it still counts real bytes.
+         */
+        struct pollfd _pfds[2];
+        int _nfd = 0;
+        if (evfd_ingest_data >= 0)
+          _pfds[_nfd].fd = evfd_ingest_data, _pfds[_nfd].events = POLLIN, _pfds[_nfd].revents = 0, _nfd++;
+        if (evfd_ingest_eof >= 0)
+          _pfds[_nfd].fd = evfd_ingest_eof,  _pfds[_nfd].events = POLLIN, _pfds[_nfd].revents = 0, _nfd++;
+        if (_nfd > 0) {
+          poll(_pfds, _nfd, 50);
+          if (evfd_ingest_data >= 0) {
+            uint64_t _drain = 0;
+            while (sys_read(evfd_ingest_data, &_drain, 8) > 0) { }
+          }
+          if (evfd_ingest_eof >= 0) {
+            uint64_t _drain = 0;
+            while (sys_read(evfd_ingest_eof, &_drain, 8) > 0) { }
+          }
+        } else {
+          usleep(100); /* no eventfds (pre-init): keep the old behaviour */
+        }
       }
     }
 
