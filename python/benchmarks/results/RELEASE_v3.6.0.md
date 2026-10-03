@@ -137,14 +137,15 @@ decomposes forkrun-vs-Executor into payload vs architecture components. CSV twin
 `headline_2026-09-30.csv` (frozen 12 qualifier rows + 5 `EXEC-C-*` rows).*
 
 
-### 5M-Record Steady-State Benchmark — 28 Workers, UMA (`nodes=auto`)
+### 5M-Record Steady-State Benchmark — 28 Workers, `nodes="auto"` (4 nodes, `numa=fake=4` boot)
 
 All systems process the same 5,000,000-record input on the same 28-thread Intel i9-7940X.
 forkrun rows re-measured 2026-10-02 (v3.6.1 parent-side work, `ce17b0a4`;
 median-of-3 + warmup, exact totals verified on every cell: light 5000000,
 medium 4997892, heavy 4997982 — 24/24 cells exact).
 **This copy is `nodes="auto"`**, the DEFAULT, which on this `numa=fake=4`
-boot resolves to 4 nodes; the copy above is `nodes=1` (UMA). Two caveats
+boot resolves to 4 nodes — it is NOT UMA, and the heading says so. The
+copy above is `nodes=1` (UMA). Two caveats
 on reading the difference as a topology result: `numa=fake=4` gives all
 4 nodes all 28 CPUs, so `auto` buys **no locality** — it is a different
 (and faster) pipeline shape, not a NUMA win, and must not be reported as
