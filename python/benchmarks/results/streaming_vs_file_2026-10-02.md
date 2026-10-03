@@ -33,11 +33,10 @@ argument:
 - **Table A — `nodes="auto"`**, the DEFAULT. Resolves to 4 nodes here.
 - **Table B — `nodes=1`**, UMA. What `RELEASE_v3.6.0.md` §0 reports.
 
-**Table B is provisional and will be re-measured on a UMA-only boot.**
-Without `numa=fake=4` the machine exposes a single NUMA node, so
-`nodes="auto"` resolves to 1 node and *is* UMA — the two tables would
-collapse into one. Table B's current numbers therefore describe UMA
-running on a fake-4 topology and will be replaced.
+**Table B has since been re-measured on a real UMA-only boot** (below);
+those are the numbers to use. The fake-4 UMA figures it replaced were
+~20–35% better in absolute terms and materially better on streaming,
+so the boot topology is itself a variable here, not just a label.
 
 ## Table A — `nodes="auto"` (DEFAULT, 4 fake nodes)
 
@@ -61,32 +60,46 @@ are indistinguishable here, as they are on files.
 
 All 48 cells complete, 48/48 exact against the release record totals.
 
-## Table B — `nodes=1` (UMA) — PROVISIONAL, UMA-boot numbers pending
+## Table B — UMA, re-measured on a UMA-only boot
 
-Complete except the four heavy-Python-UDF cells, which were still running
-when this run was stopped; they are `_`not_ missing by accident and will
-be filled by the UMA-boot re-measurement along with the rest of this
-table.
+Complete: 48/48 cells, all exact. Taken after a reboot to a single-NUMA-node
+boot (`/sys/devices/system/node/online` = `0`). On that boot
+`nodes="auto"` resolves to UMA, so these cells were invoked as `auto` and
+are labelled UMA; the distinction that made Table A meaningful no longer
+exists here.
+
+> **THP confound applies to this table too.** `shmem_enabled` is `never`
+> on this boot, which forkrun's startup notice flags as blocking the
+> memfd-backed gain "most notably in -C mode" — i.e. the C plugin rows.
+> See `RELEASE_v3.6.0.md` §0 for the full note. Re-measure with
+> `shmem_enabled=always` before treating these as forkrun's ceiling.
 
 | payload | config | output | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
 |---|---|---|---|---|---|
-| C plugin | `default` | view | 0.928 s / 5.39M rec/s (+90%) | 3.369 s / 1.48M rec/s (+78%) | 8.922 s / 560k rec/s (+52%) |
-| C plugin | `default` | bytes | 0.905 s / 5.52M rec/s (+41%) | 3.580 s / 1.40M rec/s (+51%) | 12.611 s / 396k rec/s (+92%) |
-| C plugin | `max` | view | 0.524 s / 9.55M rec/s (+8%) | 1.954 s / 2.56M rec/s (+3%) | 5.148 s / 971k rec/s (−13%) |
-| C plugin | `max` | bytes | 0.791 s / 6.32M rec/s (+18%) | 2.897 s / 1.73M rec/s (−10%) | 7.004 s / 714k rec/s (−7%) |
-| Python UDF | `default` | view | 2.649 s / 1.89M rec/s (−1%) | 5.691 s / 879k rec/s (−6%) | _(pending)_ |
-| Python UDF | `default` | bytes | 2.751 s / 1.82M rec/s (−3%) | 6.196 s / 807k rec/s (−3%) | _(pending)_ |
-| Python UDF | `max` | view | 2.602 s / 1.92M rec/s (−2%) | 5.632 s / 888k rec/s (−6%) | _(pending)_ |
-| Python UDF | `max` | bytes | 2.818 s / 1.77M rec/s (−1%) | 6.742 s / 742k rec/s (−9%) | _(pending)_ |
+| C plugin | `default` | view | 1.146 s / 4.36M rec/s (+105%) | 5.528 s / 905k rec/s (+153%) | 15.295 s / 327k rec/s (+126%) |
+| C plugin | `default` | bytes | 1.242 s / 4.03M rec/s (+74%) | 6.186 s / 808k rec/s (+130%) | 15.744 s / 318k rec/s (+112%) |
+| C plugin | `max` | view | 0.747 s / 6.69M rec/s (+37%) | 3.751 s / 1.33M rec/s (+71%) | 9.954 s / 502k rec/s (+49%) |
+| C plugin | `max` | bytes | 0.969 s / 5.16M rec/s (+27%) | 4.468 s / 1.12M rec/s (+46%) | 12.050 s / 415k rec/s (+41%) |
+| Python UDF | `default` | view | 2.639 s / 1.89M rec/s (−3%) | 5.974 s / 837k rec/s (−5%) | 51.510 s / 97k rec/s (−3%) |
+| Python UDF | `default` | bytes | 2.827 s / 1.77M rec/s (−3%) | 6.568 s / 761k rec/s (−4%) | 52.015 s / 96k rec/s (−3%) |
+| Python UDF | `max` | view | 2.635 s / 1.90M rec/s (−4%) | 5.670 s / 882k rec/s (−11%) | 51.247 s / 98k rec/s (−4%) |
+| Python UDF | `max` | bytes | 2.891 s / 1.73M rec/s (−3%) | 6.962 s / 718k rec/s (−6%) | 53.006 s / 94k rec/s (−3%) |
 
 ## What these two tables say together
 
 **The streaming penalty is a UMA-reactor property, not a streaming
-property.** On UMA the C plugin's default configuration pays +52% to
-+92% for a pipe; on the default 4-node configuration it pays +4% to
-+17%. The fail-fast (`max`) configuration pays almost nothing on either
-(+8% to −13%) — so the cost lives in the reactor's streaming ingest path
-specifically, not in ingest as such.
+property.** On UMA the C plugin's default configuration pays +105% to
++153% for a pipe; on the default 4-node configuration it pays +4% to
++17%. The fail-fast (`max`) configuration pays much less on either
+(+27% to +71% UMA, +4% to −13% four-node) — so most of the cost lives in
+the reactor's streaming ingest path specifically, not in ingest as such.
+
+**Boot topology is itself a variable, not a label.** The same
+`nodes=1` configuration measured +90/+78/+52% on the fake-4 boot and
++105/+153/+126% on the UMA-only boot, and its absolute file throughput
+dropped ~20–35% across the reboot. Part of that is the THP confound
+above (`shmem_enabled=never` on the new boot); the rest is unattributed.
+Neither table should be quoted without its boot mode.
 
 That path had a hard defect, fixed earlier today: it drained to `EAGAIN`
 then slept a flat 20 ms, once per chunk. 645 sleeps on light-5M = 12.9 s
@@ -136,9 +149,12 @@ grid) are in this directory.
 
 - `stream_cells_auto.log` — raw `RESULT` lines, `nodes="auto"`, 48/48
   cells, all exact.
-- `stream_cells_uma.log` — raw `RESULT` lines, `nodes=1`, 41/48 (the
-  four heavy-UDF pipe/file cells were still running when it was
-  stopped).
+- `stream_cells_uma_boot.log` — raw `RESULT` lines, **UMA-only boot**,
+  48/48 cells, all exact. This is Table B.
+- `stream_cells_uma.log` — raw `RESULT` lines, UMA *on the fake-4 boot*,
+  41/48 (four heavy-UDF cells were still running when it was stopped).
+  Superseded by the line above; kept because it is the only record of
+  UMA-on-fake-4.
 - `stream_rows.json` — both runs parsed to one record per cell.
 - `stream_render.py` — turns the raw logs into these tables. Handles
   both the 9-field and 10-field `RESULT` formats, because the two runs

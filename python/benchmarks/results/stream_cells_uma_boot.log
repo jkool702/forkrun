@@ -1,0 +1,2017 @@
+-- light plugin default view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light plugin default view file auto 0.5594 952.2270 5000000
+-- light plugin default view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light plugin default view pipe auto 1.1461 464.8158 5000000
+-- light plugin default bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light plugin default bytes file auto 0.7129 747.2186 5000000
+-- light plugin default bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light plugin default bytes pipe auto 1.2419 428.9574 5000000
+-- light plugin max view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light plugin max view file auto 0.5470 973.8755 5000000
+-- light plugin max view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light plugin max view pipe auto 0.7472 712.9700 5000000
+-- light plugin max bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light plugin max bytes file auto 0.7643 696.9507 5000000
+-- light plugin max bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light plugin max bytes pipe auto 0.9691 549.6931 5000000
+-- light udf default view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light udf default view file auto 2.7302 195.1162 5000000
+-- light udf default view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light udf default view pipe auto 2.6393 201.8371 5000000
+-- light udf default bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light udf default bytes file auto 2.9123 182.9187 5000000
+-- light udf default bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light udf default bytes pipe auto 2.8267 188.4576 5000000
+-- light udf max view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light udf max view file auto 2.7533 193.4795 5000000
+-- light udf max view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light udf max view pipe auto 2.6353 202.1448 5000000
+-- light udf max bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light udf max bytes file auto 2.9682 179.4708 5000000
+-- light udf max bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT light udf max bytes pipe auto 2.8912 184.2526 5000000
+-- medium plugin default view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium plugin default view file auto 2.1878 1072.9684 4997892
+-- medium plugin default view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium plugin default view pipe auto 5.5276 424.6731 4997892
+-- medium plugin default bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium plugin default bytes file auto 2.6870 873.6095 4997892
+-- medium plugin default bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium plugin default bytes pipe auto 6.1856 379.4948 4997892
+-- medium plugin max view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium plugin max view file auto 2.1947 1069.5646 4997892
+-- medium plugin max view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium plugin max view pipe auto 3.7505 625.8923 4997892
+-- medium plugin max bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium plugin max bytes file auto 3.0524 769.0442 4997892
+-- medium plugin max bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium plugin max bytes pipe auto 4.4682 525.3524 4997892
+-- medium udf default view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium udf default view file auto 6.3184 371.5176 4997892
+-- medium udf default view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium udf default view pipe auto 5.9745 392.9012 4997892
+-- medium udf default bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium udf default bytes file auto 6.8253 343.9255 4997892
+-- medium udf default bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium udf default bytes pipe auto 6.5682 357.3866 4997892
+-- medium udf max view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium udf max view file auto 6.3571 369.2575 4997892
+-- medium udf max view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium udf max view pipe auto 5.6702 413.9890 4997892
+-- medium udf max bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium udf max bytes file auto 7.4071 316.9145 4997892
+-- medium udf max bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT medium udf max bytes pipe auto 6.9623 337.1600 4997892
+-- heavy plugin default view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy plugin default view file auto 6.7570 994.5857 4997982
+-- heavy plugin default view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy plugin default view pipe auto 15.2954 439.3736 4997982
+-- heavy plugin default bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy plugin default bytes file auto 7.4197 905.7481 4997982
+-- heavy plugin default bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy plugin default bytes pipe auto 15.7439 426.8559 4997982
+-- heavy plugin max view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy plugin max view file auto 6.6862 1005.1098 4997982
+-- heavy plugin max view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy plugin max view pipe auto 9.9539 675.1522 4997982
+-- heavy plugin max bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy plugin max bytes file auto 8.5510 785.9164 4997982
+-- heavy plugin max bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy plugin max bytes pipe auto 12.0502 557.6993 4997982
+-- heavy udf default view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy udf default view file auto 53.0232 126.7441 4997982
+-- heavy udf default view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy udf default view pipe auto 51.5096 130.4684 4997982
+-- heavy udf default bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy udf default bytes file auto 53.7770 124.9677 4997982
+-- heavy udf default bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy udf default bytes pipe auto 52.0151 129.2007 4997982
+-- heavy udf max view file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy udf max view file auto 53.3044 126.0756 4997982
+-- heavy udf max view pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy udf max view pipe auto 51.2472 131.1366 4997982
+-- heavy udf max bytes file
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy udf max bytes file auto 54.5938 123.0978 4997982
+-- heavy udf max bytes pipe
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'never'.
+         forkrun's internal shared ring-state mapping can use Shmem Transparent
+         Huge Pages when this is 'advise' or 'always' (forkrun hints for it
+         automatically). For the larger throughput gain observed on memfd-backed
+         I/O (~50-60% on -s/-b/-C modes, and a large drop in system time, most
+         notably in -C mode), 'always' is currently required -- 'advise' does not
+         cover plain read/write I/O the way forkrun uses it today. Consider:
+           echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+         or, for the more conservative system-wide setting:
+           echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+RESULT heavy udf max bytes pipe auto 53.0057 126.7860 4997982
+DRIVER DONE
