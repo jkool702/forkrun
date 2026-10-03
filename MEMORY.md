@@ -265,6 +265,25 @@ on a bigger corpus before believing it.
   copies it once (fault + build the object). Closing that needs the
   consumer to map the worker memfd directly, which forces a decision
   about backpressure semantics -- a product call, not just engineering.
+
+  THAT DECISION IS NOW MADE (owner, 2026-10-03): bash answers "yes, with
+  some small lag", and the chain is worth copying verbatim --
+
+      slow consumer -> stdout blocks -> ring_order blocks
+                    -> ack pipe fills -> workers block on ack
+
+  So backpressure is the CORRECT semantics, not a regression to avoid,
+  and design (b) (zero-copy views over the worker memfd + window
+  backpressure) is unblocked. "Small lag" is the buffering already in
+  the pipe/memfd, which absorbs bursts before workers feel anything.
+
+  WORTH CHECKING while that work is scoped: bash stalls workers via the
+  ack pipe, but the Python drain has no equivalent -- if the Python
+  consumer stalls, fr_py_write_full blocks on results_fd and the worker
+  output memfds simply GROW (a memfd does not push back). So the Python
+  streaming path may have no backpressure at all, where bash has always
+  had it. `test_slow_consumer_bounds_memory` passes, so something bounds
+  it today, but confirm the mechanism before assuming the two sides agree.
 - **NEVER let exactness accounting run inside a timed region.** I put
   `count_results()` inside the clock for the streaming benchmark and it
   made forkrun look 3x slower than it is (3.17M vs the grid's 7.5M).
