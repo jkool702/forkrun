@@ -1,0 +1,7 @@
+light	ProcessPoolExecutor (pipe)	3.5076	1	5000000
+light	multiprocessing.Pool (pipe)	3.7370	1	5000000
+medium	ProcessPoolExecutor (pipe)	8.0375	1	4997892
+medium	multiprocessing.Pool (pipe)	8.5115	1	4997892
+heavy	ProcessPoolExecutor (pipe)	52.2478	0	4997982
+heavy	multiprocessing.Pool (pipe)	52.5823	0	4997982
+ALLDONE

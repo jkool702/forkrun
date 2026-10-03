@@ -82,6 +82,71 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | **forkrun C vs Polars**             |           —              | **1.18×** |            —             |
 | forkrun C vs Executor+C             | 2.77× | 1.28× | 1.08× § |
 
+
+---
+
+## 0b. Streaming Input — the regime forkrun is built for (SPLIT-1)
+
+**Input arrives on an anonymous pipe and is never materialised.** This is the
+table to read for the huge-training-run case, and it is a *different* question
+from §0: forkrun's C engine path is 5–11× the pool baseline here versus
+1.1–2.8× on files, because file input lets forkrun skip the ingest problem
+entirely while a pipe forces every system to interleave reading with compute.
+
+forkrun rows are the `pipe` columns of the 48-cell grid
+(`streaming_vs_file_2026-10-02.md`, `cells_pf.log`) — same measurement, not a
+re-run. Competitor rows are new: executor/pool fed incrementally from the same
+pipe (`bench_streaming_competitors.py`), median-of-3 after warmup, exact record
+count verified on every cell, one corpus per process.
+
+| System                                   | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
+|------------------------------------------|----------------|------------------|----------------|
+| **★ forkrun C plugin (memoryview)**      | **9.72M rec/s (1,037 MB/s)** | **3.11M rec/s (1,461 MB/s)** | **1.03M rec/s (1,384 MB/s)** |
+| **★ forkrun C plugin (bytes)**           | **7.54M rec/s (804 MB/s)** | **2.45M rec/s (1,151 MB/s)** | **0.92M rec/s (1,234 MB/s)** |
+| **★ forkrun Python UDF (memoryview)**    | **1.95M rec/s (208 MB/s)** | **0.88M rec/s (415 MB/s)** | **0.10M rec/s (130 MB/s)** |
+| **★ forkrun Python UDF (bytes)**         | **1.81M rec/s (193 MB/s)** | **0.83M rec/s (389 MB/s)** | **0.09M rec/s (128 MB/s)** |
+| ProcessPoolExecutor                      | 1.43M rec/s (152 MB/s) | 0.62M rec/s (292 MB/s) | 0.10M rec/s (129 MB/s) |
+| multiprocessing.Pool                     | 1.34M rec/s (143 MB/s) | 0.59M rec/s (276 MB/s) | 0.10M rec/s (128 MB/s) |
+|------------------------------------------|----------------|------------------|----------------|
+| **forkrun C memoryview vs Executor**     | **6.82×** | **5.00×** | **10.76×** |
+| forkrun UDF memoryview vs Executor       | 1.37× | 1.42× | 1.01× |
+| **forkrun C bytes vs Executor**          | **5.29×** | **3.94×** | **9.60×** |
+| forkrun UDF bytes vs Executor            | 1.27× | 1.33× | 0.99× |
+| forkrun C bytes vs multiprocessing.Pool  | 5.64× | 4.17× | 9.66× |
+
+Ordered output and automatic failure recovery (bad-batch poisoning without
+killing the pipeline) are active on every forkrun row here, as in §0.
+
+### Why only executor and pool appear in this table
+
+Not a shortlist — a measured finding. Every competitor "streaming" API wants a
+*path* it can mmap, seek or stat, so a FIFO cannot be ingested at all:
+
+| framework | streaming API | FIFO verdict |
+|---|---|---|
+| Polars | `pl.scan_ndjson` | fails — `OSError 19` (no such device) |
+| DuckDB | `read_json_auto` | fails — `InvalidInput: Malformed JSON` |
+| Ray Data | `ray.data.read_json` | fails — `FileNotFoundError` |
+| HuggingFace Datasets | `load_dataset(streaming=True)` | needs files/URLs |
+
+They are absent because they cannot be given forkrun's input, not because they
+are slow. Their §0 numbers remain valid for their own regime.
+
+### The two regimes, side by side
+
+| | file input (§0) | streaming (§0b) |
+|---|---|---|
+| vs ProcessPoolExecutor | 1.08–2.77× (C), 0.9–1.4× (UDF) | **3.9–10.8×** (C), 1.0–1.4× (UDF) |
+| strongest competitor | Executor + ctypes | Executor / Pool |
+| forkrun's edge comes from | skipping ingest | ingest overlapped with compute |
+
+The Python UDF rows are the honest counterweight: on **heavy**, where per-batch
+Python cost dominates (~52 s regardless of source), forkrun's advantage falls
+to ~1.0×. The 5–11× is the C-plugin path, where forkrun's advantage is real
+and where the transport actually binds. Anyone reading this table should hold
+both facts at once.
+
+
 Ratio rows use the **memoryview** rows (forkrun's default representation since
 0.17.0). Zero-copy output is worth 1.12–1.40× over per-record `bytes` here
 (workload-dependent; the `nodes="auto"` copy below reads 1.01–1.45×, and a

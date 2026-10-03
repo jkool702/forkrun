@@ -251,6 +251,24 @@ on a bigger corpus before believing it.
   A/B that means anything is on a deliberately slow producer -- 2500
   lines at 3ms: 13,222 -> 453 ctxsw, 0.14s -> 0.07s CPU. **Benchmark the
   case a change targets, not the case that is convenient to run.**
+- **NEVER let exactness accounting run inside a timed region.** I put
+  `count_results()` inside the clock for the streaming benchmark and it
+  made forkrun look 3x slower than it is (3.17M vs the grid's 7.5M).
+  count_results parses every output byte in Python; that is harness work,
+  not system work. Time with a cheap consumer, verify exactness in a
+  separate untimed pass.
+- **Two more measurement traps from the same investigation:**
+  * `map()` and `stream()` are NOT the same measurement. Over the same
+    pipe, same plugin, warm: map bytes 7.68M, map view 9.72M, stream
+    bare-drain 6.14M. So stream() really is ~20% slower than map() --
+    it hands you one item per batch through a Python generator instead
+    of collecting internally. Do not attribute that gap to the input
+    source; it is an output-representation effect.
+  * Running forkrun's big ingress memfd and later benchmarks in the
+    SAME process sequence starves the page cache: one combined run
+    decayed ~2.5x from first corpus to last with every row falling
+    together. One corpus per process, competitors measured without
+    forkrun in the same run.
 - **`ctypes.c_char` gives a `memoryview` of format `<c`, and CPython
   refuses to compare that against `bytes`** — `view == b"..."` is
   silently `False`. `c_ubyte` gives `<B` and compares equal both ways.

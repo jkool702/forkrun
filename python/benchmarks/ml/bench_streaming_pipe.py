@@ -43,6 +43,7 @@ Usage:  python3 bench_streaming_pipe.py light medium heavy
 import json
 import multiprocessing
 import os
+import statistics
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -83,6 +84,7 @@ CORPORA = {
 EXPECTED = {"light": 5000000, "medium": 4997892, "heavy": 4997982}
 
 WORKERS = 28
+TRIALS = 3          # median-of-3 after warmup (matches cell.py)
 BATCH_LINES = 2048          # forkrun's default batch size
 IN_CHUNK = 1 << 20          # parent pipe read size
 
@@ -145,6 +147,18 @@ def _iter_batches(fd, batch_lines):
 
 
 PLUGIN_DIR = "/tmp/opencode/mlbench"
+
+
+def _cheap(results):
+    """Cheap per-batch accounting for the TIMED region.
+
+    Exactness uses count_results (_valid) but that parses every output
+    byte in Python, and it must NOT run inside the timed region or it
+    measures the harness instead of the system -- that mistake made
+    forkrun look 3x slower than it is. Timing uses len() only; the
+    exactness pass is a separate, untimed run.
+    """
+    return len(results)
 
 
 def _valid(results):
@@ -230,7 +244,7 @@ PLUGIN_DIR = "/tmp/opencode/mlbench"
 
 
 
-def bench_forkrun(path, variant, expected, plugin=False):
+def bench_forkrun(path, variant, expected, plugin=False, count=True):
     """forkrun streaming from a pipe, its own default batch size.
 
     plugin=True uses the same C plugin the file table measures, so the
@@ -253,7 +267,7 @@ def bench_forkrun(path, variant, expected, plugin=False):
             payload, fd, workers=WORKERS, streaming=True, nodes=1,
             order="index", mode=("plugin" if plugin else "python"))
         for out in gen:
-            n += _valid(out)
+            n += _valid(out) if count else _cheap(out)
         dt = time.perf_counter() - t0
     finally:
         try:
@@ -267,7 +281,7 @@ def bench_forkrun(path, variant, expected, plugin=False):
     return n, dt
 
 
-def bench_pool_stream(path, variant, expected):
+def bench_pool_stream(path, variant, expected, count=True):
     """multiprocessing.Pool fed incrementally from the pipe."""
     payload = POOL_CHUNKS[variant]
     fd, pid = _spawn_producer(path)
@@ -276,7 +290,7 @@ def bench_pool_stream(path, variant, expected):
         with multiprocessing.Pool(WORKERS) as pool:
             n = 0
             for res in pool.imap(payload, _iter_batches(fd, BATCH_LINES)):
-                n += _valid(res)
+                n += _valid(res) if count else len(res)
     finally:
         try:
             os.close(fd)
@@ -290,7 +304,7 @@ def bench_pool_stream(path, variant, expected):
     return n, dt
 
 
-def bench_executor_stream(path, variant, expected):
+def bench_executor_stream(path, variant, expected, count=True):
     """ProcessPoolExecutor fed incrementally from the pipe."""
     payload = POOL_CHUNKS[variant]
     fd, pid = _spawn_producer(path)
@@ -299,7 +313,7 @@ def bench_executor_stream(path, variant, expected):
         with ProcessPoolExecutor(max_workers=WORKERS) as ex:
             n = 0
             for res in ex.map(payload, _iter_batches(fd, BATCH_LINES)):
-                n += _valid(res)
+                n += _valid(res) if count else len(res)
     finally:
         try:
             os.close(fd)
@@ -313,8 +327,8 @@ def bench_executor_stream(path, variant, expected):
     return n, dt
 
 
-def bench_forkrun_plugin(path, variant, expected):
-    return bench_forkrun(path, variant, expected, plugin=True)
+def bench_forkrun_plugin(path, variant, expected, count=True):
+    return bench_forkrun(path, variant, expected, plugin=True, count=count)
 
 
 SYSTEMS = [
@@ -337,23 +351,32 @@ def main(argv):
             continue
         exp = EXPECTED[variant]
         in_bytes = os.path.getsize(path)
-        print("## %s  (%.2f GB, expect %d records)"
+        print("## %s  (%.2f GB, expect %d valid records)"
               % (variant, in_bytes / 1e9, exp))
         for name, fn in SYSTEMS:
             try:
-                n, dt = fn(path, variant, exp)
+                # Warmup, then TIMED passes with the cheap consumer.
+                # Exactness accounting must stay OUT of the clock: it
+                # parses every output byte in Python, and timing it
+                # measured the harness, not the system.
+                fn(path, variant, exp, count=False)
+                times = []
+                for _ in range(TRIALS):
+                    _n, dt = fn(path, variant, exp, count=False)
+                    times.append(dt)
+                n, _dt = fn(path, variant, exp, count=True)   # untimed
             except Exception as exc:            # noqa: BLE001
                 print("  %-30s FAILED: %s: %s"
                       % (name, type(exc).__name__, exc))
                 continue
             if n != exp:
-                print("  %-30s FAIL exactness: %d != %d"
-                      % (name, n, exp))
+                print("  %-30s FAIL exactness: %d != %d" % (name, n, exp))
                 results[(variant, name)] = None
                 continue
-            rec_s = exp / dt
+            med = statistics.median(times)
+            rec_s = exp / med
             print("  %-30s %8.2f s  %7.2fM rec/s  %6.0f MB/s"
-                  % (name, dt, rec_s / 1e6, in_bytes / dt / 1e6))
+                  % (name, med, rec_s / 1e6, in_bytes / med / 1e6))
             results[(variant, name)] = rec_s
         print()
     with open("/tmp/opencode/stream_pipe_results.json", "w") as fh:
