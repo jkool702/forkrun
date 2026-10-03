@@ -190,24 +190,6 @@ on a bigger corpus before believing it.
   (b) is smaller and needs no ABI change. Both were left undone on
   purpose rather than half-validated.
 
-  LANDED (W-GATE2). Option (a) was right and cheap: added
-  `fr_py_ingest_complete()`, which reads `state[0].ingest_complete` --
-  the flag `fr_py_scan`'s own comment calls "the scanner's EOF gate",
-  and the one `ring_copy_main` stores with __ATOMIC_RELEASE. Paired
-  with `fr_py_ingest_copy`, streaming goes 23/23 and the full suite is
-  667 with only the pre-release tag gate red.
-
-  Two things cost time and are worth not re-learning:
-  * `tools/generated/shim_signatures.json` is ORDERED BY SOURCE
-    POSITION, not alphabetically. Sorting it looks tidy and trips
-    `test_no_order_regression`. Run `python3 tools/gen_shim.py` and let
-    it write the header too -- it is the canonical generator, and hand
-    -editing the header then regenerating just fights it.
-  * `test_shim_abi` hardcodes the extern count as a truncation guard
-    (was 48, now 50). That is intentional and the test documents its own
-    update protocol; bumping it with a W-tag note is the correct move,
-    not weakening the guard.
-
   **So the real fix is the gate race, not the spill.** Order the work:
   (1) make `gate_issued`/scanner-exit handling tolerate a completed
   ingest, (2) THEN route the spill through `ring_copy_main`. Doing it in

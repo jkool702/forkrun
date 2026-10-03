@@ -83,12 +83,6 @@ def _setup_signatures(lib) -> None:
     lib.fr_py_destroy.restype = ctypes.c_int
     lib.fr_py_ingest_done.argtypes = []
     lib.fr_py_ingest_done.restype = ctypes.c_int
-    # UMA spill via the engine's own ring_copy_main, and the reader for
-    # the ingest-complete flag that spill sets. See run.py _watch_helpers.
-    lib.fr_py_ingest_copy.argtypes = [ctypes.c_int, ctypes.c_int]
-    lib.fr_py_ingest_copy.restype = ctypes.c_int
-    lib.fr_py_ingest_complete.argtypes = []
-    lib.fr_py_ingest_complete.restype = ctypes.c_int
     lib.fr_py_scan.argtypes = [ctypes.c_int]
     lib.fr_py_scan.restype = ctypes.c_int
     lib.fr_py_worker_init.argtypes = [ctypes.c_int, ctypes.c_int,

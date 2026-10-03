@@ -5575,31 +5575,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                     state.scan_death_r = -1  # W-REL2/R11: keep the
                     # teardown-parked copy in sync (stale numbers
                     # must never be closed post-reuse).
-                    # W-GATE1: a clean scanner exit BEFORE the gate is
-                    # only data loss while input is still outstanding.
-                    # An early 0 with ingest incomplete means the tail
-                    # it never saw was never spilled, so that stays
-                    # fatal. Once the engine reports ingest_complete the
-                    # source was drained in full, the scanner saw all of
-                    # it, and exiting first is correct -- not a failure.
-                    #
-                    # The unconditional form was a latent race, not
-                    # merely over-strict: routing the spill through the
-                    # engine's ring_copy_main makes ingest genuinely
-                    # faster and properly signalled, which is exactly
-                    # what lets the scanner complete first. That tripped
-                    # "scanner failed (status 0)" on a HEALTHY run.
-                    #
-                    # fr_py_ingest_complete() reads state[0].ingest_complete
-                    # directly. The ingest child's death pipe is NOT a
-                    # substitute: the child sets the flag the moment the
-                    # source drains, but the parent may not have reaped
-                    # it yet, so ingest_done lags by a window wide enough
-                    # to fail a correct run. The flag is what the
-                    # scanner itself treats as EOF (see fr_py_scan).
-                    if kind == "error" or (
-                            not gate_issued
-                            and not lib.fr_py_ingest_complete()):
+                    if kind == "error" or not gate_issued:
                         lib.fr_py_abort()
                         raise RuntimeError(
                             "forkrun: ingest scanner failed (status %r)"
@@ -5669,18 +5645,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 # this point references it before any local assignment
                 # runs, so it died with UnboundLocalError. Cheap trap.
                 scrub_fds(engine_fds | {src_fd, memfd, ingest_death_w})
-                # The engine's own ring_copy_main -- the same spill Bash
-                # runs, so we inherit its evfd_ingest_data signalling (the
-                # scanner pre-flight waits on it), its 1 MiB pipe resize,
-                # and its ingest_complete set, with no per-chunk
-                # interpreter cost. Paired with the gate fix in
-                # _watch_helpers; neither is safe alone. The Python loop
-                # stays as the fallback for an engine predating the
-                # symbol.
-                if hasattr(lib, "fr_py_ingest_copy"):
-                    lib.fr_py_ingest_copy(src_fd, memfd)
-                else:
-                    _ingest_copy_loop(src_fd, memfd)
+                _ingest_copy_loop(src_fd, memfd)
             except BaseException:
                 rc = 1
             finally:

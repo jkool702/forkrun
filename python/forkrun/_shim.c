@@ -157,31 +157,6 @@ int fr_py_ingest_done(void) {
     return 0;
 }
 
-/* READ the UMA ingest-complete flag (1 = source fully drained).
- *
- * W-GATE2: this is the scanner's own EOF gate -- see the fr_py_scan
- * comment above: "pread returning 0 with ingest_complete clear means
- * wait for more, not EOF". So it is the authoritative answer to "has
- * everything been spilled yet?", which the parent needs in order to
- * decide whether a scanner that exited before the gate lost a tail.
- *
- * It has to be read directly rather than inferred from the ingest
- * child's death pipe: the child sets ingest_complete the moment the
- * source drains, but the parent may not have reaped the child yet, so
- * the pipe-derived ingest_done LAGS the fact by an observable window.
- * Ring_copy_main stores it with __ATOMIC_RELEASE (forkrun_ring.c), so
- * pair with __ATOMIC_ACQUIRE here.
- *
- * Returns 1 when complete, 0 when not, 0 if state is unavailable
- * (fail toward "not yet" -- the conservative answer for a tail-loss
- * decision). */
-int fr_py_ingest_complete(void) {
-    if (!state)
-        return 0;
-    return __atomic_load_n(&state[0].ingest_complete,
-                           __ATOMIC_ACQUIRE) != 0 ? 1 : 0;
-}
-
 /* Initialize worker-local state in the CALLING process (call post-fork).
  * Fills g_fr_config directly — no env vars, no bash. Mirrors the
  * ring_worker inc fill point plus node resolution and active_workers
@@ -1710,49 +1685,6 @@ int fr_py_init_numa(int lines, int bytes, int num_nodes,
  * (no fr_py_ingest_done gate needed). The usage string's 4th
  * [ordered] slot is vestigial (the engine never reads argv[4]).
  * Returns the engine rc. */
-int fr_py_ingest_copy(int infd, int outfd) {
-    /* W-PYINGESTSIG: the UMA spill, run as the SAME engine code the
-     * Bash frontend runs.
-     *
-     * The Python spill was a plain os.read/os.pwrite loop. Two
-     * divergences from Bash came out of that:
-     *
-     *  1. It never signalled evfd_ingest_data. The scanner pre-flight
-     *     polls that eventfd (forkrun_ring.c:5285) but with timeout 0,
-     *     so it never waits -- every wait fell through to the
-     *     usleep(100) at forkrun_ring.c:4406. Bash's ring_copy_main
-     *     writes the eventfd after each chunk (forkrun_ring.c:8279),
-     *     so Bash slept 78 times where Python spun ~10k times in 5 s.
-     *  2. It paid Python interpreter cost per chunk.
-     *
-     * Calling ring_copy_main fixes both and is parity by construction
-     * rather than reimplementation -- the same trick fr_py_numa_ingest
-     * uses for NUMA. It also resizes the source pipe to 1 MiB itself,
-     * and it sets state[0].ingest_complete on the way out.
-     *
-     * REQUIRES the gate fix in run.py (_watch_helpers) plus
-     * fr_py_ingest_complete: making ingest genuinely faster lets the
-     * scanner finish before the gate is issued, which the old check
-     * treated as a fatal lost tail. Do not land one without the others.
-     *
-     * ring_copy_main takes (argc, argv) with argv[1]=outfd, argv[2]=infd
-     * -- the OPPOSITE order to fr_py_numa_ingest's.
-     */
-    char a0[] = "ring_copy";
-    char a1[32], a2[32];
-    char *argv[4];
-
-    if (infd < 0 || outfd < 0)
-        return 1;
-    argv[0] = a0;
-    snprintf(a1, sizeof(a1), "%d", outfd);
-    argv[1] = a1;
-    snprintf(a2, sizeof(a2), "%d", infd);
-    argv[2] = a2;
-    argv[3] = NULL;
-    return ring_copy_main(3, argv);
-}
-
 int fr_py_numa_ingest(int infd, int outfd, int num_nodes) {
     char a0[] = "ring_numa_ingest";
     char a1[32], a2[32], a3[32];
