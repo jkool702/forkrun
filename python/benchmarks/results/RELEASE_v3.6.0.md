@@ -48,6 +48,23 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 > | automatic recovery / bad-batch poisoning | included | included |
 >
 > Neither regime asks you to trade those guarantees for the speed.
+>
+> ---
+>
+> **Why the two regimes cost forkrun the same but the competition much
+> more.** forkrun is built so that one engine serves both: the input is
+> copied into a memfd either way, so a file and a pipe converge on the
+> same fast path. Measured directly — same harness, same methodology,
+> all 24 pipe-vs-file cells — streaming runs at a **median 104% of file
+> throughput** (light 101%, medium 107%, heavy 109%; full range
+> 92–123%). The source is effectively free.
+>
+> The competition has no such property. Most of it — including the
+> highest-throughput options — cannot ingest a stream at all. The two
+> that can are measured above only by doing the batching in Python and
+> shipping it across the boundary, and they lose ground doing it. So the
+> streaming gap in §0b is mostly **the competition getting worse for
+> streaming**, not forkrun getting worse.
 
 ### 5M-Record Steady-State Benchmark — 28 Workers, UMA (`nodes=1`)
 

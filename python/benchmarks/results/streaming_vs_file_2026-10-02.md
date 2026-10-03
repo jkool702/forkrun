@@ -81,6 +81,12 @@ reading from a **file**.
 | Python UDF | `max` | view | 2.639 s (−1.1%) | 5.628 s (−6.6%) | 53.384 s (−1.4%) |
 | Python UDF | `max` | bytes | 2.857 s (−1.4%) | 6.953 s (+2.0%) | 55.020 s (−1.4%) |
 
+Across all 24 pipe-vs-file cells, streaming runs at a **median 104% of file
+throughput** (light 101%, medium 107%, heavy 109%; range 92–123%). The memfd
+copy makes the input source effectively free for forkrun, so it does not pay a
+streaming penalty at all. The competition does: most of it cannot ingest a pipe
+in the first place.
+
 **Streaming is at parity or better than reading a file.** 20 of 24
 cells are at or below file time (median −3.6%), and the remaining four
 are small. Exact record counts in all 48 cells.
