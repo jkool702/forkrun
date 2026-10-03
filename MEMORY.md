@@ -151,6 +151,32 @@ on a bigger corpus before believing it.
   `cd python && python3 -m unittest discover -s tests -p "test_*.py"`.
   Running `python3 -m unittest test_streaming...` from `python/` gives a
   bogus ModuleNotFoundError that looks like a regression.
+- **ROUTE THE UMA SPILL THROUGH `ring_copy_main` -- BUT NOT WITHOUT
+  FIXING THE GATE FIRST. Tried; it breaks two streaming tests.**
+  The obvious parity fix is right and mostly works: `_shim.c` can reach
+  `ring_copy_main` (it textually `#include`s `forkrun_ring.c`, the same
+  way `fr_py_numa_ingest` reaches `ring_numa_ingest_main`), so a
+  `fr_py_ingest_copy(infd, outfd)` wrapper calling `ring_copy_main(3,
+  argv)` -- note argv order is outfd, infd, the OPPOSITE of the NUMA one
+  -- gives Python the eventfd signalling for free and drops the
+  per-chunk interpreter cost.
+
+  It passes alone and fails in sequence, which is the tell:
+  `test_memory_bounded` raises `ingest scanner failed (status 0)` and
+  `test_pipe_auto_streams` reports a zombie. Root cause is that
+  `ring_copy_main` does two things the Python loop never did: writes
+  `evfd_ingest_eof` and sets `state[0].ingest_complete` on the way out
+  (forkrun_ring.c ~8414-8418), and writes `evfd_ingest_data` per chunk.
+  The Python parent's handshake (`gate_issued` / `check_scanner_death`,
+  run.py ~5560-5575) treats the scanner exiting 0 BEFORE the gate is
+  issued as a hard failure -- `if kind == "error" or not gate_issued`.
+  So making the ingest genuinely faster and properly signalled exposes
+  a pre-existing race in the parent, it does not create a new one.
+
+  **So the real fix is the gate race, not the spill.** Order the work:
+  (1) make `gate_issued`/scanner-exit handling tolerate a completed
+  ingest, (2) THEN route the spill through `ring_copy_main`. Doing it in
+  the other order ships a regression. Reverted; tree green.
 - **The scanner pre-flight polls a 100 us sleep, and on the PYTHON
   streaming path the eventfd it should be waiting on is never
   signalled.** `forkrun_ring.c:4406` does `usleep(100)` when the
