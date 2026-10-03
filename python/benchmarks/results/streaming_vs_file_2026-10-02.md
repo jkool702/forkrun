@@ -92,6 +92,25 @@ are small. Exact record counts in all 48 cells.
 > signal. See the slow-producer measurement below, which is the case
 > that change is actually for.
 
+## Why the streaming comparison is forkrun + C plugin vs executor/pool
+
+Not forkrun + C plugin vs executor + ctypes. That row cannot exist on a
+stream, and the reason is worth stating because it is the substance of the
+5–11× result rather than a detail.
+
+`bench_exectypes.py` enforces that no pickled input crosses the Executor
+boundary: workers `pread` assigned byte ranges from the input **file**, and
+only `(offset, length)` ints and a path are sent. On a pipe there is nothing
+to seek and nothing to range-index, so executor+ctypes loses exactly the
+property that made it a fair §0 competitor and collapses back into the same
+pickled-batch shape as executor+UDF.
+
+forkrun has no such constraint because its batching happens in C, outside
+Python: the engine scans the shared ingress memfd and forms batches, a plugin
+reads its own range by offset, and nothing per-batch crosses a Python
+boundary. That is also why forkrun can run a C plugin against input that does
+not exist in full beforehand.
+
 ## The pre-flight spin, measured on the case it targets (W-PREFLIGHT)
 
 The pre-flight scan counts input lines to size its initial batch. When

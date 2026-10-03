@@ -117,6 +117,34 @@ count verified on every cell, one corpus per process.
 Ordered output and automatic failure recovery (bad-batch poisoning without
 killing the pipeline) are active on every forkrun row here, as in §0.
 
+### This is "best of each method", and the comparison is not symmetric
+
+In the streaming regime the honest comparison is **forkrun + C plugin vs
+executor/pool + a UDF**, and the gap is architectural rather than a payload
+language choice:
+
+- **forkrun** batches on the fly **in C, outside Python**. The engine scans
+  the shared ingress memfd and forms batches itself; a C plugin then reads its
+  own range by offset. No batch data crosses a Python boundary, no pickling,
+  no GIL contention, and **the full input never has to exist before the run
+  starts** — which is the whole point when the producer is still writing.
+- **executor/pool** has no such layer. With a pipe there is nothing to seek,
+  so the parent must form batches in Python and ship them across the boundary,
+  paying that tax on every batch.
+
+`bench_exectypes.py` makes this concrete, because its own fairness rules
+require that **no pickled input crosses the Executor boundary**: workers
+`pread` assigned byte ranges from the input file, and only `(offset, length)`
+ints and a path are sent. That is a *file* capability. A pipe cannot be
+`pread` and cannot be range-indexed, so on a stream executor+ctypes cannot
+keep its defining advantage — it degenerates into the same pickled-batch shape
+as executor+UDF, differing only in payload language.
+
+So **executor + ctypes is deliberately absent from this table**, even though
+it is a legitimate competitor in §0. Its 1.08–2.77× there is real; it is
+simply not reachable on a stream, and quoting a number for it here would
+require quietly dropping the guarantee that makes the row fair.
+
 ### Why only executor and pool appear in this table
 
 Not a shortlist — a measured finding. Every competitor "streaming" API wants a
@@ -128,6 +156,7 @@ Not a shortlist — a measured finding. Every competitor "streaming" API wants a
 | DuckDB | `read_json_auto` | fails — `InvalidInput: Malformed JSON` |
 | Ray Data | `ray.data.read_json` | fails — `FileNotFoundError` |
 | HuggingFace Datasets | `load_dataset(streaming=True)` | needs files/URLs |
+| Executor + ctypes | byte ranges into a **file** | no seekable source on a pipe (see above) |
 
 They are absent because they cannot be given forkrun's input, not because they
 are slow. Their §0 numbers remain valid for their own regime.
