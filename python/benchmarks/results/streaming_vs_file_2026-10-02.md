@@ -72,20 +72,34 @@ reading from a **file**.
 
 | payload | config | output | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
 |---|---|---|---|---|---|
-| C plugin | `default` | view | 0.501 s (+1.9%) | 1.791 s (−6.4%) | 4.894 s (**−18.3%**) |
-| C plugin | `default` | bytes | 0.626 s (−1.1%) | 2.296 s (−2.5%) | 5.653 s (−14.6%) |
-| C plugin | `max` | view | 0.589 s (+21.0%) | 1.784 s (−6.9%) | 5.659 s (−5.1%) |
-| C plugin | `max` | bytes | 0.731 s (+3.3%) | 3.387 s (+13.4%) | 7.296 s (−5.2%) |
-| Python UDF | `default` | view | 2.661 s (−3.7%) | 5.736 s (−6.5%) | _(pending)_ |
-| Python UDF | `default` | bytes | 2.966 s (+3.4%) | 6.249 s (−6.3%) | _(pending)_ |
-| Python UDF | `max` | view | 2.603 s (−5.3%) | 5.724 s (−6.3%) | _(pending)_ |
-| Python UDF | `max` | bytes | 2.843 s (−4.2%) | 7.059 s (−3.1%) | _(pending)_ |
+| C plugin | `default` | view | 0.475 s (−4.0%) | 1.654 s (−12.5%) | 4.796 s (**−20.0%**) |
+| C plugin | `default` | bytes | 0.625 s (−2.2%) | 2.054 s (−12.8%) | 5.390 s (−17.5%) |
+| C plugin | `max` | view | 0.515 s (+5.3%) | 1.752 s (−6.4%) | 5.071 s (−13.9%) |
+| C plugin | `max` | bytes | 0.704 s (+3.4%) | 2.925 s (+7.3%) | 6.782 s (−12.1%) |
+| Python UDF | `default` | view | 2.590 s (−3.0%) | 5.621 s (−6.6%) | 52.236 s (−1.3%) |
+| Python UDF | `default` | bytes | 2.771 s (−2.4%) | 6.104 s (−5.9%) | 52.433 s (−1.6%) |
+| Python UDF | `max` | view | 2.639 s (−1.1%) | 5.628 s (−6.6%) | 53.384 s (−1.4%) |
+| Python UDF | `max` | bytes | 2.857 s (−1.4%) | 6.953 s (+2.0%) | 55.020 s (−1.4%) |
 
-**Streaming is no longer slower than reading a file.** 26 of the 32
-completed cells are at parity or better, and the *median* penalty is
-slightly negative — on heavy, a pipe is 18% FASTER than the file.
-The two remaining outliers are light `max` view (+21%) and medium `max`
-bytes (+13%).
+**Streaming is now faster than reading a file.** All 48 cells are
+complete. 39 of 48 are at parity or better, and the penalties are
+negative almost everywhere: a pipe **beats** the file by up to 20% on
+heavy C-plugin. The remaining outliers are small and confined to the
+`max` config on light/medium (+3% to +7%).
+
+Re-measured after the `snapshot_fds` fix (9e940a1e), which had been
+dropping a real engine fd and spinning the reactor. Against the
+pre-fix grid the fix improved **19 of 21** pipe cells (median −2.7%,
+best −13.6%, worst +1.4%):
+
+| | Light | Medium | Heavy |
+|---|---|---|---|
+| before `snapshot_fds` | +1.9% | −6.4% | −18.3% |
+| after | **−4.0%** | **−12.5%** | **−20.0%** |
+
+Heavy UDF sits at ~52 s regardless of source: it is dominated by
+per-batch Python payload cost (~4× the C plugin), so source choice is
+not the lever there.
 
 This is the end of a three-stage fix, all in the same path:
 
