@@ -151,6 +151,29 @@ on a bigger corpus before believing it.
   `cd python && python3 -m unittest discover -s tests -p "test_*.py"`.
   Running `python3 -m unittest test_streaming...` from `python/` gives a
   bogus ModuleNotFoundError that looks like a regression.
+- **The scanner pre-flight polls a 100 us sleep, and on the PYTHON
+  streaming path the eventfd it should be waiting on is never
+  signalled.** `forkrun_ring.c:4406` does `usleep(100)` when the
+  pre-flight line-counting scan finds no data yet. There IS poll-based
+  logic for exactly this (`forkrun_ring.c:5285`) on `evfd_ingest_data` /
+  `evfd_ingest_eof` — but it passes **timeout 0**, so it never waits.
+  `evfd_ingest_data` is written only by the C materialized copy
+  (`forkrun_ring.c:8279`); the Python spill (`_ingest_copy_loop`, plain
+  `os.read`/`os.pwrite`) never signals it, so on that path the poll
+  always returns 0 and every wait falls through to the sleep. Bash does
+  not have this because its `ring_copy` writes the eventfd. With a slow
+  producer this spins ~10k times in 5 s. **Unfixed** — it needs the
+  eventfd exposed to the spill (or a shim signal call), which is an ABI
+  change and wants daylight. Found by external review.
+- **`snapshot_fds()` returned phantom fds.** `os.listdir("/proc/self/fd")`
+  opens its own transient dir descriptor and that NUMBER is in the
+  listing, so `engine_fds = snapshot_fds() - pre_fds` could subtract a
+  REAL engine fd out of the set (phantom N in pre_fds, engine's first
+  fd allocated as N). Workers then inherit the engine's memfd/eventfd
+  where poll never blocks. Reproduced: pre_fds=[0,1,2,3,4] with 4 a
+  phantom, engine opens 4 and 5, computed engine_fds=[5,6] — 4 dropped.
+  **A number that a set-difference uses as an identity must be
+  validated, not assumed.** Fixed by re-checking each with fstat.
 - **`ctypes.c_char` gives a `memoryview` of format `<c`, and CPython
   refuses to compare that against `bytes`** — `view == b"..."` is
   silently `False`. `c_ubyte` gives `<B` and compares equal both ways.
