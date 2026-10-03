@@ -251,6 +251,20 @@ on a bigger corpus before believing it.
   A/B that means anything is on a deliberately slow producer -- 2500
   lines at 3ms: 13,222 -> 453 ctxsw, 0.14s -> 0.07s CPU. **Benchmark the
   case a change targets, not the case that is convenient to run.**
+- **W-DRAINHOLE: punching the output memfd is a NO-OP for speed. Do not
+  retry.** The idea was sound and the code is bash-parity (ring_order
+  holes the output memfd after moving a chunk; the Python drain now does
+  too, safe because it copies into results_fd so the consumer never
+  references the range). But a back-to-back interleaved A/B -- two
+  prebuilt .so files swapped between runs, 12 samples each -- came out
+  median +0.8%, faster in 2 of 4 paired reps. Neutral.
+  **Therefore the 15ms/64KB preads are NOT reclaim churn.** Kept for
+  parity and because it is correctness-neutral, not for speed. The
+  stream() gap is instead structural: stream copies output ~3x (pread
+  into a buffer, write to results_fd, Python reads the pipe) where map
+  copies it once (fault + build the object). Closing that needs the
+  consumer to map the worker memfd directly, which forces a decision
+  about backpressure semantics -- a product call, not just engineering.
 - **NEVER let exactness accounting run inside a timed region.** I put
   `count_results()` inside the clock for the streaming benchmark and it
   made forkrun look 3x slower than it is (3.17M vs the grid's 7.5M).
