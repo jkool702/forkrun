@@ -190,6 +190,32 @@ on a bigger corpus before believing it.
   (b) is smaller and needs no ABI change. Both were left undone on
   purpose rather than half-validated.
 
+  LANDED THEN REVERTED -- AND IT LOST DATA. Do not redo this casually.
+  W-GATE2 did exactly the above (fr_py_ingest_copy + gate relaxation via
+  fr_py_ingest_complete) and passed 667 tests, streaming 23/23, the lot.
+  The benchmark caught it on the first pipe cell:
+  `EXACTNESS FAILURE light/plugin/default/bytes/pipe: 4990161 != 5000000`
+  -- 9,839 records silently lost off the end. The whole suite missed it.
+
+  WHY: **`state[0].ingest_complete` does NOT mean "source drained".**
+  ring_copy_main writes it (and the 999999 EOF poke) UNCONDITIONALLY on
+  the way out of the function, so every `break` in the copy loop --
+  emergency_abort, limit_reached_exit, `copied_in_chunk == 0 && st_size
+  > off` -- still posts "complete". It means "my loop ended", not "I
+  copied everything". Relaxing the gate on it turns a partial copy into
+  a silent short read.
+
+  I asserted that flag meant "drained" in a code comment and never
+  checked it against the break paths. A docstring saying "ingest_complete
+  is the scanner's EOF gate" is not evidence of when it is SET. **A
+  correctness check may only be relaxed on a signal whose setting
+  condition you have read, not inferred.**
+
+  To actually do this you need a truthful signal first: have
+  ring_copy_main publish `total_moved` vs the source size, or make it
+  return non-zero unless it drained, and gate on THAT. Until such a flag
+  exists, the gate check must stay as strict as it was.
+
   **So the real fix is the gate race, not the spill.** Order the work:
   (1) make `gate_issued`/scanner-exit handling tolerate a completed
   ingest, (2) THEN route the spill through `ring_copy_main`. Doing it in
