@@ -173,6 +173,23 @@ on a bigger corpus before believing it.
   So making the ingest genuinely faster and properly signalled exposes
   a pre-existing race in the parent, it does not create a new one.
 
+  UPDATE (second attempt): scoping the check on `ingest_done` does
+  NOT fix it. `ingest_done` comes off the ingest child's death pipe, so
+  it lags: ring_copy_main has already drained the source and set
+  `state[0].ingest_complete`, but the parent has not reaped the child
+  when the scanner exits, so the "safe" branch never triggers. The
+  signal you actually want is `state[0].ingest_complete` -- ring_copy
+  writes it the moment the source is drained, which is exactly the
+  condition that makes an early scanner exit harmless. There is no
+  getter for it (`fr_py_ingest_eof_posted` reads
+  `ingest_eof_idx`, a different NUMA field). So the choice is:
+  (a) add a `fr_py_ingest_complete()` getter and test that, or
+  (b) defer the check -- remember the early exit, re-evaluate after the
+  next reactor iteration, raise only if ingest is *still* incomplete,
+      which preserves the lost-tail invariant without a new C call.
+  (b) is smaller and needs no ABI change. Both were left undone on
+  purpose rather than half-validated.
+
   **So the real fix is the gate race, not the spill.** Order the work:
   (1) make `gate_issued`/scanner-exit handling tolerate a completed
   ingest, (2) THEN route the spill through `ring_copy_main`. Doing it in
