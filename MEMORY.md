@@ -484,3 +484,72 @@ the list; "both pay it" does not.
 - `python/forkrun/libforkrun_python.so` is a build artifact; rebuild with
   `make -f Makefile.substrate python-substrate`. Build is
   byte-reproducible.
+
+## W-STREAMDRAIN: streaming c_drain wid collision -> silent record loss (2026-10-04)
+
+**Symptom.** `forkrun.stream(..., c_drain=True)` intermittently returns
+SHORT output (~5-10% of runs, load-dependent), silently: no exception,
+no stderr, no drain-audit failure. `test_c_drain_stream_matches`
+(and the four other load-sensitive stream/drain tests) fail this way.
+Loss is always a contiguous TAIL of the output.
+
+**Not the C drain.** Instrumented `fr_py_drain_loop`: on a failing run it
+exits `rc=0` having copied 16508 bytes with NO memfd left undrained
+(`DRAIN_UNDRAINED` silent). The drain does its job correctly.
+
+**Not the workers.** Instrumented the claim loop: every run claims
+`bytes=18890` and emits `emitted=18890` (delta=0) — INCLUDING failing
+runs. Workers deliver 100% of what they claim.
+
+**Not map() / not the engine.** `map()` 30/30 clean; `c_drain=False`
+25/25 clean; both share the same ring/claim/emit core. Only
+`c_drain=True` streaming loses data, so the defect is in the streaming
+supervision layer, not `forkrun_ring.c` (frozen).
+
+**ROOT CAUSE: duplicate worker `wid` in the streaming NUMA spawn path.**
+Worker diagnostics on a failing run:
+
+    wid=2 outfd=35 claims=2 bytes=4092
+    wid=3 outfd=36 claims=6 bytes=12288
+    wid=0 outfd=33 claims=4 bytes=2510
+    wid=3 outfd=36 claims=0 bytes=0     <-- wid=3 a SECOND time
+    (wid=1 / outfd=34 never ran at all)
+
+`out_fds` is allocated one-per-wid up front (`_new_output_memfds`), and
+the C drain indexes it as `out_fds[wid]` for `wid < workers`. When the
+reactor spawns two processes under the same wid, they share one output
+memfd while another wid's memfd is never drained -- so bytes are written
+into a memfd the drain never accounts for, and the totals come up short.
+A corroborating signal appears in the existing NUMA diagnostic:
+`workers=4 nodes=4` yet `forked=[0, 2, 3]` with `wids=[1]` unforked.
+
+**Suspect code.** `ReactorState.spawn_worker` / `_reactor.py` wid
+selection under W-PYSPAWNWIRE (wid->node binding). The comment there
+already records the class of bug: "picking min(wid_free) regardless
+would put a worker in a ring that disagrees with wid_node -- which is
+the mapping the NUMA drain audit verifies against (it reported a
+covered node with published-but-unclaimed batches)". The audit's
+`te != 1` vacuity exemption lets a bad slot pass unnoticed.
+
+**Why the audit never fires.** `_numa_drain_audit` checks
+`write_idx > read_idx`. The colliding worker's slot is still *claimed*
+(it ran, it acked), so drain looks complete while its OUTPUT went to a
+memfd indexed under a different wid. Drain completeness and output
+completeness are not the same invariant -- §7 of EOF_PROTOCOL.md only
+verifies the former.
+
+**Repro (intermittent; run in a loop).**
+
+    for i in $(seq 1 25); do python3 -c "
+    import sys,tempfile,os; sys.path.insert(0,'python'); sys.path.insert(0,'python/tests')
+    import forkrun; from _helpers import write_lines
+    fd,p=tempfile.mkstemp(suffix='.txt'); os.close(fd); write_lines(p,2000,fmt='line %d\n')
+    n=sum(len(bytes(b)) for b in forkrun.stream(lambda b: bytes(b.data).upper(),p,workers=4,c_drain=True,nodes=4))
+    print('OK' if n==18890 else 'SHORT %d'%n)"; done
+
+**Method note.** Two dead ends worth not repeating: (1) running a single
+test as `python3 -m unittest test_c_drain...` from `python/` fails with
+ImportError -- run it from `python/tests/`, or you are measuring the
+wrong thing; (2) GC is NOT implicated (`gc.disable()` still fails
+3/40). A `sort | uniq -c` leading number is a run frequency, not a
+worker count.
