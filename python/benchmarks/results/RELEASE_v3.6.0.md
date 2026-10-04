@@ -138,43 +138,61 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | forkrun C vs Executor+C             | 2.77× | 1.28× | 1.08× § |
 
 
-> ### ⚠ The light column of §0 is MEASURED CONTAMINATED — do not quote it
+> ### ⚠ §0 IS MEASURED CONTAMINATED — and the corrected light column is below
 >
 > Every row above came from `bench_ml_pipeline.py`, which runs all
-> frameworks **in one process** and **imports every competitor framework
-> just to test whether it is installed**. That import costs ~214 MB of
-> RSS, and `fork()` cost scales with parent RSS (measured: 0.27 ms/fork
-> clean vs 45.3 ms/fork at 5 GB), so the import silently taxed every
+> frameworks **in one process** and **imported every competitor framework
+> just to test whether it was installed**. That import costs ~214 MB of
+> RSS, and `fork()` cost scales with parent RSS (measured: **0.27 ms/fork**
+> clean vs **45.3 ms/fork** at 5 GB), so the import silently taxed every
 > row — forkrun's most, because it forks 28 workers.
 >
-> Direct A/B, same call, same byte-identical corpus:
+> Direct A/B, identical call, identical byte-identical corpus:
 >
 > | parent RSS | `forkrun.map` |
 > |---|---|
 > | 16 MB | 1.577 s → **12.69M rec/s** |
 > | 214 MB (competitors imported) | 2.116 s → **9.45M rec/s** |
 >
-> So the light column reads ~34% low for forkrun. Re-measured with
-> `--isolate` (one subprocess per system, no competitor imports,
-> shared pre-generated corpus), light at **20M records / 2.13 GB**:
+> **The benchmark was importing the very frameworks it compared against,
+> and the cost landed on the competitor.** Four harness bugs fixed:
+> `--isolate` (one subprocess per system), `forkrun-plugin` was nested
+> inside the forkrun block and silently emitted no row, each child
+> regenerated its own 2.1 GB corpus, and `detect_frameworks()` imported
+> everything (now `importlib.util.find_spec`).
 >
-> | system | rec/s | vs executor |
+> ### Corrected light column — 20M records / 2.13 GB, fully isolated
+>
+> One harness for every row, so nothing is mixed. This is the fair
+> version of the light column, and it is the number to quote.
+>
+> | System | rec/s | vs Executor |
 > |---|---|---|
-> | **forkrun C plugin (memoryview)** | **12.8M** | **8.0×** |
-> | forkrun Python UDF | 1.9M | 1.19× |
+> | **★ forkrun C plugin (memoryview)** | **12.8M** | **8.0×** |
+> | **★ forkrun C plugin (bytes)** | **9.5M** | **5.9×** |
+> | **★ forkrun Python UDF (memoryview)** | **1.90M** | 1.19× |
 > | ProcessPoolExecutor | 1.6M | — |
 > | multiprocessing.Pool | 1.5M | — |
 > | Ray Data | 368k | — |
 > | HuggingFace Datasets | 112k | — |
+> | (serial baseline) | 145k | — |
 >
-> Three independent measurements now agree (cell.py 12.89M, a direct A/B
-> 12.66M, the fixed harness 12.7M), where the old harness read 9.6M.
+> **C plugin vs Executor is 8.0×, not the 6.19× printed in §0.**
 >
-> **The corrected C-plugin advantage on light is 8.0× executor, not the
-> 6.19× printed above.** The medium and heavy columns are from the same
-> contaminated gauntlet and are almost certainly low by a similar
-> margin; they need re-running before release. The fix is committed
-> (`--isolate`, lazy framework detection); the re-run is not.
+> Cross-checked against forkrun's own 48-cell harness on the same corpus
+> (independent harness, same config): **12.92M** memoryview / **9.49M**
+> bytes / **1.96M** UDF — agreeing within 1%, where the old gauntlet
+> read 9.6M. Exact record counts on all 16 cells of that matrix.
+>
+> Note this column is **20M records** while medium and heavy remain 5M.
+> That is deliberate and matches `bench_exectypes.py`, which already
+> defaults heavy to `heavy_20M`. It also matters for honesty in the
+> other direction: at 5M the light run is ~1.6 s, short enough that
+> fixed costs are a visible share, whereas 20M is closer to steady
+> state. **Medium and heavy still need their own isolated re-runs** —
+> they come from the same contaminated gauntlet and are very likely low
+> by a similar margin. The harness fix is committed; those re-runs are
+> not done.
 
 ---
 

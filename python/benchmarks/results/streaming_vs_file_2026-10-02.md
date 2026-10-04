@@ -134,6 +134,42 @@ left to win and its per-node coordination shows up as a small cost.
 > signal. See the slow-producer measurement below, which is the case
 > that change is actually for.
 
+## Table C — light at 20M records (2.13 GB), the steady-state light case
+
+The published light column is 5M records, a ~1.6 s run in which fixed
+costs are a visible share. At 20M the same workload sustains ~1.5 s of
+real work per pass and is much closer to steady state. Measured on
+`NEW/REFACTOR3.4`, fake-NUMA (`nodes=auto`, 4 nodes),
+`shmem_enabled=always`, 28 workers, median-of-3 after warmup,
+**16/16 cells exact**.
+
+| payload | config | output | file | pipe |
+|---|---|---|---|---|
+| C plugin | `default` | view | **12.92M rec/s (1,376 MB/s)** | 12.41M rec/s (1,322 MB/s) |
+| C plugin | `default` | bytes | 9.49M rec/s (1,011 MB/s) | 9.24M rec/s (984 MB/s) |
+| C plugin | `max` | view | 13.04M rec/s (1,390 MB/s) | 12.63M rec/s (1,346 MB/s) |
+| C plugin | `max` | bytes | 9.64M rec/s (1,027 MB/s) | 9.06M rec/s (965 MB/s) |
+| Python UDF | `default` | view | 1.96M rec/s (208 MB/s) | 1.94M rec/s (206 MB/s) |
+| Python UDF | `default` | bytes | 1.85M rec/s (197 MB/s) | 1.81M rec/s (193 MB/s) |
+| Python UDF | `max` | view | 1.96M rec/s (209 MB/s) | 1.96M rec/s (209 MB/s) |
+| Python UDF | `max` | bytes | 1.83M rec/s (195 MB/s) | 1.84M rec/s (197 MB/s) |
+
+The default-config view pipe penalty is **+4.1%** at 20M, against
++3.4% at 5M — streaming input stays a couple of percent either way, so
+the sign-flip caveat in Table B (UMA vs 4-node) still governs rather
+than record count.
+
+Two things this table is for:
+
+1. **It is the honest light number.** The §0 light column came from a
+   gauntlet that imported every competitor framework into the measuring
+   process; that import cost forkrun ~34% through the RSS-driven fork
+   tax. See the contamination note in `RELEASE_v3.6.0.md`.
+2. **It is the cross-check.** `bench_ml_pipeline.py --isolate` measures
+   the same configuration through a completely different harness and
+   reports 12.8M; this matrix says 12.92M. Two independent harnesses
+   agreeing within 1% is the evidence that the number is now right.
+
 ## Why the streaming comparison is forkrun + C plugin vs executor/pool
 
 Not forkrun + C plugin vs executor + ctypes. That row cannot exist on a
