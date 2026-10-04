@@ -553,3 +553,43 @@ ImportError -- run it from `python/tests/`, or you are measuring the
 wrong thing; (2) GC is NOT implicated (`gc.disable()` still fails
 3/40). A `sort | uniq -c` leading number is a run frequency, not a
 worker count.
+
+### W-STREAMDRAIN RESOLUTION (branch NEW/REFACTOR3.6)
+
+**Two independent bugs, same symptom.** Fixing only the first took
+600 runs from 591/600 to... nothing; it took 591/600 -> and the residual
+was the second bug. Both were required.
+
+**Bug 1 — premature signal-pipe EOF (`ec293c1f`, run.py).** The parent
+dropped its spare signal write end gated on worker liveness ALONE.
+Workers fork incrementally as the scan advances, so "no live worker" is
+briefly true while the scanner still has another to fork; the false EOF
+killed the drain child. Fixed by `_spawn_quiescent()`: scanners reaped
+(C1) AND no live worker (C2) AND the spawn pipe empty. The spawn-pipe
+term is load-bearing — scanners exit AFTER writing requests.
+Applied at all four in-loop spare-drop sites.
+
+**Bug 2 — the C drain emitted PARTIAL records (`a5799f91`, _shim.c).**
+`fr_py_drain_loop` copied the raw byte range `[offset, size)`, where
+`size` is an fstat snapshot of a memfd still being appended to, so the
+range could end MID-RECORD. The drain concatenates every worker's bytes
+into ONE stream, so a partial record from worker A followed by worker
+B's bytes is unrecoverable — the shared parser reads B's header as A's
+payload continuation, desyncs permanently, and strands the rest as an
+unparseable tail. This is also why `c_drain=False` failed: the same
+partial-record desync happens in the Python drain whenever a worker's
+byte range is cut mid-record.
+
+    before:  DRAIN_EXIT drained_total=19402 | PUMP_STOP recs=20 tail=7328
+    after:   DRAIN_EXIT drained_total=19402 | PUMP_STOP recs=32 tail=0
+
+**Both fixes together: 600/600 exact** (100 runs x 6 configs: nodes
+1/2/4/8 x workers 2/4/8 x c_drain on/off). Suite 668 tests, failures=1
+(release gate only).
+
+**Generalisable lesson.** "The producer emitted everything" and "the
+consumer received everything" are different claims, and neither
+implies the other. For this bug: workers emitted 18890/18890 bytes, the
+drain copied all 19402 bytes including framing, the pump ingested all
+19402 bytes — and 40% of the output was still lost, purely to framing.
+Measure the LAST stage before blaming the first.
