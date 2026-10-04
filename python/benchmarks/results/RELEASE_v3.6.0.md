@@ -138,6 +138,44 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | forkrun C vs Executor+C             | 2.77× | 1.28× | 1.08× § |
 
 
+> ### ⚠ The light column of §0 is MEASURED CONTAMINATED — do not quote it
+>
+> Every row above came from `bench_ml_pipeline.py`, which runs all
+> frameworks **in one process** and **imports every competitor framework
+> just to test whether it is installed**. That import costs ~214 MB of
+> RSS, and `fork()` cost scales with parent RSS (measured: 0.27 ms/fork
+> clean vs 45.3 ms/fork at 5 GB), so the import silently taxed every
+> row — forkrun's most, because it forks 28 workers.
+>
+> Direct A/B, same call, same byte-identical corpus:
+>
+> | parent RSS | `forkrun.map` |
+> |---|---|
+> | 16 MB | 1.577 s → **12.69M rec/s** |
+> | 214 MB (competitors imported) | 2.116 s → **9.45M rec/s** |
+>
+> So the light column reads ~34% low for forkrun. Re-measured with
+> `--isolate` (one subprocess per system, no competitor imports,
+> shared pre-generated corpus), light at **20M records / 2.13 GB**:
+>
+> | system | rec/s | vs executor |
+> |---|---|---|
+> | **forkrun C plugin (memoryview)** | **12.8M** | **8.0×** |
+> | forkrun Python UDF | 1.9M | 1.19× |
+> | ProcessPoolExecutor | 1.6M | — |
+> | multiprocessing.Pool | 1.5M | — |
+> | Ray Data | 368k | — |
+> | HuggingFace Datasets | 112k | — |
+>
+> Three independent measurements now agree (cell.py 12.89M, a direct A/B
+> 12.66M, the fixed harness 12.7M), where the old harness read 9.6M.
+>
+> **The corrected C-plugin advantage on light is 8.0× executor, not the
+> 6.19× printed above.** The medium and heavy columns are from the same
+> contaminated gauntlet and are almost certainly low by a similar
+> margin; they need re-running before release. The fix is committed
+> (`--isolate`, lazy framework detection); the re-run is not.
+
 ---
 
 ## 0b. Streaming Input — the regime forkrun is built for (SPLIT-1)
