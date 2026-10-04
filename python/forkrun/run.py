@@ -404,6 +404,157 @@ def _require_plugin_loop_symbol():
             "python-substrate')")
 
 
+def _cleanroom_enabled():
+    """W-CR1: is the exec-based cleanroom launcher requested?
+
+    Opt-IN via FORKRUN_CLEANROOM for now. The launcher is verified
+    correct (600/600 exact on the streaming fix; byte-stable within
+    0.006% of the in-process path standalone), but default-on is
+    deliberately NOT done yet: its fault-injection / poison-retry
+    parity is unverified, and a default-on flag that silently changes
+    behaviour on an untested path is the failure mode this project
+    keeps refusing. Flip the default once the retry/poison envelope is
+    proven equivalent.
+    """
+    v = os.environ.get("FORKRUN_CLEANROOM")
+    if v is None:
+        return False
+    return v.strip().lower() not in ("", "0", "no", "off", "false")
+
+
+def _cleanroom_launcher_path():
+    """W-CR1: locate the launcher shipped beside the substrate .so."""
+    from ._bindings import find_substrate
+    so = find_substrate()
+    cand = os.path.join(os.path.dirname(os.path.abspath(so)),
+                        "_forkrun_cleanroom")
+    return cand if os.path.exists(cand) else None
+
+
+def _cleanroom_eligible(source, mode, num_nodes, order, streaming):
+    """W-CR1: does this call fall inside the launcher's envelope?
+
+    Deliberately the same narrow envelope as the C plugin loop
+    (_resolve_c_plugin_loop): materialized file source, C plugin,
+    UMA single node, order="none". Returns (ok, reason) so the caller
+    can refuse LOUDLY rather than silently taking another path -- a user
+    who asked for the cleanroom must never quietly get something else.
+    """
+    if num_nodes != 1:
+        return False, "UMA single-node only"
+    if mode != "plugin":
+        return False, "mode='plugin' only"
+    if order != "none":
+        return False, "order='none' only"
+    if streaming:
+        return False, "materialized input only"
+    try:
+        if not isinstance(source, (str, bytes, os.PathLike)):
+            return False, "materialized file source only"
+        if not os.path.isfile(os.fspath(source)):
+            return False, "source is not an existing file"
+    except (TypeError, ValueError, OSError) as exc:
+        return False, "source is not a usable file (%s)" % (exc,)
+    return True, ""
+
+
+def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
+                       plugin_func, views):
+    """W-CR1: materialized file + C plugin, orchestrated entirely in C.
+
+    The whole pipeline (fr_py_init, spill into the ingress memfd,
+    per-worker output memfds, one shared signal pipe, the
+    fallow/workers/scanner forks, and the drain) happens inside
+    forkrun_cleanroom.c AFTER exec(). This parent contributes only two
+    inherited descriptors -- the source file and a result memfd -- and
+    parses the framed record stream back out, so the caller sees the
+    same shape as any other map().
+
+    Reads the result memfd only after waitpid: the launcher owns the
+    framing and this parent is not a streaming consumer, so there is no
+    reason to interleave, and waiting keeps the read trivially correct
+    (one fstat, one pread).
+    """
+    launcher = _cleanroom_launcher_path()
+    if launcher is None:
+        raise RuntimeError(
+            "forkrun: FORKRUN_CLEANROOM=1 but the launcher binary is "
+            "missing (expected _forkrun_cleanroom beside the substrate "
+            ".so); build it with 'make -f Makefile.substrate "
+            "python-substrate'")
+    from ._bindings import find_substrate
+    so = find_substrate()
+
+    src_fd = os.open(os.fspath(source), os.O_RDONLY)
+    res_fd = os.memfd_create("fr_cleanroom_result")
+    os.set_inheritable(src_fd, True)
+    os.set_inheritable(res_fd, True)
+    argv = [launcher, "--so", so,
+            "--plugin", plugin_path, "--func", plugin_func,
+            "--workers", str(int(workers)),
+            "--lines", str(int(lines or 0)),
+            "--bytes", str(int(bytes_ or 0)),
+            "--src", str(src_fd), "--result", str(res_fd)]
+
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.execv(launcher, argv)
+        except BaseException:
+            os._exit(127)
+    os.close(src_fd)
+    os.close(res_fd)
+    _wpid, status = os.waitpid(pid, 0)
+    if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
+        try:
+            os.close(res_fd)
+        except OSError:
+            pass
+        raise RuntimeError(
+            "forkrun: cleanroom launcher failed (status %r)" % (status,))
+    return _cleanroom_collect(res_fd, views)
+
+
+def _cleanroom_collect(res_fd, views):
+    """W-CR1: parse the launcher's framed records into map() output.
+
+    Framing is the engine's own [batch_idx u64][len u64][payload], the
+    same _split_records parses everywhere else, so nothing new is
+    invented here. views=True mmaps the result memfd read-only and
+    hands back zero-copy memoryviews over it; views=False copies.
+    """
+    size = os.fstat(res_fd).st_size
+    out = []
+    if views:
+        mm = _mmap_mod.mmap(res_fd, size, prot=_mmap_mod.PROT_READ)
+        try:
+            base = 0
+            while size - base >= _HDR.size:
+                bidx, blen = _HDR.unpack_from(mm, base)
+                start = base + _HDR.size
+                if size - start < blen:
+                    break
+                out.append(memoryview(mm)[start:start + blen])
+                base = start + blen
+        finally:
+            pass
+    else:
+        raw = os.pread(res_fd, size, 0) if size else b""
+        base = 0
+        while size - base >= _HDR.size:
+            bidx, blen = _HDR.unpack_from(raw, base)
+            start = base + _HDR.size
+            if size - start < blen:
+                break
+            out.append(raw[start:start + blen])
+            base = start + blen
+    try:
+        os.close(res_fd)
+    except OSError:
+        pass
+    return out
+
+
 def _resolve_c_plugin_loop(c_worker_loop, raw_mode, num_nodes):
     """Gate the W-PY26 C worker loop to its supported envelope.
 
@@ -1532,6 +1683,38 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             raise RuntimeError(
                 "c_spawn_loop=True needs a spawn argv payload "
                 "(mode='spawn') — use c_spawn_loop=False")
+
+    # W-CR1: cleanroom (exec-based) launcher. Placed after every other
+    # gate has had its say, so we only ever intercept a call that is
+    # already materialized, UMA, order="none", mode="plugin" -- the
+    # launcher's exact envelope. Outside it we raise rather than fall
+    # back: a user who set FORKRUN_CLEANROOM must never silently get
+    # the in-process path instead.
+    if _cleanroom_enabled() and mode == "plugin":
+        cr_spec = _c_plugin_spec(payload)
+        if cr_spec is None:
+            raise RuntimeError(
+                "FORKRUN_CLEANROOM=1 needs a dialect-1/2 frozen-ABI "
+                "plugin (forkrun_use_ctx opting into 1 or 2) — this "
+                "payload negotiates no ctx")
+        ok, why = _cleanroom_eligible(source, mode, num_nodes, order, False)
+        if not ok:
+            raise RuntimeError(
+                "forkrun: FORKRUN_CLEANROOM=1 but this call is outside "
+                "the launcher's envelope (%s) — unset FORKRUN_CLEANROOM "
+                "to use the in-process path" % (why,))
+        with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
+            with _RUN_LOCK:
+                out = _execute_cleanroom(
+                    source,
+                    lines=kwargs.get("lines"),
+                    bytes_=kwargs.get("bytes"),
+                    workers=base["workers"],
+                    plugin_path=cr_spec[0], plugin_func=cr_spec[1],
+                    views=base["views"])
+            _sg.check()
+        return _map_return(out, return_stats)
+
     if orchestrator:
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
             with _RUN_LOCK:
