@@ -424,36 +424,48 @@ def _cleanroom_enabled():
     workloads are throughput-bound, default-on would trade a ~10%
     regression on large jobs for a few milliseconds. Hence opt-in.
 
-    DEFAULT IS NOW ON. The precondition was performance parity, not
-    correctness parity: correctness was already established (14 tests,
-    including TestCleanroomFaultParity), and forking the launcher's
-    spill so it overlaps the scan removed the 9% throughput deficit:
+    OPT-IN, and the default is deliberately OFF. This was ON briefly
+    (commit 5ae0b0a0) and reversed: enabling it by default is wrong
+    because it cannot be reached by default callers AND it costs them
+    something real.
 
+    It cannot be reached: the envelope below excludes orchestrator=True,
+    which is map()'s DEFAULT. So a plain forkrun.map(...) never took
+    the cleanroom even while it was nominally "on" -- the flag mostly
+    advertised an optimization that ordinary calls declined.
+
+    It costs something: the launcher runs no supervisor. No death
+    pipes, no respawn, no trap-ACK -- a dead worker loses its batch.
+    W-CR4 (branch NEW/REFACTOR3.8) implements a supervisor that does
+    recover (SIGKILL -> RESPAWN wid=N rc=0 via the same
+    ring_recover_worker_core bash and Python both use), but it is not
+    landed: a single worker kill hangs the run, and the pre-3.7 launcher
+    hangs identically, so the hang is a pre-existing liveness gap in
+    the record-aware drain rather than a regression.
+
+    So defaulting the cleanroom ON would mean defaulting crash recovery
+    OFF for every caller that did not ask for it. Orchestrator keeps the
+    default; the cleanroom is opt-in for callers who knowingly want the
+    speed and accept the supervision model.
+
+    Measured, for the caller who does opt in (28 workers, light_5M):
         STARTUP    2000 records   18.06 ms -> 8.75 ms   2.06x faster
         THROUGHPUT light_5M       677.3 ms -> 655.3 ms  1.034x faster
-
-    On by DEFAULT only where the envelope below applies; outside it the
-    in-process path is used and, because the user did not ask for the
-    cleanroom explicitly, WITHOUT a warning (see _cleanroom_explicit --
-    map() defaults orchestrator=True, which is outside the envelope, so
-    warning on fallback would fire on nearly every default call).
-    Set FORKRUN_CLEANROOM=0 to force the in-process path everywhere.
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:
-        return True          # default ON; opt out with =0
+        return False         # default OFF; opt in with =1
     return v.strip().lower() not in ("", "0", "no", "off", "false")
 
 
 def _cleanroom_explicit():
     """Did the user actually ask for the cleanroom?
 
-    Distinguishes "enabled by default" from "requested". Falling back
-    outside the envelope is worth a warning only in the second case: the
-    default is ON, map() defaults orchestrator=True (outside the
-    envelope), so warning unconditionally would fire on nearly every
-    ordinary map() call. A default-on feature must be quiet when it does
-    not apply and loud when a request is declined.
+    Distinguishes "requested" from "not set". With the default OFF
+    this is simply "did the user ask", and it drives the one warning
+    worth emitting: an explicit request that the envelope cannot honour
+    is declined LOUDLY, so nobody believes they got the cleanroom when
+    they did not.
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:

@@ -657,8 +657,26 @@ a throughput number for wrong output), warmup discarded, medians.
 | startup, 2000 records, n=20 | 18.06 ms | 8.75 ms | **2.06x faster** |
 | throughput, light_5M, n=9 | 677.3 ms | 655.3 ms | **1.034x faster** |
 
-**Default is now ON.** The precondition was performance parity, not
-correctness parity — correctness was established first (16 tests,
+**Default is OFF, and that is deliberate — it was briefly ON
+(`5ae0b0a0`) and reversed.** Two reasons, the second decisive:
+
+1. It cannot be reached by default callers. The envelope excludes
+   `orchestrator=True`, which is `map()`'s DEFAULT, so a plain
+   `forkrun.map(...)` never took the cleanroom even while nominally
+   "on". The flag mostly advertised an optimization ordinary calls
+   declined.
+2. It costs something real. The launcher runs no supervisor: no death
+   pipes, no respawn, no trap-ACK, so a dead worker loses its batch.
+   Defaulting it ON would mean **defaulting crash recovery OFF** for
+   every caller who did not ask for that.
+
+Orchestrator keeps the default. The cleanroom is opt-in
+(`FORKRUN_CLEANROOM=1`) for callers who knowingly want the speed and
+accept the supervision model it has today. The "can we have both?"
+question has the answer "not until W-CR4 lands" — see below.
+
+Correctness parity was established independently of the default
+ — correctness was established first (16 tests,
 including `TestCleanroomFaultParity`). What blocked it was a 9%
 throughput deficit, and the fix was to fork the launcher's spill so it
 overlaps the scan (W-CR2 below). That single change took throughput

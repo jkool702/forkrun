@@ -52,13 +52,16 @@ def _joined(res):
 class TestCleanroomHelpers(unittest.TestCase):
     """The envelope predicate -- pure, no plugin or launcher needed."""
 
-    def test_enabled_by_default(self):
-        # Default is ON, but NOT "explicitly requested" -- that
-        # distinction is what keeps the fallback quiet for ordinary
-        # map() calls while still warning when a request is declined.
+    def test_disabled_by_default(self):
+        # The default is OFF. It was briefly ON (5ae0b0a0) and reversed:
+        # the envelope excludes orchestrator=True, which is map()'s own
+        # default, so a plain map() never took the cleanroom anyway --
+        # and the launcher runs no supervisor, so defaulting it ON would
+        # have meant defaulting crash recovery OFF for every caller who
+        # did not ask for it.
         old = os.environ.pop("FORKRUN_CLEANROOM", None)
         try:
-            self.assertTrue(_cleanroom_enabled())
+            self.assertFalse(_cleanroom_enabled())
             self.assertFalse(_cleanroom_explicit())
         finally:
             if old is not None:
