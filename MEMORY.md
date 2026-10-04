@@ -763,3 +763,68 @@ exits 2 if not) is what caught both. **A validation config must be able
 to fail when the code under test does not run** — otherwise it is
 decorative. Same lesson as the dead hook, the res_fd close, and the
 exec probe that hung the suite.
+
+### W-CR4: reactor-in-launcher — deep dive done, wiring NOT landed (branch 3.8)
+
+Question was whether the launcher's supervision could match bash's.
+Findings, in order of importance.
+
+**1. `ring_poll` is NOT a supervisor and is unusable from C.**
+It is a single poll step: multiplex the fds, classify one event, return
+it via `bind_variable("POLL_EVENT"/"POLL_ARG1"/"POLL_ARG2")`. The
+supervisor is bash's `while` loop (it owns `nWorkers`, `wID_free`,
+`node_workers`, `nWorkersMax`, `node_worker_max`). And the output
+channel does not exist outside bash: `bind_variable` is a STUB in any
+substrate build (`substratestubs.c:22` discards name and value) with no
+getter. So the event-detection half cannot be reused — the launcher must
+run its own poll loop, exactly as `_reactor.py` does.
+
+**2. bash's and Python's supervisors ARE equivalent.** Both defer
+classification to the same C authority — `ring_recover_worker` /
+`fr_py_recover_worker` -> `ring_recover_worker_core`, the WorkerTxn
+state machine (IDLE->CLAIMING->CLAIMED->COMMITTING->IDLE). Neither
+reimplements it; both recover on ALL deaths including exit 0; both map
+rc 0/1/3 -> respawn, 2 -> free wid, 4/5 -> abort. So the correct
+reference for the launcher is `_reactor.py`, not `ring_poll`.
+
+**Near-miss worth keeping:** `_reactor.py` still contains a 3s
+trap-ACK grace that RAISES "trap-ACK did not confirm", which bash
+deleted in W-PY28 (and which bash's workers no longer satisfy, since
+death confirmations are no longer sent). It looked like a live bug — a
+SIGKILLed worker could never confirm, so Python would abort where bash
+recovers. It is guarded: `_recover = getattr(lib,
+"fr_py_recover_worker", None)` with the comment "Pre-W-PY28 substrates
+lack the symbol: fall back to the ...". The grace is a BACK-COMPAT
+FALLBACK for old `.so` files, not the live path. Verified before
+reporting it.
+
+**3. A correct supervision loop was written and does recover** — see the
+reverted commit. SIGKILLing workers produced `RESPAWN wid=N incarn=1
+rc=0`: deaths detected, `ring_recover_worker` returned RECOVERED,
+respawned onto the SAME wid (bash keeps the wid->out_fd->ring binding
+stable across generations).
+
+**4. It could not be landed, for a reason that predates it.** Killing a
+single worker hangs the run — and the 3.7 launcher hangs IDENTICALLY
+(verified by building 5616af57's launcher separately and repeating the
+kill). So the hang is NOT a W-CR4 regression: it comes from the
+record-aware drain (a5799f91), which holds back a partial trailing
+record whenever `size - offset < need` and has NO liveness escape when
+the worker dies mid-record — it simply waits for a signal from a wid
+that will never signal again.
+
+**So the real prerequisite is a drain liveness fix, not a supervisor.**
+Until the drain can distinguish "partial record, more coming" from
+"worker died mid-record", supervision cannot be exercised: the scenario
+it targets hangs before recovery can be observed. Fix that first.
+
+Two bugs found and fixed inside the reverted work, both worth not
+relearning: (a) respawn inherited a CLOSED signal/fallow write end,
+because the parent dropped its copies right after the initial spawn
+loop — the new worker signalled to EBADF and the drain blocked forever;
+the fix is run.py's spare_signal_w pattern, and the spare must be
+closed LAST. (b) With `on_error="fail-fast"` the loop respawned the
+failing worker forever — the engine's `emergency_abort` stops bash's
+poll loop, and this loop has no poll, so it must check
+`fr_py_abort_reason()` before respawning, plus a respawn cap as a
+backstop.
