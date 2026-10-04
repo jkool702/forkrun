@@ -804,7 +804,7 @@ def parse_args(argv=None):
 
 
 SYSTEM_ORDER = ["serial", "pool", "executor", "hf_datasets", "ray",
-                "forkrun"]
+                "forkrun", "forkrun-plugin"]
 
 
 def run_isolated(argv):
@@ -1011,7 +1011,13 @@ def main(argv=None):
                                           input_bytes, variant, workers,
                                           args.trials)
                         note_best("forkrun", variant, r)
-                        if plugin_so is not None:
+                        # The plugin row gets its OWN --only-system, and
+                        # therefore its own child under --isolate. Sharing
+                        # this child meant the 20M-record UDF run above
+                        # bloated it, so the plugin's 28 worker forks paid
+                        # the same RSS tax -- contamination relocated
+                        # inside one process instead of removed.
+                        if plugin_so is not None and _want("forkrun-plugin"):
                             try:
                                 r = bench_forkrun_plugin(
                                     ctx, path, args.records, input_bytes,
