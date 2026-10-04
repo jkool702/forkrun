@@ -2082,7 +2082,7 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
         ssize_t n;
         uint64_t wid;
         struct stat st;
-        uint64_t size, offset, remaining;
+        uint64_t size, offset;
         char buf[65536];
 
         /* 1. Signal heartbeat (blocking): one keyed record's worth
@@ -2109,56 +2109,99 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
         offset = offsets[wid];
         if (size <= offset)
             continue; /* duplicate/empty wakeup: next signal */
-        remaining = size - offset;
 
-        /* 3. Move them verbatim (bounded 64KB chunks — the drain's
-         * own RSS stays flat no matter how far behind it gets). */
-        while (remaining > 0) {
-            size_t want = remaining > sizeof(buf) ? sizeof(buf)
-                                                  : (size_t)remaining;
-            ssize_t r = pread(out_fds[wid], buf, want, (off_t)offset);
-            if (r < 0) {
-                if (errno == EINTR)
-                    continue;
-                break; /* transient: next signal re-drives us */
+        /* 3. Move whole RECORDS, never a partial one.
+         *
+         * W-STREAMDRAIN. This used to copy the raw byte range
+         * [offset, size) verbatim. That is wrong: `size` is a snapshot
+         * of a memfd a worker is still appending to, so the range can
+         * end mid-record. This drain CONCATENATES every worker's bytes
+         * into one results stream, so a partial record from worker A
+         * followed by worker B's bytes is unrecoverable -- the single
+         * shared parser reads B's header as A's payload continuation,
+         * desyncs permanently, and strands the remainder as an
+         * unparseable tail. Measured: drain copied 19402 bytes, the
+         * consumer parsed 20 records and discarded a 7328-byte tail,
+         * silently returning ~40% of the output short.
+         *
+         * So: read the 16-byte record header, and copy the record only
+         * once all 16 + len bytes are present. A partial trailing
+         * record is left for the next signal, when the worker has
+         * finished writing it. This mirrors what the Python drain
+         * already does per worker (per_worker[wid] = [offset, tail]).
+         *
+         * Bounded 64KB chunks keep this loop's own RSS flat no matter
+         * how far behind it gets. */
+        while (size - offset >= sizeof(struct fr_py_record_hdr)) {
+            struct fr_py_record_hdr hdr;
+            uint64_t need, done;
+            ssize_t h = pread(out_fds[wid], &hdr, sizeof(hdr),
+                              (off_t)offset);
+            if (h != (ssize_t)sizeof(hdr))
+                break; /* transient; next signal re-drives us */
+            /* A corrupt/garbage length must not spin us forever or ask
+             * for an absurd allocation; treat as end-of-records for
+             * this worker rather than trusting it. */
+            if (hdr.len > ((uint64_t)1 << 40))
+                break;
+            need = sizeof(hdr) + hdr.len;
+            if (size - offset < need)
+                break; /* partial trailing record: wait for the rest */
+            for (done = 0; done < need;) {
+                size_t want = (need - done) > sizeof(buf)
+                                  ? sizeof(buf) : (size_t)(need - done);
+                ssize_t r = pread(out_fds[wid], buf, want,
+                                  (off_t)(offset + done));
+                if (r < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    goto worker_done; /* transient */
+                }
+                if (r == 0) {
+                    /* Short read inside a record we already committed
+                     * to copying. Advance by exactly what reached the
+                     * consumer so the stream stays self-consistent --
+                     * the consumer's tail buffer completes it when the
+                     * remaining bytes come. */
+                    offset += done;
+                    goto worker_done;
+                }
+                if (fr_py_write_full(results_fd, buf, (size_t)r) != 0) {
+                    if (drain_mode == 1 && errno == EPIPE)
+                        rc = 5; /* abandoned stream: parent went away */
+                    else
+                        rc = 4;
+                    goto drain_done;
+                }
+                done += (uint64_t)r;
+                /* W-DRAINHOLE: bash's ring_order punches a hole in the
+                 * per-worker OUTPUT memfd once it has moved a chunk out
+                 * (the same fallocate the ingress path uses). Python had
+                 * the per-worker output memfds and the moving cursor but
+                 * not the punch, so those pages stayed in the working set
+                 * and the kernel had to discover they were dead -- 64KB
+                 * preads were measuring ~15ms each, which is reclaim cost
+                 * and not I/O. Explicit holes remove them from the working
+                 * set instead.
+                 *
+                 * Safe here PRECISELY because this loop COPIES into
+                 * results_fd: the consumer holds bytes from a pipe, never a
+                 * reference into out_fds[wid], so nothing can be looking at
+                 * the range we are about to free. If this loop ever hands
+                 * out mappings instead of copying, this punch becomes
+                 * use-after-free and MUST go -- same class as the
+                 * splice/SPLICE_F_MOVE lock inversion noted above, so read
+                 * that post-mortem before changing either side.
+                 *
+                 * fallocate_punch_checked warns once per failure streak and
+                 * never advances past a range it could not free. */
+                (void)fallocate_punch_checked(
+                    out_fds[wid], (off_t)(offset + done - (uint64_t)r),
+                    (off_t)r, &punch_streak, "drain-output-memfd");
             }
-            if (r == 0)
-                break; /* raced the writer: next signal re-drives us */
-            if (fr_py_write_full(results_fd, buf, (size_t)r) != 0) {
-                if (drain_mode == 1 && errno == EPIPE)
-                    rc = 5; /* abandoned stream: parent went away */
-                else
-                    rc = 4;
-                goto drain_done;
-            }
-            offset += (uint64_t)r;
-            remaining -= (uint64_t)r;
-            /* W-DRAINHOLE: bash's ring_order punches a hole in the
-             * per-worker OUTPUT memfd once it has moved a chunk out
-             * (the same fallocate the ingress path uses). Python had
-             * the per-worker output memfds and the moving cursor but
-             * not the punch, so those pages stayed in the working set
-             * and the kernel had to discover they were dead -- 64KB
-             * preads were measuring ~15ms each, which is reclaim cost
-             * and not I/O. Explicit holes remove them from the working
-             * set instead.
-             *
-             * Safe here PRECISELY because this loop COPIES into
-             * results_fd: the consumer holds bytes from a pipe, never a
-             * reference into out_fds[wid], so nothing can be looking at
-             * the range we are about to free. If this loop ever hands
-             * out mappings instead of copying, this punch becomes
-             * use-after-free and MUST go -- same class as the
-             * splice/SPLICE_F_MOVE lock inversion noted above, so read
-             * that post-mortem before changing either side.
-             *
-             * fallocate_punch_checked warns once per failure streak and
-             * never advances past a range it could not free. */
-            (void)fallocate_punch_checked(out_fds[wid],
-                                          (off_t)(offset - (uint64_t)r),
-                                          (off_t)r, &punch_streak,
-                                          "drain-output-memfd");
+            offset += need;
         }
+    worker_done:
         offsets[wid] = offset;
     }
 
