@@ -176,21 +176,47 @@ int main(int argc, char **argv) {
      * pre-flight blocks instead of spin-sleeping. */
     int memfd = fr_memfd_create("fr_cr_ingress");
     if (memfd < 0) die("memfd_create(ingress)");
-    {
-        static char buf[1 << 20];
-        unsigned long long off = 0;
+
+    /* W-CR2: spill in a CHILD so it OVERLAPS the scan.
+     *
+     * This used to run inline: read the whole source into the ingress
+     * memfd, then scan it. Two consequences, both bad:
+     *
+     *  - It cannot be live. For an unbounded/streaming source the
+     *    launcher would sit in read() until EOF and never emit a
+     *    single result, which is not streaming, it is a stall.
+     *  - It costs a full extra pass over the corpus before any work
+     *    starts. Measured end-to-end at 28 workers on light_5M, that
+     *    was 672.9 ms in-process vs 738.9 ms here -- a 9% regression,
+     *    because the Python path overlaps spill with scan using a
+     *    forked UMA ingest child and this did not.
+     *
+     * Forking the spill fixes both: the scanner starts reading the
+     * ingress memfd while it is still filling, and the engine's
+     * documented ingest->scanner EOF protocol (EOF_PROTOCOL.md §5:
+     * ingest_complete plus a forced final pread) handles the tail.
+     * The eventfd poke per chunk stays -- that is what makes the
+     * scanner's pre-flight block instead of spin-sleeping.
+     */
+    pid_t spill_pid = fork();
+    if (spill_pid < 0) die("fork(spill)");
+    if (spill_pid == 0) {
+        int keep[2] = {o.source_fd, memfd};
+        scrub_closem_others(keep, 2);
+        static char sbuf[1 << 20];
+        unsigned long long soff = 0;
         for (;;) {
-            ssize_t n = read(o.source_fd, buf, sizeof buf);
-            if (n < 0) { if (errno == EINTR) continue; die("read(source)"); }
+            ssize_t n = read(o.source_fd, sbuf, sizeof sbuf);
+            if (n < 0) { if (errno == EINTR) continue; _exit(1); }
             if (n == 0) break;
-            ssize_t w = pwrite(memfd, buf, (size_t)n, (off_t)off);
-            if (w != n) die("pwrite(ingress)");
-            off += (unsigned long long)n;
+            ssize_t w = pwrite(memfd, sbuf, (size_t)n, (off_t)soff);
+            if (w != n) _exit(1);
+            soff += (unsigned long long)n;
             p_ipost();
         }
+        _exit(p_idone() == 0 ? 0 : 1);
     }
-    if (p_idone() != 0)
-        fprintf(stderr, "forkrun-cleanroom: warning: ingest_done failed\n");
+    close(o.source_fd);      /* only the spill child reads the source */
 
     int *out_fds = calloc((size_t)o.workers, sizeof(int));
     if (!out_fds) die("calloc(out_fds)");
@@ -293,6 +319,13 @@ int main(int argc, char **argv) {
     { int st; if (waitpid(fallow_pid, &st, 0) > 0 &&
           !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1; }
     { int st; if (waitpid(drain_pid, &st, 0) > 0 &&
+          !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1; }
+    /* The spill child exits only at source EOF, which for a streaming
+     * source is the producer finishing. Join it LAST and treat a
+     * failure as fatal: if the spill died early the scanner saw a
+     * truncated corpus, and silently returning short output is exactly
+     * the class of bug this project refuses. */
+    { int st; if (waitpid(spill_pid, &st, 0) > 0 &&
           !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1; }
 
     if (o.verbose)
