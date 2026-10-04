@@ -48,6 +48,15 @@ def main():
     variant, payload_kind, cfg, output, source = sys.argv[1:6]
     nodes = sys.argv[6] if len(sys.argv) > 6 else "auto"
     path, expect = CORPORA[variant]
+    # Corpus override, for scaling studies that need a longer run than the
+    # published corpora give. The lightest published corpus is ~0.5s, which
+    # is dominated by spawn cost and INVERTS worker-scaling conclusions
+    # (14w beat 28w on light, while 28w wins by 11-28% on medium/heavy).
+    # Point a variant at a bigger file to measure steady state instead.
+    _ov = os.environ.get('FR_BENCH_CORPUS')
+    if _ov:
+        path = _ov
+        expect = int(os.environ.get('FR_BENCH_EXPECT', str(expect)))
     orch = (cfg == "default")
     order = "index" if orch else "none"
 

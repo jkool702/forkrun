@@ -271,11 +271,21 @@ on a bigger corpus before believing it.
       heavy   file +21.7..+21.8% pipe +24.1..+27.6%
 
   The light-pipe win is a fixed-overhead artifact: a ~0.5s run is
-  dominated by spawn cost, which 28 workers pay more of. As runs get
-  long enough for steady state, extra workers win monotonically. So
-  per-worker MB/s falling from 94 (8w) to 37 (28w) was NOT saturation --
-  it was amortising a fixed cost over fewer records. **Lesson: never
-  draw a scaling conclusion from the smallest corpus; it inverts.**
+  dominated by spawn cost, which 28 workers pay more of. So per-worker
+  MB/s falling from 94 (8w) to 37 (28w) was amortising a fixed cost over
+  fewer records, NOT saturation. **Lesson: never draw a scaling
+  conclusion from the smallest corpus; it inverts.**
+
+  Re-tested with light at 20M records (2.13GB, ~= medium's 2.35GB, so
+  spawn cost is no longer the story). 28w wins 6 of 8 plugin cells, but
+  by only 4-7% -- versus 11-28% on the medium/heavy corpora. The 14w
+  "win" on light is gone; what remains is 14w ahead on max+pipe only.
+
+  So the margin is corpus-dependent, and the published 5M light column
+  is close to its worst case for 28w. light-20M sustains 20M records in
+  ~1.9s -- 4x medium's per-record rate, the closest thing here to true
+  steady state -- and there 28w's edge is single digits. Re-run the
+  competitors at 20M before quoting a steady-state ratio.
 - **W-DRAINHOLE: punching the output memfd is a NO-OP for speed. Do not
   retry.** The idea was sound and the code is bash-parity (ring_order
   holes the output memfd after moving a chunk; the Python drain now does
