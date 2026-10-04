@@ -60,7 +60,33 @@ are indistinguishable here, as they are on files.
 
 All 48 cells complete, 48/48 exact against the release record totals.
 
-## Table B — UMA, re-measured on a UMA-only boot (FINAL)
+## Table B-UMA — the pipe columns quoted by §0b of the release table
+
+Preserved deliberately. §0b (`RELEASE_v3.6.0.md`) quotes forkrun's
+streaming rows from the **UMA** pipe columns, because its competitor rows
+(executor/pool) were measured on UMA and that is the only like-for-like
+pairing. Table B below is now the 4-node `numa=fake=4` measurement, so
+without this table §0b's citation would not resolve to its own figures.
+
+Measured 2026-10-03 on a UMA-only boot, `shmem_enabled=always`, 48/48
+cells exact. Median **−3.6%** vs file (20 of 24 cells at parity or
+better) — the opposite sign to the 4-node Table B, for the reason
+recorded there.
+
+| payload | config | output | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
+|---|---|---|---|---|---|
+| C plugin | `default` | view | 0.514 s (−4.0%) | 1.606 s (−15.0%) | 4.856 s (−18.6%) |
+| C plugin | `default` | bytes | 0.663 s (−2.2%) | 2.039 s (−12.5%) | 5.444 s (−17.5%) |
+| C plugin | `max` | view | 0.515 s (+5.3%) | 1.781 s (−6.4%) | 5.071 s (−13.9%) |
+| C plugin | `max` | bytes | 0.704 s (+3.4%) | 2.969 s (+7.3%) | 6.638 s (−12.1%) |
+| Python UDF | `default` | view | 2.560 s (−3.6%) | 5.659 s (−7.7%) | 51.704 s (−3.0%) |
+| Python UDF | `default` | bytes | 2.758 s (−1.4%) | 6.041 s (−7.2%) | 52.701 s (−2.3%) |
+| Python UDF | `max` | view | 2.607 s (−2.3%) | 5.641 s (−6.3%) | 51.020 s (−4.0%) |
+| Python UDF | `max` | bytes | 2.814 s (−1.5%) | 6.852 s (−3.9%) | 53.609 s (−1.1%) |
+
+---
+
+## Table B — 4-node `numa=fake=4` (`nodes="auto"`), re-measured 2026-10-03
 
 48 cells, all exact. `nodes="auto"` resolves to UMA on this boot, so
 these were invoked as `auto` and are labelled UMA. THP is

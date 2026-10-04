@@ -151,8 +151,11 @@ entirely while a pipe forces every system to interleave reading with compute.
 **Topology: UMA (`nodes=1`) throughout this table**, which is what the
 competitor rows were measured on and is therefore the only way the
 comparison stays like-for-like. forkrun rows are the `pipe` columns of
-the 48-cell grid (`streaming_vs_file_2026-10-02.md`, `cells_pf.log`) —
-same measurement, not a re-run. Competitor rows are new: executor/pool fed
+the 48-cell grid, preserved as **Table B-UMA** in
+`streaming_vs_file_2026-10-02.md` — same measurement, not a re-run. (The
+study's main table B is now the 4-node measurement, so the UMA pipe
+columns are kept under their own heading precisely so this citation
+resolves.) Competitor rows are new: executor/pool fed
 incrementally from the same pipe (`bench_streaming_competitors.py`),
 median-of-3 after warmup, exact record count verified on every cell, one
 corpus per process.
