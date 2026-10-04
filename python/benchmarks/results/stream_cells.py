@@ -33,6 +33,15 @@ CORPORA = {
 }
 WORK = '/tmp/opencode/mlbench'
 TRIALS = 3
+# Worker count and an optional skip filter, both env-driven so the driver
+# can sweep them without editing this file. WORKERS=28 is the published
+# default (and what every competitor row was measured at); 14 is the
+# physical-core count on a 14c/28t box, where 28 workers measured ~12%
+# SLOWER (see MEMORY.md: per-worker throughput collapses 2.2x from 14 to
+# 28). SKIP is a substring filter on the cell label, e.g. SKIP="heavy udf"
+# to drop the cells that cost ~52s each and dominate a short run.
+WORKERS = int(os.environ.get('FR_BENCH_WORKERS', '28'))
+SKIP = os.environ.get('FR_BENCH_SKIP', '')
 
 
 def main():
@@ -53,7 +62,7 @@ def main():
     n_bytes = os.path.getsize(path)
 
     def run_file():
-        return forkrun.map(payload, path, mode=mode, workers=28, nodes=nodes,
+        return forkrun.map(payload, path, mode=mode, workers=WORKERS, nodes=nodes,
                            orchestrator=orch, order=order, output=output)
 
     def run_pipe():
@@ -75,7 +84,7 @@ def main():
                 os._exit(rc)
         os.close(w)
         try:
-            return forkrun.map(payload, r, mode=mode, workers=28, nodes=nodes,
+            return forkrun.map(payload, r, mode=mode, workers=WORKERS, nodes=nodes,
                                orchestrator=orch, order=order, output=output)
         finally:
             os.close(r)

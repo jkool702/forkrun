@@ -10,6 +10,10 @@ for v in light medium heavy; do
     for c in default max; do
       for o in view bytes; do
         for s in file pipe; do
+          if [ -n "${FR_BENCH_SKIP:-}" ] && \
+             echo "$v $p $c $o $s" | grep -q "$FR_BENCH_SKIP"; then
+            continue
+          fi
           echo "-- $v $p $c $o $s" >> "$OUT"
           python3 cell.py "$v" "$p" "$c" "$o" "$s" >> "$OUT" 2>&1 \
             || echo "   CELL FAILED" >> "$OUT"
