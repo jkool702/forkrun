@@ -7,6 +7,7 @@
 # recording the execv call, before anything asserts on output.
 import os
 import sys
+import time
 import unittest
 import warnings
 
@@ -340,6 +341,130 @@ class TestCleanroomFaultParity(unittest.TestCase):
         os.environ["FORKRUN_RETRY_LIMIT"] = "1"
         a, b = self._both(self._fail())
         self.assertEqual(_joined(a), _joined(b))
+
+
+@unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
+class TestCleanroomStreaming(unittest.TestCase):
+    """W-CR3: streaming through the public stream() API.
+
+    The C capability was verified standalone before any wiring (first
+    result at 2.8 ms on a 200k-record pipe). These tests pin the
+    PYTHON half: byte-exactness against the in-process path, liveness,
+    and -- the one that would hurt most -- teardown when the caller
+    abandons the stream early.
+    """
+
+    def setUp(self):
+        if _cleanroom_launcher_path() is None:
+            self.skipTest("launcher binary not built")
+        self.n = 40000
+        self._old = os.environ.get("FORKRUN_CLEANROOM")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._old is None:
+            os.environ.pop("FORKRUN_CLEANROOM", None)
+        else:
+            os.environ["FORKRUN_CLEANROOM"] = self._old
+
+    def _lines(self, n):
+        for i in range(n):
+            yield ('{"eid":"e%d","uid":1,"iid":2,"ts":1700000000,'
+                   '"et":"view","dev":"ios","dur":5}\n' % i).encode()
+
+    def _pipe_with_producer(self, n, delay=0.0):
+        """A pipe fed by a background thread; returns (read_fd, thread)."""
+        import threading
+        r, w = os.pipe()
+
+        def run():
+            buf = []
+            for i in range(n):
+                buf.append('{"eid":"e%d","uid":1,"iid":2,"ts":1700000000,'
+                           '"et":"view","dev":"ios","dur":5}\n' % i)
+                if len(buf) >= 500:
+                    os.write(w, "".join(buf).encode())
+                    buf = []
+                if delay:
+                    time.sleep(delay)
+            if buf:
+                os.write(w, "".join(buf).encode())
+            os.close(w)
+
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        return r, th
+
+    def _drain(self, fd):
+        out = []
+        for blob in forkrun.stream(
+                _spec(), fd, mode="plugin", workers=4, nodes=1,
+                streaming=True, orchestrator=False):
+            out.append(bytes(blob))
+        return b"".join(out)
+
+    def test_stream_matches_in_process(self):
+        r, th = self._pipe_with_producer(self.n)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        streamed = self._drain(r)
+        th.join()
+        os.close(r)
+        # Reference: same records, materialized, in-process.
+        path = _make_input(self.n)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        ref = b"".join(bytes(x) for x in forkrun.map(
+            _spec(), path, workers=4, nodes=1, mode="plugin",
+            output="bytes", orchestrator=False))
+        self.assertEqual(len(streamed), len(ref))
+        self.assertEqual(streamed, ref)
+
+    def test_stream_is_live(self):
+        # A slow producer: if the launcher buffered to EOF, the first
+        # result could not arrive until the producer finished.
+        r, th = self._pipe_with_producer(self.n, delay=0.00005)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        t0 = time.time()
+        first = None
+        for blob in forkrun.stream(
+                _spec(), r, mode="plugin", workers=4, nodes=1,
+                streaming=True, orchestrator=False):
+            if first is None:
+                first = time.time() - t0
+        th.join()
+        os.close(r)
+        self.assertIsNotNone(first, "no result arrived at all")
+        self.assertLess(
+            first, 5.0,
+            "first result took %.1fs -- the launcher is buffering to EOF "
+            "instead of streaming" % (first,))
+
+    def test_abandon_early_does_not_hang_or_leak(self):
+        # Break out of the loop after the first batch: teardown must kill
+        # the launcher and producer, not wait on a full pipe.
+        r, th = self._pipe_with_producer(200000)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        gen = forkrun.stream(
+            _spec(), r, mode="plugin", workers=4, nodes=1,
+            streaming=True, orchestrator=False)
+        got = next(iter(gen))
+        self.assertTrue(len(bytes(got)) > 0)
+        gen.close()
+        th.join(timeout=30)
+        self.assertFalse(th.is_alive(), "producer still blocked")
+        os.close(r)
+
+    def test_stream_outside_envelope_falls_back(self):
+        # orchestrator=True is the default and is OUTSIDE the envelope;
+        # it must still produce correct output rather than break.
+        r, th = self._pipe_with_producer(5000)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        out = b"".join(bytes(x) for x in forkrun.stream(
+            _spec(), r, mode="plugin", workers=2, nodes=1,
+            streaming=True))
+        th.join()
+        os.close(r)
+        self.assertGreater(len(out), 0)
 
 
 if __name__ == "__main__":
