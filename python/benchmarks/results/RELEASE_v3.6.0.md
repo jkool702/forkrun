@@ -301,6 +301,24 @@ decomposes forkrun-vs-Executor into payload vs architecture components. CSV twin
 
 
 ### 5M-Record Steady-State Benchmark — 28 Workers, `nodes="auto"` (4 nodes, `numa=fake=4` boot)
+> **Re-measured 2026-10-03 on a fresh `numa=fake=4` boot**, superseding
+> rows that dated from `ce17b0a4` — before the 1 MiB pipe resize, the
+> forked ingest child, the `snapshot_fds` fix, the pre-flight fix and the
+> drain hole-punch. 48/48 cells exact. `shmem_enabled=always`.
+>
+> **The light C-plugin rows came in LOWER than the copy they replace**
+> (12.33M → 10.59M memoryview, 8.98M → 8.31M bytes), while medium and
+> heavy are flat-to-better (+0.8% to +8.5%). The old light figure is not
+> reproducible: a separate UMA boot measured 10.2M and this fake-NUMA boot
+> measured 10.59M, so two independent boots agree with each other and
+> disagree with it. The stale number appears to have been a favourable
+> run rather than a real regression — the ~0.5s light corpus is the most
+> sensitive to machine state. **10.59M is the number to quote.**
+>
+> Multi-node shows up exactly where there is work to distribute: the
+> `bytes` rows gain 8-9% on heavy (a real per-record copy that four nodes
+> can share) while the zero-copy `view` rows gain ~2% (nothing left to
+> parallelise). That is the shape healthy NUMA scaling should have.
 
 All systems process the same 5,000,000-record input on the same 28-thread Intel i9-7940X.
 forkrun rows re-measured 2026-10-02 (v3.6.1 parent-side work, `ce17b0a4`;
@@ -326,11 +344,11 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 
 | System                              | Light (533 MB)          | Medium (2.35 GB)        | Heavy (6.72 GB)        |
 |-------------------------------------|-------------------------|-------------------------|------------------------|
-| **★ forkrun C plugin (memoryview)**  | **12.33M rec/s (1,313 MB/s)** | **3.36M rec/s (1,580 MB/s)** | **1.03M rec/s (1,381 MB/s)** |
-| **★ forkrun C plugin (bytes)**       | **8.98M rec/s (957 MB/s)** | **2.51M rec/s (1,180 MB/s)** | **827k rec/s (1,112 MB/s)** |
+| **★ forkrun C plugin (memoryview)**  | **10.59M rec/s (1,129 MB/s)** | **3.21M rec/s (1,509 MB/s)** | **1.05M rec/s (1,414 MB/s)** |
+| **★ forkrun C plugin (bytes)**       | **8.31M rec/s (886 MB/s)** | **2.53M rec/s (1,188 MB/s)** | **900k rec/s (1,206 MB/s)** |
 | Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
-| **★ forkrun Python UDF (memoryview)** | **1.92M rec/s (205 MB/s)** |  **845k rec/s (397 MB/s)**   |  **97k rec/s (130 MB/s)**  |
-| **★ forkrun Python UDF (bytes)**     | **1.82M rec/s (194 MB/s)** |  **787k rec/s (370 MB/s)**   |  **95k rec/s (127 MB/s)**  |
+| **★ forkrun Python UDF (memoryview)** | **1.90M rec/s (202 MB/s)** |  **890k rec/s (416 MB/s)**   |  **100k rec/s (131 MB/s)** |
+| **★ forkrun Python UDF (bytes)**     | **1.78M rec/s (190 MB/s)** |  **820k rec/s (385 MB/s)**   |  **100k rec/s (129 MB/s)** |
 | ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s) |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
 | ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
 | multiprocessing.Pool                | 1.60M rec/s (170 MB/s) |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
@@ -338,9 +356,9 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
-| **forkrun C vs Executor**           | **7.52×** | **4.22×** | **10.92×** |
-| **forkrun C vs Polars**             |           —              | **1.53×** |            —             |
-| forkrun C vs Executor+C             | 3.36× | 1.66× | 1.40× § |
+| **forkrun C vs Executor**           | **6.46×** | **4.03×** | **11.17×** |
+| **forkrun C vs Polars**             |           —              | **1.46×** |            —             |
+| forkrun C vs Executor+C             | 2.89× | 1.58× | 1.43× § |
 
 Ratio rows use the **memoryview** rows (forkrun's default representation since
 0.17.0). Zero-copy output is worth 1.01×–1.45× over per-record `bytes` on these
