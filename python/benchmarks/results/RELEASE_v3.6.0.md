@@ -148,11 +148,21 @@ from §0: forkrun's C engine path is 5–11× the pool baseline here versus
 1.1–2.8× on files, because file input lets forkrun skip the ingest problem
 entirely while a pipe forces every system to interleave reading with compute.
 
-forkrun rows are the `pipe` columns of the 48-cell grid
-(`streaming_vs_file_2026-10-02.md`, `cells_pf.log`) — same measurement, not a
-re-run. Competitor rows are new: executor/pool fed incrementally from the same
-pipe (`bench_streaming_competitors.py`), median-of-3 after warmup, exact record
-count verified on every cell, one corpus per process.
+**Topology: UMA (`nodes=1`) throughout this table**, which is what the
+competitor rows were measured on and is therefore the only way the
+comparison stays like-for-like. forkrun rows are the `pipe` columns of
+the 48-cell grid (`streaming_vs_file_2026-10-02.md`, `cells_pf.log`) —
+same measurement, not a re-run. Competitor rows are new: executor/pool fed
+incrementally from the same pipe (`bench_streaming_competitors.py`),
+median-of-3 after warmup, exact record count verified on every cell, one
+corpus per process.
+
+Do not mix these rows with the `nodes="auto"` (4-node `numa=fake=4`)
+figures elsewhere in this file. That topology re-measured higher on the
+`bytes` paths (the 4-node headline copy is +8–9% over this on heavy) and
+flips the sign of the pipe-vs-file median, so the absolute numbers and
+even the direction of a streaming comparison depend on topology. §0 and
+§0b each name theirs; neither is "the" number.
 
 | System                                   | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
 |------------------------------------------|----------------|------------------|----------------|

@@ -286,6 +286,23 @@ on a bigger corpus before believing it.
   ~1.9s -- 4x medium's per-record rate, the closest thing here to true
   steady state -- and there 28w's edge is single digits. Re-run the
   competitors at 20M before quoting a steady-state ratio.
+- **THE STREAMING-VS-FILE MEDIAN FLIPS SIGN WITH TOPOLOGY (fake-NUMA,
+  2026-10-03).** Same 48-cell harness, same corpora: UMA pipe is
+  FASTER than file (median -3.6%, 20/24 at parity-or-better); the
+  4-node numa=fake=4 boot is marginally SLOWER (median +1.4%, 9/24,
+  range -8.0% to +12.1%). File input already engages the multi-node
+  ingest/indexer path, so a pipe has less left to win and its per-node
+  coordination shows up as a small cost. **Never quote "pipe is N%
+  faster than a file" without naming the topology.**
+- **Multi-node gains land where there is work, not where there is
+  bytes.** On the 4-node boot vs UMA: C-plugin `bytes` +8-9% on heavy
+  (a real per-record copy four nodes can share), zero-copy `view` ~+2%
+  (nothing left to parallelise). Healthy NUMA shape.
+- **The old light C-plugin figure was not reproducible.** It read
+  12.33M rec/s; a UMA boot measured 10.2M and the fake-NUMA boot
+  10.59M. Two independent boots agreeing against a stale number means
+  the stale one was a favourable run, not a regression. The ~0.5s
+  light corpus is the most state-sensitive cell in the grid.
 - **W-DRAINHOLE: punching the output memfd is a NO-OP for speed. Do not
   retry.** The idea was sound and the code is bash-parity (ring_order
   holes the output memfd after moving a chunk; the Python drain now does
