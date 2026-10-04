@@ -260,16 +260,22 @@ on a bigger corpus before believing it.
   i.e. when no data has landed, which is exactly when no worker can have
   arrived -- so the `active_waiters > 0` bail cannot fire while the
   old code was spinning. Same preads, same order, same count.
-- **14 WORKERS BEAT 28 ON THIS BOX.** light/plugin/view/pipe, median of
-  3: 8w 755 MB/s, 14w 1167 MB/s, 28w 1044 MB/s. Per-worker throughput
-  94 -> 83 -> 37 MB/s. 28 is past the knee and is SLOWER than 14.
-  Two candidate causes, not yet separated: SMT (this is 14c/28t, so 28
-  workers is 2 per physical core and the workload is memory-bound) and
-  genuine shared-path contention scaling with worker count. The 2.2x
-  per-worker collapse from 14w to 28w is steeper than SMT alone usually
-  gives, so both may be real. **Worth knowing before publishing a
-  headline table that uses 28 workers** -- though 28 is what the
-  competitors were measured at, so changing it breaks comparability.
+- **28 WORKERS IS CORRECT. An earlier "14 beats 28" note here was WRONG
+  -- it was measured on light only.** The light sweep (8w755, 14w1167,
+  28w1044 MB/s) made 14 look better, but re-running the whole grid at 14
+  workers shows 14 is slower in 19 of 21 plugin cells, median +11.3%,
+  and the gap WIDENS with workload size:
+
+      light   file +3.4..+7.0%   pipe -7.5..-7.3%  (14w WINS on pipe)
+      medium  file +11.8..+15.9% pipe +11.3..+14.1%
+      heavy   file +21.7..+21.8% pipe +24.1..+27.6%
+
+  The light-pipe win is a fixed-overhead artifact: a ~0.5s run is
+  dominated by spawn cost, which 28 workers pay more of. As runs get
+  long enough for steady state, extra workers win monotonically. So
+  per-worker MB/s falling from 94 (8w) to 37 (28w) was NOT saturation --
+  it was amortising a fixed cost over fewer records. **Lesson: never
+  draw a scaling conclusion from the smallest corpus; it inverts.**
 - **W-DRAINHOLE: punching the output memfd is a NO-OP for speed. Do not
   retry.** The idea was sound and the code is bash-parity (ring_order
   holes the output memfd after moving a chunk; the Python drain now does
