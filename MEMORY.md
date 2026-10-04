@@ -336,6 +336,28 @@ on a bigger corpus before believing it.
   streaming path may have no backpressure at all, where bash has always
   had it. `test_slow_consumer_bounds_memory` passes, so something bounds
   it today, but confirm the mechanism before assuming the two sides agree.
+- **fork() COST SCALES WITH PARENT RSS. MEASURED: 0.27ms/fork from a
+  clean parent, 45.3ms/fork from a 5GB one -- 7.5ms vs 1274ms for 28
+  forks.** The page table is copied per child. This is the single
+  largest performance defect found in this project and it is
+  architectural, not a bug.
+  - The Python frontend dlopens the substrate into the USER's process,
+    so workers fork from whatever that process holds. `frun` does NOT
+    have this problem: it deliberately `exec -c "$BASH" --norc
+    --noprofile` into a cleanroom BEFORE calling ring_init, so it
+    forks from a fresh small shell. (It re-opens its memfds by path --
+    `/proc/$BASHPID/fd/N` -- rather than passing fd numbers.)
+  - Consequence: ~1.27s of pure fork tax per forkrun call from a
+    bloated parent. On light/5M (0.49s run) that alone would be 2.6x;
+    on heavy (~5s) it is ~20%. It is a FIXED per-invocation cost, so
+    it masquerades as noise on long runs and dominates short ones.
+  - It corrupted the published headline table: `bench_ml_pipeline` runs
+    every framework in ONE process, so by the time forkrun runs the
+    parent is at 3.5-5.5GB. forkrun-plugin reported 6.3M rec/s
+    in-sequence vs 12.7M from the IDENTICAL function standalone -- a
+    2x error, of which fork cost explains 78% (1.27s of a 1.62s gap).
+  - Fixed in the harness by `--isolate` (one subprocess per system).
+    A `--settle` sleep does NOT help: sleep cannot reduce RSS.
 - **NEVER let exactness accounting run inside a timed region.** I put
   `count_results()` inside the clock for the streaming benchmark and it
   made forkrun look 3x slower than it is (3.17M vs the grid's 7.5M).
