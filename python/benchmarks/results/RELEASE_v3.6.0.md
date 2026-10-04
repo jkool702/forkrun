@@ -189,10 +189,14 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 > defaults heavy to `heavy_20M`. It also matters for honesty in the
 > other direction: at 5M the light run is ~1.6 s, short enough that
 > fixed costs are a visible share, whereas 20M is closer to steady
-> state. **Medium and heavy still need their own isolated re-runs** —
-> they come from the same contaminated gauntlet and are very likely low
-> by a similar margin. The harness fix is committed; those re-runs are
-> not done.
+> state. **Medium and heavy are NOT materially affected.** Checked against
+> the clean 48-cell run on this boot: medium view 3.21M vs 3.27M (+1.8%),
+> heavy view 1.05M vs 1.07M (+1.5%), bytes and UDF rows within +/-1.3%.
+> All noise. The fork tax is a *fixed* ~75 ms, which is ~5% of
+> medium's 1.53 s and ~1.6% of heavy's 4.69 s. It only became
+> catastrophic on light, whose 0.46 s run turned ~100 ms into 20%.
+> An earlier note here said medium and heavy were "probably low by
+> around 30%"; that was wrong, and is corrected here.
 
 ---
 
