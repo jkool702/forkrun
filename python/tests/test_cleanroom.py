@@ -214,5 +214,104 @@ class TestCleanroomExecutes(unittest.TestCase):
         self.assertEqual(len(_joined(out)), 2000)
 
 
+@unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
+class TestCleanroomFaultParity(unittest.TestCase):
+    """W-CR1: the launcher's fault policy must match the in-process path.
+
+    This is the gate for flipping the default ON. The launcher takes
+    --on-error/--retry across the exec boundary, so retry/skip/fail-fast
+    and FORKRUN_RETRY_LIMIT are TRANSPORTED rather than refused -- but
+    transported is not the same as honoured, and only a comparison
+    against the in-process path can show which.
+    """
+
+    V1_SO = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))),
+        "python", "tests", "plugins", "test_plugin_v1.so")
+
+    def setUp(self):
+        if not os.path.exists(self.V1_SO):
+            self.skipTest("test_plugin_v1.so not built")
+        if _cleanroom_launcher_path() is None:
+            self.skipTest("launcher binary not built")
+        self._old_cr = os.environ.get("FORKRUN_CLEANROOM")
+        self._old_rl = os.environ.get("FORKRUN_RETRY_LIMIT")
+        self.path = _make_input(600)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        for p in (self.path,):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        for k, v in (("FORKRUN_CLEANROOM", self._old_cr),
+                     ("FORKRUN_RETRY_LIMIT", self._old_rl)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _up(self):
+        return self.V1_SO + ":process_v1"
+
+    def _fail(self):
+        return self.V1_SO + ":always_fail_v1"
+
+    def _both(self, spec, **kw):
+        """Run once per path. orchestrator=False pins the cleanroom
+        inside its envelope so this compares FAULT POLICY, not topology
+        or supervision."""
+        kw.setdefault("nodes", 1)
+        kw.setdefault("workers", 1)
+        kw.setdefault("orchestrator", False)
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        a = forkrun.map(spec, self.path, mode="plugin", output="bytes", **kw)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        b = forkrun.map(spec, self.path, mode="plugin", output="bytes", **kw)
+        return a, b
+
+    def test_success_identical(self):
+        a, b = self._both(self._up())
+        self.assertEqual(_joined(a), _joined(b))
+        self.assertGreater(len(_joined(a)), 0)
+
+    def test_retry_then_poison_identical(self):
+        # always_fail_v1 with the default retry limit: every batch is
+        # retried then poisoned, so both paths must yield nothing.
+        a, b = self._both(self._fail())
+        self.assertEqual(a, [])
+        self.assertEqual(b, [])
+        self.assertEqual(_joined(a), _joined(b))
+
+    def test_skip_identical(self):
+        a, b = self._both(self._fail(), on_error="skip")
+        self.assertEqual(_joined(a), _joined(b))
+        self.assertEqual(a, [])
+
+    def test_fail_fast_raises_both(self):
+        for cr in ("0", "1"):
+            os.environ["FORKRUN_CLEANROOM"] = cr
+            with self.assertRaises(
+                    RuntimeError, msg="cr=%s did not raise" % cr):
+                forkrun.map(self._fail(), self.path, mode="plugin",
+                            output="bytes", nodes=1, workers=1,
+                            on_error="fail-fast", orchestrator=False)
+
+    def test_retry_limit_is_transported(self):
+        # FORKRUN_RETRY_LIMIT=0 poisons on the FIRST failure, so the
+        # launcher must not silently use its own default of 3. Both
+        # paths must still agree, and agree on empty.
+        os.environ["FORKRUN_RETRY_LIMIT"] = "0"
+        a, b = self._both(self._fail())
+        self.assertEqual(_joined(a), _joined(b))
+
+    def test_retry_limit_custom_agrees(self):
+        os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+        a, b = self._both(self._fail())
+        self.assertEqual(_joined(a), _joined(b))
+
+
 if __name__ == "__main__":
     unittest.main()
