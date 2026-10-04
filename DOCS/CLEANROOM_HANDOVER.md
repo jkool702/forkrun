@@ -331,26 +331,32 @@ hardware** — flag it, do not fake a result.
 `b845a96b` reverted an unsafe `ring_copy_main` / relaxed gate. Do not treat
 `ingest_complete` as a truthful drain signal.
 
-### 7.5 `test_c_drain_stream_matches` is order-dependent
+### 7.5 `test_c_drain_stream_matches` — ROOT CAUSED, see MEMORY.md `W-STREAMDRAIN`
 
-Passes inside the full suite, **fails 5/5 standalone**. Not a load flake and not
-a regression from the dedup — verified by stashing and running both ways with
-identical results.
+**CORRECTION.** An earlier version of this section claimed the test was
+"order-dependent: passes in the suite, fails 5/5 standalone." **That was
+wrong**, and the reason is worth keeping: running a single test as
+`python3 -m unittest test_c_drain.TestCDrainStream...` from `python/`
+fails with `ModuleNotFoundError` — the 5/5 "failures" were measuring an
+**ImportError**, not the test. Run single tests from `python/tests/`, or
+cd there; the test passes standalone.
 
-So something a sibling test sets up is load-bearing for it. That makes it a
-latent suite-fragility problem: any future `unittest` ordering change, or running
-a subset in CI, could turn this into a red build nobody understands.
+The test genuinely fails ~5-10% of runs under suite load, for the same
+root cause as §6.3: a duplicate worker `wid` in the streaming NUMA spawn
+path. Two processes share one output memfd (`out_fds[wid]`) while another
+wid's memfd is never drained — emitted, acked, and never delivered.
 
-Confirmed NOT a regression:
+Confirmed by measurement, not inference:
+- `fr_py_drain_loop` exits `rc=0` with **nothing undrained** — drain is fine
+- workers claim `18890` and emit `18890` **in failing runs too** (delta=0)
+- `map()` 30/30 clean; `c_drain=False` 25/25 clean — streaming-only
+- `gc.disable()` still fails 3/40 — **GC is not implicated**
+- scanner `total_scanned` always sums to 2000 — publication is complete
 
-```
-WITH dedup:    F F F F
-WITHOUT dedup: F F F F
-```
+Dead ends: GC, drain-side loss, scanner under-publication, and the
+frozen engine core are all excluded. Don't re-tread them.
 
-**Establish the baseline yourself first** — the previous instance only checked
-this one test, not the full suite in isolation, so it is not yet proven that the
-*suite* as a whole depends on ordering.
+Repro loop and full evidence: `MEMORY.md`, section `W-STREAMDRAIN`.
 
 ---
 
