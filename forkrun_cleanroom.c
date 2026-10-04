@@ -1,43 +1,41 @@
-/* W-CLEANROOM launcher — proof of concept.
+/* W-CLEANROOM launcher — integrated orchestration (NEW/REFACTOR3.5).
  *
- * Mirrors frun's cleanroom for the Python frontend:
+ * Mirrors frun's cleanroom for the Python frontend. Python dlopens the
+ * substrate into the USER's process, so its workers fork from whatever
+ * that process holds; fork() copies the page table per child, so a
+ * bloated parent costs ~45ms/fork against ~0.07ms here. frun avoids
+ * this by exec'ing into a cleanroom BEFORE ring_init; we do the same,
+ * which is also why no engine state has to survive the exec -- the
+ * launcher calls fr_py_init itself, in its own small address space.
  *
- *   bloated Python parent --posix_spawn--> THIS (small, post-exec)
- *                                            |-- fr_py_init()
- *                                            +-- fork x N workers
+ * Scope: MATERIALIZED source + C plugin, which is the path with the
+ * largest absolute numbers and the most to gain. Streaming needs the
+ * ingest child and the reactor's incremental worker spawn, which is
+ * follow-on work.
  *
- * posix_spawn uses CLONE_VM|CLONE_VFORK, so the spawn copies NO page
- * table. The launcher dlopens the substrate and then FORKS (no second
- * exec), so workers inherit the engine mapping by COW. That makes the
- * N forks cheap -- the whole point.
+ * The sequence below is a transliteration of the Python path:
+ *   run.py::_new_output_memfds / make_pipe / fork_workers
+ *   run.py::_fork_ingest_helpers  (fallow + scan children)
+ *   run.py::_fork_drain           (fr_py_drain_loop child)
+ * with fork+scrub+call+_exit replaced by fork+call+_exit, since this
+ * process has no unrelated descriptors to scrub.
  *
- * Like frun, we init AFTER arriving here, so no engine state ever
- * crosses the exec boundary. That is why the MAP_ANONYMOUS shared
- * state is not an obstacle: we do not carry it, we recreate it.
- *
- * PoC scope, deliberately narrow: prove the fork tax is gone. This does
- * NOT yet implement the full orchestration (scan/drain/reactor) -- that
- * is the integration step, gated on this measurement.
- *
- * Build: see Makefile.substrate (fr_py_cleanroom target).
+ * Build: gcc -O2 -o forkrun_cleanroom forkrun_cleanroom.c -ldl
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/syscall.h>
 
-/* Substrate entry points, resolved at runtime. Signatures mirror
- * python/forkrun/_shim.c -- keep the two in step. */
 typedef int (*fn_init)(int lines, int bytes);
 typedef int (*fn_worker_plugin_loop)(int wid, const char *path,
                                      const char *func_name,
@@ -49,258 +47,256 @@ typedef int (*fn_worker_plugin_loop)(int wid, const char *path,
 typedef int (*fn_scan)(int fd);
 typedef int (*fn_ingest_done)(void);
 typedef int (*fn_ingest_data_post)(void);
-typedef int (*fn_abort)(void);
-typedef void *(*fn_map_range)(int src_fd, unsigned long long src_off,
-                              int dst_fd, unsigned long long dst_off,
-                              unsigned long long length);
-typedef int (*fn_unmap)(void *p);
+typedef int (*fn_fallow_loop)(int fallow_r, int memfd);
+typedef int (*fn_drain_loop)(int signal_r, const int *out_fds,
+                             int num_workers, int results_fd, int mode);
 
 struct opts {
     const char *so_path;
     const char *plugin_path;
     const char *plugin_func;
     int workers;
-    int lines;              /* >0 lines mode, >0 bytes mode mutually excl. */
+    int lines;
     int bytes;
     int source_fd;
-    int result_fd;
+    int result_fd;      /* launcher writes framed results here */
+    int drain_mode;
+    int retry_limit;
+    int on_error;
     int verbose;
-    int fork_only;   /* PoC: measure fork cost, do not wait for workers */
+    int fork_only;
 };
 
-static long clock_gettime_nsec(void);
-
-/* memfd_create is not exposed by glibc headers under _GNU_SOURCE on
- * every toolchain; the engine reaches it through the same syscall
- * (forkrun_ring.c:1249), so do the same rather than adding a libc
- * dependency the engine does not have. */
-static int fr_memfd_create(const char *name, unsigned int flags) {
-    return (int)syscall(__NR_memfd_create, name, flags);
+static int fr_memfd_create(const char *name) {
+    return (int)syscall(__NR_memfd_create, name, 0);
 }
 
 static void die(const char *what) {
     fprintf(stderr, "forkrun-cleanroom: %s: %s\n", what, strerror(errno));
-    exit(70);
+    _exit(70);
 }
 
-static void *sym(void *h, const char *name) {
-    void *p = dlsym(h, name);
-    if (!p) {
-        fprintf(stderr, "forkrun-cleanroom: missing symbol %s\n", name);
-        exit(69);
-    }
+static void *sym(void *h, const char *n) {
+    void *p = dlsym(h, n);
+    if (!p) { fprintf(stderr, "forkrun-cleanroom: missing %s\n", n); _exit(69); }
     return p;
 }
 
-/* Raise the fd limit to the hard limit, exactly as frun's cleanroom
- * does (`ulimit -n $(ulimit -Hn)`). A launcher that inherits a low
- * RLIMIT_NOFILE would fail late and confusingly when it sets up
- * per-worker pipes. */
-static void raise_fd_limit(void) {
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
-        return;
-    if (rl.rlim_cur != rl.rlim_max) {
-        rl.rlim_cur = rl.rlim_max;
-        (void)setrlimit(RLIMIT_NOFILE, &rl);   /* best effort */
+static long now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000000000L + ts.tv_nsec;
+}
+
+static long rss_kb(void) {
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    char l[256]; long kb = -1;
+    while (fgets(l, sizeof l, f))
+        if (!strncmp(l, "VmRSS:", 6)) { kb = strtol(l + 6, NULL, 10); break; }
+    fclose(f);
+    return kb;
+}
+
+/* Close every descriptor except those in `keep`.
+ *
+ * Python's fork helpers call scrub_fds(keep) before entering the C
+ * loop. Without the equivalent here each worker inherits every OTHER
+ * worker's out_fd and the shared signal write end, which is both an
+ * fd-leak and -- because the drain tracks liveness through those
+ * descriptors -- a correctness hazard.
+ */
+static void scrub_closem_others(const int *keep, int nkeep) {
+    for (int fd = 3; fd < 1024; fd++) {
+        int keepit = 0;
+        for (int i = 0; i < nkeep; i++)
+            if (keep[i] == fd) { keepit = 1; break; }
+        if (!keepit)
+            close(fd);
     }
 }
 
-static long vm_rss_kb(void) {
-    FILE *f = fopen("/proc/self/status", "r");
-    if (!f)
-        return -1;
-    char line[256];
-    long kb = -1;
-    while (fgets(line, sizeof line, f)) {
-        if (strncmp(line, "VmRSS:", 6) == 0) {
-            kb = strtol(line + 6, NULL, 10);
-            break;
-        }
+static void raise_fd_limit(void) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != rl.rlim_max) {
+        rl.rlim_cur = rl.rlim_max;
+        (void)setrlimit(RLIMIT_NOFILE, &rl);
     }
-    fclose(f);
-    return kb;
 }
 
 int main(int argc, char **argv) {
     struct opts o;
     memset(&o, 0, sizeof o);
-    o.workers = 1;
-    o.source_fd = -1;
-    o.result_fd = -1;
+    o.workers = 1; o.source_fd = -1; o.result_fd = -1;
+    o.drain_mode = 0; o.retry_limit = 3; o.on_error = 0;
 
-    /* argv: --so --plugin --func --workers --lines --bytes --src
-     *       --result --verbose
-     * fds arrive as inherited descriptors, NOT numbers to look up:
-     * posix_spawn's file_actions dup2 them in before exec. */
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--so") && i + 1 < argc)          o.so_path = argv[++i];
+        if (!strcmp(argv[i], "--so") && i + 1 < argc)        o.so_path = argv[++i];
         else if (!strcmp(argv[i], "--plugin") && i + 1 < argc) o.plugin_path = argv[++i];
-        else if (!strcmp(argv[i], "--func") && i + 1 < argc)   o.plugin_func = argv[++i];
+        else if (!strcmp(argv[i], "--func") && i + 1 < argc) o.plugin_func = argv[++i];
         else if (!strcmp(argv[i], "--workers") && i + 1 < argc) o.workers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lines") && i + 1 < argc)  o.lines = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bytes") && i + 1 < argc)  o.bytes = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--src") && i + 1 < argc)   o.source_fd = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--result") && i + 1 < argc) o.result_fd = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--drain-mode") && i + 1 < argc) o.drain_mode = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--retry") && i + 1 < argc) o.retry_limit = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--on-error") && i + 1 < argc) o.on_error = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--verbose"))                o.verbose = 1;
         else if (!strcmp(argv[i], "--fork-only"))             o.fork_only = 1;
         else { fprintf(stderr, "forkrun-cleanroom: bad arg %s\n", argv[i]); return 64; }
     }
-    if (!o.so_path || o.source_fd < 0) {
-        fprintf(stderr, "forkrun-cleanroom: --so and --src are required\n");
+    if (!o.so_path || o.source_fd < 0 || !o.plugin_path) {
+        fprintf(stderr, "forkrun-cleanroom: --so --src --plugin required\n");
         return 64;
     }
     if (o.workers < 1) o.workers = 1;
-
     raise_fd_limit();
 
-    /* _FR_IN_CLEANROOM equivalent: we are already the clean process, so
-     * there is nothing to guard against here. The GUARD belongs on the
-     * parent side, which must not spawn us twice. */
-
-    if (o.verbose)
-        fprintf(stderr, "forkrun-cleanroom: RSS at entry %ld kB\n",
-                vm_rss_kb());
-
     void *h = dlopen(o.so_path, RTLD_NOW | RTLD_LOCAL);
-    if (!h) {
-        fprintf(stderr, "forkrun-cleanroom: dlopen %s: %s\n",
-                o.so_path, dlerror());
-        return 69;
-    }
-    fn_init              p_init        = (fn_init)             sym(h, "fr_py_init");
-    fn_worker_plugin_loop p_wloop      = (fn_worker_plugin_loop) sym(h, "fr_py_worker_plugin_loop");
-    fn_scan              p_scan        = (fn_scan)             sym(h, "fr_py_scan");
-    fn_ingest_done       p_idone       = (fn_ingest_done)      sym(h, "fr_py_ingest_done");
-    fn_ingest_data_post  p_ipost       = (fn_ingest_data_post) sym(h, "fr_py_ingest_data_post");
-    fn_map_range         p_copy        = (fn_map_range)        sym(h, "fr_py_copy_range");
-    fn_abort             p_abort       = (fn_abort)            sym(h, "fr_py_abort");
+    if (!h) { fprintf(stderr, "forkrun-cleanroom: dlopen: %s\n", dlerror()); return 69; }
+    fn_init                p_init  = (fn_init)                sym(h, "fr_py_init");
+    fn_worker_plugin_loop  p_wloop = (fn_worker_plugin_loop)  sym(h, "fr_py_worker_plugin_loop");
+    fn_scan                p_scan  = (fn_scan)                sym(h, "fr_py_scan");
+    fn_ingest_done         p_idone = (fn_ingest_done)         sym(h, "fr_py_ingest_done");
+    fn_ingest_data_post    p_ipost = (fn_ingest_data_post)    sym(h, "fr_py_ingest_data_post");
+    fn_fallow_loop         p_fall  = (fn_fallow_loop)         sym(h, "fr_py_fallow_loop");
+    fn_drain_loop          p_drain = (fn_drain_loop)          sym(h, "fr_py_drain_loop");
 
-    if (o.verbose)
-        fprintf(stderr, "forkrun-cleanroom: RSS after dlopen %ld kB\n",
-                vm_rss_kb());
-
-    /* Init HERE, after exec -- this is what makes the cleanroom work.
-     * The state mapping is created in this address space and inherited
-     * by the workers we fork below; it never has to survive an exec. */
+    /* Init HERE, after exec. This is the whole point: the state mapping
+     * is created in this small address space and inherited by every
+     * child forked below. Nothing had to cross the exec boundary. */
     if (p_init(o.lines, o.bytes) != 0) {
         fprintf(stderr, "forkrun-cleanroom: fr_py_init failed\n");
         return 71;
     }
-    if (o.verbose)
-        fprintf(stderr, "forkrun-cleanroom: RSS after init %ld kB\n",
-                vm_rss_kb());
 
-    /* Ingress: copy the source into a memfd so workers can pread it.
-     * PoC keeps this synchronous; the integrated launcher will overlap
-     * it with the scan exactly as the Python path does. */
-    int ingress = fr_memfd_create("fr_cleanroom_ingress", 0);
-    if (ingress < 0) die("memfd_create(ingress)");
+    /* Spill the source into the ingress memfd, poking the eventfd per
+     * chunk exactly as the Python spill does, so the scanner's
+     * pre-flight blocks instead of spin-sleeping. */
+    int memfd = fr_memfd_create("fr_cr_ingress");
+    if (memfd < 0) die("memfd_create(ingress)");
     {
-        char buf[1 << 20];
+        static char buf[1 << 20];
         unsigned long long off = 0;
         for (;;) {
             ssize_t n = read(o.source_fd, buf, sizeof buf);
-            if (n < 0) {
-                if (errno == EINTR) continue;
-                die("read(source)");
-            }
+            if (n < 0) { if (errno == EINTR) continue; die("read(source)"); }
             if (n == 0) break;
-            ssize_t w = pwrite(ingress, buf, (size_t)n, (off_t)off);
+            ssize_t w = pwrite(memfd, buf, (size_t)n, (off_t)off);
             if (w != n) die("pwrite(ingress)");
             off += (unsigned long long)n;
-            p_ipost();            /* same per-chunk poke the Python
-                                     * spill does, so the scanner's
-                                     * pre-flight does not spin */
+            p_ipost();
         }
     }
     if (p_idone() != 0)
         fprintf(stderr, "forkrun-cleanroom: warning: ingest_done failed\n");
 
-    /* Per-worker output memfds. */
-    int *outs = calloc((size_t)o.workers, sizeof(int));
-    int *sigw = calloc((size_t)o.workers, sizeof(int));
-    int *sigr = calloc((size_t)o.workers, sizeof(int));
-    if (!outs || !sigw || !sigr) die("calloc");
+    int *out_fds = calloc((size_t)o.workers, sizeof(int));
+    if (!out_fds) die("calloc(out_fds)");
     for (int i = 0; i < o.workers; i++) {
-        char nm[64];
-        snprintf(nm, sizeof nm, "fr_cleanroom_out_%d", i);
-        outs[i] = fr_memfd_create(nm, 0);
-        if (outs[i] < 0) die("memfd_create(out)");
-        int pfd[2];
-        if (pipe(pfd) != 0) die("pipe(signal)");
-        sigr[i] = pfd[0];
-        sigw[i] = pfd[1];
+        char nm[48];
+        snprintf(nm, sizeof nm, "fr_cr_out_%d", i);
+        out_fds[i] = fr_memfd_create(nm);
+        if (out_fds[i] < 0) die("memfd_create(out)");
     }
 
-    /* Fork the workers. THIS is the measurement that matters: the parent
-     * is small, so each fork should cost ~0.27ms rather than ~45ms. */
-    long t0 = clock_gettime_nsec();
+    /* ONE shared signal pipe, matching run.py: workers write, the
+     * drain reads. W-PY15 resizes it to 1MB so workers can run ahead. */
+    int sigp[2];
+    if (pipe(sigp) != 0) die("pipe(signal)");
+    {
+        /* F_SETPIPE_SZ = 1031; best effort, exactly as the Python side. */
+        (void)fcntl(sigp[1], 1031, 1 << 20);
+    }
+    int fallp[2];
+    if (pipe(fallp) != 0) die("pipe(fallow)");
+
     pid_t *pids = calloc((size_t)o.workers, sizeof(pid_t));
     if (!pids) die("calloc(pids)");
+
+    long t0 = now_ns();
+
+    /* fallow reaper child */
+    pid_t fallow_pid = fork();
+    if (fallow_pid < 0) die("fork(fallow)");
+    if (fallow_pid == 0) {
+        int keep[2] = {fallp[0], memfd};
+        scrub_closem_others(keep, 2);
+        _exit(p_fall(fallp[0], memfd) == 0 ? 0 : 1);
+    }
+
+    /* workers */
     for (int i = 0; i < o.workers; i++) {
         pid_t p = fork();
         if (p < 0) die("fork(worker)");
         if (p == 0) {
-            /* child: close everything not ours, then run the loop */
-            for (int j = 0; j < o.workers; j++) {
-                if (j != i) { close(outs[j]); close(sigr[j]); close(sigw[j]); }
-            }
-            close(o.source_fd);
-            if (o.result_fd >= 0) close(o.result_fd);
-            close(ingress);           /* workers only read their slice */
-            (void)p_init; (void)p_scan; (void)p_abort; (void)p_copy;
+            int keep[4] = {memfd, out_fds[i], sigp[1], fallp[1]};
+            scrub_closem_others(keep, 4);
             int rc = p_wloop(i, o.plugin_path, o.plugin_func,
-                             ingress, outs[i], sigw[i], -1, -1, -1,
-                             0, 3, 0);
+                             memfd, out_fds[i], sigp[1], fallp[1],
+                             -1, -1, 0, o.retry_limit, o.on_error);
             _exit(rc == 0 ? 0 : 1);
         }
         pids[i] = p;
-        close(sigr[i]);                 /* parent keeps only the write end */
     }
-    long t1 = clock_gettime_nsec();
-    double fork_ms = (double)(t1 - t0) / 1e6;
+    /* Parent drops its write copies so EOF means every worker is gone. */
+    close(sigp[1]);
+    close(fallp[1]);
 
-    if (o.verbose)
-        fprintf(stderr,
-                "forkrun-cleanroom: %d worker forks in %.2f ms "
-                "(%.3f ms/fork), launcher RSS %ld kB\n",
-                o.workers, fork_ms, fork_ms / o.workers, vm_rss_kb());
+    /* scanner child: pre-flight, ramp, publish */
+    pid_t scan_pid = fork();
+    if (scan_pid < 0) die("fork(scan)");
+    if (scan_pid == 0) {
+        int keep[1] = {memfd};
+        scrub_closem_others(keep, 1);
+        _exit(p_scan(memfd) == 0 ? 0 : 1);
+    }
 
-    /* Machine-readable line for the harness to compare against the
-     * in-process path. */
-    printf("CLEANROOM workers=%d fork_ms=%.3f per_fork_ms=%.4f rss_kb=%ld\n",
-           o.workers, fork_ms, fork_ms / o.workers, vm_rss_kb());
+    long t1 = now_ns();
 
     if (o.fork_only) {
-        /* PoC mode: the measurement above is the deliverable. The
-         * workers' full orchestration (scan/drain/ack) is the
-         * integration step, gated on this number, so do not wait for
-         * it here -- reap with WNOHANG and leave. */
-        for (int i = 0; i < o.workers; i++)
-            (void)waitpid(pids[i], NULL, WNOHANG);
+        printf("CLEANROOM workers=%d fork_ms=%.3f per_fork_ms=%.4f rss_kb=%ld\n",
+               o.workers, (t1 - t0) / 1e6, (double)(t1 - t0) / 1e6 / o.workers,
+               rss_kb());
+        for (int i = 0; i < o.workers; i++) (void)waitpid(pids[i], NULL, WNOHANG);
+        (void)waitpid(scan_pid, NULL, WNOHANG);
+        (void)waitpid(fallow_pid, NULL, WNOHANG);
         fflush(stdout);
         _exit(0);
     }
 
-    /* Wait for workers. The integrated launcher drains their output
-     * memfds here instead. */
-    int alive = o.workers;
-    while (alive > 0) {
-        int st;
-        pid_t p = waitpid(-1, &st, 0);
-        if (p < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        alive--;
+    /* drain child: move worker output memfds -> result fd */
+    pid_t drain_pid = fork();
+    if (drain_pid < 0) die("fork(drain)");
+    if (drain_pid == 0) {
+        int n = o.workers + 2;
+        int *keep = calloc((size_t)n, sizeof(int));
+        if (!keep) _exit(70);
+        keep[0] = sigp[0]; keep[1] = o.result_fd;
+        for (int i = 0; i < o.workers; i++) keep[i + 2] = out_fds[i];
+        scrub_closem_others(keep, n);
+        free(keep);
+        _exit(p_drain(sigp[0], out_fds, o.workers, o.result_fd, o.drain_mode));
     }
-    free(pids);
-    return 0;
-}
+    close(sigp[0]);
 
-static long clock_gettime_nsec(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long)ts.tv_sec * 1000000000L + ts.tv_nsec;
+    int alive = o.workers + 2;   /* workers + scan + fallow (+drain) */
+    (void)alive;
+    int bad = 0;
+    for (int i = 0; i < o.workers; i++) {
+        int st; pid_t p = waitpid(pids[i], &st, 0);
+        if (p > 0 && !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1;
+    }
+    { int st; if (waitpid(scan_pid, &st, 0) > 0 &&
+          !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1; }
+    { int st; if (waitpid(fallow_pid, &st, 0) > 0 &&
+          !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1; }
+    { int st; if (waitpid(drain_pid, &st, 0) > 0 &&
+          !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1; }
+
+    if (o.verbose)
+        fprintf(stderr, "PHASE spawn_to_scanner=%.2fms rss_kb=%ld bad=%d\n",
+                (t1 - t0) / 1e6, rss_kb(), bad);
+    return bad ? 1 : 0;
 }
