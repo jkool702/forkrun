@@ -358,6 +358,22 @@ on a bigger corpus before believing it.
     2x error, of which fork cost explains 78% (1.27s of a 1.62s gap).
   - Fixed in the harness by `--isolate` (one subprocess per system).
     A `--settle` sleep does NOT help: sleep cannot reduce RSS.
+- **THE CLEANROOM WORKS, AND IT HAS A CROSSOVER AT ~350 MB PARENT RSS.**
+  Measured on the C launcher PoC (28 workers, identical work):
+
+      parent RSS   in-process   cleanroom      saved
+          0 MB        8.5 ms     129.0 ms    -120.5 ms  (LOSES)
+       1000 MB      406.6 ms     129.5 ms    +277.0 ms
+       5000 MB     1774.4 ms     123.6 ms   +1650.7 ms
+
+  The launcher's fork cost is FLAT at ~1.9ms regardless of parent size
+  (0.064-0.070 ms/fork, its own RSS steady at ~2.7MB) -- the mechanism
+  works exactly as designed. But the launcher costs ~120ms fixed
+  (spawn + dlopen + init + a SYNCHRONOUS ingest that the integrated
+  version would overlap), against a saving of ~0.35ms per MB of parent
+  RSS. So **engaging it unconditionally taxes small-parent users for
+  nothing.** An RSS threshold is the better default: same benefit above
+  the line, no penalty below. Reconsider before flipping to always-on.
 - **NEVER let exactness accounting run inside a timed region.** I put
   `count_results()` inside the clock for the streaming benchmark and it
   made forkrun look 3x slower than it is (3.17M vs the grid's 7.5M).
