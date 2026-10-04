@@ -112,42 +112,59 @@ class TestCleanroomExecutes(unittest.TestCase):
         else:
             os.environ["FORKRUN_CLEANROOM"] = self._old
 
-    def _run_with_exec_probe(self, **kw):
-        """Run map() with os.execv instrumented to leave a marker.
+    def _run_marked(self, **kw):
+        """Run map() with the cleanroom entry point instrumented.
 
-        The marker is written BEFORE the real exec, so the child records
-        that the launcher was invoked and then genuinely becomes it.
-        Totals alone cannot prove this -- that was the original bug.
+        The marker is recorded in the PARENT, before any fork. An
+        earlier version of this probe spied on os.execv and wrote a
+        marker file from inside the forked child -- which HANGS THE
+        SUITE: fork()ing a multi-threaded process and then doing Python
+        work in the child is the documented deadlock hazard (the same
+        one Python 3.12+ warns about at every os.fork() site in
+        run.py). Nothing in a forked child may touch Python here.
+
+        A parent-side marker is also the RIGHT assertion: the defect
+        this file exists to catch was a hook that never fired, which a
+        parent-side marker detects exactly, and which an exec-status
+        check alone would not.
         """
-        import forkrun.run as R
-        marker = self.path + ".execmarker"
-        real_execv = os.execv
+        # NB: sys.modules, NOT `import forkrun.run as R` -- the package
+        # re-exports a function named `run`, so attribute access on the
+        # imported name lands on the function, not this module.
+        R = sys.modules["forkrun.run"]
+        real = R._execute_cleanroom
+        seen = []
 
-        def spy(path, argv):
-            with open(marker, "w") as fh:
-                fh.write("%s\n" % " ".join(map(str, argv)))
-            return real_execv(path, argv)
+        def spy(*a, **k):
+            seen.append(True)
+            return real(*a, **k)
 
-        os.execv = spy
-        self.addCleanup(setattr, os, "execv", real_execv)
+        R._execute_cleanroom = spy
+        self.addCleanup(setattr, R, "_execute_cleanroom", real)
         out = forkrun.map(_spec(), self.path, workers=2, nodes=1,
                           mode="plugin", output="bytes", **kw)
-        return out, os.path.exists(marker)
+        return out, bool(seen)
 
-    def test_launcher_actually_execs(self):
+    def test_cleanroom_path_is_actually_taken(self):
+        """The load-bearing test: FORKRUN_CLEANROOM=1 must REACH the
+        launcher. A hook that never fires is invisible to every other
+        assertion in this file -- an earlier version asserted only that
+        both flag settings produced identical totals, which they did
+        because both took the in-process path.
+        """
         if _cleanroom_launcher_path() is None:
             self.skipTest("launcher binary not built")
-        out, execed = self._run_with_exec_probe(orchestrator=False)
+        out, taken = self._run_marked(orchestrator=False)
         self.assertTrue(
-            execed,
-            "the launcher never exec'd -- FORKRUN_CLEANROOM=1 took the "
-            "in-process path, so this whole file proves nothing")
+            taken,
+            "FORKRUN_CLEANROOM=1 never reached the launcher -- the hook "
+            "is dead code and this whole file would prove nothing")
         self.assertEqual(len(_joined(out)), 2000)
 
     def test_matches_in_process_content(self):
         if _cleanroom_launcher_path() is None:
             self.skipTest("launcher binary not built")
-        cr, _ = self._run_with_exec_probe(orchestrator=False)
+        cr, _ = self._run_marked(orchestrator=False)
         old = os.environ["FORKRUN_CLEANROOM"]
         os.environ["FORKRUN_CLEANROOM"] = "0"
         try:
