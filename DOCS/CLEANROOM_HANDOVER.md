@@ -28,7 +28,7 @@ Read §6 (gotchas) and §7 (open bugs) before writing anything.
 | 4 | Wire launcher into `map()` behind `FORKRUN_CLEANROOM` | **DONE `f719db9f`** | 2 | §4 B |
 | 5 | Suite green flag on **and** off | **DONE — 676 tests both ways** | 4 | §4 B |
 | 6 | Flip default to on | **DONE — on by default**, perf parity reached | 5 | §4 C |
-| 7 | Streaming cleanroom support | **HALF** — C capability done + verified live; `stream()` dispatch not wired | 4 | §4 C |
+| 7 | Streaming cleanroom support | **DONE** — C capability + `stream()` dispatch, both verified | 4 | §4 C |
 | 8 | Benchmark the *integrated* path | **DONE** — 2.06x startup, 1.034x throughput | 4 | §4 C |
 | 9 | Release bookkeeping → v3.6.1 / `0.17.0` | **OWNER, not you** | — | §7.2 |
 | 10 | Real multi-socket NUMA validation | **blocked, needs hardware** | — | §7.3 |
@@ -36,11 +36,10 @@ Read §6 (gotchas) and §7 (open bugs) before writing anything.
 **Work now lives on `NEW/REFACTOR3.6`** (branched from 3.5 at `2fdc96c9`).
 Items 1-5 are finished there; 6-8 remain.
 
-Remaining: **7**, and only its Python half. The launcher's streaming
-capability is proven (first result at 3.2 ms against a pipe source, not
-buffered to EOF); what is missing is `stream()` dispatch for a
-producer-backed source. Benchmark first, then default, then streaming:
-done, in that order.
+**Items 1-8 are all done.** Nothing remains on this list except item 9,
+which is the owner's release bookkeeping. The cleanroom is on by
+default, covers map() and stream(), and measured 2.06x faster at startup
+and 1.034x faster end-to-end.
 
 ---
 
@@ -48,19 +47,20 @@ done, in that order.
 
 | Branch | Commit | State | Use it for |
 |---|---|---|---|
-| `NEW/REFACTOR3.6` | `5ae0b0a0` | clean, pushed | **current: items 1-6, 8 done; 7 half** |
+| `NEW/REFACTOR3.7` | `5f567a43` | clean, pushed | **current: items 1-8 all done** |
+| `NEW/REFACTOR3.6` | `d19ca764` | clean, pushed | default-on flip + W-CR2 spill overlap |
 | `NEW/REFACTOR3.5` | `2fdc96c9` | clean, pushed | parent of 3.6; handover origin |
 | `NEW/REFACTOR3.4` | `ee885122` | clean, pushed | safe fallback; cut the release from here if 3.5 stalls |
 | `NEW/REFACTOR3.3` | `6069b2b3` | clean, pushed | obsolete, but harness-isolation commits live here too |
 
-Suite status as of `5ae0b0a0` — **684 tests, `failures=1`**, with the
+Suite status as of `5f567a43` — **688 tests, `failures=1`**, with the
 cleanroom both at its new default (no env var) and opted out
 (`FORKRUN_CLEANROOM=0`). Release-gate failure only, pre-existing.
 
 | branch | result | notes |
 |---|---|---|
 | 3.4 | 668 tests, `failures=1` | release gate only |
-| 3.6 | 684 tests, `failures=1` | same, default-on and opt-out |
+| 3.7 | 688 tests, `failures=1` | same, default-on and opt-out |
 
 Integrated benchmark (28 workers, light_5M, paired n=9/n=20):
 startup 2.06x faster, throughput 1.034x faster.

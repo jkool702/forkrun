@@ -692,9 +692,40 @@ is the bug class this project refuses.
 Streaming verified live against a pipe source: first result at 3.2 ms,
 not buffered to EOF.
 
-**Still not done: the Python side of streaming.** `stream()` has no
-route to the launcher. The capability is proven; the dispatch for a
-producer-backed source is not wired. The hard part (overlapped spill in
-C) is done — what remains is feeding a Python producer into the
-launcher's `--src` pipe while concurrently draining results, which needs
-care to avoid a producer blocking on a full pipe.
+### W-CR3: streaming cleanroom wired (branch NEW/REFACTOR3.7)
+
+`stream()` now routes descriptor sources to the launcher. `stream()`
+sources are descriptors only (it rejects iterables), so the launcher
+reads `--src` exactly as Bash's `-s` shape does and nothing is pumped.
+The forked-producer path is kept for a descriptor-less source because
+it costs nothing and is the only way an iterable could ever work.
+
+**The parent only ever DRAINS**, which is what makes it deadlock-free:
+the launcher may block writing results, the spill child may block
+reading the source, the producer may block on a full pipe — all relieved
+because the parent never stops reading until EOF. Verified before any
+wiring on a 200k-record pipe (first result 2.8 ms) and on a
+deliberately slow producer (2.9 ms), neither deadlocking.
+
+Teardown is explicit, not best-effort: on abandonment both children are
+KILLED before the fds close, so an early `break` cannot leave the
+launcher writing into a closed pipe or the producer blocked forever.
+There is a test for exactly that.
+
+4 streaming tests: byte-exact vs in-process, liveness under a slow
+producer, early-abandonment teardown, fallback outside the envelope.
+Suite: **688 tests, `failures=1`** (release gate only) both with the
+cleanroom at its default and with `FORKRUN_CLEANROOM=0`.
+
+### W-CR3 side-finding: None and b"" are different
+
+While fixing `test_none_and_empty_output_parity` (which compared blob
+LISTS across runs — batch counts are race-dependent, so that assertion
+demanded stability that does not exist; it failed ~1 run in 8 under
+load and 12/12 alone), an intermediate attempt asserted
+`len(new_none) == len(new_empty)` and failed 8/8.
+
+**That assertion was wrong, not the code.** A `None` payload emits NO
+record at all (`len == 0`); a `b""` payload emits one empty record per
+batch. The engine preserves that distinction deliberately. Worth
+remembering before "fixing" it the other way.
