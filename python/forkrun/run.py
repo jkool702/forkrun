@@ -4610,6 +4610,63 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                           spare_signal_w=signal_w)
 
 
+def _suppliers_finished(helpers, num_nodes):
+    """W-STREAMDRAIN: True once the scanners have all been reaped.
+
+    helpers["scan"] gains a key per node as each scanner is reaped, so
+    its length reaching num_nodes means "all scanners finished". Note
+    this is necessary but NOT sufficient on its own -- scanners exit
+    AFTER writing their spawn requests, so requests can still be
+    buffered. Use _spawn_quiescent() for the spare-drop decision.
+    """
+    scan = helpers.get("scan") or {}
+    return len(scan) >= num_nodes
+
+
+def _spawn_quiescent(state, scanner_done):
+    """W-STREAMDRAIN: C1 at the parent boundary -- no further worker can
+    appear, so a signal-pipe EOF would be truthful.
+
+    Three conditions, ALL required, mirroring EOF_PROTOCOL.md §1's
+    ordering (the supplier must declare done, C1, before liveness, C2,
+    is allowed to conclude EOF):
+
+    1. ``scanner_done`` -- the supplier will produce no further spawn
+       requests. Necessary, not sufficient: scanners exit *after*
+       writing their requests, so requests can still be buffered.
+    2. no live worker -- C2.
+    3. the spawn pipe holds nothing buffered. A request the scanner
+       already wrote is still acted on next round, and select() says so
+       soundly: a buffered request makes the fd readable.
+
+    Getting this wrong is silent data loss, not a hang. Workers fork
+    incrementally as the scan advances, so "no live worker" is briefly
+    true while the scanner still has another to fork. Dropping the
+    parent's spare signal write end then hands the pipe a false EOF,
+    the C drain child exits on it believing it is finished, and every
+    byte the later worker emits is emitted and acked but never
+    delivered. Measured: 4092 of 18890 bytes silently dropped in ~5-10%
+    of streaming runs, with no exception, no stderr, and a clean
+    drain-side exit (rc=0, nothing undrained).
+    """
+    if not scanner_done:
+        return False
+    if any(s.alive for s in state.workers.values()):
+        return False
+    sr = getattr(state, "spawn_r", -1)
+    if sr is not None and sr >= 0:
+        # function-local, matching this module's convention: every other
+        # select use in run.py imports here rather than at module scope.
+        import select as _select
+        try:
+            ready, _, _ = _select.select([sr], [], [], 0)
+        except (OSError, ValueError):
+            return False
+        if ready:
+            return False
+    return True
+
+
 def _close_spare_fd(state, fd):
     """Drop a spare signal write end (W-REL6-5: single implementation).
 
@@ -4996,7 +5053,13 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             # drain reap + incremental parse. Same StopIteration
             # contract as _pump_drain below.
             nonlocal spare_signal_w
-            if not any(s.alive for s in state.workers.values()):
+# W-STREAMDRAIN: scan_rc is the C1 signal here (single UMA scanner
+            # reaped). Workers fork incrementally, so "no live worker"
+            # can be briefly true while the scanner still has another to
+            # fork; dropping the spare then hands the drain a false EOF
+            # and every byte the later worker emits is lost. See
+            # EOF_PROTOCOL.md §1 (C1 before C2).
+            if _spawn_quiescent(state, scan_rc is not None):
                 spare_signal_w = _close_spare_fd(state, spare_signal_w)
             if drain_st["alive"]:
                 try:
@@ -5041,10 +5104,17 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             # gone AND pipes EOF AND no buffered records remain (same
             # EOF-anchored rule as _drain_records).
             nonlocal sig_buf, sig_eof, spare_signal_w
-            # No live worker left: drop the parent's spare signal
-            # write end (kept for future respawns) so the signal
-            # pipe hits EOF and the drain can terminate. Idempotent.
-            if not any(s.alive for s in state.workers.values()):
+            # No live worker left AND the scanner is reaped: drop the
+            # parent's spare signal write end (kept for future
+            # respawns) so the signal pipe hits EOF and the drain can
+            # terminate. Idempotent.
+# W-STREAMDRAIN: scan_rc is the C1 signal here (single UMA scanner
+            # reaped). Workers fork incrementally, so "no live worker"
+            # can be briefly true while the scanner still has another to
+            # fork; dropping the spare then hands the drain a false EOF
+            # and every byte the later worker emits is lost. See
+            # EOF_PROTOCOL.md §1 (C1 before C2).
+            if _spawn_quiescent(state, scan_rc is not None):
                 spare_signal_w = _close_spare_fd(state, spare_signal_w)
             if not sig_eof:
                 try:
@@ -6342,8 +6412,15 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             # signal_w=-1 and never signal, starving the drain AND
             # the legacy signal parser; legacy limps home only via
             # its end-of-stream safety sweep).
-            if fstate["workers"] and not any(
-                    s.alive for s in state.workers.values()):
+            #
+            # W-STREAMDRAIN: helpers["scan_kind"] is the C1 signal on
+            # this path (single scanner, recorded when reaped). Without
+            # it the drop can fire while the scanner still has a worker
+            # left to fork, giving the drain a false EOF and losing
+            # everything that worker emits. EOF_PROTOCOL.md §1: C1
+            # before C2.
+            if fstate["workers"] and _spawn_quiescent(
+                    state, helpers["scan_kind"] is not None):
                 spare_signal_w = _close_spare_fd(state, spare_signal_w)
             if use_drain:
                 return _pump_drain_c()
@@ -7949,8 +8026,17 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             # only once some node forked (forked set), never on
             # pre-first-fork rounds — closing early poisons ctx for
             # future forks (signal_w=-1 ⇒ no signals ⇒ starvation).
-            if forked and not any(
-                    s.alive for s in state.workers.values()):
+            #
+            # W-STREAMDRAIN: `_suppliers_finished` is load-bearing, not
+            # belt-and-braces. Workers fork incrementally as the scan
+            # advances, so "no live worker" is briefly true while the
+            # scanner still has another to fork. Dropping the spare
+            # there gave the signal pipe a false EOF; the C drain child
+            # exited on it and everything the later worker emitted was
+            # lost without a warning. Gate on C1 (scanners finished)
+            # before C2 (no live worker) per EOF_PROTOCOL §1.
+            if forked and _spawn_quiescent(
+                    state, _suppliers_finished(helpers, num_nodes)):
                 spare_signal_w = _close_spare_fd(state, spare_signal_w)
             if _pump_debug_tick():
                 _pump_debug_log(
