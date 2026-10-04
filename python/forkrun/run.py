@@ -502,16 +502,19 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             os.execv(launcher, argv)
         except BaseException:
             os._exit(127)
+    # Only src_fd is the child's alone. res_fd MUST stay open here:
+    # the parent reads the result memfd in _cleanroom_collect after
+    # waitpid. Closing it (the first cut did) leaves _cleanroom_collect
+    # fstat-ing a closed descriptor -- and because the fd number is
+    # liable to be recycled, that fails as corrupt/empty output rather
+    # than a clean EBADF.
     os.close(src_fd)
-    os.close(res_fd)
     _wpid, status = os.waitpid(pid, 0)
     if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
-        try:
-            os.close(res_fd)
-        except OSError:
-            pass
+        os.close(res_fd)
         raise RuntimeError(
             "forkrun: cleanroom launcher failed (status %r)" % (status,))
+    # _cleanroom_collect owns res_fd and closes it on the way out.
     return _cleanroom_collect(res_fd, views)
 
 
@@ -1589,6 +1592,14 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             _sg.check()
             return _map_return(out, return_stats)
     nodes = 1
+    # W-CR1: keep the RAW mode. _coerce_payload normalizes "plugin" to
+    # "python" (the plugin-ness rides the payload marker), so by the
+    # time the cleanroom hook below runs, `mode` no longer says
+    # "plugin" -- testing it there silently NEVER fires. That is not
+    # hypothetical: the first cut of this hook tested the coerced mode
+    # and was dead code, while a smoke test still "passed" because it
+    # was quietly exercising the in-process path both times.
+    raw_mode = mode
     payload, mode = _coerce_payload(payload, mode)
     order = kwargs.get("order", "none")
 
@@ -1690,14 +1701,15 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     # launcher's exact envelope. Outside it we raise rather than fall
     # back: a user who set FORKRUN_CLEANROOM must never silently get
     # the in-process path instead.
-    if _cleanroom_enabled() and mode == "plugin":
+    if _cleanroom_enabled() and raw_mode == "plugin":
         cr_spec = _c_plugin_spec(payload)
         if cr_spec is None:
             raise RuntimeError(
                 "FORKRUN_CLEANROOM=1 needs a dialect-1/2 frozen-ABI "
                 "plugin (forkrun_use_ctx opting into 1 or 2) — this "
                 "payload negotiates no ctx")
-        ok, why = _cleanroom_eligible(source, mode, num_nodes, order, False)
+        ok, why = _cleanroom_eligible(source, raw_mode, num_nodes,
+                                     order, False)
         if not ok:
             raise RuntimeError(
                 "forkrun: FORKRUN_CLEANROOM=1 but this call is outside "
