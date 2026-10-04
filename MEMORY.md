@@ -594,48 +594,52 @@ drain copied all 19402 bytes including framing, the pump ingested all
 19402 bytes — and 40% of the output was still lost, purely to framing.
 Measure the LAST stage before blaming the first.
 
-### W-CR1 cleanroom integration: NOT DONE (branch 3.6, launcher only)
+### W-CR1 cleanroom integration: DONE (branch NEW/REFACTOR3.6)
 
-The launcher is built, shipped and verified standalone, and the two
-tail-loss bugs above are fixed. The **automatic `map()` hook is
-deliberately absent** — three attempts, three defects, all recorded
-here so the next attempt does not repeat them.
+Status: launcher built + shipped, wired into `map()`, **676 tests pass
+with `FORKRUN_CLEANROOM` both 0 and 1** (the one failure is the
+pre-existing release gate). Opt-IN, not default-on.
 
-Kept: `forkrun_cleanroom.c`, the `$(CR_OUT)` build target in
-Makefile.substrate, and `MANIFEST.in` shipping the .c (without it,
-`pip install <sdist>` fails to build).
+Four attempts were needed. The first three failed in ways worth
+remembering, because each failure mode is invisible to the obvious test:
 
-**Attempt 1 — hook never fired.** Gated on `mode == "plugin"` AFTER
-`_coerce_payload`, which normalizes plugin->python (the plugin-ness
-rides the payload marker, not the mode). Dead code. The smoke test
-still "passed" because BOTH flag settings ran the in-process path, so
-the test asserted nothing. Gate on the RAW mode, and make the test
-prove the launcher ran (batch-count change, or a bogus plugin that
-only fails on the launcher path) rather than matching totals.
+1. **Hook never fired.** Gated on `mode == "plugin"` AFTER
+   `_coerce_payload`, which normalizes plugin -> python (plugin-ness
+   rides the payload marker, not the mode). Dead code. The smoke test
+   "passed" because BOTH flag settings ran the in-process path -- equal
+   totals are exactly what a dead hook produces. **A test that cannot
+   distinguish "worked" from "never ran" is not a test.**
+2. **`res_fd` closed in the parent** right after fork, then handed to the
+   collector that fstats it. Only `src_fd` is the child's alone.
+3. **Envelope wrong in both directions.** Too strict (demanded a
+   dialect-1/2 frozen-ABI plugin -- that is a constraint of the C *worker
+   loop*; the launcher serves v0 plugins fine) then too loose (let
+   `order="index"` and `on_error="fail-fast"` through, and since the
+   launcher SUCCEEDS on those with wrong semantics, a fail-safe on
+   launcher exit never fired).
+4. **The exec probe hung the whole suite.** It spied on `os.execv` and
+   wrote a marker file from INSIDE the forked child. Forking a
+   multi-threaded process and then doing Python work in the child is the
+   documented deadlock hazard -- the same one Python 3.12+ warns about at
+   every `os.fork()` in run.py. Parent sat in `ThreadHandle_join` while
+   every worker thread blocked on an RLock futex. Bisected by removing
+   the file: suite back to 232s. **Nothing in a forked child may touch
+   Python in a test probe.**
 
-**Attempt 2 — res_fd closed before it was read.** `os.close(res_fd)`
-in the parent right after fork(), then handed to the collector which
-fstats it. Only src_fd is the child's alone.
+**The envelope** (what the launcher can HONOUR, not merely accept):
+materialized file + `mode='plugin'` + UMA + `order='none'` + not
+`strict_poison` + **`orchestrator=False`**. The last is load-bearing: the
+launcher has no death pipes/respawn/trap-ACK, so a dead worker loses its
+batch, and `map()` defaults `orchestrator=True`. Outside the envelope it
+WARNS and falls through to the in-process path -- never raises (breaking
+a working call to advertise an experimental accelerator is worse), never
+silent.
 
-**Attempt 3 — envelope wrong in both directions.** Too strict (demanded
-a dialect-1/2 frozen-ABI plugin, which is a constraint of the C *worker
-loop*, not the launcher; the launcher serves v0 plugins fine — that
-broke 29 plugin tests). Then too loose: it let `order="index"` and
-`on_error="fail-fast"` through, and because the launcher SUCCEEDS on
-those — just with wrong semantics (completion order, no fail-fast) — a
-fail-safe on launcher exit never fires. An opt-in acceleration must
-reject what it cannot honour, or it silently corrupts meaning.
+`on_error` and the retry limit are TRANSPORTED (`--on-error`,
+`--retry`), not refused -- the launcher already takes both and
+`_ON_ERROR_CODES` is the same table the C worker loop uses.
 
-**What the next attempt must gate on**, beyond materialized file + C
-plugin + UMA:
-- `order="none"` ONLY (launcher concatenates in completion order)
-- `on_error="retry"` ONLY (no fail-fast channel)
-- not `strict_poison`, and `return_stats` cannot be faithful (poison
-  state has no path back from the launcher)
-- `orchestrator=True` does NOT give reactor death-recovery here — the
-  launcher runs a plain C pipeline — so that must be explicit, not
-  implied
-- empty result memfd -> `[]` (mmap rejects length 0)
-
-Verify with a test that FAILS if the launcher is not taken. Do not
-trust equal totals: they are identical when the hook is dead.
+Still open: default-on flip (needs retry/poison parity proven), streaming
+cleanroom, and a real end-to-end benchmark of the INTEGRATED path. The
+standalone launcher's numbers (2.49ms spawn at 28 workers, 2.7MB RSS) are
+not end-to-end results and must not go in the release tables.
