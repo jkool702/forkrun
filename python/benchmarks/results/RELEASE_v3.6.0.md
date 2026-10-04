@@ -59,6 +59,18 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 > throughput** (light 101%, medium 107%, heavy 109%; full range
 > 92–123%). The source is effectively free.
 >
+> **Scope: that is about streaming _input_, and it is what the tables above
+> measure.** It is not a claim about `stream()`. The non-materialising
+> `stream()` API yields one joined blob per batch through a Python
+> generator, where `map()` collects internally and maps a shared results
+> memfd; measured on the same pipe, `stream()` costs ~20% more than `map`
+> with `bytes` output (6.1M vs 8.5M rec/s, light/plugin). The gap is
+> structural — `stream()` copies output roughly three times (pread from
+> the worker memfd, write to the results pipe, Python reads it) where
+> `map()` copies once — and it is characterised, not closed. Anyone
+> needing the last 20% should use `map()` over a pipe, which is what
+> §0b reports.
+>
 > The competition has no such property. Most of it — including the
 > highest-throughput options — cannot ingest a stream at all. The two
 > that can are measured above only by doing the batching in Python and
