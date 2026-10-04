@@ -729,3 +729,37 @@ load and 12/12 alone), an intermediate attempt asserted
 record at all (`len == 0`); a `b""` payload emits one empty record per
 batch. The engine preserves that distinction deliberately. Worth
 remembering before "fixing" it the other way.
+
+### W-CR2 re-validation on branch 3.7: 1000/1000 exact
+
+The gap flagged before pre-tag: the W-CR2 forked-spill change lives in
+the LAUNCHER, but the original 600-run validation ran `stream()` with
+the default `orchestrator=True`, which is OUTSIDE the cleanroom
+envelope and therefore never touched the launcher. So the pre-3.7
+evidence said nothing about the code W-CR2 actually changed.
+
+Re-ran both families, 100 runs per config
+(`python/benchmarks/tail_loss/validate_100x.sh`):
+
+| family | configs | result |
+|---|---|---|
+| in-process streaming (regression) | w4n1, w4n4, w2n4, w8n4, cd0 x2 | **600/600** |
+| cleanroom streaming (launcher, W-CR2 path) | w2/w4/w8/w16, nodes=1 | **400/400** |
+
+**Two false starts worth recording**, both caught by a probe rather than
+by a passing test:
+
+1. The first attempt added a `stream_cr` mode to the old harness — which
+   used a PYTHON UDF and a TEMP FILE. A Python UDF fails the envelope's
+   `mode="plugin"` gate, and a regular file is not a streaming source so
+   it never reached the hook AT ALL. It would have "passed" 100/100
+   while testing nothing. Same failure mode as the dead map() hook.
+2. The corrected version still didn't fire, because it passed
+   `nodes=4` and the envelope is UMA-only.
+
+The probe (`PROBE=1`, a parent-side spy on
+`_execute_cleanroom_stream` that reports whether it was entered, and
+exits 2 if not) is what caught both. **A validation config must be able
+to fail when the code under test does not run** — otherwise it is
+decorative. Same lesson as the dead hook, the res_fd close, and the
+exec probe that hung the suite.
