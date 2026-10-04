@@ -593,3 +593,49 @@ implies the other. For this bug: workers emitted 18890/18890 bytes, the
 drain copied all 19402 bytes including framing, the pump ingested all
 19402 bytes — and 40% of the output was still lost, purely to framing.
 Measure the LAST stage before blaming the first.
+
+### W-CR1 cleanroom integration: NOT DONE (branch 3.6, launcher only)
+
+The launcher is built, shipped and verified standalone, and the two
+tail-loss bugs above are fixed. The **automatic `map()` hook is
+deliberately absent** — three attempts, three defects, all recorded
+here so the next attempt does not repeat them.
+
+Kept: `forkrun_cleanroom.c`, the `$(CR_OUT)` build target in
+Makefile.substrate, and `MANIFEST.in` shipping the .c (without it,
+`pip install <sdist>` fails to build).
+
+**Attempt 1 — hook never fired.** Gated on `mode == "plugin"` AFTER
+`_coerce_payload`, which normalizes plugin->python (the plugin-ness
+rides the payload marker, not the mode). Dead code. The smoke test
+still "passed" because BOTH flag settings ran the in-process path, so
+the test asserted nothing. Gate on the RAW mode, and make the test
+prove the launcher ran (batch-count change, or a bogus plugin that
+only fails on the launcher path) rather than matching totals.
+
+**Attempt 2 — res_fd closed before it was read.** `os.close(res_fd)`
+in the parent right after fork(), then handed to the collector which
+fstats it. Only src_fd is the child's alone.
+
+**Attempt 3 — envelope wrong in both directions.** Too strict (demanded
+a dialect-1/2 frozen-ABI plugin, which is a constraint of the C *worker
+loop*, not the launcher; the launcher serves v0 plugins fine — that
+broke 29 plugin tests). Then too loose: it let `order="index"` and
+`on_error="fail-fast"` through, and because the launcher SUCCEEDS on
+those — just with wrong semantics (completion order, no fail-fast) — a
+fail-safe on launcher exit never fires. An opt-in acceleration must
+reject what it cannot honour, or it silently corrupts meaning.
+
+**What the next attempt must gate on**, beyond materialized file + C
+plugin + UMA:
+- `order="none"` ONLY (launcher concatenates in completion order)
+- `on_error="retry"` ONLY (no fail-fast channel)
+- not `strict_poison`, and `return_stats` cannot be faithful (poison
+  state has no path back from the launcher)
+- `orchestrator=True` does NOT give reactor death-recovery here — the
+  launcher runs a plain C pipeline — so that must be explicit, not
+  implied
+- empty result memfd -> `[]` (mmap rejects length 0)
+
+Verify with a test that FAILS if the launcher is not taken. Do not
+trust equal totals: they are identical when the hook is dead.
