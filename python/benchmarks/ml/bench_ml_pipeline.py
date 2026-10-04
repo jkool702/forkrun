@@ -824,11 +824,27 @@ def run_isolated(argv):
     by the "forkrun" child.
     """
     import subprocess
+    import tempfile
     rows = []
     child_args = list(argv or [])
+    # ONE shared corpus dir for every child. Without this each child
+    # mkdtemp'd its own and regenerated the corpus (2.1GB at 20M) inside
+    # the same process that then measures it -- so the child's RSS and
+    # page-cache state carried the cost of generating the input it was
+    # about to time. bench_ml_pipeline's forkrun-plugin measured 9.6M
+    # rec/s that way against 12.6M for the identical call on an
+    # identical corpus. Sharing also makes --isolate ~6x faster.
+    shared = tempfile.mkdtemp(prefix="fr_mlbench_shared_")
+    # Pre-generate the corpus in its own throwaway process, so no
+    # measuring child ever pays for generating its own input.
+    pregen_cmd = [sys.executable, os.path.abspath(__file__),
+                  "--only-system", "__pregen__"] + child_args
+    subprocess.run(pregen_cmd, capture_output=True, text=True,
+                   env=dict(os.environ, FORKRUN_PREGEN_DIR=shared))
+
     for system in SYSTEM_ORDER:
         cmd = [sys.executable, os.path.abspath(__file__),
-               "--only-system", system] + child_args
+               "--only-system", system, "--tmpdir", shared] + child_args
         print("[isolate] %s" % system, flush=True)
         proc = subprocess.run(cmd, capture_output=True, text=True)
         out = proc.stdout
@@ -919,13 +935,16 @@ def main(argv=None):
     print("Worker sweep: %s (best reported per system)" % sweep,
           flush=True)
 
-    tmpdir = args.tmpdir or tempfile.mkdtemp(prefix="fr_mlbench_")
+    tmpdir = (args.tmpdir or os.environ.get("FORKRUN_PREGEN_DIR")
+              or tempfile.mkdtemp(prefix="fr_mlbench_"))
     os.makedirs(tmpdir, exist_ok=True)
     ctx = BenchContext(scale="small", trials=args.trials)
     best = {}
 
     def _want(system):
         """True if this system should run under --only-system."""
+        if args.only_system == "__pregen__":
+            return False
         return args.only_system in (None, system)
 
     def settle():
@@ -960,7 +979,13 @@ def main(argv=None):
 
                 # C plugin .so (once per variant; skipped if unbuildable).
                 plugin_so = None
-                if found["forkrun"]:
+                # Build whenever EITHER row wants it. Gating this on
+                # found["forkrun"] alone meant a --only-system
+                # forkrun-plugin child never built the plugin, so it
+                # emitted no rows at all and the merged table silently
+                # lost the most important row.
+                if found["forkrun"] and (_want("forkrun")
+                                         or _want("forkrun-plugin")):
                     try:
                         plugin_so = build_ml_plugin(variant, tmpdir)
                     except Exception as exc:  # noqa: BLE001
@@ -1011,24 +1036,26 @@ def main(argv=None):
                                           input_bytes, variant, workers,
                                           args.trials)
                         note_best("forkrun", variant, r)
-                        # The plugin row gets its OWN --only-system, and
-                        # therefore its own child under --isolate. Sharing
-                        # this child meant the 20M-record UDF run above
-                        # bloated it, so the plugin's 28 worker forks paid
-                        # the same RSS tax -- contamination relocated
-                        # inside one process instead of removed.
-                        if plugin_so is not None and _want("forkrun-plugin"):
-                            try:
-                                r = bench_forkrun_plugin(
-                                    ctx, path, args.records, input_bytes,
-                                    variant, workers, args.trials,
-                                    plugin_so)
-                                note_best("forkrun-plugin", variant, r)
-                            except Exception as exc:  # noqa: BLE001
-                                print("forkrun-plugin failed (%s, w=%d): %s"
-                                      % (variant, workers,
-                                         str(exc)[:150]),
-                                      flush=True)
+                    # The plugin row is a SIBLING of the forkrun row, not
+                    # nested inside it, and gets its own --only-system
+                    # (so its own --isolate child). Two bugs lived here:
+                    # sharing the forkrun child meant the 20M-record UDF run
+                    # bloated it and the plugin's 28 worker forks paid the
+                    # same RSS tax; and nesting meant a --only-system
+                    # forkrun-plugin child skipped the block entirely and
+                    # silently contributed no row at all.
+                    if (plugin_so is not None
+                            and _want("forkrun-plugin")):
+                        try:
+                            r = bench_forkrun_plugin(
+                                ctx, path, args.records, input_bytes,
+                                variant, workers, args.trials,
+                                plugin_so)
+                            note_best("forkrun-plugin", variant, r)
+                        except Exception as exc:  # noqa: BLE001
+                            print("forkrun-plugin failed (%s, w=%d): %s"
+                                  % (variant, workers, str(exc)[:150]),
+                                  flush=True)
                         if yyjson_so is not None:
                             try:
                                 r = bench_forkrun_yyjson(
