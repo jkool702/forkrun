@@ -22,24 +22,23 @@ Read §6 (gotchas) and §7 (open bugs) before writing anything.
 
 | # | task | status | blocked by | see |
 |---|---|---|---|---|
-| 1 | 10-site init dedup | **DONE**, committed `44b2128c` | — | §4 A, §5 |
-| 2 | Lost-tail truncation, 4 stream/drain tests | **OPEN — highest priority** | needs repro under load | §6.3, §7.1 |
-| 3 | `test_c_drain_stream_matches` order-dependence | **OPEN** — passes in suite, fails 5/5 alone | — | §5, §7.5 |
-| 4 | Wire launcher into one `map()`+plugin path, flag default **off** | **OPEN — the real work** | 2 | §4 B |
-| 5 | Suite green with flag on **and** off | **OPEN** | 4 | §4 B |
-| 6 | Flip default to on | **OPEN** — do not skip #5 | 5 | §4 C |
+| 1 | 10-site init dedup | **DONE** `44b2128c` | — | §4 A |
+| 2 | Lost-tail truncation (4 stream/drain tests) | **DONE — root-caused, two bugs** | — | §7.1 |
+| 3 | `test_c_drain_stream_matches` | **DONE — was my ImportError** | — | §7.5 |
+| 4 | Wire launcher into `map()` behind `FORKRUN_CLEANROOM` | **DONE `f719db9f`** | 2 | §4 B |
+| 5 | Suite green flag on **and** off | **DONE — 676 tests both ways** | 4 | §4 B |
+| 6 | Flip default to on | **OPEN** — needs retry/poison parity proven | 5 | §4 C |
 | 7 | Streaming cleanroom support | **OPEN** — hard, see §3 | 4 | §4 C |
 | 8 | Benchmark the *integrated* path | **OPEN** | 4 | §4 C |
 | 9 | Release bookkeeping → v3.6.1 / `0.17.0` | **OWNER, not you** | — | §7.2 |
 | 10 | Real multi-socket NUMA validation | **blocked, needs hardware** | — | §7.3 |
 
-Suggested order: **2 → 4 → 5 → 6**, with 8 after 4. Items 1, 3, 9 are
-independent of the cleanroom and can be done at any time.
+**Work now lives on `NEW/REFACTOR3.6`** (branched from 3.5 at `2fdc96c9`).
+Items 1-5 are finished there; 6-8 remain.
 
-**Do #2 before #4.** Wiring a cleanroom branch on top of a path that
-intermittently loses its tail would make every subsequent measurement
-untrustworthy — you would have no way to tell a cleanroom bug from the
-pre-existing truncation.
+Remaining order: **8 → 6 → 7**. Benchmark the integrated path before
+flipping the default, so the default-on decision rests on end-to-end
+numbers rather than the launcher's standalone microbenchmarks.
 
 ---
 
@@ -47,16 +46,18 @@ pre-existing truncation.
 
 | Branch | Commit | State | Use it for |
 |---|---|---|---|
-| `NEW/REFACTOR3.5` | `44b2128c` | clean, pushed | **the work happens here** |
+| `NEW/REFACTOR3.6` | `a2ae2456` | clean, pushed | **current work: items 4-5 landed** |
+| `NEW/REFACTOR3.5` | `2fdc96c9` | clean, pushed | parent of 3.6; handover origin |
 | `NEW/REFACTOR3.4` | `ee885122` | clean, pushed | safe fallback; cut the release from here if 3.5 stalls |
 | `NEW/REFACTOR3.3` | `6069b2b3` | clean, pushed | obsolete, but harness-isolation commits live here too |
 
-Suite status as of `44b2128c`:
+Suite status as of `a2ae2456` — **676 tests, `failures=1`, identical
+with `FORKRUN_CLEANROOM` both 0 and 1** (release gate only, pre-existing):
 
 | branch | result | notes |
 |---|---|---|
 | 3.4 | 668 tests, `failures=1` | release gate only |
-| 3.5 | 668 tests, `failures=2` | release gate + `test_c_drain_stream_matches` |
+| 3.6 | 676 tests, `failures=1` | same, both flag settings |
 
 The extra 3.5 failure is **not** from the dedup — see §5. It is an
 order-dependence, not a regression.
