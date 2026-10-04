@@ -123,6 +123,13 @@ what the engine sets itself, and every unrelated descriptor (the parent
 ## Rollback and rollout
 
 - Default **on**, opt out with `FORKRUN_CLEANROOM=0`, per owner decision.
+- **No RSS threshold.** An earlier draft proposed gating on ~350 MB
+  parent RSS; that number was wrong. It came from a PoC whose fixed
+  cost was inflated by a synchronous whole-corpus ingest. With the
+  launcher's real fixed cost (~3 ms: bare exec 0.4 ms + dlopen ~1 ms +
+  `fr_py_init` ~1 ms) the crossover is **negative** — the cleanroom is
+  ahead at every realistic parent size, since its forks cost 0.068 ms
+  against 0.30 ms in-process even at 0 MB parent RSS.
 - The opt-out keeps the existing in-process `os.fork()` path intact as
   the fallback, so there is no second implementation to delete.
 - If the launcher fails to spawn or returns an unexpected status, the

@@ -358,41 +358,20 @@ on a bigger corpus before believing it.
     2x error, of which fork cost explains 78% (1.27s of a 1.62s gap).
   - Fixed in the harness by `--isolate` (one subprocess per system).
     A `--settle` sleep does NOT help: sleep cannot reduce RSS.
-- **THE CLEANROOM WORKS, AND IT HAS A CROSSOVER AT ~350 MB PARENT RSS.**
-  Measured on the C launcher PoC (28 workers, identical work):
-
-      parent RSS   in-process   cleanroom      saved
-          0 MB        8.5 ms     129.0 ms    -120.5 ms  (LOSES)
-       1000 MB      406.6 ms     129.5 ms    +277.0 ms
-       5000 MB     1774.4 ms     123.6 ms   +1650.7 ms
-
-  The launcher's fork cost is FLAT at ~1.9ms regardless of parent size
-  (0.064-0.070 ms/fork, its own RSS steady at ~2.7MB) -- the mechanism
-  works exactly as designed. But the launcher costs ~120ms fixed
-  (spawn + dlopen + init + a SYNCHRONOUS ingest that the integrated
-  version would overlap), against a saving of ~0.35ms per MB of parent
-  RSS. So **engaging it unconditionally taxes small-parent users for
-  nothing.** An RSS threshold is the better default: same benefit above
-  the line, no penalty below. Reconsider before flipping to always-on.
-- **FOUR STREAM/DRAIN TESTS ARE LOAD-SENSITIVE AND TRUNCATE OUTPUT.**
-  Observed across two full-suite runs on 2026-10-03, never in isolation:
-    test_none_and_empty_output_parity      5/5 + 2/2 OK alone
-    test_spawn_v1_stream_ordered           5/5 OK alone
-    test_c_drain_stream_ordered            failed in the NESTED suite
-    test_reactor_stream_drain_parity       failed in the NESTED suite
-  Every failure is the SAME SIGNATURE -- output truncated at the tail,
-  e.g. `b'...line 338\n' != b'...line 338\nline 1339\nline 1340\n...'`.
-  That is the lost-tail signature, so do NOT dismiss it as ordinary
-  flakiness without a look: it is the same failure mode as W-GATE2 and
-  as the W-EXACT gap. They pass 10/10 in isolation, so it needs load
-  or memory pressure to appear -- which is exactly the condition under
-  which a lost tail would be hardest to notice in production.
-  **Open item, worth a dedicated run before release.**
-  Beware the reporting trap: `test_release_check_passes` shells out to
-  `release_check.py`, which runs a NESTED full suite, so a flake in the
-  nested run shows up as an outer release-gate failure. Count
-  `FAILED (failures=N)` rather than grepping `^FAIL:`, which picks up
-  the nested run's failures too.
+- **CLEANROOM: ALWAYS-ON. The "~350MB crossover" I recorded earlier was
+  WRONG -- an artefact of the PoC's fixed cost.** Re-derived with the
+  launcher's real fixed cost:
+    - in-process 28 forks: 8.5ms @0MB -> 1774.4ms @5GB (slope 0.353ms/MB)
+    - cleanroom 28 forks: 1.9ms FLAT, launcher RSS steady at 2.7MB
+    - launcher fixed cost: ~3ms (bare exec 0.4ms + dlopen ~1ms +
+      fr_py_init ~1ms). NOT the ~120-129ms I first measured -- that
+      figure was dominated by the PoC doing a SYNCHRONOUS whole-corpus
+      ingest, which the integrated launcher overlaps with the scan.
+  Crossover is therefore NEGATIVE (-10MB): the cleanroom is ahead at
+  every realistic parent size, because even at 0MB its forks are 4.4x
+  cheaper (0.068 vs 0.30 ms/fork) and a Python process with forkrun
+  loaded is already ~17-20MB. **Default-on with an opt-out is correct;
+  do not implement an RSS threshold.**
 - **NEVER let exactness accounting run inside a timed region.** I put
   `count_results()` inside the clock for the streaming benchmark and it
   made forkrun look 3x slower than it is (3.17M vs the grid's 7.5M).
