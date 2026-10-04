@@ -644,7 +644,7 @@ cleanroom, and a real end-to-end benchmark of the INTEGRATED path. The
 standalone launcher's numbers (2.49ms spawn at 28 workers, 2.7MB RSS) are
 not end-to-end results and must not go in the release tables.
 
-### W-CR1 integrated benchmark: 1.91x startup, 0.91x throughput
+### W-CR1 final state: default ON, 2.06x startup, 1.034x throughput
 
 `python/benchmarks/bench_cleanroom.py` — the first end-to-end numbers
 for the cleanroom path. Paired interleaved A/B, exact output byte
@@ -654,23 +654,47 @@ a throughput number for wrong output), warmup discarded, medians.
 
 | regime | in-process | cleanroom | ratio |
 |---|---|---|---|
-| startup, 2000 records, n=60 | 17.95 ms | 9.42 ms | **1.91x faster** |
-| throughput, light_5M, n=9 | 672.9 ms | 738.9 ms | **0.91x (9% slower)** |
+| startup, 2000 records, n=20 | 18.06 ms | 8.75 ms | **2.06x faster** |
+| throughput, light_5M, n=9 | 677.3 ms | 655.3 ms | **1.034x faster** |
 
-**So the default stays OFF, and now for a measured reason rather than
-caution.** Correctness parity is already established
-(`TestCleanroomFaultParity`, 6/6); what is missing is performance
-parity, and it is not close.
+**Default is now ON.** The precondition was performance parity, not
+correctness parity — correctness was established first (16 tests,
+including `TestCleanroomFaultParity`). What blocked it was a 9%
+throughput deficit, and the fix was to fork the launcher's spill so it
+overlaps the scan (W-CR2 below). That single change took throughput
+0.911x -> 1.034x and startup 1.91x -> 2.06x, and made the launcher
+genuinely streaming as a side effect.
 
-**Likely cause of the throughput loss** (hypothesis, not yet proven):
-the launcher spills the whole source into its own ingress memfd and
-only then scans it, while the in-process path overlaps spill with scan
-using a forked UMA ingest child. The launcher is therefore strictly
-sequential where the Python path is pipelined — one extra full pass
-over the corpus. Fixing it means forking the launcher's spill into a
-child too, which is a real change to the launcher, not a flag.
+`_cleanroom_explicit()` exists because default-on and `map()`'s
+`orchestrator=True` default collide: orchestrator=True is outside the
+envelope, so warning on every fallback would fire on nearly every
+ordinary `map()` call. A default-on feature must be quiet when it does
+not apply and loud when a request is declined.
 
-This also supersedes the earlier standalone microbenchmarks (2.49 ms
-spawn at 28 workers, 2.7 MB RSS). Those measured the launcher in
-isolation and were never end-to-end; the table above is what a caller
-of `map()` gets. Do not quote the standalone numbers in release docs.
+`FORKRUN_CLEANROOM=0` forces the in-process path everywhere.
+
+Suite: 684 tests, `failures=1` (release gate only) both with no env var
+and with `=0`.
+
+### W-CR2: fork the spill (one change, three payoffs)
+
+The launcher used to spill inline — read the whole source into its
+ingress memfd, then scan. That meant it could not be live (a streaming
+source stalled until producer EOF), and it cost a full extra pass over
+the corpus, which is exactly the throughput deficit above. The in-process
+path overlaps spill with scan via a forked UMA ingest child; the
+launcher now forks its spill child the same way. The engine's documented
+ingest->scanner EOF protocol (EOF_PROTOCOL.md §5) handles the tail. The
+spill child is joined LAST and its failure is fatal — if it died early
+the scanner saw a truncated corpus, and silently returning short output
+is the bug class this project refuses.
+
+Streaming verified live against a pipe source: first result at 3.2 ms,
+not buffered to EOF.
+
+**Still not done: the Python side of streaming.** `stream()` has no
+route to the launcher. The capability is proven; the dispatch for a
+producer-backed source is not wired. The hard part (overlapped spill in
+C) is done — what remains is feeding a Python producer into the
+launcher's `--src` pipe while concurrently draining results, which needs
+care to avoid a producer blocking on a full pipe.
