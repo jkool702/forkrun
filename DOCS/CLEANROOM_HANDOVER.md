@@ -12,17 +12,34 @@ Read this whole file before touching anything. Most of the value is in the
 ## 0. TL;DR
 
 The C cleanroom launcher **works and is verified correct**. It is a standalone
-binary, committed and pushed on `NEW/REFACTOR3.5` at `1b0d7192`.
+binary, committed and pushed on `NEW/REFACTOR3.5`.
 
 It is **not wired into `forkrun` yet**. That is the remaining work.
 
-Your job, in order:
+Read §6 (gotchas) and §7 (open bugs) before writing anything.
 
-1. Read §6 (gotchas) and §7 (open bugs) before writing code.
-2. Land the 10-site init dedup (already staged in the working tree — see §5).
-3. Wire the launcher into `forkrun` behind `FORKRUN_CLEANROOM`, default **off**.
-4. Get the suite green **both ways** (flag on and flag off).
-5. Only then consider default-on, streaming support, and the release.
+### Every outstanding item
+
+| # | task | status | blocked by | see |
+|---|---|---|---|---|
+| 1 | 10-site init dedup | **DONE**, committed `44b2128c` | — | §4 A, §5 |
+| 2 | Lost-tail truncation, 4 stream/drain tests | **OPEN — highest priority** | needs repro under load | §6.3, §7.1 |
+| 3 | `test_c_drain_stream_matches` order-dependence | **OPEN** — passes in suite, fails 5/5 alone | — | §5, §7.5 |
+| 4 | Wire launcher into one `map()`+plugin path, flag default **off** | **OPEN — the real work** | 2 | §4 B |
+| 5 | Suite green with flag on **and** off | **OPEN** | 4 | §4 B |
+| 6 | Flip default to on | **OPEN** — do not skip #5 | 5 | §4 C |
+| 7 | Streaming cleanroom support | **OPEN** — hard, see §3 | 4 | §4 C |
+| 8 | Benchmark the *integrated* path | **OPEN** | 4 | §4 C |
+| 9 | Release bookkeeping → v3.6.1 / `0.17.0` | **OWNER, not you** | — | §7.2 |
+| 10 | Real multi-socket NUMA validation | **blocked, needs hardware** | — | §7.3 |
+
+Suggested order: **2 → 4 → 5 → 6**, with 8 after 4. Items 1, 3, 9 are
+independent of the cleanroom and can be done at any time.
+
+**Do #2 before #4.** Wiring a cleanroom branch on top of a path that
+intermittently loses its tail would make every subsequent measurement
+untrustworthy — you would have no way to tell a cleanroom bug from the
+pre-existing truncation.
 
 ---
 
@@ -30,12 +47,19 @@ Your job, in order:
 
 | Branch | Commit | State | Use it for |
 |---|---|---|---|
-| `NEW/REFACTOR3.5` | `1b0d7192` | clean, pushed | **the work happens here** |
+| `NEW/REFACTOR3.5` | `44b2128c` | clean, pushed | **the work happens here** |
 | `NEW/REFACTOR3.4` | `ee885122` | clean, pushed | safe fallback; cut the release from here if 3.5 stalls |
 | `NEW/REFACTOR3.3` | `6069b2b3` | clean, pushed | obsolete, but harness-isolation commits live here too |
 
-Both 3.4 and 3.5 pass the suite identically: **668 tests, `failures=1`**, and
-that one failure is `test_release_check_passes` (expected — see §7).
+Suite status as of `44b2128c`:
+
+| branch | result | notes |
+|---|---|---|
+| 3.4 | 668 tests, `failures=1` | release gate only |
+| 3.5 | 668 tests, `failures=2` | release gate + `test_c_drain_stream_matches` |
+
+The extra 3.5 failure is **not** from the dedup — see §5. It is an
+order-dependence, not a regression.
 
 **`3.4` is shippable today.** If anything in your work becomes unclear, revert to
 it and release v3.6.1. Do not let the cleanroom block the release.
@@ -161,11 +185,11 @@ one path's workers and nowhere else — invisible to the entire rest of the suit
 because no other path is wrong.
 
 The replacement `_init_engine_and_fds(*, lines, bytes_, spec, num_nodes=None,
-numa_map=None)` is **already written and sitting uncommitted in the working
-tree.** Confirm it, run the suite, commit.
+numa_map=None)` was written, verified, and **committed in `44b2128c`**.
 
-Status at handover: syntax OK, smoke test byte-identical to HEAD, full suite
-running. If the suite came back clean, just commit it.
+Status at handover: syntax OK, smoke test byte-identical to HEAD, suite
+`failures=2` — both understood (§5). **Task A is effectively done**; your only
+job here is to confirm it, not to write it.
 
 ### Task B — wire the launcher in (the real work)
 
@@ -196,9 +220,10 @@ path, which the launcher already fully covers.
 
 | item | state |
 |---|---|
-| `python/forkrun/run.py` | **uncommitted** — the 10-site dedup, +46/−60 |
-| `forkrun_cleanroom.c` | committed at `1b0d7192`, pushed |
-| everything else | clean |
+| `python/forkrun/run.py` | **committed** `44b2128c` — the 10-site dedup, +46/−60 |
+| `forkrun_cleanroom.c` | committed `1b0d7192`, pushed |
+| `DOCS/CLEANROOM_HANDOVER.md` | this file, committed `44b2128c` |
+| working tree | **clean** |
 
 Full suite over the dedup: **668 tests, `failures=2`**
 (`test_release_check_passes` + `test_c_drain_stream_matches`).
@@ -305,6 +330,27 @@ hardware** — flag it, do not fake a result.
 
 `b845a96b` reverted an unsafe `ring_copy_main` / relaxed gate. Do not treat
 `ingest_complete` as a truthful drain signal.
+
+### 7.5 `test_c_drain_stream_matches` is order-dependent
+
+Passes inside the full suite, **fails 5/5 standalone**. Not a load flake and not
+a regression from the dedup — verified by stashing and running both ways with
+identical results.
+
+So something a sibling test sets up is load-bearing for it. That makes it a
+latent suite-fragility problem: any future `unittest` ordering change, or running
+a subset in CI, could turn this into a red build nobody understands.
+
+Confirmed NOT a regression:
+
+```
+WITH dedup:    F F F F
+WITHOUT dedup: F F F F
+```
+
+**Establish the baseline yourself first** — the previous instance only checked
+this one test, not the full suite in isolation, so it is not yet proven that the
+*suite* as a whole depends on ordering.
 
 ---
 
