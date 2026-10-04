@@ -374,6 +374,25 @@ on a bigger corpus before believing it.
   RSS. So **engaging it unconditionally taxes small-parent users for
   nothing.** An RSS threshold is the better default: same benefit above
   the line, no penalty below. Reconsider before flipping to always-on.
+- **FOUR STREAM/DRAIN TESTS ARE LOAD-SENSITIVE AND TRUNCATE OUTPUT.**
+  Observed across two full-suite runs on 2026-10-03, never in isolation:
+    test_none_and_empty_output_parity      5/5 + 2/2 OK alone
+    test_spawn_v1_stream_ordered           5/5 OK alone
+    test_c_drain_stream_ordered            failed in the NESTED suite
+    test_reactor_stream_drain_parity       failed in the NESTED suite
+  Every failure is the SAME SIGNATURE -- output truncated at the tail,
+  e.g. `b'...line 338\n' != b'...line 338\nline 1339\nline 1340\n...'`.
+  That is the lost-tail signature, so do NOT dismiss it as ordinary
+  flakiness without a look: it is the same failure mode as W-GATE2 and
+  as the W-EXACT gap. They pass 10/10 in isolation, so it needs load
+  or memory pressure to appear -- which is exactly the condition under
+  which a lost tail would be hardest to notice in production.
+  **Open item, worth a dedicated run before release.**
+  Beware the reporting trap: `test_release_check_passes` shells out to
+  `release_check.py`, which runs a NESTED full suite, so a flake in the
+  nested run shows up as an outer release-gate failure. Count
+  `FAILED (failures=N)` rather than grepping `^FAIL:`, which picks up
+  the nested run's failures too.
 - **NEVER let exactness accounting run inside a timed region.** I put
   `count_results()` inside the clock for the streaming benchmark and it
   made forkrun look 3x slower than it is (3.17M vs the grid's 7.5M).
