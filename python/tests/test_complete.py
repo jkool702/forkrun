@@ -318,8 +318,35 @@ class TestCompleteParity(unittest.TestCase):
                 old_empty = forkrun.map(_empty, path, workers=2, nodes=1)
             new_none = forkrun.map(_none, path, workers=2, nodes=1)
             new_empty = forkrun.map(_empty, path, workers=2, nodes=1)
-            self.assertEqual(old_none, new_none)
-            self.assertEqual(old_empty, new_empty)
+            # Compare JOINED BYTES, not blob lists. This test used to
+            # assertEqual(old_none, new_none) on the blob lists, which
+            # compares blob COUNT across two runs -- and adaptive
+            # batching is race-dependent (pre-flight overlap sets L per
+            # run), so the count legitimately varies. With None/empty
+            # payloads every blob is zero-length, so the count IS the
+            # batch count and the assertion was asserting batch-boundary
+            # stability that does not exist. It failed roughly 1 run in
+            # 8 under suite load and passed 12/12 alone, which is the
+            # signature of a bad invariant rather than a race in the
+            # code. The neighbouring test_none_parity already states
+            # the rule: "never compare blob identity across runs".
+            self.assertEqual(b"".join(old_none), b"".join(new_none))
+            self.assertEqual(b"".join(old_empty), b"".join(new_empty))
+            # The payloads produce no output bytes at all -- that IS the
+            # contract, and it is checkable without depending on splits.
+            self.assertEqual(b"".join(new_none), b"")
+            self.assertEqual(b"".join(new_empty), b"")
+            # None and b"" are NOT the same and must not be asserted
+            # equal: a None payload emits NO record, while b"" emits an
+            # empty record per batch (the None-vs-b"" distinction the
+            # engine deliberately preserves). So their counts differ by
+            # the batch count -- asserting equality here fails 8/8.
+            # What must hold is that neither ever emits a non-empty
+            # blob, and that the empty path does emit records.
+            self.assertTrue(all(len(bytes(b)) == 0 for b in new_none))
+            self.assertTrue(all(len(bytes(b)) == 0 for b in new_empty))
+            self.assertGreater(len(new_empty), 0)
+            self.assertEqual(len(new_none), 0)
         finally:
             os.unlink(path)
 
