@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import forkrun  # noqa: E402
 from forkrun.run import (  # noqa: E402
-    _cleanroom_eligible, _cleanroom_enabled, _cleanroom_launcher_path)
+    _cleanroom_eligible, _cleanroom_enabled, _cleanroom_explicit,
+    _cleanroom_launcher_path)
 
 PLUGIN = None
 for _cand in (
@@ -50,12 +51,40 @@ def _joined(res):
 class TestCleanroomHelpers(unittest.TestCase):
     """The envelope predicate -- pure, no plugin or launcher needed."""
 
-    def test_disabled_without_env(self):
+    def test_enabled_by_default(self):
+        # Default is ON, but NOT "explicitly requested" -- that
+        # distinction is what keeps the fallback quiet for ordinary
+        # map() calls while still warning when a request is declined.
         old = os.environ.pop("FORKRUN_CLEANROOM", None)
         try:
-            self.assertFalse(_cleanroom_enabled())
+            self.assertTrue(_cleanroom_enabled())
+            self.assertFalse(_cleanroom_explicit())
         finally:
             if old is not None:
+                os.environ["FORKRUN_CLEANROOM"] = old
+
+    def test_explicit_opt_out_disables(self):
+        old = os.environ.get("FORKRUN_CLEANROOM")
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        try:
+            self.assertFalse(_cleanroom_enabled())
+            self.assertFalse(_cleanroom_explicit())
+        finally:
+            if old is None:
+                os.environ.pop("FORKRUN_CLEANROOM", None)
+            else:
+                os.environ["FORKRUN_CLEANROOM"] = old
+
+    def test_explicit_request_is_flagged(self):
+        old = os.environ.get("FORKRUN_CLEANROOM")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        try:
+            self.assertTrue(_cleanroom_enabled())
+            self.assertTrue(_cleanroom_explicit())
+        finally:
+            if old is None:
+                os.environ.pop("FORKRUN_CLEANROOM", None)
+            else:
                 os.environ["FORKRUN_CLEANROOM"] = old
 
     def test_truthy_and_falsey_spellings(self):
