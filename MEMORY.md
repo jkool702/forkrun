@@ -643,3 +643,34 @@ Still open: default-on flip (needs retry/poison parity proven), streaming
 cleanroom, and a real end-to-end benchmark of the INTEGRATED path. The
 standalone launcher's numbers (2.49ms spawn at 28 workers, 2.7MB RSS) are
 not end-to-end results and must not go in the release tables.
+
+### W-CR1 integrated benchmark: 1.91x startup, 0.91x throughput
+
+`python/benchmarks/bench_cleanroom.py` — the first end-to-end numbers
+for the cleanroom path. Paired interleaved A/B, exact output byte
+counts asserted on every pass (a mismatch aborts rather than reporting
+a throughput number for wrong output), warmup discarded, medians.
+28 workers, UMA, orchestrator=False, `ml_process_light`.
+
+| regime | in-process | cleanroom | ratio |
+|---|---|---|---|
+| startup, 2000 records, n=60 | 17.95 ms | 9.42 ms | **1.91x faster** |
+| throughput, light_5M, n=9 | 672.9 ms | 738.9 ms | **0.91x (9% slower)** |
+
+**So the default stays OFF, and now for a measured reason rather than
+caution.** Correctness parity is already established
+(`TestCleanroomFaultParity`, 6/6); what is missing is performance
+parity, and it is not close.
+
+**Likely cause of the throughput loss** (hypothesis, not yet proven):
+the launcher spills the whole source into its own ingress memfd and
+only then scans it, while the in-process path overlaps spill with scan
+using a forked UMA ingest child. The launcher is therefore strictly
+sequential where the Python path is pipelined — one extra full pass
+over the corpus. Fixing it means forking the launcher's spill into a
+child too, which is a real change to the launcher, not a flag.
+
+This also supersedes the earlier standalone microbenchmarks (2.49 ms
+spawn at 28 workers, 2.7 MB RSS). Those measured the launcher in
+isolation and were never end-to-end; the table above is what a caller
+of `map()` gets. Do not quote the standalone numbers in release docs.

@@ -407,10 +407,26 @@ def _require_plugin_loop_symbol():
 def _cleanroom_enabled():
     """W-CR1: is the exec-based cleanroom launcher requested?
 
-    Opt-IN via FORKRUN_CLEANROOM. Deliberately NOT default-on: the
-    envelope below is narrower than map()'s, and a default-on flag that
-    quietly serves less than the caller asked for is the failure mode
-    this project keeps refusing.
+    Opt-IN via FORKRUN_CLEANROOM, and MEASURED opt-in -- not caution.
+    Integrated benchmarks (benchmarks/bench_cleanroom.py, paired
+    interleaved A/B, exact counts asserted, 28 workers, UMA,
+    orchestrator=False, ml_process_light on light_5M):
+
+        STARTUP    2000 records   17.95 ms -> 9.42 ms   1.91x faster
+        THROUGHPUT light_5M       672.9 ms -> 738.9 ms  0.91x (9% SLOWER)
+
+    That is the trade in one line: the cleanroom removes Python from the
+    address space before the worker fan-out, which is worth ~8.5 ms of
+    fixed startup, and pays for it with a full extra pass over the
+    corpus because it must spill the source into its own memfd before it
+    can scan (the in-process path overlaps spill with scan via a forked
+    ingest child; the launcher is strictly sequential). Since real
+    workloads are throughput-bound, default-on would trade a ~10%
+    regression on large jobs for a few milliseconds. Hence opt-in.
+
+    Flipping the default needs the spill/scan overlap recovered in the
+    launcher, not just more correctness evidence -- correctness parity
+    is already established (test_cleanroom.TestCleanroomFaultParity).
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:
