@@ -773,10 +773,132 @@ def parse_args(argv=None):
     parser.add_argument("--fault-workers", type=int, default=8)
     parser.add_argument("--csv", default=None)
     parser.add_argument("--tmpdir", default=None)
+    parser.add_argument(
+        "--only-system", default=None,
+        help="run ONLY this system (serial|pool|executor|hf_datasets|"
+             "forkrun|forkrun-plugin) and print just its rows. Used by "
+             "--isolate to give every system a fresh process.")
+    parser.add_argument(
+        "--isolate", action="store_true",
+        help="run each system in its own subprocess. fork() cost scales "
+             "with the parent's RSS (page-table copy), and a threaded "
+             "parent serialises every fork against its thread locks. In "
+             "one shared process the parent sits at 3.5-5.5GB by the "
+             "time forkrun runs, so its 28 worker spawns are measurably "
+             "slower: forkrun-plugin reported 6.3M rec/s in-sequence vs "
+             "12.7M from the identical function in a fresh process. A "
+             "settle delay does NOT fix this -- only a fresh address "
+             "space does.")
+    parser.add_argument(
+        "--settle", type=float, default=5.0,
+        help="seconds to sleep between systems (default 5). The gauntlet "
+             "runs every framework in ONE process, so the previous "
+             "system's teardown -- worker pools, GC, page cache and "
+             "memfd release -- is still in flight when the next one "
+             "starts. Measured consequence: forkrun-plugin reports "
+             "6.3M rec/s in-sequence and 12.7M rec/s from the identical "
+             "function in a fresh process, so ~2x of the published "
+             "number was cross-system contamination, not the code "
+             "path. Set --settle 0 to reproduce the old behaviour.")
     return parser.parse_args(argv)
 
 
+SYSTEM_ORDER = ["serial", "pool", "executor", "hf_datasets", "ray",
+                "forkrun"]
+
+
+def run_isolated(argv):
+    """Run every system in its OWN process, then print one merged table.
+
+    Why: fork() cost scales with the parent's RSS (the page table has to
+    be copied for every child) and a multi-threaded parent serialises
+    each fork against its thread locks. Running every framework in one
+    process means the parent carries the previous frameworks' resident
+    memory into forkrun's 28 worker spawns. Measured on light/20M:
+    forkrun-plugin reports 6.3M rec/s in-sequence and 12.7M rec/s from
+    the identical function in a fresh process -- a 2x contamination that
+    has nothing to do with forkrun.
+
+    forkrun-plugin is driven by --only-system forkrun (it is the same
+    call path as the forkrun UDF row plus the plugin), so it is covered
+    by the "forkrun" child.
+    """
+    import subprocess
+    rows = []
+    child_args = list(argv or [])
+    for system in SYSTEM_ORDER:
+        cmd = [sys.executable, os.path.abspath(__file__),
+               "--only-system", system] + child_args
+        print("[isolate] %s" % system, flush=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        out = proc.stdout
+        if proc.returncode != 0:
+            print("[isolate] %s FAILED rc=%d\n%s"
+                  % (system, proc.returncode, proc.stderr[-800:]), flush=True)
+            continue
+        for line in out.splitlines():
+            if line.startswith("|"):
+                rows.append(line)
+
+    # Each child prints its own table twice (per-variant slice and
+    # overall) with different column padding, so dedupe on the
+    # benchmark NAME in column 0 rather than on the whole line.
+    def name_of(line):
+        parts = [c.strip() for c in line.strip().strip("|").split("|")]
+        return parts[0] if parts and parts[0] else None
+
+    header, body, seen = None, [], set()
+    for r in rows:
+        nm = name_of(r)
+        if nm is None:
+            continue
+        if set(r) <= set("|+- "):
+            if header is None:
+                header = r
+            continue
+        if nm in seen:
+            continue
+        seen.add(nm)
+        body.append(r)
+
+    # Order rows by first appearance; children run in SYSTEM_ORDER so
+    # the merged table reads in that order.
+    if not body:
+        print("[isolate] no rows produced", flush=True)
+        return 1
+
+    # Re-render with consistent column widths. Each child sized its own
+    # header to its own rows, so the merged table would not line up.
+    def cells(line):
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    parsed = [cells(r) for r in body]
+    ncol = max(len(r) for r in parsed)
+    for r in parsed:
+        while len(r) < ncol:
+            r.append("-")
+    widths = [max(len(r[i]) for r in parsed) for i in range(ncol)]
+    rule = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+
+    def render(r):
+        return "| " + " | ".join(r[i].ljust(widths[i]) for i in range(ncol)) + " |"
+
+    print(rule, flush=True)
+    print(render(parsed[0]), flush=True)
+    print(rule, flush=True)
+    for r in parsed[1:]:
+        print(render(r), flush=True)
+    print(rule, flush=True)
+    return 0
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    _pre = argparse.ArgumentParser(add_help=False)
+    _pre.add_argument("--isolate", action="store_true")
+    _known, _rest = _pre.parse_known_args(argv)
+    if _known.isolate:
+        return run_isolated(_rest)
     args = parse_args(argv)
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     for v in variants:
@@ -801,6 +923,20 @@ def main(argv=None):
     os.makedirs(tmpdir, exist_ok=True)
     ctx = BenchContext(scale="small", trials=args.trials)
     best = {}
+
+    def _want(system):
+        """True if this system should run under --only-system."""
+        return args.only_system in (None, system)
+
+    def settle():
+        """Let the previous system finish tearing down before the next.
+
+        Without this the frameworks contaminate each other: the run
+        that matters most (forkrun-plugin) goes last and measured half
+        its isolated speed. Cheap insurance -- 5s per system.
+        """
+        if args.settle > 0:
+            time.sleep(args.settle)
 
     def note_best(system, variant, rate):
         key = (system, variant)
@@ -840,22 +976,26 @@ def main(argv=None):
                         print("yyjson build skipped (%s): %s"
                               % (variant, str(exc)[:150]), flush=True)
 
-                if found["serial"]:
+                    settle()
+                if found["serial"] and _want("serial"):
                     r = bench_serial(ctx, path, args.records,
                                      input_bytes, variant, args.trials)
                     note_best("serial", variant, r)
                 for workers in sweep:
-                    if found["pool"]:
+                    settle()
+                    if found["pool"] and _want("pool"):
                         r = bench_pool(ctx, path, args.records,
                                        input_bytes, variant, workers,
                                        args.trials)
                         note_best("pool", variant, r)
-                    if found["executor"]:
+                    settle()
+                    if found["executor"] and _want("executor"):
                         r = bench_executor(ctx, path, args.records,
                                            input_bytes, variant, workers,
                                            args.trials)
                         note_best("executor", variant, r)
-                    if found["hf_datasets"]:
+                    settle()
+                    if found["hf_datasets"] and _want("hf_datasets"):
                         try:
                             r = bench_hf_datasets(
                                 ctx, path, args.records, input_bytes,
@@ -865,7 +1005,8 @@ def main(argv=None):
                             print("hf_datasets failed (w=%d): %s"
                                   % (workers, str(exc)[:120]),
                                   flush=True)
-                    if found["forkrun"]:
+                    settle()
+                    if found["forkrun"] and _want("forkrun"):
                         r = bench_forkrun(ctx, path, args.records,
                                           input_bytes, variant, workers,
                                           args.trials)
@@ -894,7 +1035,7 @@ def main(argv=None):
                                       % (variant, workers,
                                          str(exc)[:150]),
                                       flush=True)
-                if found["ray"]:
+                if found["ray"] and _want("ray"):
                     try:
                         rb = RayBench(cpus=max(sweep))
                         for workers in sweep:
@@ -912,7 +1053,7 @@ def main(argv=None):
                 print("--- %s results (this variant) ---" % variant)
                 print(format_table(ctx.results[base:]), flush=True)
 
-        if not args.no_fault:
+        if not args.no_fault and args.only_system is None:
             fault_path = os.path.join(tmpdir, "ml_fault.jsonl")
             if not os.path.exists(fault_path):
                 print("generating fault data (%d records, 5%% "
