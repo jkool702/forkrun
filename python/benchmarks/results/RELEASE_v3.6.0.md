@@ -57,7 +57,13 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 > same fast path. Measured directly — same harness, same methodology,
 > all 24 pipe-vs-file cells — streaming runs at a **median 104% of file
 > throughput** (light 101%, medium 107%, heavy 109%; full range
-> 92–123%). The source is effectively free.
+> 92–123%). The source is effectively free. **That figure is UMA
+> (`nodes=1`).** Re-measured on the 4-node `numa=fake=4` boot the median
+> inverts to **98.6% of file** (median penalty +1.4%, 9 of 24 cells at
+> parity or better, range −8.0% to +12.1%) — file input already engages
+> the multi-node ingest path, so a pipe has less to win. Either way it
+> is a couple of percent; just don't quote the sign without naming the
+> topology.
 >
 > **Scope: that is about streaming _input_, and it is what the tables above
 > measure.** It is not a claim about `stream()`. The non-materialising

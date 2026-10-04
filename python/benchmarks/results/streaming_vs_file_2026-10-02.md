@@ -45,14 +45,14 @@ same configuration reading from a **file**.
 
 | payload | config | output | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
 |---|---|---|---|---|---|
-| C plugin | `default` | view | 0.514 s (+3.5%) | 1.606 s (−15.0%) | 4.856 s (−18.6%) |
-| C plugin | `default` | bytes | 0.663 s (+2.3%) | 2.039 s (−13.5%) | 5.444 s (−16.3%) |
-| C plugin | `max` | view | 0.507 s (+4.0%) | 1.781 s (−5.4%) | 4.864 s (−17.6%) |
-| C plugin | `max` | bytes | 0.692 s (−1.0%) | 2.969 s (+9.1%) | 6.638 s (−12.1%) |
-| Python UDF | `default` | view | 2.560 s (−3.6%) | 5.659 s (−7.7%) | 51.704 s (−3.0%) |
-| Python UDF | `default` | bytes | 2.758 s (−1.4%) | 6.041 s (−7.2%) | 52.701 s (−2.3%) |
-| Python UDF | `max` | view | 2.607 s (−2.3%) | 5.641 s (−6.3%) | 51.020 s (−4.0%) |
-| Python UDF | `max` | bytes | 2.814 s (−1.5%) | 6.852 s (−3.9%) | 53.609 s (−1.1%) |
+| C plugin | `default` | view | 0.488 s (+3.4%) | 1.641 s (+5.5%) | 4.841 s (+1.9%) |
+| C plugin | `default` | bytes | 0.622 s (+3.4%) | 2.060 s (+4.3%) | 5.516 s (−1.0%) |
+| C plugin | `max` | view | 0.481 s (+3.8%) | 1.611 s (+5.0%) | 4.835 s (+2.2%) |
+| C plugin | `max` | bytes | 0.681 s (+12.1%) | 2.087 s (−0.6%) | 5.584 s (+2.9%) |
+| Python UDF | `default` | view | 2.689 s (+2.0%) | 5.788 s (+2.6%) | 50.000 s (−2.9%) |
+| Python UDF | `default` | bytes | 2.811 s (+0.2%) | 6.050 s (−0.7%) | 51.423 s (−1.1%) |
+| Python UDF | `max` | view | 2.687 s (−0.8%) | 5.689 s (+1.0%) | 51.526 s (+0.4%) |
+| Python UDF | `max` | bytes | 2.817 s (−7.2%) | 6.168 s (−8.0%) | 51.645 s (−1.2%) |
 
 **Streaming costs 0–17% on the default configuration**, and four of the
 eight rows are faster over a pipe than from a file. `default` and `max`
@@ -87,9 +87,19 @@ copy makes the input source effectively free for forkrun, so it does not pay a
 streaming penalty at all. The competition does: most of it cannot ingest a pipe
 in the first place.
 
-**Streaming is at parity or better than reading a file.** 20 of 24
-cells are at or below file time (median −3.6%), and the remaining four
-are small. Exact record counts in all 48 cells.
+**Streaming input costs about 1% on this topology.** 48/48 cells exact,
+re-measured 2026-10-03 on a fresh `numa=fake=4` boot (`nodes="auto"`,
+4 nodes, `shmem_enabled=always`). 9 of 24 cells come in at or below file
+time, median penalty **+1.4%**, range −8.0% to +12.1%.
+
+**The sign of that median flips with topology.** On UMA
+(`cells_pf.log`) pipe was *faster* than file — median −3.6%, 20 of 24 at
+parity-or-better. On the 4-node fake-NUMA boot it is marginally
+*slower*, +1.4%. Either way the cost is a couple of percent, but a
+"pipe is 4% faster than a file" claim is UMA-specific and should not be
+quoted without saying so. The most likely reason: file input already
+engages the multi-node ingest/indexer path, so a pipe has less
+left to win and its per-node coordination shows up as a small cost.
 
 > **This grid does not measure the pre-flight fix.** Its pipe sources
 > deliver at full speed, so the pre-flight has almost nothing to wait
