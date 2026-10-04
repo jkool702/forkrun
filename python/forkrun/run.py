@@ -496,6 +496,30 @@ import threading as _threading
 _RUN_LOCK = _threading.RLock()
 
 
+def _init_engine_and_fds(*, lines, bytes_, spec, num_nodes=None,
+                         numa_map=None):
+    """W-DEDUP-INIT: snapshot -> load -> fr_py_init -> engine_fds.
+
+    This four-step idiom was repeated verbatim at ten executor entry
+    points in this file. Collapse it for correctness, not tidiness:
+    `engine_fds` is the keep-set every child scrubs to, so a site that
+    computed it differently would leak descriptors into that one path's
+    workers and nowhere else -- a bug every other test in the suite would
+    miss, because no other path is wrong.
+
+    Returns (lib, engine_fds).
+    """
+    pre_fds = snapshot_fds()
+    lib = load()
+    if num_nodes is None:
+        _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                          spec=spec)
+    else:
+        _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
+                          num_nodes=num_nodes, numa_map=numa_map, spec=spec)
+    # Engine fds for child keep sets (W-PY16 addendum scrub).
+    return lib, snapshot_fds() - pre_fds
+
 def _open_source(source):
     """Return (fd, must_close) for path | int-fd | fileno() object."""
     import os as _os
@@ -2278,12 +2302,8 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                          supervision="plain", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      spec=_spec)
-    # Engine fds for child keep sets (W-PY16 addendum scrub).
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec)
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -2629,12 +2649,8 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                          supervision="plain", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      spec=_spec)
-    # Engine fds for child keep sets (see locked path).
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec)
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -3140,15 +3156,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                          supervision="plain", shape="blocking",
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      spec=_spec)
-    # Engine fds (escrow/eventfds, born in init) stay open in every
-    # child: closing them breaks escrow retry and forces claim-polling
-    # into POLLNVAL spins. Differenced out of the pre-init baseline so
-    # host event-loop fds are never kept.
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec)
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -3571,13 +3580,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order, c_worker_loop=c_worker_loop,
                          c_spawn_loop=c_spawn_loop)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      spec=_spec)
-    # Engine fds for child keep sets (W-PY16 addendum: scrub host
-    # event-loop fds in every forked child, keep engine + job fds).
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec)
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -4291,11 +4295,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order, c_worker_loop=c_worker_loop,
                          c_spawn_loop=c_spawn_loop)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      spec=_spec)
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec)
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. Raises before any
     # child exists. engine_live gates the abort choreography below.
@@ -4856,11 +4857,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                          supervision="reactor", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      spec=_spec)
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec)
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
@@ -5387,11 +5385,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                          supervision="reactor", shape="blocking",
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      spec=_spec)
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec)
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
@@ -6014,11 +6009,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                          supervision="reactor", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      spec=_spec)
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec)
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
@@ -7099,12 +7091,9 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order)
     _zc = bool(views)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      num_nodes=num_nodes, numa_map=numa_map,
-                      spec=_spec)
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec,
+        num_nodes=num_nodes, numa_map=numa_map)
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -7674,12 +7663,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                          supervision="reactor", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    pre_fds = snapshot_fds()
-    lib = load()
-    _core_init_engine(lib, lines=lines or 0, bytes_=bytes_ or 0,
-                      num_nodes=num_nodes, numa_map=numa_map,
-                      spec=_spec)
-    engine_fds = snapshot_fds() - pre_fds
+    lib, engine_fds = _init_engine_and_fds(
+        lines=lines, bytes_=bytes_, spec=_spec,
+        num_nodes=num_nodes, numa_map=numa_map)
 
     src_fd, must_close = _open_source(source)
     memfd = None
