@@ -803,7 +803,15 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # surfaces as empty/corrupt output rather than a clean EBADF.
     os.close(src_fd)
     _wpid, status = os.waitpid(pid, 0)
-    npois, npois_idx = _read_cleanroom_stats(stats_fd)
+    # Unpack ONLY after the None check below. _read_cleanroom_stats
+    # returns None for "no trustworthy count" -- notably when the
+    # launcher declined the payload (a v0 plugin under FORKRUN_CLEANROOM=1
+    # has no use_ctx, so there is no stats fd at all). Unpacking here
+    # raised TypeError: cannot unpack non-iterable NoneType, which
+    # crashed the fallback path the None was written to trigger. Eight
+    # test_plugin tests hit this with the gate ON and were green with it
+    # off, which is why the cleanroom-OFF run alone never showed it.
+    stats = _read_cleanroom_stats(stats_fd)
     os.close(stats_fd)
     if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
         os.close(res_fd)
@@ -811,8 +819,9 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "forkrun: cleanroom launcher failed (status %r) — using the "
             "in-process path." % (status,), UserWarning, stacklevel=3)
         return None
-    if npois is None:
-        # The counter record is missing or unreadable. Refuse the
+    if stats is None:
+        # The counter record is missing, unreadable, or absent because the
+        # launcher declined the payload. Refuse the
         # cleanroom result rather than report completed-as-total: a
         # wrong-but-plausible total is worse than the slower path.
         os.close(res_fd)
@@ -822,6 +831,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "(or strict_poison unenforceable) — using the in-process "
             "path.", UserWarning, stacklevel=3)
         return None
+    npois, npois_idx = stats
     # Record the counter BEFORE collecting: a poisoned batch is absent
     # from the results, so completed = len(out) undercounts unless the
     # poison count is added back, and _finish_map_stats needs it.
