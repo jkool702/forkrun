@@ -122,7 +122,21 @@ def main():
     ap.add_argument("--first", choices=["in-process", "cleanroom"],
                     default="in-process")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--ballast-mb", type=int, default=0,
+                    help="allocate this much in the PARENT before "
+                         "running, to model a realistically bloated "
+                         "Python process. This is the dimension that "
+                         "matters most: the cleanroom exists because "
+                         "workers must not fork from a large address "
+                         "space, and a tiny benchmark parent understates "
+                         "that benefit (and overstates the in-process "
+                         "path's cost of nothing).")
     args = ap.parse_args()
+
+    if args.ballast_mb > 0:
+        _ballast = bytearray(args.ballast_mb * 1024 * 1024)
+        for _i in range(0, len(_ballast), 4096):
+            _ballast[_i] = 1
 
     spec = _plugin_spec(args)
     out = {"plugin": spec, "workers": args.workers}
@@ -169,6 +183,15 @@ def main():
     print("W-CR1 integrated cleanroom benchmark")
     print("  plugin  %s" % spec)
     print("  workers %d   node 1 (UMA)   orchestrator=False" % args.workers)
+    try:
+        with open("/proc/self/status") as fh:
+            for ln in fh:
+                if ln.startswith("VmRSS:"):
+                    print("  parent RSS %s" % ln.split(":", 1)[1].strip())
+    except OSError:
+        pass
+    if args.ballast_mb:
+        print("  ballast     %d MB allocated in the parent" % args.ballast_mb)
     print()
     print("STARTUP  (%d records, %d paired passes, %d discarded)"
           % (records, args.startup_passes, args.warmup))

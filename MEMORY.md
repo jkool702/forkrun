@@ -815,3 +815,31 @@ invocation counts are not comparable across paths. The correct
 measurement compares WITHIN one path — same arm, with and without a
 death. Comparing counts across the two execution models measures batch
 shape and will mislead you.
+
+
+### W-CR6: parent-RSS is the dimension that matters (P1)
+
+The earlier integrated numbers (2.06x startup, 1.034x throughput) were
+measured in a ~29 MB benchmark parent, and the unimpressive throughput
+figure was an artefact of that, not a ceiling. `--ballast-mb` now grows
+the PARENT before running, which is the whole premise of the cleanroom:
+workers must not fork from a large address space.
+
+28 workers, UMA, orchestrator=False, paired, exact counts asserted.
+
+| corpus | parent RSS | startup | end-to-end |
+|---|---|---|---|
+| medium_5M | 29 MB | 2.00x | 1.01x |
+| medium_5M | 2.1 GB | 10.26x | 1.18x |
+| light_5M | 2.1 GB | 10.76x | **1.51x** |
+| heavy_1M | 2.1 GB | 10.54x | **1.56x** |
+
+**The benefit scales with parent address-space size**, which is exactly
+what the architecture claims and what a small benchmark parent cannot
+show. Startup goes 2x -> ~10x; end-to-end goes ~1.0x -> 1.2-1.6x.
+
+Practical read: in a small script the cleanroom buys little on
+throughput; in a real service (a web worker, a notebook, anything with
+a loaded parent) it is a 1.2-1.6x end-to-end win, not a rounding error.
+Any future cleanroom performance claim should state the parent RSS it
+was measured at, or it is not a claim.
