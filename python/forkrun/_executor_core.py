@@ -98,6 +98,11 @@ def _parent_rss_kb():
 
 
 def warn_fork_cost(rss_kb, fork_ms, n_workers):
+    """Deprecated shim: prefer warn_fork_cost_once(fork_ms, n)."""
+    return warn_fork_cost_once(fork_ms, n_workers, rss_kb)
+
+
+def warn_fork_cost_once(fork_ms, n_workers, rss_kb=None):
     """Warn once when this fan-out is paying an unusual fork cost.
 
     fork() copies the parent's page tables, so its cost scales with the
@@ -115,13 +120,26 @@ def warn_fork_cost(rss_kb, fork_ms, n_workers):
     to read /proc is silent rather than fatal.
     """
     global _RSS_WARNED
-    if _RSS_WARNED or rss_kb is None:
+    if _RSS_WARNED:
+        return False
+    if rss_kb is None:
+        rss_kb = _parent_rss_kb()
+    if rss_kb is None:
         return False
     try:
         limit = int(os.environ.get("FORKRUN_RSS_WARN_KB", "524288"))
     except ValueError:
         limit = 524288
     if limit <= 0 or rss_kb < limit:
+        # Not warning is the common case, and this runs on EVERY worker
+        # fork. Once the threshold is known to be unreachable for this
+        # process, stop measuring entirely rather than re-reading
+        # /proc/self/statm per fork: it is a syscall on the hot path of
+        # every fan-out, and the whole reason this was hard to live with
+        # is that adding work immediately before fork() is not free.
+        if rss_kb < limit:
+            _RSS_WARNED = "under"
+            return False
         return False
     _RSS_WARNED = True
     per = (fork_ms / n_workers) if n_workers else fork_ms
@@ -201,7 +219,6 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
             c_worker_loop = False
         if c_spawn_loop is None:
             c_spawn_loop = False
-    _rss_before = _parent_rss_kb()
     _t_fork = _time.perf_counter()
     from ._worker import resolve_payload_parent as _resolve_parent
     if payload is not None and isinstance(payload, str):
@@ -280,9 +297,8 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
     # not an estimate. warn_fork_cost is diagnostics only and warns at
     # most once per process.
     try:
-        warn_fork_cost(_rss_before,
-                       (_time.perf_counter() - _t_fork) * 1e3,
-                       max(workers, 1))
+        warn_fork_cost_once((_time.perf_counter() - _t_fork) * 1e3,
+                            max(workers, 1))
     except Exception:
         pass
     return pids

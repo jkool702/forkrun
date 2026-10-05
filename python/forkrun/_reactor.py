@@ -325,9 +325,8 @@ class ReactorState:
         # offsets), and passed with it removed. So the mitigation that
         # looked obviously safe and nearly shipped is gone. The warning
         # -- which only reads /proc and prints -- is unaffected.
-        from ._executor_core import warn_fork_cost as _warn_fork
-        from ._executor_core import _parent_rss_kb as _rss
-        _rss_kb, _t0 = _rss(), _time.perf_counter()
+        from ._executor_core import warn_fork_cost_once as _warn_fork
+        _t0 = _time.perf_counter()
 
         pid = os.fork()
         if pid == 0:
@@ -397,7 +396,7 @@ class ReactorState:
         except OSError:
             pass
         try:
-            _warn_fork(_rss_kb, (_time.perf_counter() - _t0) * 1e3, 1)
+            _warn_fork((_time.perf_counter() - _t0) * 1e3, 1)
         except Exception:
             pass
         slot = WorkerSlot(wid, node, pid, death_r, -1, incarn=incarn)
