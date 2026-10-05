@@ -154,31 +154,45 @@ class TestCleanroomHelpers(unittest.TestCase):
     def test_envelope_accepts_only_what_it_can_honour(self):
         p = _make_input(10)
         self.addCleanup(lambda: os.path.exists(p) and os.unlink(p))
-        ok, _ = _cleanroom_eligible(p, "plugin", 1, "none", False, False)
-        self.assertTrue(ok)
-        # W-CR4 gave the launcher a supervisor and the ordering is
-        # applied downstream, so these three are now served and must be
-        # ACCEPTED. They used to be in the reject list; leaving them
-        # there would keep the gate lying about what the launcher does.
+        ok, why = _cleanroom_eligible(p, "plugin", 1, "none", False, True)
+        self.assertTrue(ok, "the basic envelope case must be eligible: %s"
+                             % (why,))
+        # Served today. Every entry passes orchestrator=True, because
+        # that is now a REQUIREMENT rather than an accepted no-op: the
+        # launcher supervises unconditionally, so it cannot honour the
+        # legacy fail-fast model. Keeping it in the accept list (as
+        # "orchestrator is accepted and ignored" claimed) would assert
+        # the wrong thing.
         for args in (
-                (p, "plugin", 1, "index", False, False),  # ordered map
-                (p, "plugin", 1, "index", False, True),   # + orchestrator
-                (p, "plugin", 1, "none", False, True),    # orchestrator
-                (p, "plugin", 1, "none", True, False),    # strict_poison
-                (p, "plugin", 1, "none", True, True),     # both counters
+                (p, "plugin", 1, "none", False, True),    # baseline
+                (p, "plugin", 1, "index", False, True),   # ordered map
+                (p, "plugin", 1, "none", True, True),     # strict_poison
+                (p, "plugin", 1, "none", False, True, True),   # + stats
         ):
             ok, why = _cleanroom_eligible(*args)
-            self.assertTrue(ok, "should now accept %r (%s)" % (args, why))
-        # Each of these would change RESULTS, not just speed.
+            self.assertTrue(ok, "should accept %r (%s)" % (args, why))
+
+        # Declined. Each passes orchestrator=True on purpose so it is
+        # rejected for ITS OWN reason -- otherwise the orchestrator gate
+        # would reject everything first and these assertions would pass
+        # while testing nothing.
         for args in (
-                (p, "python", 1, "none", False, False),   # no plugin
-                (p, "plugin", 4, "none", False, False),   # multi-node
-                (p, "plugin", 1, "hash", False, False),   # unknown order
-                ("/no/such/file", "plugin", 1, "none", False, False),
+                (p, "python", 1, "none", False, True),    # not a plugin
+                (p, "plugin", 4, "none", False, True),    # multi-node
+                (p, "plugin", 1, "hash", False, True),    # unknown order
+                ("/no/such/file", "plugin", 1, "none", False, True),
         ):
             ok, why = _cleanroom_eligible(*args)
             self.assertFalse(ok, "should reject %r" % (args,))
             self.assertTrue(why)
+
+        # The orchestrator gate itself, and specifically that it is about
+        # SUPERVISION SEMANTICS rather than tidiness: the launcher has a
+        # supervisor, so a caller who asked for fail-fast would get
+        # recovery instead -- a different answer, not a slower one.
+        ok, why = _cleanroom_eligible(p, "plugin", 1, "none", False, False)
+        self.assertFalse(ok, "orchestrator=False must decline the cleanroom")
+        self.assertIn("fail-fast", why)
 
 
 @unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
@@ -243,7 +257,7 @@ class TestCleanroomExecutes(unittest.TestCase):
         """
         if _cleanroom_launcher_path() is None:
             self.skipTest("launcher binary not built")
-        out, taken = self._run_marked(orchestrator=False)
+        out, taken = self._run_marked(orchestrator=True)
         self.assertTrue(
             taken,
             "FORKRUN_CLEANROOM=1 never reached the launcher -- the hook "
@@ -253,13 +267,13 @@ class TestCleanroomExecutes(unittest.TestCase):
     def test_matches_in_process_content(self):
         if _cleanroom_launcher_path() is None:
             self.skipTest("launcher binary not built")
-        cr, _ = self._run_marked(orchestrator=False)
+        cr, _ = self._run_marked(orchestrator=True)
         old = os.environ["FORKRUN_CLEANROOM"]
         os.environ["FORKRUN_CLEANROOM"] = "0"
         try:
             ref = forkrun.map(_spec(), self.path, workers=2, nodes=1,
                               mode="plugin", output="bytes",
-                              orchestrator=False)
+                              orchestrator=True)
         finally:
             os.environ["FORKRUN_CLEANROOM"] = old
         # Batch boundaries may differ (the launcher spills and scans in
@@ -274,7 +288,7 @@ class TestCleanroomExecutes(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(empty) and os.unlink(empty))
         out = forkrun.map(_spec(), empty, workers=2, nodes=1,
                           mode="plugin", output="bytes",
-                          orchestrator=False)
+                          orchestrator=True)
         self.assertEqual(len(out), 0)
 
     def test_outside_envelope_warns_and_stays_correct(self):
@@ -318,13 +332,13 @@ class TestCleanroomExecutes(unittest.TestCase):
           2. the bytes equal the in-process ordered run -- parity, not
              "looks sorted". The in-process path is the oracle.
         """
-        out, seen = self._run_marked(order="index", orchestrator=False)
+        out, seen = self._run_marked(order="index", orchestrator=True)
         self.assertTrue(seen, "order='index' must take the launcher")
 
         os.environ["FORKRUN_CLEANROOM"] = "0"
         ref = forkrun.map(_spec(), self.path, workers=2, nodes=1,
                           mode="plugin", output="bytes",
-                          order="index", orchestrator=False)
+                          order="index", orchestrator=True)
         os.environ["FORKRUN_CLEANROOM"] = "1"
 
         self.assertEqual(_joined(out), _joined(ref),
@@ -384,6 +398,29 @@ class TestCleanroomExecutes(unittest.TestCase):
                           mode="plugin", output="bytes")
         os.environ["FORKRUN_CLEANROOM"] = "1"
         self.assertEqual(_joined(out), _joined(ref))
+
+    def test_orchestrator_false_falls_back_rather_than_supervise(self):
+        """orchestrator=False must NOT be silently upgraded to recovery.
+
+        The launcher supervises unconditionally. If the envelope kept
+        accepting orchestrator=False, a caller who explicitly asked for
+        legacy fail-fast supervision would get worker-death RECOVERY
+        instead -- a different answer, not merely a slower one -- and
+        could not tell from the result.
+
+        Asserted end to end: the call warns, the launcher is not taken,
+        and the bytes are still correct.
+        """
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                              mode="plugin", output="bytes",
+                              orchestrator=False)
+        self.assertEqual(len(_joined(out)), 2000)
+        self.assertTrue(
+            any("FORKRUN_CLEANROOM" in str(w.message) for w in caught),
+            "orchestrator=False must say it was not using the launcher; "
+            "warnings=%r" % ([str(w.message) for w in caught],))
 
     def test_default_map_call_needs_no_kwargs(self):
         """A plain map() call -- all defaults -- must be eligible.
@@ -614,9 +651,9 @@ class TestCleanroomNonFileSources(unittest.TestCase):
         """
         R = sys.modules["forkrun.run"]
         self.assertIsNone(
-            R._cleanroom_map_source_fd(iter(self._records(3))),
+            R._cleanroom_source_fd(iter(self._records(3))),
             "a list iterator is not a descriptor")
-        fd = R._cleanroom_map_source_fd(self.path)
+        fd = R._cleanroom_source_fd(self.path)
         self.addCleanup(os.close, fd)
         self.assertIsInstance(fd, int)
 
@@ -667,7 +704,7 @@ class TestCleanroomFaultParity(unittest.TestCase):
         return self.V1_SO + ":always_fail_v1"
 
     def _both(self, spec, **kw):
-        """Run once per path. orchestrator=False pins the cleanroom
+        """Run once per path. orchestrator=True pins the cleanroom
         inside its envelope so this compares FAULT POLICY, not topology
         or supervision."""
         kw.setdefault("nodes", 1)
@@ -704,7 +741,7 @@ class TestCleanroomFaultParity(unittest.TestCase):
                     RuntimeError, msg="cr=%s did not raise" % cr):
                 forkrun.map(self._fail(), self.path, mode="plugin",
                             output="bytes", nodes=1, workers=1,
-                            on_error="fail-fast", orchestrator=False)
+                            on_error="fail-fast", orchestrator=True)
 
     def test_return_stats_poison_counts_are_consistent(self):
         """return_stats now works on the cleanroom, and is self-consistent.
@@ -732,7 +769,7 @@ class TestCleanroomFaultParity(unittest.TestCase):
             os.environ["FORKRUN_CLEANROOM"] = flag
             out, st = forkrun.map(self._fail(), self.path, mode="plugin",
                                   output="bytes", return_stats=True,
-                                  nodes=1, workers=1, orchestrator=False)
+                                  nodes=1, workers=1, orchestrator=True)
             self.assertEqual(
                 st["total"], st["completed"] + st["poisoned"],
                 "FORKRUN_CLEANROOM=%s: total %r != completed %r + "
@@ -768,7 +805,7 @@ class TestCleanroomFaultParity(unittest.TestCase):
             with self.assertRaises(_fk.ForkrunPoisonSkip) as ctx:
                 forkrun.map(self._fail(), self.path, mode="plugin",
                             output="bytes", strict_poison=True,
-                            nodes=1, workers=1, orchestrator=False)
+                            nodes=1, workers=1, orchestrator=True)
             self.assertGreater(
                 ctx.exception.count, 0,
                 "FORKRUN_CLEANROOM=%s raised with count=0" % (flag,))
@@ -860,7 +897,7 @@ class TestCleanroomStreaming(unittest.TestCase):
         out = []
         for blob in forkrun.stream(
                 _spec(), fd, mode="plugin", workers=4, nodes=1,
-                streaming=True, orchestrator=False, order=order):
+                streaming=True, orchestrator=True, order=order):
             out.append(bytes(blob))
         return b"".join(out)
 
@@ -876,7 +913,7 @@ class TestCleanroomStreaming(unittest.TestCase):
         os.environ["FORKRUN_CLEANROOM"] = "0"
         ref = b"".join(bytes(x) for x in forkrun.map(
             _spec(), path, workers=4, nodes=1, mode="plugin",
-            output="bytes", orchestrator=False))
+            output="bytes", orchestrator=True))
         self.assertEqual(len(streamed), len(ref))
         self.assertEqual(streamed, ref)
 
@@ -905,7 +942,7 @@ class TestCleanroomStreaming(unittest.TestCase):
         os.environ["FORKRUN_CLEANROOM"] = "0"
         ref = b"".join(bytes(x) for x in forkrun.map(
             _spec(), path, workers=4, nodes=1, mode="plugin",
-            output="bytes", order="index", orchestrator=False))
+            output="bytes", order="index", orchestrator=True))
         self.assertEqual(len(streamed), len(ref))
         self.assertEqual(streamed, ref,
                          "cleanroom stream order='index' differs from "
@@ -920,7 +957,7 @@ class TestCleanroomStreaming(unittest.TestCase):
         first = None
         for blob in forkrun.stream(
                 _spec(), r, mode="plugin", workers=4, nodes=1,
-                streaming=True, orchestrator=False):
+                streaming=True, orchestrator=True):
             if first is None:
                 first = time.time() - t0
         th.join()
@@ -956,7 +993,7 @@ class TestCleanroomStreaming(unittest.TestCase):
         os.environ["FORKRUN_CLEANROOM"] = "1"
         gen = forkrun.stream(
             _spec(), r2, mode="plugin", workers=4, nodes=1,
-            streaming=True, orchestrator=False)
+            streaming=True, orchestrator=True)
         got = next(iter(gen))
         self.assertTrue(len(bytes(got)) > 0)
         # The library has now dup'd the source and closed its own copy,
@@ -1008,19 +1045,19 @@ class TestCleanroomStreaming(unittest.TestCase):
         no error at all.
 
         Asserted against the map path rather than a byte count, and with
-        orchestrator=False because that is the only setting under which
-        the cleanroom stream is eligible at all.
+        orchestrator=True because the cleanroom stream requires the
+        reactor supervision model, same as the map path.
         """
         path = _make_input(1000)
         self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
         os.environ["FORKRUN_CLEANROOM"] = "1"
         got = b"".join(bytes(x) for x in forkrun.stream(
             _spec(), path, mode="plugin", workers=2, nodes=1,
-            streaming=True, orchestrator=False))
+            streaming=True, orchestrator=True))
         os.environ["FORKRUN_CLEANROOM"] = "0"
         ref = b"".join(bytes(x) for x in forkrun.map(
             _spec(), path, mode="plugin", output="bytes",
-            workers=2, nodes=1, orchestrator=False))
+            workers=2, nodes=1, orchestrator=True))
         os.environ["FORKRUN_CLEANROOM"] = "1"
         self.assertEqual(len(ref), 1000)
         self.assertEqual(got, ref)
@@ -1049,7 +1086,7 @@ class TestCleanroomStreaming(unittest.TestCase):
         with self.assertRaises(Exception):
             out = list(forkrun.stream(
                 legacy + ":process", _make_input(500), mode="plugin",
-                workers=2, nodes=1, streaming=True, orchestrator=False))
+                workers=2, nodes=1, streaming=True, orchestrator=True))
             self.fail("stream() returned %d blobs from a launcher that "
                       "exited non-zero instead of raising" % (len(out),))
 
@@ -1128,7 +1165,7 @@ class TestCleanroomProcessDeath(unittest.TestCase):
         os.environ["FORKRUN_CLEANROOM"] = "1"
         out = forkrun.map(self.V1_SO + ":die_once_v1", self.path,
                           workers=2, nodes=1, mode="plugin",
-                          output="bytes", orchestrator=False)
+                          output="bytes", orchestrator=True)
         joined = b"".join(bytes(x) for x in out)
         # die_once_v1 emits nothing, so correct output IS empty -- what
         # matters is that the run completed rather than hanging or
@@ -1166,7 +1203,7 @@ class TestCleanroomProcessDeath(unittest.TestCase):
             self.tmp, "already-fired")
         forkrun.map(self.V1_SO + ":die_once_v1", self.path,
                     workers=2, nodes=1, mode="plugin", output="bytes",
-                    orchestrator=False)
+                    orchestrator=True)
         clean_arm = len(self._read(m))
         os.unlink(m)
 
@@ -1176,7 +1213,7 @@ class TestCleanroomProcessDeath(unittest.TestCase):
             warnings.simplefilter("always")
             forkrun.map(self.V1_SO + ":die_once_v1", self.path,
                         workers=2, nodes=1, mode="plugin", output="bytes",
-                        orchestrator=False)
+                        orchestrator=True)
         fallbacks = [str(w.message) for w in caught
                      if "in-process path" in str(w.message)]
         self.assertEqual(
@@ -1255,7 +1292,7 @@ class TestCleanroomWorkerDeath(unittest.TestCase):
         try:
             return sum(len(bytes(x)) for x in forkrun.map(
                 _spec(), self.path, workers=4, nodes=1, mode="plugin",
-                output="bytes", orchestrator=False))
+                output="bytes", orchestrator=True))
         finally:
             if old is None:
                 os.environ.pop("FORKRUN_CLEANROOM", None)

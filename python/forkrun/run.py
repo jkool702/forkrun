@@ -511,8 +511,24 @@ def _cleanroom_launcher_path():
 
 def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
                         orchestrator, return_stats=False):
-    # orchestrator is accepted and ignored: W-CR4 made the launcher
-    # supervise unconditionally, so both settings are served faithfully.
+    # orchestrator=True is REQUIRED, not merely accepted.
+    #
+    # orchestrator is not a performance knob; it selects a supervision
+    # MODEL. False means legacy fork-and-wait / fail-fast: a batch whose
+    # worker died is lost and the run fails. True means reactor
+    # supervision with recovery by wid.
+    #
+    # The launcher supervises unconditionally (W-CR4), so it can serve
+    # the second but NOT the first. Accepting orchestrator=False and
+    # quietly supervising anyway means a caller who explicitly asked for
+    # fail-fast gets recovery instead -- a worker death that should have
+    # failed the run gets repaired, and the caller cannot tell. Slower is
+    # acceptable; quietly different is not.
+    #
+    # The alternative -- teaching the launcher both models -- is a
+    # protocol change for a mode whose only remaining users are the ones
+    # deliberately asking for the legacy behaviour. They keep the
+    # in-process path, which honours it exactly.
     """W-CR1: can the launcher serve this call FAITHFULLY?
 
     Returns (ok, reason). Every condition here is one where saying yes
@@ -550,7 +566,7 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
       channel back, and return_stats was a live P0 bug: completed=len(out)
       with poisoned hardwired to 0 reported total=90 for a run of 100
       batches with 10 poisoned.
-    * orchestrator=True AND False both OK -- was False-only, and that
+    * orchestrator=True ONLY -- was False-only, and that
       gate was the load-bearing one. The launcher used to run a plain C
       pipeline (fallow/workers/scanner/drain) with no death pipes, no
       respawn and no trap-ACK, so a dead worker's batch was silently
@@ -564,6 +580,11 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
         return False, "UMA single-node only (got nodes=%r)" % (num_nodes,)
     if raw_mode != "plugin":
         return False, "mode='plugin' only (got %r)" % (raw_mode,)
+    if not orchestrator:
+        return False, ("orchestrator=False asks for legacy "
+                       "fork-and-wait/fail-fast, but the launcher "
+                       "supervises unconditionally and would recover a "
+                       "dead worker's batch instead of failing the run")
     if order not in ("none", "index"):
         return False, ("order=%r is not served; the launcher relies on "
                        "downstream ordering (collect_records sort for "
@@ -2730,7 +2751,7 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
         if raw_mode == "plugin" and num_nodes == 1 \
                 and kwargs.get("order", "none") == "none" \
                 and not kwargs.get("strict_poison", False) \
-                and not orchestrator \
+                and orchestrator \
                 and kwargs.get("resume") is None \
                 and kwargs.get("checkpoint_file") is None \
                 and _cleanroom_launcher_path() is not None:
