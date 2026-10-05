@@ -1699,5 +1699,75 @@ class TestCleanroomRespawnIncarnation(unittest.TestCase):
             "the lineage above proves nothing")
 
 
+class TestForkCostWarning(unittest.TestCase):
+    """fork() cost scales with PARENT rss -- make that visible.
+
+    Measured on this host: 1.6 ms per fork at 10 MB resident versus 58 ms
+    at 1.6 GB. A 36x swing that buys the workers nothing, because the
+    pages copied belong to the caller and are never read by a worker.
+
+    The user-visible symptom is that forkrun gets mysteriously slow in a
+    long-lived host process with no visible cause. So measure it, and say
+    so once -- not never (invisible), and not per call (noise in a loop).
+    """
+
+    def setUp(self):
+        from forkrun import _executor_core as core
+        self.core = core
+        self._old = os.environ.get("FORKRUN_RSS_WARN_KB")
+        self._saved = core._RSS_WARNED
+        core._RSS_WARNED = False
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self.core._RSS_WARNED = self._saved
+        if self._old is None:
+            os.environ.pop("FORKRUN_RSS_WARN_KB", None)
+        else:
+            os.environ["FORKRUN_RSS_WARN_KB"] = self._old
+
+    def _run(self, rss_kb):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            fired = self.core.warn_fork_cost(rss_kb, 12.5, 4)
+        return fired, buf.getvalue()
+
+    def test_small_parent_is_silent(self):
+        os.environ["FORKRUN_RSS_WARN_KB"] = "524288"
+        fired, out = self._run(10 * 1024)
+        self.assertFalse(fired)
+        self.assertEqual(out, "", "a small parent must not be warned about")
+
+    def test_large_parent_warns_with_an_actionable_message(self):
+        os.environ["FORKRUN_RSS_WARN_KB"] = "524288"
+        fired, out = self._run(700 * 1024)
+        self.assertTrue(fired)
+        self.assertIn("resident", out)
+        self.assertIn("fork()", out)
+        self.assertIn("FORKRUN_RSS_WARN_KB=0", out)
+
+    def test_warns_at_most_once_per_process(self):
+        os.environ["FORKRUN_RSS_WARN_KB"] = "1"
+        first, _ = self._run(700 * 1024)
+        second, out = self._run(700 * 1024)
+        self.assertTrue(first)
+        self.assertFalse(second, "must not repeat: noise in a loop")
+        self.assertEqual(out, "")
+
+    def test_zero_disables(self):
+        os.environ["FORKRUN_RSS_WARN_KB"] = "0"
+        fired, out = self._run(700 * 1024)
+        self.assertFalse(fired)
+        self.assertEqual(out, "")
+
+    def test_rss_probe_is_available_here(self):
+        # Guards the warning from being permanently dead on a host with
+        # no /proc: if this ever returns None the feature is inert and
+        # should be reconsidered rather than left silently doing nothing.
+        self.assertIsNotNone(self.core._parent_rss_kb())
+
+
 if __name__ == "__main__":
     unittest.main()
