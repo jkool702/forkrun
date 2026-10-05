@@ -1620,8 +1620,18 @@ class TestCleanroomRespawnIncarnation(unittest.TestCase):
             self.skipTest("test_plugin_v1.so not built")
         if _cleanroom_launcher_path() is None:
             self.skipTest("launcher binary not built")
+        # EVERY variable this test mutates must be saved AND restored.
+        # FORKRUN_RETRY_LIMIT was originally set here and omitted from
+        # _old, so it leaked 0 into every test that ran afterwards:
+        # retry_limit 0 poisons a batch on its FIRST death, which made 31
+        # death/recovery tests across the suite fail with truncated
+        # output. It looked like a launcher or engine fault -- those
+        # tests pass in isolation and fail only when test_cleanroom runs
+        # first -- and cost a long bisect to find, because the leak is
+        # invisible from the failing test itself.
         self._old = {k: os.environ.get(k) for k in
-                     ("FORKRUN_CLEANROOM", "FORKRUN_TEST_SIDE_EFFECT_FILE")}
+                     ("FORKRUN_CLEANROOM", "FORKRUN_TEST_SIDE_EFFECT_FILE",
+                      "FORKRUN_RETRY_LIMIT")}
         os.environ["FORKRUN_CLEANROOM"] = "1"
         os.environ["FORKRUN_RETRY_LIMIT"] = "0"
         self.tmp = tempfile.mkdtemp(prefix="frincarn")
