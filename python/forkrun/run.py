@@ -54,7 +54,8 @@ from ._pipes import make_pipe
 from ._plugin import make_plugin_payload
 from ._reassembly import ReassemblyBuffer
 from ._executor_core import ExecutorSpec
-from ._executor_core import init_engine as _core_init_engine
+from ._executor_core import collect_records, init_engine as _core_init_engine
+from ._executor_core import flush_stdio as _flush_stdio
 from ._resume import (ORDERER_REAP_TIMEOUT, WORKER_REAP_TIMEOUT,
                        _waitpid_bounded, checkpoint_on_abort,
                        consume_sidecar, require_resume_path,
@@ -3126,14 +3127,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                 "forkrun: materialized scanner failed (status %r)"
                 % (scan_st,))
 
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        _flush_stdio()
 
         out_fds, out_hold = _new_output_memfds(workers)
         # W-PY15: 1MB signal pipe (65536 outstanding 16B signals vs 4096
@@ -3444,14 +3438,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         signal_r, signal_w, _ = make_pipe()
         fallow_r, fallow_w = os.pipe()
 
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        _flush_stdio()
 
         fallow_pid, scan_pid = _fork_ingest_helpers(
             lib, memfd, fallow_r, fallow_w, engine_fds)
@@ -3954,14 +3941,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             # Workers signal the C drain (1MB pipe, like streaming).
             signal_r, signal_w, _ = make_pipe()
 
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        _flush_stdio()
 
         fallow_pid, scan_pid = _fork_ingest_helpers(
             lib, memfd, fallow_r, fallow_w, engine_fds)
@@ -4200,13 +4180,12 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 except OSError:
                     pass
 
-        from ._executor_core import collect_records as _core_collect
         from ._executor_core import report_poison as _core_poison
         _core_poison(lib, strict_poison=strict_poison)
 
         if not collect:
             return None
-        return _core_collect(results_fd=results_fd,
+        return collect_records(results_fd=results_fd,
                              out_fds=out_fds, spec=_spec,
                              lib=lib, views=views)
     finally:
@@ -4368,14 +4347,7 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
         scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
 
         # Flush buffered stdio before forking (no duplicated output).
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        _flush_stdio()
 
         out_fds: list = []
         out_hold: list = []
@@ -4387,7 +4359,6 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             # Workers signal the drain (not the parent): 1MB pipe.
             signal_r, signal_w, _ = make_pipe()
 
-        from ._executor_core import collect_records as _core_collect
         from ._executor_core import fork_workers as _core_fork
         from ._executor_core import report_poison as _core_poison
         pids = _core_fork(
@@ -4526,7 +4497,7 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
 
         if not collect:
             return None
-        return _core_collect(results_fd=results_fd,
+        return collect_records(results_fd=results_fd,
                              out_fds=out_fds, spec=_spec,
                              lib=lib, views=views)
     finally:
@@ -5117,14 +5088,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         # byte 0, so completeness never depends on the race.
         scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
 
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        _flush_stdio()
 
         if collect:
             out_fds, out_hold = _new_output_memfds(workers)
@@ -5330,20 +5294,11 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 records = consume_sidecar(resume, records)
             # Already batch_idx-ordered by the C orderer; no sort.
             return [blob for _, blob in records]
-        if use_drain:
-            # Dynamic-fork paths (ingest/NUMA) fork no drain on
-            # empty input (no workers ever existed) — vacuously
-            # no records. Materialized paths always fork workers,
-            # so their drain always exists here.
-            records = (list(_iter_records(lib, results_fd, views=_zc))
-                       if results_fd is not None else [])
-        else:
-            records = []
-            for fd in out_fds:
-                records.extend(_iter_records(lib, fd, views=_zc))
-        if order == "index":
-            records.sort(key=lambda kv: kv[0])
-        return [blob for _, blob in records]
+        # Collection is _executor_core.collect_records: drain-vs-direct
+        # and order-index-vs-none are mechanics, not lifecycle shape.
+        return collect_records(use_drain=use_drain,
+                               results_fd=results_fd, out_fds=out_fds,
+                               order=order, lib=lib, views=_zc)
     except BaseException:
         # W-PY22 abort choreography (quiesce -> reap -> snapshot ->
         # publish) BEFORE the finally-teardown destroys the engine.
@@ -5738,14 +5693,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         # byte 0, so completeness never depends on the race.
         scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
 
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        _flush_stdio()
 
         out_fds, out_hold = _new_output_memfds(workers)
         signal_r, signal_w, _ = make_pipe()
@@ -6311,14 +6259,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             # write end for respawns (closed when no worker is live).
             signal_r, signal_w, _ = make_pipe()
 
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        _flush_stdio()
 
         # Fallow reaper child (plain fork: no spawn pipe needed).
         # Pre-fork default: the finally block reaps ingest_pid even when
@@ -6732,20 +6673,11 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             if resume is not None:
                 records = consume_sidecar(resume, records)
             return [blob for _, blob in records]
-        if use_drain:
-            # Dynamic-fork paths (ingest/NUMA) fork no drain on
-            # empty input (no workers ever existed) — vacuously
-            # no records. Materialized paths always fork workers,
-            # so their drain always exists here.
-            records = (list(_iter_records(lib, results_fd, views=_zc))
-                       if results_fd is not None else [])
-        else:
-            records = []
-            for fd in out_fds:
-                records.extend(_iter_records(lib, fd, views=_zc))
-        if order == "index":
-            records.sort(key=lambda kv: kv[0])
-        return [blob for _, blob in records]
+        # Collection is _executor_core.collect_records: drain-vs-direct
+        # and order-index-vs-none are mechanics, not lifecycle shape.
+        return collect_records(use_drain=use_drain,
+                               results_fd=results_fd, out_fds=out_fds,
+                               order=order, lib=lib, views=_zc)
     except BaseException:
         # W-PY22 abort choreography (quiesce -> reap -> snapshot ->
         # publish) BEFORE the finally-teardown destroys the engine
@@ -6924,14 +6856,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         trap_r, trap_w = os.pipe()
 
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        try:
-            sys.stderr.flush()
-        except Exception:
-            pass
+        _flush_stdio()
 
         fallow_pid = os.fork()
         if fallow_pid == 0:
@@ -7658,14 +7583,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     must_close after this returns — every child already inherited
     what it needs).
     """
-    try:
-        sys.stdout.flush()
-    except Exception:
-        pass
-    try:
-        sys.stderr.flush()
-    except Exception:
-        pass
+    _flush_stdio()
 
     fallow_r, fallow_w = os.pipe()
     fallow_pid = os.fork()
@@ -8405,20 +8323,11 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             return None
         if use_orderer:
             return [blob for _, blob in _iter_records(lib, coll_fd, views=_zc)]
-        if use_drain:
-            # Dynamic-fork paths (ingest/NUMA) fork no drain on
-            # empty input (no workers ever existed) — vacuously
-            # no records. Materialized paths always fork workers,
-            # so their drain always exists here.
-            records = (list(_iter_records(lib, results_fd, views=_zc))
-                       if results_fd is not None else [])
-        else:
-            records = []
-            for fd in out_fds:
-                records.extend(_iter_records(lib, fd, views=_zc))
-        if order == "index":
-            records.sort(key=lambda kv: kv[0])
-        return [blob for _, blob in records]
+        # Collection is _executor_core.collect_records: drain-vs-direct
+        # and order-index-vs-none are mechanics, not lifecycle shape.
+        return collect_records(use_drain=use_drain,
+                               results_fd=results_fd, out_fds=out_fds,
+                               order=order, lib=lib, views=_zc)
     except KeyboardInterrupt as _ki:
         try:
             lib.fr_py_abort()

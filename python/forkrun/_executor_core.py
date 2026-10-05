@@ -209,6 +209,32 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
 # Single collection (I7 EOF verification at the callers' join)
 # ---------------------------------------------------------------------------
 
+def flush_stdio():
+    """Flush the parent's buffered stdout/stderr before any fork.
+
+    A fork duplicates the whole userspace buffer, so anything still
+    buffered in the parent is written TWICE -- once by the parent and
+    once by the child that inherited the copy. With multiple workers
+    inheriting the same buffer the duplication multiplies.
+
+    This is a SEMANTIC rule, not boilerplate, which is why it was worth
+    nine identical inline copies (one per executor, plus one at a
+    different indent level). A single definition means a future change to
+    the policy -- say, an fsync, or a check that the streams are not
+    line-buffered -- cannot land in eight of nine executors.
+
+    Errors are ignored deliberately: a stream can legitimately be closed
+    or detached under `pythonw`/embedded use, and failing to fork because
+    a flush on a dead stream raised would be a worse outcome than
+    possibly-unflushed output.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+
+
 def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
                       spec=None, lib=None, views=False):
     """Parse collected output memfds into ordered blobs. Single site.
@@ -244,8 +270,19 @@ def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
     def _records_from(fd):
         if fd is None:
             return []
-        if views and lib is not None:
-            return list(_run_mod._iter_records(lib, fd, views=True))
+        if lib is not None:
+            # Always the incremental C iterator, not just for views.
+            # _iter_records is documented as equivalent to
+            # _parse_records(_read_fd_all(fd)) minus the double
+            # buffering, so this is the same RESULT either way -- but
+            # the old `views and lib is not None` test sent every
+            # views=False caller down the _read_fd_all path, which
+            # materialises the whole stream and then copies it again in
+            # _parse_records. That is the 155ms-of-638ms join the
+            # _iter_records docstring was written to remove, still being
+            # paid by the fail-fast path. views is a payload TYPE choice
+            # (bytes vs memoryview), never a parser choice.
+            return list(_run_mod._iter_records(lib, fd, views=views))
         return _run_mod._parse_records(_run_mod._read_fd_all(fd))
 
     if use_drain:
@@ -368,4 +405,4 @@ def teardown_union(lib, *, supervision=None, state=None,
 
 
 __all__ = ["ExecutorSpec", "fork_workers", "collect_records",
-           "report_poison", "init_engine", "teardown_union"]
+           "report_poison", "init_engine", "teardown_union", "flush_stdio"]
