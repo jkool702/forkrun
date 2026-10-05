@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +56,8 @@ static fn_abort_fn p_abort;
 typedef int (*fn_recover)(int wid, int incarnation, int output_fd,
                          int exit_code);
 typedef int (*fn_abort_reason_fn)(void);
+typedef unsigned int (*fn_poisoned_count)(void);
+static fn_poisoned_count p_poisoned;
 static fn_recover p_recover;
 static fn_abort_reason_fn p_abort_reason;
 
@@ -70,6 +73,7 @@ struct opts {
     int bytes;
     int source_fd;
     int result_fd;      /* launcher writes framed results here */
+    int stats_fd;       /* launcher writes the poison/counter record */
     int drain_mode;
     int retry_limit;
     int on_error;
@@ -224,7 +228,7 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
 int main(int argc, char **argv) {
     struct opts o;
     memset(&o, 0, sizeof o);
-    o.workers = 1; o.source_fd = -1; o.result_fd = -1;
+    o.workers = 1; o.source_fd = -1; o.result_fd = -1; o.stats_fd = -1;
     o.drain_mode = 0; o.retry_limit = 3; o.on_error = 0;
     o.respawn_cap = 64;
 
@@ -237,6 +241,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--bytes") && i + 1 < argc)  o.bytes = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--src") && i + 1 < argc)   o.source_fd = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--result") && i + 1 < argc) o.result_fd = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--stats-fd") && i + 1 < argc) o.stats_fd = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--drain-mode") && i + 1 < argc) o.drain_mode = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--retry") && i + 1 < argc) o.retry_limit = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--on-error") && i + 1 < argc) o.on_error = atoi(argv[++i]);
@@ -264,6 +269,7 @@ int main(int argc, char **argv) {
     p_recover              = (fn_recover)              sym(h, "fr_py_recover_worker");
     p_abort                = (fn_abort_fn)             sym(h, "fr_py_abort");
     p_abort_reason         = (fn_abort_reason_fn)     sym(h, "fr_py_abort_reason");
+    p_poisoned             = (fn_poisoned_count)      sym(h, "fr_py_poisoned_count");
     p_abort                = (fn_abort_fn)               sym(h, "fr_py_abort");
 
     /* Init HERE, after exec. This is the whole point: the state mapping
@@ -644,5 +650,39 @@ int main(int argc, char **argv) {
     if (o.verbose)
         fprintf(stderr, "PHASE spawn_to_scanner=%.2fms rss_kb=%ld bad=%d\n",
                 (t1 - t0) / 1e6, rss_kb(), bad);
+    /* Emit the counter record LAST, after every worker has been joined,
+     * so the count is final. This is the channel that lets the launcher
+     * serve strict_poison and return_stats instead of declining them.
+     *
+     * It works because g_state (which holds poisoned_count) lives in
+     * SHARED memory -- fr_py_init mmaps it MAP_SHARED precisely so that
+     * forked children share it -- so the atomic increment a worker makes
+     * on its way to poisoning a batch is visible here in the parent. A
+     * plain global would have given a per-process copy and a silent
+     * zero.
+     *
+     * Layout (little-endian, fixed):
+     *   u32 version (=1)
+     *   u32 poisoned
+     *   u32 pad     (reserved; keeps the record 8-byte aligned)
+     *   u32 pad
+     * Written on a best-effort basis: a failed stats write must not
+     * change the run's exit status. The reader treats a short/absent
+     * record as "no counts available" and declines rather than
+     * reporting a plausible-looking zero. */
+    if (o.stats_fd >= 0) {
+        uint32_t rec[4] = {1u, 0u, 0u, 0u};
+        rec[1] = p_poisoned ? p_poisoned() : 0u;
+        size_t off = 0;
+        while (off < sizeof rec) {
+            ssize_t w = write(o.stats_fd, (const char *)rec + off,
+                              sizeof rec - off);
+            if (w <= 0) {
+                if (w < 0 && errno == EINTR) continue;
+                break;
+            }
+            off += (size_t)w;
+        }
+    }
     return bad ? 1 : 0;
 }

@@ -473,6 +473,32 @@ def _cleanroom_explicit():
     return v.strip().lower() not in ("", "0", "no", "off", "false")
 
 
+def _warn_cleanroom_multinode(num_nodes):
+    """Multi-node routes AROUND the cleanroom envelope entirely.
+
+    Every `if num_nodes > 1:` branch RETURNS before
+    _cleanroom_eligible is consulted, so an explicit
+    FORKRUN_CLEANROOM used to be dropped here in silence. That
+    contradicted the envelope's own rule ("a user who set
+    FORKRUN_CLEANROOM must learn they did not get it") and read as the
+    cleanroom quietly ignoring them.
+
+    Multi-node is also the launcher's largest remaining gap -- it builds
+    one ring in one process and has no node-bound worker placement -- so
+    the message says so plainly rather than implying a transient miss.
+    It must be called from each branch: the envelope check cannot cover
+    these, because it is never reached.
+    """
+    if not (_cleanroom_enabled() and _cleanroom_explicit()):
+        return
+    import warnings as _warnings
+    _warnings.warn(
+        "forkrun: FORKRUN_CLEANROOM ignored -- multi-node (nodes=%r) "
+        "runs the dedicated NUMA pipeline. The launcher serves UMA "
+        "single-node only." % (num_nodes,),
+        UserWarning, stacklevel=3)
+
+
 def _cleanroom_launcher_path():
     """W-CR1: locate the launcher shipped beside the substrate .so."""
     from ._bindings import find_substrate
@@ -484,6 +510,8 @@ def _cleanroom_launcher_path():
 
 def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
                         orchestrator, return_stats=False):
+    # orchestrator is accepted and ignored: W-CR4 made the launcher
+    # supervise unconditionally, so both settings are served faithfully.
     """W-CR1: can the launcher serve this call FAITHFULLY?
 
     Returns (ok, reason). Every condition here is one where saying yes
@@ -497,46 +525,40 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
       Note this is NOT the frozen-ABI restriction of the C *worker
       loop*: the launcher serves v0 72B-convention plugins fine too.
     * UMA single node -- no multi-node rings.
-    * order="none" -- the launcher concatenates worker output verbatim
-      in COMPLETION order and never runs the C orderer, so order="index"
-      would silently return permuted results.
-    * not strict_poison -- no channel back from the launcher for poison
-      state, so poison could not be turned into an error.
-    * orchestrator=False -- THE LOAD-BEARING ONE. The launcher runs a
-      plain C pipeline (fallow/workers/scanner/drain) with no death
-      pipes, no respawn and no trap-ACK. map() defaults
-      orchestrator=True, whose reactor recovers a batch whose worker
-      died; without that, such a batch is silently lost. So the
-      cleanroom serves only the non-reactor path, whose supervision
-      model it actually matches.
+    * order in ("none", "index") -- the launcher does NOT run the C
+      orderer (ring_order is forked only by the in-process reactor, for
+      memory reasons), but it does not need to. The ordering is applied
+      downstream by shared code: map/collect sorts by index in
+      collect_records, and stream() reassembles parent-side from the
+      batch_idx already present in the batch framing. Both consume the
+      launcher's framing unchanged, so order="index" is served
+      correctly without an orderer in the launcher.
+    * strict_poison and return_stats -- served via a counter channel:
+      the launcher writes [version][poisoned] to a memfd after joining
+      every worker. It works because g_state (holding poisoned_count) is
+      SHARED memory, so a worker's atomic poison increment is visible in
+      the parent. Previously both were declined because there was no
+      channel back, and return_stats was a live P0 bug: completed=len(out)
+      with poisoned hardwired to 0 reported total=90 for a run of 100
+      batches with 10 poisoned.
+    * orchestrator=True AND False both OK -- was False-only, and that
+      gate was the load-bearing one. The launcher used to run a plain C
+      pipeline (fallow/workers/scanner/drain) with no death pipes, no
+      respawn and no trap-ACK, so a dead worker's batch was silently
+      lost. W-CR4 added the supervisor: waitpid over all children,
+      ring_recover_worker by wid, respawn on the same wid, and abort on
+      rc 4/5. That is the same recovery the reactor performs, so the
+      cleanroom can serve orchestrator=True. Note the launcher always
+      supervises -- there is no flag and no non-supervised mode.
     """
     if num_nodes != 1:
         return False, "UMA single-node only (got nodes=%r)" % (num_nodes,)
     if raw_mode != "plugin":
         return False, "mode='plugin' only (got %r)" % (raw_mode,)
-    if order != "none":
-        return False, ("order=%r needs the C orderer, which the launcher "
-                       "does not run" % (order,))
-    if strict_poison:
-        return False, ("strict_poison needs poison state the launcher "
-                       "does not return")
-    # P0: return_stats is a CONCRETE public-API bug here, not a gap.
-    # _map_return -> _finish_map_stats computes
-    #     completed = len(out); poisoned = _LAST_STATS["poisoned"]
-    #     total    = completed + poisoned
-    # and a cleanroom run NEVER populates _LAST_STATS["poisoned"]. So a
-    # run of 100 batches with 10 poisoned returns poisoned=0, total=90
-    # instead of poisoned=10, total=100 -- silently wrong stats from a
-    # successful-looking call. The launcher has no channel back for
-    # poison counts, so the honest fix is to decline rather than report
-    # a plausible-looking wrong number.
-    if return_stats:
-        return False, ("return_stats needs poison/counters the launcher "
-                       "does not return (totals would be silently wrong)")
-    if orchestrator:
-        return False, ("orchestrator=True wants reactor death recovery "
-                       "(death pipes/respawn/trap-ACK); the launcher has "
-                       "none, so a dead worker would lose its batch")
+    if order not in ("none", "index"):
+        return False, ("order=%r is not served; the launcher relies on "
+                       "downstream ordering (collect_records sort for "
+                       "map, parent-side reassembly for stream)" % (order,))
     try:
         if not isinstance(source, (str, bytes, os.PathLike)):
             return False, "materialized file source only"
@@ -548,7 +570,7 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
 
 
 def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
-                       plugin_func, on_error, views):
+                       plugin_func, on_error, views, strict_poison=False):
     """W-CR1: materialized file + C plugin, orchestrated entirely in C.
 
     Everything (fr_py_init, spill to the ingress memfd, per-worker output
@@ -577,8 +599,15 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
 
     src_fd = os.open(os.fspath(source), os.O_RDONLY)
     res_fd = os.memfd_create("fr_cleanroom_result")
+    # Counter channel. The launcher writes [u32 version][u32 poisoned]
+    # here after joining every worker, which is what lets it serve
+    # strict_poison and return_stats rather than declining them: without
+    # it, _LAST_STATS["poisoned"] stayed 0 and a run with 10 poisoned
+    # batches reported total=completed instead of completed+10.
+    stats_fd = os.memfd_create("fr_cleanroom_stats")
     os.set_inheritable(src_fd, True)
     os.set_inheritable(res_fd, True)
+    os.set_inheritable(stats_fd, True)
     argv = [launcher, "--so", so,
             "--plugin", plugin_path, "--func", plugin_func,
             "--workers", str(int(workers)),
@@ -589,7 +618,8 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             # is the same table the C worker loop uses.
             "--on-error", str(_ON_ERROR_CODES.get(on_error, 0)),
             "--retry", str(int(_resolve_retry_limit())),
-            "--src", str(src_fd), "--result", str(res_fd)]
+            "--src", str(src_fd), "--result", str(res_fd),
+            "--stats-fd", str(stats_fd)]
 
     pid = os.fork()
     if pid == 0:
@@ -604,14 +634,58 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # surfaces as empty/corrupt output rather than a clean EBADF.
     os.close(src_fd)
     _wpid, status = os.waitpid(pid, 0)
+    npois = _read_cleanroom_stats(stats_fd)
+    os.close(stats_fd)
     if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
         os.close(res_fd)
         _warnings.warn(
             "forkrun: cleanroom launcher failed (status %r) — using the "
             "in-process path." % (status,), UserWarning, stacklevel=3)
         return None
-    # _cleanroom_collect owns res_fd and closes it.
-    return _cleanroom_collect(res_fd, views)
+    if npois is None:
+        # The counter record is missing or unreadable. Refuse the
+        # cleanroom result rather than report completed-as-total: a
+        # wrong-but-plausible total is worse than the slower path.
+        os.close(res_fd)
+        _warnings.warn(
+            "forkrun: cleanroom launcher returned no counter record; "
+            "poison counts are unknown so total/poisoned would be wrong "
+            "(or strict_poison unenforceable) — using the in-process "
+            "path.", UserWarning, stacklevel=3)
+        return None
+    # Record the counter BEFORE collecting: a poisoned batch is absent
+    # from the results, so completed = len(out) undercounts unless the
+    # poison count is added back, and _finish_map_stats needs it.
+    _LAST_STATS["poisoned"] = npois
+    out = _cleanroom_collect(res_fd, views)
+    # strict_poison is served now: the count came back over the stats
+    # channel, so raising is a real enforcement rather than a guess.
+    # Default (False) keeps warn-and-return-partial semantics.
+    if strict_poison:
+        _raise_for_poisoned(npois, True)
+    return out
+
+
+def _read_cleanroom_stats(stats_fd):
+    """Read the launcher's counter record. Returns the poisoned count.
+
+    Returns None when the record is absent, short or a version we do not
+    know -- meaning "no trustworthy count", which is deliberately NOT the
+    same as zero. Zero would let _finish_map_stats compute
+    total = completed + 0 and report a plausible-looking wrong total,
+    which is the exact bug the stats channel exists to remove. None makes
+    the caller fall back to the in-process path instead.
+    """
+    try:
+        raw = os.pread(stats_fd, 16, 0)
+    except OSError:
+        return None
+    if len(raw) < 8:
+        return None
+    version, poisoned = struct.unpack_from("<II", raw, 0)
+    if version != 1:
+        return None
+    return int(poisoned)
 
 
 def _cleanroom_collect(res_fd, views):
@@ -1728,6 +1802,7 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
         collect=False, c_drain=c_drain, views=output)
 
     if num_nodes > 1:
+        _warn_cleanroom_multinode(num_nodes)
         # NUMA pipeline (ingest owns the source — files and pipes
         # uniformly; no materialized/streaming split here).
         _require_numa_symbol()
@@ -1912,6 +1987,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         collect=True, c_drain=c_drain, views=output)
 
     if num_nodes > 1:
+        _warn_cleanroom_multinode(num_nodes)
         _require_numa_symbol()
         payload, mode = _coerce_payload(payload, mode)
         order = kwargs.get("order", "none")
@@ -2067,21 +2143,23 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                             workers=base["workers"],
                             plugin_path=_p, plugin_func=_f,
                             on_error=kwargs.get("on_error", "retry"),
-                            views=base["views"])
+                            views=base["views"],
+                            strict_poison=bool(
+                                kwargs.get("strict_poison", False)))
                     _sg.check()
                 if out is not None:
                     return _map_return(out, return_stats)
         elif _cleanroom_explicit():
-            # Only warn when the user ASKED. The cleanroom is on by
-            # default, so an unconditional warning here would fire on
-            # every default map() call (orchestrator=True is outside
-            # the envelope).
+            # Only warn when the user ASKED. The default is OFF, so
+            # this branch is reachable only via an explicit
+            # FORKRUN_CLEANROOM -- which is exactly when the user needs
+            # to hear that the envelope could not be honoured.
             import warnings as _warnings
             _warnings.warn(
                 "forkrun: FORKRUN_CLEANROOM=1 ignored for this call "
                 "(%s) — using the in-process path. The launcher covers "
-                "materialized file + C plugin + UMA + order='none' + "
-                "orchestrator=False." % (_why,),
+                "materialized file + C plugin + UMA + "
+                "order in ('none', 'index')." % (_why,),
                 UserWarning, stacklevel=3)
 
     if orchestrator:
@@ -2212,6 +2290,7 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
              mode=kwargs.get("mode", "python"),
              collect=True, splice=False, num_nodes=num_nodes)
     if num_nodes > 1:
+        _warn_cleanroom_multinode(num_nodes)
         _require_numa_symbol()
         payload, engine_mode = _coerce_payload(payload, kwargs.get(
             "mode", "python"))

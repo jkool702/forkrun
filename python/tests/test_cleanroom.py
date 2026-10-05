@@ -153,13 +153,24 @@ class TestCleanroomHelpers(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(p) and os.unlink(p))
         ok, _ = _cleanroom_eligible(p, "plugin", 1, "none", False, False)
         self.assertTrue(ok)
+        # W-CR4 gave the launcher a supervisor and the ordering is
+        # applied downstream, so these three are now served and must be
+        # ACCEPTED. They used to be in the reject list; leaving them
+        # there would keep the gate lying about what the launcher does.
+        for args in (
+                (p, "plugin", 1, "index", False, False),  # ordered map
+                (p, "plugin", 1, "index", False, True),   # + orchestrator
+                (p, "plugin", 1, "none", False, True),    # orchestrator
+                (p, "plugin", 1, "none", True, False),    # strict_poison
+                (p, "plugin", 1, "none", True, True),     # both counters
+        ):
+            ok, why = _cleanroom_eligible(*args)
+            self.assertTrue(ok, "should now accept %r (%s)" % (args, why))
         # Each of these would change RESULTS, not just speed.
         for args in (
                 (p, "python", 1, "none", False, False),   # no plugin
                 (p, "plugin", 4, "none", False, False),   # multi-node
-                (p, "plugin", 1, "index", False, False),  # needs orderer
-                (p, "plugin", 1, "none", True, False),    # strict_poison
-                (p, "plugin", 1, "none", False, True),    # orchestrator
+                (p, "plugin", 1, "hash", False, False),   # unknown order
                 ("/no/such/file", "plugin", 1, "none", False, False),
         ):
             ok, why = _cleanroom_eligible(*args)
@@ -264,11 +275,21 @@ class TestCleanroomExecutes(unittest.TestCase):
         self.assertEqual(len(out), 0)
 
     def test_outside_envelope_warns_and_stays_correct(self):
-        # orchestrator=True is the DEFAULT, and the launcher has no
-        # reactor. It must refuse loudly and still return right answers.
+        """A call the launcher CANNOT serve must still warn, and still
+        return right answers.
+
+        The trigger has moved twice as the envelope grew: it was
+        orchestrator=True (the default), then strict_poison, and is now
+        multi-node. Each was the load-bearing exclusion at the time, and
+        each was removed only when the launcher genuinely stopped losing
+        information on that path. nodes=2 is still excluded -- the
+        launcher builds one ring in one process and has no node-bound
+        worker placement. The refusal path itself is what this guards:
+        warning plus correct results, never silent wrong answers.
+        """
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            out = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+            out = forkrun.map(_spec(), self.path, workers=2, nodes=2,
                               mode="plugin", output="bytes")
         self.assertEqual(len(_joined(out)), 2000)
         self.assertTrue(
@@ -276,17 +297,69 @@ class TestCleanroomExecutes(unittest.TestCase):
             "expected a loud warning, got %r"
             % [str(w.message) for w in caught])
 
-    def test_order_index_refuses_cleanroom(self):
-        # order="index" must NOT silently come back permuted.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            out = forkrun.map(_spec(), self.path, workers=2, nodes=1,
-                              mode="plugin", output="bytes",
-                              order="index", orchestrator=False)
-        self.assertTrue(
-            any("FORKRUN_CLEANROOM" in str(w.message) for w in caught),
-            "order='index' must warn that the launcher was skipped")
+    def test_order_index_takes_cleanroom_and_matches_in_process(self):
+        """order="index" is served by the launcher, not refused.
+
+        This test used to assert the opposite -- that order="index"
+        warns and falls back. That was correct while the launcher had no
+        ordering story at all, but it was over-narrow: the ordering is
+        applied by SHARED downstream code (collect_records sorts by
+        index; stream() reassembles parent-side from batch_idx), and the
+        launcher already emits both keys in its batch framing. So no C
+        orderer is needed in the launcher and the gate was refusing a
+        case the launcher serves correctly.
+
+        Asserted two ways, because the failure mode is silent:
+          1. the launcher is ACTUALLY taken (otherwise a future
+             regression re-falls-back and still passes), and
+          2. the bytes equal the in-process ordered run -- parity, not
+             "looks sorted". The in-process path is the oracle.
+        """
+        out, seen = self._run_marked(order="index", orchestrator=False)
+        self.assertTrue(seen, "order='index' must take the launcher")
+
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        ref = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                          mode="plugin", output="bytes",
+                          order="index", orchestrator=False)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+
+        self.assertEqual(_joined(out), _joined(ref),
+                         "cleanroom order='index' differs from in-process")
         self.assertEqual(len(_joined(out)), 2000)
+
+    def test_orchestrator_true_takes_cleanroom_and_matches(self):
+        """map()'s DEFAULT orchestrator=True is now served.
+
+        orchestrator=True used to be the load-bearing rejection: the
+        launcher had no supervisor, so a dead worker's batch was
+        silently lost, and the default map() call could therefore not
+        be accelerated at all. W-CR4 added the supervisor, so the
+        default path can take the launcher. Death-recovery behaviour
+        under orchestrator=True is covered in TestCleanroomWorkerDeath.
+        """
+        out, seen = self._run_marked(orchestrator=True)
+        self.assertTrue(seen, "orchestrator=True must take the launcher")
+        self.assertEqual(len(_joined(out)), 2000)
+
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        ref = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                          mode="plugin", output="bytes")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        self.assertEqual(_joined(out), _joined(ref))
+
+    def test_default_map_call_needs_no_kwargs(self):
+        """A plain map() call -- all defaults -- must be eligible.
+
+        Guards the interaction of the two flipped gates: orchestrator
+        defaults True and order defaults "none", so if EITHER gate were
+        still closed the default call would silently fall back and the
+        acceleration would never be reachable in practice.
+        """
+        R = sys.modules["forkrun.run"]
+        ok, why = R._cleanroom_eligible(self.path, "plugin", 1,
+                                        "none", False, True)
+        self.assertTrue(ok, "default map() must be eligible: %s" % (why,))
 
 
 @unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
@@ -374,6 +447,63 @@ class TestCleanroomFaultParity(unittest.TestCase):
                             output="bytes", nodes=1, workers=1,
                             on_error="fail-fast", orchestrator=False)
 
+    def test_return_stats_poison_counts_agree_with_in_process(self):
+        """return_stats now works on the cleanroom, and agrees.
+
+        This was a live P0: the cleanroom never populated
+        _LAST_STATS["poisoned"], so _finish_map_stats computed
+        completed = len(out) and total = completed + 0. A run of 100
+        batches with 10 poisoned reported total=90 and poisoned=0 --
+        silently wrong numbers from a call that looked perfectly
+        successful. The launcher now reports the count over a stats
+        memfd, so both paths must return identical stats.
+
+        Asserting equality with the in-process path (rather than
+        "poisoned > 0") is the point: the old bug produced a perfectly
+        plausible non-zero-looking result set, and only parity catches
+        that.
+        """
+        os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        _, ref = forkrun.map(self._fail(), self.path, mode="plugin",
+                             output="bytes", return_stats=True,
+                             nodes=1, workers=1, orchestrator=False)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        out, got = forkrun.map(self._fail(), self.path, mode="plugin",
+                               output="bytes", return_stats=True,
+                               nodes=1, workers=1, orchestrator=False)
+        self.assertGreater(ref["poisoned"], 0,
+                           "fixture must actually poison something, else "
+                           "this test proves nothing")
+        self.assertEqual(got, ref,
+                         "cleanroom stats differ from in-process stats")
+        self.assertEqual(got["total"], got["completed"] + got["poisoned"])
+        self.assertEqual(got["completed"], len(out))
+
+    def test_strict_poison_raises_with_the_real_count(self):
+        """strict_poison=True is enforced on the cleanroom.
+
+        Only enforceable because the count came back over the stats
+        channel; before that the launcher declined the call. Asserting
+        the COUNT (not merely that it raised) is deliberate -- a raise
+        with count=0 would satisfy a weaker test while telling the user
+        nothing about how much was skipped.
+        """
+        import forkrun as _fk
+        os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        with self.assertRaises(_fk.ForkrunPoisonSkip) as ref:
+            forkrun.map(self._fail(), self.path, mode="plugin",
+                        output="bytes", strict_poison=True,
+                        nodes=1, workers=1, orchestrator=False)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        with self.assertRaises(_fk.ForkrunPoisonSkip) as got:
+            forkrun.map(self._fail(), self.path, mode="plugin",
+                        output="bytes", strict_poison=True,
+                        nodes=1, workers=1, orchestrator=False)
+        self.assertEqual(got.exception.count, ref.exception.count)
+        self.assertGreater(got.exception.count, 0)
+
     def test_retry_limit_is_transported(self):
         # FORKRUN_RETRY_LIMIT=0 poisons on the FIRST failure, so the
         # launcher must not silently use its own default of 3. Both
@@ -440,11 +570,11 @@ class TestCleanroomStreaming(unittest.TestCase):
         th.start()
         return r, th
 
-    def _drain(self, fd):
+    def _drain(self, fd, order="none"):
         out = []
         for blob in forkrun.stream(
                 _spec(), fd, mode="plugin", workers=4, nodes=1,
-                streaming=True, orchestrator=False):
+                streaming=True, orchestrator=False, order=order):
             out.append(bytes(blob))
         return b"".join(out)
 
@@ -463,6 +593,37 @@ class TestCleanroomStreaming(unittest.TestCase):
             output="bytes", orchestrator=False))
         self.assertEqual(len(streamed), len(ref))
         self.assertEqual(streamed, ref)
+
+    def test_stream_order_index_matches_in_process(self):
+        """stream(order="index") through the launcher must match.
+
+        stream() orders by PARENT-SIDE reassembly from batch_idx, with a
+        bounded out-of-order buffer -- it does not run the C orderer
+        either, so the launcher needs no ordering process. This pins
+        that: the ordered streamed bytes must equal the ordered
+        in-process run, which is the oracle.
+
+        Compared against the in-process run rather than a sorted-ness
+        check on purpose. A stream that silently dropped or duplicated
+        records could still come out monotonic; only parity catches
+        that.
+        """
+        r, th = self._pipe_with_producer(self.n)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        streamed = self._drain(r, order="index")
+        th.join()
+        os.close(r)
+
+        path = _make_input(self.n)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        ref = b"".join(bytes(x) for x in forkrun.map(
+            _spec(), path, workers=4, nodes=1, mode="plugin",
+            output="bytes", order="index", orchestrator=False))
+        self.assertEqual(len(streamed), len(ref))
+        self.assertEqual(streamed, ref,
+                         "cleanroom stream order='index' differs from "
+                         "in-process")
 
     def test_stream_is_live(self):
         # A slow producer: if the launcher buffered to EOF, the first
