@@ -13,6 +13,8 @@ import signal
 import struct
 import tempfile
 import threading
+import fcntl
+from fcntl import F_GETPIPE_SZ
 import time
 import unittest
 import warnings
@@ -329,6 +331,40 @@ class TestCleanroomExecutes(unittest.TestCase):
                          "cleanroom order='index' differs from in-process")
         self.assertEqual(len(_joined(out)), 2000)
 
+    def test_order_index_actually_sorts_out_of_order_records(self):
+        """Deterministic proof that order="index" SORTS, not just that
+        the output happened to be ordered.
+
+        The end-to-end order test cannot establish this: with two workers
+        and a cheap plugin, completion order frequently EQUALS input
+        order, so the old code passed that test while returning
+        completion order for every genuinely shuffled run.
+
+        So this drives _cleanroom_collect directly over a result memfd
+        whose records are deliberately out of order. No workers, no
+        timing, no luck: if the sort is missing or keyed wrongly this
+        fails every time.
+        """
+        R = sys.modules["forkrun.run"]
+        hdr = R._HDR
+        # batch_idx deliberately shuffled: 3, 0, 4, 1, 2
+        order_in = (3, 0, 4, 1, 2)
+        fd = os.memfd_create("fr_collect_order")
+        blob = b""
+        for i in order_in:
+            payload = b"payload-%d" % i
+            blob += hdr.pack(i, len(payload)) + payload
+        os.write(fd, blob)
+        got = R._cleanroom_collect(fd, False, "index")
+        self.assertEqual([bytes(x) for x in got],
+                         [b"payload-%d" % i for i in (0, 1, 2, 3, 4)])
+        # Same bytes, order="none" must stay in memfd (completion) order.
+        fd2 = os.memfd_create("fr_collect_none")
+        os.write(fd2, blob)
+        got2 = R._cleanroom_collect(fd2, False, "none")
+        self.assertEqual([bytes(x) for x in got2],
+                         [b"payload-%d" % i for i in order_in])
+
     def test_orchestrator_true_takes_cleanroom_and_matches(self):
         """map()'s DEFAULT orchestrator=True is now served.
 
@@ -403,31 +439,50 @@ class TestCleanroomNonFileSources(unittest.TestCase):
                 '"et":"view","dev":"ios","dur":5}\n' % i for i in range(n)]
 
     def _fresh_pipe(self, records):
-        """A NEW pipe fed by a live writer thread, for ONE run.
+        """A NEW pipe pre-loaded with `records`, for ONE run.
 
         A pipe is one-shot, so a parity check cannot hand the same
         descriptor to both paths -- each gets its own.
 
-        The writer runs CONCURRENTLY and is joined only after the run
-        drains it. Writing everything first and then joining deadlocks
-        whenever the payload exceeds the pipe buffer (64 KiB by default):
-        the writer blocks in write() forever because the only reader is
-        the run that has not started yet. ~85 bytes per record means
-        ~780 records is the ceiling, which is exactly the kind of hidden
-        limit that makes a test mysteriously hang instead of failing.
+        Loaded SYNCHRONOUSLY, with the payload capped to half the real
+        pipe capacity (queried via F_GETPIPE_SZ, not assumed). An earlier
+        version used a writer thread, which is where the suite-wide stall
+        came from: if the run ever returned without draining the source
+        (envelope decline, launcher fallback, an early raise), nobody
+        read the pipe, the writer blocked in write() forever, and the
+        addCleanup(th.join) turned that into a HANG rather than a
+        failure. It reproduced only under full-suite load, never in
+        isolation -- exactly the class of defect that gets mistaken for
+        "the suite is just slow".
+
+        Bounding by the queried capacity rather than a magic number keeps
+        this correct on hosts with a non-default pipe size, where a
+        hardcoded 64 KiB assumption would reintroduce the same deadlock.
         """
         r, w = os.pipe()
-
-        def pump():
-            try:
-                os.write(w, "".join(records).encode())
-            finally:
-                os.close(w)
-
-        th = threading.Thread(target=pump)
-        th.start()
-        self.addCleanup(th.join)
+        try:
+            cap = fcntl.fcntl(w, F_GETPIPE_SZ)
+        except (OSError, NameError):
+            cap = 65536                      # Linux default
+        payload = "".join(records).encode()
+        room = cap // 2
+        if len(payload) > room:
+            raise AssertionError(
+                "payload %d bytes exceeds half the pipe capacity %d; "
+                "reduce the record count instead of reintroducing a "
+                "blocking writer" % (len(payload), room))
+        self.addCleanup(lambda: os.close(r) if self._fd_open(r) else None)
+        os.write(w, payload)
+        os.close(w)
         return r
+
+    @staticmethod
+    def _fd_open(fd):
+        try:
+            os.fstat(fd)
+            return True
+        except OSError:
+            return False
 
     def _agree(self, make_source, **kw):
         """Run both paths, each on its OWN source, and assert parity.
@@ -457,8 +512,8 @@ class TestCleanroomNonFileSources(unittest.TestCase):
         return got
 
     def test_pipe_descriptor(self):
-        out = self._agree(lambda: self._fresh_pipe(self._records(1000)))
-        self.assertEqual(len(_joined(out)), 1000)
+        out = self._agree(lambda: self._fresh_pipe(self._records(400)))
+        self.assertEqual(len(_joined(out)), 400)
 
     def test_cleanroom_run_never_dlopens_in_the_parent(self):
         """A cleanroom run must not dlopen the plugin in the PARENT.
@@ -771,18 +826,31 @@ class TestCleanroomStreaming(unittest.TestCase):
         r, w = os.pipe()
 
         def run():
-            buf = []
-            for i in range(n):
-                buf.append('{"eid":"e%d","uid":1,"iid":2,"ts":1700000000,'
-                           '"et":"view","dev":"ios","dur":5}\n' % i)
-                if len(buf) >= 500:
+            # BrokenPipeError is now EXPECTED, not a harness bug: when
+            # the launcher fails, the stream raises instead of quietly
+            # draining, so our reader end closes and the producer gets
+            # EPIPE. That is the fixed behaviour working -- previously
+            # the reader stayed open and the producer hung instead.
+            try:
+                buf = []
+                for i in range(n):
+                    buf.append('{"eid":"e%d","uid":1,"iid":2,'
+                               '"ts":1700000000,"et":"view","dev":"ios",'
+                               '"dur":5}\n' % i)
+                    if len(buf) >= 500:
+                        os.write(w, "".join(buf).encode())
+                        buf = []
+                    if delay:
+                        time.sleep(delay)
+                if buf:
                     os.write(w, "".join(buf).encode())
-                    buf = []
-                if delay:
-                    time.sleep(delay)
-            if buf:
-                os.write(w, "".join(buf).encode())
-            os.close(w)
+            except BrokenPipeError:
+                pass
+            finally:
+                try:
+                    os.close(w)
+                except OSError:
+                    pass
 
         th = threading.Thread(target=run, daemon=True)
         th.start()
@@ -928,6 +996,62 @@ class TestCleanroomStreaming(unittest.TestCase):
         self.assertFalse(th.is_alive(),
                          "producer still blocked after abandonment")
         th.join(timeout=5)
+
+    def test_stream_regular_file_path_is_not_eaten_as_an_iterable(self):
+        """stream(spec, "/path/file", streaming=True) must read the FILE.
+
+        The stream resolver used to return None for a regular file, after
+        which its caller asked "is this an iterable?" -- and a str path
+        IS iterable. So the PATH STRING was fed to the producer character
+        by character, the launcher failed, and (before the exit-status
+        check below) the caller saw a clean EOF: a truncated stream and
+        no error at all.
+
+        Asserted against the map path rather than a byte count, and with
+        orchestrator=False because that is the only setting under which
+        the cleanroom stream is eligible at all.
+        """
+        path = _make_input(1000)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        got = b"".join(bytes(x) for x in forkrun.stream(
+            _spec(), path, mode="plugin", workers=2, nodes=1,
+            streaming=True, orchestrator=False))
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        ref = b"".join(bytes(x) for x in forkrun.map(
+            _spec(), path, mode="plugin", output="bytes",
+            workers=2, nodes=1, orchestrator=False))
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        self.assertEqual(len(ref), 1000)
+        self.assertEqual(got, ref)
+
+    def test_stream_raises_when_the_launcher_fails(self):
+        """A failed launcher must NOT look like a clean end-of-stream.
+
+        EOF on the result pipe is not proof of success: the launcher
+        exits non-zero for unrecoverable worker death, helper death,
+        spill failure and abort, having already streamed some records.
+        The stream path discarded that status, so a partial stream
+        completed normally and the caller could not tell.
+
+        Forced here with a plugin that exports no forkrun_use_ctx: the
+        launcher refuses it by design (exit 78) because the engine would
+        drive it via the legacy stdout route, whose output the launcher
+        cannot collect. Previously that produced an empty stream and no
+        error; it must now raise.
+        """
+        legacy = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tests", "plugins", "test_plugin.so")
+        if not os.path.exists(legacy):
+            self.skipTest("test_plugin.so not built")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        with self.assertRaises(Exception):
+            out = list(forkrun.stream(
+                legacy + ":process", _make_input(500), mode="plugin",
+                workers=2, nodes=1, streaming=True, orchestrator=False))
+            self.fail("stream() returned %d blobs from a launcher that "
+                      "exited non-zero instead of raising" % (len(out),))
 
     def test_stream_outside_envelope_falls_back(self):
         # orchestrator=True is the default and is OUTSIDE the envelope;

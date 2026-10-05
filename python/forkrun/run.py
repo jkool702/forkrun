@@ -594,7 +594,8 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
 
 
 def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
-                       plugin_func, on_error, views, strict_poison=False):
+                       plugin_func, on_error, views, strict_poison=False,
+                       order="none"):
     """W-CR1: materialized file + C plugin, orchestrated entirely in C.
 
     Everything (fr_py_init, spill to the ingress memfd, per-worker output
@@ -639,7 +640,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # rather than left as dead code -- an unreachable fork of a
     # multi-threaded process is exactly the deadlock hazard the codebase
     # comments warn about, and dead safety code is not safety.
-    src_fd = _cleanroom_map_source_fd(source)
+    src_fd = _cleanroom_source_fd(source)
     if src_fd is None:
         return None
     res_fd = os.memfd_create("fr_cleanroom_result")
@@ -701,7 +702,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # from the results, so completed = len(out) undercounts unless the
     # poison count is added back, and _finish_map_stats needs it.
     _LAST_STATS["poisoned"] = npois
-    out = _cleanroom_collect(res_fd, views)
+    out = _cleanroom_collect(res_fd, views, order)
     # strict_poison is served now: the count came back over the stats
     # channel, so raising is a real enforcement rather than a guess.
     # Default (False) keeps warn-and-return-partial semantics.
@@ -732,13 +733,22 @@ def _read_cleanroom_stats(stats_fd):
     return int(poisoned)
 
 
-def _cleanroom_collect(res_fd, views):
+def _cleanroom_collect(res_fd, views, order="none"):
     """W-CR1: parse the launcher's framed records into map() output.
 
     Framing is the engine's own [batch_idx u64][len u64][payload] -- the
     same _HDR struct _worker writes -- so nothing new is invented.
     views=True mmaps the result memfd read-only for zero-copy
     memoryviews; views=False copies. Owns and closes res_fd.
+
+    order="index" SORTS by the batch_idx already present in each record's
+    own framing header. The launcher runs no orderer and its drain is
+    unordered, so the memfd is in batch-COMPLETION order; without this
+    sort, order="index" silently returned completion order, which is a
+    direct violation of the documented API contract. (This is the same
+    job collect_records does for the in-process paths -- it just cannot
+    be used here because the cleanroom framing is parsed straight out of
+    the result memfd rather than through _iter_records.)
     """
     try:
         size = os.fstat(res_fd).st_size
@@ -757,7 +767,7 @@ def _cleanroom_collect(res_fd, views):
                 start = base + _HDR.size
                 if size - start < blen:
                     break
-                out.append(mv[start:start + blen])
+                out.append((_bidx, mv[start:start + blen]))
                 base = start + blen
         else:
             raw = os.pread(res_fd, size, 0)
@@ -767,9 +777,11 @@ def _cleanroom_collect(res_fd, views):
                 start = base + _HDR.size
                 if size - start < blen:
                     break
-                out.append(raw[start:start + blen])
+                out.append((_bidx, raw[start:start + blen]))
                 base = start + blen
-        return out
+        if order == "index":
+            out.sort(key=lambda kv: kv[0])
+        return [blob for _, blob in out]
     finally:
         try:
             os.close(res_fd)
@@ -778,44 +790,29 @@ def _cleanroom_collect(res_fd, views):
 
 
 def _cleanroom_source_fd(source):
-    """Return a dup'd, inheritable fd for `source`, or None.
+    """Resolve a cleanroom source to an fd, or None if it is not one.
 
-    None means "source is not already a descriptor" -- a Python iterable
-    that a forked producer child will pump into a pipe instead.
-    """
-    import stat as _stat
-    try:
-        if isinstance(source, int) and not isinstance(source, bool) \
-                and source >= 0:
-            fd = os.dup(source)
-        elif isinstance(source, (str, bytes, os.PathLike)):
-            st = os.stat(os.fspath(source))
-            if not _stat.S_ISFIFO(st.st_mode):
-                return None          # a regular file: not the streaming path
-            fd = os.open(os.fspath(source), os.O_RDONLY)
-        elif hasattr(source, "fileno"):
-            fd = os.dup(source.fileno())
-        else:
-            return None
-    except (OSError, ValueError, AttributeError):
-        return None
-    os.set_inheritable(fd, True)
-    return fd
+    THE single source resolver, used by both the map and stream cleanroom
+    paths. There used to be two, and they disagreed in a way that was a
+    live bug in each:
 
+      * The stream resolver returned None for a REGULAR FILE (written
+        when "streaming never materializes, so a fifo is the interesting
+        case"). Its caller then asked "is this an iterable?" -- and a
+        str path IS iterable, so forkrun.stream(spec, "/path/file",
+        streaming=True) fed the PATH STRING to the producer, character by
+        character. The launcher then failed ("spill child died"), and
+        because that path also discarded the launcher's exit status, the
+        caller saw a clean EOF: a truncated stream and no error.
 
-def _cleanroom_map_source_fd(source):
-    """Resolve a map() source to an fd, or None if it needs a producer.
+      * The map resolver handled regular files correctly but was a second
+        copy of the same path-vs-iterable precedence rule.
 
-    Deliberately NOT _cleanroom_source_fd: that one returns None for a
-    REGULAR FILE, because the streaming path never materializes and a
-    fifo is the interesting case there. Reusing it here was a real bug --
-    a str path has __iter__, so a plain file fell through to the
-    producer branch and was pumped ONE CHARACTER AT A TIME (the path
-    string itself), yielding 1 byte of output where 2000 were expected.
-
-    Order matters for the same reason: decide "is this a path/descriptor"
-    BEFORE considering "is this an iterable", because str and bytes both
-    satisfy __iter__ and would otherwise be mistaken for a record source.
+    Order is the whole point: decide "path/descriptor" BEFORE "iterable",
+    because str and bytes both satisfy __iter__ and would otherwise be
+    mistaken for a record source. A regular file needs no special case
+    at all -- the launcher spills from a descriptor exactly as it does
+    for a fifo.
     """
     try:
         if isinstance(source, int) and not isinstance(source, bool) \
@@ -980,6 +977,30 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                     "forkrun: cleanroom source producer failed (status "
                     "%r); the input was truncated, so the results are "
                     "not trustworthy" % (pstatus,))
+        # EOF on the result pipe is NOT proof of success. The launcher
+        # exits non-zero for unrecoverable worker death, helper death,
+        # spill failure, recovery failure and abort -- and in every one
+        # of those cases it has already streamed some records and then
+        # closed the pipe. Treating that EOF as normal completion
+        # returns a PARTIAL stream and no error, which is the exact
+        # silent truncation this codebase rejects everywhere else (the
+        # map cleanroom path has checked its status since W-CR1; this
+        # one did not).
+        #
+        # So reap the launcher here and judge its status BEFORE
+        # declaring the stream finished. Raising from the finally below
+        # would mask the real error and double-wait the child, hence the
+        # explicit waitpid here and finished=1 (which tells the finally
+        # the child is already reaped).
+        if launch_pid is not None:
+            _lp, lstatus = os.waitpid(launch_pid, 0)
+            launch_pid = None
+            if not (os.WIFEXITED(lstatus)
+                    and os.WEXITSTATUS(lstatus) == 0):
+                raise RuntimeError(
+                    "forkrun: cleanroom launcher failed (status %r); the "
+                    "stream is TRUNCATED and the records already yielded "
+                    "are incomplete" % (lstatus,))
         finished = True
     finally:
         try:
@@ -2385,7 +2406,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                             on_error=kwargs.get("on_error", "retry"),
                             views=base["views"],
                             strict_poison=bool(
-                                kwargs.get("strict_poison", False)))
+                                kwargs.get("strict_poison", False)),
+                            order=order)
                     _sg.check()
                 if out is not None:
                     return _map_return(out, return_stats)
