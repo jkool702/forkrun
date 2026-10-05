@@ -316,8 +316,14 @@ class TestWorkerException(unittest.TestCase):
                 self.assertIsInstance(out2, list)
                 self.assertEqual(len(out2), 10)
                 self.assertEqual(stats, {"total": 10, "completed": 10,
-                                         "poisoned": 0,
-                                         "poisoned_batches": []})
+"poisoned": 0,
+                             "poisoned_batches": [],
+                             # New in v3.6.1: the cleanroom's bounded relay
+                             # slot can drop indices, so the stats say so
+                             # instead of leaving a short list
+                             # indistinguishable from a complete one.
+                             # False here because nothing poisoned.
+                             "poisoned_batches_truncated": False})
                 self.assertEqual(forkrun.last_run_stats(), stats)
 
                 def poison_head(batch):
@@ -331,7 +337,9 @@ class TestWorkerException(unittest.TestCase):
                 self.assertEqual(len(out3), 9)
                 self.assertEqual(stats3, {"total": 10, "completed": 9,
                                           "poisoned": 1,
-                                          "poisoned_batches": [0]})
+                                          "poisoned_batches": [0],
+                                          "poisoned_batches_truncated":
+                                              False})
                 self.assertEqual(forkrun.last_run_stats(), stats3)
 
                 with self.assertRaises(TypeError):

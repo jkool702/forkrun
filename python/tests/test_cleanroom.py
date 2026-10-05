@@ -1910,8 +1910,17 @@ class TestPoisonRelayTruncation(unittest.TestCase):
     def test_stats_key_present_and_false_in_normal_run(self):
         """The public flag exists on an ordinary run and reads False."""
         path = _make_input(200)
+        # Save BOTH knobs. Setting FORKRUN_RETRY_LIMIT while restoring only
+        # FORKRUN_CLEANROOM leaks retry_limit=1 into every later test
+        # module -- test_cleanroom sorts first, so this broke 32 tests in
+        # test_doc_accuracy, test_escrow, test_fault, test_numa_recovery,
+        # test_reactor, test_recovery_adv, test_spawn_loop and
+        # test_streaming, every one of which asserts "retried at least
+        # once". This suite has now leaked an env var twice; the restore
+        # block is symmetric by construction so it cannot drift again.
+        prev = {k: os.environ.get(k) for k in
+                ("FORKRUN_CLEANROOM", "FORKRUN_RETRY_LIMIT")}
         os.environ["FORKRUN_RETRY_LIMIT"] = "1"
-        prev = os.environ.get("FORKRUN_CLEANROOM")
         os.environ["FORKRUN_CLEANROOM"] = "1"
         try:
             _, st = forkrun.map(
@@ -1919,10 +1928,11 @@ class TestPoisonRelayTruncation(unittest.TestCase):
                 output="bytes", return_stats=True, workers=1, nodes=1,
                 orchestrator=True)
         finally:
-            if prev is None:
-                os.environ.pop("FORKRUN_CLEANROOM", None)
-            else:
-                os.environ["FORKRUN_CLEANROOM"] = prev
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
         self.assertIn("poisoned_batches_truncated", st)
         self.assertFalse(st["poisoned_batches_truncated"])
         self.assertEqual(len(st["poisoned_batches"]), st["poisoned"])
