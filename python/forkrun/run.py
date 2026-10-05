@@ -483,7 +483,7 @@ def _cleanroom_launcher_path():
 
 
 def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
-                        orchestrator):
+                        orchestrator, return_stats=False):
     """W-CR1: can the launcher serve this call FAITHFULLY?
 
     Returns (ok, reason). Every condition here is one where saying yes
@@ -520,6 +520,19 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
     if strict_poison:
         return False, ("strict_poison needs poison state the launcher "
                        "does not return")
+    # P0: return_stats is a CONCRETE public-API bug here, not a gap.
+    # _map_return -> _finish_map_stats computes
+    #     completed = len(out); poisoned = _LAST_STATS["poisoned"]
+    #     total    = completed + poisoned
+    # and a cleanroom run NEVER populates _LAST_STATS["poisoned"]. So a
+    # run of 100 batches with 10 poisoned returns poisoned=0, total=90
+    # instead of poisoned=10, total=100 -- silently wrong stats from a
+    # successful-looking call. The launcher has no channel back for
+    # poison counts, so the honest fix is to decline rather than report
+    # a plausible-looking wrong number.
+    if return_stats:
+        return False, ("return_stats needs poison/counters the launcher "
+                       "does not return (totals would be silently wrong)")
     if orchestrator:
         return False, ("orchestrator=True wants reactor death recovery "
                        "(death pipes/respawn/trap-ACK); the launcher has "
@@ -1956,7 +1969,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     if _cleanroom_enabled() and raw_mode == "plugin":
         _ok, _why = _cleanroom_eligible(
             source, raw_mode, num_nodes, order,
-            kwargs.get("strict_poison", False), orchestrator)
+            kwargs.get("strict_poison", False), orchestrator,
+            bool(return_stats))
         if _ok:
             # rpartition on the last colon, exactly as _coerce_payload
             # parses the spec. Deliberately NOT _c_plugin_spec(): that
