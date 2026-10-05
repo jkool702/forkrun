@@ -2346,8 +2346,63 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     # flag settings quietly ran the in-process path.
     raw_mode = mode
     raw_payload = payload
-    payload, mode = _coerce_payload(payload, mode)
     order = kwargs.get("order", "none")
+    if _cleanroom_enabled() and raw_mode == "plugin":
+        _ok, _why = _cleanroom_eligible(
+            source, raw_mode, num_nodes, order,
+            kwargs.get("strict_poison", False), orchestrator,
+            bool(return_stats))
+        if _ok:
+            # rpartition on the last colon, exactly as _coerce_payload
+            # parses the spec. Deliberately NOT _c_plugin_spec(): that
+            # only answers for a dialect-1/2 frozen-ABI plugin, which is
+            # a constraint of the C *worker loop*.
+            #
+            # This dispatch sits ABOVE _coerce_payload on purpose (see
+            # the note at the top of the block): coercing first would
+            # build the ctypes payload and dlopen the plugin IN THIS
+            # PROCESS, which both wastes the work -- the launcher
+            # dlopens it again -- and is the fork hazard _plugin.py
+            # itself warns about, for a plugin whose ELF initializers
+            # start threads. The cleanroom exists to create workers after
+            # a clean exec; loading the object beforehand in the large
+            # Python parent quietly undid that.
+            #
+            # A plugin without forkrun_use_ctx is refused by the launcher
+            # (see its dlopen probe); _cleanroom_eligible's docstring
+            # covers why.
+            _p, _sep, _f = raw_payload.rpartition(":")
+            if _p and _f:
+                with _signal_guard(
+                        kwargs.get("signal_policy", "default")) as _sg:
+                    with _RUN_LOCK:
+                        out = _execute_cleanroom(
+                            source,
+                            lines=kwargs.get("lines"),
+                            bytes_=kwargs.get("bytes"),
+                            workers=base["workers"],
+                            plugin_path=_p, plugin_func=_f,
+                            on_error=kwargs.get("on_error", "retry"),
+                            views=base["views"],
+                            strict_poison=bool(
+                                kwargs.get("strict_poison", False)))
+                    _sg.check()
+                if out is not None:
+                    return _map_return(out, return_stats)
+        elif _cleanroom_explicit():
+            # Only warn when the user ASKED. The default is OFF, so
+            # this branch is reachable only via an explicit
+            # FORKRUN_CLEANROOM -- which is exactly when the user needs
+            # to hear that the envelope could not be honoured.
+            import warnings as _warnings
+            _warnings.warn(
+                "forkrun: FORKRUN_CLEANROOM=1 ignored for this call "
+                "(%s) — using the in-process path. The launcher covers "
+                "materialized file + C plugin + UMA + "
+                "order in ('none', 'index')." % (_why,),
+                UserWarning, stacklevel=3)
+
+    payload, mode = _coerce_payload(payload, mode)
 
     base["order"] = order
     base["mode"] = mode
@@ -2388,48 +2443,6 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 **base)
             _sg.check()
             return _map_return(out, return_stats)
-    if _cleanroom_enabled() and raw_mode == "plugin":
-        _ok, _why = _cleanroom_eligible(
-            source, raw_mode, num_nodes, order,
-            kwargs.get("strict_poison", False), orchestrator,
-            bool(return_stats))
-        if _ok:
-            # rpartition on the last colon, exactly as _coerce_payload
-            # parses the spec. Deliberately NOT _c_plugin_spec(): that
-            # only answers for a dialect-1/2 frozen-ABI plugin, which is
-            # a constraint of the C *worker loop*; the launcher dlopens
-            # and calls the entry point, so v0 72B plugins are fine too.
-            _p, _sep, _f = raw_payload.rpartition(":")
-            if _p and _f:
-                with _signal_guard(
-                        kwargs.get("signal_policy", "default")) as _sg:
-                    with _RUN_LOCK:
-                        out = _execute_cleanroom(
-                            source,
-                            lines=kwargs.get("lines"),
-                            bytes_=kwargs.get("bytes"),
-                            workers=base["workers"],
-                            plugin_path=_p, plugin_func=_f,
-                            on_error=kwargs.get("on_error", "retry"),
-                            views=base["views"],
-                            strict_poison=bool(
-                                kwargs.get("strict_poison", False)))
-                    _sg.check()
-                if out is not None:
-                    return _map_return(out, return_stats)
-        elif _cleanroom_explicit():
-            # Only warn when the user ASKED. The default is OFF, so
-            # this branch is reachable only via an explicit
-            # FORKRUN_CLEANROOM -- which is exactly when the user needs
-            # to hear that the envelope could not be honoured.
-            import warnings as _warnings
-            _warnings.warn(
-                "forkrun: FORKRUN_CLEANROOM=1 ignored for this call "
-                "(%s) — using the in-process path. The launcher covers "
-                "materialized file + C plugin + UMA + "
-                "order in ('none', 'index')." % (_why,),
-                UserWarning, stacklevel=3)
-
     if _detect_streaming(source, kwargs.get("streaming")):
         if c_worker_loop:
             raise RuntimeError(

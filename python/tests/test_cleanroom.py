@@ -460,6 +460,65 @@ class TestCleanroomNonFileSources(unittest.TestCase):
         out = self._agree(lambda: self._fresh_pipe(self._records(1000)))
         self.assertEqual(len(_joined(out)), 1000)
 
+    def test_cleanroom_run_never_dlopens_in_the_parent(self):
+        """A cleanroom run must not dlopen the plugin in the PARENT.
+
+        The whole premise of the cleanroom is that workers are created
+        after a clean exec, from a small process that holds no Python
+        address space. That premise was quietly broken: _coerce_payload()
+        ran BEFORE the cleanroom dispatch and, for a plugin spec, built
+        make_plugin_payload(path, func) -> load_plugin() -> ctypes.CDLL in
+        the large Python parent. The launcher then dlopened the SAME
+        object again.
+
+        So a "clean" run was really: dlopen in the big parent, exec,
+        dlopen again in the launcher. Besides wasting the work, parent
+        dlopen is the fork hazard _plugin.py itself warns about -- a
+        plugin whose ELF initializers start threads is not
+        fork-safe, and doing it in the parent is precisely what the
+        cleanroom exists to avoid.
+
+        Asserted by counting CDLL calls for the plugin path. Without the
+        fix this is 1, not 0, so the test genuinely distinguishes the
+        two behaviours.
+        """
+        import ctypes
+        R = sys.modules["forkrun.run"]
+
+        real_cdll = ctypes.CDLL      # bind BEFORE patching, or the
+                                     # wrapper calls itself forever
+        dlopens = []
+
+        class _CountingCDLL:
+            def __init__(self, name, *a, **kw):
+                dlopens.append(name)
+                self._real = real_cdll(name)
+
+            def __getattr__(self, item):
+                return getattr(self._real, item)
+
+        ctypes.CDLL = _CountingCDLL
+        self.addCleanup(setattr, ctypes, "CDLL", real_cdll)
+        seen = []
+        real_exec = R._execute_cleanroom
+        R._execute_cleanroom = lambda *a, **k: (seen.append(1),
+                                                real_exec(*a, **k))[1]
+        self.addCleanup(setattr, R, "_execute_cleanroom", real_exec)
+
+        out = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                          mode="plugin", output="bytes")
+        self.assertTrue(seen, "launcher was not taken")
+        plugin_so = _spec().split(":", 1)[0]
+        self.assertTrue(
+            plugin_so, "could not determine the plugin path from _spec()")
+        hits = [d for d in dlopens if plugin_so in str(d)]
+        self.assertEqual(
+            hits, [],
+            "the parent dlopened the plugin for a cleanroom run; the "
+            "launcher is supposed to be the only process that loads it. "
+            "Saw %r (all parent loads: %r)" % (hits, dlopens))
+        self.assertEqual(len(_joined(out)), 2000)
+
     def test_int_fd_of_a_file(self):
         out = self._agree(lambda: os.open(self.path, os.O_RDONLY))
         self.assertEqual(len(_joined(out)), 2000)
