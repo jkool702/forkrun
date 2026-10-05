@@ -83,6 +83,53 @@ class ExecutorSpec:
 # Single worker-fork dispatch (I4 escrow discipline lives in the callees)
 # ---------------------------------------------------------------------------
 
+def trim_parent_heap():
+    """Return the parent heap's free pages to the OS. Best-effort.
+
+    WHY: fork() copies the parent's page tables, so its cost scales with
+    the parent's RSS -- not with what the workers actually touch. A host
+    that has processed a few large chunks before calling forkrun pays
+    that per worker, and at GB-scale it dominates: measured 1.6 ms per
+    fork at 10 MB RSS versus 58 ms at 1.6 GB, so a 28-worker fan-out
+    goes from ~45 ms to ~1.6 s for no benefit to anyone.
+
+    This is the cheap mitigation for the in-process path. It is NOT a
+    general fix, and it is worth being precise about why:
+
+    * It only reclaims memory the allocator is HOLDING but no longer
+      using -- i.e. free chunks retained in glibc's main arena.
+    * Large allocations (glibc serves >128 KB straight from mmap) are
+      already munmap'd on free, so they need no help. Measured: 1.5 GB
+      of 64 MB blocks, freed, dropped RSS to baseline with no trim at
+      all, and malloc_trim changed nothing.
+    * Live memory is untouched, by definition. If the caller still holds
+      the data, no amount of trimming will make the fork cheaper.
+
+    So: costs ~0.07 ms, helps workloads that churn many medium-sized
+    objects through the arena, does nothing for the two cases above.
+    The structural answer is the cleanroom launcher, which forks from a
+    small exec'd process instead of from the host -- see
+    _cleanroom_enabled. This is the mitigation available to callers who
+    are not using it.
+
+    Best-effort throughout: no libc, no malloc_trim (musl, or a
+    non-glibc host), or a trim that fails for any reason is a silent
+    no-op. Never let an optimisation abort a run.
+    """
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        trim = libc.malloc_trim
+    except (OSError, AttributeError, ImportError):
+        return False
+    try:
+        trim.argtypes = [ctypes.c_size_t]
+        trim.restype = ctypes.c_int
+        return bool(trim(0))
+    except Exception:
+        return False
+
+
 def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
                   engine_fds, payload, sink, mode, on_error,
                   plugin_spec=None, spawn_argv=None, splice=None,
@@ -96,6 +143,11 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
     deposit nothing on failure (fail-loud, I4 deviation recorded in the
     manifest); all Python-worker paths share the escrow retry helpers via
     ``worker_main``.
+
+    Trims the parent heap once, immediately before the fan-out -- see
+    ``trim_parent_heap``. fork() cost scales with parent RSS, so doing
+    this at the ONE place workers are forked covers every executor
+    rather than relying on ten call sites to remember.
 
     ``src_fd``/``must_close``: materialized executors close the source in
     the Python child post-fork (parent spilled already; I3 hygiene).
@@ -125,6 +177,11 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
             c_worker_loop = False
         if c_spawn_loop is None:
             c_spawn_loop = False
+    # Once, immediately before the fan-out. fork() copies page tables, so
+    # its cost scales with parent RSS rather than with anything the
+    # workers touch -- see trim_parent_heap for what this does and does
+    # not fix. Best-effort and silent by construction.
+    trim_parent_heap()
     from ._worker import resolve_payload_parent as _resolve_parent
     if payload is not None and isinstance(payload, str):
         payload = _resolve_parent(payload)
@@ -350,4 +407,5 @@ def init_engine(lib, *, lines, bytes_, topology=None, num_nodes=1,
     return rc
 
 __all__ = ["ExecutorSpec", "fork_workers", "collect_records",
+           "trim_parent_heap",
            "report_poison", "init_engine", "flush_stdio"]
