@@ -863,3 +863,32 @@ reach producer EOF before scanning anything.
 Note this benchmark tripped the new threaded-fork detection on its own:
 the producer is a thread, so the harness is exactly the shape the warning
 describes. Detection working unprompted is the intended behaviour.
+
+
+### Post-review status (branch NEW/REFACTOR3.7)
+
+Addressed from the external review, in its priority order:
+
+| # | item | status |
+|---|---|---|
+| 2 | return_stats silently wrong under cleanroom | **FIXED** `6c923e2b` -- declined in the envelope |
+| 3 | fork() from a threaded host | **MITIGATED** `526ede03` -- warns once, fatal under env var, installed at the _RUN_LOCK choke point |
+| 1 | worker death untested / whole-job rerun | **TESTED + PINNED** `104fc551` -- at-least-once made observable |
+| 4 | spill failure strands the launcher | **FIXED** `8dfd8ace` -- spill now calls fr_py_abort |
+| 8 | abandonment leaks the subtree | **FIXED** `8dfd8ace` -- PR_SET_PDEATHSIG in every child |
+| 6 | benchmark base too narrow | **DONE** `36431490`, `757a7eb3` -- parent RSS + streaming latency |
+| 7 | _RUN_LOCK serializes jobs | architectural, untouched (correctly) |
+| 5 | real NUMA | needs hardware |
+
+Suite: **690 tests, `failures=1`** (release gate only) both at the
+default and with `FORKRUN_CLEANROOM=1`.
+
+Two findings from this round worth more than the fixes:
+
+- The abandonment test PASSED BECAUSE OF THE BUG. It asserted the
+  producer completes; the producer completed only because the orphaned
+  spill child kept draining its pipe. A test whose assertion is
+  satisfied by a leak is worse than no test.
+- Comparing invocation counts ACROSS the two execution models measures
+  batch shape, not semantics (27 vs 50 was batching). At-least-once
+  had to be measured within one path.
