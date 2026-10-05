@@ -8,10 +8,6 @@ executors in ``run.py`` (see ``dev/supervisor/DEDUP_DESIGN.md`` +
   (one branch per worker kind; the only per-kind code in the tree).
 - :func:`collect_records` — drain-vs-direct + order-index-vs-none collection.
 - :func:`report_poison` — engine poison summary + ``strict_poison`` mapping.
-- :func:`teardown_union` — union-fd-set teardown covering both plain
-  (``_teardown_stream`` shape) and reactor (``_teardown_reactor`` shape)
-  callers; supervision-specific pid sets arrive as parameters so this
-  function carries zero mode branches.
 - :func:`init_engine` — ``fr_py_init`` vs ``fr_py_init_numa`` selection.
 
 Cycle discipline: leaf modules (``_bindings``, ``_fd_scrub``, ``_pipes``,
@@ -353,56 +349,5 @@ def init_engine(lib, *, lines, bytes_, topology=None, num_nodes=1,
                            else "substrate init failed")
     return rc
 
-
-# ---------------------------------------------------------------------------
-# Union teardown (I3 + I8, zero mode branches)
-# ---------------------------------------------------------------------------
-
-def teardown_union(lib, *, supervision=None, state=None,
-                    pids=(), extra_pids=(), orderer_pid=None,
-                    drain_pid=None, results_fd=None,
-                    signal_r=None, signal_w=None, spare_signal_w=None,
-                    out_fds=(), out_hold=None, memfd=None, mem_hold=None,
-                    src_fd=None, must_close=False,
-                    order_r=None, order_w=None, trap_r=None, trap_w=None,
-                    coll_fd=None, coll_hold=None, fallow_w=None,
-                    scan_pid=None, spec=None):
-    """Kill strays + close union fd set + destroy. Single implementation.
-
-    ``supervision == "reactor"`` routes to ``_teardown_reactor`` (which
-    additionally reaps ``state.workers``, parked spawn/fallow spares, and
-    the scanner death pipe); otherwise routes to ``_teardown_stream``.
-    Callers pass already-assembled pid/fd sets — this function adds no
-    per-mode branches beyond the one supervision selection.
-
-    W-REL6-5: ``supervision`` defaults from ``spec`` (explicit wins).
-    """
-    if supervision is None:
-        supervision = spec.supervision if spec is not None else "plain"
-    import sys as _sys
-    _run_mod = _sys.modules["forkrun.run"]
-
-    if supervision == "reactor":
-        _run_mod._teardown_reactor(
-            lib, state, signal_r=signal_r, out_fds=out_fds,
-            out_hold=out_hold, memfd=memfd, mem_hold=mem_hold,
-            src_fd=src_fd, must_close=must_close,
-            extra_pids=tuple(extra_pids)
-            + ((scan_pid,) if scan_pid is not None else ()),
-            orderer_pid=orderer_pid, order_r=order_r, order_w=order_w,
-            trap_r=trap_r, trap_w=trap_w, coll_fd=coll_fd,
-            coll_hold=coll_hold, drain_pid=drain_pid,
-            results_fd=results_fd, spare_signal_w=spare_signal_w)
-        return
-    _run_mod._teardown_stream(
-        lib, list(pids), signal_r, list(out_fds),
-        out_hold if out_hold is not None else [],
-        memfd, src_fd, must_close,
-        extra_pids=tuple(extra_pids)
-        + ((scan_pid,) if scan_pid is not None else ()),
-        fallow_w=fallow_w, drain_pid=drain_pid,
-        results_fd=results_fd)
-
-
 __all__ = ["ExecutorSpec", "fork_workers", "collect_records",
-           "report_poison", "init_engine", "teardown_union", "flush_stdio"]
+           "report_poison", "init_engine", "flush_stdio"]

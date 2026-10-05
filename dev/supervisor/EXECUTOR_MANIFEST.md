@@ -191,9 +191,8 @@ Consolidation landed per `DEDUP_DESIGN.md` (costume-detection PASS):
 - New module `python/forkrun/_executor_core.py`: `ExecutorSpec`,
   `fork_workers` (single splice/c_plugin/c_spawn/python dispatch),
   `collect_records` (drain-vs-direct + order), `report_poison`,
-  `init_engine` (UMA vs NUMA selection), `teardown_union` (union fd set,
-  1 supervision branch). Cycle-safe via `sys.modules["forkrun.run"]`
-  lazy binding.
+  `init_engine` (UMA vs NUMA selection). Cycle-safe via
+  `sys.modules["forkrun.run"]` lazy binding.
 - Ported (behavior-preserving, same names/signatures/probe points):
   #1 `_execute_locked` (fork+collect+poison to core),
   #2 `_execute_ingest_locked` (fork+collect+poison to core),
@@ -225,12 +224,22 @@ Consolidation landed per `DEDUP_DESIGN.md` (costume-detection PASS):
 
 ## W-REL6 addendum (Wave 5: seam USED + measured consolidation)
 
-ExecutorSpec/init_engine/teardown_union no longer exist-but-unused:
+ExecutorSpec/init_engine no longer exist-but-unused:
 every core function accepts `spec=` (explicit overrides), all ten
 executors construct one spec (lattice + call flags) and thread it
 through init/fork/collect; init bodies (10 sites) route via
 init_engine (NUMA message + NULL-map convention preserved
 call-site-exact).
+
+Correction (SSoT pass, W-DEDUP2): `teardown_union` was in this list
+but is now DELETED, not wired. It turned out to be a pure routing shim
+over `_teardown_stream` / `_teardown_reactor` with no logic of its own,
+and no callers. Wiring it in would have replaced a direct 1-2 argument
+teardown call with a 20+ argument one that forwards to the same target
+-- more indirection, more parameters, and no duplicated logic removed.
+The two teardown implementations remain the single sources for their
+respective supervision regimes; the helper that claimed to unify them
+was the part that was not real.
 
 Consolidated this wave (zero behavior change, gated per step):
 - 2 legacy poison scalar sites -> core report_poison (npois override
