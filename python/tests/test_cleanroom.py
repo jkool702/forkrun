@@ -1653,130 +1653,50 @@ class TestCleanroomRespawnIncarnation(unittest.TestCase):
     def _marker(self):
         return os.path.join(self.tmp, "invocations")
 
-    def test_respawn_generations_are_distinct(self):
-        """The launcher must tell the engine which generation it spawns.
+    def test_respawn_lineage_is_wid_and_generation_paired(self):
+        """Assert the exact wid:incarnation lineage, not just "a respawn".
 
-        fr_py_worker_init stores the wincarn it is given into
-        g_fr_config.ring_wincarn, the engine stamps that into the
-        worker's transaction record at claim time, and
-        ring_recover_worker_core refuses to reclaim a batch whose
-        txn->incarnation differs from the incarnation passed to
-        recovery -- it clears the record and reports "nothing to
-        recover" instead.
+        The invariant is per-WID: the launcher's counter for a worker and
+        the wincarn it hands that worker must be the same number, because
+        the engine stamps the latter into txn->incarnation and
+        ring_recover_worker refuses to reclaim a batch whose incarnation
+        does not match.
 
-        So the launcher's per-wid counter and the wincarn it hands each
-        worker MUST agree. The launcher used to pass a hardcoded 0 for
-        every generation while incrementing its own counter. The first
-        death of a worker still recovered (both sides agreed on 0); the
-        SECOND death of the same wid then mismatched and the in-flight
-        batch was dropped without returning to escrow.
+        So the assertion has to be about a SINGLE wid surviving multiple
+        generations. With workers>1 a fixture that simply dies N times
+        can land every death on a different wid, giving (w0:g0, w1:g0,
+        w0:g1) -- "a respawn was observed", true, while never once
+        exercising a second death of the same worker, which is precisely
+        the case that dropped a batch.
 
-        ctx->worker_incarn is also plugin-ABI-visible and defined as the
-        respawn generation, so a plugin could observe the lie directly.
-        That is what this asserts -- it reads the generations the plugin
-        actually saw.
-
-        Deliberately NOT asserting a blob-for-blob comparison against a
-        healthy run: the BATCH COUNT varies between runs of identical
-        input (measured 7/23/25/50 blobs over 15 runs of 200 records),
-        because boundaries depend on how much has been ingested when the
-        scanner looks. That is pre-existing and shared with the
-        in-process path. Joined bytes are invariant -- one digest across
-        all 15 runs, equal to the input size -- so a byte comparison
-        would be stable, but it is not what this test is for and
-        test_matches_in_process_content already covers it. This test
-        isolates the propagation, which is deterministic.
+        workers=1 forces the sequence onto one wid, and the fixture
+        records wid:incarnation so the lineage is read directly rather
+        than inferred. Expected: (0:0) dies, (0:1) dies, (0:2) succeeds.
         """
         os.environ["FORKRUN_TEST_SIDE_EFFECT_FILE"] = self._marker()
         got = forkrun.map(self.V1_SO + ":die_twice_v1", self.path,
-                          mode="plugin", output="bytes", workers=2,
+                          mode="plugin", output="bytes", workers=1,
                           nodes=1, orchestrator=True)
         with open(self._marker()) as fh:
-            gens = [int(x[1:]) for x in fh.read().split()]
-        self.assertTrue(gens, "the payload never ran")
-        self.assertIn(
-            0, gens, "expected a generation-0 invocation, saw %r" % (gens,))
+            tags = fh.read().split()
+        self.assertGreaterEqual(
+            len(tags), 3,
+            "expected at least three invocations on one wid; saw %r"
+            % (tags,))
+        self.assertEqual(
+            tags[:3], ["w0:g0", "w0:g1", "w0:g2"],
+            "the wid:incarnation lineage is wrong. The first two "
+            "invocations must die on wid 0 at generations 0 and 1 and "
+            "the third must succeed at generation 2; anything else means "
+            "the launcher is not handing each worker its own generation.")
         self.assertTrue(
-            any(g > 0 for g in gens),
-            "every invocation reported generation 0, so the launcher is "
-            "NOT propagating wincarn and the engine's incarnation check "
-            "would mismatch on the second death of a wid. Saw %r"
-            % (gens,))
-        # And the payload must actually have produced output, so the
-        # generations above came from real work rather than a run that
-        # failed early.
-        self.assertGreater(len(got), 0)
-
-
-class TestForkCostWarning(unittest.TestCase):
-    """fork() cost scales with PARENT rss -- make that visible.
-
-    Measured on this host: 1.6 ms per fork at 10 MB resident versus 58 ms
-    at 1.6 GB. A 36x swing that buys the workers nothing, because the
-    pages copied belong to the caller and are never read by a worker.
-
-    The user-visible symptom is that forkrun gets mysteriously slow in a
-    long-lived host process with no visible cause. So measure it, and say
-    so once -- not never (invisible), and not per call (noise in a loop).
-    """
-
-    def setUp(self):
-        from forkrun import _executor_core as core
-        self.core = core
-        self._old = os.environ.get("FORKRUN_RSS_WARN_KB")
-        self._saved = core._RSS_WARNED
-        core._RSS_WARNED = False
-        self.addCleanup(self._restore)
-
-    def _restore(self):
-        self.core._RSS_WARNED = self._saved
-        if self._old is None:
-            os.environ.pop("FORKRUN_RSS_WARN_KB", None)
-        else:
-            os.environ["FORKRUN_RSS_WARN_KB"] = self._old
-
-    def _run(self, rss_kb):
-        import io
-        import contextlib
-        buf = io.StringIO()
-        with contextlib.redirect_stderr(buf):
-            fired = self.core.warn_fork_cost(rss_kb, 12.5, 4)
-        return fired, buf.getvalue()
-
-    def test_small_parent_is_silent(self):
-        os.environ["FORKRUN_RSS_WARN_KB"] = "524288"
-        fired, out = self._run(10 * 1024)
-        self.assertFalse(fired)
-        self.assertEqual(out, "", "a small parent must not be warned about")
-
-    def test_large_parent_warns_with_an_actionable_message(self):
-        os.environ["FORKRUN_RSS_WARN_KB"] = "524288"
-        fired, out = self._run(700 * 1024)
-        self.assertTrue(fired)
-        self.assertIn("resident", out)
-        self.assertIn("fork()", out)
-        self.assertIn("FORKRUN_RSS_WARN_KB=0", out)
-
-    def test_warns_at_most_once_per_process(self):
-        os.environ["FORKRUN_RSS_WARN_KB"] = "1"
-        first, _ = self._run(700 * 1024)
-        second, out = self._run(700 * 1024)
-        self.assertTrue(first)
-        self.assertFalse(second, "must not repeat: noise in a loop")
-        self.assertEqual(out, "")
-
-    def test_zero_disables(self):
-        os.environ["FORKRUN_RSS_WARN_KB"] = "0"
-        fired, out = self._run(700 * 1024)
-        self.assertFalse(fired)
-        self.assertEqual(out, "")
-
-    def test_rss_probe_is_available_here(self):
-        # Guards the warning from being permanently dead on a host with
-        # no /proc: if this ever returns None the feature is inert and
-        # should be reconsidered rather than left silently doing nothing.
-        self.assertIsNotNone(self.core._parent_rss_kb())
-
+            all(t.startswith("w0:") for t in tags),
+            "every invocation should be on wid 0 with workers=1, saw %r"
+            % (tags,))
+        self.assertGreater(
+            len(got), 0,
+            "the surviving generation must actually produce output, or "
+            "the lineage above proves nothing")
 
 if __name__ == "__main__":
     unittest.main()

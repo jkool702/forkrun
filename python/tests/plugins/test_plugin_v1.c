@@ -195,10 +195,21 @@ int die_twice_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
             }
         }
     }
-    /* Always record the generation we were launched with, so the test
-     * can assert which generations actually ran. */
+    /* Always record the WID and generation we were launched with, so
+     * the test can assert the exact lineage rather than inferring it.
+     *
+     * Recording wid:incarnation rather than just the incarnation is
+     * what makes this a test of the invariant. The bug was that the
+     * launcher's per-wid counter and the wincarn it handed each worker
+     * disagreed. With workers>1 a fixture that simply dies N times can
+     * have every death land on a DIFFERENT wid, so the sequence
+     * (0, 0, 1) satisfies "a respawn was observed" while never
+     * exercising a second death of the same worker -- which is exactly
+     * the case that silently dropped a batch. Pairing each generation
+     * with its wid lets the test assert wid=0 across all three. */
     char tag[64];
-    snprintf(tag, sizeof tag, "g%u", (unsigned)ctx->worker_incarn);
+    snprintf(tag, sizeof tag, "w%u:g%u",
+             (unsigned)ctx->worker_id, (unsigned)ctx->worker_incarn);
     _append_marker(tag);
     if (prior < 2)
         raise(SIGKILL);
