@@ -64,6 +64,14 @@ int fr_py_output_advanced(uint64_t nbytes);
 int64_t fr_py_parse_descriptors(const char *input, uint64_t input_len, struct fr_py_record_desc *descriptors, uint64_t max_descriptors);
 int fr_py_plugin_call(const char *path, const char *func_name, int ingress_fd, int out_fd, uint64_t batch_off, uint64_t batch_len, uint64_t batch_idx, uint32_t line_count, uint32_t num_kills, int wid, int wincarn);
 unsigned int fr_py_poisoned_count(void);
+
+/* Append a poisoned batch index to the per-worker slot on the fd named
+ * by $FRK_POISON_FD (see fr_poison_relay in forkrun_ring.c). Used by
+ * BOTH poison sites -- the C worker loop's and the fr_py_* shim's --
+ * because they are separate translation units and the cleanroom reaches
+ * the shim one. No-op when the variable is unset, i.e. on every
+ * non-cleanroom run. */
+void fr_poison_relay(uint32_t batch_idx);
 int fr_py_recover_worker(int wid, int incarnation, int output_fd, int exit_code);
 int fr_py_resume_snapshot(uint64_t *horizon, uint64_t *stdout_bytes, struct FrPyInterval *jagged, uint32_t *count_out, uint32_t max_jagged);
 int fr_py_scan(int fd);

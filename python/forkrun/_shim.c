@@ -294,6 +294,15 @@ int fr_py_claim(fr_py_batch_t *out) {
                 if (batch.num_kills == poison_threshold && g_state) {
                     uint32_t total_poisoned = __atomic_add_fetch(
                         &g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+                    /* Relay the index to the parent. The count alone
+                     * already crosses via shared g_state; the index has
+                     * no shared home, so it goes out on the stats memfd.
+                     * This is the site the CLEANROOM reaches --
+                     * fr_py_worker_plugin_loop lives here, not in the
+                     * ring's own loop -- which is why the ring.c call
+                     * alone produced an empty poisoned_batches with a
+                     * correct poisoned count. */
+                    fr_poison_relay((uint32_t)batch.batch_idx);
                     uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
                     uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;
                     if (h_cnt > 0 && total_poisoned >= h_cnt) {

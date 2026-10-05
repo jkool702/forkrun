@@ -767,6 +767,13 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # it, _LAST_STATS["poisoned"] stayed 0 and a run with 10 poisoned
     # batches reported total=completed instead of completed+10.
     stats_fd = os.memfd_create("fr_cleanroom_stats")
+    # Pre-size so every worker owns a real slot to append to. A memfd
+    # starts zero-filled, which the slot-count convention relies on;
+    # without the size the workers' writes land past EOF and are
+    # discarded, so poisoned_batches reads back empty while `poisoned`
+    # stays correct -- the exact silent gap this closes.
+    _stats_ftruncate(stats_fd, _STATS_HEADER_BYTES
+                     + max(int(workers), 1) * _STATS_SLOT_U32 * 4)
     os.set_inheritable(src_fd, True)
     os.set_inheritable(res_fd, True)
     os.set_inheritable(stats_fd, True)
@@ -796,7 +803,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # surfaces as empty/corrupt output rather than a clean EBADF.
     os.close(src_fd)
     _wpid, status = os.waitpid(pid, 0)
-    npois = _read_cleanroom_stats(stats_fd)
+    npois, npois_idx = _read_cleanroom_stats(stats_fd)
     os.close(stats_fd)
     if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
         os.close(res_fd)
@@ -819,6 +826,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # from the results, so completed = len(out) undercounts unless the
     # poison count is added back, and _finish_map_stats needs it.
     _LAST_STATS["poisoned"] = npois
+    _LAST_STATS["poisoned_batches"] = list(npois_idx)
     out = _cleanroom_collect(res_fd, views, order)
     # strict_poison is served now: the count came back over the stats
     # channel, so raising is a real enforcement rather than a guess.
@@ -826,6 +834,22 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     if strict_poison:
         _raise_for_poisoned(npois, True)
     return out
+
+
+# Stats channel geometry, mirrored by the launcher (v2 header) and by
+# fr_poison_relay() in forkrun_ring.c. All three must agree:
+#   header : [u32 version][u32 poisoned][u32 workers][u32 slot_stride]
+#   slot   : [u32 count][count x u32 batch_idx], one per worker
+_STATS_HEADER_BYTES = 16
+_STATS_SLOT_U32 = 1024
+
+
+def _stats_ftruncate(fd, size):
+    """Grow the stats memfd. Best-effort; absence is caught downstream."""
+    try:
+        os.ftruncate(fd, size)
+    except OSError:
+        pass
 
 
 def _read_cleanroom_stats(stats_fd):
@@ -838,16 +862,48 @@ def _read_cleanroom_stats(stats_fd):
     which is the exact bug the stats channel exists to remove. None makes
     the caller fall back to the in-process path instead.
     """
+    # Read the WHOLE region, not just the header: the poisoned-index
+    # slots follow it. Reading 16 bytes made the slot loop below see
+    # base+4 > len(raw) and return an empty list, i.e. the relay was
+    # working and the reader threw the data away.
     try:
-        raw = os.pread(stats_fd, 16, 0)
+        size = os.fstat(stats_fd).st_size
+    except OSError:
+        return None
+    try:
+        raw = os.pread(stats_fd, max(int(size), 16), 0)
     except OSError:
         return None
     if len(raw) < 8:
         return None
     version, poisoned = struct.unpack_from("<II", raw, 0)
-    if version != 1:
+    if version < 1:
         return None
-    return int(poisoned)
+    if version == 1:
+        return int(poisoned), []
+    # v2: poisoned batch indices follow the header, one bounded slot per
+    # worker. Anything malformed degrades to the scalar alone, which is
+    # still authoritative for total and strict_poison.
+    if len(raw) < _STATS_HEADER_BYTES:
+        return int(poisoned), []
+    _ver, _poi, workers, stride = struct.unpack_from("<IIII", raw, 0)
+    if not stride:
+        return int(poisoned), []
+    idxs = []
+    for wid in range(min(int(workers), 4096)):
+        base = _STATS_HEADER_BYTES + wid * stride * 4
+        if base + 4 > len(raw):
+            break
+        (n,) = struct.unpack_from("<I", raw, base)
+        if n > _STATS_SLOT_U32:
+            break                      # bounded slot: never trust the count
+        for k in range(int(n)):
+            off = base + 4 + k * 4
+            if off + 4 > len(raw):
+                break
+            (b,) = struct.unpack_from("<I", raw, off)
+            idxs.append(int(b))
+    return int(poisoned), sorted(set(idxs))
 
 
 def _cleanroom_collect(res_fd, views, order="none"):
@@ -2378,17 +2434,15 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
       total = completed + poisoned, poisoned_batches sorted batch
       indices (see forkrun.last_run_stats for the caveats).
 
-      KNOWN GAP, cleanroom only: the launcher transports the poison
-      COUNT over its stats memfd but not the batch INDICES, so with
-      FORKRUN_CLEANROOM=1 `poisoned_batches` is [] even when
-      `poisoned` > 0. The three scalars are correct -- they were the
-      actual P0, since a hardwired 0 made `total` undercount -- so this
-      is a missing detail rather than a wrong number. Filling it needs a
-      poisoned-index array in the engine's shared GlobalState, which is
-      a layout change to memory both the substrate and the launcher
-      depend on; that deserves its own verification cycle rather than
-      being folded into a release. Treat an empty list as "not
-      reported", never as "nothing was poisoned" -- check `poisoned`.
+      The cleanroom serves BOTH the scalars and the index list. The
+      launcher relays each poisoned batch index out of the worker on a
+      per-worker slot of the stats memfd (see fr_poison_relay), so
+      `len(poisoned_batches) == poisoned` holds on the cleanroom path
+      exactly as it does in process. The slot is BOUNDED (1024 indices
+      per worker); a run that poisons more than that in one worker keeps
+      the correct COUNT and reports a truncated list, which is the
+      degradation direction that cannot make a number look better than
+      it is.
     """
     if kwargs.get("sink") is not None:
         raise ValueError(

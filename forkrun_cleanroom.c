@@ -193,6 +193,12 @@ static int death_cause(int status) {
  * which keeps the wid -> out_fd -> ring binding stable across
  * generations. Takes the pointer the parent already resolved: dlopen
  * after fork is a classic post-fork hazard. */
+/* Stats fd the workers append poisoned batch indices to. Set once in
+ * main() before any fork so it is inherited; -1 disables the relay. Read
+ * inside spawn_wid to keep it out of that signature, which already has
+ * twelve parameters. */
+static int g_poison_stats_fd = -1;
+
 static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
                        int fall_w, fn_worker_plugin_loop wloop,
                        const char *path, const char *func,
@@ -217,7 +223,15 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
          * respawn creates -- so it hides completely in normal runs. */
         for (int i = 0; i < n_engine; i++)
             keep[4 + i] = engine_fd[i];
-        scrub_closem_others(keep, 4 + n_engine);
+        /* The poison relay needs this one too. Scrubbing it away is
+         * silent -- the worker's relay just finds a closed fd and stops
+         * recording, so poisoned_batches would come back empty with
+         * poisoned still correct. Exactly the failure mode the relay
+         * exists to remove, so it is kept explicitly. */
+        int n_keep = 4 + n_engine;
+        if (g_poison_stats_fd >= 0)
+            keep[n_keep++] = g_poison_stats_fd;
+        scrub_closem_others(keep, n_keep);
         if (!wloop) _exit(70);
         /* wincarn MUST be this generation's number. It is not
          * diagnostic: fr_py_worker_init stores it in
@@ -462,6 +476,17 @@ int main(int argc, char **argv) {
         int keep[2] = {fallp[0], memfd};
         scrub_closem_others(keep, 2);
         _exit(p_fall(fallp[0], memfd) == 0 ? 0 : 1);
+    }
+
+    /* Poison relay: tell workers which fd to append batch indices to.
+     * getenv-in-the-child is the established mechanism here (see
+     * FORKRUN_C_STDIN / FD_WORKER_W), and setenv here is inherited by
+     * every fork below. */
+    if (o.stats_fd >= 0) {
+        char num[32];
+        snprintf(num, sizeof num, "%d", o.stats_fd);
+        setenv("FRK_POISON_FD", num, 1);
+        g_poison_stats_fd = o.stats_fd;
     }
 
     /* workers */
@@ -739,7 +764,15 @@ int main(int argc, char **argv) {
      * record as "no counts available" and declines rather than
      * reporting a plausible-looking zero. */
     if (o.stats_fd >= 0) {
-        uint32_t rec[4] = {1u, 0u, 0u, 0u};
+        /* v2 adds the poisoned-batch-index slots that follow the header:
+         *   [u32 version=2][u32 poisoned][u32 workers][u32 slot_stride_u32]
+         * then workers * slot_stride_u32 of u32, one slot per worker,
+         * each [u32 count][count x u32 batch_idx]. v1 readers only look
+         * at the first two words, so the layout is backward compatible.
+         * The launcher does NOT zero the slots: workers own their own
+         * slot and the memfd starts zero-filled, and memfds are
+         * guaranteed zero on creation. */
+        uint32_t rec[4] = {2u, 0u, (uint32_t)o.workers, 1024u + 1u};
         rec[1] = p_poisoned ? p_poisoned() : 0u;
         size_t off = 0;
         while (off < sizeof rec) {

@@ -1874,6 +1874,61 @@ struct SharedState {
 };
 
 static struct GlobalState *g_state = NULL;
+
+/* ── Poison-index relay (cleanroom stats channel) ──────────────────────────
+ *
+ * The poison COUNT already reaches the parent: poisoned_count lives in
+ * g_state, which fr_py_init maps MAP_SHARED precisely so forked children
+ * share it, so a worker's atomic increment is visible in the launcher.
+ * The batch INDICES have no such home -- the engine does not model poison
+ * as a ring_poll event (the six events are ABORT/EOF/IGNORE/SPAWN/
+ * TIMEOUT/TRAP_ACK), so nothing already carries them.
+ *
+ * Rather than grow GlobalState, relay them through the stats memfd the
+ * launcher ALREADY creates for the scalar count, using one fixed slot per
+ * worker. Each worker writes only its own slot, so there is no shared
+ * writer and no atomic protocol beyond a release store of the count; the
+ * launcher writes the header after joining every worker.
+ *
+ * The fd number arrives by environment rather than by config, for the
+ * same reason FORKRUN_C_STDIN and FD_WORKER_W do: it is frontend
+ * plumbing, not engine configuration, and getenv is valid post-fork where
+ * running bash internals would not be.
+ *
+ * Entirely best-effort. Absent env var (every non-cleanroom run) means the
+ * first call costs one getenv and then nothing; a full slot stops
+ * recording rather than growing, so the relay is BOUNDED and cannot make
+ * a run fail.
+ */
+#define FR_POISON_SLOT_U32 1024u   /* slot capacity in u32 indices */
+static __thread int g_poison_fd = -2;   /* -2 = not yet looked up */
+
+void fr_poison_relay(uint32_t batch_idx) {
+    if (g_poison_fd == -2) {
+        const char *e = getenv("FRK_POISON_FD");
+        g_poison_fd = (e && e[0]) ? atoi(e) : -1;
+    }
+    if (g_poison_fd < 0)
+        return;
+    const unsigned wid = g_fr_config.ring_wid;
+    if (wid >= 4096u)
+        return;
+    /* header is 4 u32; slot is [count][idx...] with a fixed capacity. */
+    const off_t slot = (off_t)(4 + (size_t)wid * (FR_POISON_SLOT_U32 + 1)) * 4;
+    uint32_t n = 0;
+    if (pread(g_poison_fd, &n, sizeof n, slot) != (ssize_t)sizeof n)
+        return;
+    if (n >= FR_POISON_SLOT_U32)
+        return;                      /* bounded: drop, never grow */
+    uint32_t buf[1];
+    buf[0] = batch_idx;
+    if (pwrite(g_poison_fd, buf, sizeof buf,
+               slot + (off_t)(1 + n) * 4) != (ssize_t)sizeof buf)
+        return;
+    n++;
+    /* Publish the count last: a reader that sees n must see the indices. */
+    (void)!pwrite(g_poison_fd, &n, sizeof n, slot);
+}
 static struct SharedState *state = NULL;
 
 static inline void cleanup_waiter_state() {
@@ -6648,6 +6703,7 @@ static int ring_claim_main(int argc, char **argv) {
       uint32_t poison_threshold = (limit > 0) ? (uint32_t)limit : 1;
       if (batch.num_kills == poison_threshold && g_state) {
           uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+          fr_poison_relay((uint32_t)batch.batch_idx);
 
           uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
           uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;

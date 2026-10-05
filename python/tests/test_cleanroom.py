@@ -793,40 +793,62 @@ class TestCleanroomFaultParity(unittest.TestCase):
             # poisoned=0 AND completed=len(out) both looked plausible.
             self.assertEqual(st["completed"], 0)
 
-    def test_stats_scalars_are_right_and_the_index_list_is_known_empty(self):
-        """Pin the cleanroom return_stats contract exactly as it stands.
+    def test_stats_scalars_and_index_list_agree_with_in_process(self):
+        """Poison COUNT and poisoned_batches must both be right.
 
-        The three scalars are correct and are what the P0 was about:
-        before the stats channel, `poisoned` was hardwired to 0, so
-        `total` undercounted and a run with poisoned batches reported
-        success-looking wrong numbers.
+        The count was the original P0: poisoned was hardwired to 0, so
+        total undercounted and a run with poisoned batches reported
+        plausible, wrong numbers from a successful-looking call.
 
-        `poisoned_batches` is empty under the cleanroom -- the launcher
-        transports the count but not the indices. That is a KNOWN,
-        DOCUMENTED gap (filling it means a poisoned-index array in the
-        engine's shared GlobalState, a layout change to memory the
-        substrate and launcher both depend on). It is pinned here so it
-        stays a deliberate, asserted limitation instead of a silent
-        surprise: the assertion that matters is that `poisoned` is
-        correct, and an empty list must never be read as "nothing was
-        poisoned".
+        The index LIST was a documented gap -- the launcher relayed the
+        count but not the indices, so poisoned_batches came back []
+        while poisoned was correct. It now relays each index out of the
+        worker on a per-worker slot of the same stats memfd, which is a
+        bounded parent-created side channel rather than growth of the
+        engine's shared state.
+
+        The property asserted is INTERNAL CONSISTENCY plus agreement with
+        the in-process path:
+
+          * len(poisoned_batches) == poisoned -- every poisoned batch
+            is accounted for, which is the claim a caller acts on
+          * the list is sorted and de-duplicated
+          * the set matches the in-process run's set
+
+        Not asserted: identical batch COUNTS across the two paths. Batch
+        grouping is timing-dependent (documented in run.py and pinned by
+        test_ctx_fields_identical), so the same input can yield a
+        different number of batches per run; the poison INDICES are what
+        must agree, and they do.
         """
         os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+        seen = {}
         for flag in ("0", "1"):
             os.environ["FORKRUN_CLEANROOM"] = flag
             out, st = forkrun.map(self._fail(), self.path, mode="plugin",
                                   output="bytes", return_stats=True,
                                   nodes=1, workers=1, orchestrator=True)
-            self.assertEqual(st["total"],
-                             st["completed"] + st["poisoned"])
-            self.assertGreater(st["poisoned"], 0)
+            seen[flag] = st
+            self.assertGreater(
+                st["poisoned"], 0, "fixture must poison something")
+            self.assertEqual(
+                st["total"], st["completed"] + st["poisoned"])
+            self.assertEqual(
+                len(st["poisoned_batches"]), st["poisoned"],
+                "FORKRUN_CLEANROOM=%s: %d poisoned but %d indices "
+                "reported" % (flag, st["poisoned"],
+                              len(st["poisoned_batches"])))
+            self.assertEqual(
+                st["poisoned_batches"], sorted(set(st["poisoned_batches"])),
+                "indices must be sorted and unique")
             self.assertEqual(st["completed"], len(out))
-            if flag == "1":
-                self.assertEqual(
-                    st["poisoned_batches"], [],
-                    "cleanroom does not transport poison indices yet; if "
-                    "this now passes, the gap was closed and the "
-                    "return_stats docstring should be updated")
+        self.assertEqual(
+            set(seen["1"]["poisoned_batches"]),
+            set(seen["0"]["poisoned_batches"]),
+            "cleanroom reported different poisoned indices than the "
+            "in-process path: %r vs %r"
+            % (seen["1"]["poisoned_batches"][:8],
+               seen["0"]["poisoned_batches"][:8]))
 
     def test_strict_poison_raises_with_a_real_count(self):
         """strict_poison=True is enforced on the cleanroom.
