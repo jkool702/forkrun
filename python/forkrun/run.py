@@ -408,22 +408,44 @@ def _require_plugin_loop_symbol():
 def _cleanroom_enabled():
     """W-CR1: is the exec-based cleanroom launcher requested?
 
-    Opt-IN via FORKRUN_CLEANROOM, and MEASURED opt-in -- not caution.
-    Integrated benchmarks (benchmarks/bench_cleanroom.py, paired
+    WORK IN PROGRESS BETA. Opt-IN via FORKRUN_CLEANROOM, and the
+    default is OFF -- not out of caution, but because in the shape a
+    real caller actually uses, it is currently SLOWER than the in-process
+    path it replaces.
+
+    Integrated benchmark (benchmarks/bench_cleanroom.py, paired
     interleaved A/B, exact counts asserted, 28 workers, UMA,
-    orchestrator=False, ml_process_light on light_5M):
+    ml_process_light). Measured with --orchestrator, i.e. the reactor-
+    supervised shape that a plain forkrun.map() uses:
 
-        STARTUP    2000 records   17.95 ms -> 9.42 ms   1.91x faster
-        THROUGHPUT light_5M       672.9 ms -> 738.9 ms  0.91x (9% SLOWER)
+        STARTUP    2000 records   17.91 ms -> 105.88 ms  0.17x (5.9x SLOWER)
+        THROUGHPUT light_5M      640.88 ms -> 719.53 ms  0.89x (11% SLOWER)
 
-    That is the trade in one line: the cleanroom removes Python from the
-    address space before the worker fan-out, which is worth ~8.5 ms of
-    fixed startup, and pays for it with a full extra pass over the
-    corpus because it must spill the source into its own memfd before it
-    can scan (the in-process path overlaps spill with scan via a forked
-    ingest child; the launcher is strictly sequential). Since real
-    workloads are throughput-bound, default-on would trade a ~10%
-    regression on large jobs for a few milliseconds. Hence opt-in.
+    The gap is a FIXED ~100 ms per run, not per-record work: it measures
+    105.9 ms at 2000 records and 109.6 ms at 20000. Bisected with
+    launcher instrumentation (since reverted): not pre-main (0.9 ms),
+    not dlopen (0.4 ms), not the final child joins (~0.2 ms), not
+    post-main (0.8 ms) -- it is spent inside main, between the spawn
+    phase and the joins, i.e. the supervision loop waiting for workers
+    whose first claim appears to block about one poll interval. Leading
+    hypothesis: a worker's first fr_py_claim blocks until the scanner's
+    first publish. Not yet isolated.
+
+    An earlier version of this note advertised 1.91x-2.06x FASTER
+    startup and 1.03x throughput. Those were measured with
+    orchestrator=False, which the envelope now REJECTS (see
+    _cleanroom_eligible: the launcher supervises unconditionally and so
+    cannot honour a caller's request for legacy fail-fast). They
+    therefore described a configuration that can no longer take the
+    cleanroom at all. The figures above replace them; the benchmark
+    gained --orchestrator so the default shape can be measured directly.
+
+    The motivation is still sound: the launcher forks its workers from a
+    tiny exec'd process instead of from the possibly-very-large Python
+    parent, so per-fork page-table copy does not scale with host RSS.
+    The in-process path pays that cost on every fork. Fixing the fixed
+    overhead is what stands between the current beta and that win --
+    the idea is sound, the implementation is not there yet.
 
     OPT-IN, and the default is deliberately OFF. This was ON briefly
     (commit 5ae0b0a0) and reversed.
@@ -438,28 +460,29 @@ def _cleanroom_enabled():
     any more, and neither should be used to argue for or against
     defaulting this on.)
 
-    The reasons the default stays OFF are the ones still true:
+    It stays OFF while it is a beta, for the reasons that are actually
+    true today:
 
-    * It is narrower than the API. mode="plugin" only, UMA only,
-      orchestrator=True only (see _cleanroom_eligible). Everything else
-      declines, so this is an accelerator for a subset, not a
-      transparent swap-in.
-    * The performance envelope is not yet characterised for the
-      DEFAULT shape of a call. The integrated benchmark still measures
-      orchestrator=False at 28 workers, which is not how a plain
-      forkrun.map() is invoked.
+    * It is SLOWER in the shape callers use (the fixed ~100 ms above).
+    * It is narrower than the API: mode="plugin" only, UMA only,
+      orchestrator=True only. Everything else declines, so it is an
+      accelerator for a subset, not a transparent swap-in.
     * Real multi-node hardware has never exercised it; NUMA validation
       here is fake-NUMA only.
 
-    So defaulting it ON would make the common case faster while
-    silently narrowing which calls it can serve -- correct, but a
-    coverage surprise. It stays opt-in until the envelope is broad
-    enough to be a genuine default and the benchmark covers the default
-    call shape.
+    The intent is that it eventually covers ALL modes and becomes the
+    default. That needs the fixed overhead gone, the envelope widened
+    (mode="python", multi-node), and real-NUMA validation -- in that
+    order, since widening an accelerator that is currently slower would
+    make things worse, not better.
 
-    Measured, for the caller who does opt in (28 workers, light_5M):
-        STARTUP    2000 records   18.06 ms -> 8.75 ms   2.06x faster
-        THROUGHPUT light_5M       677.3 ms -> 655.3 ms  1.034x faster
+    For reference, the orchestrator=False configuration this feature was
+    originally tuned against measured 2.06x faster startup and 1.034x
+    throughput -- a genuine win, and the reason the idea is worth
+    finishing. That configuration is no longer reachable from the public
+    API (the envelope requires orchestrator=True), so those numbers
+    describe a path that cannot be taken today. Use --orchestrator for
+    the numbers that matter.
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:
