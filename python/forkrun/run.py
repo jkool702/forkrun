@@ -831,12 +831,26 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "(or strict_poison unenforceable) — using the in-process "
             "path.", UserWarning, stacklevel=3)
         return None
-    npois, npois_idx = stats
+    npois, npois_idx, nrelayed = stats
+    # Surface, don't hide: a bounded slot means the list can be a strict
+    # prefix of the count. Say so once, loudly, rather than letting a
+    # caller infer completeness from a number that quietly stopped
+    # growing. `poisoned` stays authoritative either way.
+    _trunc = nrelayed < npois
+    if _trunc:
+        _warnings.warn(
+            "forkrun: poisoned_batches is TRUNCATED — %d of %d poisoned "
+            "batch indices are missing because a worker's relay slot is "
+            "full (capacity %d indices per worker). The poisoned count is "
+            "exact; only the index list is incomplete."
+            % (npois - nrelayed, npois, _STATS_SLOT_U32),
+            UserWarning, stacklevel=3)
     # Record the counter BEFORE collecting: a poisoned batch is absent
     # from the results, so completed = len(out) undercounts unless the
     # poison count is added back, and _finish_map_stats needs it.
     _LAST_STATS["poisoned"] = npois
     _LAST_STATS["poisoned_batches"] = list(npois_idx)
+    _LAST_STATS["poisoned_batches_truncated"] = _trunc
     out = _cleanroom_collect(res_fd, views, order)
     # strict_poison is served now: the count came back over the stats
     # channel, so raising is a real enforcement rather than a guess.
@@ -890,16 +904,17 @@ def _read_cleanroom_stats(stats_fd):
     if version < 1:
         return None
     if version == 1:
-        return int(poisoned), []
+        return int(poisoned), [], 0
     # v2: poisoned batch indices follow the header, one bounded slot per
     # worker. Anything malformed degrades to the scalar alone, which is
     # still authoritative for total and strict_poison.
     if len(raw) < _STATS_HEADER_BYTES:
-        return int(poisoned), []
+        return int(poisoned), [], 0
     _ver, _poi, workers, stride = struct.unpack_from("<IIII", raw, 0)
     if not stride:
-        return int(poisoned), []
+        return int(poisoned), [], 0
     idxs = []
+    relayed = 0
     for wid in range(min(int(workers), 4096)):
         base = _STATS_HEADER_BYTES + wid * stride * 4
         if base + 4 > len(raw):
@@ -907,13 +922,22 @@ def _read_cleanroom_stats(stats_fd):
         (n,) = struct.unpack_from("<I", raw, base)
         if n > _STATS_SLOT_U32:
             break                      # bounded slot: never trust the count
+        relayed += int(n)
         for k in range(int(n)):
             off = base + 4 + k * 4
             if off + 4 > len(raw):
                 break
             (b,) = struct.unpack_from("<I", raw, off)
             idxs.append(int(b))
-    return int(poisoned), sorted(set(idxs))
+    # `relayed` is how many indices the workers actually managed to hand
+    # over; `poisoned` is the exact scalar. Whenever relayed < poisoned the
+    # list is a PREFIX of the truth, not the truth: either a worker filled
+    # its 1024-entry slot and the rest were dropped, or a poison happened
+    # with no usable $FRK_POISON_FD. The parent cannot tell those apart and
+    # does not need to -- both mean the list is incomplete, which is the
+    # one thing a caller has to know before trusting len(). Deriving this
+    # from data that already crosses keeps the on-wire layout unchanged.
+    return int(poisoned), sorted(set(idxs)), relayed
 
 
 def _cleanroom_collect(res_fd, views, order="none"):
@@ -2440,19 +2464,23 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
 
     return_stats=False (default) returns the bare list[bytes].
       True returns (list[bytes], stats) where stats is
-      {"total", "completed", "poisoned", "poisoned_batches"} --
+      {"total", "completed", "poisoned", "poisoned_batches",
+       "poisoned_batches_truncated"} --
       total = completed + poisoned, poisoned_batches sorted batch
       indices (see forkrun.last_run_stats for the caveats).
 
       The cleanroom serves BOTH the scalars and the index list. The
       launcher relays each poisoned batch index out of the worker on a
-      per-worker slot of the stats memfd (see fr_poison_relay), so
+      per-worker slot of the stats memfd (see fr_py_poison_relay), so
       `len(poisoned_batches) == poisoned` holds on the cleanroom path
       exactly as it does in process. The slot is BOUNDED (1024 indices
       per worker); a run that poisons more than that in one worker keeps
       the correct COUNT and reports a truncated list, which is the
       degradation direction that cannot make a number look better than
-      it is.
+      it is. When that happens map() warns and sets
+      poisoned_batches_truncated=True, so a caller never has to guess
+      whether len(poisoned_batches) means "all of them". The count is
+      always exact.
     """
     if kwargs.get("sink") is not None:
         raise ValueError(
@@ -5068,7 +5096,11 @@ def _poisoned_now(lib) -> int:
 # frontend (map-focused; a stream()/run() leaves its own poisoned
 # count with the previous completed/total).
 _LAST_STATS: dict = {"total": None, "completed": None,
-                     "poisoned": 0, "poisoned_batches": []}
+                     "poisoned": 0, "poisoned_batches": [],
+                     # False means "the index list is the complete truth".
+                     # Only the cleanroom's bounded relay slot can make it
+                     # True; the in-process path keeps every index.
+                     "poisoned_batches_truncated": False}
 
 
 def _reset_stats() -> None:
@@ -5077,6 +5109,7 @@ def _reset_stats() -> None:
     _LAST_STATS["completed"] = None
     _LAST_STATS["poisoned"] = 0
     _LAST_STATS["poisoned_batches"] = []
+    _LAST_STATS["poisoned_batches_truncated"] = False
 
 
 def _poison_indices(entries):
@@ -5117,11 +5150,17 @@ def last_run_stats():
     """Batch accounting for the last map() call (W-REL6-3.6).
 
     Returns a snapshot dict {"total", "completed", "poisoned",
-    "poisoned_batches"} (batch indices, sorted). total =
+    "poisoned_batches", "poisoned_batches_truncated"} (batch indices,
+    sorted). total =
     completed + poisoned: on_error="skip" immediate skips appear in
     neither (documented lower bound in that mode). completed/total
     are None until a map() succeeds; use map(return_stats=True)
     for per-call exactness under threads.
+
+    poisoned_batches_truncated is True only when the cleanroom's bounded
+    relay slot filled up, so poisoned_batches is a prefix of the poisoned
+    set rather than all of it. Check it before treating len() as a count;
+    `poisoned` itself is always exact.
     """
     return dict(_LAST_STATS)
 
@@ -5197,6 +5236,10 @@ def _reactor_poison_summary(lib, state, strict_poison=False) -> None:
     # raise below still leaves the batches for last_run_stats().
     _LAST_STATS["poisoned_batches"] = _poison_indices(
         getattr(state, "poisoned_batches", None))
+    # The in-process path keeps every index in a Python list, so it is
+    # never truncated -- only the cleanroom's fixed-size relay slot can
+    # drop indices. Stated explicitly so the flag means one thing.
+    _LAST_STATS["poisoned_batches_truncated"] = False
     if npois:
         try:
             os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "

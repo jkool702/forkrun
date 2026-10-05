@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import forkrun  # noqa: E402
 from forkrun.run import (  # noqa: E402
     _cleanroom_eligible, _cleanroom_enabled, _cleanroom_explicit,
-    _cleanroom_launcher_path)
+    _cleanroom_launcher_path, _read_cleanroom_stats)
 
 PLUGIN = None
 for _cand in (
@@ -833,15 +833,25 @@ class TestCleanroomFaultParity(unittest.TestCase):
                 st["poisoned"], 0, "fixture must poison something")
             self.assertEqual(
                 st["total"], st["completed"] + st["poisoned"])
-            self.assertEqual(
-                len(st["poisoned_batches"]), st["poisoned"],
-                "FORKRUN_CLEANROOM=%s: %d poisoned but %d indices "
-                "reported" % (flag, st["poisoned"],
-                              len(st["poisoned_batches"])))
+            if not st.get("poisoned_batches_truncated"):
+                # Not truncated, so the list must be complete. When it IS
+                # truncated len() < poisoned legitimately, and the
+                # assertion below covers that instead.
+                self.assertEqual(
+                    len(st["poisoned_batches"]), st["poisoned"],
+                    "FORKRUN_CLEANROOM=%s: %d poisoned but %d indices "
+                    "reported" % (flag, st["poisoned"],
+                                  len(st["poisoned_batches"])))
             self.assertEqual(
                 st["poisoned_batches"], sorted(set(st["poisoned_batches"])),
                 "indices must be sorted and unique")
             self.assertEqual(st["completed"], len(out))
+            # Whatever the case, len() is either the full count or the flag
+            # says it is knowingly short. Silently short is the failure.
+            self.assertTrue(
+                len(st["poisoned_batches"]) == st["poisoned"]
+                or st["poisoned_batches_truncated"],
+                "index list shorter than the count with no truncation flag")
         # Cross-path agreement on the index SET -- but only when the two
         # runs produced the same number of batches. Batch grouping is
         # timing-dependent (see run.py and test_ctx_fields_identical), so
@@ -1797,6 +1807,125 @@ class TestForkCostWarning(unittest.TestCase):
         # no /proc: if this ever returns None the feature is inert and
         # should be reconsidered rather than left silently doing nothing.
         self.assertIsNotNone(self.core._parent_rss_kb())
+
+
+class TestPoisonRelayTruncation(unittest.TestCase):
+    """The bounded relay slot must be VISIBLE when it fills.
+
+    fr_py_poison_relay drops an index once a worker's slot holds
+    FR_POISON_SLOT_U32 of them ("bounded: drop, never grow"), while the
+    scalar `poisoned` keeps counting. So above 1024 poisons in ONE worker
+    len(poisoned_batches) < poisoned by design, and the reader must be
+    able to tell that apart from a complete list -- otherwise a caller
+    reads a count that silently stopped growing and believes it.
+
+    Driven against the shipped _read_cleanroom_stats with a memfd laid
+    out exactly as the launcher header + worker slots are. An end-to-end
+    overflow run is not usable here: the launcher stops early (an
+    always-failing fixture stops around 69 batches, and on_error="skip"
+    poisons nothing at all), so no realistic input reaches 1024 poisons
+    on one worker. The layout and the reader are the same either way.
+    """
+
+    V1_SO = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))),
+        "python", "tests", "plugins", "test_plugin_v1.so")
+
+    STRIDE = 1025          # [u32 count][1024 x u32 batch_idx]
+    CAP = 1024
+
+    def _memfd(self, poisoned, workers=1, per_worker=None):
+        """A stats memfd shaped like the launcher's, filled like workers."""
+        fd = os.memfd_create("stats", 0)
+        os.ftruncate(fd, 16 + workers * self.STRIDE * 4)
+        os.pwrite(fd, struct.pack("<IIII", 2, poisoned, workers,
+                                  self.STRIDE), 0)
+        for wid in range(workers):
+            idxs = (per_worker[wid] if per_worker is not None
+                    else list(range(min(poisoned, self.CAP))))
+            base = 16 + wid * self.STRIDE * 4
+            os.pwrite(fd, struct.pack("<I", len(idxs)), base)
+            if idxs:
+                os.pwrite(fd, struct.pack("<%dI" % len(idxs), *idxs),
+                          base + 4)
+        return fd
+
+    def test_complete_slot_reports_poisoned_count(self):
+        """The ordinary case: every poison relayed, nothing truncated."""
+        fd = self._memfd(poisoned=10)
+        try:
+            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(poisoned, 10)
+        self.assertEqual(len(idxs), 10)
+        self.assertEqual(relayed, 10)
+        self.assertFalse(relayed < poisoned,
+                         "a complete slot must not look truncated")
+
+    def test_full_slot_is_detectable_as_truncated(self):
+        """Exactly at capacity: complete, so still not truncated."""
+        fd = self._memfd(poisoned=self.CAP)
+        try:
+            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(poisoned, self.CAP)
+        self.assertEqual(len(idxs), self.CAP)
+        self.assertEqual(relayed, self.CAP)
+        self.assertFalse(relayed < poisoned)
+
+    def test_overflowing_slot_reports_short_list(self):
+        """Past capacity: the list is short and must be recognisable."""
+        fd = self._memfd(poisoned=self.CAP + 76)
+        try:
+            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+        finally:
+            os.close(fd)
+        # Count stays exact -- that is what total and strict_poison use.
+        self.assertEqual(poisoned, self.CAP + 76)
+        # List is the prefix the worker managed before the slot filled.
+        self.assertEqual(len(idxs), self.CAP)
+        # And that shortfall is detectable, which is the whole point.
+        self.assertLess(relayed, poisoned)
+        self.assertEqual(poisoned - relayed, 76)
+
+    def test_partial_slot_across_workers(self):
+        """Shortfall in one worker while another relayed in full."""
+        # Disjoint index ranges: the reader applies set(), so overlapping
+        # ranges would dedup away and hide the per-worker contribution.
+        fd = self._memfd(poisoned=2048, workers=2,
+                         per_worker=[list(range(self.CAP)),
+                                     list(range(50000, 50500))])
+        try:
+            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(poisoned, 2048)
+        self.assertEqual(len(idxs), self.CAP + 500)
+        self.assertEqual(relayed, self.CAP + 500)
+        self.assertLess(relayed, poisoned)
+
+    def test_stats_key_present_and_false_in_normal_run(self):
+        """The public flag exists on an ordinary run and reads False."""
+        path = _make_input(200)
+        os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+        prev = os.environ.get("FORKRUN_CLEANROOM")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        try:
+            _, st = forkrun.map(
+                self.V1_SO + ":always_fail_v1", path, mode="plugin",
+                output="bytes", return_stats=True, workers=1, nodes=1,
+                orchestrator=True)
+        finally:
+            if prev is None:
+                os.environ.pop("FORKRUN_CLEANROOM", None)
+            else:
+                os.environ["FORKRUN_CLEANROOM"] = prev
+        self.assertIn("poisoned_batches_truncated", st)
+        self.assertFalse(st["poisoned_batches_truncated"])
+        self.assertEqual(len(st["poisoned_batches"]), st["poisoned"])
 
 
 if __name__ == "__main__":
