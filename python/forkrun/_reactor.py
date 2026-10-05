@@ -306,9 +306,9 @@ class ReactorState:
             return None
 
         # fork() copies page tables, so its cost scales with the parent's
-        # RSS, not with anything the workers read. Trim the heap and
-        # measure the cost once per process -- see
-        # _executor_core.trim_parent_heap / warn_fork_cost.
+        # RSS rather than with anything the workers touch. MEASURE it
+        # here so the cost can be reported -- see
+        # _executor_core.warn_fork_cost.
         #
         # Needed HERE as well as in fork_workers: the reactor has its own
         # spawn path, so the non-reactor helpers do not cover it -- and
@@ -316,10 +316,17 @@ class ReactorState:
         # With the call only in fork_workers this was dead code for every
         # default call, which is exactly how the first attempt at the
         # fork-cost warning silently never fired.
-        from ._executor_core import trim_parent_heap as _trim
+        #
+        # MEASUREMENT ONLY. An earlier version also called
+        # trim_parent_heap() (malloc_trim) here, on the theory that
+        # returning free heap pages before a fork makes the page-table
+        # copy cheaper. It is cheap and it is HARMFUL: 31 recovery tests
+        # failed with it (output truncated to start at LINE 256 and other
+        # offsets), and passed with it removed. So the mitigation that
+        # looked obviously safe and nearly shipped is gone. The warning
+        # -- which only reads /proc and prints -- is unaffected.
         from ._executor_core import warn_fork_cost as _warn_fork
         from ._executor_core import _parent_rss_kb as _rss
-        _trim()
         _rss_kb, _t0 = _rss(), _time.perf_counter()
 
         pid = os.fork()
