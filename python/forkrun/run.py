@@ -901,16 +901,94 @@ def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
 # Process-wide run serialization (W-PY4.b G/Q-series). The engine's
 # globals (g_state/state, eventfds, escrow pipes) are process-wide, so two
 # _execute() calls racing in parent threads would interleave init/scan
-# state. The lock makes concurrent invocations sequentially correct
-# (parent threads are fine — workers fork from whichever thread holds the
-# lock; the child never touches it). One lock for the whole pipeline:
-# coarse, deterministic, v0-appropriate.
+# state. The lock makes concurrent invocations SEQUENTIALLY correct --
+# two forkrun calls from two threads are safe because one waits. It does
+# NOT make forking safe in general: an unrelated application thread can
+# still hold a lock at fork time. See _warn_threaded_fork. One lock for
+# the whole pipeline: coarse, deterministic, v0-appropriate.
 # W-REL2/R10: RLock, not Lock. Same-thread nesting (a forkrun.map call
 # inside a live stream() iteration) is legitimate and must re-enter
 # instead of deadlocking; cross-thread contenders still serialize.
 import threading as _threading
 
-_RUN_LOCK = _threading.RLock()
+_THREAD_WARNED = []
+
+
+def _warn_threaded_fork():
+    """P0: fork() from a multi-threaded Python process is not safe.
+
+    CPython warns at every os.fork() site (3.12+) because a lock held by
+    a thread that does not exist in the child can never be released --
+    the child then hangs before it reaches its exec or os._exit. This
+    codebase forks 21 times (run.py 15, _reactor 3, _worker 2, plus the
+    launcher), and the children run PYTHON between fork and exit, so the
+    window is wide, not theoretical.
+
+    _RUN_LOCK does NOT make this safe. It serialises forkrun calls
+    against each other; it does nothing about an unrelated application
+    thread that happened to hold the import lock, an allocator lock or
+    a logging lock at the moment of the fork.
+
+    Default is a warning, not an error: raising would break hosts that
+    are working today, and the cleanroom's fork->exec is the narrowest
+    case. Set FORKRUN_REQUIRE_SINGLE_THREADED=1 to make it fatal where
+    a hang is worse than an error.
+
+    Warns ONCE per process -- it fires on every run entry otherwise.
+    """
+    if _THREAD_WARNED:
+        return
+    import threading as _t
+    if _t.active_count() <= 1:
+        return
+    _THREAD_WARNED.append(1)
+    msg = (
+        "forkrun: running in a multi-threaded Python process "
+        "(%d threads). forkrun forks %d times and its children run "
+        "Python before exec/_exit, so a lock held by another thread at "
+        "fork time can deadlock the child. This is a known hazard, not a "
+        "bug in your code. If this run hangs, that is the likely cause. "
+        "Set FORKRUN_REQUIRE_SINGLE_THREADED=1 to refuse instead."
+        % (_t.active_count(), 21))
+    import os as _os
+    if _os.environ.get("FORKRUN_REQUIRE_SINGLE_THREADED") == "1":
+        raise RuntimeError(msg)
+    import warnings as _w
+    _w.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+class _RunLock:
+    """_RUN_LOCK, plus the threaded-fork warning on entry.
+
+    Wrapping the lock rather than adding a check at each `with
+    _RUN_LOCK:` site means all ~20 entry points are covered by
+    construction -- a new executor cannot forget it.
+    """
+
+    def __init__(self, lock):
+        self._lock = lock
+
+    def __enter__(self):
+        self._lock.acquire()
+        try:
+            _warn_threaded_fork()
+        except BaseException:
+            self._lock.release()
+            raise
+        return self._lock
+
+    def __exit__(self, *exc):
+        self._lock.release()
+        return False
+
+    def acquire(self, *a, **k):
+        return self._lock.acquire(*a, **k)
+
+    def release(self):
+        return self._lock.release()
+
+
+_RUN_LOCK = _RunLock(_threading.RLock())
 
 
 def _init_engine_and_fds(*, lines, bytes_, spec, num_nodes=None,

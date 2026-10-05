@@ -3,8 +3,34 @@
 Sequential invocations re-init/re-scan/re-fork in one process (no state
 leakage, no fd/memfd leaks). Concurrent invocations from parent threads
 are serialized by run._RUN_LOCK (engine globals are process-wide), so
-both complete correctly — threads in the PARENT are fine; the v0
-single-threaded contract constrains WORKER payloads only.
+both complete correctly.
+
+SCOPE CORRECTION. The previous wording here -- "threads in the PARENT
+are fine" -- was too broad and is what external review flagged. What
+these tests actually demonstrate is only:
+
+    two threads each invoking forkrun()
+      -> _RUN_LOCK serializes them
+      -> both jobs complete
+
+They do NOT demonstrate safety under an arbitrary threaded host:
+
+    a threaded application + unrelated background threads
+      + a fork during arbitrary runtime state
+      -> safe
+
+That is a different and much stronger claim, and it does not hold.
+_RUN_LOCK orders forkrun calls against each other; it does nothing about
+an unrelated thread holding the import lock, an allocator lock or a
+logging lock at the instant of fork(). forkrun forks 21 times and its
+children execute Python before exec/_exit, so a lock inherited in a
+held state can deadlock the child -- which is exactly what CPython's
+os.fork() DeprecationWarning is about.
+
+run._warn_threaded_fork() now warns once per process when it sees
+active_count() > 1, and FORKRUN_REQUIRE_SINGLE_THREADED=1 makes that
+fatal. The v0 single-threaded contract still constrains WORKER payloads;
+this note concerns the CALLER's process.
 """
 
 import os
