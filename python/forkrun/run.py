@@ -421,15 +421,36 @@ def _cleanroom_enabled():
         STARTUP    2000 records   17.91 ms -> 105.88 ms  0.17x (5.9x SLOWER)
         THROUGHPUT light_5M      640.88 ms -> 719.53 ms  0.89x (11% SLOWER)
 
-    The gap is a FIXED ~100 ms per run, not per-record work: it measures
-    105.9 ms at 2000 records and 109.6 ms at 20000. Bisected with
-    launcher instrumentation (since reverted): not pre-main (0.9 ms),
-    not dlopen (0.4 ms), not the final child joins (~0.2 ms), not
-    post-main (0.8 ms) -- it is spent inside main, between the spawn
-    phase and the joins, i.e. the supervision loop waiting for workers
-    whose first claim appears to block about one poll interval. Leading
-    hypothesis: a worker's first fr_py_claim blocks until the scanner's
-    first publish. Not yet isolated.
+    The gap is a FIXED ~100 ms per run, not per-record work: 105.9 ms at
+    2000 records, 109.6 ms at 20000. Localised by instrumentation (all
+    reverted):
+
+      * not pre-main (0.9 ms), not dlopen (0.4 ms), not the final child
+        joins (~0.2 ms), not post-main (0.8 ms)
+      * it IS the supervision loop: LOOP_DONE at t=103 ms, and the loop
+        is a blocking waitpid, so it is waiting on a child
+      * per-child reap stamps show the scanner and spill exit at
+        t=0.9 ms and ALL FOUR WORKERS exit together at t=101.5-102.1 ms
+        -- they are not slow, they are all released at once
+      * total CPU for the whole run is ~13 ms (user 5.4, sys 18.8), so
+        nobody is spinning: the launcher and its workers are BLOCKED
+      * strace of the whole tree shows two workers sitting in
+        read() = 0 for ~95 ms -- a read waiting for EOF -- alongside one
+        poll() that times out at 100 ms
+
+    So this is a CIRCULAR WAIT, not slow work and not a poll interval.
+    The most consistent reading: the launcher holds spare signal/fallow
+    pipe WRITE ends across the supervision loop (closed only after it,
+    so respawns can be handed a fresh end), while a worker blocks reading
+    for EOF; the loop cannot finish until the workers exit, and the
+    workers only wake when a 100 ms timeout breaks the tie.
+
+    NOT yet fixed, and the next thing to try: release the spares as soon
+    as the last worker is spawned and no respawn can occur, or not hold
+    spares at all on the no-death path. Note that lowering the engine's
+    100 ms poll timeouts does NOT help (measured: 100 -> 10 ms changed
+    nothing), so the timeout is not the thing paying for the wait -- it
+    is only what ends it.
 
     An earlier version of this note advertised 1.91x-2.06x FASTER
     startup and 1.03x throughput. Those were measured with
