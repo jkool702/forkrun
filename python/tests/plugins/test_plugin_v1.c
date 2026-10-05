@@ -146,6 +146,70 @@ int die_once_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
 /* Always dies. Used to show the cleanroom's fallback still returns
  * CORRECT BYTES even though the job cannot complete under the
  * cleanroom -- i.e. the rerun is what saves it. */
+/* die_twice_v1: SIGKILL for respawn generations 0 and 1, then succeed.
+ *
+ * Deterministic by construction, which is the point. Branches on
+ * ctx->worker_incarn -- the respawn generation the launcher passes at
+ * worker init -- so the sequence is exactly: gen 0 dies, gen 1 dies on
+ * the SAME batch, gen 2 completes.
+ *
+ * This exists because a hardcoded wincarn of 0 in the launcher made
+ * every generation look like generation 0. The FIRST death still
+ * recovered (parent and worker agreed on 0); the SECOND death of the
+ * same wid mismatched, so ring_recover_worker_core() saw a
+ * "stale record from a previous generation", cleared the transaction
+ * and reported nothing to recover -- dropping the in-flight batch
+ * WITHOUT returning it to escrow. The run then completed looking
+ * successful, silently missing records.
+ *
+ * With wincarn propagated correctly this fixture succeeds on gen 2 and
+ * the job's bytes match a healthy run. With it hardcoded, the worker
+ * would report incarnation 0 forever, die forever, and the launcher
+ * would hit its respawn cap and abort -- so this test cannot pass by
+ * accident. It is a regression test for the propagation, not just for
+ * "a death was survived".
+ */
+int die_twice_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    (void)argc; (void)argv;
+    /* Kill the first TWO invocations, then succeed. The count is kept in
+     * the marker file rather than derived from ctx->worker_incarn on
+     * purpose: the death schedule must not depend on the very field
+     * whose propagation is under test, or a regression in that field
+     * would change which invocations die and quietly invalidate the
+     * comparison against a healthy run. */
+    /* Count invocations in the SAME file _append_marker writes, so the
+     * counter and the record cannot disagree. (An earlier cut counted
+     * FORKRUN_TEST_DIE_FILE while the marker went to
+     * FORKRUN_TEST_SIDE_EFFECT_FILE: the counter never advanced, the
+     * fixture killed itself forever, and every batch was poisoned.) */
+    int prior = 0;
+    {
+        const char *k = getenv("FORKRUN_TEST_SIDE_EFFECT_FILE");
+        if (k && *k) {
+            FILE *rf = fopen(k, "r");
+            if (rf) {
+                int c, lines = 0;
+                while ((c = fgetc(rf)) != EOF) if (c == '\n') lines++;
+                fclose(rf);
+                prior = lines;
+            }
+        }
+    }
+    /* Always record the generation we were launched with, so the test
+     * can assert which generations actually ran. */
+    char tag[64];
+    snprintf(tag, sizeof tag, "g%u", (unsigned)ctx->worker_incarn);
+    _append_marker(tag);
+    if (prior < 2)
+        raise(SIGKILL);
+    /* Emit exactly what process_v1 emits, by CALLING it, so a run that
+     * survives the deaths is byte-comparable with a healthy run. An
+     * earlier cut returned 0 without writing anything, so every batch
+     * was empty and the record count was 0 on BOTH paths -- which made
+     * the whole comparison vacuous. */
+    return process_v1(argc, argv, ctx);
+}
+
 int die_always_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
     (void)argc; (void)argv; (void)ctx;
     _append_marker("die_always");

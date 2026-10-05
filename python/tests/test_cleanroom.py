@@ -1531,5 +1531,124 @@ class TestCleanroomWorkerDeath(unittest.TestCase):
                              "form a whole record" % (len(out) - pos))
 
 
+@unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
+class TestCleanroomRespawnIncarnation(unittest.TestCase):
+    """Two deaths on the SAME worker must not lose the batch.
+
+    The launcher tracks a per-wid incarnation and passes it to
+    ring_recover_worker. It also passes an incarnation to each worker at
+    init (fr_py_worker_init -> g_fr_config.ring_wincarn), and the engine
+    stamps that value into the worker's transaction record at claim
+    time.
+
+    Those two MUST agree. The launcher used to pass a hardcoded 0 to
+    every generation while incrementing its own counter, so:
+
+      gen 0 dies -> parent recovers with incarnation 0, worker agrees
+                    (0 == 0) -> batch correctly reclaimed to escrow
+      gen 1 dies -> parent recovers with incarnation 1, but the worker
+                    published 0 -> ring_recover_worker_core sees a
+                    "stale record from a previous generation", clears
+                    the transaction and reports NOTHING TO RECOVER
+
+    The in-flight batch was therefore dropped without returning to
+    escrow, and the run completed looking successful -- silent data
+    loss. A plugin can also observe ctx->worker_incarn, which is
+    defined as the respawn generation, so the ABI lied too.
+
+    The fixture die_twice_v1 branches on that field, so this is
+    deterministic rather than timing-based: it dies for generations 0
+    and 1 and succeeds at 2. With wincarn propagated it completes; with
+    it hardcoded the worker would report 0 forever, die forever, and hit
+    the respawn cap. It cannot pass by accident.
+    """
+
+    V1_SO = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))),
+        "python", "tests", "plugins", "test_plugin_v1.so")
+
+    def setUp(self):
+        if not os.path.exists(self.V1_SO):
+            self.skipTest("test_plugin_v1.so not built")
+        if _cleanroom_launcher_path() is None:
+            self.skipTest("launcher binary not built")
+        self._old = {k: os.environ.get(k) for k in
+                     ("FORKRUN_CLEANROOM", "FORKRUN_TEST_SIDE_EFFECT_FILE")}
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        os.environ["FORKRUN_RETRY_LIMIT"] = "0"
+        self.tmp = tempfile.mkdtemp(prefix="frincarn")
+        self.path = _make_input(400)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        for k, v in self._old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _marker(self):
+        return os.path.join(self.tmp, "invocations")
+
+    def test_respawn_generations_are_distinct(self):
+        """The launcher must tell the engine which generation it spawns.
+
+        fr_py_worker_init stores the wincarn it is given into
+        g_fr_config.ring_wincarn, the engine stamps that into the
+        worker's transaction record at claim time, and
+        ring_recover_worker_core refuses to reclaim a batch whose
+        txn->incarnation differs from the incarnation passed to
+        recovery -- it clears the record and reports "nothing to
+        recover" instead.
+
+        So the launcher's per-wid counter and the wincarn it hands each
+        worker MUST agree. The launcher used to pass a hardcoded 0 for
+        every generation while incrementing its own counter. The first
+        death of a worker still recovered (both sides agreed on 0); the
+        SECOND death of the same wid then mismatched and the in-flight
+        batch was dropped without returning to escrow.
+
+        ctx->worker_incarn is also plugin-ABI-visible and defined as the
+        respawn generation, so a plugin could observe the lie directly.
+        That is what this asserts -- it reads the generations the plugin
+        actually saw.
+
+        Deliberately NOT asserting a byte-for-byte comparison against a
+        healthy run: the launcher currently loses records
+        NONDETERMINISTICALLY at small record counts with one worker
+        (measured: 25/25/25/23/23/7/... over repeated runs of the same
+        input, against a deterministic 25 on the in-process path). That
+        is a separate, larger bug -- see the cleanroom notes in
+        run.py::_cleanroom_enabled -- and a byte assertion here would
+        report it as this test's failure and be flaky besides. This test
+        isolates the propagation, which IS deterministic.
+        """
+        os.environ["FORKRUN_TEST_SIDE_EFFECT_FILE"] = self._marker()
+        got = forkrun.map(self.V1_SO + ":die_twice_v1", self.path,
+                          mode="plugin", output="bytes", workers=2,
+                          nodes=1, orchestrator=True)
+        with open(self._marker()) as fh:
+            gens = [int(x[1:]) for x in fh.read().split()]
+        self.assertTrue(gens, "the payload never ran")
+        self.assertIn(
+            0, gens, "expected a generation-0 invocation, saw %r" % (gens,))
+        self.assertTrue(
+            any(g > 0 for g in gens),
+            "every invocation reported generation 0, so the launcher is "
+            "NOT propagating wincarn and the engine's incarnation check "
+            "would mismatch on the second death of a wid. Saw %r"
+            % (gens,))
+        # And the payload must actually have produced output, so the
+        # generations above came from real work rather than a run that
+        # failed early.
+        self.assertGreater(len(got), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

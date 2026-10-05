@@ -197,7 +197,8 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
                        int fall_w, fn_worker_plugin_loop wloop,
                        const char *path, const char *func,
                        int retry_limit, int on_error,
-                       const int *engine_fd, int n_engine) {
+                       const int *engine_fd, int n_engine,
+                       int wincarn) {
     pid_t p = fork();
     if (p < 0)
         return -1;
@@ -218,8 +219,27 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
             keep[4 + i] = engine_fd[i];
         scrub_closem_others(keep, 4 + n_engine);
         if (!wloop) _exit(70);
+        /* wincarn MUST be this generation's number. It is not
+         * diagnostic: fr_py_worker_init stores it in
+         * g_fr_config.ring_wincarn, the engine stamps every transaction
+         * record with it at claim time, and
+         * ring_recover_worker_core() REFUSES to reclaim a batch whose
+         * txn->incarnation does not equal the incarnation passed to
+         * recovery -- it clears the record and reports "nothing to
+         * recover" instead.
+         *
+         * So hardcoding 0 here (as this did) made every respawned
+         * worker publish generation 0 while the parent believed it was
+         * generation 1, 2, ... The FIRST death of a worker still
+         * recovered correctly, because parent and worker agreed on 0.
+         * The SECOND death of the same wid then mismatched, and the
+         * in-flight batch was dropped WITHOUT going back to escrow --
+         * a completed-looking run, silently missing records.
+         *
+         * It is also plugin-ABI-visible: ctx->worker_incarn is defined
+         * as the respawn generation of the calling worker. */
         int rc = wloop(wid, path, func, memfd, out_fd, sig_w, fall_w,
-                       -1, -1, 0, retry_limit, on_error);
+                       -1, -1, wincarn, retry_limit, on_error);
         _exit(rc == 0 ? 0 : 1);
     }
     return p;
@@ -449,7 +469,7 @@ int main(int argc, char **argv) {
         pid_t p = spawn_wid(i, memfd, out_fds[i], sigp[1], fallp[1],
                             p_wloop, o.plugin_path, o.plugin_func,
                             o.retry_limit, o.on_error,
-                            engine_fd, n_engine);
+                            engine_fd, n_engine, /*wincarn=*/0);
         if (p < 0) die("fork(worker)");
         pids[i] = p;
         live++;
@@ -654,7 +674,7 @@ int main(int argc, char **argv) {
         pid_t np = spawn_wid(wid, memfd, out_fds[wid], rs, rf, p_wloop,
                              o.plugin_path, o.plugin_func,
                              o.retry_limit, o.on_error,
-                             engine_fd, n_engine);
+                             engine_fd, n_engine, incarn[wid]);
         /* The child inherited its own copy of rs/rf; the launcher's must
          * be dropped or every respawn PERMANENTLY holds the signal and
          * fallow pipe write ends open. That is precisely what the drain
