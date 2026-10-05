@@ -408,22 +408,65 @@ def _require_plugin_loop_symbol():
 def _cleanroom_enabled():
     """W-CR1: is the exec-based cleanroom launcher requested?
 
-    Opt-IN via FORKRUN_CLEANROOM, and MEASURED opt-in -- not caution.
-    Integrated benchmarks (benchmarks/bench_cleanroom.py, paired
+    WORK IN PROGRESS BETA. Opt-IN via FORKRUN_CLEANROOM, and the
+    default is OFF -- not out of caution, but because in the shape a
+    real caller actually uses, it is currently SLOWER than the in-process
+    path it replaces.
+
+    Integrated benchmark (benchmarks/bench_cleanroom.py, paired
     interleaved A/B, exact counts asserted, 28 workers, UMA,
-    orchestrator=False, ml_process_light on light_5M):
+    ml_process_light). Measured with --orchestrator, i.e. the reactor-
+    supervised shape that a plain forkrun.map() uses:
 
-        STARTUP    2000 records   17.95 ms -> 9.42 ms   1.91x faster
-        THROUGHPUT light_5M       672.9 ms -> 738.9 ms  0.91x (9% SLOWER)
+        STARTUP    2000 records   17.91 ms -> 105.88 ms  0.17x (5.9x SLOWER)
+        THROUGHPUT light_5M      640.88 ms -> 719.53 ms  0.89x (11% SLOWER)
 
-    That is the trade in one line: the cleanroom removes Python from the
-    address space before the worker fan-out, which is worth ~8.5 ms of
-    fixed startup, and pays for it with a full extra pass over the
-    corpus because it must spill the source into its own memfd before it
-    can scan (the in-process path overlaps spill with scan via a forked
-    ingest child; the launcher is strictly sequential). Since real
-    workloads are throughput-bound, default-on would trade a ~10%
-    regression on large jobs for a few milliseconds. Hence opt-in.
+    The gap is a FIXED ~100 ms per run, not per-record work: 105.9 ms at
+    2000 records, 109.6 ms at 20000. Localised by instrumentation (all
+    reverted):
+
+      * not pre-main (0.9 ms), not dlopen (0.4 ms), not the final child
+        joins (~0.2 ms), not post-main (0.8 ms)
+      * it IS the supervision loop: LOOP_DONE at t=103 ms, and the loop
+        is a blocking waitpid, so it is waiting on a child
+      * per-child reap stamps show the scanner and spill exit at
+        t=0.9 ms and ALL FOUR WORKERS exit together at t=101.5-102.1 ms
+        -- they are not slow, they are all released at once
+      * total CPU for the whole run is ~13 ms (user 5.4, sys 18.8), so
+        nobody is spinning: the launcher and its workers are BLOCKED
+      * strace of the whole tree shows two workers sitting in
+        read() = 0 for ~95 ms -- a read waiting for EOF -- alongside one
+        poll() that times out at 100 ms
+
+    So this is a CIRCULAR WAIT, not slow work and not a poll interval.
+    The most consistent reading: the launcher holds spare signal/fallow
+    pipe WRITE ends across the supervision loop (closed only after it,
+    so respawns can be handed a fresh end), while a worker blocks reading
+    for EOF; the loop cannot finish until the workers exit, and the
+    workers only wake when a 100 ms timeout breaks the tie.
+
+    NOT yet fixed, and the next thing to try: release the spares as soon
+    as the last worker is spawned and no respawn can occur, or not hold
+    spares at all on the no-death path. Note that lowering the engine's
+    100 ms poll timeouts does NOT help (measured: 100 -> 10 ms changed
+    nothing), so the timeout is not the thing paying for the wait -- it
+    is only what ends it.
+
+    An earlier version of this note advertised 1.91x-2.06x FASTER
+    startup and 1.03x throughput. Those were measured with
+    orchestrator=False, which the envelope now REJECTS (see
+    _cleanroom_eligible: the launcher supervises unconditionally and so
+    cannot honour a caller's request for legacy fail-fast). They
+    therefore described a configuration that can no longer take the
+    cleanroom at all. The figures above replace them; the benchmark
+    gained --orchestrator so the default shape can be measured directly.
+
+    The motivation is still sound: the launcher forks its workers from a
+    tiny exec'd process instead of from the possibly-very-large Python
+    parent, so per-fork page-table copy does not scale with host RSS.
+    The in-process path pays that cost on every fork. Fixing the fixed
+    overhead is what stands between the current beta and that win --
+    the idea is sound, the implementation is not there yet.
 
     OPT-IN, and the default is deliberately OFF. This was ON briefly
     (commit 5ae0b0a0) and reversed.
@@ -438,28 +481,47 @@ def _cleanroom_enabled():
     any more, and neither should be used to argue for or against
     defaulting this on.)
 
-    The reasons the default stays OFF are the ones still true:
+    NOT A CORRECTNESS BUG, despite appearances: the BATCH COUNT varies
+    between runs of identical input, which looks alarming and is not.
+    Measured over 15 runs of 200 records, workers=1:
 
-    * It is narrower than the API. mode="plugin" only, UMA only,
-      orchestrator=True only (see _cleanroom_eligible). Everything else
-      declines, so this is an accelerator for a subset, not a
-      transparent swap-in.
-    * The performance envelope is not yet characterised for the
-      DEFAULT shape of a call. The integrated benchmark still measures
-      orchestrator=False at 28 workers, which is not how a plain
-      forkrun.map() is invoked.
+        blob-count distribution   7 x1, 23 x3, 25 x10, 50 x1
+        distinct joined digests   ONE (15/15)
+        joined bytes              12890 == input bytes
+        zero-length blobs         0
+
+    Every run returns every record exactly once; only the grouping into
+    batches differs, because batch boundaries depend on how much has been
+    ingested when the scanner looks. This is pre-existing and shared with
+    the in-process path -- test_ctx_fields_identical already notes that
+    "batch counts legitimately differ run to run (pre-flight race sets
+    L)". It was mistaken here for record loss by counting BLOBS as
+    records, so do not repeat that: compare JOINED BYTES, which is what
+    test_matches_in_process_content does and why it is stable.
+
+    It stays OFF while it is a beta, for the reasons that are actually    It stays OFF while it is a beta, for the reasons that are actually
+    true today:
+
+    * It is SLOWER in the shape callers use (the fixed ~100 ms above).
+    * It is narrower than the API: mode="plugin" only, UMA only,
+      orchestrator=True only. Everything else declines, so it is an
+      accelerator for a subset, not a transparent swap-in.
     * Real multi-node hardware has never exercised it; NUMA validation
       here is fake-NUMA only.
 
-    So defaulting it ON would make the common case faster while
-    silently narrowing which calls it can serve -- correct, but a
-    coverage surprise. It stays opt-in until the envelope is broad
-    enough to be a genuine default and the benchmark covers the default
-    call shape.
+    The intent is that it eventually covers ALL modes and becomes the
+    default. That needs the fixed overhead gone, the envelope widened
+    (mode="python", multi-node), and real-NUMA validation -- in that
+    order, since widening an accelerator that is currently slower would
+    make things worse, not better.
 
-    Measured, for the caller who does opt in (28 workers, light_5M):
-        STARTUP    2000 records   18.06 ms -> 8.75 ms   2.06x faster
-        THROUGHPUT light_5M       677.3 ms -> 655.3 ms  1.034x faster
+    For reference, the orchestrator=False configuration this feature was
+    originally tuned against measured 2.06x faster startup and 1.034x
+    throughput -- a genuine win, and the reason the idea is worth
+    finishing. That configuration is no longer reachable from the public
+    API (the envelope requires orchestrator=True), so those numbers
+    describe a path that cannot be taken today. Use --orchestrator for
+    the numbers that matter.
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:
@@ -518,7 +580,8 @@ def _cleanroom_launcher_path():
 
 
 def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
-                        orchestrator, return_stats=False):
+                        orchestrator, return_stats=False, *, streaming=False,
+                        resume=None, checkpoint_file=None):
     # orchestrator=True is REQUIRED, not merely accepted.
     #
     # orchestrator is not a performance knob; it selects a supervision
@@ -597,6 +660,31 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
         return False, ("order=%r is not served; the launcher relies on "
                        "downstream ordering (collect_records sort for "
                        "map, parent-side reassembly for stream)" % (order,))
+    # Streaming (stream()) is NARROWER than map() and the difference is
+    # deliberate, so it is expressed here rather than as a second,
+    # hand-written predicate at the stream() dispatch site. That second
+    # copy had already drifted once: it required `not orchestrator` while
+    # this one required it, and it excluded order="index" while this one
+    # serves it -- so map and stream disagreed about the envelope.
+    #
+    # The streaming gap is real, not an oversight: the stream path has no
+    # collect step, so it cannot sort by index after the fact, and its
+    # parent-side reassembly only handles order="none". Until that is
+    # built, order="index" declines to the ordinary reactor path -- which
+    # is CORRECT (just not accelerated), and is why narrowing here is
+    # safe: a declined call falls back, it does not silently change
+    # semantics.
+    if streaming:
+        if order != "none":
+            return False, ("stream(order=%r) is not served; the stream "
+                           "path has no collect step to sort with"
+                           % (order,))
+        if strict_poison:
+            return False, ("stream(strict_poison=True) is not served; no "
+                           "poison count reaches a streaming caller")
+        if resume is not None or checkpoint_file is not None:
+            return False, "stream(resume=/checkpoint_file=) is not served"
+
     # Sources: a materialized file, any already-open descriptor (int fd,
     # fifo, socket, file object), or a Python iterable. The last is fed
     # in by a forked producer child, which is how stream() has always
@@ -2764,31 +2852,46 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
             order=kwargs.get("order", "none"),
             c_drain=kwargs.get("c_drain", True)))
     if _detect_streaming(source, kwargs.get("streaming")):
-        # W-CR3: cleanroom streaming. Same envelope discipline as map():
-        # only where the launcher can HONOUR the call, else fall through
-        # quietly (the cleanroom is on by default, so warning on every
-        # inapplicable call would be noise).
-        if raw_mode == "plugin" and num_nodes == 1 \
-                and kwargs.get("order", "none") == "none" \
-                and not kwargs.get("strict_poison", False) \
-                and orchestrator \
-                and kwargs.get("resume") is None \
-                and kwargs.get("checkpoint_file") is None \
-                and _cleanroom_launcher_path() is not None:
-            _p, _sep, _f = (
-                raw_payload.rpartition(":")
-                if isinstance(raw_payload, str) else ("", "", ""))
-            if _p and _f:
-                return _guarded_gen(
-                    _signal_guard(kwargs.get("signal_policy", "default")),
-                    _execute_cleanroom_stream(
-                        source,
-                        lines=kwargs.get("lines"),
-                        bytes_=kwargs.get("bytes"),
-                        workers=_resolve_workers_numa(
-                            kwargs.get("workers"), num_nodes),
-                        plugin_path=_p, plugin_func=_f,
-                        on_error=kwargs.get("on_error", "retry")))
+        # W-CR3: cleanroom streaming, gated by the SAME predicate map()
+        # uses. This used to be a second hand-written condition here, and
+        # the two had already drifted (it wanted `not orchestrator` where
+        # the envelope wanted it, and it excluded order="index" where the
+        # envelope serves it). One predicate, one answer.
+        #
+        # Falls through QUIETLY when ineligible: the default is OFF, so
+        # an unserved call is the overwhelmingly common case and
+        # warning on each would be noise. An explicit request that cannot
+        # be honoured still warns, as it does for map().
+        if _cleanroom_enabled() and raw_mode == "plugin":
+            _ok, _why = _cleanroom_eligible(
+                source, raw_mode, num_nodes,
+                kwargs.get("order", "none"),
+                kwargs.get("strict_poison", False), orchestrator,
+                streaming=True,
+                resume=kwargs.get("resume"),
+                checkpoint_file=kwargs.get("checkpoint_file"))
+            if _ok and _cleanroom_launcher_path() is not None:
+                _p, _sep, _f = (
+                    raw_payload.rpartition(":")
+                    if isinstance(raw_payload, str) else ("", "", ""))
+                if _p and _f:
+                    return _guarded_gen(
+                        _signal_guard(
+                            kwargs.get("signal_policy", "default")),
+                        _execute_cleanroom_stream(
+                            source,
+                            lines=kwargs.get("lines"),
+                            bytes_=kwargs.get("bytes"),
+                            workers=_resolve_workers_numa(
+                                kwargs.get("workers"), num_nodes),
+                            plugin_path=_p, plugin_func=_f,
+                            on_error=kwargs.get("on_error", "retry")))
+            elif _cleanroom_explicit() and _why:
+                import warnings as _warnings
+                _warnings.warn(
+                    "forkrun: FORKRUN_CLEANROOM=1 ignored for this "
+                    "stream() call (%s) \u2014 using the in-process path."
+                    % (_why,), UserWarning, stacklevel=3)
         if orchestrator:
             return _guarded_gen(
                 _signal_guard(kwargs.get("signal_policy", "default")),

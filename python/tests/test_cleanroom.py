@@ -1662,7 +1662,7 @@ class TestCleanroomRespawnIncarnation(unittest.TestCase):
         ring_recover_worker refuses to reclaim a batch whose incarnation
         does not match.
 
-        So the assertion has to be about a SINGLE wid surviving multiple
+        So the assertion must be about a SINGLE wid surviving multiple
         generations. With workers>1 a fixture that simply dies N times
         can land every death on a different wid, giving (w0:g0, w1:g0,
         w0:g1) -- "a respawn was observed", true, while never once
@@ -1697,6 +1697,7 @@ class TestCleanroomRespawnIncarnation(unittest.TestCase):
             len(got), 0,
             "the surviving generation must actually produce output, or "
             "the lineage above proves nothing")
+
 
 if __name__ == "__main__":
     unittest.main()
