@@ -209,6 +209,11 @@
     "linkage": "static",
     "return": "int"
   },
+  "fr_py_poison_relay": {
+    "args": "uint32_t batch_idx",
+    "linkage": "extern",
+    "return": "void"
+  },
   "fr_py_poisoned_count": {
     "args": "void",
     "linkage": "extern",

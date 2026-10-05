@@ -1903,32 +1903,9 @@ static struct GlobalState *g_state = NULL;
 #define FR_POISON_SLOT_U32 1024u   /* slot capacity in u32 indices */
 static __thread int g_poison_fd = -2;   /* -2 = not yet looked up */
 
-void fr_py_poison_relay(uint32_t batch_idx) {
-    if (g_poison_fd == -2) {
-        const char *e = getenv("FRK_POISON_FD");
-        g_poison_fd = (e && e[0]) ? atoi(e) : -1;
-    }
-    if (g_poison_fd < 0)
-        return;
-    const unsigned wid = g_fr_config.ring_wid;
-    if (wid >= 4096u)
-        return;
-    /* header is 4 u32; slot is [count][idx...] with a fixed capacity. */
-    const off_t slot = (off_t)(4 + (size_t)wid * (FR_POISON_SLOT_U32 + 1)) * 4;
-    uint32_t n = 0;
-    if (pread(g_poison_fd, &n, sizeof n, slot) != (ssize_t)sizeof n)
-        return;
-    if (n >= FR_POISON_SLOT_U32)
-        return;                      /* bounded: drop, never grow */
-    uint32_t buf[1];
-    buf[0] = batch_idx;
-    if (pwrite(g_poison_fd, buf, sizeof buf,
-               slot + (off_t)(1 + n) * 4) != (ssize_t)sizeof buf)
-        return;
-    n++;
-    /* Publish the count last: a reader that sees n must see the indices. */
-    (void)!pwrite(g_poison_fd, &n, sizeof n, slot);
-}
+/* fr_py_poison_relay is defined in python/forkrun/_shim.c, which is
+ * the generator's source of truth for the fr_py_* ABI. See the forward
+ * declaration there. */
 static struct SharedState *state = NULL;
 
 static inline void cleanup_waiter_state() {

@@ -139,7 +139,9 @@ class TestShimBindings(unittest.TestCase):
         table = _load_table()
         names = list(table.keys())
         self.assertEqual(len(names), len(set(names)), "duplicate entries")
-        # 49 extern + 11 static = 60 (guard against silent truncation).
+        # 50 extern + 11 static = 61 (guard against silent truncation).
+        # 50 rather than 49 because fr_py_poison_relay was added (the
+        # cleanroom's poisoned-batch-index relay).
         # W-PREFLIGHT added fr_py_ingest_data_post: an advisory
         # "more bytes landed in ingress" poke on evfd_ingest_data, so
         # the pre-flight scan can block on the eventfd instead of
@@ -162,7 +164,7 @@ class TestShimBindings(unittest.TestCase):
                     if v["linkage"] == "extern")
         n_st = sum(1 for v in table.values()
                    if v["linkage"] == "static")
-        self.assertEqual((n_ext, n_st), (49, 11),
+        self.assertEqual((n_ext, n_st), (50, 11),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

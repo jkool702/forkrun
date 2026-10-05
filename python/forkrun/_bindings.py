@@ -103,6 +103,11 @@ def _setup_signatures(lib) -> None:
     lib.fr_py_abort.restype = ctypes.c_int
     lib.fr_py_poisoned_count.argtypes = []
     lib.fr_py_poisoned_count.restype = ctypes.c_uint
+    # Poison-index relay (cleanroom stats channel). Not called from Python
+    # -- the WORKER calls it, via $FRK_POISON_FD -- but every exported
+    # fr_py_* symbol must be bound, and test_shim_abi enforces that.
+    lib.fr_py_poison_relay.argtypes = [ctypes.c_uint32]
+    lib.fr_py_poison_relay.restype = None
     # W-PY13 v1 fast paths (optional: absent on pre-v1 substrates — the
     # worker falls back to v0 subprocess/ctypes dispatch). Guarded per
     # symbol so a partial substrate never breaks signature setup.
