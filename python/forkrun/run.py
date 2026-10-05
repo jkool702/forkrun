@@ -460,31 +460,27 @@ def _cleanroom_enabled():
     any more, and neither should be used to argue for or against
     defaulting this on.)
 
-    KNOWN CORRECTNESS BUG, and the reason this is further from default
-    than the performance numbers alone suggest: the launcher loses
-    records NONDETERMINISTICALLY. Same input, same flags, repeated runs
-    of 200 records through ml/process_v1 on this host:
+    NOT A CORRECTNESS BUG, despite appearances: the BATCH COUNT varies
+    between runs of identical input, which looks alarming and is not.
+    Measured over 15 runs of 200 records, workers=1:
 
-        cleanroom, workers=1   25, 25, 25, 23, 23, 7, ...   (10 runs)
-        cleanroom, workers=2   25, 25, 23, 23, 25, ...      (10 runs)
-        in-process, workers=1  25 x6                          (deterministic)
+        blob-count distribution   7 x1, 23 x3, 25 x10, 50 x1
+        distinct joined digests   ONE (15/15)
+        joined bytes              12890 == input bytes
+        zero-length blobs         0
 
-    7 out of 25 records is silent data loss with no error and no
-    warning. It is NOT the respawn/incarnation bug fixed alongside this
-    note (that one reproduced deterministically); it was measured with a
-    payload that never dies, and it survives reverting that fix -- the
-    fix only perturbs the timing and moves which number appears. At
-    2000 records the paths agree, so it is a short-run / tail effect.
-    Not yet bisected.
+    Every run returns every record exactly once; only the grouping into
+    batches differs, because batch boundaries depend on how much has been
+    ingested when the scanner looks. This is pre-existing and shared with
+    the in-process path -- test_ctx_fields_identical already notes that
+    "batch counts legitimately differ run to run (pre-flight race sets
+    L)". It was mistaken here for record loss by counting BLOBS as
+    records, so do not repeat that: compare JOINED BYTES, which is what
+    test_matches_in_process_content does and why it is stable.
 
-    Until that is root-caused, the cleanroom cannot be trusted for
-    correctness on small inputs, independent of how fast it is.
-
-    It stays OFF while it is a beta, for the reasons that are actually
+    It stays OFF while it is a beta, for the reasons that are actually    It stays OFF while it is a beta, for the reasons that are actually
     true today:
 
-    * It loses records nondeterministically (measured above). This alone
-      rules out defaulting it, regardless of performance.
     * It is SLOWER in the shape callers use (the fixed ~100 ms above).
     * It is narrower than the API: mode="plugin" only, UMA only,
       orchestrator=True only. Everything else declines, so it is an

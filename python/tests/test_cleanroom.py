@@ -1619,15 +1619,16 @@ class TestCleanroomRespawnIncarnation(unittest.TestCase):
         That is what this asserts -- it reads the generations the plugin
         actually saw.
 
-        Deliberately NOT asserting a byte-for-byte comparison against a
-        healthy run: the launcher currently loses records
-        NONDETERMINISTICALLY at small record counts with one worker
-        (measured: 25/25/25/23/23/7/... over repeated runs of the same
-        input, against a deterministic 25 on the in-process path). That
-        is a separate, larger bug -- see the cleanroom notes in
-        run.py::_cleanroom_enabled -- and a byte assertion here would
-        report it as this test's failure and be flaky besides. This test
-        isolates the propagation, which IS deterministic.
+        Deliberately NOT asserting a blob-for-blob comparison against a
+        healthy run: the BATCH COUNT varies between runs of identical
+        input (measured 7/23/25/50 blobs over 15 runs of 200 records),
+        because boundaries depend on how much has been ingested when the
+        scanner looks. That is pre-existing and shared with the
+        in-process path. Joined bytes are invariant -- one digest across
+        all 15 runs, equal to the input size -- so a byte comparison
+        would be stable, but it is not what this test is for and
+        test_matches_in_process_content already covers it. This test
+        isolates the propagation, which is deterministic.
         """
         os.environ["FORKRUN_TEST_SIDE_EFFECT_FILE"] = self._marker()
         got = forkrun.map(self.V1_SO + ":die_twice_v1", self.path,
