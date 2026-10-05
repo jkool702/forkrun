@@ -781,3 +781,37 @@ exits 2 if not) is what caught both. **A validation config must be able
 to fail when the code under test does not run** — otherwise it is
 decorative. Same lesson as the dead hook, the res_fd close, and the
 exec probe that hung the suite.
+
+
+### W-CR5: process-death semantics of the cleanroom fallback (P0)
+
+The cleanroom's failure mode is WHOLE-JOB, and external review is right
+that "double the work" understates it. A worker that dies makes the
+launcher exit non-zero; Python warns and re-runs the entire input in
+process. For any plugin with side effects that is **at-least-once
+execution** — not a retry of the failed batch, a replay of everything
+that already succeeded. The reactor path instead recovers the single
+dead worker/batch, so the two paths differ in exactly this respect.
+
+This is now TESTED rather than implied. New fixtures in
+`tests/plugins/test_plugin_v1.c` (note: distinct from `always_fail_v1`,
+which merely RETURNS 42 and so only exercises retry/poison):
+
+  die_once_v1    appends a marker, then SIGKILLs itself exactly once
+  die_always_v1  SIGKILLs on every call
+  count_only_v1  pure side effect, never dies
+
+`TestCleanroomProcessDeath` pins both halves:
+  - a worker death still returns correct bytes (the rerun saves it)
+  - a death causes strictly more invocations than a clean run, i.e.
+    at-least-once is real and observable
+
+**A methodology trap worth recording.** The first version compared a
+cleanroom run against an in-process run and saw 27 vs 50 invocations,
+then nearly concluded "the cleanroom under-executes". That gap is
+BATCHING, not duplication: the launcher spills and scans in its own
+process, so its batch boundaries differ from the in-process path and
+invocation counts are not comparable across paths. The correct
+measurement compares WITHIN one path — same arm, with and without a
+death. Comparing counts across the two execution models measures batch
+shape and will mislead you.

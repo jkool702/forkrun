@@ -90,3 +90,72 @@ int always_fail_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
     (void)ctx;
     return 42;
 }
+
+/* ---- W-CR5: process-DEATH fixtures (distinct from always_fail_v1) ----
+ *
+ * always_fail_v1 returns 42: an ordinary failure the engine retries and
+ * poisons. These instead KILL the worker outright, which is the case
+ * external review flagged as untested: the launcher exits non-zero,
+ * Python falls back and RE-RUNS THE WHOLE JOB, so any plugin with side
+ * effects performs them at least twice.
+ *
+ * die_once_v1 appends a marker per invocation and SIGKILLs itself on
+ * the first call only. After the rerun the marker file therefore holds
+ * TWO entries for the batch that succeeded the first time -- which is
+ * the at-least-once semantics, made observable rather than asserted.
+ *
+ * kill_path lets the test aim at a specific invocation.
+ */
+#include <signal.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+static void _append_marker(const char *tag) {
+    const char *p = getenv("FORKRUN_TEST_SIDE_EFFECT_FILE");
+    if (!p || !*p)
+        return;
+    FILE *f = fopen(p, "a");
+    if (!f)
+        return;
+    fprintf(f, "%s\n", tag);
+    fclose(f);
+}
+
+int die_once_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    (void)argc; (void)argv;
+    _append_marker("die_once");
+    /* One-shot: a marker file makes the kill happen exactly once, so a
+     * rerun of the job completes normally. */
+    const char *k = getenv("FORKRUN_TEST_DIE_FILE");
+    if (k && *k) {
+        FILE *f = fopen(k, "r");
+        if (!f) {
+            f = fopen(k, "w");
+            if (f) fclose(f);
+            raise(SIGKILL);
+        }
+        fclose(f);
+    } else {
+        static int once = 0;
+        if (!once) { once = 1; raise(SIGKILL); }
+    }
+    return 0;
+}
+
+/* Always dies. Used to show the cleanroom's fallback still returns
+ * CORRECT BYTES even though the job cannot complete under the
+ * cleanroom -- i.e. the rerun is what saves it. */
+int die_always_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    (void)argc; (void)argv; (void)ctx;
+    _append_marker("die_always");
+    raise(SIGKILL);
+    return 0;
+}
+
+/* Pure side effect, never dies: proves the rerun duplicates work. */
+int count_only_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    (void)argc; (void)argv;
+    _append_marker("count");
+    return 0;
+}

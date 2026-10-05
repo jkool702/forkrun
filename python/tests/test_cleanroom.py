@@ -8,6 +8,8 @@
 import os
 import sys
 import glob
+import shutil
+import tempfile
 import time
 import unittest
 import warnings
@@ -557,6 +559,122 @@ class TestCleanroomStreaming(unittest.TestCase):
         th.join()
         os.close(r)
         self.assertGreater(len(out), 0)
+
+
+@unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
+class TestCleanroomProcessDeath(unittest.TestCase):
+    """P0: a worker that DIES, not one that returns an error.
+
+    always_fail_v1 covers the ordinary path (return 42 -> retry ->
+    poison). These fixtures raise(SIGKILL) inside the plugin, which is
+    the case external review flagged: the launcher exits non-zero,
+    Python falls back, and the WHOLE JOB RE-RUNS.
+
+    That makes cleanroom semantics AT-LEAST-ONCE for any plugin with
+    side effects. These tests pin that behaviour explicitly rather than
+    leaving it implied -- a reader should not have to infer it.
+    """
+
+    V1_SO = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))),
+        "python", "tests", "plugins", "test_plugin_v1.so")
+
+    def setUp(self):
+        if not os.path.exists(self.V1_SO):
+            self.skipTest("test_plugin_v1.so not built")
+        if _cleanroom_launcher_path() is None:
+            self.skipTest("launcher binary not built")
+        self._old = {k: os.environ.get(k) for k in
+                     ("FORKRUN_CLEANROOM", "FORKRUN_TEST_SIDE_EFFECT_FILE",
+                      "FORKRUN_TEST_DIE_FILE")}
+        self.tmp = tempfile.mkdtemp(prefix="frdeath")
+        self.path = _make_input(400)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        for k, v in self._old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def _marker(self):
+        p = os.path.join(self.tmp, "side_effects")
+        os.environ["FORKRUN_TEST_SIDE_EFFECT_FILE"] = p
+        return p
+
+    def _read(self, p):
+        if not os.path.exists(p):
+            return []
+        with open(p) as fh:
+            return [ln.strip() for ln in fh if ln.strip()]
+
+    def test_worker_death_falls_back_and_returns_correct_bytes(self):
+        """A SIGKILLed worker must not cost the caller its output."""
+        die = os.path.join(self.tmp, "died")
+        os.environ["FORKRUN_TEST_DIE_FILE"] = die
+        self._marker()
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        out = forkrun.map(self.V1_SO + ":die_once_v1", self.path,
+                          workers=2, nodes=1, mode="plugin",
+                          output="bytes", orchestrator=False)
+        joined = b"".join(bytes(x) for x in out)
+        # die_once_v1 emits nothing, so correct output IS empty -- what
+        # matters is that the run completed rather than hanging or
+        # aborting, and that the job was actually re-executed.
+        self.assertEqual(joined, b"")
+        self.assertTrue(
+            os.path.exists(die),
+            "the kill-once marker was never written, so the worker never "
+            "died and this test proved nothing")
+
+    def test_fallback_reruns_the_whole_job(self):
+        """AT-LEAST-ONCE, pinned: a death makes the job run twice.
+
+        Measured WITHIN the cleanroom path so batching differences
+        between the two paths cannot confound the count -- an earlier
+        version compared a cleanroom run against an in-process one and
+        saw 27 vs 50 invocations, which is BATCHING (the launcher
+        spills and scans in its own process, so its batch boundaries
+        differ), not duplication. That was the wrong comparison and it
+        nearly became a wrong conclusion.
+
+        Here both arms start down the cleanroom path. The only
+        difference is that one of them hits a worker death, which makes
+        the launcher fail and Python re-run the whole job. So the death
+        arm must execute strictly MORE times than the clean arm.
+        """
+        os.environ["FORKRUN_TEST_DIE_FILE"] = os.path.join(
+            self.tmp, "never-written")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+
+        m = self._marker()
+        forkrun.map(self.V1_SO + ":count_only_v1", self.path,
+                    workers=2, nodes=1, mode="plugin", output="bytes",
+                    orchestrator=False)
+        clean_arm = len(self._read(m))
+        os.unlink(m)
+
+        # Now arm the one-shot death: the first batch kills its worker,
+        # the launcher fails, and the job restarts from the beginning.
+        os.environ["FORKRUN_TEST_DIE_FILE"] = os.path.join(self.tmp, "fired")
+        forkrun.map(self.V1_SO + ":die_once_v1", self.path,
+                    workers=2, nodes=1, mode="plugin", output="bytes",
+                    orchestrator=False)
+        death_arm = len(self._read(m))
+
+        self.assertGreater(
+            death_arm, clean_arm,
+            "a worker death must cost at-least-once execution "
+            "(clean=%d, death=%d); if these are equal the rerun is not "
+            "happening and the at-least-once caveat is stale"
+            % (clean_arm, death_arm))
 
 
 if __name__ == "__main__":
