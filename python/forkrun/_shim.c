@@ -302,7 +302,7 @@ int fr_py_claim(fr_py_batch_t *out) {
                      * ring's own loop -- which is why the ring.c call
                      * alone produced an empty poisoned_batches with a
                      * correct poisoned count. */
-                    fr_poison_relay((uint32_t)batch.batch_idx);
+                    fr_py_poison_relay((uint32_t)batch.batch_idx);
                     uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
                     uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;
                     if (h_cnt > 0 && total_poisoned >= h_cnt) {

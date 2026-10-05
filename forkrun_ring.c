@@ -1903,7 +1903,7 @@ static struct GlobalState *g_state = NULL;
 #define FR_POISON_SLOT_U32 1024u   /* slot capacity in u32 indices */
 static __thread int g_poison_fd = -2;   /* -2 = not yet looked up */
 
-void fr_poison_relay(uint32_t batch_idx) {
+void fr_py_poison_relay(uint32_t batch_idx) {
     if (g_poison_fd == -2) {
         const char *e = getenv("FRK_POISON_FD");
         g_poison_fd = (e && e[0]) ? atoi(e) : -1;
@@ -6703,7 +6703,7 @@ static int ring_claim_main(int argc, char **argv) {
       uint32_t poison_threshold = (limit > 0) ? (uint32_t)limit : 1;
       if (batch.num_kills == poison_threshold && g_state) {
           uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
-          fr_poison_relay((uint32_t)batch.batch_idx);
+          fr_py_poison_relay((uint32_t)batch.batch_idx);
 
           uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
           uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;
