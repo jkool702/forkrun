@@ -255,6 +255,54 @@ int main(int argc, char **argv) {
         return 64;
     }
     if (o.workers < 1) o.workers = 1;
+
+    /* Refuse a plugin the engine will NOT drive through the ctx
+     * protocol. forkrun_use_ctx is the single capability-negotiation
+     * symbol (forkrun_ring.c: forkrun_worker_plugin_loop dlsyms it);
+     * without it the engine falls back to the legacy ARGV/stdout route,
+     * and the launcher's output channel is a per-worker MEMFD, not that
+     * worker's stdout. So such a plugin produces no bytes the launcher
+     * can collect -- and the run still exits 0.
+     *
+     * That combination is the worst possible failure: a
+     * successful-looking run that silently returns an empty result
+     * set, with no fallback triggered because nothing "failed". Widening
+     * the cleanroom envelope is what exposed it -- nine existing plugin
+     * tests had been silently taking the in-process path, and started
+     * returning b"" the moment the launcher was allowed to serve them.
+     *
+     * Checking here, before any fork, fails fast and cheap. Exiting
+     * non-zero is deliberate: run.py treats that as "launcher
+     * unavailable for this call", warns, and falls back to the
+     * in-process path, which handles these plugins correctly. The
+     * in-process path is slower and CORRECT, which beats fast and
+     * empty.
+     *
+     * dlopen is RTLD_LOCAL and closed immediately; the engine does its
+     * own dlopen later and this handle is only a probe.
+     */
+    {
+        void *ph = dlopen(o.plugin_path, RTLD_NOW | RTLD_LOCAL);
+        if (!ph) {
+            fprintf(stderr, "forkrun-cleanroom: dlopen plugin: %s\n",
+                    dlerror());
+            return 69;
+        }
+        int *use_ctx = (int *)dlsym(ph, "forkrun_use_ctx");
+        unsigned ver = use_ctx ? (unsigned)*use_ctx : 0u;
+        dlclose(ph);
+        if ((ver & 0x3u) != 1u && (ver & 0x3u) != 2u) {
+            fprintf(stderr,
+                    "forkrun-cleanroom: plugin %s exports no "
+                    "forkrun_use_ctx (dialect v1/v2 ctx protocol); it "
+                    "would be driven via the legacy stdout route, whose "
+                    "output the launcher cannot collect. Refusing rather "
+                    "than returning an empty result set -- use the "
+                    "in-process path for this plugin.\n",
+                    o.plugin_path);
+            return 78;
+        }
+    }
     raise_fd_limit();
 
     void *h = dlopen(o.so_path, RTLD_NOW | RTLD_LOCAL);

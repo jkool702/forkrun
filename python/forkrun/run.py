@@ -523,7 +523,15 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
       there is no streaming-ingest or producer-side spill.
     * mode="plugin" -- it dlopens an object and calls an entry point.
       Note this is NOT the frozen-ABI restriction of the C *worker
-      loop*: the launcher serves v0 72B-convention plugins fine too.
+      loop*. It IS, however, narrower in one respect: the plugin must
+      export forkrun_use_ctx (dialect v1/v2). A plugin without it is
+      driven by the engine via the legacy ARGV/stdout route, whose
+      output lands on the worker's stdout rather than in the memfd the
+      launcher collects -- so the launcher would exit 0 with an EMPTY
+      result set. It now refuses such plugins (exit 78) so run.py falls
+      back, rather than returning silently wrong results. An earlier
+      draft of this comment claimed v0 plugins were served "fine too";
+      nine existing plugin tests disproved that.
     * UMA single node -- no multi-node rings.
     * order in ("none", "index") -- the launcher does NOT run the C
       orderer (ring_order is forked only by the in-process reactor, for
@@ -559,13 +567,28 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
         return False, ("order=%r is not served; the launcher relies on "
                        "downstream ordering (collect_records sort for "
                        "map, parent-side reassembly for stream)" % (order,))
-    try:
-        if not isinstance(source, (str, bytes, os.PathLike)):
-            return False, "materialized file source only"
-        if not os.path.isfile(os.fspath(source)):
+    # Sources: a materialized file, any already-open descriptor (int fd,
+    # fifo, socket, file object), or a Python iterable. The last is fed
+    # in by a forked producer child, which is how stream() has always
+    # worked, so map() now shares that machinery instead of demanding a
+    # file on disk. What is NOT servable is a source that is none of
+    # these -- notably a directory, or a path that does not exist.
+    if isinstance(source, (str, bytes, os.PathLike)):
+        try:
+            path = os.fspath(source)
+        except (TypeError, ValueError) as exc:
+            return False, "source path is unusable (%s)" % (exc,)
+        if not os.path.exists(path):
             return False, "source is not an existing file"
-    except (TypeError, ValueError, OSError) as exc:
-        return False, "source is not a usable file (%s)" % (exc,)
+        if os.path.isdir(path):
+            return False, "source is a directory"
+    elif isinstance(source, int) and not isinstance(source, bool):
+        pass                                  # descriptor; validated later
+    elif hasattr(source, "fileno") or hasattr(source, "__iter__"):
+        pass                                  # file object or iterable
+    else:
+        return False, ("source must be a path, an open descriptor, or "
+                       "an iterable (got %r)" % (type(source),))
     return True, ""
 
 
@@ -597,7 +620,27 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     from ._worker import _ON_ERROR_CODES
     so = find_substrate()
 
-    src_fd = os.open(os.fspath(source), os.O_RDONLY)
+    # Source resolution, matching the stream() path exactly:
+    #   * already a descriptor (int fd, fifo, socket, file object) --
+    #     passed straight through as --src. Nothing is pumped; the
+    #     launcher reads it the way Bash's -s shape does. Proven by the
+    #     SIGKILL tests, which feed a live pipe.
+    #   * a Python iterable -- a forked producer child pumps it into a
+    #     pipe. FORK, not a thread: the producer's closure must survive
+    #     copy-on-write, and nothing in a forked child may contend for
+    #     the GIL with the parent's collect. A thread would also be a
+    #     deadlock hazard in a process that has already forked workers.
+    #   * neither -- not eligible; the envelope declines it first.
+    # Descriptors only. Unlike stream(), map()/run() must NOT accept a
+    # Python iterable: _api._reject_iterable_source rejects it outright
+    # ("Python is never an input pump"), so the branch that would fork a
+    # producer here is unreachable from the public API. It was removed
+    # rather than left as dead code -- an unreachable fork of a
+    # multi-threaded process is exactly the deadlock hazard the codebase
+    # comments warn about, and dead safety code is not safety.
+    src_fd = _cleanroom_map_source_fd(source)
+    if src_fd is None:
+        return None
     res_fd = os.memfd_create("fr_cleanroom_result")
     # Counter channel. The launcher writes [u32 version][u32 poisoned]
     # here after joining every worker, which is what lets it serve
@@ -759,6 +802,36 @@ def _cleanroom_source_fd(source):
     return fd
 
 
+def _cleanroom_map_source_fd(source):
+    """Resolve a map() source to an fd, or None if it needs a producer.
+
+    Deliberately NOT _cleanroom_source_fd: that one returns None for a
+    REGULAR FILE, because the streaming path never materializes and a
+    fifo is the interesting case there. Reusing it here was a real bug --
+    a str path has __iter__, so a plain file fell through to the
+    producer branch and was pumped ONE CHARACTER AT A TIME (the path
+    string itself), yielding 1 byte of output where 2000 were expected.
+
+    Order matters for the same reason: decide "is this a path/descriptor"
+    BEFORE considering "is this an iterable", because str and bytes both
+    satisfy __iter__ and would otherwise be mistaken for a record source.
+    """
+    try:
+        if isinstance(source, int) and not isinstance(source, bool) \
+                and source >= 0:
+            fd = os.dup(source)
+        elif isinstance(source, (str, bytes, os.PathLike)):
+            fd = os.open(os.fspath(source), os.O_RDONLY)
+        elif hasattr(source, "fileno"):
+            fd = os.dup(source.fileno())
+        else:
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    os.set_inheritable(fd, True)
+    return fd
+
+
 def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                               plugin_path, plugin_func, on_error):
     """W-CR3: STREAMING cleanroom -- yield results as they arrive.
@@ -770,9 +843,9 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
       passed straight through as --src. Nothing is pumped; the launcher
       reads it exactly as Bash's `-s` shape does.
     * source a Python iterable: forked producer child pumps it into a
-      pipe. Fork, not a thread, so the producer's closure survives
-      copy-on-write AND nothing in a forked child contends for the GIL
-      with the parent's drain loop.
+      pipe. NOTE this is currently unreachable -- _reject_iterable_source
+      refuses iterables for stream() as well -- so it is retained as
+      defence in depth, not as a supported input shape.
 
     The parent only ever DRAINS. That is what makes it deadlock-free:
     the launcher can block writing results, the spill child can block
@@ -878,6 +951,34 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                 yield data[start:start + blen]
                 base = start + blen
             tail = data[base:]
+        # The pipe hit EOF. That is only a legitimate END OF INPUT if the
+        # producer exited cleanly: a producer that raises (or is killed)
+        # also EOFs the pipe, and the launcher ingests a SHORT corpus and
+        # exits 0, so the caller would get plausible-looking truncated
+        # results and no error.
+        #
+        # HONEST SCOPE: this branch is currently UNREACHABLE from the
+        # public API. _api._reject_iterable_source refuses a Python
+        # iterable for map(), run() AND stream() alike ("Python is never
+        # an input pump"), so producer_pid is always None here and every
+        # real streaming source is a pipe/fd fed by the caller. That
+        # caller's failure is not detectable from in here -- there is no
+        # child to inspect -- so a writer that dies mid-stream is still
+        # silently truncated, and no check in this function can fix that.
+        #
+        # It is kept as defence in depth, and it is the reason the
+        # producer block above was not deleted along with map()'s copy.
+        # Checked here rather than in the finally because a raise from a
+        # finally would mask the real error.
+        if producer_pid is not None:
+            _pp, pstatus = os.waitpid(producer_pid, 0)
+            producer_pid = None
+            if not (os.WIFEXITED(pstatus)
+                    and os.WEXITSTATUS(pstatus) == 0):
+                raise RuntimeError(
+                    "forkrun: cleanroom source producer failed (status "
+                    "%r); the input was truncated, so the results are "
+                    "not trustworthy" % (pstatus,))
         finished = True
     finally:
         try:
@@ -2060,6 +2161,48 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 **base)
             _sg.check()
             return _map_return(out, return_stats)
+    if _cleanroom_enabled() and raw_mode == "plugin":
+        _ok, _why = _cleanroom_eligible(
+            source, raw_mode, num_nodes, order,
+            kwargs.get("strict_poison", False), orchestrator,
+            bool(return_stats))
+        if _ok:
+            # rpartition on the last colon, exactly as _coerce_payload
+            # parses the spec. Deliberately NOT _c_plugin_spec(): that
+            # only answers for a dialect-1/2 frozen-ABI plugin, which is
+            # a constraint of the C *worker loop*; the launcher dlopens
+            # and calls the entry point, so v0 72B plugins are fine too.
+            _p, _sep, _f = raw_payload.rpartition(":")
+            if _p and _f:
+                with _signal_guard(
+                        kwargs.get("signal_policy", "default")) as _sg:
+                    with _RUN_LOCK:
+                        out = _execute_cleanroom(
+                            source,
+                            lines=kwargs.get("lines"),
+                            bytes_=kwargs.get("bytes"),
+                            workers=base["workers"],
+                            plugin_path=_p, plugin_func=_f,
+                            on_error=kwargs.get("on_error", "retry"),
+                            views=base["views"],
+                            strict_poison=bool(
+                                kwargs.get("strict_poison", False)))
+                    _sg.check()
+                if out is not None:
+                    return _map_return(out, return_stats)
+        elif _cleanroom_explicit():
+            # Only warn when the user ASKED. The default is OFF, so
+            # this branch is reachable only via an explicit
+            # FORKRUN_CLEANROOM -- which is exactly when the user needs
+            # to hear that the envelope could not be honoured.
+            import warnings as _warnings
+            _warnings.warn(
+                "forkrun: FORKRUN_CLEANROOM=1 ignored for this call "
+                "(%s) — using the in-process path. The launcher covers "
+                "materialized file + C plugin + UMA + "
+                "order in ('none', 'index')." % (_why,),
+                UserWarning, stacklevel=3)
+
     if _detect_streaming(source, kwargs.get("streaming")):
         if c_worker_loop:
             raise RuntimeError(
@@ -2120,48 +2263,6 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     # correct, and breaking a working map() call to advertise an
     # experimental accelerator is strictly worse. Not silent, though --
     # a user who set FORKRUN_CLEANROOM must learn they did not get it.
-    if _cleanroom_enabled() and raw_mode == "plugin":
-        _ok, _why = _cleanroom_eligible(
-            source, raw_mode, num_nodes, order,
-            kwargs.get("strict_poison", False), orchestrator,
-            bool(return_stats))
-        if _ok:
-            # rpartition on the last colon, exactly as _coerce_payload
-            # parses the spec. Deliberately NOT _c_plugin_spec(): that
-            # only answers for a dialect-1/2 frozen-ABI plugin, which is
-            # a constraint of the C *worker loop*; the launcher dlopens
-            # and calls the entry point, so v0 72B plugins are fine too.
-            _p, _sep, _f = raw_payload.rpartition(":")
-            if _p and _f:
-                with _signal_guard(
-                        kwargs.get("signal_policy", "default")) as _sg:
-                    with _RUN_LOCK:
-                        out = _execute_cleanroom(
-                            source,
-                            lines=kwargs.get("lines"),
-                            bytes_=kwargs.get("bytes"),
-                            workers=base["workers"],
-                            plugin_path=_p, plugin_func=_f,
-                            on_error=kwargs.get("on_error", "retry"),
-                            views=base["views"],
-                            strict_poison=bool(
-                                kwargs.get("strict_poison", False)))
-                    _sg.check()
-                if out is not None:
-                    return _map_return(out, return_stats)
-        elif _cleanroom_explicit():
-            # Only warn when the user ASKED. The default is OFF, so
-            # this branch is reachable only via an explicit
-            # FORKRUN_CLEANROOM -- which is exactly when the user needs
-            # to hear that the envelope could not be honoured.
-            import warnings as _warnings
-            _warnings.warn(
-                "forkrun: FORKRUN_CLEANROOM=1 ignored for this call "
-                "(%s) — using the in-process path. The launcher covers "
-                "materialized file + C plugin + UMA + "
-                "order in ('none', 'index')." % (_why,),
-                UserWarning, stacklevel=3)
-
     if orchestrator:
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
             with _RUN_LOCK:
