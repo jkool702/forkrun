@@ -843,3 +843,23 @@ throughput; in a real service (a web worker, a notebook, anything with
 a loaded parent) it is a 1.2-1.6x end-to-end win, not a rounding error.
 Any future cleanroom performance claim should state the parent RSS it
 was measured at, or it is not a claim.
+
+
+### Streaming latency: 24x on first result
+
+200k records through a pipe, 28 workers, paired, 5 runs, median:
+
+| path | first result | bytes |
+|---|---|---|
+| in-process stream (orchestrator=True) | 269.5 ms | 200000 |
+| cleanroom stream (orchestrator=False) | **11.1 ms** | 200000 |
+
+**24x lower time-to-first-result**, which is the metric that matters for
+the interactive/latency-sensitive case a stream exists to serve; the
+throughput story is the 1.2-1.6x above. The cleanroom's spilled+overlapped
+scan (W-CR2) is what makes this possible -- an inline spill would have to
+reach producer EOF before scanning anything.
+
+Note this benchmark tripped the new threaded-fork detection on its own:
+the producer is a thread, so the harness is exactly the shape the warning
+describes. Detection working unprompted is the intended behaviour.
