@@ -1901,11 +1901,17 @@ static struct GlobalState *g_state = NULL;
  * a run fail.
  */
 #define FR_POISON_SLOT_U32 1024u   /* slot capacity in u32 indices */
-static __thread int g_poison_fd = -2;   /* -2 = not yet looked up */
 
-/* fr_py_poison_relay is defined in python/forkrun/_shim.c, which is
- * the generator's source of truth for the fr_py_* ABI. See the forward
- * declaration there. */
+/* fr_py_poison_relay is DEFINED in python/forkrun/_shim.c, because
+ * tools/gen_shim.py parses that file textually to derive the fr_py_* ABI
+ * and would not see a definition living here. ring.c still calls it from
+ * its own poison site below, so it needs the declaration on THIS side:
+ * ring.c is its own translation unit and compiling it standalone must
+ * not depend on _shim.c's includes. When _shim.c does include this file,
+ * it already declares the function via the generated forkrun_shim.h, and
+ * these two declarations are compatible, so the redeclaration is fine. */
+void fr_py_poison_relay(uint32_t batch_idx);
+
 static struct SharedState *state = NULL;
 
 static inline void cleanup_waiter_state() {

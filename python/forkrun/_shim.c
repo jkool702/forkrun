@@ -41,6 +41,13 @@ void fr_py_poison_relay(unsigned int batch_idx);
 #include <sys/uio.h>
 
 void fr_py_poison_relay(uint32_t batch_idx) {
+    /* The relay moved here from forkrun_ring.c, so its fd cache moves
+     * with it. It lived in ring.c only because the function did; once the
+     * definition is here, keeping the cache in ring.c only worked by
+     * accident of _shim.c including that file into the same translation
+     * unit. The wheel build compiles _shim.c on its own and caught the
+     * dangling reference. -2 = not yet looked up. */
+    static __thread int g_poison_fd = -2;
     if (g_poison_fd == -2) {
         const char *e = getenv("FRK_POISON_FD");
         g_poison_fd = (e && e[0]) ? atoi(e) : -1;
