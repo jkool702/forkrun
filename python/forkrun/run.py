@@ -1322,6 +1322,141 @@ def _new_output_memfds(n) -> tuple[list, list]:
     return fds, hold
 
 
+def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
+    """Classify NUMA helper deaths for one supervision step. Raises on fatal.
+
+    Single source for the NUMA blocking and streaming executors, which
+    carried byte-identical copies of this -- the only textual difference
+    was a comment, which is the clearest possible evidence that the
+    duplication was accidental.
+
+    Deliberately split by KIND rather than by lifecycle: what a child
+    death MEANS is a mechanic and lives here, while what the executor does
+    next stays with the caller. That boundary is what lets two different
+    lifecycles share it without growing a 14-argument helper -- `pipe`
+    and `helpers` are already the per-executor state containers, so no
+    shape-specific knowledge leaks through this signature.
+    """
+    # Fallow death (WNOHANG) is fatal; indexer/scanner/ingest
+    # deaths classify via their death pipes. Error kinds
+    # raise at once. A clean indexer/scanner exit keys on
+    # ingest EOF POSTED (fr_py_ingest_eof_posted -- the same
+    # sentinel the indexers watch), NOT on ingest process
+    # exit: the ingest routinely outlives its helpers (it
+    # flushes on chunk_done before exiting), so
+    # exit-ordering alone cannot tell normal teardown
+    # ("helper done after EOF posted, ingest still
+    # flushing") from tail loss ("helper done before EOF
+    # was even posted" -- fatal).
+    #
+    # Imported here, not at module scope, for the same reason every
+    # executor imports it locally: _reactor resolves run.py-owned
+    # symbols lazily, so a top-level import would close the cycle. This
+    # keeps the helper usable from both NUMA lifecycles without either
+    # of them having to pass it in -- a parameter here would have been
+    # the fourth argument that exists only to work around an import
+    # cycle.
+    from ._reactor import check_scanner_death
+
+    try:
+        wpid, st = os.waitpid(pipe["fallow_pid"], os.WNOHANG)
+    except (ChildProcessError, OSError):
+        wpid, st = None, None
+    if wpid == pipe["fallow_pid"]:
+        helpers["fallow_rc"] = st
+        ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
+        if not ok:
+            lib.fr_py_abort()
+            raise RuntimeError(
+                "forkrun: NUMA reaper failed (status %r)"
+                % (st,))
+    _poll_ingest_once(lib, helpers, pipe)
+    try:
+        eof_posted = lib.fr_py_ingest_eof_posted()
+    except Exception:
+        eof_posted = 0
+    for pids, deaths, key in (
+            (pipe["indexer_pids"], pipe["indexer_deaths"],
+             "index"),
+            (pipe["scanner_pids"], pipe["scanner_deaths"],
+             "scan")):
+        for node in range(num_nodes):
+            if node in helpers[key]:
+                continue
+            kind, code = check_scanner_death(
+                pids[node], deaths[node])
+            if kind == "running":
+                continue
+            # D-PORT2/D6: query the abort reason BEFORE our
+            # own abort — an abort already in flight makes
+            # this death an expected emergency exit, not a
+            # fatal one (re-aborting would print a spurious
+            # FATAL and clobber the abort's own outcome).
+            disp = _helper_death_disposition(
+                kind, bool(eof_posted),
+                _abort_reason_now(lib))
+            helpers[key][node] = (kind, code)
+            deaths[node] = None
+            if disp != "fatal":
+                if disp == "excuse":
+                    helpers.setdefault(
+                        "excused", set()).add((key, node))
+                continue
+            lib.fr_py_abort()
+            raise RuntimeError(
+                "forkrun: NUMA %s %d failed "
+                "(status %r)" % (key, node, code))
+
+
+def _fork_workers_for_node(state, assignments, node, forked):
+    """Spawn every worker assigned to `node`. Returns nothing.
+
+    The node -> worker mapping is the part that must not diverge between
+    the blocking and streaming NUMA executors: a fix applied to one and
+    not the other shows up only as a NUMA-specific hang or a wrong
+    worker count. The two closures this replaces differed ONLY in which
+    assignment list they read (`wid_node` vs `stream_wid_node`) and in
+    trailing bookkeeping their owners needed, so both are now
+    parameters/return-free and the lifecycle step stays with the caller.
+    """
+    for wid, nd in enumerate(assignments):
+        if nd == node:
+            state.spawn_worker(wid=wid, node=node)
+    forked.add(node)
+
+
+def _retire_parent_signal(signal_w, state, spare_signal_w):
+    """Retire the parent's copy of the worker-signal pipe. Returns the
+    new value for the caller's ``signal_w`` (always None).
+
+    Workers -- those present now and any future respawn via the spare --
+    each hold a write end, so the parent's own copy must go or the drain
+    never sees EOF. The spare is installed into the reactor state at the
+    same moment so a respawn has a write end to hand out.
+
+    Returning the new value rather than using ``nonlocal`` is what makes
+    this shareable: the two copies this replaces were closures over
+    different enclosing scopes, which is the only reason they were ever
+    separate functions.
+
+    WHY signal_w MUST become None (W-PY21-A erratum, kept here because
+    this is the one copy of the rule that explains it): if it kept the
+    old integer, every later _fork_node would close the same descriptor
+    NUMBER again. The results pipe later recycles that number, so the
+    second close kills the pump's read end and the run hangs with data
+    ready but unread -- a use-after-close that presents as a deadlock,
+    which is why it was so expensive to find.
+    """
+    if signal_w is not None:
+        try:
+            os.close(signal_w)
+        except OSError:
+            pass
+        signal_w = None
+    state.ctx["signal_w"] = spare_signal_w
+    return signal_w
+
+
 def _read_fd_all(fd) -> bytes:
     """Read an fd from offset 0 to EOF (parent-side, post-waitpid)."""
     try:
@@ -6907,15 +7042,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         def _drop_parent_signal():
             nonlocal signal_w, spare_signal_w
-            # Workers (present + future respawns via the spare) hold
-            # write ends; the parent's original copy must go for EOF.
-            if signal_w is not None:
-                try:
-                    os.close(signal_w)
-                except OSError:
-                    pass
-                signal_w = None
-            state.ctx["signal_w"] = spare_signal_w
+            signal_w = _retire_parent_signal(signal_w, state,
+                                        spare_signal_w)
 
         def _fork_workers_now():
             for _ in range(workers):
@@ -7962,71 +8090,9 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 return [0] * num_nodes
 
         def _watch_pipeline():
-            # Fallow death (WNOHANG) is fatal; indexer/scanner/ingest
-            # deaths classify via their death pipes. Error kinds
-            # raise at once. A clean indexer/scanner exit keys on
-            # ingest EOF POSTED (fr_py_ingest_eof_posted — the same
-            # sentinel the indexers watch), NOT on ingest process
-            # exit: the ingest routinely outlives its helpers (it
-            # flushes on chunk_done before exiting), so
-            # exit-ordering alone cannot tell normal teardown
-            # ("helper done after EOF posted, ingest still
-            # flushing") from tail loss ("helper done before EOF
-            # was even posted" — fatal).
-            try:
-                wpid, st = os.waitpid(pipe["fallow_pid"], os.WNOHANG)
-            except (ChildProcessError, OSError):
-                wpid, st = None, None
-            if wpid == pipe["fallow_pid"]:
-                helpers["fallow_rc"] = st
-                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
-                if not ok:
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: NUMA reaper failed (status %r)"
-                        % (st,))
-            _poll_ingest_once(lib, helpers, pipe)
-            try:
-                eof_posted = lib.fr_py_ingest_eof_posted()
-            except Exception:
-                eof_posted = 0
-            for pids, deaths, key in (
-                    (pipe["indexer_pids"], pipe["indexer_deaths"],
-                     "index"),
-                    (pipe["scanner_pids"], pipe["scanner_deaths"],
-                     "scan")):
-                for node in range(num_nodes):
-                    if node in helpers[key]:
-                        continue
-                    kind, code = check_scanner_death(
-                        pids[node], deaths[node])
-                    if kind == "running":
-                        continue
-                    # D-PORT2/D6: query the abort reason BEFORE our
-                    # own abort — an abort already in flight makes
-                    # this death an expected emergency exit, not a
-                    # fatal one (re-aborting would print a spurious
-                    # FATAL and clobber the abort's own outcome).
-                    disp = _helper_death_disposition(
-                        kind, bool(eof_posted),
-                        _abort_reason_now(lib))
-                    helpers[key][node] = (kind, code)
-                    deaths[node] = None
-                    if disp != "fatal":
-                        if disp == "excuse":
-                            helpers.setdefault(
-                                "excused", set()).add((key, node))
-                        continue
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: NUMA %s %d failed "
-                        "(status %r)" % (key, node, code))
-
+            _watch_numa_pipeline(lib, pipe, helpers, num_nodes)
         def _fork_node(node):
-            for wid, nd in enumerate(wid_node):
-                if nd == node:
-                    state.spawn_worker(wid=wid, node=node)
-            forked.add(node)
+            _fork_workers_for_node(state, wid_node, node, forked)
 
         # Workers a node's workers-block needs, and the published-batch
         # floor its fork is gated on (see the loop comment below).
@@ -8512,78 +8578,19 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
 
         def _drop_parent_signal():
             nonlocal signal_w
-            # NOTE: signal_w MUST go None here (W-PY21-A erratum):
-            # without it every _fork_node re-closes the same NUMBER,
-            # which the results pipe later recycles — killing the
-            # pump's read end and hanging with data ready but unread.
-            if signal_w is not None:
-                try:
-                    os.close(signal_w)
-                except OSError:
-                    pass
-                signal_w = None
-            state.ctx["signal_w"] = spare_signal_w
+            signal_w = _retire_parent_signal(signal_w, state,
+                                        spare_signal_w)
 
         def _fork_node(node):
-            for wid, nd in enumerate(stream_wid_node):
-                if nd == node:
-                    state.spawn_worker(wid=wid, node=node)
+            _fork_workers_for_node(state, stream_wid_node, node, forked)
+            # Only the streaming path retires the parent signal here: it
+            # has a drain blocked on EOF, so the parent's write end must
+            # go once workers exist. The blocking NUMA path collects from
+            # out_fds directly and needs no EOF.
             _drop_parent_signal()
-            forked.add(node)
 
         def _watch_pipeline():
-            # Same classification contract as the locked NUMA path:
-            # clean helper exits key on ingest EOF POSTED (not on
-            # ingest process exit — the ingest flushes last).
-            try:
-                wpid, st = os.waitpid(pipe["fallow_pid"], os.WNOHANG)
-            except (ChildProcessError, OSError):
-                wpid, st = None, None
-            if wpid == pipe["fallow_pid"]:
-                helpers["fallow_rc"] = st
-                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
-                if not ok:
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: NUMA reaper failed (status %r)"
-                        % (st,))
-            _poll_ingest_once(lib, helpers, pipe)
-            try:
-                eof_posted = lib.fr_py_ingest_eof_posted()
-            except Exception:
-                eof_posted = 0
-            for pids, deaths, key in (
-                    (pipe["indexer_pids"], pipe["indexer_deaths"],
-                     "index"),
-                    (pipe["scanner_pids"], pipe["scanner_deaths"],
-                     "scan")):
-                for node in range(num_nodes):
-                    if node in helpers[key]:
-                        continue
-                    kind, code = check_scanner_death(
-                        pids[node], deaths[node])
-                    if kind == "running":
-                        continue
-                    # D-PORT2/D6: query the abort reason BEFORE our
-                    # own abort — an abort already in flight makes
-                    # this death an expected emergency exit, not a
-                    # fatal one (re-aborting would print a spurious
-                    # FATAL and clobber the abort's own outcome).
-                    disp = _helper_death_disposition(
-                        kind, bool(eof_posted),
-                        _abort_reason_now(lib))
-                    helpers[key][node] = (kind, code)
-                    deaths[node] = None
-                    if disp != "fatal":
-                        if disp == "excuse":
-                            helpers.setdefault(
-                                "excused", set()).add((key, node))
-                        continue
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: NUMA %s %d failed "
-                        "(status %r)" % (key, node, code))
-
+            _watch_numa_pipeline(lib, pipe, helpers, num_nodes)
         def _fork_timing():
             if len(forked) >= num_nodes:
                 return
