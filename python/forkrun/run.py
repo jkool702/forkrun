@@ -1322,6 +1322,97 @@ def _new_output_memfds(n) -> tuple[list, list]:
     return fds, hold
 
 
+def _resume_begin_after_init(lib, resume, *, order, mode, collect,
+                             splice, source):
+    """resume_begin, guaranteeing the pre-fork engine destroy on failure.
+
+    resume_begin raises BEFORE the caller's try/finally is entered (it is
+    pre-fork by design) but AFTER fr_py_init. So when it raises, the
+    initialized engine is still live and nothing else owns tearing it
+    down: without an explicit destroy it leaks into the next call in the
+    same process. That was observed as total output loss on the
+    following run, which is a spectacular way to learn the rule.
+
+    No children or fds exist at this point, so a bare destroy is
+    complete teardown.
+
+    Four executors carried this try/except by hand. The invariant is
+    exactly the kind that must not have four independent copies: the
+    failure mode is a leak that only manifests on a LATER, unrelated
+    call, so it is invisible in the test that provoked it.
+    """
+    try:
+        return resume_begin(lib, resume, order=order, orchestrator=True,
+                           mode=mode, collect=collect, splice=splice,
+                           source=source)
+    except BaseException:
+        # W-REL6-3.4b
+        try:
+            lib.fr_py_destroy()
+        except Exception:
+            pass
+        raise
+
+
+def _watch_ingest_helpers(lib, *, fallow_pid, scan_pid, helpers,
+                           scan_death_r, state, gate_issued):
+    """Classify ingest helper deaths for one supervision step.
+
+    Returns the (possibly advanced) ``scan_death_r`` for the caller to
+    store back; raises on a fatal classification.
+
+    Single source for the blocking and streaming ingest-reactor
+    executors. Merging them FIXED a divergence rather than merely
+    removing a copy: the streaming path was missing
+    ``state.scan_death_r = -1``, which the blocking path sets precisely
+    so the teardown-parked copy cannot hold a stale descriptor number
+    after the real pipe has been consumed and its number recycled
+    (W-REL2/R11). Exactly the "fixed one path, forgot the other" failure
+    this duplication invites -- the comment explaining the rule existed
+    only on the copy that had it.
+
+    ``gate_issued`` is passed as a value because the two callers keep it
+    under different names (a bool in one, a dict key in the other);
+    normalising here is cheaper than unifying their state containers,
+    which are genuinely per-executor.
+    """
+    from ._reactor import check_scanner_death
+
+    # Fallow death (WNOHANG) is fatal; scanner state comes from its
+    # death pipe with error classification. A clean scanner exit BEFORE
+    # the gate is equally fatal (exit 0 is only reachable via the EOF
+    # gate -- an early 0 means the tail it never saw is lost).
+    try:
+        wpid, st = os.waitpid(fallow_pid, os.WNOHANG)
+    except ChildProcessError:
+        wpid, st = None, None
+    except OSError:
+        wpid, st = None, None
+    if wpid == fallow_pid:
+        helpers["fallow_rc"] = st
+        ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
+        if not ok:
+            lib.fr_py_abort()
+            raise RuntimeError(
+                "forkrun: ingest reaper failed (status %r)" % (st,))
+    if scan_death_r is not None and helpers["scan_kind"] is None:
+        kind, code = check_scanner_death(scan_pid, scan_death_r)
+        if kind != "running":
+            # Definitive: the pipe is consumed (closed inside) --
+            # record and stop polling it.
+            helpers["scan_kind"] = kind
+            helpers["scan_code"] = code
+            scan_death_r = None
+            # Keep the teardown-parked copy in sync; a stale number must
+            # never be closed after reuse (W-REL2/R11).
+            state.scan_death_r = -1
+            if kind == "error" or not gate_issued:
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: ingest scanner failed (status %r)" % (code,))
+    return scan_death_r
+
+
 def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
     """Classify NUMA helper deaths for one supervision step. Raises on fatal.
 
@@ -5168,23 +5259,9 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. Raises before any
     # child exists. engine_live gates the abort choreography below.
-    try:
-        resume_state = resume_begin(lib, resume, order=order,
-                                     orchestrator=True, mode=mode,
-                                     collect=collect, splice=splice,
-                                     source=source)
-    except BaseException:
-        # W-REL6-3.4b: resume_begin raises BEFORE the try/finally
-        # below is entered (pre-fork, by design) -- but AFTER
-        # fr_py_init. Without this destroy the initialized engine
-        # leaks live into the next map() in this process (observed:
-        # total output loss on the following run). No children or
-        # fds exist yet, so a bare destroy is complete teardown.
-        try:
-            lib.fr_py_destroy()
-        except Exception:
-            pass
-        raise
+    resume_state = _resume_begin_after_init(
+        lib, resume, order=order, mode=mode,
+        collect=collect, splice=splice, source=source)
     engine_live = True
 
     src_fd, must_close = _open_source(source)
@@ -5771,23 +5848,9 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
-    try:
-        resume_state = resume_begin(lib, resume, order=order,
-                                     orchestrator=True, mode=mode,
-                                     collect=True, splice=splice,
-                                     source=source)
-    except BaseException:
-        # W-REL6-3.4b: resume_begin raises BEFORE the try/finally
-        # below is entered (pre-fork, by design) -- but AFTER
-        # fr_py_init. Without this destroy the initialized engine
-        # leaks live into the next map() in this process (observed:
-        # total output loss on the following run). No children or
-        # fds exist yet, so a bare destroy is complete teardown.
-        try:
-            lib.fr_py_destroy()
-        except Exception:
-            pass
-        raise
+    resume_state = _resume_begin_after_init(
+        lib, resume, order=order, mode=mode,
+        collect=True, splice=splice, source=source)
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (spill/scan, before assignment below).
@@ -6305,23 +6368,9 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
-    try:
-        resume_state = resume_begin(lib, resume, order=order,
-                                     orchestrator=True, mode=mode,
-                                     collect=collect, splice=splice,
-                                     source=source)
-    except BaseException:
-        # W-REL6-3.4b: resume_begin raises BEFORE the try/finally
-        # below is entered (pre-fork, by design) -- but AFTER
-        # fr_py_init. Without this destroy the initialized engine
-        # leaks live into the next map() in this process (observed:
-        # total output loss on the following run). No children or
-        # fds exist yet, so a bare destroy is complete teardown.
-        try:
-            lib.fr_py_destroy()
-        except Exception:
-            pass
-        raise
+    resume_state = _resume_begin_after_init(
+        lib, resume, order=order, mode=mode,
+        collect=collect, splice=splice, source=source)
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
@@ -6458,43 +6507,11 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         state.scan_death_r = scan_death_r
 
         def _watch_helpers():
-            # Fallow death (WNOHANG) is fatal; scanner state comes
-            # from its death pipe with error classification. A clean
-            # scanner exit BEFORE the gate is equally fatal (exit 0
-            # is only reachable via the EOF gate — an early 0 means
-            # the tail it never saw is lost).
             nonlocal scan_death_r
-            try:
-                wpid, st = os.waitpid(fallow_pid, os.WNOHANG)
-            except ChildProcessError:
-                wpid, st = None, None
-            except OSError:
-                wpid, st = None, None
-            if wpid == fallow_pid:
-                helpers["fallow_rc"] = st
-                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
-                if not ok:
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: ingest reaper failed (status %r)"
-                        % (st,))
-            if scan_death_r is not None and helpers["scan_kind"] is None:
-                kind, code = check_scanner_death(scan_pid,
-                                                scan_death_r)
-                if kind != "running":
-                    # Definitive: the pipe is consumed (closed
-                    # inside) — record and stop polling it.
-                    helpers["scan_kind"] = kind
-                    helpers["scan_code"] = code
-                    scan_death_r = None
-                    state.scan_death_r = -1  # W-REL2/R11: keep the
-                    # teardown-parked copy in sync (stale numbers
-                    # must never be closed post-reuse).
-                    if kind == "error" or not gate_issued:
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: ingest scanner failed (status %r)"
-                            % (code,))
+            scan_death_r = _watch_ingest_helpers(
+                lib, fallow_pid=fallow_pid, scan_pid=scan_pid,
+                helpers=helpers, scan_death_r=scan_death_r, state=state,
+                gate_issued=gate_issued)
 
         def _fork_workers_now():
             nonlocal workers_forked, fork_at
@@ -6913,23 +6930,9 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
-    try:
-        resume_state = resume_begin(lib, resume, order=order,
-                                     orchestrator=True, mode=mode,
-                                     collect=True, splice=splice,
-                                     source=source)
-    except BaseException:
-        # W-REL6-3.4b: resume_begin raises BEFORE the try/finally
-        # below is entered (pre-fork, by design) -- but AFTER
-        # fr_py_init. Without this destroy the initialized engine
-        # leaks live into the next map() in this process (observed:
-        # total output loss on the following run). No children or
-        # fds exist yet, so a bare destroy is complete teardown.
-        try:
-            lib.fr_py_destroy()
-        except Exception:
-            pass
-        raise
+    resume_state = _resume_begin_after_init(
+        lib, resume, order=order, mode=mode,
+        collect=True, splice=splice, source=source)
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
@@ -7055,36 +7058,11 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             _fork_cdrain_if_needed()
 
         def _watch_helpers():
-            # Raises on fallow death / scanner error / early clean
-            # scanner exit (same rules as the locked ingest path).
             nonlocal scan_death_r
-            try:
-                wpid, st = os.waitpid(fallow_pid, os.WNOHANG)
-            except ChildProcessError:
-                wpid, st = None, None
-            except OSError:
-                wpid, st = None, None
-            if wpid == fallow_pid:
-                helpers["fallow_rc"] = st
-                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
-                if not ok:
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: ingest reaper failed (status %r)"
-                        % (st,))
-            if scan_death_r is not None \
-                    and helpers["scan_kind"] is None:
-                kind, code = check_scanner_death(scan_pid,
-                                                scan_death_r)
-                if kind != "running":
-                    helpers["scan_kind"] = kind
-                    helpers["scan_code"] = code
-                    scan_death_r = None
-                    if kind == "error" or not gate["issued"]:
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: ingest scanner failed "
-                            "(status %r)" % (code,))
+            scan_death_r = _watch_ingest_helpers(
+                lib, fallow_pid=fallow_pid, scan_pid=scan_pid,
+                helpers=helpers, scan_death_r=scan_death_r, state=state,
+                gate_issued=gate["issued"])
 
         def _maybe_fork_workers():
             if fstate["workers"]:
