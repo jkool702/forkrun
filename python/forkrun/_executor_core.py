@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time as _time
 
 from ._bindings import RC_OK, get as _get_lib
 from ._fd_scrub import scrub_fds
@@ -82,6 +83,62 @@ class ExecutorSpec:
 # ---------------------------------------------------------------------------
 # Single worker-fork dispatch (I4 escrow discipline lives in the callees)
 # ---------------------------------------------------------------------------
+
+_RSS_WARNED = False
+
+
+def _parent_rss_kb():
+    """Resident set size of THIS process, in KiB. None if unavailable."""
+    try:
+        with open("/proc/self/statm") as fh:
+            return int(fh.read().split()[1]) * (os.sysconf("SC_PAGE_SIZE")
+                                               // 1024)
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def warn_fork_cost(rss_kb, fork_ms, n_workers):
+    """Warn once when this fan-out is paying an unusual fork cost.
+
+    fork() copies the parent's page tables, so its cost scales with the
+    parent's RSS rather than with anything the workers touch. Measured
+    on this host: 1.6 ms per fork at 10 MB, 58 ms at 1.6 GB -- a 36x
+    swing that buys the workers nothing. A user whose host process has
+    grown sees forkrun get mysteriously slow with no visible cause, and
+    no signal that the cause is their own RSS.
+
+    So measure it and say so, once per process. Emitting this on every
+    call would be noise in a loop; never emitting it leaves the cost
+    invisible. Threshold via FORKRUN_RSS_WARN_KB (0 disables).
+
+    This is diagnostics only: it never changes behaviour, and a failure
+    to read /proc is silent rather than fatal.
+    """
+    global _RSS_WARNED
+    if _RSS_WARNED or rss_kb is None:
+        return False
+    try:
+        limit = int(os.environ.get("FORKRUN_RSS_WARN_KB", "524288"))
+    except ValueError:
+        limit = 524288
+    if limit <= 0 or rss_kb < limit:
+        return False
+    _RSS_WARNED = True
+    per = (fork_ms / n_workers) if n_workers else fork_ms
+    import sys as _sys
+    print(
+        "forkrun: warning: this process holds %.1f GiB resident before "
+        "forking %d worker%s (%.1f ms of fork, %.1f ms per worker). fork() "
+        "copies page tables, so its cost scales with OUR memory, not with "
+        "what the workers read -- the workers will not use these pages. "
+        "Call forkrun before the memory-heavy phase, or from a fresh "
+        "process, if fan-out latency matters. Suppress with "
+        "FORKRUN_RSS_WARN_KB=0."
+        % (rss_kb / 1048576.0, n_workers,
+           "" if n_workers == 1 else "s", fork_ms, per),
+        file=_sys.stderr)
+    return True
+
 
 def trim_parent_heap():
     """Return the parent heap's free pages to the OS. Best-effort.
@@ -182,6 +239,8 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
     # workers touch -- see trim_parent_heap for what this does and does
     # not fix. Best-effort and silent by construction.
     trim_parent_heap()
+    _rss_before = _parent_rss_kb()
+    _t_fork = _time.perf_counter()
     from ._worker import resolve_payload_parent as _resolve_parent
     if payload is not None and isinstance(payload, str):
         payload = _resolve_parent(payload)
@@ -255,6 +314,15 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
             os._exit(127)  # unreachable; worker_main exits
         else:
             pids.append(pid)
+    # Measured AFTER, so the number reported is the real fan-out cost and
+    # not an estimate. warn_fork_cost is diagnostics only and warns at
+    # most once per process.
+    try:
+        warn_fork_cost(_rss_before,
+                       (_time.perf_counter() - _t_fork) * 1e3,
+                       max(workers, 1))
+    except Exception:
+        pass
     return pids
 
 
@@ -407,5 +475,5 @@ def init_engine(lib, *, lines, bytes_, topology=None, num_nodes=1,
     return rc
 
 __all__ = ["ExecutorSpec", "fork_workers", "collect_records",
-           "trim_parent_heap",
+           "trim_parent_heap", "warn_fork_cost",
            "report_poison", "init_engine", "flush_stdio"]

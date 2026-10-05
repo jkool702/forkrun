@@ -305,6 +305,23 @@ class ReactorState:
             self.wid_free.add(wid)
             return None
 
+        # fork() copies page tables, so its cost scales with the parent's
+        # RSS, not with anything the workers read. Trim the heap and
+        # measure the cost once per process -- see
+        # _executor_core.trim_parent_heap / warn_fork_cost.
+        #
+        # Needed HERE as well as in fork_workers: the reactor has its own
+        # spawn path, so the non-reactor helpers do not cover it -- and
+        # the reactor is what orchestrator=True uses, i.e. the DEFAULT.
+        # With the call only in fork_workers this was dead code for every
+        # default call, which is exactly how the first attempt at the
+        # fork-cost warning silently never fired.
+        from ._executor_core import trim_parent_heap as _trim
+        from ._executor_core import warn_fork_cost as _warn_fork
+        from ._executor_core import _parent_rss_kb as _rss
+        _trim()
+        _rss_kb, _t0 = _rss(), _time.perf_counter()
+
         pid = os.fork()
         if pid == 0:
             # Child — never returns.
@@ -371,6 +388,10 @@ class ReactorState:
         try:
             os.close(death_w)
         except OSError:
+            pass
+        try:
+            _warn_fork(_rss_kb, (_time.perf_counter() - _t0) * 1e3, 1)
+        except Exception:
             pass
         slot = WorkerSlot(wid, node, pid, death_r, -1, incarn=incarn)
         self.workers[wid] = slot
