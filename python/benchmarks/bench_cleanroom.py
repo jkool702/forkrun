@@ -55,7 +55,7 @@ def _run_once(spec, path, args):
     t0 = time.perf_counter()
     out = forkrun.map(spec, path, workers=args.workers, nodes=1,
                       mode="plugin", output="bytes",
-                      orchestrator=False)
+                      orchestrator=getattr(args, "orchestrator", False))
     dt = time.perf_counter() - t0
     n = sum(len(bytes(x)) for x in out)
     return dt, n
@@ -113,6 +113,9 @@ def main():
     ap.add_argument("--func", default="ml_process_light")
     ap.add_argument("--corpus", default="/mnt/ramdisk/numa1/ml/light_5M.jsonl")
     ap.add_argument("--workers", type=int, default=28)
+    ap.add_argument("--orchestrator", action="store_true",
+                    help="measure the reactor-supervised shape, "
+                         "which is what a plain map() uses")
     ap.add_argument("--repeat", type=int, default=15,
                     help="paired passes (throughput)")
     ap.add_argument("--startup-passes", type=int, default=40,
@@ -182,7 +185,8 @@ def main():
         return
     print("W-CR1 integrated cleanroom benchmark")
     print("  plugin  %s" % spec)
-    print("  workers %d   node 1 (UMA)   orchestrator=False" % args.workers)
+    print("  workers %d   node 1 (UMA)   orchestrator=%s"
+          % (args.workers, getattr(args, "orchestrator", False)))
     try:
         with open("/proc/self/status") as fh:
             for ln in fh:

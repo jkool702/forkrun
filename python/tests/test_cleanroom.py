@@ -785,6 +785,41 @@ class TestCleanroomFaultParity(unittest.TestCase):
             # poisoned=0 AND completed=len(out) both looked plausible.
             self.assertEqual(st["completed"], 0)
 
+    def test_stats_scalars_are_right_and_the_index_list_is_known_empty(self):
+        """Pin the cleanroom return_stats contract exactly as it stands.
+
+        The three scalars are correct and are what the P0 was about:
+        before the stats channel, `poisoned` was hardwired to 0, so
+        `total` undercounted and a run with poisoned batches reported
+        success-looking wrong numbers.
+
+        `poisoned_batches` is empty under the cleanroom -- the launcher
+        transports the count but not the indices. That is a KNOWN,
+        DOCUMENTED gap (filling it means a poisoned-index array in the
+        engine's shared GlobalState, a layout change to memory the
+        substrate and launcher both depend on). It is pinned here so it
+        stays a deliberate, asserted limitation instead of a silent
+        surprise: the assertion that matters is that `poisoned` is
+        correct, and an empty list must never be read as "nothing was
+        poisoned".
+        """
+        os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+        for flag in ("0", "1"):
+            os.environ["FORKRUN_CLEANROOM"] = flag
+            out, st = forkrun.map(self._fail(), self.path, mode="plugin",
+                                  output="bytes", return_stats=True,
+                                  nodes=1, workers=1, orchestrator=True)
+            self.assertEqual(st["total"],
+                             st["completed"] + st["poisoned"])
+            self.assertGreater(st["poisoned"], 0)
+            self.assertEqual(st["completed"], len(out))
+            if flag == "1":
+                self.assertEqual(
+                    st["poisoned_batches"], [],
+                    "cleanroom does not transport poison indices yet; if "
+                    "this now passes, the gap was closed and the "
+                    "return_stats docstring should be updated")
+
     def test_strict_poison_raises_with_a_real_count(self):
         """strict_poison=True is enforced on the cleanroom.
 

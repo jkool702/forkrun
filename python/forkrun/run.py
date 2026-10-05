@@ -426,28 +426,36 @@ def _cleanroom_enabled():
     regression on large jobs for a few milliseconds. Hence opt-in.
 
     OPT-IN, and the default is deliberately OFF. This was ON briefly
-    (commit 5ae0b0a0) and reversed: enabling it by default is wrong
-    because it cannot be reached by default callers AND it costs them
-    something real.
+    (commit 5ae0b0a0) and reversed.
 
-    It cannot be reached: the envelope below excludes orchestrator=True,
-    which is map()'s DEFAULT. So a plain forkrun.map(...) never took
-    the cleanroom even while it was nominally "on" -- the flag mostly
-    advertised an optimization that ordinary calls declined.
+    (An earlier version of this note justified that with two claims that
+    are both now FALSE, kept here so they are not re-derived: it said the
+    envelope excluded orchestrator=True "so a plain forkrun.map() never
+    took the cleanroom", and that the launcher "runs no supervisor ...
+    W-CR4 is not landed". W-CR4 IS landed (branch NEW/REFACTOR3.9) and
+    the envelope now REQUIRES orchestrator=True. So neither the
+    reachability argument nor the missing-supervisor argument applies
+    any more, and neither should be used to argue for or against
+    defaulting this on.)
 
-    It costs something: the launcher runs no supervisor. No death
-    pipes, no respawn, no trap-ACK -- a dead worker loses its batch.
-    W-CR4 (branch NEW/REFACTOR3.8) implements a supervisor that does
-    recover (SIGKILL -> RESPAWN wid=N rc=0 via the same
-    ring_recover_worker_core bash and Python both use), but it is not
-    landed: a single worker kill hangs the run, and the pre-3.7 launcher
-    hangs identically, so the hang is a pre-existing liveness gap in
-    the record-aware drain rather than a regression.
+    The reasons the default stays OFF are the ones still true:
 
-    So defaulting the cleanroom ON would mean defaulting crash recovery
-    OFF for every caller that did not ask for it. Orchestrator keeps the
-    default; the cleanroom is opt-in for callers who knowingly want the
-    speed and accept the supervision model.
+    * It is narrower than the API. mode="plugin" only, UMA only,
+      orchestrator=True only (see _cleanroom_eligible). Everything else
+      declines, so this is an accelerator for a subset, not a
+      transparent swap-in.
+    * The performance envelope is not yet characterised for the
+      DEFAULT shape of a call. The integrated benchmark still measures
+      orchestrator=False at 28 workers, which is not how a plain
+      forkrun.map() is invoked.
+    * Real multi-node hardware has never exercised it; NUMA validation
+      here is fake-NUMA only.
+
+    So defaulting it ON would make the common case faster while
+    silently narrowing which calls it can serve -- correct, but a
+    coverage surprise. It stays opt-in until the envelope is broad
+    enough to be a genuine default and the benchmark covers the default
+    call shape.
 
     Measured, for the caller who does opt in (28 workers, light_5M):
         STARTUP    2000 records   18.06 ms -> 8.75 ms   2.06x faster
@@ -2281,6 +2289,18 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
       {"total", "completed", "poisoned", "poisoned_batches"} --
       total = completed + poisoned, poisoned_batches sorted batch
       indices (see forkrun.last_run_stats for the caveats).
+
+      KNOWN GAP, cleanroom only: the launcher transports the poison
+      COUNT over its stats memfd but not the batch INDICES, so with
+      FORKRUN_CLEANROOM=1 `poisoned_batches` is [] even when
+      `poisoned` > 0. The three scalars are correct -- they were the
+      actual P0, since a hardwired 0 made `total` undercount -- so this
+      is a missing detail rather than a wrong number. Filling it needs a
+      poisoned-index array in the engine's shared GlobalState, which is
+      a layout change to memory both the substrate and the launcher
+      depend on; that deserves its own verification cycle rather than
+      being folded into a release. Treat an empty list as "not
+      reported", never as "nothing was poisoned" -- check `poisoned`.
     """
     if kwargs.get("sink") is not None:
         raise ValueError(
