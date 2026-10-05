@@ -98,12 +98,20 @@ class TestCleanroomHelpers(unittest.TestCase):
     """The envelope predicate -- pure, no plugin or launcher needed."""
 
     def test_disabled_by_default(self):
-        # The default is OFF. It was briefly ON (5ae0b0a0) and reversed:
-        # the envelope excludes orchestrator=True, which is map()'s own
-        # default, so a plain map() never took the cleanroom anyway --
-        # and the launcher runs no supervisor, so defaulting it ON would
-        # have meant defaulting crash recovery OFF for every caller who
-        # did not ask for it.
+        # The default is OFF. It was briefly ON (5ae0b0a0) and reversed.
+        #
+        # That reversal was justified by two claims that are BOTH NOW
+        # FALSE, kept here so nobody re-derives them from the history:
+        # "the envelope excludes orchestrator=True, which is map()'s own
+        # default" (the envelope now REQUIRES orchestrator=True) and "the
+        # launcher runs no supervisor" (W-CR4 gave it one). So neither
+        # the reachability argument nor the missing-supervisor argument
+        # applies any more.
+        #
+        # The reasons it is still OFF are the ones that remain true: it
+        # is a beta, it is SLOWER in the shape callers actually use, and
+        # its envelope is narrower than the API. See
+        # run.py::_cleanroom_enabled for the measured numbers.
         old = os.environ.pop("FORKRUN_CLEANROOM", None)
         try:
             self.assertFalse(_cleanroom_enabled())
@@ -952,36 +960,75 @@ class TestCleanroomStreaming(unittest.TestCase):
         self.assertEqual(len(streamed), len(ref))
         self.assertEqual(streamed, ref)
 
-    def test_stream_order_index_matches_in_process(self):
-        """stream(order="index") through the launcher must match.
+    def test_stream_order_index_declines_cleanroom_and_still_correct(self):
+        """stream(order="index") must DECLINE the cleanroom, not fake it.
 
-        stream() orders by PARENT-SIDE reassembly from batch_idx, with a
-        bounded out-of-order buffer -- it does not run the C orderer
-        either, so the launcher needs no ordering process. This pins
-        that: the ordered streamed bytes must equal the ordered
-        in-process run, which is the oracle.
+        Two things are pinned here.
 
-        Compared against the in-process run rather than a sorted-ness
-        check on purpose. A stream that silently dropped or duplicated
-        records could still come out monotonic; only parity catches
-        that.
+        First, the launcher is genuinely NOT taken. An earlier version
+        of this test compared cleanroom output against in-process output
+        without checking which path ran -- so a regression that made the
+        stream path fall back permanently would still have passed. That
+        is the failure mode the review flagged, and it is invisible to a
+        pure output comparison.
+
+        Second, and the reason the launcher cannot serve it: the stream
+        path has no collect step, so there is nowhere to sort by index
+        after the fact. map() gets order="index" for free because
+        collect_records sorts the drained blobs; stream() yields records
+        as they arrive and its parent-side reassembly only handles
+        order="none". So the envelope declines, the ordinary reactor path
+        runs, and the answer is still correct -- declined, not silently
+        permuted.
+
+        Asserted by spying on the launcher entry point, in the parent,
+        before any fork.
         """
-        r, th = self._pipe_with_producer(self.n)
-        os.environ["FORKRUN_CLEANROOM"] = "1"
-        streamed = self._drain(r, order="index")
-        th.join()
-        os.close(r)
+        R = sys.modules["forkrun.run"]
+        real = R._execute_cleanroom_stream
+        taken = []
+        R._execute_cleanroom_stream = lambda *a, **k: (
+            taken.append(1), real(*a, **k))[1]
+        self.addCleanup(setattr, R, "_execute_cleanroom_stream", real)
 
-        path = _make_input(self.n)
+        path = _make_input(1000)
         self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        got = b"".join(bytes(x) for x in forkrun.stream(
+            _spec(), path, mode="plugin", workers=2, nodes=1,
+            streaming=True, order="index", orchestrator=True))
+        self.assertFalse(
+            taken,
+            "stream(order='index') must NOT take the launcher: it cannot "
+            "sort by index without a collect step")
+
         os.environ["FORKRUN_CLEANROOM"] = "0"
         ref = b"".join(bytes(x) for x in forkrun.map(
-            _spec(), path, workers=4, nodes=1, mode="plugin",
-            output="bytes", order="index", orchestrator=True))
-        self.assertEqual(len(streamed), len(ref))
-        self.assertEqual(streamed, ref,
-                         "cleanroom stream order='index' differs from "
-                         "in-process")
+            _spec(), path, mode="plugin", output="bytes",
+            workers=2, nodes=1, order="index", orchestrator=True))
+        self.assertEqual(len(ref), 1000)
+        self.assertEqual(got, ref)
+
+    def test_stream_none_does_take_the_cleanroom(self):
+        """The counterpart: order="none" streaming IS accelerated.
+
+        Without this, the test above would also pass if the stream
+        cleanroom were simply dead. Together they pin both halves of the
+        envelope decision.
+        """
+        R = sys.modules["forkrun.run"]
+        real = R._execute_cleanroom_stream
+        taken = []
+        R._execute_cleanroom_stream = lambda *a, **k: (
+            taken.append(1), real(*a, **k))[1]
+        self.addCleanup(setattr, R, "_execute_cleanroom_stream", real)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        r, th = self._pipe_with_producer(self.n)
+        out = self._drain(r)
+        th.join()
+        os.close(r)
+        self.assertTrue(taken,
+                        "stream(order='none') should take the launcher")
 
     def test_stream_is_live(self):
         # A slow producer: if the launcher buffered to EOF, the first

@@ -559,7 +559,8 @@ def _cleanroom_launcher_path():
 
 
 def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
-                        orchestrator, return_stats=False):
+                        orchestrator, return_stats=False, *, streaming=False,
+                        resume=None, checkpoint_file=None):
     # orchestrator=True is REQUIRED, not merely accepted.
     #
     # orchestrator is not a performance knob; it selects a supervision
@@ -638,6 +639,31 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
         return False, ("order=%r is not served; the launcher relies on "
                        "downstream ordering (collect_records sort for "
                        "map, parent-side reassembly for stream)" % (order,))
+    # Streaming (stream()) is NARROWER than map() and the difference is
+    # deliberate, so it is expressed here rather than as a second,
+    # hand-written predicate at the stream() dispatch site. That second
+    # copy had already drifted once: it required `not orchestrator` while
+    # this one required it, and it excluded order="index" while this one
+    # serves it -- so map and stream disagreed about the envelope.
+    #
+    # The streaming gap is real, not an oversight: the stream path has no
+    # collect step, so it cannot sort by index after the fact, and its
+    # parent-side reassembly only handles order="none". Until that is
+    # built, order="index" declines to the ordinary reactor path -- which
+    # is CORRECT (just not accelerated), and is why narrowing here is
+    # safe: a declined call falls back, it does not silently change
+    # semantics.
+    if streaming:
+        if order != "none":
+            return False, ("stream(order=%r) is not served; the stream "
+                           "path has no collect step to sort with"
+                           % (order,))
+        if strict_poison:
+            return False, ("stream(strict_poison=True) is not served; no "
+                           "poison count reaches a streaming caller")
+        if resume is not None or checkpoint_file is not None:
+            return False, "stream(resume=/checkpoint_file=) is not served"
+
     # Sources: a materialized file, any already-open descriptor (int fd,
     # fifo, socket, file object), or a Python iterable. The last is fed
     # in by a forked producer child, which is how stream() has always
@@ -2805,31 +2831,46 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
             order=kwargs.get("order", "none"),
             c_drain=kwargs.get("c_drain", True)))
     if _detect_streaming(source, kwargs.get("streaming")):
-        # W-CR3: cleanroom streaming. Same envelope discipline as map():
-        # only where the launcher can HONOUR the call, else fall through
-        # quietly (the cleanroom is on by default, so warning on every
-        # inapplicable call would be noise).
-        if raw_mode == "plugin" and num_nodes == 1 \
-                and kwargs.get("order", "none") == "none" \
-                and not kwargs.get("strict_poison", False) \
-                and orchestrator \
-                and kwargs.get("resume") is None \
-                and kwargs.get("checkpoint_file") is None \
-                and _cleanroom_launcher_path() is not None:
-            _p, _sep, _f = (
-                raw_payload.rpartition(":")
-                if isinstance(raw_payload, str) else ("", "", ""))
-            if _p and _f:
-                return _guarded_gen(
-                    _signal_guard(kwargs.get("signal_policy", "default")),
-                    _execute_cleanroom_stream(
-                        source,
-                        lines=kwargs.get("lines"),
-                        bytes_=kwargs.get("bytes"),
-                        workers=_resolve_workers_numa(
-                            kwargs.get("workers"), num_nodes),
-                        plugin_path=_p, plugin_func=_f,
-                        on_error=kwargs.get("on_error", "retry")))
+        # W-CR3: cleanroom streaming, gated by the SAME predicate map()
+        # uses. This used to be a second hand-written condition here, and
+        # the two had already drifted (it wanted `not orchestrator` where
+        # the envelope wanted it, and it excluded order="index" where the
+        # envelope serves it). One predicate, one answer.
+        #
+        # Falls through QUIETLY when ineligible: the default is OFF, so
+        # an unserved call is the overwhelmingly common case and
+        # warning on each would be noise. An explicit request that cannot
+        # be honoured still warns, as it does for map().
+        if _cleanroom_enabled() and raw_mode == "plugin":
+            _ok, _why = _cleanroom_eligible(
+                source, raw_mode, num_nodes,
+                kwargs.get("order", "none"),
+                kwargs.get("strict_poison", False), orchestrator,
+                streaming=True,
+                resume=kwargs.get("resume"),
+                checkpoint_file=kwargs.get("checkpoint_file"))
+            if _ok and _cleanroom_launcher_path() is not None:
+                _p, _sep, _f = (
+                    raw_payload.rpartition(":")
+                    if isinstance(raw_payload, str) else ("", "", ""))
+                if _p and _f:
+                    return _guarded_gen(
+                        _signal_guard(
+                            kwargs.get("signal_policy", "default")),
+                        _execute_cleanroom_stream(
+                            source,
+                            lines=kwargs.get("lines"),
+                            bytes_=kwargs.get("bytes"),
+                            workers=_resolve_workers_numa(
+                                kwargs.get("workers"), num_nodes),
+                            plugin_path=_p, plugin_func=_f,
+                            on_error=kwargs.get("on_error", "retry")))
+            elif _cleanroom_explicit() and _why:
+                import warnings as _warnings
+                _warnings.warn(
+                    "forkrun: FORKRUN_CLEANROOM=1 ignored for this "
+                    "stream() call (%s) \u2014 using the in-process path."
+                    % (_why,), UserWarning, stacklevel=3)
         if orchestrator:
             return _guarded_gen(
                 _signal_guard(kwargs.get("signal_policy", "default")),
