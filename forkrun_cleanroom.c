@@ -32,6 +32,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -48,6 +49,8 @@ typedef int (*fn_scan)(int fd);
 typedef int (*fn_ingest_done)(void);
 typedef int (*fn_ingest_data_post)(void);
 typedef int (*fn_fallow_loop)(int fallow_r, int memfd);
+typedef void (*fn_abort_fn)(void);
+static fn_abort_fn p_abort;
 typedef int (*fn_drain_loop)(int signal_r, const int *out_fds,
                              int num_workers, int results_fd, int mode);
 
@@ -124,6 +127,18 @@ static void raise_fd_limit(void) {
     }
 }
 
+/* Every launcher child dies with the launcher.
+ *
+ * The Python streaming path kills the launcher on abandonment and waits
+ * only for it. Without an explicit parent-death relationship the
+ * launcher's descendants -- spill, fallow, scanner, drain and every
+ * worker -- survive and unwind only "eventually", by noticing a closed
+ * pipe. That is emergent behaviour, not ownership: it leaks fds and CPU
+ * and accumulates in a long-lived service. */
+static void die_with_parent(void) {
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+}
+
 int main(int argc, char **argv) {
     struct opts o;
     memset(&o, 0, sizeof o);
@@ -162,6 +177,7 @@ int main(int argc, char **argv) {
     fn_ingest_data_post    p_ipost = (fn_ingest_data_post)    sym(h, "fr_py_ingest_data_post");
     fn_fallow_loop         p_fall  = (fn_fallow_loop)         sym(h, "fr_py_fallow_loop");
     fn_drain_loop          p_drain = (fn_drain_loop)          sym(h, "fr_py_drain_loop");
+    p_abort                = (fn_abort_fn)               sym(h, "fr_py_abort");
 
     /* Init HERE, after exec. This is the whole point: the state mapping
      * is created in this small address space and inherited by every
@@ -201,16 +217,27 @@ int main(int argc, char **argv) {
     pid_t spill_pid = fork();
     if (spill_pid < 0) die("fork(spill)");
     if (spill_pid == 0) {
+        die_with_parent();
         int keep[2] = {o.source_fd, memfd};
         scrub_closem_others(keep, 2);
         static char sbuf[1 << 20];
         unsigned long long soff = 0;
         for (;;) {
             ssize_t n = read(o.source_fd, sbuf, sizeof sbuf);
-            if (n < 0) { if (errno == EINTR) continue; _exit(1); }
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                /* Tell the ENGINE, not just ourselves. Otherwise the
+                 * scanner and workers wait on an ingest that will never
+                 * finish, and the launcher joins spill_pid only LAST. */
+                if (p_abort) p_abort();
+                _exit(1);
+            }
             if (n == 0) break;
             ssize_t w = pwrite(memfd, sbuf, (size_t)n, (off_t)soff);
-            if (w != n) _exit(1);
+            if (w != n) {
+                if (p_abort) p_abort();
+                _exit(1);
+            }
             soff += (unsigned long long)n;
             p_ipost();
         }
@@ -247,6 +274,7 @@ int main(int argc, char **argv) {
     pid_t fallow_pid = fork();
     if (fallow_pid < 0) die("fork(fallow)");
     if (fallow_pid == 0) {
+        die_with_parent();
         int keep[2] = {fallp[0], memfd};
         scrub_closem_others(keep, 2);
         _exit(p_fall(fallp[0], memfd) == 0 ? 0 : 1);
@@ -257,6 +285,7 @@ int main(int argc, char **argv) {
         pid_t p = fork();
         if (p < 0) die("fork(worker)");
         if (p == 0) {
+            die_with_parent();
             int keep[4] = {memfd, out_fds[i], sigp[1], fallp[1]};
             scrub_closem_others(keep, 4);
             int rc = p_wloop(i, o.plugin_path, o.plugin_func,
@@ -274,6 +303,7 @@ int main(int argc, char **argv) {
     pid_t scan_pid = fork();
     if (scan_pid < 0) die("fork(scan)");
     if (scan_pid == 0) {
+        die_with_parent();
         int keep[1] = {memfd};
         scrub_closem_others(keep, 1);
         _exit(p_scan(memfd) == 0 ? 0 : 1);
@@ -296,6 +326,7 @@ int main(int argc, char **argv) {
     pid_t drain_pid = fork();
     if (drain_pid < 0) die("fork(drain)");
     if (drain_pid == 0) {
+        die_with_parent();
         int n = o.workers + 2;
         int *keep = calloc((size_t)n, sizeof(int));
         if (!keep) _exit(70);

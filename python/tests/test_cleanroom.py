@@ -7,6 +7,7 @@
 # recording the execv call, before anything asserts on output.
 import os
 import sys
+import glob
 import time
 import unittest
 import warnings
@@ -47,6 +48,43 @@ def _make_input(n=2000, path=None):
 
 def _joined(res):
     return b"".join(bytes(x) for x in res)
+
+
+def _find_launcher():
+    """pid of the live cleanroom launcher among our children."""
+    for d in glob.glob("/proc/self/task/*/children"):
+        try:
+            pids = [int(x) for x in open(d).read().split()]
+        except OSError:
+            continue
+        for p in pids:
+            try:
+                with open("/proc/%d/comm" % p, "rb") as fh:
+                    # /proc/pid/comm is capped at 15 chars (TASK_COMM_LEN),
+                    # so "_forkrun_cleanroom" never matches in full.
+                    if fh.read().startswith(b"_forkrun"):
+                        return p
+            except OSError:
+                pass
+    return None
+
+
+def _descendants_of(pid):
+    """Every descendant pid of `pid`, via /proc children files."""
+    out = set()
+    stack = [pid]
+    while stack:
+        cur = stack.pop()
+        for d in glob.glob("/proc/%d/task/*/children" % cur):
+            try:
+                kids = [int(x) for x in open(d).read().split()]
+            except OSError:
+                continue
+            for k in kids:
+                if k not in out:
+                    out.add(k)
+                    stack.append(k)
+    return out
 
 
 class TestCleanroomHelpers(unittest.TestCase):
@@ -443,19 +481,70 @@ class TestCleanroomStreaming(unittest.TestCase):
             "instead of streaming" % (first,))
 
     def test_abandon_early_does_not_hang_or_leak(self):
-        # Break out of the loop after the first batch: teardown must kill
-        # the launcher and producer, not wait on a full pipe.
+        """Abandon mid-stream: nothing may survive.
+
+        This test used to assert that the PRODUCER completes, and it
+        passed -- but only because of the leak it was supposed to catch.
+        Abandoning killed the launcher while its children survived, and
+        the orphaned spill child kept draining the producer's pipe, so
+        the producer ran to completion. "Producer finished" was
+        therefore evidence of the bug, not of correctness.
+
+        PR_SET_PDEATHSIG in the launcher fixes that: the subtree dies,
+        and the producer then blocks on a full pipe -- correctly, since
+        no reader is left. So the assertion has to change to the
+        property that actually matters: NO DESCENDANT SURVIVES.
+
+        The test also closes its own read fd before streaming (the
+        library dups it), so the producer gets EPIPE and unwinds rather
+        than parking on a pipe whose only reader is this process.
+        """
         r, th = self._pipe_with_producer(200000)
+        r2 = os.dup(r)
+        os.close(r)
         os.environ["FORKRUN_CLEANROOM"] = "1"
         gen = forkrun.stream(
-            _spec(), r, mode="plugin", workers=4, nodes=1,
+            _spec(), r2, mode="plugin", workers=4, nodes=1,
             streaming=True, orchestrator=False)
         got = next(iter(gen))
         self.assertTrue(len(bytes(got)) > 0)
+        # The library has now dup'd the source and closed its own copy,
+        # so dropping ours leaves the spill child as the only reader.
+        # That is what lets the producer see EPIPE once the subtree dies,
+        # instead of parking forever on a pipe nobody is draining.
+        os.close(r2)
+
+        # Snapshot the launcher's whole subtree BEFORE abandoning --
+        # afterwards the launcher is gone and there is nothing to walk.
+        launch_pid = _find_launcher()
+        self.assertIsNotNone(launch_pid, "launcher pid not found")
+        before = _descendants_of(launch_pid)
+        self.assertTrue(before, "launcher had no descendants to leak")
+
         gen.close()
+
+        # The whole point: nothing outlives the launcher.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            alive = [k for k in before
+                     if os.path.exists("/proc/%d" % k)]
+            if not alive:
+                break
+            time.sleep(0.1)
+        self.assertFalse(
+            os.path.exists("/proc/%d" % launch_pid),
+            "launcher survived gen.close()")
+        survivors = [k for k in before
+                     if os.path.exists("/proc/%d" % k)]
+        self.assertEqual(
+            survivors, [],
+            "descendants survived abandonment -- PDEATHSIG not effective: "
+            "%r" % (survivors,))
+        # And the producer must unwind rather than park on a full pipe.
         th.join(timeout=30)
-        self.assertFalse(th.is_alive(), "producer still blocked")
-        os.close(r)
+        self.assertFalse(th.is_alive(),
+                         "producer still blocked after abandonment")
+        th.join(timeout=5)
 
     def test_stream_outside_envelope_falls_back(self):
         # orchestrator=True is the default and is OUTSIDE the envelope;
