@@ -168,21 +168,47 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 >
 > | System | rec/s | vs Executor |
 > |---|---|---|
-> | **★ forkrun C plugin (memoryview)** | **12.8M** | **8.0×** |
-> | **★ forkrun C plugin (bytes)** | **9.5M** | **5.9×** |
-> | **★ forkrun Python UDF (memoryview)** | **1.90M** | 1.19× |
+> | **★ forkrun C plugin (memoryview)** | **13.52M** | **8.45×** |
+> | **★ forkrun C plugin (bytes)** | **9.81M** | **6.13×** |
+> | **★ forkrun Python UDF (memoryview)** | **1.92M** | 1.20× |
 > | ProcessPoolExecutor | 1.6M | — |
 > | multiprocessing.Pool | 1.5M | — |
 > | Ray Data | 368k | — |
 > | HuggingFace Datasets | 112k | — |
 > | (serial baseline) | 145k | — |
 >
-> **C plugin vs Executor is 8.0×, not the 6.19× printed in §0.**
+> **C plugin vs Executor is 8.45×, not the 6.19× printed in §0.**
 >
-> Cross-checked against forkrun's own 48-cell harness on the same corpus
-> (independent harness, same config): **12.92M** memoryview / **9.49M**
-> bytes / **1.96M** UDF — agreeing within 1%, where the old gauntlet
-> read 9.6M. Exact record counts on all 16 cells of that matrix.
+> Re-measured 2026-10-06 on `bb621b19`+ (v3.6.1) after removing the
+> artificial worker-fork stall, same corpus and same protocol as the
+> cross-check below (fake-NUMA, `nodes=auto` → 4 nodes,
+> `shmem_enabled=always`, 28 workers, median-of-3 after warmup):
+> **13.52M** memoryview / **9.81M** bytes / **1.92M** UDF, file input —
+> **16/16 cells exact** (20,000,000 records each).
+>
+> That supersedes the previous cross-check against forkrun's own 48-cell
+> harness, which read **12.92M** memoryview / **9.49M** bytes / **1.96M**
+> UDF on identical settings: **+4.7%** memoryview, **+3.4%** bytes,
+> **−2.2%** UDF. The UDF row is Python-callback bound and does not fork,
+> so it is unaffected by fork timing — its ±2% is run-to-run spread. The
+> plugin rows are the ones that benefit, which is the expected shape:
+> they are the rows that pay the fork tax.
+>
+> Full 16-cell light grid at 20M (MB/s, file input):
+>
+> | config | C plugin view | C plugin bytes | Python UDF view | Python UDF bytes |
+> |---|---|---|---|---|
+> | default | **1440.7** | **1045.2** | **204.2** | **184.8** |
+> | max | **1463.9** | **1020.1** | **192.7** | **191.6** |
+>
+> (pipe input runs 5–8% lower on the plugin view cells and ~2–3% lower on
+> the bytes cells; the full pipe column is in the raw log below.)
+>
+> Topology matters and is named here deliberately: **these are fake-NUMA
+> `nodes=auto` (4-node) numbers**, the same boot and settings as the 48-cell
+> cross-check they replace. The 5M §0 table at the top of this file is
+> **UMA (`nodes=1`) and was NOT re-measured**, so the two are not
+> interchangeable — do not read the 20M figure as a §0 number.
 >
 > Note this column is **20M records** while medium and heavy remain 5M.
 > That is deliberate and matches `bench_exectypes.py`, which already
