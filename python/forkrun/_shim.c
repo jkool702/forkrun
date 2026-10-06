@@ -2199,8 +2199,16 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
             /* A corrupt/garbage length must not spin us forever or ask
              * for an absurd allocation; treat as end-of-records for
              * this worker rather than trusting it. */
-            if (hdr.len > ((uint64_t)1 << 40))
-                break;
+            if (hdr.len > ((uint64_t)1 << 40)) {
+                /* A garbage length used to `break` out of this loop with
+                 * offset unmoved, so every later signal re-read the same
+                 * impossible header and broke again: the worker was
+                 * stranded silently and the drain still returned rc=0, so
+                 * the caller could not tell output had been dropped. Fail
+                 * the drain instead. */
+                rc = 4;
+                goto drain_done;
+            }
             need = sizeof(hdr) + hdr.len;
             if (size - offset < need)
                 break; /* partial trailing record: wait for the rest */
@@ -2212,16 +2220,28 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
                 if (r < 0) {
                     if (errno == EINTR)
                         continue;
-                    goto worker_done; /* transient */
+                    /* Once bytes of THIS record are in results_fd the
+                     * stream is committed: a partial record must never be
+                     * followed by another worker's bytes, because the
+                     * single shared parser would read the next header as
+                     * payload and desync permanently. Abandoning here
+                     * with offset unmoved was worse than it looked -- the
+                     * chunk we already copied and PUNCHED is gone from
+                     * out_fds[wid], so re-reading the header on the next
+                     * signal returned zeros, and the record was then
+                     * re-emitted as a zero-length one. Fail loudly. */
+                    rc = 4;
+                    goto drain_done;
                 }
                 if (r == 0) {
-                    /* Short read inside a record we already committed
-                     * to copying. Advance by exactly what reached the
-                     * consumer so the stream stays self-consistent --
-                     * the consumer's tail buffer completes it when the
-                     * remaining bytes come. */
-                    offset += done;
-                    goto worker_done;
+                    /* Same reasoning: we are mid-record with bytes
+                     * already emitted. There is no per-worker tail buffer
+                     * on this path to complete it -- that is the whole
+                     * reason this function only ever emits whole records
+                     * -- so advancing offset here would resume the next
+                     * signal in the middle of a record. */
+                    rc = 4;
+                    goto drain_done;
                 }
                 if (fr_py_write_full(results_fd, buf, (size_t)r) != 0) {
                     if (drain_mode == 1 && errno == EPIPE)
@@ -2258,7 +2278,10 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
             }
             offset += need;
         }
-    worker_done:
+        /* Save this worker's cursor. This used to be the `worker_done`
+         * label, which the three mid-record failure paths above used to
+         * jump to; they now fail the drain instead, so nothing branches
+         * here any more and the label only drew -Wunused-label. */
         offsets[wid] = offset;
     }
 

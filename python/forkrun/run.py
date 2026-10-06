@@ -767,11 +767,19 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # it, _LAST_STATS["poisoned"] stayed 0 and a run with 10 poisoned
     # batches reported total=completed instead of completed+10.
     stats_fd = os.memfd_create("fr_cleanroom_stats")
-    # Pre-size so every worker owns a real slot to append to. A memfd
-    # starts zero-filled, which the slot-count convention relies on;
-    # without the size the workers' writes land past EOF and are
-    # discarded, so poisoned_batches reads back empty while `poisoned`
-    # stays correct -- the exact silent gap this closes.
+    # Pre-size so every worker owns a real slot. A memfd starts
+    # zero-filled, which the slot-count convention relies on.
+    #
+    # The slot STRIDE is _STATS_SLOT_U32 (count word + capacity), and the
+    # C side writes the same number into the v2 header, so the two agree
+    # by construction rather than by the pre-size happening to be close
+    # enough. An earlier version pre-sized with the capacity instead of
+    # the stride and carried a comment claiming writes past EOF are
+    # "discarded" -- they are not: memfds are sparse, pwrite extends the
+    # file, and _read_cleanroom_stats reads fstat's size, so the shortfall
+    # silently repaired itself. The numbers were never wrong in practice;
+    # the reasoning was, and it would have bitten anyone who took the
+    # comment at face value.
     _stats_ftruncate(stats_fd, _STATS_HEADER_BYTES
                      + max(int(workers), 1) * _STATS_SLOT_U32 * 4)
     os.set_inheritable(src_fd, True)
@@ -843,7 +851,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "batch indices are missing because a worker's relay slot is "
             "full (capacity %d indices per worker). The poisoned count is "
             "exact; only the index list is incomplete."
-            % (npois - nrelayed, npois, _STATS_SLOT_U32),
+            % (npois - nrelayed, npois, _STATS_CAPACITY),
             UserWarning, stacklevel=3)
     # Record the counter BEFORE collecting: a poisoned batch is absent
     # from the results, so completed = len(out) undercounts unless the
@@ -865,7 +873,11 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
 #   header : [u32 version][u32 poisoned][u32 workers][u32 slot_stride]
 #   slot   : [u32 count][count x u32 batch_idx], one per worker
 _STATS_HEADER_BYTES = 16
-_STATS_SLOT_U32 = 1024
+# Slot STRIDE in u32, not capacity: one count word followed by the indices.
+# Must equal FR_POISON_SLOT_U32 + 1 in forkrun_ring.c, which is also what
+# the launcher puts in the v2 header's stride field.
+_STATS_SLOT_U32 = 1024 + 1
+_STATS_CAPACITY = _STATS_SLOT_U32 - 1   # indices per slot, excluding count
 
 
 def _stats_ftruncate(fd, size):
@@ -920,8 +932,11 @@ def _read_cleanroom_stats(stats_fd):
         if base + 4 > len(raw):
             break
         (n,) = struct.unpack_from("<I", raw, base)
-        if n > _STATS_SLOT_U32:
-            break                      # bounded slot: never trust the count
+        if n > _STATS_CAPACITY:
+            # One slot is unreadable, but slots are independent and each
+            # has a single writer, so skip THIS one rather than abandoning
+            # every later worker's indices as well.
+            continue
         relayed += int(n)
         for k in range(int(n)):
             off = base + 4 + k * 4
@@ -960,6 +975,7 @@ def _cleanroom_collect(res_fd, views, order="none"):
     try:
         size = os.fstat(res_fd).st_size
         out = []
+        import warnings as _warnings
         if size == 0:
             # Empty input (or every record discarded) legitimately
             # yields a zero-length result memfd; mmap rejects length 0
@@ -973,6 +989,22 @@ def _cleanroom_collect(res_fd, views, order="none"):
                 _bidx, blen = _HDR.unpack_from(mm, base)
                 start = base + _HDR.size
                 if size - start < blen:
+                    # A header whose payload is not fully there is a torn
+                    # record, not end-of-stream. Returning normally here
+                    # made a truncated result indistinguishable from a
+                    # complete one -- the same silent-tail-loss shape as
+                    # F-NUMA1, and the output still looked well-formed.
+                    # WARN, do not raise: a worker killed mid-record
+                    # legitimately leaves a torn tail, and strict_poison /
+                    # the poison counts already report that. Raising here
+                    # would report one death twice, once as an exception.
+                    _warnings.warn(
+                        "forkrun: cleanroom result ends in a torn record "
+                        "-- %d byte(s) short of the advertised length. "
+                        "Output is incomplete; check poisoned/strict_poison "
+                        "for a worker death mid-record."
+                        % (blen - (size - start)), UserWarning,
+                        stacklevel=3)
                     break
                 out.append((_bidx, mv[start:start + blen]))
                 base = start + blen
@@ -983,6 +1015,22 @@ def _cleanroom_collect(res_fd, views, order="none"):
                 _bidx, blen = _HDR.unpack_from(raw, base)
                 start = base + _HDR.size
                 if size - start < blen:
+                    # A header whose payload is not fully there is a torn
+                    # record, not end-of-stream. Returning normally here
+                    # made a truncated result indistinguishable from a
+                    # complete one -- the same silent-tail-loss shape as
+                    # F-NUMA1, and the output still looked well-formed.
+                    # WARN, do not raise: a worker killed mid-record
+                    # legitimately leaves a torn tail, and strict_poison /
+                    # the poison counts already report that. Raising here
+                    # would report one death twice, once as an exception.
+                    _warnings.warn(
+                        "forkrun: cleanroom result ends in a torn record "
+                        "-- %d byte(s) short of the advertised length. "
+                        "Output is incomplete; check poisoned/strict_poison "
+                        "for a worker death mid-record."
+                        % (blen - (size - start)), UserWarning,
+                        stacklevel=3)
                     break
                 out.append((_bidx, raw[start:start + blen]))
                 base = start + blen

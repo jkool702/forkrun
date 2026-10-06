@@ -1938,5 +1938,73 @@ class TestPoisonRelayTruncation(unittest.TestCase):
         self.assertEqual(len(st["poisoned_batches"]), st["poisoned"])
 
 
+class TestCleanroomTornTail(unittest.TestCase):
+    """A torn final record must be visible, not silently accepted.
+
+    _cleanroom_collect used to `break` out of its record loop on a short
+    payload and return normally, so a truncated result was
+    indistinguishable from a complete one -- the output still parsed
+    cleanly, it was just short. That is the silent-tail-loss shape.
+
+    It WARNS rather than raises on purpose: a worker killed mid-record
+    legitimately leaves a torn tail, and strict_poison / the poison counts
+    already report that death. Raising would report one failure twice,
+    the second time as an exception the caller did not ask for.
+    """
+
+    # Must match forkrun._worker._HDR exactly (batch_idx u64, len u64).
+    # An <IQ> guess here desyncs from record 0 and looks like a
+    # production bug when it is only the test building bad framing.
+    HDR = struct.Struct("<QQ")
+
+    def _result_memfd(self, records, truncate_last_by=0):
+        """A result memfd holding `records`, last one optionally torn."""
+        fd = os.memfd_create("res", 0)
+        blob = b""
+        for bidx, payload in records:
+            blob += self.HDR.pack(bidx, len(payload)) + payload
+        if truncate_last_by:
+            blob = blob[:-truncate_last_by]
+        os.write(fd, blob)
+        return fd
+
+    def _collect(self, records, truncate_last_by=0, views=False):
+        from forkrun.run import _cleanroom_collect
+        fd = self._result_memfd(records, truncate_last_by)
+        # _cleanroom_collect closes res_fd itself, so no cleanup here.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = _cleanroom_collect(fd, views=views, order="none")
+        return out, [str(w.message) for w in caught]
+
+    def test_complete_output_does_not_warn(self):
+        recs = [(0, b"aaaa"), (1, b"bbbbbb"), (2, b"cc")]
+        for views in (False, True):
+            out, msgs = self._collect(recs, views=views)
+            self.assertEqual([bytes(b) for b in out],
+                             [b"aaaa", b"bbbbbb", b"cc"])
+            self.assertEqual(
+                [m for m in msgs if "torn record" in m], [],
+                "clean output must not warn (views=%s): %r" % (views, msgs))
+
+    def test_torn_tail_warns_on_both_paths(self):
+        recs = [(0, b"aaaa"), (1, b"bbbbbb"), (2, b"cccc")]
+        for views in (False, True):
+            # Chop 2 bytes off the final payload: the header still
+            # advertises 4, only 2 are present.
+            out, msgs = self._collect(recs, truncate_last_by=2,
+                                      views=views)
+            torn = [m for m in msgs if "torn record" in m]
+            self.assertEqual(
+                len(torn), 1,
+                "expected exactly one torn-tail warning (views=%s), got %r"
+                % (views, msgs))
+            self.assertIn("2 byte(s) short", torn[0])
+            # The warning is the contract; the short read is still
+            # tolerated so an already-reported worker death does not turn
+            # into an exception.
+            self.assertEqual([bytes(b) for b in out], [b"aaaa", b"bbbbbb"])
+
+
 if __name__ == "__main__":
     unittest.main()

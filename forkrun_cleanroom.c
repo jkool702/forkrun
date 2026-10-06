@@ -755,7 +755,7 @@ int main(int argc, char **argv) {
      * zero.
      *
      * Layout (little-endian, fixed):
-     *   u32 version (=1)
+     *   u32 version (=2)
      *   u32 poisoned
      *   u32 pad     (reserved; keeps the record 8-byte aligned)
      *   u32 pad
