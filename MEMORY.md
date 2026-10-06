@@ -600,6 +600,13 @@ Status: launcher built + shipped, wired into `map()`, **676 tests pass
 with `FORKRUN_CLEANROOM` both 0 and 1** (the one failure is the
 pre-existing release gate). Opt-IN, not default-on.
 
+> **Count as of the W-CR1 milestone on `NEW/REFACTOR3.6`, not current.**
+> For the v3.6.1 release the figure is **726 passing in each mode**
+> (cleanroom 0 and cleanroom 1) on the UMA boot, `skipped=7` — the
+> skips are the tests that require multi-node NUMA. Bash: 96 + 264 +
+> 101 = **461/461**. `release_check` is **21/21 green** once the release
+> heading is finalized.
+
 Four attempts were needed. The first three failed in ways worth
 remembering, because each failure mode is invisible to the obvious test:
 

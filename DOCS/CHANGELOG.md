@@ -2,6 +2,25 @@
 
 ## v3.6.1 — 2026-10-06
 
+### Verification
+
+Verified on a UMA boot (single NUMA node, `shmem_enabled=always`):
+
+| suite | result |
+|---|---|
+| Python suite, `FORKRUN_CLEANROOM` unset | **726 passing**, 7 skipped |
+| Python suite, `FORKRUN_CLEANROOM=1` | **726 passing**, 7 skipped |
+| Bash `test_c_plugins.sh` / `test_frun.sh` | **96/96** |
+| Bash `test_frun_comprehensive.sh` | **264/264** |
+| Bash `test_frun_security.sh` | **101/101** |
+| `python/release_check.py` | **21/21 green** |
+
+The 7 skips are the tests that require multi-node NUMA and are skipped
+by design on a single-node box. The Bash suites must be run in the
+FOREGROUND: a backgrounded shell starts with SIGINT ignored and cannot
+un-ignore it, so `M1a` (SIGINT -> checkpoint + exit 130) reports a false
+failure — see the note at `UNIT_TESTS/test_frun_comprehensive.sh:2011`.
+
 ### Python frontend: the pre-flight scan no longer spin-sleeps
 
 The pre-flight scan counts input lines so the geometric ramp can start
