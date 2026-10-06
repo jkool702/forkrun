@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import forkrun  # noqa: E402
 from forkrun.run import (  # noqa: E402
-    _cleanroom_eligible, _cleanroom_enabled, _cleanroom_explicit,
-    _cleanroom_launcher_path, _read_cleanroom_stats)
+    _cleanroom_collect, _cleanroom_eligible, _cleanroom_enabled,
+    _cleanroom_explicit, _cleanroom_launcher_path, _read_cleanroom_stats)
 
 PLUGIN = None
 for _cand in (
@@ -1969,7 +1969,6 @@ class TestCleanroomTornTail(unittest.TestCase):
         return fd
 
     def _collect(self, records, truncate_last_by=0, views=False):
-        from forkrun.run import _cleanroom_collect
         fd = self._result_memfd(records, truncate_last_by)
         # _cleanroom_collect closes res_fd itself, so no cleanup here.
         with warnings.catch_warnings(record=True) as caught:
@@ -2004,6 +2003,76 @@ class TestCleanroomTornTail(unittest.TestCase):
             # tolerated so an already-reported worker death does not turn
             # into an exception.
             self.assertEqual([bytes(b) for b in out], [b"aaaa", b"bbbbbb"])
+
+
+class TestCleanroomCollectBuffer(unittest.TestCase):
+    """_cleanroom_collect must behave like the in-process collect path.
+
+    It used to run a second, hand-copied parse loop over a stdlib
+    mmap.mmap. Two consequences, both now covered here:
+
+      * mmap.mmap(fd, ...) dups the descriptor and holds it for the life
+        of the mapping, which contradicts API.md's "No descriptor is
+        held". It now routes through _map_collect, like the shim path.
+      * Having two loops meant a fix applied to one missed the other --
+        which is exactly how the torn-record check ended up needing to be
+        written twice.
+    """
+
+    HDR = struct.Struct("<QQ")
+
+    def _result(self, recs):
+        fd = os.memfd_create("res", 0)
+        blob = b"".join(self.HDR.pack(i, len(p)) + p for i, p in recs)
+        os.write(fd, blob)
+        return fd
+
+    def _open_fds(self):
+        return set(os.listdir("/proc/self/fd"))
+
+    def test_views_are_zero_copy_memoryviews(self):
+        fd = self._result([(0, b"aaaa"), (1, b"bbbbbb")])
+        out = _cleanroom_collect(fd, views=True, order="none")
+        self.assertEqual([type(b).__name__ for b in out],
+                         ["memoryview", "memoryview"],
+                         "views=True must stay zero-copy memoryview")
+        self.assertEqual([bytes(b) for b in out], [b"aaaa", b"bbbbbb"])
+
+    def test_bytes_output_is_bytes(self):
+        fd = self._result([(0, b"aaaa"), (1, b"bbbbbb")])
+        out = _cleanroom_collect(fd, views=False, order="none")
+        self.assertEqual([type(b) for b in out], [bytes, bytes])
+        self.assertEqual(out, [b"aaaa", b"bbbbbb"])
+
+    def test_order_index_still_sorts(self):
+        fd = self._result([(7, b"seven"), (2, b"two"), (5, b"five")])
+        out = _cleanroom_collect(fd, views=True, order="index")
+        self.assertEqual([bytes(b) for b in out],
+                         [b"two", b"five", b"seven"])
+
+    def test_no_descriptor_retained_by_views(self):
+        """The gap test_no_fd_leak_from_mappings left open.
+
+        That test covers the shim path only, so the cleanroom's stdlib
+        mmap could dup an fd for the life of the mapping with nothing
+        watching. Keep one view alive across the measurement -- that is
+        the case where the mapping (and any descriptor behind it) is
+        still reachable.
+        """
+        fd = self._result([(0, os.urandom(4096))])
+        before = self._open_fds()
+        out = _cleanroom_collect(fd, views=True, order="none")
+        self.assertEqual(len(out), 1)
+        held = out[0]                      # keep the view reachable
+        self.assertGreaterEqual(len(bytes(held)), 4096)
+        after = self._open_fds()
+        # No descriptor may survive the collect. The memfd we passed in
+        # is closed by _cleanroom_collect itself, so any extra fd here is
+        # a retained duplicate.
+        self.assertEqual(
+            after - before, set(),
+            "cleanroom collect leaked descriptors: %r"
+            % sorted(after - before))
 
 
 if __name__ == "__main__":

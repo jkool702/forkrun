@@ -978,62 +978,73 @@ def _cleanroom_collect(res_fd, views, order="none"):
         import warnings as _warnings
         if size == 0:
             # Empty input (or every record discarded) legitimately
-            # yields a zero-length result memfd; mmap rejects length 0
-            # and there is nothing to map. An empty run is [].
+            # yields a zero-length result memfd; there is nothing to map.
+            # An empty run is [].
             return out
+
+        # ONE buffer, ONE parse loop.
+        #
+        # This used to have two near-identical loops -- one over an
+        # mmap.mmap, one over an os.pread -- which had already let the
+        # torn-record fix land in one and miss the other. The only real
+        # difference between them is where the bytes come from, so that
+        # is the only thing that varies now.
+        #
+        # The mapping goes through _map_collect, the same helper the
+        # in-process path uses, rather than stdlib mmap.mmap. Two
+        # reasons, both substantive:
+        #   - mmap.mmap(fd, ...) DUPs the descriptor and holds it for the
+        #     life of the mapping. API.md states the invariant this
+        #     violates: "No descriptor is held (mmap.mmap(fd, ...) would
+        #     dups one)". The cleanroom path was the one place that broke
+        #     it, and test_no_fd_leak_from_mappings only covered the shim
+        #     path, so nothing noticed.
+        #   - fr_py_map_readonly also prefaults (MADV_POPULATE_READ) and
+        #     requests hugepages. Python's mmap exposes neither
+        #     (MADV_POPULATE_READ is not in this build's mmap or os), so
+        #     the cleanroom was paying the page-fault cost lazily on the
+        #     first pass instead of up front.
+        buf = None
         if views:
-            mm = _mmap_mod.mmap(res_fd, size, prot=_mmap_mod.PROT_READ)
-            mv = memoryview(mm)
-            base = 0
-            while size - base >= _HDR.size:
-                _bidx, blen = _HDR.unpack_from(mm, base)
-                start = base + _HDR.size
-                if size - start < blen:
-                    # A header whose payload is not fully there is a torn
-                    # record, not end-of-stream. Returning normally here
-                    # made a truncated result indistinguishable from a
-                    # complete one -- the same silent-tail-loss shape as
-                    # F-NUMA1, and the output still looked well-formed.
-                    # WARN, do not raise: a worker killed mid-record
-                    # legitimately leaves a torn tail, and strict_poison /
-                    # the poison counts already report that. Raising here
-                    # would report one death twice, once as an exception.
-                    _warnings.warn(
-                        "forkrun: cleanroom result ends in a torn record "
-                        "-- %d byte(s) short of the advertised length. "
-                        "Output is incomplete; check poisoned/strict_poison "
-                        "for a worker death mid-record."
-                        % (blen - (size - start)), UserWarning,
-                        stacklevel=3)
-                    break
-                out.append((_bidx, mv[start:start + blen]))
-                base = start + blen
-        else:
+            from ._bindings import get as _get
+            buf = _map_collect(_get(), res_fd, size)
+        if buf is None:
+            # Either the caller wanted bytes, or mapping was unavailable
+            # (None means "cannot map", never "empty"). Degrade to a
+            # pread: correct, one copy per record, and still no descriptor
+            # retained past the read.
             raw = os.pread(res_fd, size, 0)
-            base = 0
-            while size - base >= _HDR.size:
-                _bidx, blen = _HDR.unpack_from(raw, base)
-                start = base + _HDR.size
-                if size - start < blen:
-                    # A header whose payload is not fully there is a torn
-                    # record, not end-of-stream. Returning normally here
-                    # made a truncated result indistinguishable from a
-                    # complete one -- the same silent-tail-loss shape as
-                    # F-NUMA1, and the output still looked well-formed.
-                    # WARN, do not raise: a worker killed mid-record
-                    # legitimately leaves a torn tail, and strict_poison /
-                    # the poison counts already report that. Raising here
-                    # would report one death twice, once as an exception.
-                    _warnings.warn(
-                        "forkrun: cleanroom result ends in a torn record "
-                        "-- %d byte(s) short of the advertised length. "
-                        "Output is incomplete; check poisoned/strict_poison "
-                        "for a worker death mid-record."
-                        % (blen - (size - start)), UserWarning,
-                        stacklevel=3)
-                    break
-                out.append((_bidx, raw[start:start + blen]))
-                base = start + blen
+            if len(raw) < size:
+                # Short read: parse what actually arrived rather than
+                # trusting `size`, or unpack_from reads past the buffer.
+                size = len(raw)
+            buf = raw
+
+        base = 0
+        while size - base >= _HDR.size:
+            _bidx, blen = _HDR.unpack_from(buf, base)
+            start = base + _HDR.size
+            if size - start < blen:
+                # A header whose payload is not fully there is a torn
+                # record, not end-of-stream. Returning normally here made
+                # a truncated result indistinguishable from a complete
+                # one -- the same silent-tail-loss shape as F-NUMA1, and
+                # the output still parsed cleanly, it was just short.
+                #
+                # WARN, do not raise: a worker killed mid-record
+                # legitimately leaves a torn tail, and strict_poison /
+                # the poison counts already report that death. Raising
+                # would report one failure twice, the second time as an
+                # exception the caller did not ask for.
+                _warnings.warn(
+                    "forkrun: cleanroom result ends in a torn record "
+                    "-- %d byte(s) short of the advertised length. "
+                    "Output is incomplete; check poisoned/strict_poison "
+                    "for a worker death mid-record."
+                    % (blen - (size - start)), UserWarning, stacklevel=3)
+                break
+            out.append((_bidx, buf[start:start + blen]))
+            base = start + blen
         if order == "index":
             out.sort(key=lambda kv: kv[0])
         return [blob for _, blob in out]
