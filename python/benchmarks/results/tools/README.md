@@ -44,18 +44,30 @@ for v in ("light", "medium", "heavy"):
 PY
 
 # 3. corpora — ml_data_gen.generate_data is seeded (SEED = 42), so these
-#    reproduce the published column sizes exactly:
-#    light 5,000,000 / 533 MB · medium 4,997,892 / 2.347 GB
-#    heavy 4,997,982 / 6.720 GB
+#    reproduce the published files BYTE FOR BYTE. Note the record COUNTS:
+#      light  5,000,000 lines = 532,711,015 B
+#      medium 5,000,000 lines = 2,347,403,909 B
+#      heavy  4,997,982 lines = 6,717,677,449 B  (see below)
 python3 - <<'PY'
-import sys; sys.path.insert(0, 'python/benchmarks')
+import sys; sys.path.insert(0, 'python/benchmarks/ml')
 from ml_data_gen import generate_data
-for variant, n in (("light", 5_000_000),
-                   ("medium", 4_997_892),
-                   ("heavy", 4_997_982)):
-    print(generate_data("/mnt/ramdisk/numa1/ml/%s_5M.jsonl" % variant,
-                        n, variant))
+for variant, n in (("light", 5_000_000), ("medium", 5_000_000)):
+    generate_data("numa1/ml/%s_5M.jsonl" % variant, n, variant)
 PY
+head -n 4997982 numa1/ml/heavy_20M.jsonl > numa1/ml/heavy_5M.jsonl
+```
+
+**Gotcha that cost a full sweep: do not use cell.py's `expect` as the
+record count.** `stream_cells.py` carries an EXPECTED-OUTPUT count per
+corpus (`medium: 4997892`), which is NOT the number of records in the
+file (5,000,000) — it is what a clean run is expected to deliver. Feeding
+that number to `generate_data` produces a corpus that is ~1 MB short with
+the same line count, and every medium/heavy cell then fails the
+exactness guard with a shortfall of ~2,100 records that looks alarming
+but is purely a bad input. Verify by byte size, not line count:
+
+```bash
+python3 -c "import os;p='numa1/ml/medium_5M.jsonl';print(os.path.getsize(p)==2347403909)"
 ```
 
 The 20M light corpus used for the corrected light column is the 5M file
