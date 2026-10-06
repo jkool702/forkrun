@@ -1,0 +1,97 @@
+-- light plugin default view file
+RESULT light plugin default view file auto 0.4055 1313.5928 5000000
+-- light plugin default view pipe
+RESULT light plugin default view pipe auto 0.4193 1270.5757 5000000
+-- light plugin default bytes file
+RESULT light plugin default bytes file auto 0.5502 968.2703 5000000
+-- light plugin default bytes pipe
+RESULT light plugin default bytes pipe auto 0.5565 957.1972 5000000
+-- light plugin max view file
+RESULT light plugin max view file auto 0.3998 1332.5590 5000000
+-- light plugin max view pipe
+RESULT light plugin max view pipe auto 0.4105 1297.7416 5000000
+-- light plugin max bytes file
+RESULT light plugin max bytes file auto 0.5482 971.8266 5000000
+-- light plugin max bytes pipe
+RESULT light plugin max bytes pipe auto 0.6500 819.5645 5000000
+-- light udf default view file
+RESULT light udf default view file auto 2.6047 204.5195 5000000
+-- light udf default view pipe
+RESULT light udf default view pipe auto 2.6284 202.6716 5000000
+-- light udf default bytes file
+RESULT light udf default bytes file auto 2.7418 194.2905 5000000
+-- light udf default bytes pipe
+RESULT light udf default bytes pipe auto 2.7509 193.6468 5000000
+-- light udf max view file
+RESULT light udf max view file auto 2.6013 204.7861 5000000
+-- light udf max view pipe
+RESULT light udf max view pipe auto 2.6133 203.8480 5000000
+-- light udf max bytes file
+RESULT light udf max bytes file auto 3.4610 153.9201 5000000
+-- light udf max bytes pipe
+RESULT light udf max bytes pipe auto 3.3766 157.7636 5000000
+-- medium plugin default view file
+RESULT medium plugin default view file auto 1.4667 1600.4513 4997892
+-- medium plugin default view pipe
+RESULT medium plugin default view pipe auto 1.5385 1525.7502 4997892
+-- medium plugin default bytes file
+RESULT medium plugin default bytes file auto 1.9183 1223.6924 4997892
+-- medium plugin default bytes pipe
+RESULT medium plugin default bytes pipe auto 1.9930 1177.8036 4997892
+-- medium plugin max view file
+RESULT medium plugin max view file auto 1.4578 1610.2418 4997892
+-- medium plugin max view pipe
+RESULT medium plugin max view pipe auto 1.5081 1556.5066 4997892
+-- medium plugin max bytes file
+RESULT medium plugin max bytes file auto 2.1660 1083.7471 4997892
+-- medium plugin max bytes pipe
+RESULT medium plugin max bytes pipe auto 2.1926 1070.5871 4997892
+-- medium udf default view file
+RESULT medium udf default view file auto 5.6069 418.6604 4997892
+-- medium udf default view pipe
+RESULT medium udf default view pipe auto 5.7522 408.0886 4997892
+-- medium udf default bytes file
+RESULT medium udf default bytes file auto 6.1160 383.8135 4997892
+-- medium udf default bytes pipe
+RESULT medium udf default bytes pipe auto 6.1802 379.8265 4997892
+-- medium udf max view file
+RESULT medium udf max view file auto 5.6064 418.7022 4997892
+-- medium udf max view pipe
+RESULT medium udf max view pipe auto 5.7729 406.6274 4997892
+-- medium udf max bytes file
+RESULT medium udf max bytes file auto 6.5768 356.9198 4997892
+-- medium udf max bytes pipe
+RESULT medium udf max bytes pipe auto 6.5123 360.4590 4997892
+-- heavy plugin default view file
+RESULT heavy plugin default view file auto 4.7428 1416.9532 4997982
+-- heavy plugin default view pipe
+RESULT heavy plugin default view pipe auto 4.8209 1393.9961 4997982
+-- heavy plugin default bytes file
+RESULT heavy plugin default bytes file auto 5.6889 1181.3119 4997982
+-- heavy plugin default bytes pipe
+RESULT heavy plugin default bytes pipe auto 5.4117 1241.8238 4997982
+-- heavy plugin max view file
+RESULT heavy plugin max view file auto 4.6691 1439.3420 4997982
+-- heavy plugin max view pipe
+RESULT heavy plugin max view pipe auto 4.7694 1409.0742 4997982
+-- heavy plugin max bytes file
+RESULT heavy plugin max bytes file auto 5.6912 1180.8470 4997982
+-- heavy plugin max bytes pipe
+RESULT heavy plugin max bytes pipe auto 5.9714 1125.4365 4997982
+-- heavy udf default view file
+RESULT heavy udf default view file auto 52.2523 128.6141 4997982
+-- heavy udf default view pipe
+RESULT heavy udf default view pipe auto 52.1885 128.7713 4997982
+-- heavy udf default bytes file
+RESULT heavy udf default bytes file auto 53.3446 125.9805 4997982
+-- heavy udf default bytes pipe
+RESULT heavy udf default bytes pipe auto 52.6433 127.6587 4997982
+-- heavy udf max view file
+RESULT heavy udf max view file auto 51.8679 129.5673 4997982
+-- heavy udf max view pipe
+RESULT heavy udf max view pipe auto 51.8757 129.5479 4997982
+-- heavy udf max bytes file
+RESULT heavy udf max bytes file auto 53.0182 126.7561 4997982
+-- heavy udf max bytes pipe
+RESULT heavy udf max bytes pipe auto 55.2360 121.6666 4997982
+DRIVER DONE

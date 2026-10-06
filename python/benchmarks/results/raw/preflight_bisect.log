@@ -1,0 +1,30 @@
+bisecting 119 commits, boundary 1197 MB/s
+[59/119] BAD 1136.823 MB/s  2fdc96c9  docs(cleanroom): correct 7.5 -- wrong 'order-dependent' conc
+[29/119] BAD 1144.626 MB/s  979f52d7  perf(python): punch holes in the output memfd as the drain m
+[14/119] GOOD 1320.6472 MB/s  e018c904  docs: record that ingest_done lags; gate fix needs ingest_co
+[22/119] BAD 1119.8118 MB/s  5a490d83  bench+docs: split the headline table into file-input and str
+[18/119] GOOD 1329.5302 MB/s  ea0aab59  test: guard pipe exactness under a slow producer (W-EXACT)
+[20/119] BAD 1130.2648 MB/s  246335f4  bench+docs: refresh Table B for the pre-flight fix; document
+[19/119] BAD 1131.952 MB/s  c55a2714  perf: block the pre-flight scan on the ingest eventfd instea
+=== first BAD commit ===
+c55a2714 10-03 12:37 perf: block the pre-flight scan on the ingest eventfd instead of spin-sleeping (W-PREFLIGHT)
+The pre-flight scan counts input lines to size the geometric ramp's
+initial batch. When pread returns 0 with ingest not yet complete it
+means 'wait for more', and it did that with usleep(100) -- about 10k
+wakeups in 5 s on a slow producer, where bash slept 78 times.
+
+ring_copy_main already signals evfd_ingest_data after every chunk
+(forkrun_ring.c:8279) so that wait can block; the pre-flight just
+never used it. Two changes:
+
+1. The wait branch now polls evfd_ingest_data / evfd_ingest_eof for a
+   BOUNDED 50 ms, then drains. The bound matters: one of the three
+   exit conditions (first worker spawns) is detected by re-reading
+   active_waiters at the top of the loop, so an unbounded poll would
+   stop us noticing it. The drain matters because an eventfd left
+   readable makes the next poll return at once, rebuilding the spin one
+   level up.
+
+2. fr_py_ingest_data_post: the Python spill was os.read/os.pwrite and
+   never signalled that eventfd, which is WHY the pre-flight had to
+   sleep. It now pokes it per chunk, exactly where ring_copy_main does.
