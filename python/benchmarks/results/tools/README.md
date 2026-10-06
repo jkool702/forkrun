@@ -58,17 +58,34 @@ PY
 head -n 5000000 numa1/ml/heavy_20M.jsonl > numa1/ml/heavy_5M.jsonl
 ```
 
-**Gotcha that cost a full sweep: do not use cell.py's `expect` as the
-record count.** `stream_cells.py` carries an EXPECTED-OUTPUT count per
-corpus (`medium: 4997892`), which is NOT the number of records in the
-file (5,000,000) — it is what a clean run is expected to deliver. Feeding
-that number to `generate_data` produces a corpus that is ~1 MB short with
-the same line count, and every medium/heavy cell then fails the
-exactness guard with a shortfall of ~2,100 records that looks alarming
-but is purely a bad input. Verify by byte size, not line count:
+**Gotcha that cost two full sweeps: never take a record count from
+`cell.py`'s `expect`, or from a results table.** Those are
+EXPECTED-OUTPUT totals, not file record counts:
 
-```bash
-python3 -c "import os;p='numa1/ml/medium_5M.jsonl';print(os.path.getsize(p)==2347403909)"
+| source                      | says         | actual records |
+|-----------------------------|--------------|----------------|
+| `stream_cells.py` CORPORA  | 4997892 med  | 5,000,000      |
+| `numa_5m_study.md`          | 4997982 hv   | 5,000,000      |
+
+Feeding those to `generate_data` / `head -n` produces a corpus ~1 MB
+short with the *same line count*, and then every medium/heavy cell fails
+the exactness guard short by ~2,000 records. That reads exactly like
+silent data loss and is not -- I chased it as far as suspecting the
+poison relay before checking byte size. The tells that it is the corpus
+and not the code: the shortfall is identical across `plugin` and `udf`
+payloads, and it appears with `poisoned=0` and no warnings at all.
+
+**Always verify by byte size against the published figure**, never by
+line count alone:
+
+```python
+import os
+for n, want in (("light", 532711015), ("medium", 2347403909),
+                ("heavy", 6720381299)):
+    p = "numa1/ml/%s_5M.jsonl" % n
+    got = os.path.getsize(p)
+    print("%-7s %d  want %d  %s" % (n, got, want,
+                                    "OK" if got == want else "MISMATCH"))
 ```
 
 The 20M light corpus used for the corrected light column is the 5M file
