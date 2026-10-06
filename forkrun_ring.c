@@ -4454,9 +4454,12 @@ uint64_t chunk_bounds[16] = {0};
          *    conditions (the first worker spawning) is detected by
          *    re-reading active_waiters at the top of this loop. An
          *    unbounded poll would stop us ever noticing that, so we
-         *    force a re-loop and re-check every 50 ms. At 50 ms this is
-         *    ~100 wakeups in 5 s instead of ~10k, and all three exit
-         *    conditions still fire on the same schedule.
+         *    force a re-loop and re-check on a short bound (2 ms -- see
+         *    below for why not 50). Where the eventfd does fire the bound
+         *    is only a fallback and wakeups stay event-driven, so the
+         *    ~10k-wakeups-per-5s spin this replaced is gone either way.
+         *    50 ms measured as a flat ~65 ms of fixed per-run cost
+         *    instead, which is not free at all.
          *
          *  - The counter is DRAINED. An eventfd left readable makes the
          *    next poll return at once, which would rebuild the spin one
@@ -4473,7 +4476,18 @@ uint64_t chunk_bounds[16] = {0};
         if (evfd_ingest_eof >= 0)
           _pfds[_nfd].fd = evfd_ingest_eof,  _pfds[_nfd].events = POLLIN, _pfds[_nfd].revents = 0, _nfd++;
         if (_nfd > 0) {
-          poll(_pfds, _nfd, 50);
+          /* 2 ms, not 50. Measured on a file input the eventfd does NOT
+           * wake this poll, so the timeout is what returns and the bound
+           * IS the latency: 50 ms cost a fixed 75 ms of wall clock on the
+           * 5M light cell (+18%), 70 ms medium, 60 ms heavy. The absolute
+           * cost was flat across payloads spanning 0.41 s to 4.70 s,
+           * which is what identified it as fixed overhead rather than
+           * anything proportional. At 2 ms all three return to the
+           * pre-c55a2714 baseline. Tighter is the safe direction for both
+           * reasons the bound exists: it notices the "first worker
+           * spawned" exit condition sooner, and where the eventfd does
+           * fire the timeout is only a fallback. */
+          poll(_pfds, _nfd, 2);
           if (evfd_ingest_data >= 0) {
             uint64_t _drain = 0;
             while (sys_read(evfd_ingest_data, &_drain, 8) > 0) { }
