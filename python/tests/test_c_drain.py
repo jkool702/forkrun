@@ -177,13 +177,29 @@ class TestCDrainBasic(unittest.TestCase):
                     raise ValueError("poison me")
                 return bytes(b.data).upper()
 
+            # Count RECORDS, not blobs. map() returns one blob per BATCH,
+            # and in dynamic batching mode the blob count is a function of
+            # batch size, so `len(res) < len(healthy)` compared batching
+            # rather than fault impact -- measured 80 blobs vs 9 for the
+            # same run shape, which made this fail 6/6 once fork timing
+            # changed. The line multiset is invariant to batching and is
+            # what actually expresses "the fault cost us output".
             for cd in (True, False):
                 res = forkrun.map(_sometimes, path, workers=4,
                                   on_error="retry", c_drain=cd)
                 healthy = forkrun.map(_up, path, workers=4)
-                self.assertLess(len(res), len(healthy))
+                res_lines, healthy_lines = _lines(res), _lines(healthy)
+                self.assertEqual(len(healthy_lines), 1000,
+                                 "healthy path must deliver every line")
+                self.assertLess(
+                    len(res_lines), len(healthy_lines),
+                    "c_drain=%s: faulted run kept %d/%d lines -- the fault "
+                    "removed nothing" % (cd, len(res_lines),
+                                         len(healthy_lines)))
+                self.assertEqual(set(res_lines), set(healthy_lines) &
+                                 set(res_lines))
                 self.assertTrue(
-                    set(_lines(res)) <= set(_lines(healthy)))
+                    set(res_lines) <= set(healthy_lines))
         finally:
             os.unlink(path)
 

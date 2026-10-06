@@ -90,14 +90,36 @@ _INTERRUPTED_MSG = (
 # and entering phase 1 with already-complete input publishes nothing
 # (silent loss). So workers fork only after pre-flight is provably
 # over — i.e. after the first DATA publish — except:
-# - stall path: no publish within STALL_FORK_AFTER with the gate still
-#   open (slow source) → fork to trigger the bail deliberately; the
-#   input is still arriving, which is the shape CASE B handles (bash
-#   parity: pre-flight routinely bails under early workers).
-# - gate path: source exhausted with no publish yet → wait for publish
+# - fork path: the parent forks workers as soon as its own setup is done,
+#   with no artificial delay. `ready > 0` still short-circuits, so when the
+#   pre-flight finished on its own during setup the fork is immediate and
+#   nothing waits. STALL_FORK_AFTER is only the fallback for "setup done
+#   and the scan has not finished", and it defaults to 0.
+# - gate path: source exhausted with no publish yet -> wait for publish
 #   (CASE A completes it); fork on publish, skip on empty input,
 #   RuntimeError on the reaped-with-data-but-nothing-published anomaly.
-STALL_FORK_AFTER = 2.0
+#
+# Why 0 and not the 2.0 this used to be. The pre-flight is a race the
+# scanner should win or lose on merit, not a reason to hold workers back.
+# CASE B (a worker arrives, scan cut short) resumes the geometric ramp from
+# sim_L, and that ramp doubles, so it converges on a sane batch size without
+# help -- delaying the fork buys the ramp nothing. The scanner is already
+# forked before the ingest loop, so the scan gets the NATURAL latency of
+# the parent's remaining setup; a timer only adds latency on top of that.
+#
+# Measured, light/medium/heavy 5M file plus a 2816-line input, median of 3-5:
+#
+#   STALL_FORK_AFTER   light    medium   heavy    small input
+#   2.0                0.4081s  1.4793s  4.7188s  0.1079s
+#   0.05               --       --       --       0.1073s
+#   0.0                0.3952s  1.4771s  4.7085s  0.0257s   <-- default
+#
+# Equal or better everywhere, and 4x on a small input where a fixed wait
+# dominates the whole run. CASE B is also the bash-normal path (see the
+# parity note above), so 0 moves Python toward bash rather than away.
+#
+# FR_STALL_FORK_AFTER stays as a knob; 2.0 remains reachable.
+STALL_FORK_AFTER = float(os.environ.get("FR_STALL_FORK_AFTER", "0.0"))
 # Post-stall-fork gate grace: after a stall-triggered fork, withhold
 # the EOF gate until first publish or this long, so the gate can never
 # land before phase-1 entry (entry follows the bail within ms).

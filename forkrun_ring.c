@@ -4486,7 +4486,36 @@ uint64_t chunk_bounds[16] = {0};
            * pre-c55a2714 baseline. Tighter is the safe direction for both
            * reasons the bound exists: it notices the "first worker
            * spawned" exit condition sooner, and where the eventfd does
-           * fire the timeout is only a fallback. */
+           * fire the timeout is only a fallback.
+           *
+           * Why a small bound is SAFE here -- measured, not assumed. The
+           * pre-flight is bounded, not open-ended: it ends at EOF, at
+           * target_pre == W_max * Lmax lines counted, or when a worker
+           * arrives and starves. Instrumented (window = scanner entry to
+           * post-pre-flight) against a deliberately slowed pipe producer:
+           *
+           *   producer      window        pre_lines/target  waiters  case
+           *   fast 5M file   3.8-6.5 ms   39361/28672         0      A
+           *   1.2 s/MB, 6MB 2005-2014 ms  19678/28672         1      B
+           *
+           * Both branches work as designed. Fast: reaches target_pre,
+           * CASE A computes the optimal L = pre_lines/W and skips the
+           * geometric ramp -- the entire point of the pre-flight. Slow:
+           * STALL_FORK_AFTER (run.py) forks a worker, it starves on an
+           * empty ring (waiters=1), CASE B resumes the ramp from sim_L=4.
+           *
+           * The 2005 ms row is also why this bound is 2 ms and not 50: a
+           * 2 ms poll over a window that can reach the stall timeout is
+           * cheap, whereas 50 ms was paying a fixed ~65 ms on EVERY run,
+           * fast producer included. A spin-then-sleep ramp (Shape 4) was
+           * tried here on the theory that the window could be seconds; it
+           * measured identical in wall time and ~7% HIGHER in voluntary
+           * context switches (11084 vs 10372), so it was reverted.
+           *
+           * This contradicts c55a2714's "~10k wakes in 5 s on a slow
+           * producer": ~10k wakes at usleep(100) is ~1 s of spinning, and
+           * nothing makes this window that long except STALL_FORK_AFTER
+           * itself, which is a fork-timing constant, not a wait. */
           poll(_pfds, _nfd, 2);
           if (evfd_ingest_data >= 0) {
             uint64_t _drain = 0;
