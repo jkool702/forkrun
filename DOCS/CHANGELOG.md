@@ -322,11 +322,32 @@ between 0 and 2 s — it is 2 s. CASE B is also the Bash-normal path, so
 this moves Python toward Bash rather than away from it.
 `FR_STALL_FORK_AFTER` remains as a tuning knob.
 
-Re-measured `light` at 20M records / 2.13 GB on this boot (fake-NUMA,
-`nodes=auto`, `shmem_enabled=always`, 28 workers, median-of-3, **16/16
-cells exact**): 1440.7 MB/s memoryview / 1045.2 MB/s bytes / 204.2 MB/s
-UDF, file input — **+4.6%** and **+3.3%** against the prior 48-cell
-cross-check on the identical protocol.
+Re-measured on the release boot (UMA, `nodes=1`, `shmem_enabled=always`,
+28 workers, median-of-3, fresh process per cell, **48/48 and 16/16 cells
+exact**) after this change. Every §0 forkrun row moved **up**, +0.2% to
++8.7%, the rows that gained most being the ones that fork — a fixed
+~65 ms saving is a bigger share of a 0.49 s light plugin run than of a
+52 s heavy UDF run.
+
+`light` at 20M records / 2.13 GB, file input, both topologies:
+
+| topology | plugin view | plugin bytes | UDF view |
+|---|---|---|---|
+| UMA `nodes=1` | 1134.7 MB/s (10.65M rec/s) | 873.2 MB/s (8.20M) | 203.5 MB/s (1.91M) |
+| fake-NUMA `nodes=auto` | 1440.7 MB/s (13.52M rec/s) | 1045.2 MB/s (9.81M) | 204.2 MB/s (1.92M) |
+
+Against the prior 48-cell cross-check on identical fake-NUMA settings:
+**+4.6%** view and **+3.3%** bytes; the UDF row is flat (−0.5%), as
+expected for a Python-callback-bound row that forks nothing.
+
+**The file-vs-pipe sign flips between topologies, so a streaming number
+quoted without naming the topology can be backwards.** On UMA a pipe is
+13–21% *faster* than a file on the plugin rows (1134.7 → 1377.8 MB/s
+view); on the 4-node boot a pipe *costs* 5–8%. Same code, same corpus,
+both 16/16 exact. The cause is topology rather than the stream: file
+input already engages the multi-node ingest path on 4 nodes, leaving a
+pipe less to win, while on UMA there is no such path for a file to
+borrow.
 
 ### Python frontend: `poisoned_batches` is now real, and says when it is short
 

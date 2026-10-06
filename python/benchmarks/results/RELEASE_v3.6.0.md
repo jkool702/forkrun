@@ -119,13 +119,25 @@ avoid have been removed. Measured (max) numbers kept in
 `forkrun_output_and_supervisor_2026-10-02.md` so that claim is checkable.
 Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ bytes/s).
 
+> **forkrun rows re-measured 2026-10-06 on the v3.6.1 release branch**,
+> on the UMA boot, after removing the artificial 2.0 s worker-fork stall
+> (v3.6.1 sets `STALL_FORK_AFTER=0`). All 48 cells exact; 28 workers,
+> median-of-3 after warmup, fresh process per cell, same seeded corpora
+> as before (byte-identical: light 532,711,015 / medium 2,347,403,909 /
+> heavy 6,720,381,299 B). Every forkrun row moved **up**, +0.2% to
+> +8.7%, which is the expected direction: the rows that gained most are
+> the ones that fork, and a fixed ~65 ms saving is a larger share of a
+> 0.49 s light plugin run than of a 52 s heavy UDF run. Competitor rows
+> are untouched and keep their original dates. Raw log:
+> `raw/stream_cells_uma_v361_stall0.log`.
+
 | System                              | Light (533 MB)          | Medium (2.35 GB)        | Heavy (6.72 GB)        |
 |-------------------------------------|-------------------------|-------------------------|------------------------|
-| **★ forkrun C plugin (memoryview)**  | **10.16M rec/s (1,082 MB/s)** | **2.60M rec/s (1,219 MB/s)** | **797k rec/s (1,072 MB/s)** |
-| **★ forkrun C plugin (bytes)**       | **7.26M rec/s (773 MB/s)** | **1.95M rec/s (916 MB/s)** | **739k rec/s (993 MB/s)** |
+| **★ forkrun C plugin (memoryview)**  | **10.18M rec/s (1,084 MB/s)** | **2.64M rec/s (1,242 MB/s)** | **850k rec/s (1,137 MB/s)** |
+| **★ forkrun C plugin (bytes)**       | **7.84M rec/s (836 MB/s)** | **2.12M rec/s (998 MB/s)** | **780k rec/s (1,042 MB/s)** |
 | Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
-| **★ forkrun Python UDF (memoryview)** | **1.85M rec/s (197 MB/s)** |  **790k rec/s (371 MB/s)**   |  **95k rec/s (127 MB/s)**  |
-| **★ forkrun Python UDF (bytes)**     | **1.71M rec/s (182 MB/s)** |  **751k rec/s (353 MB/s)**   |  **93k rec/s (125 MB/s)**  |
+| **★ forkrun Python UDF (memoryview)** | **1.90M rec/s (203 MB/s)** |  **840k rec/s (396 MB/s)**   |  **100k rec/s (128 MB/s)**  |
+| **★ forkrun Python UDF (bytes)**     | **1.80M rec/s (192 MB/s)** |  **780k rec/s (365 MB/s)**   |  **100k rec/s (129 MB/s)**  |
 | ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s) |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
 | ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
 | multiprocessing.Pool                | 1.60M rec/s (170 MB/s) |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
@@ -133,9 +145,9 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
-| **forkrun C vs Executor**           | **6.19×** | **3.26×** | **8.48×** |
-| **forkrun C vs Polars**             |           —              | **1.18×** |            —             |
-| forkrun C vs Executor+C             | 2.77× | 1.28× | 1.08× § |
+| **forkrun C vs Executor**           | **6.21×** | **3.31×** | **9.04×** |
+| **forkrun C vs Polars**             |           —              | **1.20×** |            —     |
+| forkrun C vs Executor+C             | 2.77× | 1.30× | 1.16× § |
 
 
 > ### ⚠ §0 IS MEASURED CONTAMINATED — and the corrected light column is below
@@ -166,49 +178,67 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 > One harness for every row, so nothing is mixed. This is the fair
 > version of the light column, and it is the number to quote.
 >
-> | System | rec/s | vs Executor |
-> |---|---|---|
-> | **★ forkrun C plugin (memoryview)** | **13.52M** | **8.45×** |
-> | **★ forkrun C plugin (bytes)** | **9.81M** | **6.13×** |
-> | **★ forkrun Python UDF (memoryview)** | **1.92M** | 1.20× |
-> | ProcessPoolExecutor | 1.6M | — |
-> | multiprocessing.Pool | 1.5M | — |
-> | Ray Data | 368k | — |
-> | HuggingFace Datasets | 112k | — |
-> | (serial baseline) | 145k | — |
+> **Two topologies, both measured on v3.6.1.** The UMA column is
+> primary — it is this release machine and it matches the UMA §0 table
+> above. The 4-node fake-NUMA column is retained because the file-vs-pipe
+> penalty *changes sign* between them, which is a finding worth keeping
+> rather than averaging away.
 >
-> **C plugin vs Executor is 8.45×, not the 6.19× printed in §0.**
+> | System | **UMA `nodes=1`** | fake-NUMA `nodes=auto` (4 nodes) | vs Executor (UMA) |
+> |---|---|---|---|
+> | **★ forkrun C plugin (memoryview)** | **10.65M** | 13.52M | **6.66×** |
+> | **★ forkrun C plugin (bytes)** | **8.20M** | 9.81M | **5.13×** |
+> | **★ forkrun Python UDF (memoryview)** | **1.91M** | 1.92M | 1.19× |
+> | ProcessPoolExecutor | 1.6M | — | — |
+> | multiprocessing.Pool | 1.5M | — | — |
+> | Ray Data | 368k | — | — |
+> | HuggingFace Datasets | 112k | — | — |
+> | (serial baseline) | 145k | — | — |
 >
-> Re-measured 2026-10-06 on `bb621b19`+ (v3.6.1) after removing the
-> artificial worker-fork stall, same corpus and same protocol as the
-> cross-check below (fake-NUMA, `nodes=auto` → 4 nodes,
-> `shmem_enabled=always`, 28 workers, median-of-3 after warmup):
-> **13.52M** memoryview / **9.81M** bytes / **1.92M** UDF, file input —
-> **16/16 cells exact** (20,000,000 records each).
+> The plugin rows are ~21% / ~16% faster on the 4-node topology; the
+> UDF row is flat (−0.5%), which is the expected shape — the UDF row is
+> Python-callback bound and forks nothing, so the multi-node ingest path
+> has nothing to win. The plugin rows are the ones that engage it.
 >
-> That supersedes the previous cross-check against forkrun's own 48-cell
-> harness, which read **12.92M** memoryview / **9.49M** bytes / **1.96M**
-> UDF on identical settings: **+4.7%** memoryview, **+3.4%** bytes,
-> **−2.2%** UDF. The UDF row is Python-callback bound and does not fork,
-> so it is unaffected by fork timing — its ±2% is run-to-run spread. The
-> plugin rows are the ones that benefit, which is the expected shape:
-> they are the rows that pay the fork tax.
+> **C plugin vs Executor is 6.66× on UMA (the release topology),
+> 8.45× on fake-NUMA — not the 6.19× printed in §0.**
 >
-> Full 16-cell light grid at 20M (MB/s, file input):
+> Re-measured 2026-10-06 on the v3.6.1 release branch after removing
+> the artificial worker-fork stall. Same protocol on both boots:
+> `shmem_enabled=always`, 28 workers, median-of-3 after warmup, fresh
+> process per cell, **16/16 cells exact** at 20,000,000 records.
 >
-> | config | C plugin view | C plugin bytes | Python UDF view | Python UDF bytes |
-> |---|---|---|---|---|
-> | default | **1440.7** | **1045.2** | **204.2** | **184.8** |
-> | max | **1463.9** | **1020.1** | **192.7** | **191.6** |
+> | topology | C plugin view | C plugin bytes | Python UDF view |
+> |---|---|---|---|
+> | **UMA `nodes=1`** | **10.65M** (1134.7 MB/s) | **8.20M** (873.2 MB/s) | **1.91M** (203.5 MB/s) |
+> | fake-NUMA `nodes=auto` | 13.52M (1440.7 MB/s) | 9.81M (1045.2 MB/s) | 1.92M (204.2 MB/s) |
 >
-> (pipe input runs 5–8% lower on the plugin view cells and ~2–3% lower on
-> the bytes cells; the full pipe column is in the raw log below.)
+> Against the pre-change 48-cell cross-check on identical fake-NUMA
+> settings (12.92M / 9.49M / 1.96M): **+4.7%** view, **+3.4%** bytes,
+> **−2.2%** UDF. The UDF row is Python-callback bound and forks nothing,
+> so fork timing does not touch it — its ±2% is run-to-run spread. The
+> plugin rows are the ones that pay the fork tax, and they gain.
 >
-> Topology matters and is named here deliberately: **these are fake-NUMA
-> `nodes=auto` (4-node) numbers**, the same boot and settings as the 48-cell
-> cross-check they replace. The 5M §0 table at the top of this file is
-> **UMA (`nodes=1`) and was NOT re-measured**, so the two are not
-> interchangeable — do not read the 20M figure as a §0 number.
+> Full 16-cell light grid at 20M, UMA (MB/s):
+>
+> | config | source | C plugin view | C plugin bytes | UDF view | UDF bytes |
+> |---|---|---|---|---|---|
+> | default | file | **1134.7** | **873.2** | **203.5** | **193.5** |
+> | default | pipe | 1377.8 | 963.4 | 210.3 | 199.5 |
+> | max | file | 1148.1 | 892.3 | 202.6 | 192.6 |
+> | max | pipe | 1226.7 | 823.9 | 205.6 | 195.4 |
+>
+> **On UMA a pipe is 13–21% FASTER than the file** on the plugin rows
+> (1134.7 → 1377.8 MB/s view). That is the opposite sign from the
+> fake-NUMA boot, where a pipe cost 5–8%. Same code, same corpus, both
+> measured 16/16 exact. The cause is topology, not the stream: file
+> input already engages the multi-node ingest path on 4 nodes, so a pipe
+> has less to win, while on UMA there is no multi-node path for a file
+> to borrow. Anyone quoting a streaming-input number must name the
+> topology; this is the case that makes that non-optional.
+>
+> Raw logs: `raw/stream_cells_light_20M_UMA_v361.log` and
+> `raw/stream_cells_uma_v361_stall0.log`.
 >
 > Note this column is **20M records** while medium and heavy remain 5M.
 > That is deliberate and matches `bench_exectypes.py`, which already

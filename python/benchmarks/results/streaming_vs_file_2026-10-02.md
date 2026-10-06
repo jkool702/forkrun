@@ -170,6 +170,19 @@ Two things this table is for:
    reports 12.8M; this matrix says 12.92M. Two independent harnesses
    agreeing within 1% is the evidence that the number is now right.
 
+> **Superseded for the release figures (2026-10-06).** This study is
+> retained as the record of that measurement; the numbers below are on
+> `NEW/REFACTOR3.4` at **fake-NUMA `nodes=auto` (4 nodes)**. v3.6.1 was
+> re-measured on the **UMA** boot and the two are not interchangeable:
+> **10.65M** plugin-view on UMA vs **13.52M** here. More importantly the
+> **file-vs-pipe sign flips between them** — on UMA a pipe is 13–21%
+> *faster* (1134.7 → 1377.8 MB/s), while on this 4-node boot a pipe
+> *costs* 5–8%. Same code, same corpus, both 16/16 exact. See
+> `RELEASE_v3.6.0.md` §0 "Corrected light column" for the current
+> figures and `raw/stream_cells_light_20M_UMA_v361.log` for the raw run.
+> Quoting a streaming-input number without naming the topology is
+> therefore not a style preference — it inverts the answer.
+
 ## Why the streaming comparison is forkrun + C plugin vs executor/pool
 
 Not forkrun + C plugin vs executor + ctypes. That row cannot exist on a
