@@ -84,6 +84,20 @@ by a `weakref.finalize` attached to the ctypes array each
 cannot be torn down while any view is reachable. No descriptor is held
 (`mmap.mmap(fd, ...)` would dups one).
 
+**Lifetime is per-result-stream, not per-record.** One surviving view
+keeps the *whole* mapping resident, so filtering a large result down to
+a handful of records can hold gigabytes:
+
+```python
+big = forkrun.map(..., output="view")        # maps the full result
+keep = [r for r in big if r["uid"] == 7]     # maps it ALL still
+```
+
+Use `forkrun.materialize()` on the records you intend to keep, and drop
+the rest, if you are filtering a large stream. This is inherent to
+zero-copy — the alternative is the copy `output="bytes"` always
+performs — not a leak, and it is the trade the default makes.
+
 ### What works on a view
 
 `len()`, slicing, `==` against `bytes` (both directions),
