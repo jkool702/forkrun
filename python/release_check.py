@@ -169,7 +169,7 @@ def check_changelog_final():
 
 @check("Docs: no (unreleased) heading on a tagged version")
 def check_unreleased_untagged():
-    # W-REL6-2.2: the v3.6.0-finality guard above is scoped to the release
+    # W-REL6-2.2: the finality guard above is scoped to the release
     # heading by design (it stays red until tag time). THIS guard catches
     # the wider class: any older heading still marked (unreleased) after
     # its version was tagged (v3.5.2 shipped tagged while its heading said
