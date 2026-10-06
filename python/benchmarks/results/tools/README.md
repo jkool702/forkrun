@@ -47,14 +47,15 @@ PY
 #    reproduce the published files BYTE FOR BYTE. Note the record COUNTS:
 #      light  5,000,000 lines = 532,711,015 B
 #      medium 5,000,000 lines = 2,347,403,909 B
-#      heavy  4,997,982 lines = 6,717,677,449 B  (see below)
+#      heavy  5,000,000 lines = 6,720,381,299 B  (first 5M lines of the
+#                                                 PRE-EXISTING heavy_20M)
 python3 - <<'PY'
 import sys; sys.path.insert(0, 'python/benchmarks/ml')
 from ml_data_gen import generate_data
 for variant, n in (("light", 5_000_000), ("medium", 5_000_000)):
     generate_data("numa1/ml/%s_5M.jsonl" % variant, n, variant)
 PY
-head -n 4997982 numa1/ml/heavy_20M.jsonl > numa1/ml/heavy_5M.jsonl
+head -n 5000000 numa1/ml/heavy_20M.jsonl > numa1/ml/heavy_5M.jsonl
 ```
 
 **Gotcha that cost a full sweep: do not use cell.py's `expect` as the
