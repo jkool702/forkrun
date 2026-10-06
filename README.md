@@ -93,8 +93,12 @@ frun -s -I bash -c 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique o
 
 ### What These Benchmarks Do NOT Measure
 
-- **NUMA multi-node scaling** — single-node only; NUMA is Stage 5 P5.
-- **TB-scale streaming** — v0 materializes input; streaming ingest is v1.
+- **NUMA multi-node scaling** — the headline table is UMA single-node
+  (`nodes=1`). NUMA exists and has its own leg (fake-NUMA, `numa=fake=N`),
+  but that is a separate measurement, not this table.
+- **Streamed input** — the headline table ingests from files. Streaming
+  ingest over pipes/sockets is implemented and has its own study
+  ([`benchmarks/results/streaming_vs_file_2026-10-02.md`](benchmarks/results/streaming_vs_file_2026-10-02.md)).
 - **aarch64** — x86_64 only; ARM legs are run manually on hardware.
 - **GPU workloads** — workers are CPU-only by design; GPU work belongs in the parent.
 - **Sub-100k-line jobs** — fixed ~30ms bring-up dominates; use serial Python.

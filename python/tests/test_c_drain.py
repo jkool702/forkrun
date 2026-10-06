@@ -95,10 +95,10 @@ class TestCDrainBasic(unittest.TestCase):
             for order in ("none", "index"):
                 c_res = forkrun.map(_up, path, workers=4,
                                     order=order, c_drain=True,
-                                    nodes=1)
+                                    nodes=1, output="bytes")
                 py_res = forkrun.map(_up, path, workers=4,
                                      order=order, c_drain=False,
-                                     nodes=1)
+                                     nodes=1, output="bytes")
                 if order == "index":
                     # Split-agnostic parity: the C drain and the
                     # Python drain consume the same records, but the
@@ -118,11 +118,11 @@ class TestCDrainBasic(unittest.TestCase):
         # default stays legacy so no user regresses.)
         path = _make_input(1000)
         try:
-            default = forkrun.map(_up, path, workers=2, nodes=1)
+            default = forkrun.map(_up, path, workers=2, nodes=1, output="bytes")
             explicit = forkrun.map(_up, path, workers=2, nodes=1,
-                                   c_drain=True)
+                                   c_drain=True, output="bytes")
             legacy = forkrun.map(_up, path, workers=2, nodes=1,
-                                 c_drain=False)
+                                 c_drain=False, output="bytes")
             self.assertEqual(lines_of(default), lines_of(legacy))
             self.assertEqual(lines_of(default), lines_of(explicit))
         finally:
@@ -177,13 +177,29 @@ class TestCDrainBasic(unittest.TestCase):
                     raise ValueError("poison me")
                 return bytes(b.data).upper()
 
+            # Count RECORDS, not blobs. map() returns one blob per BATCH,
+            # and in dynamic batching mode the blob count is a function of
+            # batch size, so `len(res) < len(healthy)` compared batching
+            # rather than fault impact -- measured 80 blobs vs 9 for the
+            # same run shape, which made this fail 6/6 once fork timing
+            # changed. The line multiset is invariant to batching and is
+            # what actually expresses "the fault cost us output".
             for cd in (True, False):
                 res = forkrun.map(_sometimes, path, workers=4,
                                   on_error="retry", c_drain=cd)
                 healthy = forkrun.map(_up, path, workers=4)
-                self.assertLess(len(res), len(healthy))
+                res_lines, healthy_lines = _lines(res), _lines(healthy)
+                self.assertEqual(len(healthy_lines), 1000,
+                                 "healthy path must deliver every line")
+                self.assertLess(
+                    len(res_lines), len(healthy_lines),
+                    "c_drain=%s: faulted run kept %d/%d lines -- the fault "
+                    "removed nothing" % (cd, len(res_lines),
+                                         len(healthy_lines)))
+                self.assertEqual(set(res_lines), set(healthy_lines) &
+                                 set(res_lines))
                 self.assertTrue(
-                    set(_lines(res)) <= set(_lines(healthy)))
+                    set(res_lines) <= set(healthy_lines))
         finally:
             os.unlink(path)
 
@@ -347,10 +363,10 @@ class TestCDrainReactor(unittest.TestCase):
                 kw = {} if order == "none" else {"order": "index"}
                 a = forkrun.map(_up, path, workers=4,
                                 orchestrator=True, c_drain=True,
-                                **kw)
+                                **kw, output="bytes")
                 b = forkrun.map(_up, path, workers=4,
                                 orchestrator=True, c_drain=False,
-                                **kw)
+                                **kw, output="bytes")
                 if order == "index":
                     # index+non-splice uses the C orderer under both
                     # settings (the flag is accepted but inert
@@ -377,9 +393,9 @@ class TestCDrainReactor(unittest.TestCase):
         path = _make_input(1500)
         try:
             a = forkrun.map(_up, path, workers=2, orchestrator=True,
-                            streaming=True, c_drain=True, nodes=1)
+                            streaming=True, c_drain=True, nodes=1, output="bytes")
             b = forkrun.map(_up, path, workers=2, orchestrator=True,
-                            streaming=True, c_drain=False, nodes=1)
+                            streaming=True, c_drain=False, nodes=1, output="bytes")
             self.assertEqual(lines_of(a), lines_of(b))
         finally:
             os.unlink(path)

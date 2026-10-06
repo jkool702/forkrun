@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""forkrun v3.6.0 release checklist (W-PY23, W-REL5-F F6).
+"""forkrun v3.6.1 release checklist (W-PY23, W-REL5-F F6).
 
-Run from the repo root BEFORE tagging v3.6.0. Every check must pass:
+Run from the repo root BEFORE tagging v3.6.1. Every check must pass:
 
     python3 python/release_check.py
 
@@ -27,8 +27,27 @@ import sys
 import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PY_VERSION = "0.16.0"
-PROJECT_VERSION = "v3.6.0"
+
+
+def _read_py_version():
+    """Single-source the Python version from forkrun.__version__.
+
+    This was a hardcoded literal and silently rotted: the wheel built
+    as 0.17.0 while every artifact glob still looked for 0.16.0, so
+    _ensure_artifacts() found nothing and the release gate failed with
+    a misleading "found []" instead of a version mismatch. setup.py
+    already reads the same field; read it the same way.
+    """
+    src = os.path.join(REPO_ROOT, "python", "forkrun", "__init__.py")
+    with open(src) as fh:
+        m = re.search(r'^__version__\s*=\s*"([^"]+)"', fh.read(), re.M)
+    if not m:
+        raise RuntimeError("could not find __version__ in %s" % src)
+    return m.group(1)
+
+
+PY_VERSION = _read_py_version()
+PROJECT_VERSION = "v3.6.1"
 FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
 
 CHECKS = []
@@ -134,18 +153,23 @@ def check_changelog_final():
     # editing early; the red is the gate working.
     with open(os.path.join(REPO_ROOT, "DOCS", "CHANGELOG.md")) as fh:
         content = fh.read()
-    marked = re.search(r"^##\s+%s\s+\(unreleased\)" % re.escape(PROJECT_VERSION),
-                       content, re.M)
+    # Match the heading as it is actually written. This previously only
+    # recognised "## vX (unreleased)" in parentheses, while the changelog
+    # writes "## vX — unreleased" with an em dash -- so the guard never
+    # fired and a release could look final while its own heading still said
+    # unreleased. Accept either separator.
+    marked = re.search(r"^##\s+%s\s*(?:\(|—|-)\s*unreleased\s*\)?"
+                       % re.escape(PROJECT_VERSION), content, re.M)
     assert marked is None, \
         "CHANGELOG.md still heads %s as (unreleased) -- finalize the " \
-        "heading at tag time (TAG_PREP_v3.6.0.md step: this red is " \
+        "heading at tag time (TAG_PREP_v3.6.1.md step: this red is " \
         "designed, not a bug)" % PROJECT_VERSION
     return True
 
 
 @check("Docs: no (unreleased) heading on a tagged version")
 def check_unreleased_untagged():
-    # W-REL6-2.2: the v3.6.0-finality guard above is scoped to the release
+    # W-REL6-2.2: the finality guard above is scoped to the release
     # heading by design (it stays red until tag time). THIS guard catches
     # the wider class: any older heading still marked (unreleased) after
     # its version was tagged (v3.5.2 shipped tagged while its heading said
@@ -171,7 +195,7 @@ def check_unreleased_untagged():
 def check_tag_free():
     # W-REL5-F (F6.1): tagging over an existing tag would move/fail
     # it. Local tags only (offline-safe); pushing the tag is the
-    # owner's step in TAG_PREP_v3.6.0.md.
+    # owner's step in TAG_PREP_v3.6.1.md.
     proc = _run(["git", "tag", "--list", PROJECT_VERSION], timeout=60)
     assert proc.returncode == 0, proc.stderr[-500:]
     assert proc.stdout.strip() == "", \

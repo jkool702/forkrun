@@ -63,9 +63,16 @@ def _build(tmpdir, srcs, out):
 
 
 def _records(results):
-    """Sorted record set (batching-independent comparison)."""
-    return sorted(r for blob in results for r in blob.split(b"\n")
-                  if r)
+    """Sorted record set (batching-independent comparison).
+
+    materialize() first: results are memoryview views by default since
+    0.17.0, and this helper needs bytes to split and sort.
+    """
+    recs = []
+    for blob in results:
+        blob = forkrun.materialize(blob)
+        recs.extend(r for r in blob.split(b"\n") if r)
+    return sorted(recs)
 
 
 def _base_event():

@@ -8,6 +8,7 @@
 
 # C sources needed for building the substrate
 include forkrun_ring.c
+include forkrun_cleanroom.c
 include forkrun_substrate.h
 include substratestubs.c
 include Makefile.substrate

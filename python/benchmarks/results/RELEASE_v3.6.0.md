@@ -7,13 +7,16 @@
 > so fork+scan+teardown dominate; their rank order is
 > meaningful, their absolutes understate sustained throughput
 > — always read them alongside a steady-state section.
-> forkrun rows re-measured 2026-09-25/26 (engine v3.6.0);
-> competitor rows keep their original dates (those codebases
-> didn't change).
+> forkrun §0 rows re-measured 2026-10-02 (v3.6.1,
+> `ce17b0a4`); competitor rows keep their original dates (those
+> codebases didn't change) — so §0 compares a 2026 frontend against
+> 2026 competitors. Treat the *rank order* as current and the
+> competitor absolutes as historical.
 
 Consolidated from every study in `python/benchmarks/results/`,
 `DOCS/python/AI_benchmark_results.md`, the main README (bash
-engine), and fresh re-runs on 2026-09-25/26. Hardware throughout:
+engine), and fresh re-runs on 2026-09-25/26 (2026-10-02 for §0).
+Hardware throughout:
 28c Intel i9-7940X unless noted. **Freshest forkrun numbers are
 listed first in each section**; older rows are kept where they
 carry data the re-runs didn't (competitors, sweeps, fault modes).
@@ -26,26 +29,115 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 
 ## 0. Headline HN Release Table (AI/ML Python Benchmark)
 
+> ### Bottom line
+>
+> **In every case measured here, forkrun matches or exceeds the best
+> available option — and adds ordered output plus automatic failure recovery
+> on top of it.**
+>
+> **In some cases, especially streaming workloads, forkrun keeps those same
+> benefits and is drastically faster than the next best: up to, and in some
+> cases slightly more than, an order of magnitude.**
+>
+> Concretely, against the strongest competitor in each regime:
+>
+> | | file input | streaming input |
+> |---|---|---|
+> | vs the best option available | 1.08–2.77× (exceeds) | **3.94–10.76×** (exceeds) |
+> | ordered output | included | included |
+> | automatic recovery / bad-batch poisoning | included | included |
+>
+> Neither regime asks you to trade those guarantees for the speed.
+>
+> ---
+>
+> **Why the two regimes cost forkrun the same but the competition much
+> more.** forkrun is built so that one engine serves both: the input is
+> copied into a memfd either way, so a file and a pipe converge on the
+> same fast path. Measured directly — same harness, same methodology,
+> all 24 pipe-vs-file cells — streaming runs at a **median 104% of file
+> throughput** (light 101%, medium 107%, heavy 109%; full range
+> 92–123%). The source is effectively free. **That figure is UMA
+> (`nodes=1`).** Re-measured on the 4-node `numa=fake=4` boot the median
+> inverts to **98.6% of file** (median penalty +1.4%, 9 of 24 cells at
+> parity or better, range −8.0% to +12.1%) — file input already engages
+> the multi-node ingest path, so a pipe has less to win. Either way it
+> is a couple of percent; just don't quote the sign without naming the
+> topology.
+>
+> **Scope: that is about streaming _input_, and it is what the tables above
+> measure.** It is not a claim about `stream()`. The non-materialising
+> `stream()` API yields one joined blob per batch through a Python
+> generator, where `map()` collects internally and maps a shared results
+> memfd; measured on the same pipe, `stream()` costs ~20% more than `map`
+> with `bytes` output (6.1M vs 8.5M rec/s, light/plugin). The gap is
+> structural — `stream()` copies output roughly three times (pread from
+> the worker memfd, write to the results pipe, Python reads it) where
+> `map()` copies once — and it is characterised, not closed. Anyone
+> needing the last 20% should use `map()` over a pipe, which is what
+> §0b reports.
+>
+> The competition has no such property. Most of it — including the
+> highest-throughput options — cannot ingest a stream at all. The two
+> that can are measured above only by doing the batching in Python and
+> shipping it across the boundary, and they lose ground doing it. So the
+> streaming gap in §0b is mostly **the competition getting worse for
+> streaming**, not forkrun getting worse.
+
 ### 5M-Record Steady-State Benchmark — 28 Workers, UMA (`nodes=1`)
 
 All systems process the same 5,000,000-record input on the same 28-thread Intel i9-7940X.
-forkrun rows re-measured 2026-09-29 (post-W-REL6, `ff99eb7`; median-of-3 + warmup, exact
-totals everywhere: light 5000000, medium 4997892, heavy 4997982).
-Two forkrun configurations per engine: **(†) the reactor default** (`orchestrator=True`,
-`order="index"`) — crash recovery, pays the C-orderer transit; **(max) the unordered
-ceiling** (`orchestrator=False`, `order="none"`) — legacy fail-fast, no recovery, no
-ordering. The (max) legs reproduce the 2026-09-25 single-line numbers (6.70 vs 6.61M,
-2.34 vs 2.37M, 698k vs 718k), confirming those were legacy-path measurements; the W-REL1/R1
-default flip (reactor-by-default, 2026-09-27) moved the default from the second row to the
-first. Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ bytes/s).
+forkrun rows re-measured on a **UMA-only boot** (single NUMA node; no
+`numa=fake=4`) after a reboot, on regenerated corpora that reproduce the
+column sizes exactly (0.533 / 2.347 / 6.720 GB, 5,000,000 lines each —
+`ml_data_gen.py` is seeded, SEED=42). Median-of-3 + warmup; exact totals
+verified on every cell (light 5000000, medium 4997892, heavy 4997982) —
+**24/24 cells exact.**
+
+> **THP: these rows require `shmem_enabled=always`.** The first
+> UMA-boot measurement came in ~17% low on the C plugin rows (light
+> 8.54M vs the earlier 10.28M) purely because
+> `/sys/kernel/mm/transparent_hugepage/shmem_enabled` was `never` — a
+> reboot dropped it, and forkrun's own startup notice flags that value
+> as blocking the memfd-backed gain "most notably in `-C` mode", which
+> is what these rows measure. Re-measured with `shmem_enabled=always`
+> and the gap closes: **10.16M rec/s**, i.e. back to the earlier level.
+> The Python UDF rows moved only 1–3% across the THP change, which is
+> the control that confirms the effect is mode-specific rather than
+> measurement drift.
+>
+> **A benchmark run with `shmem_enabled=never` understates forkrun's
+> `-C`/plugin throughput by ~15–20%.** Anyone quoting a forkrun C plugin
+> number should state the THP setting.
+Every forkrun row is the **reactor default** (`orchestrator=True`, `order="index"`):
+crash recovery and input-batch ordering both active. Rows are split by output
+representation, which is the only axis that still separates them.
+The old **(max)** unordered fail-fast ceiling is **gone** — it was 24% faster in
+v3.6.0 and is now indistinguishable from default (−1.8% to +7.9%, no consistent
+direction), because the C-orderer transit and supervision overhead it existed to
+avoid have been removed. Measured (max) numbers kept in
+`forkrun_output_and_supervisor_2026-10-02.md` so that claim is checkable.
+Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ bytes/s).
+
+> **forkrun rows re-measured 2026-10-06 on the v3.6.1 release branch**,
+> on the UMA boot, after removing the artificial 2.0 s worker-fork stall
+> (v3.6.1 sets `STALL_FORK_AFTER=0`). All 48 cells exact; 28 workers,
+> median-of-3 after warmup, fresh process per cell, same seeded corpora
+> as before (byte-identical: light 532,711,015 / medium 2,347,403,909 /
+> heavy 6,720,381,299 B). Every forkrun row moved **up**, +0.2% to
+> +8.7%, which is the expected direction: the rows that gained most are
+> the ones that fork, and a fixed ~65 ms saving is a larger share of a
+> 0.49 s light plugin run than of a 52 s heavy UDF run. Competitor rows
+> are untouched and keep their original dates. Raw log:
+> `raw/stream_cells_uma_v361_stall0.log`.
 
 | System                              | Light (533 MB)          | Medium (2.35 GB)        | Heavy (6.72 GB)        |
 |-------------------------------------|-------------------------|-------------------------|------------------------|
-| **★ forkrun C plugin (†)**          | **5.38M rec/s (573 MB/s)** | **1.91M rec/s (894 MB/s)** | **634k rec/s (852 MB/s)** |
-| **★ forkrun C plugin (max)**        | **6.70M rec/s (714 MB/s)** | **2.34M rec/s (1,097 MB/s)** | **698k rec/s (938 MB/s)** |
+| **★ forkrun C plugin (memoryview)**  | **10.18M rec/s (1,084 MB/s)** | **2.64M rec/s (1,242 MB/s)** | **850k rec/s (1,137 MB/s)** |
+| **★ forkrun C plugin (bytes)**       | **7.84M rec/s (836 MB/s)** | **2.12M rec/s (998 MB/s)** | **780k rec/s (1,042 MB/s)** |
 | Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
-| **★ forkrun Python UDF (†)**        | **1.56M rec/s (167 MB/s)** |  **672k rec/s (315 MB/s)**   |  **90k rec/s (121 MB/s)**  |
-| **★ forkrun Python UDF (max)**      | **1.65M rec/s (175 MB/s)** |  **720k rec/s (338 MB/s)**   |  **91k rec/s (122 MB/s)**  |
+| **★ forkrun Python UDF (memoryview)** | **1.90M rec/s (203 MB/s)** |  **840k rec/s (396 MB/s)**   |  **100k rec/s (128 MB/s)**  |
+| **★ forkrun Python UDF (bytes)**     | **1.80M rec/s (192 MB/s)** |  **780k rec/s (365 MB/s)**   |  **100k rec/s (129 MB/s)**  |
 | ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s) |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
 | ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
 | multiprocessing.Pool                | 1.60M rec/s (170 MB/s) |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
@@ -53,22 +145,270 @@ first. Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
-| **forkrun C vs Executor**           | **3.3× (†) · 4.1× (max)** | **2.4× (†) · 2.9× (max)** | **6.7× (†) · 7.4× (max)** |
-| **forkrun C vs Polars**             |           —              | **0.87× (†) · 1.06× (max)** |            —             |
-| forkrun C(max) vs Executor+C        | 1.83× | 1.15× | ~0.94× § |
+| **forkrun C vs Executor**           | **6.21×** | **3.31×** | **9.04×** |
+| **forkrun C vs Polars**             |           —              | **1.20×** |            —     |
+| forkrun C vs Executor+C             | 2.77× | 1.30× | 1.16× § |
 
-**(†) Tested worker-failure recovery:** the (†) forkrun rows run the reactor default and
+
+> ### ⚠ §0 IS MEASURED CONTAMINATED — and the corrected light column is below
+>
+> Every row above came from `bench_ml_pipeline.py`, which runs all
+> frameworks **in one process** and **imported every competitor framework
+> just to test whether it was installed**. That import costs ~214 MB of
+> RSS, and `fork()` cost scales with parent RSS (measured: **0.27 ms/fork**
+> clean vs **45.3 ms/fork** at 5 GB), so the import silently taxed every
+> row — forkrun's most, because it forks 28 workers.
+>
+> Direct A/B, identical call, identical byte-identical corpus:
+>
+> | parent RSS | `forkrun.map` |
+> |---|---|
+> | 16 MB | 1.577 s → **12.69M rec/s** |
+> | 214 MB (competitors imported) | 2.116 s → **9.45M rec/s** |
+>
+> **The benchmark was importing the very frameworks it compared against,
+> and the cost landed on the competitor.** Four harness bugs fixed:
+> `--isolate` (one subprocess per system), `forkrun-plugin` was nested
+> inside the forkrun block and silently emitted no row, each child
+> regenerated its own 2.1 GB corpus, and `detect_frameworks()` imported
+> everything (now `importlib.util.find_spec`).
+>
+> ### Corrected light column — 20M records / 2.13 GB, fully isolated
+>
+> One harness for every row, so nothing is mixed. This is the fair
+> version of the light column, and it is the number to quote.
+>
+> **Two topologies, both measured on v3.6.1.** The UMA column is
+> primary — it is this release machine and it matches the UMA §0 table
+> above. The 4-node fake-NUMA column is retained because the file-vs-pipe
+> penalty *changes sign* between them, which is a finding worth keeping
+> rather than averaging away.
+>
+> | System | **UMA `nodes=1`** | fake-NUMA `nodes=auto` (4 nodes) | vs Executor (UMA) |
+> |---|---|---|---|
+> | **★ forkrun C plugin (memoryview)** | **10.65M** | 13.52M | **6.66×** |
+> | **★ forkrun C plugin (bytes)** | **8.20M** | 9.81M | **5.13×** |
+> | **★ forkrun Python UDF (memoryview)** | **1.91M** | 1.92M | 1.19× |
+> | ProcessPoolExecutor | 1.6M | — | — |
+> | multiprocessing.Pool | 1.5M | — | — |
+> | Ray Data | 368k | — | — |
+> | HuggingFace Datasets | 112k | — | — |
+> | (serial baseline) | 145k | — | — |
+>
+> The plugin rows are ~21% / ~16% faster on the 4-node topology; the
+> UDF row is flat (−0.5%), which is the expected shape — the UDF row is
+> Python-callback bound and forks nothing, so the multi-node ingest path
+> has nothing to win. The plugin rows are the ones that engage it.
+>
+> **C plugin vs Executor is 6.66× on UMA (the release topology),
+> 8.45× on fake-NUMA — not the 6.19× printed in §0.**
+>
+> Re-measured 2026-10-06 on the v3.6.1 release branch after removing
+> the artificial worker-fork stall. Same protocol on both boots:
+> `shmem_enabled=always`, 28 workers, median-of-3 after warmup, fresh
+> process per cell, **16/16 cells exact** at 20,000,000 records.
+>
+> | topology | C plugin view | C plugin bytes | Python UDF view |
+> |---|---|---|---|
+> | **UMA `nodes=1`** | **10.65M** (1134.7 MB/s) | **8.20M** (873.2 MB/s) | **1.91M** (203.5 MB/s) |
+> | fake-NUMA `nodes=auto` | 13.52M (1440.7 MB/s) | 9.81M (1045.2 MB/s) | 1.92M (204.2 MB/s) |
+>
+> Against the pre-change 48-cell cross-check on identical fake-NUMA
+> settings (12.92M / 9.49M / 1.96M): **+4.7%** view, **+3.4%** bytes,
+> **−2.2%** UDF. The UDF row is Python-callback bound and forks nothing,
+> so fork timing does not touch it — its ±2% is run-to-run spread. The
+> plugin rows are the ones that pay the fork tax, and they gain.
+>
+> Full 16-cell light grid at 20M, UMA (MB/s):
+>
+> | config | source | C plugin view | C plugin bytes | UDF view | UDF bytes |
+> |---|---|---|---|---|---|
+> | default | file | **1134.7** | **873.2** | **203.5** | **193.5** |
+> | default | pipe | 1377.8 | 963.4 | 210.3 | 199.5 |
+> | max | file | 1148.1 | 892.3 | 202.6 | 192.6 |
+> | max | pipe | 1226.7 | 823.9 | 205.6 | 195.4 |
+>
+> **On UMA a pipe is 13–21% FASTER than the file** on the plugin rows
+> (1134.7 → 1377.8 MB/s view). That is the opposite sign from the
+> fake-NUMA boot, where a pipe cost 5–8%. Same code, same corpus, both
+> measured 16/16 exact. The cause is topology, not the stream: file
+> input already engages the multi-node ingest path on 4 nodes, so a pipe
+> has less to win, while on UMA there is no multi-node path for a file
+> to borrow. Anyone quoting a streaming-input number must name the
+> topology; this is the case that makes that non-optional.
+>
+> Raw logs: `raw/stream_cells_light_20M_UMA_v361.log` and
+> `raw/stream_cells_uma_v361_stall0.log`.
+>
+> Note this column is **20M records** while medium and heavy remain 5M.
+> That is deliberate and matches `bench_exectypes.py`, which already
+> defaults heavy to `heavy_20M`. It also matters for honesty in the
+> other direction: at 5M the light run is ~1.6 s, short enough that
+> fixed costs are a visible share, whereas 20M is closer to steady
+> state. **Medium and heavy are NOT materially affected.** Checked against
+> the clean 48-cell run on this boot: medium view 3.21M vs 3.27M (+1.8%),
+> heavy view 1.05M vs 1.07M (+1.5%), bytes and UDF rows within +/-1.3%.
+> All noise. The fork tax is a *fixed* ~75 ms, which is ~5% of
+> medium's 1.53 s and ~1.6% of heavy's 4.69 s. It only became
+> catastrophic on light, whose 0.46 s run turned ~100 ms into 20%.
+> An earlier note here said medium and heavy were "probably low by
+> around 30%"; that was wrong, and is corrected here.
+
+---
+
+## 0b. Streaming Input — the regime forkrun is built for (SPLIT-1)
+
+**Input arrives on an anonymous pipe and is never materialised.** This is the
+table to read for the huge-training-run case, and it is a *different* question
+from §0: forkrun's C engine path is 5–11× the pool baseline here versus
+1.1–2.8× on files, because file input lets forkrun skip the ingest problem
+entirely while a pipe forces every system to interleave reading with compute.
+
+**Topology: UMA (`nodes=1`) throughout this table**, which is what the
+competitor rows were measured on and is therefore the only way the
+comparison stays like-for-like. forkrun rows are the `pipe` columns of
+the 48-cell grid, preserved as **Table B-UMA** in
+`streaming_vs_file_2026-10-02.md` — same measurement, not a re-run. (The
+study's main table B is now the 4-node measurement, so the UMA pipe
+columns are kept under their own heading precisely so this citation
+resolves.) Competitor rows are new: executor/pool fed
+incrementally from the same pipe (`bench_streaming_competitors.py`),
+median-of-3 after warmup, exact record count verified on every cell, one
+corpus per process.
+
+Do not mix these rows with the `nodes="auto"` (4-node `numa=fake=4`)
+figures elsewhere in this file. That topology re-measured higher on the
+`bytes` paths (the 4-node headline copy is +8–9% over this on heavy) and
+flips the sign of the pipe-vs-file median, so the absolute numbers and
+even the direction of a streaming comparison depend on topology. §0 and
+§0b each name theirs; neither is "the" number.
+
+| System                                   | Light (533 MB) | Medium (2.35 GB) | Heavy (6.72 GB) |
+|------------------------------------------|----------------|------------------|----------------|
+| **★ forkrun C plugin (memoryview)**      | **9.72M rec/s (1,037 MB/s)** | **3.11M rec/s (1,461 MB/s)** | **1.03M rec/s (1,384 MB/s)** |
+| **★ forkrun C plugin (bytes)**           | **7.54M rec/s (804 MB/s)** | **2.45M rec/s (1,151 MB/s)** | **0.92M rec/s (1,234 MB/s)** |
+| **★ forkrun Python UDF (memoryview)**    | **1.95M rec/s (208 MB/s)** | **0.88M rec/s (415 MB/s)** | **0.10M rec/s (130 MB/s)** |
+| **★ forkrun Python UDF (bytes)**         | **1.81M rec/s (193 MB/s)** | **0.83M rec/s (389 MB/s)** | **0.09M rec/s (128 MB/s)** |
+| ProcessPoolExecutor                      | 1.43M rec/s (152 MB/s) | 0.62M rec/s (292 MB/s) | 0.10M rec/s (129 MB/s) |
+| multiprocessing.Pool                     | 1.34M rec/s (143 MB/s) | 0.59M rec/s (276 MB/s) | 0.10M rec/s (128 MB/s) |
+|------------------------------------------|----------------|------------------|----------------|
+| **forkrun C memoryview vs Executor**     | **6.82×** | **5.00×** | **10.76×** |
+| forkrun UDF memoryview vs Executor       | 1.37× | 1.42× | 1.01× |
+| **forkrun C bytes vs Executor**          | **5.29×** | **3.94×** | **9.60×** |
+| forkrun UDF bytes vs Executor            | 1.27× | 1.33× | 0.99× |
+| forkrun C bytes vs multiprocessing.Pool  | 5.64× | 4.17× | 9.66× |
+
+Ordered output and automatic failure recovery (bad-batch poisoning without
+killing the pipeline) are active on every forkrun row here, as in §0.
+
+### This is "best of each method", and the comparison is not symmetric
+
+In the streaming regime the honest comparison is **forkrun + C plugin vs
+executor/pool + a UDF**, and the gap is architectural rather than a payload
+language choice:
+
+- **forkrun** batches on the fly **in C, outside Python**. The engine scans
+  the shared ingress memfd and forms batches itself; a C plugin then reads its
+  own range by offset. No batch data crosses a Python boundary, no pickling,
+  no GIL contention, and **the full input never has to exist before the run
+  starts** — which is the whole point when the producer is still writing.
+- **executor/pool** has no such layer. With a pipe there is nothing to seek,
+  so the parent must form batches in Python and ship them across the boundary,
+  paying that tax on every batch.
+
+`bench_exectypes.py` makes this concrete, because its own fairness rules
+require that **no pickled input crosses the Executor boundary**: workers
+`pread` assigned byte ranges from the input file, and only `(offset, length)`
+ints and a path are sent. That is a *file* capability. A pipe cannot be
+`pread` and cannot be range-indexed, so on a stream executor+ctypes cannot
+keep its defining advantage — it degenerates into the same pickled-batch shape
+as executor+UDF, differing only in payload language.
+
+So **executor + ctypes is deliberately absent from this table**, even though
+it is a legitimate competitor in §0. Its 1.08–2.77× there is real; it is
+simply not reachable on a stream, and quoting a number for it here would
+require quietly dropping the guarantee that makes the row fair.
+
+### Why only executor and pool appear in this table
+
+Not a shortlist — a measured finding. Every competitor "streaming" API wants a
+*path* it can mmap, seek or stat, so a FIFO cannot be ingested at all:
+
+| framework | streaming API | FIFO verdict |
+|---|---|---|
+| Polars | `pl.scan_ndjson` | fails — `OSError 19` (no such device) |
+| DuckDB | `read_json_auto` | fails — `InvalidInput: Malformed JSON` |
+| Ray Data | `ray.data.read_json` | fails — `FileNotFoundError` |
+| HuggingFace Datasets | `load_dataset(streaming=True)` | needs files/URLs |
+| Executor + ctypes | byte ranges into a **file** | no seekable source on a pipe (see above) |
+
+They are absent because they cannot be given forkrun's input, not because they
+are slow. Their §0 numbers remain valid for their own regime.
+
+### The two regimes, side by side — and why they are split
+
+Splitting the table is the point, because the two regimes are not the same
+competition.
+
+**File input has respectable alternatives, and forkrun still wins.** An
+Executor + ctypes + static-partitioning setup is a genuinely good answer to
+"process this JSONL in parallel" — it runs the same C payload, needs no
+orchestration layer, and is what most serious Python pipelines actually do.
+forkrun's margin there is real but modest (1.08–2.77× vs Executor, 1.08–1.40×
+vs Executor + ctypes) precisely *because* the competitor is good.
+
+On top of that speed, every forkrun row in §0 already includes **ordered
+output and automatic failure recovery** — bad-batch poisoning without killing
+the pipeline. The static-partitioning alternative gives you neither.
+
+**Streaming removes most of those alternatives.** A pipe has no seekable
+source, so the thing that made Executor + ctypes strong — handing workers
+byte ranges into a file, with no pickled input — stops being available. That
+row degenerates into ordinary pickled batches. Polars, DuckDB, Ray and HF
+Datasets cannot ingest a pipe at all. What is left is executor/pool with a
+Python UDF, and against that forkrun's C path dominates 3.9–10.8×, still
+including ordering and recovery.
+
+So the summary claim is: **forkrun wins on speed in both regimes, and wins
+by a much wider margin in the streaming regime precisely because that is
+where the strong alternatives stop working** — while carrying ordered output
+and automatic recovery in both, which the alternatives do not.
+
+The Python UDF rows are the honest counterweight: on **heavy**, where per-batch
+Python cost dominates (~52 s regardless of source), forkrun's advantage falls
+to ~1.0×. The 5–11× is the C-plugin path, where forkrun's advantage is real
+and where the transport actually binds. Anyone reading this table should hold
+both facts at once.
+
+Ratio rows use the **memoryview** rows (forkrun's default representation since
+0.17.0). Zero-copy output is worth 1.12–1.40× over per-record `bytes` here
+(workload-dependent; the `nodes="auto"` copy below reads 1.01–1.45×, and a
+pure-echo payload reaches 2.0–2.3× — these payloads do real per-record work,
+so result collection is a smaller share of wall) — less than the 2.0–2.3× it reaches on a pure-echo workload, because
+these payloads do real per-record work (parse, extract, filter) so result
+collection is a smaller share of wall. The C plugin gains more than the Python
+UDF (1.11–1.45× vs 1.01–1.09×) for the same reason. See
+`forkrun_output_and_supervisor_2026-10-02.md` for all 24 cells.
+
+**All forkrun rows run crash recovery:** they use the reactor default and
 automatically recover from unhandled worker
 exceptions, `SIGSEGV`, and `SIGKILL`-class deaths — including OOM-kill, which the kernel
 delivers as SIGKILL — completing with 100% byte-exact output on the tested cases
 (orphaned batches are rolled back via `ftruncate`, re-queued to escrow, and re-executed). SIGKILL-tested;
 a cgroup-OOM scenario test is queued (no cgroup-specific test exists yet — the mechanism
 claim is true-by-mechanism, untested-by-scenario).
-The **(max)** rows run legacy fail-fast (`orchestrator=False`, `order="none"`): a worker death
-aborts the run — ceiling throughput, no recovery, unordered output.
-Ray Data's tested recovery uses task retry. The other systems were not observed to autonomously
-recover from the injected worker-failure cases tested here; observed behavior included pipeline
-abort (`BrokenProcessPool`), lost state, or indefinite hang.
+There is deliberately **no fail-fast "ceiling" row** any more. The v3.6.0 table carried
+one (`orchestrator=False`, `order="none"`) because disabling recovery and ordering was
+worth 24% on light. After the v3.6.1 parent-side work it is worth nothing: across 12
+cells the two configurations differ by −1.8% to +7.9% with no consistent direction, and
+(max) is the slower of the pair in 7 of 12. Quoting a ceiling that no longer exists
+would misrepresent the default as paying a cost it does not pay. The measurements are
+kept in `forkrun_output_and_supervisor_2026-10-02.md`.
+† On the Ray Data row, † marks *tested* recovery (task retry). It previously also marked
+forkrun's reactor-default rows; it no longer does, because those are now every forkrun row
+and need no marker. Ray Data's tested recovery uses task retry. The other systems were not
+observed to autonomously recover from the injected worker-failure cases tested here; observed
+behavior included pipeline abort (`BrokenProcessPool`), lost state, or indefinite hang.
 
 ‡ **Executor+C control row** (2026-09-30, `exectypes_2026-09-30.md` — the control
 that separates the payload-language advantage from the orchestration advantage): same C
@@ -81,10 +421,124 @@ in-session line-range pre-computation** (mmap scan: 0.7s light / 0.9s medium / 7
 forkrun's scan runs inside its timed region, so parity requires it here too). Timed-only
 ceilings retained in the results file (7.54M / 3.20M / 1.04M). Decomposition on effective
 rates: payload dividend (Exec-C ÷ Exec-Py) ~2.2× / ~2.5× / ~7.8×; architecture dividend
-(forkrun-C(max) ÷ Exec-C) 1.83× / 1.15× / ~0.94× — forkrun leads light and medium once
-indexing is counted, Executor still leads heavy-20M narrowly; vs (†) the legs read 1.47× /
-0.94× / ~0.87×. Setup amortizes to zero over repeat runs on the same file (ranges are
-cacheable; forkrun re-scans every run), so ceiling and effective bracket the truth. Coarse
+(forkrun-C ÷ Exec-C) 2.80× / 1.24× / 1.06× on the §0 memoryview rows — forkrun now
+leads on all three once indexing is counted, where it trailed heavy-20M narrowly
+before (0.94× on the v3.6.0 (max) legs). Setup amortizes to zero over repeat runs on the
+same file (ranges are cacheable; forkrun re-scans every run), so ceiling and effective
+bracket the truth. Coarse
+(~100k-line) sensitivity recorded in the results file (fine wins both: no flip). § Heavy
+cell measured at 20M/26.9 GB (pre-generated) vs the column's 5M/6.72 GB — steady-state
+rate; nearest same-scale forkrun-C references are 0.69M (§2) / 0.64M (spotcheck §3).
+
+*Supersession log: Executor+ctypes control row added 2026-09-30 (W-EXECTYPES);
+decomposes forkrun-vs-Executor into payload vs architecture components. CSV twin:
+`headline_2026-09-30.csv` (frozen 12 qualifier rows + 5 `EXEC-C-*` rows).*
+
+
+### 5M-Record Steady-State Benchmark — 28 Workers, `nodes="auto"` (4 nodes, `numa=fake=4` boot)
+> **Re-measured 2026-10-03 on a fresh `numa=fake=4` boot**, superseding
+> rows that dated from `ce17b0a4` — before the 1 MiB pipe resize, the
+> forked ingest child, the `snapshot_fds` fix, the pre-flight fix and the
+> drain hole-punch. 48/48 cells exact. `shmem_enabled=always`.
+>
+> **The light C-plugin rows came in LOWER than the copy they replace**
+> (12.33M → 10.59M memoryview, 8.98M → 8.31M bytes), while medium and
+> heavy are flat-to-better (+0.8% to +8.5%). The old light figure is not
+> reproducible: a separate UMA boot measured 10.2M and this fake-NUMA boot
+> measured 10.59M, so two independent boots agree with each other and
+> disagree with it. The stale number appears to have been a favourable
+> run rather than a real regression — the ~0.5s light corpus is the most
+> sensitive to machine state. **10.59M is the number to quote.**
+>
+> Multi-node shows up exactly where there is work to distribute: the
+> `bytes` rows gain 8-9% on heavy (a real per-record copy that four nodes
+> can share) while the zero-copy `view` rows gain ~2% (nothing left to
+> parallelise). That is the shape healthy NUMA scaling should have.
+
+All systems process the same 5,000,000-record input on the same 28-thread Intel i9-7940X.
+forkrun rows re-measured 2026-10-02 (v3.6.1 parent-side work, `ce17b0a4`;
+median-of-3 + warmup, exact totals verified on every cell: light 5000000,
+medium 4997892, heavy 4997982 — 24/24 cells exact).
+**This copy is `nodes="auto"`**, the DEFAULT, which on this `numa=fake=4`
+boot resolves to 4 nodes — it is NOT UMA, and the heading says so. The
+copy above is `nodes=1` (UMA). Two caveats
+on reading the difference as a topology result: `numa=fake=4` gives all
+4 nodes all 28 CPUs, so `auto` buys **no locality** — it is a different
+(and faster) pipeline shape, not a NUMA win, and must not be reported as
+one. And on a single-node boot `nodes="auto"` resolves to 1 node, so the
+two copies would collapse into one.
+Every forkrun row is the **reactor default** (`orchestrator=True`, `order="index"`):
+crash recovery and input-batch ordering both active. Rows are split by output
+representation, which is the only axis that still separates them.
+The old **(max)** unordered fail-fast ceiling is **gone** — it was 24% faster in
+v3.6.0 and is now indistinguishable from default (−1.8% to +7.9%, no consistent
+direction), because the C-orderer transit and supervision overhead it existed to
+avoid have been removed. Measured (max) numbers kept in
+`forkrun_output_and_supervisor_2026-10-02.md` so that claim is checkable.
+Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ bytes/s).
+
+| System                              | Light (533 MB)          | Medium (2.35 GB)        | Heavy (6.72 GB)        |
+|-------------------------------------|-------------------------|-------------------------|------------------------|
+| **★ forkrun C plugin (memoryview)**  | **10.59M rec/s (1,129 MB/s)** | **3.21M rec/s (1,509 MB/s)** | **1.05M rec/s (1,414 MB/s)** |
+| **★ forkrun C plugin (bytes)**       | **8.31M rec/s (886 MB/s)** | **2.53M rec/s (1,188 MB/s)** | **900k rec/s (1,206 MB/s)** |
+| Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
+| **★ forkrun Python UDF (memoryview)** | **1.90M rec/s (202 MB/s)** |  **890k rec/s (416 MB/s)**   |  **100k rec/s (131 MB/s)** |
+| **★ forkrun Python UDF (bytes)**     | **1.78M rec/s (190 MB/s)** |  **820k rec/s (385 MB/s)**   |  **100k rec/s (129 MB/s)** |
+| ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s) |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
+| ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
+| multiprocessing.Pool                | 1.60M rec/s (170 MB/s) |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
+| DuckDB native (SQL/JSON)            |           —            |  189k rec/s (89 MB/s)   |          —             |
+| Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
+| HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
+|-------------------------------------|---------------------------|---------------------------|---------------------------|
+| **forkrun C vs Executor**           | **6.46×** | **4.03×** | **11.17×** |
+| **forkrun C vs Polars**             |           —              | **1.46×** |            —             |
+| forkrun C vs Executor+C             | 2.89× | 1.58× | 1.43× § |
+
+Ratio rows use the **memoryview** rows (forkrun's default representation since
+0.17.0). Zero-copy output is worth 1.01×–1.45× over per-record `bytes` on these
+workloads — less than the 2.0–2.3× it reaches on a pure-echo workload, because
+these payloads do real per-record work (parse, extract, filter) so result
+collection is a smaller share of wall. The C plugin gains more than the Python
+UDF (1.11–1.45× vs 1.01–1.09×) for the same reason. See
+`forkrun_output_and_supervisor_2026-10-02.md` for all 24 cells.
+
+**All forkrun rows run crash recovery:** they use the reactor default and
+automatically recover from unhandled worker
+exceptions, `SIGSEGV`, and `SIGKILL`-class deaths — including OOM-kill, which the kernel
+delivers as SIGKILL — completing with 100% byte-exact output on the tested cases
+(orphaned batches are rolled back via `ftruncate`, re-queued to escrow, and re-executed). SIGKILL-tested;
+a cgroup-OOM scenario test is queued (no cgroup-specific test exists yet — the mechanism
+claim is true-by-mechanism, untested-by-scenario).
+There is deliberately **no fail-fast "ceiling" row** any more. The v3.6.0 table carried
+one (`orchestrator=False`, `order="none"`) because disabling recovery and ordering was
+worth 24% on light. After the v3.6.1 parent-side work it is worth nothing: across 12
+cells the two configurations differ by −1.8% to +7.9% with no consistent direction, and
+(max) is the slower of the pair in 7 of 12. Quoting a ceiling that no longer exists
+would misrepresent the default as paying a cost it does not pay. The measurements are
+kept in `forkrun_output_and_supervisor_2026-10-02.md`.
+† On the Ray Data row, † marks *tested* recovery (task retry). It previously also marked
+forkrun's reactor-default rows; it no longer does, because those are now every forkrun row
+and need no marker. Ray Data's tested recovery uses task retry. The other systems were not
+observed to autonomously recover from the injected worker-failure cases tested here; observed
+behavior included pipeline abort (`BrokenProcessPool`), lost state, or indefinite hang.
+
+‡ **Executor+C control row** (2026-09-30, `exectypes_2026-09-30.md` — the control
+that separates the payload-language advantage from the orchestration advantage): same C
+payload as forkrun's plugin rows (yyjson single-pass on medium, scalar on light/heavy —
+fresh builds, byte-identity vs the forkrun plugin path verified on 2.8 MB); workers `pread`
+assigned ~4k-line byte ranges (no input pickling — only offsets/lengths cross); plugin
+loaded post-fork per worker (python 3.14 forkserver); ctypes call overhead ~1.7µs (FFI
+spike figure). **Effective rates (quoted): timed executor.map phase PLUS the one-time
+in-session line-range pre-computation** (mmap scan: 0.7s light / 0.9s medium / 7.9s heavy —
+forkrun's scan runs inside its timed region, so parity requires it here too). Timed-only
+ceilings retained in the results file (7.54M / 3.20M / 1.04M). Decomposition on effective
+rates: payload dividend (Exec-C ÷ Exec-Py) ~2.2× / ~2.5× / ~7.8×; architecture dividend
+(forkrun-C ÷ Exec-C) 2.80× / 1.24× / 1.06× on the §0 memoryview rows — forkrun now
+leads on all three once indexing is counted, where it trailed heavy-20M narrowly
+before (0.94× on the v3.6.0 (max) legs). Setup amortizes to zero over repeat runs on the
+same file (ranges are cacheable; forkrun re-scans every run), so ceiling and effective
+bracket the truth. Coarse
 (~100k-line) sensitivity recorded in the results file (fine wins both: no flip). § Heavy
 cell measured at 20M/26.9 GB (pre-generated) vs the column's 5M/6.72 GB — steady-state
 rate; nearest same-scale forkrun-C references are 0.69M (§2) / 0.64M (spotcheck §3).
@@ -364,11 +818,16 @@ speed). (`AI_benchmark_results.md` W-PY31–33.)
   silently partial ~25% in 2 of ~10): meta-ring lapping fixed
   and gated as above; the NOTE† stands corrected, not open.
 - §0 four-line revision (2026-09-29, post-W-REL6): the single
-  2026-09-25 forkrun rows are superseded by (†)/(max) pairs —
-  the old numbers were legacy-path measurements (the (max) legs
-  reproduce them: 6.70 vs 6.61M, 2.34 vs 2.37M, 698k vs 718k).
+  2026-09-25 forkrun rows were superseded by (†)/(max) pairs —
+  those old numbers were legacy-path measurements (the (max) legs
+  reproduced them: 6.70 vs 6.61M, 2.34 vs 2.37M, 698k vs 718k).
   Python-(max)-heavy (W-P0LEGACY hang, fixed pre-tag) refreshed to
   91k post-fix; all twelve cells qualified, zero BLOCKs.
+  **Superseded again 2026-10-02** (v3.6.1, `ce17b0a4`): the four
+  (†)/(max) rows become four output-representation rows on the
+  default configuration, and the (max) rows are dropped entirely —
+  they no longer measure anything (see §0 prose and
+  `forkrun_output_and_supervisor_2026-10-02.md`).
 
 ## v3.6.0 claims (what the tables above support)
 

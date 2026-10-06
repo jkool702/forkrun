@@ -101,7 +101,7 @@ class TestStreamingIngest(unittest.TestCase):
         r, pid = _pipe_with_lines(1000)
         try:
             out = forkrun.map(lambda b: bytes(b.data).upper(), r,
-                              workers=2, order="index", nodes=1)
+                              workers=2, order="index", nodes=1, output="bytes")
             self.assertEqual(len(out) > 0, True)
             got = sorted(b for blob in out for b in blob.splitlines())
             exp = sorted(("line %d" % i).upper().encode()
@@ -191,6 +191,124 @@ class TestStreamingIngest(unittest.TestCase):
             assert_no_zombies(self)
         finally:
             os.close(r)
+
+    def test_reactor_stream_does_not_sleep_per_chunk(self):
+        """A streamed reactor run must WAIT on the source, not pace.
+
+        Regression: the reactor ingest drained to EAGAIN then slept a
+        flat 20 ms, once per chunk, because the reader outruns the
+        writer. 645 sleeps on light-5M -- 12.9 s of a 14.65 s wall, 88%
+        of the run. It now select()s on the source fd.
+
+        Asserts the mechanism (the pacing sleep does not fire per
+        chunk) rather than wall time, so it is not a benchmark: it
+        fails on the old code and passes on the new in well under a
+        second either way.
+        """
+        import collections
+        import time as _t
+        real_sleep = _t.sleep
+        seen = collections.Counter()
+
+        def counting(d):
+            seen[round(d, 4)] += 1
+            real_sleep(d)
+
+        # The writer must be SLOWER than the reader, or the reader
+        # never sees EAGAIN and the bug never fires. A memory-speed
+        # writer pushing 64 KB chunks keeps the pipe permanently full:
+        # this test passed against the reverted fix until the writer
+        # was made to pull from a file, which is the real condition
+        # (and the one the benchmark hit at 645 sleeps).
+        src_path = os.path.join(tempfile.gettempdir(),
+                                "forkrun_ingest_wait_src.bin")
+        n_chunks = 16
+        with open(src_path, "wb") as fh:
+            for _ in range(n_chunks):
+                fh.write(b"y" * (1 << 20))
+
+        r, w = os.pipe()
+        try:
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    os.close(r)
+                    with open(src_path, "rb") as s, os.fdopen(w, "wb") as d:
+                        while True:
+                            b = s.read(1 << 20)
+                            if not b:
+                                break
+                            d.write(b)
+                finally:
+                    os._exit(0)
+            os.close(w)
+            _t.sleep = counting
+            try:
+                out = forkrun.map(lambda b: b.data, r, workers=4, nodes=1,
+                                  orchestrator=True, output="bytes")
+                n = len(out)
+                del out
+            finally:
+                _t.sleep = real_sleep
+                os.close(r)
+                os.waitpid(pid, 0)
+        finally:
+            try:
+                os.close(w)
+            except OSError:
+                pass
+            try:
+                os.unlink(src_path)
+            except OSError:
+                pass
+
+        self.assertGreater(n, 0)
+        # Before the fix this fired ~n_chunks times; the wait is now a
+        # select() that returns as soon as the writer lands a chunk.
+        self.assertLess(
+            seen[0.02], n_chunks // 4,
+            "20 ms pacing sleep fired %d times for %d chunks -- the "
+            "streamed reactor path is pacing instead of waiting"
+            % (seen[0.02], n_chunks))
+
+    def test_pipe_exactness_slow_source(self):
+        """EXACT record count from a slow pipe source.
+
+        W-EXACT: the pre-flight scan counts the input to size its
+        initial batch. If it is told "input complete" before the
+        ingest has actually spilled everything, it stops counting, the
+        scanner treats that as EOF, and the tail is silently DROPPED
+        with no error anywhere -- the run just returns fewer records.
+
+        This is not hypothetical: an earlier attempt at the pre-flight
+        fix lost 9,839 of 5,000,000 records this way and the entire
+        667-test suite passed. So assert the count exactly, and assert
+        it under a SLOW producer, which is the case where the pre-flight
+        spends its time waiting.
+        """
+        n = 4000
+        r, pid = _pipe_with_lines(n, fmt='{"i": %d}\n', delay=0.0005)
+        try:
+            def _count(batch):
+                # one RESULT per batch, so report the record count the
+                # batch carried rather than 1 -- a batch spans many lines
+                return b"%d" % bytes(batch.data).count(b"\n")
+            got = sum(int(v) for v in forkrun.stream(
+                _count, r, workers=4, streaming=True, nodes=1))
+        finally:
+            try:
+                os.close(r)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+        self.assertEqual(
+            got, n,
+            "W-EXACT: lost the tail off a slow pipe -- %d of %d records "
+            "returned. The pre-flight must never treat 'ingest finished' "
+            "as EOF unless the input was genuinely drained." % (got, n))
 
     def test_memory_bounded(self):
         # 256MB through a pipe: parent growth must stay far below input

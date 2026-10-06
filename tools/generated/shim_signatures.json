@@ -29,6 +29,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_backlog_node": {
+    "args": "int node",
+    "linkage": "extern",
+    "return": "uint64_t"
+  },
   "fr_py_cap_rewind": {
     "args": "int *slot, const char *name",
     "linkage": "static",
@@ -119,6 +124,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_ingest_data_post": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_ingest_done": {
     "args": "void",
     "linkage": "extern",
@@ -141,6 +151,11 @@
   },
   "fr_py_is_resume_mode": {
     "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_map_readonly": {
+    "args": "int fd, uint64_t length, uint64_t *out_addr",
     "linkage": "extern",
     "return": "int"
   },
@@ -194,6 +209,11 @@
     "linkage": "static",
     "return": "int"
   },
+  "fr_py_poison_relay": {
+    "args": "uint32_t batch_idx",
+    "linkage": "extern",
+    "return": "void"
+  },
   "fr_py_poisoned_count": {
     "args": "void",
     "linkage": "extern",
@@ -243,6 +263,11 @@
     "args": "int src_fd, int dst_fd, uint64_t max_bytes",
     "linkage": "extern",
     "return": "int64_t"
+  },
+  "fr_py_unmap": {
+    "args": "uint64_t addr, uint64_t length",
+    "linkage": "extern",
+    "return": "void"
   },
   "fr_py_version": {
     "args": "void",

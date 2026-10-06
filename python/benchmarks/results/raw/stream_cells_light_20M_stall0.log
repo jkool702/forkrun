@@ -1,0 +1,33 @@
+-- light plugin default view file
+RESULT light plugin default view file auto 1.4791 1440.6775 20000000
+-- light plugin default view pipe
+RESULT light plugin default view pipe auto 1.5554 1369.9778 20000000
+-- light plugin default bytes file
+RESULT light plugin default bytes file auto 2.0386 1045.2349 20000000
+-- light plugin default bytes pipe
+RESULT light plugin default bytes pipe auto 2.1010 1014.1846 20000000
+-- light plugin max view file
+RESULT light plugin max view file auto 1.4556 1463.9213 20000000
+-- light plugin max view pipe
+RESULT light plugin max view pipe auto 1.5214 1400.5628 20000000
+-- light plugin max bytes file
+RESULT light plugin max bytes file auto 2.0888 1020.1310 20000000
+-- light plugin max bytes pipe
+RESULT light plugin max bytes pipe auto 2.1570 987.8967 20000000
+-- light udf default view file
+RESULT light udf default view file auto 10.4338 204.2255 20000000
+-- light udf default view pipe
+RESULT light udf default view pipe auto 10.8331 196.6977 20000000
+-- light udf default bytes file
+RESULT light udf default bytes file auto 11.5284 184.8343 20000000
+-- light udf default bytes pipe
+RESULT light udf default bytes pipe auto 11.2853 188.8156 20000000
+-- light udf max view file
+RESULT light udf max view file auto 11.0568 192.7181 20000000
+-- light udf max view pipe
+RESULT light udf max view pipe auto 10.5544 201.8922 20000000
+-- light udf max bytes file
+RESULT light udf max bytes file auto 11.1205 191.6136 20000000
+-- light udf max bytes pipe
+RESULT light udf max bytes pipe auto 11.4534 186.0451 20000000
+LIGHT20M DONE

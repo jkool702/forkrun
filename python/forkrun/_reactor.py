@@ -68,6 +68,17 @@ RESPAWN_SIGKILL_BACKOFF_MAX_S = 0.2
 
 # Per-round drain burst cap (see reactor_loop §4).
 DRAIN_BURST = 64
+# W-PYREAPSWEEP: minimum interval between the out-of-band reap backstop
+# sweeps. The death pipe is the primary death detector and is in the
+# reactor's watch set, so this only bounds how long an UNFLAGGED exit
+# can go unnoticed; teardown reaps definitively regardless.
+#
+# Kept small deliberately: the sweep is N waitpid syscalls, so the win
+# is in the COUNT, not the interval. At 2ms a 79k-batch run does ~150
+# sweeps instead of 79500 -- a ~500x cut -- while the worst-case
+# end-of-run latency stays inside measurement noise. A 20ms version
+# cost stream() ~6% purely in wind-down latency.
+_REAP_SWEEP_INTERVAL_S = 0.002
 
 # W-REL6-3.1: per-worker startup deadline. A child forked from a
 # threaded host can deadlock before signaling readiness (frozen
@@ -144,8 +155,19 @@ class ReactorState:
 
     def __init__(self, max_workers, num_nodes=1, respawn_cap=-1,
                  spawn_ceiling=-1, trap_ack_grace=TRAP_ACK_GRACE_S,
-                 startup_deadline=None):
+                 startup_deadline=None, wid_node=None):
         self.workers = {}  # wid -> WorkerSlot
+        # W-PYSPAWNWIRE: stable wid -> node assignment, mirroring the
+        # orchestrator's wid_to_node(). The scanner's spawn requests name
+        # a node, so the wid chosen for one MUST belong to that node's
+        # block; picking min(wid_free) regardless would put a worker in a
+        # ring that disagrees with wid_node, which is the mapping the
+        # NUMA drain audit verifies against (it reported a covered node
+        # with published-but-unclaimed batches). None means UMA, where
+        # every wid is node 0 and the default is already correct.
+        self.wid_node = list(wid_node) if wid_node else None
+        # W-PYREAPSWEEP: last out-of-band reap backstop sweep (monotonic).
+        self._reap_last = 0.0
         self.max_workers = max_workers
         self.num_nodes = max(1, num_nodes)
         self.respawn_cap = respawn_cap
@@ -283,6 +305,29 @@ class ReactorState:
             self.wid_free.add(wid)
             return None
 
+        # fork() copies page tables, so its cost scales with the parent's
+        # RSS rather than with anything the workers touch. MEASURE it
+        # here so the cost can be reported -- see
+        # _executor_core.warn_fork_cost.
+        #
+        # Needed HERE as well as in fork_workers: the reactor has its own
+        # spawn path, so the non-reactor helpers do not cover it -- and
+        # the reactor is what orchestrator=True uses, i.e. the DEFAULT.
+        # With the call only in fork_workers this was dead code for every
+        # default call, which is exactly how the first attempt at the
+        # fork-cost warning silently never fired.
+        #
+        # MEASUREMENT ONLY. An earlier version also called
+        # trim_parent_heap() (malloc_trim) here, on the theory that
+        # returning free heap pages before a fork makes the page-table
+        # copy cheaper. It is cheap and it is HARMFUL: 31 recovery tests
+        # failed with it (output truncated to start at LINE 256 and other
+        # offsets), and passed with it removed. So the mitigation that
+        # looked obviously safe and nearly shipped is gone. The warning
+        # -- which only reads /proc and prints -- is unaffected.
+        from ._executor_core import warn_fork_cost_once as _warn_fork
+        _t0 = _time.perf_counter()
+
         pid = os.fork()
         if pid == 0:
             # Child — never returns.
@@ -349,6 +394,10 @@ class ReactorState:
         try:
             os.close(death_w)
         except OSError:
+            pass
+        try:
+            _warn_fork((_time.perf_counter() - _t0) * 1e3, 1)
+        except Exception:
             pass
         slot = WorkerSlot(wid, node, pid, death_r, -1, incarn=incarn)
         self.workers[wid] = slot
@@ -624,13 +673,43 @@ class ReactorState:
             else:
                 self.startup_kills.append(wid)
 
-    def reap_clean_exits(self):
+    def reap_clean_exits(self, force=False):
         """WNOHANG sweep for exits the death pipe hasn't flagged yet.
 
         The death pipe is the primary detector; this catches exits
         observed out-of-band. Reaped exits are classified immediately
         (respawn included) via note_exit — never blocks.
+
+        W-PYREAPSWEEP: the death pipe is already in the reactor's watch
+        set and is what normally reports a death (POLLHUP/POLLIN, and
+        a death needs zero read syscalls), so this sweep is only a
+        backstop. It was running on EVERY round with one waitpid per
+        live worker — O(N) syscalls per round, regardless of how many
+        records were flowing. bash's ring_poll has no equivalent: it
+        builds its pollfd array once and lets poll() report liveness
+        (forkrun_ring.c:8815), so the orchestrator does no reaping in
+        its loop at all.
+
+        At 79k batches that was 79554 waitpid calls, 0.06s, plus a
+        list() copy of the workers dict per round. Throttle it: the
+        death pipe still reports immediately, and _teardown_reactor
+        does its own definitive per-slot reap, so nothing can be lost
+        by sampling the backstop periodically instead of every round.
+        ``force=True`` bypasses the throttle for callers that need an
+        immediate answer.
         """
+        if not force:
+            # When nothing is alive the sweep is free (every slot is
+            # skipped), and it is exactly the state a run winds down in --
+            # so never throttle it, or the last round pays the full
+            # interval as end-of-run latency for no saving.
+            if not any(slot.alive for slot in self.workers.values()):
+                pass
+            else:
+                now = _time.monotonic()
+                if now - self._reap_last < _REAP_SWEEP_INTERVAL_S:
+                    return
+                self._reap_last = now
         for wid, slot in list(self.workers.items()):
             if not slot.alive:
                 continue
@@ -913,6 +992,21 @@ def handle_spawn_bytes(state, data):
         node_cur = state.node_workers.get(node, 0)
         if node_cur + count > state.node_worker_max:
             count = state.node_worker_max - node_cur
+        # W-PYSPAWNWIRE: hand each worker a wid that belongs to the
+        # requested node, so wid_node stays authoritative (see
+        # ReactorState.wid_node).
+        if state.wid_node:
+            # wid_free spans max_workers + num_nodes (spare capacity for
+            # respawn/bump headroom) while wid_node only covers
+            # max_workers, so bound the lookup: an unassigned spare wid
+            # belongs to no node's block and must not be handed out here.
+            _n = len(state.wid_node)
+            _want = [w for w in sorted(state.wid_free)
+                     if 0 <= w < _n and state.wid_node[w] == node]
+            for _w in _want[:max(0, count)]:
+                if state.spawn_worker(wid=_w, node=node) is None:
+                    break
+            return
         for _ in range(max(0, count)):
             if state.spawn_worker(node=node) is None:
                 break
@@ -1126,7 +1220,29 @@ def reactor_run(state, poll_timeout=0.1, service=None):
             "poisoned": list(state.poisoned_batches)}
 
 
-def reactor_poll_once(state, poll_timeout=0.0):
+def reactor_watch_fds(state, spawn=True):
+    """Descriptors reactor_poll_once() selects on.
+
+    Factored out so a caller that is waiting on something ELSE -- the
+    ingest source, say -- can wait on the source and every reactor
+    notification in ONE select instead of blocking on the source alone
+    and leaving worker deaths unserviced for the length of the wait
+    (W-PYINGESTWAIT). Single source of truth: the list here and the
+    dispatch inside reactor_poll_once must agree, and two copies of it
+    would drift exactly the way duplicated flag lists do.
+    """
+    watch = []
+    for slot in state.workers.values():
+        if slot.alive and slot.death_r is not None and slot.death_r >= 0:
+            watch.append(slot.death_r)
+    if spawn and state.spawn_r is not None and state.spawn_r >= 0:
+        watch.append(state.spawn_r)
+    if state.trap_ack_r is not None and state.trap_ack_r >= 0:
+        watch.append(state.trap_ack_r)
+    return watch
+
+
+def reactor_poll_once(state, poll_timeout=0.0, spawn=True):
     """Service one nonblocking event round (spill-loop interleaving).
 
     Runs a single select round over death/spawn/trap-ACK pipes plus
@@ -1138,21 +1254,25 @@ def reactor_poll_once(state, poll_timeout=0.0):
     EOF precedes os._exit, so an unreaped child defers to the sweep
     instead of stalling the spill). Raises RuntimeError on
     trap-ACK timeout.
+
+    ``spawn=False`` leaves the scanner's spawn pipe out of the watch
+    set for this round (W-PYSPAWNWIRE). The NUMA fork gate calls this to
+    supervise helpers while it decides its forks, and servicing spawn
+    requests there would fork workers the gate's own ``forked`` set
+    never records -- the gate then exits with ``forked`` empty and the
+    run dies on a false "ingest landed N bytes with no published
+    batches". Suppressing the watch entry (rather than blanking
+    state.spawn_r around the gate) keeps the descriptor parked on state
+    for teardown, so it cannot leak on any early-error path.
     """
     state.check_trap_timeouts()
     # W-REL6-3.1: startup deadline also bounds spill-loop supervision
     # (a hung child would otherwise stall the spill, not just the run).
     state.check_startup_timeouts()
-    watch = []
-    death_of = {}
-    for slot in state.workers.values():
-        if slot.alive and slot.death_r is not None and slot.death_r >= 0:
-            watch.append(slot.death_r)
-            death_of[slot.death_r] = slot.wid
-    if state.spawn_r is not None and state.spawn_r >= 0:
-        watch.append(state.spawn_r)
-    if state.trap_ack_r is not None and state.trap_ack_r >= 0:
-        watch.append(state.trap_ack_r)
+    watch = reactor_watch_fds(state, spawn=spawn)
+    death_of = {slot.death_r: slot.wid for slot in state.workers.values()
+                if slot.alive and slot.death_r is not None
+                and slot.death_r >= 0}
     if watch:
         try:
             readable, _, _ = _select.select(watch, [], [], poll_timeout)

@@ -122,6 +122,8 @@ jobs:
                   # artifacts. Informational strings only; the
                   # quoting rides the same "${DEFS[@]}" mechanism as
                   # the entries above.
+                  # DISABLED: for byte-reproducible builds uncomment these 
+                  # and insert the date/time shown by ring_version
                   "-D__DATE__=\"Sep  1 2026\""
                   "-D__TIME__=\"00:00:00\""
                )

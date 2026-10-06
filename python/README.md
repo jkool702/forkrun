@@ -1,4 +1,4 @@
-# forkrun Python frontend — v0.16.0 (W-PY23 release prep)
+# forkrun Python frontend — v0.17.0 (W-PY23 release prep)
 
 > **New here?** Start with [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
 > (5 minutes to your first parallel job). Full user guides:
@@ -19,7 +19,7 @@
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.16.0"`; `forkrun.__engine_version__` reports the
+`forkrun.__version__` is `"0.17.0"`; `forkrun.__engine_version__` reports the
 substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
@@ -65,6 +65,15 @@ results = forkrun.map(upper, "inputs.txt",               # batch-granular,
 for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
                                                          # yields while workers run
 ```
+
+- **Results are `memoryview` views, not `bytes`.** Since 0.17.0 `map()`
+  maps the result stream and hands back slices — no copy per record. Use
+  `len()`, slicing, `==` against `bytes`, `.tobytes()`, `.hex()` and the
+  buffer protocol directly. `.split`/`.splitlines`/`.decode`/`in`/sorting
+  need a real `bytes`: `forkrun.materialize(r)` per record, or
+  `forkrun.map(..., output="bytes")` per call. `stream()` always yields
+  `bytes` (it drains live, with no finished file to map). Full contract:
+  [docs/API.md](docs/API.md#result-representation).
 
 - `payload`: `"pkg.mod:func"` (imported post-fork in the worker — keeps the
   parent virgin of native imports) or a callable (fork-inherited, never

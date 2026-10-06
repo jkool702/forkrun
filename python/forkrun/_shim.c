@@ -20,12 +20,60 @@
  * from TLS and clears worker_last_cnt.
  */
 
+/* Poison-index relay: appends a poisoned batch index to the per-worker
+ * slot on the fd named by $FRK_POISON_FD. Defined BELOW, but declared
+ * here because ring.c (included next) calls it from its own poison
+ * site -- the two poison sites are one translation unit, and this
+ * file is also the generator's source of truth for fr_py_* symbols,
+ * so the definition has to live here. */
+/* unsigned int, not uint32_t: <stdint.h> is included AFTER the ring
+ * include below, so uint32_t is not yet a type name at this point --
+ * and the declaration has to precede the include for ring.c's own poison
+ * site to see it. The definition below uses uint32_t, which is the same
+ * type. */
+void fr_py_poison_relay(unsigned int batch_idx);
+
 #include "../../forkrun_ring.c"
 
 /* W-PY14: <sys/uio.h> for writev (fr_py_emit). Included AFTER the engine
  * (the FIRST-directive rule above is preserved): the engine's FTM block
  * already ran, and writev is POSIX — no feature-test dependency. */
 #include <sys/uio.h>
+
+void fr_py_poison_relay(uint32_t batch_idx) {
+    /* The relay moved here from forkrun_ring.c, so its fd cache moves
+     * with it. It lived in ring.c only because the function did; once the
+     * definition is here, keeping the cache in ring.c only worked by
+     * accident of _shim.c including that file into the same translation
+     * unit. The wheel build compiles _shim.c on its own and caught the
+     * dangling reference. -2 = not yet looked up. */
+    static __thread int g_poison_fd = -2;
+    if (g_poison_fd == -2) {
+        const char *e = getenv("FRK_POISON_FD");
+        g_poison_fd = (e && e[0]) ? atoi(e) : -1;
+    }
+    if (g_poison_fd < 0)
+        return;
+    const unsigned wid = g_fr_config.ring_wid;
+    if (wid >= 4096u)
+        return;
+    /* header is 4 u32; slot is [count][idx...] with a fixed capacity. */
+    const off_t slot = (off_t)(4 + (size_t)wid * (FR_POISON_SLOT_U32 + 1)) * 4;
+    uint32_t n = 0;
+    if (pread(g_poison_fd, &n, sizeof n, slot) != (ssize_t)sizeof n)
+        return;
+    if (n >= FR_POISON_SLOT_U32)
+        return;                      /* bounded: drop, never grow */
+    uint32_t buf[1];
+    buf[0] = batch_idx;
+    if (pwrite(g_poison_fd, buf, sizeof buf,
+               slot + (off_t)(1 + n) * 4) != (ssize_t)sizeof buf)
+        return;
+    n++;
+    /* Publish the count last: a reader that sees n must see the indices. */
+    (void)!pwrite(g_poison_fd, &n, sizeof n, slot);
+}
+
 
 /* Forward: publish-mark epoch reset (defined with the marks below). */
 static void fr_py_data_hwm_reset(void);
@@ -150,6 +198,36 @@ int fr_py_scan(int fd) {
 /* Signal end of input (UMA): the scanner's EOF gate. Call after writing
  * the last byte to the ingress memfd and before fr_py_scan(). Mirrors
  * ring_ingest (which the bash pipeline calls when its copy finishes). */
+int fr_py_ingest_data_post(void) {
+    /* W-PREFLIGHT: announce "more bytes have landed in the ingress
+     * memfd", and NOTHING more.
+     *
+     * The pre-flight scan (core_scanner_loop, the usleep(100) branch)
+     * waits for the ingest to deliver the next chunk. Bash's
+     * ring_copy_main signals evfd_ingest_data after each chunk
+     * (forkrun_ring.c:8279) so that wait can block instead of spin.
+     * The Python spill was os.read/os.pwrite and never signalled, which
+     * is why Python spun ~10k times in 5 s where Bash slept 78 times.
+     *
+     * DELIBERATELY does NOT touch state[0].ingest_complete. That flag
+     * is the scanner's EOF gate, and a previous attempt (W-GATE2) got
+     * this wrong by letting ring_copy_main own it: ring_copy_main sets
+     * it UNCONDITIONALLY on the way out, including after an early
+     * break, so it means "my loop ended", not "input drained". Trusting
+     * it cost 9,839 records. This function asserts only the one thing
+     * that is unconditionally true at the call site -- bytes were just
+     * written -- so it cannot manufacture a premature EOF.
+     *
+     * Returns 0 on success, 1 if the eventfd is unavailable (caller
+     * keeps working; the pre-flight just falls back to its timeout).
+     */
+    if (evfd_ingest_data < 0)
+        return 1;
+    uint64_t v = 1;
+    ssize_t _w = sys_write(evfd_ingest_data, &v, 8);
+    return (_w == 8) ? 0 : 1;
+}
+
 int fr_py_ingest_done(void) {
     if (!state)
         return 1;
@@ -264,6 +342,15 @@ int fr_py_claim(fr_py_batch_t *out) {
                 if (batch.num_kills == poison_threshold && g_state) {
                     uint32_t total_poisoned = __atomic_add_fetch(
                         &g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+                    /* Relay the index to the parent. The count alone
+                     * already crosses via shared g_state; the index has
+                     * no shared home, so it goes out on the stats memfd.
+                     * This is the site the CLEANROOM reaches --
+                     * fr_py_worker_plugin_loop lives here, not in the
+                     * ring's own loop -- which is why the ring.c call
+                     * alone produced an empty poisoned_batches with a
+                     * correct poisoned count. */
+                    fr_py_poison_relay((uint32_t)batch.batch_idx);
                     uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
                     uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;
                     if (h_cnt > 0 && total_poisoned >= h_cnt) {
@@ -1772,6 +1859,95 @@ int fr_py_fallow_phys(int fd_in, int fd_file) {
     return ring_fallow_phys_main(3, argv);
 }
 
+/* W-PYZEROCOPY: read-only mapping of a whole result stream, for the
+ * parent-side collect.
+ *
+ * The collect is the parent's serial tail: every result byte has to
+ * reach the orchestrator, and doing that with bytes objects means one
+ * kernel->user copy for the stream PLUS one memcpy per record. Handing
+ * the caller memoryview slices over a mapping removes the second copy
+ * entirely, which is the same hand-a-reference shape bash's orderer uses
+ * (it passes (fd, offset, len) and lets the kernel move bytes only if
+ * the consumer reads them -- forkrun_ring.c:7520).
+ *
+ * Why this is in C and not Python's mmap: mmap.mmap(fd, ...) dups the
+ * descriptor, and that dup is released only when the mmap object is
+ * collected -- i.e. when the CALLER drops the records. Holding a result
+ * list would hold an extra descriptor for the life of the list, which
+ * is what test_concurrent's fd-stability gate and test_v1_fast's child
+ * fd hygiene forbid. A mapping made here holds the file, not a
+ * descriptor number, so nothing extra shows up in /proc/self/fd.
+ *
+ * Lifetime is the caller's problem and is delicate: the address is raw,
+ * so the Python side wraps it in a ctypes array and attaches a
+ * weakref.finalize that calls fr_py_unmap. Every memoryview slice
+ * references that array, so the mapping cannot be torn down while a
+ * record is alive -- touching a record after munmap is SIGSEGV, not an
+ * exception. fr_py_unmap is idempotent-safe to call only once, which is
+ * what finalize guarantees.
+ *
+ * PROT_READ only: a write through the mapping faults rather than
+ * corrupting another record's bytes. */
+/* MADV_POPULATE_READ landed in Linux 5.14; fall back to the older
+ * WILLNEED hint where the build host's headers predate it. Both are
+ * advisory -- correctness never depends on either. */
+#ifndef MADV_POPULATE_READ
+#define MADV_POPULATE_READ MADV_WILLNEED
+#endif
+
+int fr_py_map_readonly(int fd, uint64_t length, uint64_t *out_addr) {
+    if (fd < 0 || length == 0 || !out_addr)
+        return EINVAL;
+    void *p = mmap(NULL, (size_t)length, PROT_READ, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED)
+        return errno ? errno : ENOMEM;
+    /* Prefault. Without this the copy cost does not go away, it just
+     * moves from the kernel's bulk copy into per-page faults paid
+     * lazily by the parent's own loop -- measured SLOWER than a plain
+     * pread for the 28 per-worker memfds (~98k faults for 386MB), and
+     * slower still than pread even for the single orderer file. Populate
+     * up front, in the kernel, where transparent huge pages can batch
+     * it. Both hints are advisory: if neither is supported we simply
+     * fault in on demand, which is correct, only slower. */
+    (void)madvise(p, (size_t)length, MADV_POPULATE_READ);
+    (void)madvise(p, (size_t)length, MADV_HUGEPAGE);
+    *out_addr = (uint64_t)(uintptr_t)p;
+    return 0;
+}
+
+void fr_py_unmap(uint64_t addr, uint64_t length) {
+    if (addr && length)
+        munmap((void *)(uintptr_t)addr, (size_t)length);
+}
+
+/* W-PYFORKGATE: NON-DESTRUCTIVE published-minus-consumed backlog for one
+ * NUMA node's DATA ring.
+ *
+ * fr_py_data_ready_node above is deliberately consume-once: it walks
+ * write_idx forward from a private high-water mark and returns only the
+ * batches NEW since the previous call, because the fork gate uses it as a
+ * one-shot "did anything publish yet" edge. That makes it unusable as a
+ * level gauge — a caller that reads it and then decides its threshold was
+ * not met has already discarded the evidence, and can never satisfy the
+ * threshold on a later call.
+ *
+ * The fork gate needs a level: it must hold workers back until each node
+ * has published enough backlog to keep them fed (see the gate loop in
+ * run.py). This reads the two indices directly and never mutates them, so
+ * it can be polled as often as the caller likes. write_idx only advances
+ * over real DATA slots (the scanner publishes the zero-length EOF
+ * sentinel separately), so no zero-length filtering is needed here. */
+uint64_t fr_py_backlog_node(int node) {
+    uint64_t w, r;
+
+    if (!state || node < 0 || node >= 512 ||
+        node >= (int)global_num_nodes)
+        return 0;
+    w = __atomic_load_n(&state[node].write_idx, __ATOMIC_ACQUIRE);
+    r = __atomic_load_n(&state[node].read_idx, __ATOMIC_ACQUIRE);
+    return (w > r) ? (w - r) : 0;
+}
+
 /* Per-node published-DATA-batch count (W-PY21 fork timing). Same contract as fr_py_data_ready but for one NUMA node's ring:
  * cumulative DATA batches (lines>0, or byte-length>0 for byte
  * mode's 0-means-undefined); the zero-length EOF sentinel never
@@ -1948,6 +2124,7 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
                      int results_fd, int drain_mode) {
     uint64_t *offsets;
     int rc = 0;
+    unsigned punch_streak = 0;
 
     if (signal_r < 0 || !out_fds || num_workers <= 0 ||
         num_workers > 4096 || results_fd < 0 ||
@@ -1962,7 +2139,7 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
         ssize_t n;
         uint64_t wid;
         struct stat st;
-        uint64_t size, offset, remaining;
+        uint64_t size, offset;
         char buf[65536];
 
         /* 1. Signal heartbeat (blocking): one keyed record's worth
@@ -1989,31 +2166,122 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
         offset = offsets[wid];
         if (size <= offset)
             continue; /* duplicate/empty wakeup: next signal */
-        remaining = size - offset;
 
-        /* 3. Move them verbatim (bounded 64KB chunks — the drain's
-         * own RSS stays flat no matter how far behind it gets). */
-        while (remaining > 0) {
-            size_t want = remaining > sizeof(buf) ? sizeof(buf)
-                                                  : (size_t)remaining;
-            ssize_t r = pread(out_fds[wid], buf, want, (off_t)offset);
-            if (r < 0) {
-                if (errno == EINTR)
-                    continue;
-                break; /* transient: next signal re-drives us */
-            }
-            if (r == 0)
-                break; /* raced the writer: next signal re-drives us */
-            if (fr_py_write_full(results_fd, buf, (size_t)r) != 0) {
-                if (drain_mode == 1 && errno == EPIPE)
-                    rc = 5; /* abandoned stream: parent went away */
-                else
-                    rc = 4;
+        /* 3. Move whole RECORDS, never a partial one.
+         *
+         * W-STREAMDRAIN. This used to copy the raw byte range
+         * [offset, size) verbatim. That is wrong: `size` is a snapshot
+         * of a memfd a worker is still appending to, so the range can
+         * end mid-record. This drain CONCATENATES every worker's bytes
+         * into one results stream, so a partial record from worker A
+         * followed by worker B's bytes is unrecoverable -- the single
+         * shared parser reads B's header as A's payload continuation,
+         * desyncs permanently, and strands the remainder as an
+         * unparseable tail. Measured: drain copied 19402 bytes, the
+         * consumer parsed 20 records and discarded a 7328-byte tail,
+         * silently returning ~40% of the output short.
+         *
+         * So: read the 16-byte record header, and copy the record only
+         * once all 16 + len bytes are present. A partial trailing
+         * record is left for the next signal, when the worker has
+         * finished writing it. This mirrors what the Python drain
+         * already does per worker (per_worker[wid] = [offset, tail]).
+         *
+         * Bounded 64KB chunks keep this loop's own RSS flat no matter
+         * how far behind it gets. */
+        while (size - offset >= sizeof(struct fr_py_record_hdr)) {
+            struct fr_py_record_hdr hdr;
+            uint64_t need, done;
+            ssize_t h = pread(out_fds[wid], &hdr, sizeof(hdr),
+                              (off_t)offset);
+            if (h != (ssize_t)sizeof(hdr))
+                break; /* transient; next signal re-drives us */
+            /* A corrupt/garbage length must not spin us forever or ask
+             * for an absurd allocation; treat as end-of-records for
+             * this worker rather than trusting it. */
+            if (hdr.len > ((uint64_t)1 << 40)) {
+                /* A garbage length used to `break` out of this loop with
+                 * offset unmoved, so every later signal re-read the same
+                 * impossible header and broke again: the worker was
+                 * stranded silently and the drain still returned rc=0, so
+                 * the caller could not tell output had been dropped. Fail
+                 * the drain instead. */
+                rc = 4;
                 goto drain_done;
             }
-            offset += (uint64_t)r;
-            remaining -= (uint64_t)r;
+            need = sizeof(hdr) + hdr.len;
+            if (size - offset < need)
+                break; /* partial trailing record: wait for the rest */
+            for (done = 0; done < need;) {
+                size_t want = (need - done) > sizeof(buf)
+                                  ? sizeof(buf) : (size_t)(need - done);
+                ssize_t r = pread(out_fds[wid], buf, want,
+                                  (off_t)(offset + done));
+                if (r < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    /* Once bytes of THIS record are in results_fd the
+                     * stream is committed: a partial record must never be
+                     * followed by another worker's bytes, because the
+                     * single shared parser would read the next header as
+                     * payload and desync permanently. Abandoning here
+                     * with offset unmoved was worse than it looked -- the
+                     * chunk we already copied and PUNCHED is gone from
+                     * out_fds[wid], so re-reading the header on the next
+                     * signal returned zeros, and the record was then
+                     * re-emitted as a zero-length one. Fail loudly. */
+                    rc = 4;
+                    goto drain_done;
+                }
+                if (r == 0) {
+                    /* Same reasoning: we are mid-record with bytes
+                     * already emitted. There is no per-worker tail buffer
+                     * on this path to complete it -- that is the whole
+                     * reason this function only ever emits whole records
+                     * -- so advancing offset here would resume the next
+                     * signal in the middle of a record. */
+                    rc = 4;
+                    goto drain_done;
+                }
+                if (fr_py_write_full(results_fd, buf, (size_t)r) != 0) {
+                    if (drain_mode == 1 && errno == EPIPE)
+                        rc = 5; /* abandoned stream: parent went away */
+                    else
+                        rc = 4;
+                    goto drain_done;
+                }
+                done += (uint64_t)r;
+                /* W-DRAINHOLE: bash's ring_order punches a hole in the
+                 * per-worker OUTPUT memfd once it has moved a chunk out
+                 * (the same fallocate the ingress path uses). Python had
+                 * the per-worker output memfds and the moving cursor but
+                 * not the punch, so those pages stayed in the working set
+                 * and the kernel had to discover they were dead -- 64KB
+                 * preads were measuring ~15ms each, which is reclaim cost
+                 * and not I/O. Explicit holes remove them from the working
+                 * set instead.
+                 *
+                 * Safe here PRECISELY because this loop COPIES into
+                 * results_fd: the consumer holds bytes from a pipe, never a
+                 * reference into out_fds[wid], so nothing can be looking at
+                 * the range we are about to free. If this loop ever hands
+                 * out mappings instead of copying, this punch becomes
+                 * use-after-free and MUST go -- same class as the
+                 * splice/SPLICE_F_MOVE lock inversion noted above, so read
+                 * that post-mortem before changing either side.
+                 *
+                 * fallocate_punch_checked warns once per failure streak and
+                 * never advances past a range it could not free. */
+                (void)fallocate_punch_checked(
+                    out_fds[wid], (off_t)(offset + done - (uint64_t)r),
+                    (off_t)r, &punch_streak, "drain-output-memfd");
+            }
+            offset += need;
         }
+        /* Save this worker's cursor. This used to be the `worker_done`
+         * label, which the three mid-record failure paths above used to
+         * jump to; they now fail the drain instead, so nothing branches
+         * here any more and the label only drew -Wunused-label. */
         offsets[wid] = offset;
     }
 

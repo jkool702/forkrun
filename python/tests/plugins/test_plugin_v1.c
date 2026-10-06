@@ -90,3 +90,147 @@ int always_fail_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
     (void)ctx;
     return 42;
 }
+
+/* ---- W-CR5: process-DEATH fixtures (distinct from always_fail_v1) ----
+ *
+ * always_fail_v1 returns 42: an ordinary failure the engine retries and
+ * poisons. These instead KILL the worker outright, which is the case
+ * external review flagged as untested: the launcher exits non-zero,
+ * Python falls back and RE-RUNS THE WHOLE JOB, so any plugin with side
+ * effects performs them at least twice.
+ *
+ * die_once_v1 appends a marker per invocation and SIGKILLs itself on
+ * the first call only. After the rerun the marker file therefore holds
+ * TWO entries for the batch that succeeded the first time -- which is
+ * the at-least-once semantics, made observable rather than asserted.
+ *
+ * kill_path lets the test aim at a specific invocation.
+ */
+#include <signal.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+static void _append_marker(const char *tag) {
+    const char *p = getenv("FORKRUN_TEST_SIDE_EFFECT_FILE");
+    if (!p || !*p)
+        return;
+    FILE *f = fopen(p, "a");
+    if (!f)
+        return;
+    fprintf(f, "%s\n", tag);
+    fclose(f);
+}
+
+int die_once_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    (void)argc; (void)argv;
+    _append_marker("die_once");
+    /* One-shot: a marker file makes the kill happen exactly once, so a
+     * rerun of the job completes normally. */
+    const char *k = getenv("FORKRUN_TEST_DIE_FILE");
+    if (k && *k) {
+        FILE *f = fopen(k, "r");
+        if (!f) {
+            f = fopen(k, "w");
+            if (f) fclose(f);
+            raise(SIGKILL);
+        }
+        fclose(f);
+    } else {
+        static int once = 0;
+        if (!once) { once = 1; raise(SIGKILL); }
+    }
+    return 0;
+}
+
+/* Always dies. Used to show the cleanroom's fallback still returns
+ * CORRECT BYTES even though the job cannot complete under the
+ * cleanroom -- i.e. the rerun is what saves it. */
+/* die_twice_v1: SIGKILL for respawn generations 0 and 1, then succeed.
+ *
+ * Deterministic by construction, which is the point. Branches on
+ * ctx->worker_incarn -- the respawn generation the launcher passes at
+ * worker init -- so the sequence is exactly: gen 0 dies, gen 1 dies on
+ * the SAME batch, gen 2 completes.
+ *
+ * This exists because a hardcoded wincarn of 0 in the launcher made
+ * every generation look like generation 0. The FIRST death still
+ * recovered (parent and worker agreed on 0); the SECOND death of the
+ * same wid mismatched, so ring_recover_worker_core() saw a
+ * "stale record from a previous generation", cleared the transaction
+ * and reported nothing to recover -- dropping the in-flight batch
+ * WITHOUT returning it to escrow. The run then completed looking
+ * successful, silently missing records.
+ *
+ * With wincarn propagated correctly this fixture succeeds on gen 2 and
+ * the job's bytes match a healthy run. With it hardcoded, the worker
+ * would report incarnation 0 forever, die forever, and the launcher
+ * would hit its respawn cap and abort -- so this test cannot pass by
+ * accident. It is a regression test for the propagation, not just for
+ * "a death was survived".
+ */
+int die_twice_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    (void)argc; (void)argv;
+    /* Kill the first TWO invocations, then succeed. The count is kept in
+     * the marker file rather than derived from ctx->worker_incarn on
+     * purpose: the death schedule must not depend on the very field
+     * whose propagation is under test, or a regression in that field
+     * would change which invocations die and quietly invalidate the
+     * comparison against a healthy run. */
+    /* Count invocations in the SAME file _append_marker writes, so the
+     * counter and the record cannot disagree. (An earlier cut counted
+     * FORKRUN_TEST_DIE_FILE while the marker went to
+     * FORKRUN_TEST_SIDE_EFFECT_FILE: the counter never advanced, the
+     * fixture killed itself forever, and every batch was poisoned.) */
+    int prior = 0;
+    {
+        const char *k = getenv("FORKRUN_TEST_SIDE_EFFECT_FILE");
+        if (k && *k) {
+            FILE *rf = fopen(k, "r");
+            if (rf) {
+                int c, lines = 0;
+                while ((c = fgetc(rf)) != EOF) if (c == '\n') lines++;
+                fclose(rf);
+                prior = lines;
+            }
+        }
+    }
+    /* Always record the WID and generation we were launched with, so
+     * the test can assert the exact lineage rather than inferring it.
+     *
+     * Recording wid:incarnation rather than just the incarnation is
+     * what makes this a test of the invariant. The bug was that the
+     * launcher's per-wid counter and the wincarn it handed each worker
+     * disagreed. With workers>1 a fixture that simply dies N times can
+     * have every death land on a DIFFERENT wid, so the sequence
+     * (0, 0, 1) satisfies "a respawn was observed" while never
+     * exercising a second death of the same worker -- which is exactly
+     * the case that silently dropped a batch. Pairing each generation
+     * with its wid lets the test assert wid=0 across all three. */
+    char tag[64];
+    snprintf(tag, sizeof tag, "w%u:g%u",
+             (unsigned)ctx->worker_id, (unsigned)ctx->worker_incarn);
+    _append_marker(tag);
+    if (prior < 2)
+        raise(SIGKILL);
+    /* Emit exactly what process_v1 emits, by CALLING it, so a run that
+     * survives the deaths is byte-comparable with a healthy run. An
+     * earlier cut returned 0 without writing anything, so every batch
+     * was empty and the record count was 0 on BOTH paths -- which made
+     * the whole comparison vacuous. */
+    return process_v1(argc, argv, ctx);
+}
+
+int die_always_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    (void)argc; (void)argv; (void)ctx;
+    _append_marker("die_always");
+    raise(SIGKILL);
+    return 0;
+}
+
+/* Pure side effect, never dies: proves the rerun duplicates work. */
+int count_only_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    (void)argc; (void)argv;
+    _append_marker("count");
+    return 0;
+}

@@ -118,7 +118,7 @@ class TestPluginMode(unittest.TestCase):
         try:
             write_lines(path, 2000)
             out = forkrun.map(self._spec("identify"), path, mode="plugin",
-                              workers=4, order="index", nodes=1)
+                              workers=4, order="index", nodes=1, output="bytes")
             idxs = [int(rec.split(b"=", 1)[1]) for rec in out]
             self.assertEqual(idxs, list(range(len(out))))
             self.assertGreater(len(out), 1)

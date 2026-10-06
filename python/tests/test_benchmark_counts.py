@@ -129,7 +129,7 @@ class TestExactTotals(unittest.TestCase):
         valids = []
         for label, payload, mode in jobs:
             out = forkrun.map(payload, path, mode=mode, workers=4,
-                              order="index", nodes=1)
+                              order="index", nodes=1, output="bytes")
             total = count_total(out)
             valid = count_results(out)
             self.assertEqual(
@@ -196,16 +196,16 @@ class TestExactTotals(unittest.TestCase):
                 ("python", py_payload, "python"),
                 ("plugin", self.tok_spec, "plugin")):
             out = forkrun.map(payload, corpus, mode=mode, workers=4,
-                              order="index", nodes=1)
+                              order="index", nodes=1, output="bytes")
             self.assertEqual(
                 count_total(out), n_in,
                 "%s: total != %d non-blank input docs" % (label, n_in))
         py_valid = count_results(forkrun.map(
             py_payload, corpus, mode="python", workers=4,
-            order="index", nodes=1))
+            order="index", nodes=1, output="bytes"))
         pl_valid = count_results(forkrun.map(
             self.tok_spec, corpus, mode="plugin", workers=4,
-            order="index", nodes=1))
+            order="index", nodes=1, output="bytes"))
         self.assertEqual(py_valid, pl_valid)
 
 

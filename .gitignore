@@ -100,3 +100,10 @@ epyc/**/*.so
 epyc/**/headline_plugins/
 epyc/**/ml_plugin_*.so
 epyc/**/tokenize_plugin.so
+# Generated ML corpora (light/medium/heavy 5M, heavy 20M) and the heavy
+# plugin fixture, staged here for benchmark runs. Multi-GB derived data,
+# reproducible from python/benchmarks/ml/ml_data_gen.py (SEED=42) and
+# build_ml_plugin(). Ignored for the same reason as
+# BENCHMARKS/benchmark.out above: they pollute the clean-tree check that
+# release_check runs.
+numa1/

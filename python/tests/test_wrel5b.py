@@ -110,28 +110,67 @@ class TestB2StreamTaxonomy(unittest.TestCase):
         return path
 
     def _check_sigint(self, **kw):
-        path = self._path()
+        # 5000 lines, and the SIGINT is armed on PROGRESS, not on a fixed
+        # wall clock. Two independent reasons, both learned the hard way:
+        #
+        # 1. A fixed timer races a bimodal workload. When the pre-flight
+        #    wins its race against the first forked worker, CASE A picks a
+        #    very wide L (measured 9 batches for 5000 lines -- ~555 lines
+        #    each); when it loses, CASE B resumes from sim_L and the same
+        #    input becomes ~79 narrow batches. So the fast mode finished in
+        #    0.472 s and a 0.5 s timer arrived 28 ms too late, with caught
+        #    None. Every fixed-timer sizing I tried was wrong for one mode.
+        #
+        # 2. Arming only after the first blob means the interrupt cannot
+        #    land before the stream is live, and cannot land after it is
+        #    done -- the two ways a wall-clock timer fails. What remains is
+        #    guaranteed work in flight: at n=5000 even the widest batching
+        #    observed yields ~9 batches, so ~8 remain after the first.
+        #    0.05 s is short against _slow's 0.05 s per batch.
+        path = self._path(n=5000)
         old = _signal.getsignal(_signal.SIGINT)
         _signal.signal(_signal.SIGINT, _signal.default_int_handler)
-        timer = threading.Timer(0.5, lambda: os.kill(
-            os.getpid(), _signal.SIGINT))
+        # Deliver SIGINT from the kernel via setitimer, NOT a
+        # threading.Timer. forkrun forks ~21 times, so a timer thread makes
+        # the parent multi-threaded at exactly the moment it forks -- the
+        # hazard forkrun warns about in its own RuntimeWarning. That race is
+        # what made this test flaky (~1 in 3) once worker fork timing moved:
+        # the SIGINT could land inside the fork sequence and be swallowed,
+        # so `caught` came back None. A SIGALRM handler runs in the MAIN
+        # thread and raises nothing itself, so the parent stays
+        # single-threaded and the only signal in play is the SIGINT under
+        # test. setitimer is also more precise than Timer, which matters when
+        # the thing being timed is a half-second window.
+        def _fire_sigint(_signum, _frame):
+            os.kill(os.getpid(), _signal.SIGINT)
+
+        old_alrm = _signal.signal(_signal.SIGALRM, _fire_sigint)
         caught = None
+        _nb = 0
+        _t0 = time.monotonic()
         try:
-            timer.start()
             try:
                 for _blob in forkrun.stream(_slow, path, workers=2,
                                             nodes=1, **kw):
-                    pass
+                    _nb += 1
+                    if _nb == 1:
+                        # Stream is demonstrably live; now start the clock.
+                        _signal.setitimer(_signal.ITIMER_REAL, 0.05)
             except BaseException as exc:  # noqa: BLE001
                 # Catch KI itself: pre-fix the bare
                 # KeyboardInterrupt lands here (bite); post-fix the
                 # translated ForkrunInterrupted does.
                 caught = exc
         finally:
-            timer.cancel()
+            _elapsed = time.monotonic() - _t0
+            _signal.setitimer(_signal.ITIMER_REAL, 0)
+            _signal.signal(_signal.SIGALRM, old_alrm)
             _signal.signal(_signal.SIGINT, old)
-        self.assertIsInstance(caught, ForkrunInterrupted,
-                              "stream SIGINT taxonomy: got %r" % (caught,))
+        self.assertIsInstance(
+            caught, ForkrunInterrupted,
+            "stream SIGINT taxonomy: got %r after %d batch(s) in %.3fs "
+            "(SIGINT scheduled at 0.500s) kw=%r"
+            % (caught, _nb, _elapsed, kw))
         self.assertEqual(caught.signo, _signal.SIGINT)
         self.assertEqual(caught.bash_code, 130)
         self.assertIsInstance(caught, KeyboardInterrupt)
@@ -380,12 +419,21 @@ class TestB3IngestReactorLiveness(unittest.TestCase):
             # the two helpers (fallow + scanner).
             time.sleep(3.0)
             mid_kids = self._children()
-            new_kids = mid_kids - early_kids
-            self.assertTrue(
-                len(mid_kids) > len(early_kids) and new_kids,
-                "spill loop dead during stall: children %s -> %s "
+            # Assert the INVARIANT, not the fork schedule. The property
+            # under test is "the spill loop stays alive during a source
+            # stall, with workers present beyond the two helpers" -- the
+            # parent being blocked in read with the reactor blind is the
+            # bug being guarded. The old form asserted children *increase
+            # between t=1s and t=4s*, which was only true because worker
+            # forking was pinned to STALL_FORK_AFTER=2.0s; fork earlier and
+            # the workers are already present at t=1s, so the count is flat
+            # and the test failed while the invariant held. Compare against
+            # the helper count instead.
+            self.assertGreater(
+                len(mid_kids), 2,
+                "spill loop dead during stall: only helpers present %s "
                 "(reactor blind while blocked in read)"
-                % (sorted(early_kids), sorted(mid_kids)))
+                % (sorted(mid_kids),))
             # Kill a stall-forked worker; observation must be
             # prompt (poll quantum), not at writer release.
             # NOTE: a SIGKILL landing while pre-gate workers are
@@ -393,7 +441,13 @@ class TestB3IngestReactorLiveness(unittest.TestCase):
             # abort (rc==4, engine semantics — unattributable
             # batch), not a respawn: the promise under test is
             # prompt OBSERVATION/termination, not recovery.
-            victim = sorted(new_kids)[0]
+            # Pick a WORKER, not a helper. Helpers (fallow + scanner) are
+            # always forked before workers, and Linux pids are monotonic,
+            # so the highest child is a worker. Selecting by "appeared
+            # after t=1s" no longer works now that workers fork without an
+            # artificial delay -- by t=1s they are already present, so the
+            # newly-appeared set is empty.
+            victim = max(mid_kids)
             t_kill = time.monotonic()
             os.kill(victim, 9)
             rt.join(30)

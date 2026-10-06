@@ -1,0 +1,25 @@
+PASS1 light plugin default view file
+RESULT light plugin default view file auto 0.4027 1322.7110 5000000
+PASS1 light plugin max bytes pipe
+RESULT light plugin max bytes pipe auto 0.6949 766.5958 5000000
+PASS1 light plugin max view file
+RESULT light plugin max view file auto 0.3973 1340.9443 5000000
+PASS1 light plugin default view pipe
+RESULT light plugin default view pipe auto 0.4294 1240.5543 5000000
+PASS1 light plugin max view pipe
+RESULT light plugin max view pipe auto 0.4119 1293.3581 5000000
+PASS1 medium plugin default view pipe
+RESULT medium plugin default view pipe auto 1.5955 1471.2380 4997892
+PASS2 light plugin default view file
+RESULT light plugin default view file auto 0.4144 1285.6241 5000000
+PASS2 light plugin max bytes pipe
+RESULT light plugin max bytes pipe auto 0.6123 870.0356 5000000
+PASS2 light plugin max view file
+RESULT light plugin max view file auto 0.4013 1327.4433 5000000
+PASS2 light plugin default view pipe
+RESULT light plugin default view pipe auto 0.4278 1245.3562 5000000
+PASS2 light plugin max view pipe
+RESULT light plugin max view pipe auto 0.4223 1261.3975 5000000
+PASS2 medium plugin default view pipe
+RESULT medium plugin default view pipe auto 1.5724 1492.8658 4997892
+BASERUN_DONE

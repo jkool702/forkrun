@@ -180,7 +180,7 @@ class TestSpliceMode(unittest.TestCase):
         os.close(w)
         try:
             out = forkrun.map(None, r, mode="splice", bytes=16384,
-                              workers=2, order="index", nodes=1)
+                              workers=2, order="index", nodes=1, output="bytes")
             got = sorted(b for blob in out for b in blob.splitlines())
             exp = sorted(("line %d" % i).encode() for i in range(500))
             self.assertEqual(got, exp)

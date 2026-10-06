@@ -41,6 +41,10 @@ output** (batches returning `None` contribute nothing).
 `order="none"` (default) returns worker-completion order.
 Empty input returns `[]`.
 
+Each element is a **`memoryview` over a read-only mapping** of the
+result stream (`output="view"`, the default since 0.17.0) — no copy
+is made per record. See [Result representation](#result-representation).
+
 ## forkrun.stream(payload, source, **kwargs)
 
 A generator that yields each result the moment its worker
@@ -57,6 +61,85 @@ batch briefly holds the head of line, by design). Validates
 eagerly on call (bad arguments raise before the first
 `next()`). Abandoning the generator (close/GC/exception)
 tears down workers safely.
+
+**Records are always `bytes` here**, even though the default
+representation for `map()` is a view: records are drained live out of
+a results pipe or worker memfd as they arrive, so there is no finished
+collection file to map. Zero-copy is a `map()`-only property.
+`output=` is accepted and validated so all three entry points share one
+surface; it does not change what `stream()` yields.
+
+## Result representation
+
+`output=` selects the representation of each result record.
+
+| value | element type | cost |
+| --- | --- | --- |
+| `"view"` (default) | `memoryview` | a slice; no copy |
+| `"bytes"` | `bytes` | a `pread`, an allocation, and a copy per record |
+
+A view is backed by a read-only `mmap` of the result stream, unmapped
+by a `weakref.finalize` attached to the ctypes array each
+`memoryview` references. Slices keep that array alive, so the mapping
+cannot be torn down while any view is reachable. No descriptor is held
+(`mmap.mmap(fd, ...)` would dups one).
+
+**Lifetime is per-result-stream, not per-record.** One surviving view
+keeps the *whole* mapping resident, so filtering a large result down to
+a handful of records can hold gigabytes:
+
+```python
+big = forkrun.map(..., output="view")        # maps the full result
+keep = [r for r in big if r["uid"] == 7]     # maps it ALL still
+```
+
+Use `forkrun.materialize()` on the records you intend to keep, and drop
+the rest, if you are filtering a large stream. This is inherent to
+zero-copy — the alternative is the copy `output="bytes"` always
+performs — not a leak, and it is the trade the default makes.
+
+### What works on a view
+
+`len()`, slicing, `==` against `bytes` (both directions),
+`.tobytes()`, `.hex()`, `bytes(rec)`, and the buffer protocol
+(`socket.send`, `write`, `mmap.write`, …).
+
+Note that slicing a view yields another **view**, not `bytes`:
+
+```python
+rec[:4] == b"line"        # False — rec[:4] is a memoryview
+bytes(rec[:4]) == b"line"  # True
+```
+
+### What does not
+
+`memoryview` is a buffer, not a `str`/`bytes`. These need
+`forkrun.materialize(rec)` or `bytes(rec)`:
+
+```python
+rec.split(b"\n")     rec.splitlines()     rec.decode()
+rec.startswith(b"x")  b"x" in rec        sorted([rec, ...])
+```
+
+The raised types are CPython's, not ours: `AttributeError` for the
+missing methods, `NotImplementedError` for `in` (which rejects any
+`memoryview`). `rec * 3` raises `TypeError`.
+
+### Opting out
+
+```python
+records = forkrun.map(f, src, output="bytes")   # per call
+
+for rec in forkrun.map(f, src):
+    row = forkrun.materialize(rec)              # per record
+```
+
+`forkrun.materialize(rec)` returns `bytes`, copying only if `rec` is
+already a view; it is a no-op for `bytes`, `bytearray` and `str`.
+
+Any other `output` value raises `ValueError`.
+
+## forkrun.sweep(payload, source=None, *, args=None, args_from=None, link=False, **kwargs)
 
 ## forkrun.sweep(payload, source=None, *, args=None, args_from=None, link=False, **kwargs)
 
@@ -113,6 +196,7 @@ else raises `TypeError`.
 | `on_error` | `str` | `"retry"` | all — `"retry"`, `"skip"`, `"fail-fast"` |
 | `nodes` | `str`/`int` | `"auto"` | all — `"auto"`, `1`, `N`, `"0,1"`, `"@N"` |
 | `streaming` | `bool`/`None` | `None` (auto) | all — force streaming ingest or materialized |
+| `output` | `str` | `"view"` | all — `"view"` (zero-copy views) or `"bytes"`; `stream()` always yields `bytes` regardless |
 | `orchestrator` | `bool`/`None` | `None` (= reactor) | all — `None`/`True` = death-pipe supervision + respawn (worker death recovers); `False` = fail-fast fork-and-wait |
 | `c_drain` | `bool`/`None` | `False` | `map`/`stream` — forked C result collection (opt-in) |
 | `c_worker_loop` | `bool` | `False` | `map` + `mode="plugin"` — C worker loop (opt-in) |

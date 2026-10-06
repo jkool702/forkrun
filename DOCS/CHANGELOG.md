@@ -1,5 +1,423 @@
 # forkrun Changelog
 
+## v3.6.1 — 2026-10-06
+
+### Verification
+
+Verified on a UMA boot (single NUMA node, `shmem_enabled=always`):
+
+| suite | result |
+|---|---|
+| Python suite, `FORKRUN_CLEANROOM` unset | **726 passing**, 7 skipped |
+| Python suite, `FORKRUN_CLEANROOM=1` | **726 passing**, 7 skipped |
+| Bash `test_c_plugins.sh` / `test_frun.sh` | **96/96** |
+| Bash `test_frun_comprehensive.sh` | **264/264** |
+| Bash `test_frun_security.sh` | **101/101** |
+| `python/release_check.py` | **21/21 green** |
+
+The 7 skips are the tests that require multi-node NUMA and are skipped
+by design on a single-node box. The Bash suites must be run in the
+FOREGROUND: a backgrounded shell starts with SIGINT ignored and cannot
+un-ignore it, so `M1a` (SIGINT -> checkpoint + exit 130) reports a false
+failure — see the note at `UNIT_TESTS/test_frun_comprehensive.sh:2011`.
+
+### Python frontend: the pre-flight scan no longer spin-sleeps
+
+The pre-flight scan counts input lines so the geometric ramp can start
+at a batch size that gives every worker at least one equal batch. When
+`pread` returns 0 with ingest not yet complete it means "wait for more",
+and it waited with `usleep(100)` — about 10,000 wakeups in 5 s on a slow
+producer, where the Bash frontend slept 78 times. The engine already
+signals `evfd_ingest_data` when each chunk lands; the pre-flight simply
+never waited on it, and the Python spill never signalled it either.
+
+- The wait now blocks on that eventfd for a **bounded 2 ms**, then drains
+  it. The bound is load-bearing: one of the three exit conditions (the
+  first worker spawning) is detected by re-reading `active_waiters` at
+  the top of the loop, so an unbounded poll would stop noticing it. The
+  drain is load-bearing too — an eventfd left readable makes the next
+  poll return immediately, rebuilding the spin one level up.
+- The Python spill now signals the eventfd per chunk, at the same point
+  `ring_copy` does for Bash.
+
+  **The bound was 50 ms when this first landed, and that was a
+  regression, now corrected.** On a file input the eventfd does *not*
+  wake this poll, so the timeout is what returns and the bound **is** the
+  latency: it cost a fixed ~65 ms on every run — +75.7 ms on the 5M light
+  cell (+18%), +70 ms medium, +60 ms heavy. The absolute cost was flat
+  across payloads spanning 0.41 s to 4.70 s, which is what identified it
+  as fixed overhead rather than anything proportional. Found by
+  re-running the 48-cell harness and bisecting 119 commits, then
+  confirmed by re-measuring the pre-change code *on the same day* — it
+  reproduced the old baseline within 1%, which cleared the machine of
+  blame. 2 ms restores all three payloads. A spin-then-sleep ramp was
+  also tried and reverted: identical wall time, ~7% *more* voluntary
+  context switches.
+Measured on a deliberately slow pipe (2500 lines at 3 ms, 4 workers):
+13,222 → 453 context switches and 0.14 s → 0.07 s CPU, with exact
+record counts both ways.
+
+Semantics are unchanged. The pre-flight still only ever waits for more
+input, still exits only on real EOF / a full ramp's worth of lines /
+the first worker, and `pre_lines` still counts real bytes. The new
+signal deliberately never touches `state[0].ingest_complete` — that flag
+means "the copy loop ended", not "the input drained", and treating it
+as EOF is what an earlier attempt got wrong, silently dropping the
+tail. A new regression test asserts exact record counts from a slow
+pipe, the case the suite had never covered.
+
+### Python frontend: parent-side collect and fork-gate throughput
+
+Measured on an i9-7940X (14c/28t, 4 logical nodes on one socket),
+5M records / 386 MB, echo payload so the numbers isolate movement
+rather than UDF speed, `min` of 4. Paired A/B against v3.6.0.
+
+Two independent defects, both in the single-threaded parent.
+
+- **The ordered collect copied the whole result stream twice.**
+  `_read_fd_all()` accumulated every chunk in a list and then
+  `b"".join`'d them -- a second full copy of the entire ordered
+  result stream -- before parsing a single record. Profiling the
+  parent put the join alone at 155 ms of a 638 ms run (24%), with
+  `_split_records` at a further 160 ms, and the peak holding ~2x the
+  stream before parsing began. Replaced the eight buffer-then-parse
+  collect sites with `_iter_records()`, which reads a chunk, parses
+  the complete records in it, and carries only the straddling tail.
+  `_iter_records()` then maps the collection file instead of reading
+  it, parsing straight out of the mapping (each record wrapped
+  individually), which removes the kernel copy as well.
+  `map(order="index")` on this workload: **0.667 s -> 0.318 s
+  (2.1x)**; `map(order="none")` 0.358 s -> 0.305 s.
+
+  Byte-identical output: the ordered digest is unchanged, and the
+  unordered stream matches on an order-independent digest (its order
+  is nondeterministic at v3.6.0 too -- three consecutive runs give
+  three digests).
+
+- **The NUMA fork gate slept a fixed 50 ms on every run.** The gate
+  forks workers on publish and then slept 50 ms unconditionally, so
+  every multi-node run paid a full quantum even when the publish
+  landed in the first millisecond -- measured at 50.00 ms of a
+  137 ms run (24-37% of wall). Readiness is now polled on a short
+  doubling ramp. Supervision (`_watch_pipeline` +
+  `reactor_poll_once`'s O(N) waitpid sweep) deliberately stays on the
+  original 50 ms cadence; running it on every fast poll made high
+  worker counts slower (+8.8% at 48w, +24% at 96w) while the same
+  ramp won -20.8% at 8w.
+
+  A flat ramp still regressed at 96w (+34%), because forking the
+  whole `-j` complement against a barely-filled ring starts every
+  worker spinning (`forkrun_ring.c:6121` `cpu_relax` x100) and
+  steals the cores the ingest threads need. At the measured
+  ~13 batches/ms publish rate a first-publish gate saw 46 batches of
+  backlog at 96w (0.5/worker). The gate now waits for a per-worker
+  backlog floor: **-26% at 8w, -5.5% at 28w, -3.0% at 48w, neutral
+  at 96w.**
+
+  That floor needs a level gauge, and `fr_py_data_ready_node` cannot
+  supply one: it is consume-once, walking `write_idx` forward from a
+  private high-water mark, so a poll below the floor has already
+  burned the evidence and the floor becomes unreachable. (This
+  deadlocked the gate into a false "no published batches" error
+  before it was caught.) Added **`fr_py_backlog_node`**, a
+  non-destructive `write_idx - read_idx` read. Read-only and
+  additive -- no existing signature or struct layout moved, so the
+  ABI stays backward compatible for already-built consumers. A
+  substrate predating the symbol degrades to the old first-publish
+  gate rather than hard-failing, and a node still holding unclaimed
+  batches when the pipeline quiesces always forks, so the floor can
+  never drop work.
+
+Net effect on the bash gap at this workload: `map(order="index")`
+2.90x -> **1.39x**, `map(order="none")` 1.56x -> **1.33x**.
+
+The remaining collect cost is the irreducible per-record `bytes`
+copy (386 MB at ~2.5 GB/s), which is what separates a
+discrete-`bytes`-objects API from bash's byte-stream emit.
+
+Also measured and deliberately NOT changed: the 20 ms streaming
+backpressure sleep is genuine rate-limiting, not a defect -- it fired
+zero times on a healthy pipeline (file or pipe source). The
+`_time.sleep(0.005)` death-confirm spin and the
+`os.fork()`-per-worker cost (315 us at 28w, 974 us at 96w, fully
+serial in the parent, vs 61 us for bash's clone) remain open.
+
+### Python frontend: zero-copy result records, default `output="view"`
+
+**This changes the default result representation. Python frontend
+version 0.16.0 -> 0.17.0.** Migration notes at the end of this
+section; `output="bytes"` is a complete escape hatch.
+
+The previous section closed most of the bash gap but named what was
+left: "the remaining collect cost is the irreducible per-record
+`bytes` copy (386 MB at ~2.5 GB/s)". It was irreducible *given a
+discrete-`bytes`-objects API*. It is not irreducible given a mapping.
+
+- **The result stream is now mapped, and records are views into it.**
+  Added `fr_py_map_readonly` / `fr_py_unmap` to the shim: the parent
+  maps the collection file `PROT_READ`/`MAP_SHARED` and `_iter_records`
+  yields `memoryview` slices over it instead of `bytes` copies. Each
+  `bytes` record cost a `pread` plus an allocation plus a copy; a view
+  costs a slice. Measured on this workload: **order="none" 0.318 s ->
+  0.125 s, order="index" 0.343 s -> 0.148 s (2.5x / 2.3x).**
+
+  `madvise(MADV_POPULATE_READ)` is load-bearing, not a nicety: without
+  the prefault the mapping takes a fault per page during the first
+  pass over the records and gives most of the win back. `MADV_HUGEPAGE`
+  is set too, for the same reason.
+
+  `mmap.mmap(fd, ...)` was rejected for this: it dups the descriptor
+  and releases it only when the mapping is collected, and these
+  mappings are held by live records. Mapping in C keeps the descriptor
+  out of it entirely -- `test_no_fd_leak_from_mappings` asserts the fd
+  count is unchanged while results are held.
+
+  Lifetime is structural, not conventional. The `memoryview` references
+  a ctypes array that owns the address, and a `weakref.finalize` on
+  that array unmaps. Every slice keeps the array alive, so the mapping
+  cannot be torn down while any view is reachable -- there is no window
+  in which a stale view would fault. `test_view_survives_run_and_source_teardown`
+  reads a record after the run is gone *and* the source file is
+  unlinked; it was written to catch the failure mode that mattered
+  (a silently zeroed or recycled region), and it passes.
+
+- **Two bugs the migration surfaced, both now fixed.** Both were found
+  by writing tests, not by reading code:
+
+  - `c_char` gives a `memoryview` of format `<c`, and CPython refuses
+    to compare that against bytes -- `view == b"..."` was silently
+    **False**. Switched the backing array to `c_ubyte` (format `<B`),
+    which compares equal in both directions. A user comparing a result
+    to an expected `bytes` would have gotten a wrong answer, not an
+    error.
+
+  - `output="bytes"` was silently ignored on every streaming-ingest
+    path (pipe sources). The flag was threaded to 13 dispatch sites;
+    `_execute`, `_execute_locked`, `_execute_ingest` and
+    `_execute_ingest_locked` had no parameter to receive it, so those
+    runs returned views regardless of what was asked for. `map()` over a
+    pipe with `output="bytes"` now returns `bytes`.
+
+- **`stream()` is unchanged and still yields `bytes`.** It drains
+  records live from a results pipe or worker memfd as they arrive, so
+  there is no finished collection file to map; zero-copy is a
+  `map()`-only property. `output=` is still accepted and validated on
+  `stream()` so the three entry points share one surface, but it does
+  not change what is yielded. Documented rather than faked.
+
+- **Also in this wave:** the ordered collect no longer `pop(0)`s off a
+  list (quadratic); buffers are resliced per signal instead of
+  reallocated; the environment is read per quantum instead of per
+  batch; and the reactor's reap sweep is throttled rather than O(N)
+  per poll. `stream(lines=1)` went from not completing in 120 s to
+  3.35 s. Scanner `spawn_r`/`spawn_w` are wired, which needed a
+  `wid_node` invariant fix: scanner requests must allocate wids from the
+  *requested* node's block, or multi-node spawn silently shares one.
+
+Measured against bash on the same box at **10 GB / 7.44M records**, so no
+measurement is in the startup-dominated regime: same `-j 28`, matched
+echo payloads (bash `f(){ cat; }`, Python `batch.data`), `-b 4M`,
+`min` of 3, interleaved, `frun.bash` sourced outside the timed region.
+Every row is byte-verified against the input size.
+
+| path | ordered | unordered |
+| --- | --- | --- |
+| bash (`-k` / `-u`) | **3.91 s** (2556 MB/s) | **3.55 s** (2817 MB/s) |
+| Python 0.17.0 `output="view"` | 5.12 s (1955 MB/s) | 3.73 s (2681 MB/s) |
+| Python 0.17.0 `output="bytes"` | 10.16 s (984 MB/s) | 8.46 s (1183 MB/s) |
+
+Zero-copy is worth **2.0–2.3×** over the bytes representation, and it
+closes most of the remaining gap: unordered is at parity (1.05×), ordered
+is 1.31×.
+
+Two measurement notes, both of which changed a conclusion here:
+
+- **At 386 MB the same comparison said Python *beat* bash** (0.148 s vs
+  0.181 s). At 10 GB it does not. The short run flattered Python and the
+  larger one did not, so the earlier reading was a size artifact, not a
+  result. Short runs stay in the regime where fixed costs — engine init,
+  forking 28 workers, mapping setup — are a visible fraction of wall.
+- **`orchestrator=False` gets the same win** (3.96 s vs 3.73 s
+  unordered) only because its collect was rerouted through the mapping;
+  it has its own parse and was the second place `output=` was ignored.
+
+Caveat on the bash row: its echo payload is a shell function that forks
+`cat` per batch, so bash carries a per-batch fork Python does not. The
+comparison is fair in output volume, not in UDF mechanics.
+
+**Migration.** Code that treats results as `bytes` and uses `.split`,
+`.splitlines`, `.decode`, `.startswith`, `b"x" in rec`, sorting, or
+arithmetic needs one of:
+
+```python
+rec = forkrun.materialize(rec)   # explicit, and the escape hatch is public
+records = [bytes(r) for r in forkrun.map(...)]   # or opt out per call
+records = forkrun.map(..., output="bytes")       # or per call
+```
+
+`len()`, slicing, `==` against bytes, `.tobytes()`, `.hex()` and
+buffer protocol use need no change. `memoryview` has no `.split` and
+`in` raises `NotImplementedError` for any `memoryview` -- both are
+CPython's, not ours.
+
+**The unordered fail-fast ceiling no longer exists.** The v3.6.0
+release benchmark carried a `(max)` row (`orchestrator=False`,
+`order="none"`) because disabling recovery and ordering was worth 24% on
+the light 5M corpus. Re-measured 2026-10-02 across 12 cells it is worth
+nothing: the two configurations differ by -1.8% to +7.9% with no
+consistent direction, and `(max)` is the slower of the pair in 7 of 12.
+Ordering and crash recovery are now effectively free, because the
+C-orderer transit they used to pay has been removed. The release table
+now carries only default-configuration rows, split by output
+representation; the `(max)` measurements are kept so the claim is
+checkable rather than asserted.
+
+The same re-measurement bounds what the zero-copy change is worth on
+real UDF workloads: **1.01x-1.45x**, not the 2.0-2.3x a pure-echo
+payload reaches. These payloads parse, extract and filter per record, so
+result collection is a smaller share of wall. The C plugin gains more
+(1.11-1.45x) than the Python UDF (1.01-1.09x) for the same reason. All
+24 cells exactness-checked against the release table's record totals.
+
+**Streamed input now matches file input.** `read()` on a pipe returns at
+most what the pipe buffer holds, however much was requested, so against
+a 64 KiB default capacity and a 1 MiB read size every streamed source
+spilled in 64 KiB writes — 16× the syscall count of the same bytes from
+a file. Both Bash ingest paths already resize the FIFO to 1 MiB on
+`S_ISFIFO` (`ring_copy_main` for UMA, `ring_numa_ingest_main` for NUMA);
+Python's UMA streaming path was the only ingest path in the codebase
+that did not. Fixing it took the default configuration's pipe penalty
+from **+105% / +153% / +126%** (light/medium/heavy) to
+**+1.9% / −6.4% / −18.3%** — on heavy, a pipe is now 18% *faster* than
+the file. 26 of 32 completed cells are at parity or better.
+
+Three further fixes in the same path, each found by measuring: a flat
+20 ms sleep per empty ingest quantum (645 sleeps on light-5M = 12.9 s of
+a 14.65 s wall, now a `select()` on the source and the reactor's
+descriptors together); `output=` silently ignored on the pipe and
+fail-fast paths; and two pre-existing teardown leaks on the abort path
+— the streaming-reactor executor never passed `orderer_pid` to teardown,
+and the reap list covered only worker slots still marked alive, so a
+SIGKILLed worker's pid was never reaped. Both leak classes were found
+by logging every `os.fork()` in the path and diffing the ledger against
+what teardown had been told.
+
+The ingest-source setup (dup + resize) is now one helper called by all
+three ingest executors, with a test that fails if any of them stops
+using it.
+
+Tests: 656 run. Coverage added: 12 tests in `test_output_mode.py`
+(both representations, byte-identity, invalid values, lifetime, fd
+hygiene, degenerate shapes). The pre-existing content tests were moved
+to `output="bytes"` so they keep testing the bytes contract, with
+`test_output_mode.py` taking the view side. Remaining failures are the
+packaging/release gates (wheel rebuild and the dirty-tree release
+checklist), both pre-existing.
+
+### Python frontend: workers fork without an artificial stall
+
+`STALL_FORK_AFTER` (the timer that forked workers when the pre-flight had
+not published within N seconds) drops from **2.0 s to 0**. The parent now
+forks workers as soon as its own setup is done, using only the natural
+latency the scanner already gets — it is forked before the ingest loop,
+so the scan runs concurrently with setup rather than being serialised
+behind a timer.
+
+CASE B (a worker arrives, the scan is cut short) resumes the geometric
+ramp from `sim_L`, and that ramp doubles, so it converges without help.
+Delaying the fork bought the ramp nothing. Measured, light/medium/heavy
+5M file plus a 2816-line input, median of 3–5:
+
+| `STALL_FORK_AFTER` | light | medium | heavy | small input |
+|---|---|---|---|---|
+| 2.0 | 0.4081 s | 1.4793 s | 4.7188 s | 0.1079 s |
+| 0.05 | — | — | — | 0.1073 s |
+| **0.0** | **0.3952 s** | **1.4771 s** | **4.7085 s** | **0.0257 s** |
+
+Equal or better everywhere, and **4× on a small input**, where a fixed
+wait dominates the entire run. There is a cliff at zero: anything ≥ 50 ms
+costs the full ~107 ms, so an intermediate value is not a compromise
+between 0 and 2 s — it is 2 s. CASE B is also the Bash-normal path, so
+this moves Python toward Bash rather than away from it.
+`FR_STALL_FORK_AFTER` remains as a tuning knob.
+
+Re-measured on the release boot (UMA, `nodes=1`, `shmem_enabled=always`,
+28 workers, median-of-3, fresh process per cell, **48/48 and 16/16 cells
+exact**) after this change. Every §0 forkrun row moved **up**, +0.2% to
++8.7%, the rows that gained most being the ones that fork — a fixed
+~65 ms saving is a bigger share of a 0.49 s light plugin run than of a
+52 s heavy UDF run.
+
+`light` at 20M records / 2.13 GB, file input, both topologies:
+
+| topology | plugin view | plugin bytes | UDF view |
+|---|---|---|---|
+| UMA `nodes=1` | 1134.7 MB/s (10.65M rec/s) | 873.2 MB/s (8.20M) | 203.5 MB/s (1.91M) |
+| fake-NUMA `nodes=auto` | 1440.7 MB/s (13.52M rec/s) | 1045.2 MB/s (9.81M) | 204.2 MB/s (1.92M) |
+
+Against the prior 48-cell cross-check on identical fake-NUMA settings:
+**+4.6%** view and **+3.3%** bytes; the UDF row is flat (−0.5%), as
+expected for a Python-callback-bound row that forks nothing.
+
+**The file-vs-pipe sign flips between topologies, so a streaming number
+quoted without naming the topology can be backwards.** On UMA a pipe is
+13–21% *faster* than a file on the plugin rows (1134.7 → 1377.8 MB/s
+view); on the 4-node boot a pipe *costs* 5–8%. Same code, same corpus,
+both 16/16 exact. The cause is topology rather than the stream: file
+input already engages the multi-node ingest path on 4 nodes, leaving a
+pipe less to win, while on UMA there is no such path for a file to
+borrow.
+
+### Python frontend: `poisoned_batches` is now real, and says when it is short
+
+The cleanroom reported a poisoned-batch **count** but not the **indices**,
+so `poisoned_batches` came back empty whenever poison happened — the same
+silent gap the scalar count was added to close. Each worker now relays its
+poisoned batch index out on a bounded per-worker slot of the stats memfd
+(`fr_py_poison_relay`), with the count published last so a reader that
+sees the count also sees the indices. The slot is fixed-capacity and
+drops rather than grows.
+
+Because that capacity can be reached, a short list is no longer
+indistinguishable from a complete one. `map(..., return_stats=True)` and
+`forkrun.last_run_stats()` gain **`poisoned_batches_truncated`**, and
+`map()` warns once when it is set, naming how many indices are missing.
+It is derived from data that already crosses (`poisoned` is exact; the
+per-slot counts are summed), so the wire format is unchanged. `poisoned`
+itself remains exact either way. The flag is always `False` on the
+in-process path, which keeps every index in a Python list.
+
+### Fixes in opt-in paths found by review
+
+- **`c_drain` (`fr_py_drain_loop`) could corrupt the stream.** A non-EINTR
+  `pread` error mid-record resumed with `offset` unmoved, but the bytes
+  already copied had been *punched* out of the worker memfd — so the next
+  signal re-read the record header from a hole, got zeros, and re-emitted
+  the record as a zero-length one. A short read advanced `offset` past a
+  partial record, and an absurd `hdr.len` stranded that worker permanently
+  while still reporting success. All three now fail the drain explicitly
+  instead of corrupting it. Each is unreachable while the pre-flight's
+  fstat assumption holds, so no healthy path changes.
+- **A torn final record was accepted as a clean end of stream.** The
+  cleanroom collector broke out of its parse loop on a short payload and
+  returned normally, so truncated output looked well-formed and was merely
+  short. It now warns — deliberately not raises, because a worker killed
+  mid-record legitimately leaves a torn tail that `strict_poison` and the
+  poison counts already report, and raising would report one death twice.
+- **The cleanroom used a second, hand-copied result collector** built on
+  stdlib `mmap.mmap`, which dups the descriptor and holds it for the life
+  of the mapping — contradicting the invariant `API.md` already states. It
+  now routes through the same `_map_collect`/`fr_py_map_readonly` helper
+  the in-process path uses, which also prefaults and requests hugepages.
+  The two parse loops are collapsed into one, so a fix cannot land in one
+  and miss the other again.
+- **`forkrun_ring.c` no longer references a shim symbol.** It briefly
+  called `fr_py_poison_relay`, whose definition lives in `_shim.c`; the
+  call was dead (only the cleanroom sets `$FRK_POISON_FD`, and the
+  cleanroom runs the shim's loop) but it broke the substrate canary,
+  which links `ring.o` with `-Wl,--no-undefined` precisely to keep ring.c
+  free of shim symbols.
+
 ## v3.6.0 — 2026-09-30
 
 ### Second-review remediation, six waves (W-REL6)

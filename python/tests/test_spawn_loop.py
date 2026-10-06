@@ -97,8 +97,10 @@ class TestCSpawnLoopParity(unittest.TestCase):
         # C worker loops are UMA-only by gate — pin UMA so the
         # parity compares loop implementations, not topologies.
         kw.setdefault("nodes", 1)
-        a = forkrun.map(payload, path, mode="spawn", **kw)
+        a = forkrun.map(payload, path, mode="spawn", output="bytes",
+                        **kw)
         b = forkrun.map(payload, path, mode="spawn", c_spawn_loop=True,
+                        output="bytes",
                         **kw)
         return a, b
 

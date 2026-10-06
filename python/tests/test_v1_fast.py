@@ -216,7 +216,7 @@ class TestSpawnV1(unittest.TestCase):
         try:
             write_lines(path, 20)
             out = forkrun.map(["ls", "/proc/self/fd"], path, mode="spawn",
-                              workers=2, order="index", nodes=1)
+                              workers=2, order="index", nodes=1, output="bytes")
             for blob in out:
                 self.assertEqual(sorted(blob.decode().split()),
                                  ["0", "1", "2", "3"])

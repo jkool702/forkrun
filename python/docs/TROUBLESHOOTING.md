@@ -75,16 +75,40 @@ the same process (calls serialize on a process-wide lock).
 
 ## Calling from threaded parents
 
-Concurrent `run()`/`map()` calls from threads are supported
-(serialized internally), and you will see CPython's
-`DeprecationWarning: ... multi-threaded, use of fork() ...`
-when workers fork — that warning is expected noise, not a
-failure. One real caveat: pass payloads as **callables**,
-not `"pkg.mod:func"` strings, from threaded parents. A
-string spec makes the forked worker `import` the module, and
-if another thread holds the import lock at fork time the
-child can deadlock. (Single-threaded parents are unaffected
-— the import happens post-fork with no contention.)
+**Read this before assuming a threaded host is fine. It is not.**
+
+What is true: concurrent `run()`/`map()` calls are serialized
+internally by `_RUN_LOCK`, so two forkrun invocations will not
+interleave. That is all "supported" means here — it is a lock
+around forkrun's own state, **not** a guarantee that forking a
+multi-threaded process is safe.
+
+What is not true: that arbitrary threaded-parent usage is
+supported. `fork()` gives the child only the calling thread. Any
+lock another thread held at that instant — the import lock, a
+logging lock, an allocator lock, your own mutex — stays held
+forever in the child, which then hangs. CPython warns about this
+(`DeprecationWarning: ... multi-threaded, use of fork() ...`),
+and that warning is **not** expected noise: it is the accurate
+signal that this hazard applies to your program.
+
+Practical guidance:
+
+- **Single-threaded parent: fully supported.** No caveat.
+- **Threaded parent: you own the risk.** forkrun warns once when
+  it detects multiple threads. Set
+  `FORKRUN_REQUIRE_SINGLE_THREADED=1` to make that condition
+  FATAL instead of a warning, which is what you want in CI or in
+  a service where a silent deadlock is worse than a refusal.
+- **Pass payloads as callables**, not `"pkg.mod:func"` strings,
+  from threaded parents. A string spec makes the forked worker
+  `import` the module, and if another thread holds the import lock
+  at fork time the child deadlocks on it.
+
+If you need forkrun inside a threaded host, the robust shape is
+to run it in a dedicated single-threaded process (a subprocess or
+a dedicated worker thread that owns its own event loop) rather
+than relying on the internal lock.
 
 ## `CUDA ... refusing to fork`
 

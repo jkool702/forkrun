@@ -53,6 +53,11 @@ def lines_of(blobs):
             continue
         if isinstance(b, str):
             b = b.encode()
+        # Results are memoryview views by default since 0.17.0, and this
+        # helper needs bytes to split. tobytes() rather than
+        # forkrun.materialize() to keep this module import-light.
+        if isinstance(b, memoryview):
+            b = b.tobytes()
         out.extend(b.splitlines())
     return sorted(out)
 

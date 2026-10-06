@@ -354,7 +354,7 @@ class TestNumaExecution(unittest.TestCase):
             try:
                 res = forkrun.map("w21pin_mod:payload",
                                   _make_input(400), workers=4,
-                                  nodes=NODES_2)
+                                  nodes=NODES_2, output="bytes")
             finally:
                 sys.path.remove(d)
             self.assertTrue(res)

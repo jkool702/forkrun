@@ -53,7 +53,19 @@ CANARY_STUBS = substratestubs.o
 PY_OUT ?= python/forkrun/libforkrun_python.so
 PY_SHIM_OBJ = forkrun_python_shim.o
 
+# W-CR1: the cleanroom launcher. Standalone C program that owns the
+# WHOLE pipeline (init, spill, memfds, fork fallow/workers/scanner,
+# drain) so the hot path crosses exec() instead of inheriting a large
+# Python address space. It dlopens $(PY_OUT) at runtime, so it does NOT
+# link the engine -- building it needs no engine objects, only -ldl.
+# Shipped next to the .so; forkrun.run locates it relative to that.
+CR_OUT ?= python/forkrun/_forkrun_cleanroom
+CR_SRC = forkrun_cleanroom.c
+
 all: canary
+
+.PHONY: cleanroom-launcher
+cleanroom-launcher: $(CR_OUT)
 
 .PHONY: all canary canary-versions check clean python-substrate FORCE bench bench-small bench-large bench-csv reproducibility-check clean-python
 
@@ -88,9 +100,16 @@ $(PY_OUT): $(PY_SHIM_OBJ) $(CANARY_STUBS)
 	$(CC) -shared -o $@ $(PY_SHIM_OBJ) $(CANARY_STUBS) \
 		-Wl,--no-undefined $(ALLOWED_DEPS) $(LDFLAGS_REPRO)
 
-python-substrate: $(PY_OUT)
+python-substrate: $(PY_OUT) $(CR_OUT)
 	@file $(PY_OUT) | sed 's/^/python substrate artifact: /'
 	@echo "python-substrate OK: $(PY_OUT)"
+
+# W-CR1: launcher build. -O2 -D_GNU_SOURCE for memfd_create/
+# copy_file_range; -ldl for dlopen. No engine linkage on purpose --
+# it resolves every fr_py_* symbol from the .so at runtime.
+$(CR_OUT): $(CR_SRC) $(PY_OUT)
+	$(CC) -O2 -D_GNU_SOURCE -o $@ $(CR_SRC) -ldl -lrt
+	@echo "cleanroom launcher OK: $@"
 
 # W-PY23: two consecutive builds must be byte-identical (same
 # source + same compiler). Touches the shim so both builds

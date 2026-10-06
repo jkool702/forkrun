@@ -76,9 +76,9 @@ class TestReactorBasic(unittest.TestCase):
     def test_map_parity_none(self):
         path = _make_input(1500)
         try:
-            simple = forkrun.map(_up, path, workers=4, nodes=1)
+            simple = forkrun.map(_up, path, workers=4, nodes=1, output="bytes")
             react = forkrun.map(_up, path, workers=4,
-                                orchestrator=True, nodes=1)
+                                orchestrator=True, nodes=1, output="bytes")
             self.assertEqual(lines_of(simple), lines_of(react))
         finally:
             os.unlink(path)
@@ -127,10 +127,10 @@ class TestReactorBasic(unittest.TestCase):
         path = _make_input(3000)
         try:
             simple = forkrun.map(None, path, mode="splice",
-                                 bytes=32768, workers=2, nodes=1)
+                                 bytes=32768, workers=2, nodes=1, output="bytes")
             react = forkrun.map(None, path, mode="splice",
                                 bytes=32768, workers=2,
-                                orchestrator=True, nodes=1)
+                                orchestrator=True, nodes=1, output="bytes")
             self.assertEqual(lines_of(simple), lines_of(react))
         finally:
             os.unlink(path)

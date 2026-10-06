@@ -272,11 +272,13 @@ class TestPythonOutputRollback(unittest.TestCase):
             try:
                 t0 = time.monotonic()
                 res = forkrun.map(spec, path, workers=2,
+                                  output="bytes",
                                   orchestrator=True, order=order, nodes=1)
                 dt = time.monotonic() - t0
             finally:
                 sys.path.remove(plugin_dir)
-            healthy = forkrun.map(_up, path, workers=2, order=order, nodes=1)
+            healthy = forkrun.map(_up, path, workers=2, order=order,
+                                  nodes=1, output="bytes")
             if order == "none":
                 # Completion order is nondeterministic — compare sets.
                 self.assertEqual(lines_of(res), lines_of(healthy))
@@ -381,6 +383,7 @@ class TestPublishPayloadBoundary(unittest.TestCase):
             sys.path.insert(0, plugin_dir)
             try:
                 res = forkrun.map(spec, path, workers=2,
+                                  output="bytes",
                                   orchestrator=True, order="index", nodes=1)
             finally:
                 sys.path.remove(plugin_dir)
@@ -444,6 +447,7 @@ class TestMultipleDeaths(unittest.TestCase):
             sys.path.insert(0, plugin_dir)
             try:
                 res = forkrun.map(spec, path, workers=2,
+                                  output="bytes",
                                   orchestrator=True, order="index", nodes=1)
             finally:
                 sys.path.remove(plugin_dir)

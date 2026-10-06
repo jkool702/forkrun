@@ -448,7 +448,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.6.0"
+#define FORKRUN_RING_VERSION "v3.6.1"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -1874,6 +1874,41 @@ struct SharedState {
 };
 
 static struct GlobalState *g_state = NULL;
+
+/* ── Poison-index relay (cleanroom stats channel) ──────────────────────────
+ *
+ * The poison COUNT already reaches the parent: poisoned_count lives in
+ * g_state, which fr_py_init maps MAP_SHARED precisely so forked children
+ * share it, so a worker's atomic increment is visible in the launcher.
+ * The batch INDICES have no such home -- the engine does not model poison
+ * as a ring_poll event (the six events are ABORT/EOF/IGNORE/SPAWN/
+ * TIMEOUT/TRAP_ACK), so nothing already carries them.
+ *
+ * Rather than grow GlobalState, relay them through the stats memfd the
+ * launcher ALREADY creates for the scalar count, using one fixed slot per
+ * worker. Each worker writes only its own slot, so there is no shared
+ * writer and no atomic protocol beyond a release store of the count; the
+ * launcher writes the header after joining every worker.
+ *
+ * The fd number arrives by environment rather than by config, for the
+ * same reason FORKRUN_C_STDIN and FD_WORKER_W do: it is frontend
+ * plumbing, not engine configuration, and getenv is valid post-fork where
+ * running bash internals would not be.
+ *
+ * Entirely best-effort. Absent env var (every non-cleanroom run) means the
+ * first call costs one getenv and then nothing; a full slot stops
+ * recording rather than growing, so the relay is BOUNDED and cannot make
+ * a run fail.
+ *
+ * The capacity constant lives HERE because _shim.c includes this file and
+ * fr_py_poison_relay (defined in _shim.c) needs it. It is a #define, so it
+ * creates no link dependency -- which is the point: ring.c must stay free
+ * of shim symbols so the substrate canary can link it with
+ * -Wl,--no-undefined and no shim present.
+ */
+#define FR_POISON_SLOT_U32 1024u   /* slot capacity in u32 indices */
+
+
 static struct SharedState *state = NULL;
 
 static inline void cleanup_waiter_state() {
@@ -4403,7 +4438,93 @@ uint64_t chunk_bounds[16] = {0};
         hit_real_eof = true;
         break; // reached real EOF — pre_lines is the exact total line count
       } else {
-        usleep(100);
+        /* W-PREFLIGHT: pread returning 0 with ingest NOT done means
+         * "wait for more", never EOF. Spin-sleeping here cost ~10k
+         * wakes in 5 s on a slow producer where Bash slept 78 times,
+         * because ring_copy_main signals evfd_ingest_data when each
+         * chunk lands and this branch never waited on it.
+         *
+         * Block on that eventfd instead. Two details make this a pure
+         * latency fix rather than a semantic change:
+         *
+         *  - The timeout is BOUNDED on purpose. One of the three exit
+         *    conditions (the first worker spawning) is detected by
+         *    re-reading active_waiters at the top of this loop. An
+         *    unbounded poll would stop us ever noticing that, so we
+         *    force a re-loop and re-check on a short bound (2 ms -- see
+         *    below for why not 50). Where the eventfd does fire the bound
+         *    is only a fallback and wakeups stay event-driven, so the
+         *    ~10k-wakeups-per-5s spin this replaced is gone either way.
+         *    50 ms measured as a flat ~65 ms of fixed per-run cost
+         *    instead, which is not free at all.
+         *
+         *  - The counter is DRAINED. An eventfd left readable makes the
+         *    next poll return at once, which would rebuild the spin one
+         *    level up. The main ramp drains it the same way (5333).
+         *
+         * Semantics are unchanged: we still only ever wait for more
+         * input, and only ingest_done ends the pre-flight. The exactness
+         * of pre_lines is unaffected -- it still counts real bytes.
+         */
+        struct pollfd _pfds[2];
+        int _nfd = 0;
+        if (evfd_ingest_data >= 0)
+          _pfds[_nfd].fd = evfd_ingest_data, _pfds[_nfd].events = POLLIN, _pfds[_nfd].revents = 0, _nfd++;
+        if (evfd_ingest_eof >= 0)
+          _pfds[_nfd].fd = evfd_ingest_eof,  _pfds[_nfd].events = POLLIN, _pfds[_nfd].revents = 0, _nfd++;
+        if (_nfd > 0) {
+          /* 2 ms, not 50. Measured on a file input the eventfd does NOT
+           * wake this poll, so the timeout is what returns and the bound
+           * IS the latency: 50 ms cost a fixed 75 ms of wall clock on the
+           * 5M light cell (+18%), 70 ms medium, 60 ms heavy. The absolute
+           * cost was flat across payloads spanning 0.41 s to 4.70 s,
+           * which is what identified it as fixed overhead rather than
+           * anything proportional. At 2 ms all three return to the
+           * pre-c55a2714 baseline. Tighter is the safe direction for both
+           * reasons the bound exists: it notices the "first worker
+           * spawned" exit condition sooner, and where the eventfd does
+           * fire the timeout is only a fallback.
+           *
+           * Why a small bound is SAFE here -- measured, not assumed. The
+           * pre-flight is bounded, not open-ended: it ends at EOF, at
+           * target_pre == W_max * Lmax lines counted, or when a worker
+           * arrives and starves. Instrumented (window = scanner entry to
+           * post-pre-flight) against a deliberately slowed pipe producer:
+           *
+           *   producer      window        pre_lines/target  waiters  case
+           *   fast 5M file   3.8-6.5 ms   39361/28672         0      A
+           *   1.2 s/MB, 6MB 2005-2014 ms  19678/28672         1      B
+           *
+           * Both branches work as designed. Fast: reaches target_pre,
+           * CASE A computes the optimal L = pre_lines/W and skips the
+           * geometric ramp -- the entire point of the pre-flight. Slow:
+           * STALL_FORK_AFTER (run.py) forks a worker, it starves on an
+           * empty ring (waiters=1), CASE B resumes the ramp from sim_L=4.
+           *
+           * The 2005 ms row is also why this bound is 2 ms and not 50: a
+           * 2 ms poll over a window that can reach the stall timeout is
+           * cheap, whereas 50 ms was paying a fixed ~65 ms on EVERY run,
+           * fast producer included. A spin-then-sleep ramp (Shape 4) was
+           * tried here on the theory that the window could be seconds; it
+           * measured identical in wall time and ~7% HIGHER in voluntary
+           * context switches (11084 vs 10372), so it was reverted.
+           *
+           * This contradicts c55a2714's "~10k wakes in 5 s on a slow
+           * producer": ~10k wakes at usleep(100) is ~1 s of spinning, and
+           * nothing makes this window that long except STALL_FORK_AFTER
+           * itself, which is a fork-timing constant, not a wait. */
+          poll(_pfds, _nfd, 2);
+          if (evfd_ingest_data >= 0) {
+            uint64_t _drain = 0;
+            while (sys_read(evfd_ingest_data, &_drain, 8) > 0) { }
+          }
+          if (evfd_ingest_eof >= 0) {
+            uint64_t _drain = 0;
+            while (sys_read(evfd_ingest_eof, &_drain, 8) > 0) { }
+          }
+        } else {
+          usleep(100); /* no eventfds (pre-init): keep the old behaviour */
+        }
       }
     }
 
@@ -4440,6 +4561,20 @@ uint64_t chunk_bounds[16] = {0};
 
     if (L > Lmax) L = Lmax;
     if (L < 1)    L = 1;
+    /* W-PREFLIGHT-TRACE: env-gated, so it costs nothing in normal runs.
+     * Reports which of the two cases the pre-flight landed in and the
+     * batch size it committed to. CASE A (pre_lines >= target_pre or
+     * real EOF) skips the geometric ramp entirely and uses
+     * pre_lines/W; CASE B means the pre-flight was cut short because a
+     * worker arrived first, and falls back to the small-size ramp. */
+    if (getenv("FR_PREFLIGHT_TRACE"))
+      fprintf(stderr,
+              "PREFLIGHT case=%s pre_lines=%llu W=%llu target_pre=%llu "
+              "eof=%d waiter=%llu L=%llu\n",
+              (pre_lines >= target_pre || hit_real_eof) ? "A" : "B",
+              (unsigned long long)pre_lines, (unsigned long long)W,
+              (unsigned long long)target_pre, (int)hit_real_eof,
+              (unsigned long long)W, (unsigned long long)L);
   }
   // -----------------------------------------------------------------
 
@@ -6591,6 +6726,20 @@ static int ring_claim_main(int argc, char **argv) {
       uint32_t poison_threshold = (limit > 0) ? (uint32_t)limit : 1;
       if (batch.num_kills == poison_threshold && g_state) {
           uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+          /* No poisoned-index relay here, deliberately. The relay writes to
+           * the stats memfd named by $FRK_POISON_FD, and only the cleanroom
+           * launcher ever sets it (forkrun_cleanroom.c); the cleanroom runs
+           * fr_py_worker_plugin_loop from the shim, which carries its own
+           * call to fr_py_poison_relay. So on this path g_poison_fd is always
+           * -1 and the call never fired.
+           *
+           * It was worse than dead: the definition lives in _shim.c (tools/
+           * gen_shim.py parses that file to derive the fr_py_* ABI, so it
+           * cannot live here), which left an undefined reference in ring.o.
+           * The substrate canary links ring.o + substratestubs.o with
+           * -Wl,--no-undefined and no shim, so it stopped linking. Keeping
+           * ring.c free of shim symbols is precisely what that canary
+           * checks -- do not reintroduce a cross-TU call here. */
 
           uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
           uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;

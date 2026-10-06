@@ -63,8 +63,13 @@ def _build(tmpdir, srcs, out):
 
 
 def _records(results):
-    return sorted(r for blob in results for r in blob.split(b"\n")
-                  if r)
+    # materialize() first: results are memoryview views by default
+    # since 0.17.0, and this helper needs bytes to split and sort.
+    recs = []
+    for blob in results:
+        blob = forkrun.materialize(blob)
+        recs.extend(r for r in blob.split(b"\n") if r)
+    return sorted(recs)
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")

@@ -8,10 +8,6 @@ executors in ``run.py`` (see ``dev/supervisor/DEDUP_DESIGN.md`` +
   (one branch per worker kind; the only per-kind code in the tree).
 - :func:`collect_records` — drain-vs-direct + order-index-vs-none collection.
 - :func:`report_poison` — engine poison summary + ``strict_poison`` mapping.
-- :func:`teardown_union` — union-fd-set teardown covering both plain
-  (``_teardown_stream`` shape) and reactor (``_teardown_reactor`` shape)
-  callers; supervision-specific pid sets arrive as parameters so this
-  function carries zero mode branches.
 - :func:`init_engine` — ``fr_py_init`` vs ``fr_py_init_numa`` selection.
 
 Cycle discipline: leaf modules (``_bindings``, ``_fd_scrub``, ``_pipes``,
@@ -33,6 +29,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time as _time
 
 from ._bindings import RC_OK, get as _get_lib
 from ._fd_scrub import scrub_fds
@@ -87,6 +84,80 @@ class ExecutorSpec:
 # Single worker-fork dispatch (I4 escrow discipline lives in the callees)
 # ---------------------------------------------------------------------------
 
+_RSS_WARNED = False
+
+
+def _parent_rss_kb():
+    """Resident set size of THIS process, in KiB. None if unavailable."""
+    try:
+        with open("/proc/self/statm") as fh:
+            return int(fh.read().split()[1]) * (os.sysconf("SC_PAGE_SIZE")
+                                               // 1024)
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def warn_fork_cost(rss_kb, fork_ms, n_workers):
+    """Deprecated shim: prefer warn_fork_cost_once(fork_ms, n)."""
+    return warn_fork_cost_once(fork_ms, n_workers, rss_kb)
+
+
+def warn_fork_cost_once(fork_ms, n_workers, rss_kb=None):
+    """Warn once when this fan-out is paying an unusual fork cost.
+
+    fork() copies the parent's page tables, so its cost scales with the
+    parent's RSS rather than with anything the workers touch. Measured
+    on this host: 1.6 ms per fork at 10 MB, 58 ms at 1.6 GB -- a 36x
+    swing that buys the workers nothing. A user whose host process has
+    grown sees forkrun get mysteriously slow with no visible cause, and
+    no signal that the cause is their own RSS.
+
+    So measure it and say so, once per process. Emitting this on every
+    call would be noise in a loop; never emitting it leaves the cost
+    invisible. Threshold via FORKRUN_RSS_WARN_KB (0 disables).
+
+    This is diagnostics only: it never changes behaviour, and a failure
+    to read /proc is silent rather than fatal.
+    """
+    global _RSS_WARNED
+    if _RSS_WARNED:
+        return False
+    if rss_kb is None:
+        rss_kb = _parent_rss_kb()
+    if rss_kb is None:
+        return False
+    try:
+        limit = int(os.environ.get("FORKRUN_RSS_WARN_KB", "524288"))
+    except ValueError:
+        limit = 524288
+    if limit <= 0 or rss_kb < limit:
+        # Not warning is the common case, and this runs on EVERY worker
+        # fork. Once the threshold is known to be unreachable for this
+        # process, stop measuring entirely rather than re-reading
+        # /proc/self/statm per fork: it is a syscall on the hot path of
+        # every fan-out, and the whole reason this was hard to live with
+        # is that adding work immediately before fork() is not free.
+        if rss_kb < limit:
+            _RSS_WARNED = "under"
+            return False
+        return False
+    _RSS_WARNED = True
+    per = (fork_ms / n_workers) if n_workers else fork_ms
+    import sys as _sys
+    print(
+        "forkrun: warning: this process holds %.1f GiB resident before "
+        "forking %d worker%s (%.1f ms of fork, %.1f ms per worker). fork() "
+        "copies page tables, so its cost scales with OUR memory, not with "
+        "what the workers read -- the workers will not use these pages. "
+        "Call forkrun before the memory-heavy phase, or from a fresh "
+        "process, if fan-out latency matters. Suppress with "
+        "FORKRUN_RSS_WARN_KB=0."
+        % (rss_kb / 1048576.0, n_workers,
+           "" if n_workers == 1 else "s", fork_ms, per),
+        file=_sys.stderr)
+    return True
+
+
 def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
                   engine_fds, payload, sink, mode, on_error,
                   plugin_spec=None, spawn_argv=None, splice=None,
@@ -100,6 +171,25 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
     deposit nothing on failure (fail-loud, I4 deviation recorded in the
     manifest); all Python-worker paths share the escrow retry helpers via
     ``worker_main``.
+
+    fork() cost scales with parent RSS, so the fan-out is MEASURED and
+    reported here -- see ``warn_fork_cost``. Measuring at the ONE place
+    workers are forked covers every executor rather than relying on ten
+    call sites to remember.
+
+    It deliberately does NOT call malloc_trim(0) first. That was tried,
+    on the reasonable theory that returning free heap pages makes the
+    page-table copy cheaper. It is cheap, it is plausible, and it
+    BREAKS WORKER-DEATH RECOVERY: 31 tests across test_recovery_
+    adversarial, test_streaming_recovery, test_reactor, test_numa_
+    recovery and others failed with it in place, producing truncated
+    output that started at an arbitrary offset (LINE 256 and similar),
+    and all passed with it removed. The cause is not fully understood --
+    the leading suspicion is that malloc_trim's arena walk interacts
+    badly with forking around it -- but the empirical result is
+    unambiguous, so the "obviously safe" mitigation was deleted rather
+    than kept with a caveat. Do not reintroduce it without a test that
+    exercises recovery.
 
     ``src_fd``/``must_close``: materialized executors close the source in
     the Python child post-fork (parent spilled already; I3 hygiene).
@@ -129,6 +219,7 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
             c_worker_loop = False
         if c_spawn_loop is None:
             c_spawn_loop = False
+    _t_fork = _time.perf_counter()
     from ._worker import resolve_payload_parent as _resolve_parent
     if payload is not None and isinstance(payload, str):
         payload = _resolve_parent(payload)
@@ -202,6 +293,14 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
             os._exit(127)  # unreachable; worker_main exits
         else:
             pids.append(pid)
+    # Measured AFTER, so the number reported is the real fan-out cost and
+    # not an estimate. warn_fork_cost is diagnostics only and warns at
+    # most once per process.
+    try:
+        warn_fork_cost_once((_time.perf_counter() - _t_fork) * 1e3,
+                            max(workers, 1))
+    except Exception:
+        pass
     return pids
 
 
@@ -209,8 +308,34 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
 # Single collection (I7 EOF verification at the callers' join)
 # ---------------------------------------------------------------------------
 
+def flush_stdio():
+    """Flush the parent's buffered stdout/stderr before any fork.
+
+    A fork duplicates the whole userspace buffer, so anything still
+    buffered in the parent is written TWICE -- once by the parent and
+    once by the child that inherited the copy. With multiple workers
+    inheriting the same buffer the duplication multiplies.
+
+    This is a SEMANTIC rule, not boilerplate, which is why it was worth
+    nine identical inline copies (one per executor, plus one at a
+    different indent level). A single definition means a future change to
+    the policy -- say, an fsync, or a check that the streams are not
+    line-buffered -- cannot land in eight of nine executors.
+
+    Errors are ignored deliberately: a stream can legitimately be closed
+    or detached under `pythonw`/embedded use, and failing to fork because
+    a flush on a dead stream raised would be a worse outcome than
+    possibly-unflushed output.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+
+
 def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
-                      spec=None):
+                      spec=None, lib=None, views=False):
     """Parse collected output memfds into ordered blobs. Single site.
 
     Branches: drain-vs-direct (1), order-index-vs-none (1). Byte-identical
@@ -219,6 +344,14 @@ def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
 
     W-REL6-5: ``use_drain``/``order`` default from ``spec``
     (``use_drain = spec.c_drain and spec.collect``).
+
+    W-PYZEROCOPY: ``views=True`` with a ``lib`` routes the parse through
+    ``_iter_records`` so records are memoryview slices over a mapping of
+    the stream instead of per-record copies. Without it this stayed on
+    ``_read_fd_all`` + ``_parse_records``, which meant the fail-fast
+    (``orchestrator=False``) path silently returned ``bytes`` even when
+    the caller asked for ``output="view"``. Framing, record boundaries
+    and ordering are ``_iter_records``' contract and are unchanged.
     """
     if spec is not None:
         if use_drain is None:
@@ -233,15 +366,30 @@ def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
     import sys as _sys
     _run_mod = _sys.modules["forkrun.run"]
 
+    def _records_from(fd):
+        if fd is None:
+            return []
+        if lib is not None:
+            # Always the incremental C iterator, not just for views.
+            # _iter_records is documented as equivalent to
+            # _parse_records(_read_fd_all(fd)) minus the double
+            # buffering, so this is the same RESULT either way -- but
+            # the old `views and lib is not None` test sent every
+            # views=False caller down the _read_fd_all path, which
+            # materialises the whole stream and then copies it again in
+            # _parse_records. That is the 155ms-of-638ms join the
+            # _iter_records docstring was written to remove, still being
+            # paid by the fail-fast path. views is a payload TYPE choice
+            # (bytes vs memoryview), never a parser choice.
+            return list(_run_mod._iter_records(lib, fd, views=views))
+        return _run_mod._parse_records(_run_mod._read_fd_all(fd))
+
     if use_drain:
-        records = (_run_mod._parse_records(
-            _run_mod._read_fd_all(results_fd))
-            if results_fd is not None else [])
+        records = _records_from(results_fd)
     else:
         records = []
         for fd in out_fds:
-            records.extend(_run_mod._parse_records(
-                _run_mod._read_fd_all(fd)))
+            records.extend(_records_from(fd))
     if order == "index":
         records.sort(key=lambda kv: kv[0])
     return [blob for _, blob in records]
@@ -304,56 +452,6 @@ def init_engine(lib, *, lines, bytes_, topology=None, num_nodes=1,
                            else "substrate init failed")
     return rc
 
-
-# ---------------------------------------------------------------------------
-# Union teardown (I3 + I8, zero mode branches)
-# ---------------------------------------------------------------------------
-
-def teardown_union(lib, *, supervision=None, state=None,
-                    pids=(), extra_pids=(), orderer_pid=None,
-                    drain_pid=None, results_fd=None,
-                    signal_r=None, signal_w=None, spare_signal_w=None,
-                    out_fds=(), out_hold=None, memfd=None, mem_hold=None,
-                    src_fd=None, must_close=False,
-                    order_r=None, order_w=None, trap_r=None, trap_w=None,
-                    coll_fd=None, coll_hold=None, fallow_w=None,
-                    scan_pid=None, spec=None):
-    """Kill strays + close union fd set + destroy. Single implementation.
-
-    ``supervision == "reactor"`` routes to ``_teardown_reactor`` (which
-    additionally reaps ``state.workers``, parked spawn/fallow spares, and
-    the scanner death pipe); otherwise routes to ``_teardown_stream``.
-    Callers pass already-assembled pid/fd sets — this function adds no
-    per-mode branches beyond the one supervision selection.
-
-    W-REL6-5: ``supervision`` defaults from ``spec`` (explicit wins).
-    """
-    if supervision is None:
-        supervision = spec.supervision if spec is not None else "plain"
-    import sys as _sys
-    _run_mod = _sys.modules["forkrun.run"]
-
-    if supervision == "reactor":
-        _run_mod._teardown_reactor(
-            lib, state, signal_r=signal_r, out_fds=out_fds,
-            out_hold=out_hold, memfd=memfd, mem_hold=mem_hold,
-            src_fd=src_fd, must_close=must_close,
-            extra_pids=tuple(extra_pids)
-            + ((scan_pid,) if scan_pid is not None else ()),
-            orderer_pid=orderer_pid, order_r=order_r, order_w=order_w,
-            trap_r=trap_r, trap_w=trap_w, coll_fd=coll_fd,
-            coll_hold=coll_hold, drain_pid=drain_pid,
-            results_fd=results_fd, spare_signal_w=spare_signal_w)
-        return
-    _run_mod._teardown_stream(
-        lib, list(pids), signal_r, list(out_fds),
-        out_hold if out_hold is not None else [],
-        memfd, src_fd, must_close,
-        extra_pids=tuple(extra_pids)
-        + ((scan_pid,) if scan_pid is not None else ()),
-        fallow_w=fallow_w, drain_pid=drain_pid,
-        results_fd=results_fd)
-
-
 __all__ = ["ExecutorSpec", "fork_workers", "collect_records",
-           "report_poison", "init_engine", "teardown_union"]
+           "warn_fork_cost",
+           "report_poison", "init_engine", "flush_stdio"]
