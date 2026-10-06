@@ -1899,18 +1899,15 @@ static struct GlobalState *g_state = NULL;
  * first call costs one getenv and then nothing; a full slot stops
  * recording rather than growing, so the relay is BOUNDED and cannot make
  * a run fail.
+ *
+ * The capacity constant lives HERE because _shim.c includes this file and
+ * fr_py_poison_relay (defined in _shim.c) needs it. It is a #define, so it
+ * creates no link dependency -- which is the point: ring.c must stay free
+ * of shim symbols so the substrate canary can link it with
+ * -Wl,--no-undefined and no shim present.
  */
 #define FR_POISON_SLOT_U32 1024u   /* slot capacity in u32 indices */
 
-/* fr_py_poison_relay is DEFINED in python/forkrun/_shim.c, because
- * tools/gen_shim.py parses that file textually to derive the fr_py_* ABI
- * and would not see a definition living here. ring.c still calls it from
- * its own poison site below, so it needs the declaration on THIS side:
- * ring.c is its own translation unit and compiling it standalone must
- * not depend on _shim.c's includes. When _shim.c does include this file,
- * it already declares the function via the generated forkrun_shim.h, and
- * these two declarations are compatible, so the redeclaration is fine. */
-void fr_py_poison_relay(uint32_t batch_idx);
 
 static struct SharedState *state = NULL;
 
@@ -6729,7 +6726,20 @@ static int ring_claim_main(int argc, char **argv) {
       uint32_t poison_threshold = (limit > 0) ? (uint32_t)limit : 1;
       if (batch.num_kills == poison_threshold && g_state) {
           uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
-          fr_py_poison_relay((uint32_t)batch.batch_idx);
+          /* No poisoned-index relay here, deliberately. The relay writes to
+           * the stats memfd named by $FRK_POISON_FD, and only the cleanroom
+           * launcher ever sets it (forkrun_cleanroom.c); the cleanroom runs
+           * fr_py_worker_plugin_loop from the shim, which carries its own
+           * call to fr_py_poison_relay. So on this path g_poison_fd is always
+           * -1 and the call never fired.
+           *
+           * It was worse than dead: the definition lives in _shim.c (tools/
+           * gen_shim.py parses that file to derive the fr_py_* ABI, so it
+           * cannot live here), which left an undefined reference in ring.o.
+           * The substrate canary links ring.o + substratestubs.o with
+           * -Wl,--no-undefined and no shim, so it stopped linking. Keeping
+           * ring.c free of shim symbols is precisely what that canary
+           * checks -- do not reintroduce a cross-TU call here. */
 
           uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
           uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;
