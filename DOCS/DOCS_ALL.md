@@ -513,6 +513,89 @@ to `output="bytes"` so they keep testing the bytes contract, with
 packaging/release gates (wheel rebuild and the dirty-tree release
 checklist), both pre-existing.
 
+### Python frontend: workers fork without an artificial stall
+
+`STALL_FORK_AFTER` (the timer that forked workers when the pre-flight had
+not published within N seconds) drops from **2.0 s to 0**. The parent now
+forks workers as soon as its own setup is done, using only the natural
+latency the scanner already gets — it is forked before the ingest loop,
+so the scan runs concurrently with setup rather than being serialised
+behind a timer.
+
+CASE B (a worker arrives, the scan is cut short) resumes the geometric
+ramp from `sim_L`, and that ramp doubles, so it converges without help.
+Delaying the fork bought the ramp nothing. Measured, light/medium/heavy
+5M file plus a 2816-line input, median of 3–5:
+
+| `STALL_FORK_AFTER` | light | medium | heavy | small input |
+|---|---|---|---|---|
+| 2.0 | 0.4081 s | 1.4793 s | 4.7188 s | 0.1079 s |
+| 0.05 | — | — | — | 0.1073 s |
+| **0.0** | **0.3952 s** | **1.4771 s** | **4.7085 s** | **0.0257 s** |
+
+Equal or better everywhere, and **4× on a small input**, where a fixed
+wait dominates the entire run. There is a cliff at zero: anything ≥ 50 ms
+costs the full ~107 ms, so an intermediate value is not a compromise
+between 0 and 2 s — it is 2 s. CASE B is also the Bash-normal path, so
+this moves Python toward Bash rather than away from it.
+`FR_STALL_FORK_AFTER` remains as a tuning knob.
+
+Re-measured `light` at 20M records / 2.13 GB on this boot (fake-NUMA,
+`nodes=auto`, `shmem_enabled=always`, 28 workers, median-of-3, **16/16
+cells exact**): 1440.7 MB/s memoryview / 1045.2 MB/s bytes / 204.2 MB/s
+UDF, file input — **+4.6%** and **+3.3%** against the prior 48-cell
+cross-check on the identical protocol.
+
+### Python frontend: `poisoned_batches` is now real, and says when it is short
+
+The cleanroom reported a poisoned-batch **count** but not the **indices**,
+so `poisoned_batches` came back empty whenever poison happened — the same
+silent gap the scalar count was added to close. Each worker now relays its
+poisoned batch index out on a bounded per-worker slot of the stats memfd
+(`fr_py_poison_relay`), with the count published last so a reader that
+sees the count also sees the indices. The slot is fixed-capacity and
+drops rather than grows.
+
+Because that capacity can be reached, a short list is no longer
+indistinguishable from a complete one. `map(..., return_stats=True)` and
+`forkrun.last_run_stats()` gain **`poisoned_batches_truncated`**, and
+`map()` warns once when it is set, naming how many indices are missing.
+It is derived from data that already crosses (`poisoned` is exact; the
+per-slot counts are summed), so the wire format is unchanged. `poisoned`
+itself remains exact either way. The flag is always `False` on the
+in-process path, which keeps every index in a Python list.
+
+### Fixes in opt-in paths found by review
+
+- **`c_drain` (`fr_py_drain_loop`) could corrupt the stream.** A non-EINTR
+  `pread` error mid-record resumed with `offset` unmoved, but the bytes
+  already copied had been *punched* out of the worker memfd — so the next
+  signal re-read the record header from a hole, got zeros, and re-emitted
+  the record as a zero-length one. A short read advanced `offset` past a
+  partial record, and an absurd `hdr.len` stranded that worker permanently
+  while still reporting success. All three now fail the drain explicitly
+  instead of corrupting it. Each is unreachable while the pre-flight's
+  fstat assumption holds, so no healthy path changes.
+- **A torn final record was accepted as a clean end of stream.** The
+  cleanroom collector broke out of its parse loop on a short payload and
+  returned normally, so truncated output looked well-formed and was merely
+  short. It now warns — deliberately not raises, because a worker killed
+  mid-record legitimately leaves a torn tail that `strict_poison` and the
+  poison counts already report, and raising would report one death twice.
+- **The cleanroom used a second, hand-copied result collector** built on
+  stdlib `mmap.mmap`, which dups the descriptor and holds it for the life
+  of the mapping — contradicting the invariant `API.md` already states. It
+  now routes through the same `_map_collect`/`fr_py_map_readonly` helper
+  the in-process path uses, which also prefaults and requests hugepages.
+  The two parse loops are collapsed into one, so a fix cannot land in one
+  and miss the other again.
+- **`forkrun_ring.c` no longer references a shim symbol.** It briefly
+  called `fr_py_poison_relay`, whose definition lives in `_shim.c`; the
+  call was dead (only the cleanroom sets `$FRK_POISON_FD`, and the
+  cleanroom runs the shim's loop) but it broke the substrate canary,
+  which links `ring.o` with `-Wl,--no-undefined` precisely to keep ring.c
+  free of shim symbols.
+
 ## v3.6.0 — 2026-09-30
 
 ### Second-review remediation, six waves (W-REL6)
