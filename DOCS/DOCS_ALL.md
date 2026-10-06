@@ -231,7 +231,7 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
-## v3.6.1 — unreleased
+## v3.6.1 — 2026-10-06
 
 ### Python frontend: the pre-flight scan no longer spin-sleeps
 
