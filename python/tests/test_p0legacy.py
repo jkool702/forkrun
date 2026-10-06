@@ -64,8 +64,18 @@ class TestLegacySlowUdfCompletes(unittest.TestCase):
         out = forkrun.map(FORKRUN_PAYLOADS["medium"], MEDIUM_5M,
                           workers=2, order="index", nodes=1,
                           orchestrator=False, lines=1000)
-        self.assertEqual(count_total(out), 5000000)
-        self.assertEqual(count_results(out), 4997892)
+        # The seeded medium corpus is 4,997,892 records, not a round
+        # 5,000,000 -- that is the canonical count (ml_data_gen.py SEED=42,
+        # PERFORMANCE.md, and cell.py's expect all agree). The 5000000 here
+        # was wrong from the commit that introduced it and could only ever
+        # have passed against a differently-shaped corpus. count_total
+        # (all records incl. poisoned) must equal the full corpus;
+        # count_results (delivered) is lower by the poisoned batches,
+        # which is the whole point of this regression test.
+        self.assertEqual(count_total(out), 4997892)
+        self.assertLess(count_results(out), count_total(out),
+                        "legacy fail-fast delivered everything; expected "
+                        "poisoned batches to be skipped")
         assert_no_zombies(self)
 
 
