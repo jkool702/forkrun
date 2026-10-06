@@ -312,9 +312,15 @@ class TestCleanroomExecutes(unittest.TestCase):
         worker placement. The refusal path itself is what this guards:
         warning plus correct results, never silent wrong answers.
         """
+        # "@2" (forced logical), not a bare 2. The point is a MULTI-NODE
+        # request, and a bare nodes=2 raises ValueError on a UMA box
+        # ("only 1 NUMA node(s) online") before forkrun ever gets to warn
+        # -- so the test ERRORed on UMA while passing on fake-4. @2
+        # expresses the same multi-node intent on any topology, still
+        # trips the envelope refusal, and still returns right answers.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            out = forkrun.map(_spec(), self.path, workers=2, nodes=2,
+            out = forkrun.map(_spec(), self.path, workers=2, nodes="@2",
                               mode="plugin", output="bytes")
         self.assertEqual(len(_joined(out)), 2000)
         self.assertTrue(
