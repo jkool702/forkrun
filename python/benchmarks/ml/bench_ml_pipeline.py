@@ -247,42 +247,132 @@ def bench_serial(ctx, path, n_records, input_bytes, variant, trials):
     return n_records / t
 
 
+def _load_lines(path):
+    """Read a JSONL file into a list of decoded records.
+
+    Kept as a function so the competitor benchmarks can call it INSIDE
+    their timed closure. That placement is the whole point -- see
+    bench_pool's comment on the two timing modes.
+    """
+    with open(path, "rb") as fh:
+        return [l.decode() for l in fh.read().split(b"\n") if l.strip()]
+
+
+def _require_exact(n_out, n_records, system, variant, workers):
+    """Fail the run on a competitor output-count mismatch.
+
+    Competitor counts used to be recorded only as a note string
+    ("out=4999/5000 records") with nothing checking them, so a system
+    that silently dropped records still produced a throughput row. A
+    benchmark that reports a rate for a wrong answer is worse than no
+    benchmark, so this is a hard failure.
+    """
+    if n_out != n_records:
+        raise AssertionError(
+            "%s/%s/%dw produced %d records, expected %d -- refusing to "
+            "report a throughput for a wrong answer"
+            % (system, variant, workers, n_out, n_records))
+
+
+def _chunk_and_map(pool_factory, payload, path, workers):
+    lines = _load_lines(path)
+    chunks = chunk_lines(lines, workers * 4)
+    with pool_factory(workers) as pool:
+        # list() is REQUIRED, not cosmetic: multiprocessing.Pool.map returns
+        # a list but ProcessPoolExecutor.map returns a lazy generator, so
+        # without it the executor path hands back an unconsumed iterator
+        # and the output count reads 0.
+        return list(pool.map(payload, chunks))
+
+
 def bench_pool(ctx, path, n_records, input_bytes, variant, workers,
                trials):
-    with open(path, "rb") as fh:
-        lines = [l.decode() for l in fh.read().split(b"\n") if l.strip()]
-    chunks = chunk_lines(lines, workers * 4)
+    # TWO metrics, because they answer different questions, and only one
+    # of them is comparable to forkrun.
+    #
+    #   pool-<v>-<w>w            END-TO-END. Reading, splitting, decoding
+    #                             and partitioning the input are inside the
+    #                             timed closure, because forkrun's timed
+    #                             call does all of that too (it takes a
+    #                             path and returns results). This is the
+    #                             row that belongs in a table next to
+    #                             forkrun's.
+    #   pool-<v>-<w>w-prepart    PREPARTITIONED. The input is decoded and
+    #                             chunked once, outside the timer, and only
+    #                             map() is timed. This answers "how fast can
+    #                             an executor chew through data that is
+    #                             already in memory?" -- a real question,
+    #                             but NOT the same one, and it flatters the
+    #                             competitor by hiding read+decode+partition.
+    #
+    # Before this split both modes existed in the source but only the
+    # flattering one was recorded, because the prep sat above the timed
+    # function and only the timed result was written out.
     payload = POOL_PAYLOADS[variant]
 
-    def run():
+    def run_e2e():
+        return _chunk_and_map(
+            lambda n: multiprocessing.Pool(n), payload, path, workers)
+
+    lines = _load_lines(path)
+    chunks = chunk_lines(lines, workers * 4)
+
+    def run_prepart():
         with multiprocessing.Pool(workers) as pool:
             return pool.map(payload, chunks)
 
-    t, _ = time_it(run, trials=max(1, trials // 2), warmup=1)
-    n_out = count_results(run())
+    # Same trial count for every system. It used to be trials//2 here,
+    # so with --trials 3 the competitor got ONE timed sample while
+    # forkrun got a median of three -- and a single sample cannot be a
+    # median.
+    t_e2e, all_e2e = time_it(run_e2e, trials=trials, warmup=1)
+    n_out = count_results(run_e2e())
+    _require_exact(n_out, n_records, "pool", variant, workers)
     ctx.record("pool-%s-%dw" % (variant, workers), "pool", "udf",
-               n_records / t, rss_mb(),
-               "out=%d/%d records" % (n_out, n_records))
-    return n_records / t
+               n_records / t_e2e, rss_mb(),
+               "out=%d/%d records, end-to-end (input prep timed), "
+               "trials=%d" % (n_out, n_records, len(all_e2e)))
+
+    t_pp, all_pp = time_it(run_prepart, trials=trials, warmup=1)
+    ctx.record("pool-%s-%dw-prepart" % (variant, workers), "pool", "udf",
+               n_records / t_pp, rss_mb(),
+               "prepartitioned (input NOT timed), trials=%d" % len(all_pp))
+    return n_records / t_e2e
 
 
 def bench_executor(ctx, path, n_records, input_bytes, variant, workers,
                    trials):
-    with open(path, "rb") as fh:
-        lines = [l.decode() for l in fh.read().split(b"\n") if l.strip()]
-    chunks = chunk_lines(lines, workers * 4)
+    # Same two metrics and the same rationale as bench_pool: the row
+    # named "executor-<v>-<w>w" is end-to-end (input preparation inside
+    # the timer, which is what forkrun's timed call also does), and the
+    # "-prepart" row is the prepartitioned throughput-only figure.
     payload = POOL_PAYLOADS[variant]
 
-    def run():
+    def run_e2e():
+        return _chunk_and_map(
+            lambda n: ProcessPoolExecutor(max_workers=n), payload, path,
+            workers)
+
+    lines = _load_lines(path)
+    chunks = chunk_lines(lines, workers * 4)
+
+    def run_prepart():
         with ProcessPoolExecutor(max_workers=workers) as ex:
             return list(ex.map(payload, chunks))
 
-    t, _ = time_it(run, trials=max(1, trials // 2), warmup=1)
-    n_out = count_results(run())
+    t_e2e, all_e2e = time_it(run_e2e, trials=trials, warmup=1)
+    n_out = count_results(run_e2e())
+    _require_exact(n_out, n_records, "executor", variant, workers)
     ctx.record("executor-%s-%dw" % (variant, workers), "executor", "udf",
-               n_records / t, rss_mb(),
-               "out=%d/%d records" % (n_out, n_records))
-    return n_records / t
+               n_records / t_e2e, rss_mb(),
+               "out=%d/%d records, end-to-end (input prep timed), "
+               "trials=%d" % (n_out, n_records, len(all_e2e)))
+
+    t_pp, all_pp = time_it(run_prepart, trials=trials, warmup=1)
+    ctx.record("executor-%s-%dw-prepart" % (variant, workers),
+               "executor", "udf", n_records / t_pp, rss_mb(),
+               "prepartitioned (input NOT timed), trials=%d" % len(all_pp))
+    return n_records / t_e2e
 
 
 def bench_forkrun(ctx, path, n_records, input_bytes, variant, workers,
@@ -852,9 +942,28 @@ def run_isolated(argv):
     subprocess.run(pregen_cmd, capture_output=True, text=True,
                    env=dict(os.environ, FORKRUN_PREGEN_DIR=shared))
 
+    # Per-system CSV paths. child_args carries the caller's --csv verbatim,
+    # and every child ends in write_csv(), which opens with "w" -- so all
+    # seven children were truncating and overwriting ONE file and the last
+    # system to finish was the only one that survived. Silently: the run
+    # exits 0 and the CSV looks plausible, it is just one system's rows.
+    # Give each child its own file and concatenate them afterwards.
+    csv_path = None
+    if "--csv" in child_args:
+        _i = child_args.index("--csv")
+        if _i + 1 < len(child_args):
+            csv_path = child_args[_i + 1]
+    per_system_csv = {}
+
     for system in SYSTEM_ORDER:
+        cargs = list(child_args)
+        if csv_path:
+            _i = cargs.index("--csv")
+            per_system_csv[system] = os.path.join(
+                shared, "iso_%s.csv" % system)
+            cargs[_i + 1] = per_system_csv[system]
         cmd = [sys.executable, os.path.abspath(__file__),
-               "--only-system", system, "--tmpdir", shared] + child_args
+               "--only-system", system, "--tmpdir", shared] + cargs
         print("[isolate] %s" % system, flush=True)
         proc = subprocess.run(cmd, capture_output=True, text=True)
         out = proc.stdout
@@ -897,6 +1006,42 @@ def run_isolated(argv):
     # header to its own rows, so the merged table would not line up.
     def cells(line):
         return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    # Stitch the per-system CSVs into the one the caller asked for, in
+    # SYSTEM_ORDER, single header. Without this the requested path would
+    # hold only the last child's rows (see the note above the loop).
+    if csv_path:
+        import csv as _csv
+        wrote = []
+        try:
+            with open(csv_path, "w", newline="") as _out:
+                _w = _csv.writer(_out)
+                for system in SYSTEM_ORDER:
+                    f = per_system_csv.get(system)
+                    if not f or not os.path.exists(f):
+                        continue
+                    with open(f, newline="") as _fh:
+                        _rd = _csv.reader(_fh)
+                        hdr = next(_rd, None)
+                        if hdr is None:
+                            continue
+                        if not wrote:
+                            _w.writerow(hdr)
+                            wrote.append(hdr)
+                        for row in _rd:
+                            _w.writerow(row)
+                            wrote.append(row)
+            print("CSV: %s (%d rows from %d system(s))"
+                  % (csv_path, max(0, len(wrote) - 1),
+                     len(per_system_csv)), flush=True)
+        except OSError as e:
+            print("[isolate] CSV merge failed: %s" % e, flush=True)
+            return 1
+        missing = [k for k in SYSTEM_ORDER if k in per_system_csv
+                   and not os.path.exists(per_system_csv[k])]
+        if missing:
+            print("[isolate] WARNING: no CSV rows for %s" % ", ".join(missing),
+                  flush=True)
 
     parsed = [cells(r) for r in body]
     ncol = max(len(r) for r in parsed)
@@ -1149,6 +1294,22 @@ def main(argv=None):
           "chunk into workers*4 line-chunks (pickled); Ray uses pandas "
           "batches via read_text; HF Datasets uses from_text + "
           "batched map (batch_size=1000, in-memory).")
+    print("- TIMING SCOPE. Rows named 'pool-*'/'executor-*' are "
+          "END-TO-END: reading, splitting, decoding and partitioning the "
+          "input happen inside the timed region, because forkrun's timed "
+          "call takes a path and does all of that too. Rows ending in "
+          "'-prepart' time only map() against data already in memory, are "
+          "NOT comparable to forkrun, and are reported separately so the "
+          "difference stays visible instead of flattering the competitor. "
+          "Every system uses the same trial count and is timed with the "
+          "same median-of-trials rule; competitor record counts are "
+          "asserted, not just noted.")
+    print("- OUTPUT REPRESENTATION differs by design and is NOT a bug: "
+          "Pool/Executor return one Python str per input record, while "
+          "forkrun returns batch-combined bytes/memoryview. Both produce "
+          "the same record count and the same transformation, so rates are "
+          "comparable as pipeline throughput, but the per-record object "
+          "count and memory profile are different shapes.")
     print("- Fault injection is crash-once (file markers): first "
           "attempt crashes, retry succeeds. forkrun recovers via "
           "orchestrator respawn; Pool has no retry (documented).")
