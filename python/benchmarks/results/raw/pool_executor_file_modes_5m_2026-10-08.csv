@@ -1,0 +1,32 @@
+# Pool/Executor file modes, 5M records, 28 workers, median-of-3 after warmup
+# corpora byte-identical: light 532711015 / medium 2347403909 / heavy 6720381299
+# measured 2026-10-08 on NEW/REFACTOR4.0
+# readall = fh.read() whole file -> list of every line -> chunk -> pickle (materialises everything)
+# lazy   = 1 MiB reads, 2048-line batches yielded as produced (same shaping as the streaming path)
+# prepart= input already decoded+chunked in memory; map() only
+# streaming = pipe-fed lazy batches, from bench_streaming_pipe.py, shown for comparison only
+system,variant,mode,rec_s,exact_slots
+pool,light,readall,999691,
+pool,light,lazy,1352855,
+pool,light,prepart,1515790,
+executor,light,readall,1056545,
+executor,light,lazy,1233721,
+executor,light,prepart,1600686,
+pool,medium,readall,462773,
+pool,medium,lazy,654019,
+pool,medium,prepart,775026,
+executor,medium,readall,457229,
+executor,medium,lazy,644437,
+executor,medium,prepart,778160,
+pool,heavy,readall,82161,
+pool,heavy,lazy,95929,
+pool,heavy,prepart,93218,
+executor,heavy,readall,83015,
+executor,heavy,lazy,96155,
+executor,heavy,prepart,93986,
+pool,light,streaming,1338000,
+executor,light,streaming,1419000,
+pool,medium,streaming,577945,
+executor,medium,streaming,610176,
+pool,heavy,streaming,96472,
+executor,heavy,streaming,96306,

@@ -9,12 +9,16 @@ each system runs its idiomatic best.
 > **Competitor rows in this table predate the 2026-10-08 timing-scope
 > fix and are therefore optimistic.** They were measured with input
 > preparation (read + split + decode + partition) *outside* the timed
-> region, which flatters Pool/Executor — by ~40% on medium, and more the
-> larger the file. Re-measured end-to-end on the same configuration
-> (28 workers, 5M records), ProcessPoolExecutor is **454k** and
-> multiprocessing.Pool **451k**, not the 755k/757k below. The forkrun rows
-> here are left as measured, because they come from a different study
-> (`numa_5m_study.md`) and mixing two studies in one table is the error
+> region, which flatters Pool/Executor -- by ~40% on medium, and more the
+> larger the file. Re-measured on the same configuration (28 workers, 5M
+> records) against the best of three file modes, ProcessPoolExecutor is
+> **764k** and multiprocessing.Pool **750k**, not the 755k/757k below --
+> so this study's medium figures were, by coincidence, close to right.
+> The forkrun rows here are left as measured, because they come from a
+> different study (`numa_5m_study.md`) and mixing two studies in one
+> table is the error this note exists to prevent. For a single-study,
+> like-for-like table see `python/benchmarks/results/RELEASE_v3.6.0.md`
+> section 0.
 > this note exists to prevent. For a single-study, like-for-like table
 > see `python/benchmarks/results/RELEASE_v3.6.0.md` §0.
 

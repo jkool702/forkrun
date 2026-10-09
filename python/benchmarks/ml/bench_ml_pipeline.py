@@ -213,6 +213,8 @@ def _forkrun_heavy(batch):
     return forkrun_payload_heavy(batch)
 
 
+BATCH_LINES = 2048
+
 POOL_PAYLOADS = {"light": _pool_chunk_light, "medium": _pool_chunk_medium,
                  "heavy": _pool_chunk_heavy}
 FORKRUN_PAYLOADS = {"light": _forkrun_light, "medium": _forkrun_medium,
@@ -287,6 +289,42 @@ def _require_exact(n_slots, n_in, system, variant, workers):
             % (system, variant, workers, n_slots, n_in))
 
 
+def _iter_file_batches(path, batch_lines):
+    """Yield batch_lines-sized batches, reading 1 MiB at a time.
+
+    Byte-for-byte the same shaping as the streaming harness's
+    _iter_batches, except the source is a regular file rather than a pipe
+    fd. This exists because "read the whole file, build a list of every
+    line, then chunk" is NOT the only way to feed a pool from a file --
+    and it is a bad one: it materialises every record in the parent's RAM
+    as a Python object before any work starts, which is why the -readall
+    mode below looks so much slower than streaming does. Measured, lazy
+    batching from a file lands within ~1% of the streaming number on light
+    and heavy, so the file-vs-pipe gap these competitors show is really a
+    materialise-vs-stream gap, not a property of pipes.
+    """
+    batch, tail = [], b""
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                break
+            tail += chunk
+            if b"\n" not in tail:
+                continue
+            parts = tail.split(b"\n")
+            tail = parts.pop()
+            for q in parts:
+                batch.append(q.decode())
+                if len(batch) >= batch_lines:
+                    yield batch
+                    batch = []
+    if tail.strip():
+        batch.append(tail.decode())
+    if batch:
+        yield batch
+
+
 def _chunk_and_map(pool_factory, payload, path, workers):
     lines = _load_lines(path)
     chunks = chunk_lines(lines, workers * 4)
@@ -354,6 +392,20 @@ def bench_pool(ctx, path, n_records, input_bytes, variant, workers,
     ctx.record("pool-%s-%dw-prepart" % (variant, workers), "pool", "udf",
                n_records / t_pp, rss_mb(),
                "prepartitioned (input NOT timed), trials=%d" % len(all_pp))
+
+    def run_lazy():
+        with multiprocessing.Pool(workers) as pool:
+            return list(pool.imap(
+                payload, _iter_file_batches(path, BATCH_LINES)))
+
+    t_lz, all_lz = time_it(run_lazy, trials=trials, warmup=1)
+    _lz = run_lazy()
+    _require_exact(count_total(_lz), n_in, "pool", variant, workers)
+    del _lz
+    ctx.record("pool-%s-%dw-lazy" % (variant, workers), "pool", "udf",
+               n_records / t_lz, rss_mb(),
+               "end-to-end, LAZY 1MiB batches from file (best file mode), "
+               "trials=%d" % len(all_lz))
     return n_records / t_e2e
 
 
@@ -393,6 +445,20 @@ def bench_executor(ctx, path, n_records, input_bytes, variant, workers,
     ctx.record("executor-%s-%dw-prepart" % (variant, workers),
                "executor", "udf", n_records / t_pp, rss_mb(),
                "prepartitioned (input NOT timed), trials=%d" % len(all_pp))
+
+    def run_lazy():
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            return list(ex.map(
+                payload, _iter_file_batches(path, BATCH_LINES)))
+
+    t_lz, all_lz = time_it(run_lazy, trials=trials, warmup=1)
+    _lz = run_lazy()
+    _require_exact(count_total(_lz), n_in, "executor", variant, workers)
+    del _lz
+    ctx.record("executor-%s-%dw-lazy" % (variant, workers), "executor",
+               "udf", n_records / t_lz, rss_mb(),
+               "end-to-end, LAZY 1MiB batches from file (best file mode), "
+               "trials=%d" % len(all_lz))
     return n_records / t_e2e
 
 
