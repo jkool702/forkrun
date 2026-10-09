@@ -138,16 +138,68 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
 | **★ forkrun Python UDF (memoryview)** | **1.90M rec/s (203 MB/s)** |  **840k rec/s (396 MB/s)**   |  **100k rec/s (128 MB/s)**  |
 | **★ forkrun Python UDF (bytes)**     | **1.80M rec/s (192 MB/s)** |  **780k rec/s (365 MB/s)**   |  **100k rec/s (129 MB/s)**  |
-| ProcessPoolExecutor                 | 1.64M rec/s (175 MB/s) |  797k rec/s (374 MB/s)  |  94k rec/s (126 MB/s)  |
+| ProcessPoolExecutor ‡‡              | 1.02M rec/s (109 MB/s) | 454k rec/s (213 MB/s)   | 79k rec/s (107 MB/s)   |
 | ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
-| multiprocessing.Pool                | 1.60M rec/s (170 MB/s) |  757k rec/s (355 MB/s)  |  94k rec/s (126 MB/s)  |
+| multiprocessing.Pool ‡‡             | 1.00M rec/s (107 MB/s) | 451k rec/s (212 MB/s)   | 81k rec/s (109 MB/s)   |
 | DuckDB native (SQL/JSON)            |           —            |  189k rec/s (89 MB/s)   |          —             |
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
-| **forkrun C vs Executor**           | **6.21×** | **3.31×** | **9.04×** |
+| **forkrun C vs Executor**           | 9.99×     | 5.82×     | 10.71×    |
 | **forkrun C vs Polars**             |           —              | **1.20×** |            —     |
 | forkrun C vs Executor+C             | 2.77× | 1.30× | 1.16× § |
+| forkrun UDF memoryview vs Executor ‡‡ | 1.87× | 1.85× | 1.26×   |
+| forkrun UDF bytes vs Executor ‡‡    | 1.77× | 1.72× | 1.26×   |
+| forkrun UDF memoryview vs Pool ‡‡   | 1.90× | 1.86× | 1.24×   |
+| forkrun UDF bytes vs Pool ‡‡        | 1.80× | 1.73× | 1.24×   |
+
+> **‡‡ The Executor and Pool rows were re-measured 2026-10-08, and the
+> correction makes forkrun look *better* — so it is documented rather than
+> quietly swapped.** The previous figures timed only `map()`: the file was
+> read, split, decoded and partitioned into worker-sized chunks *above* the
+> timed closure, while forkrun's timed call takes a path and does all of
+> that work inside the measurement. That inflated the competitors, and it
+> inflated them *more the larger the file* — backwards, since ingestion is
+> precisely the part that scales with input size.
+>
+> Same protocol as the forkrun rows above: 28 workers, median-of-3 after
+> warmup, one system per process, byte-identical seeded corpora (light
+> 532,711,015 / medium 2,347,403,909 / heavy 6,720,381,299 B — all three
+> confirmed identical on re-generation). Every cell verified exact against
+> the input line count: 5,000,000 lines in, 5,000,000 output slots out, on
+> all six cells. The payload deliberately filters 2,108 (medium) and 2,018
+> (heavy) records, which is accounted for rather than counted as loss.
+>
+> | | light | medium | heavy |
+> |---|---|---|---|
+> | Executor, previous | 1.64M | 797k | 94k |
+> | **Executor, corrected** | **1.02M** | **454k** | **79k** |
+> | change | −37.9% | −43.1% | −15.5% |
+> | Pool, previous | 1.60M | 757k | 94k |
+> | **Pool, corrected** | **1.00M** | **451k** | **81k** |
+> | change | −37.4% | −40.5% | −14.0% |
+>
+> Hence `forkrun C vs Executor` rises 6.21× → **9.99×** (light) and
+> 3.31× → **5.82×** (medium).
+>
+> The four `forkrun UDF …` ratio rows are new with this correction. They
+> compare forkrun against the competitors running the *same Python payload*,
+> which is the tightest apples-to-apples pairing in the table, and they were
+> previously absent from §0 — the only UDF-vs-competitor ratios in this file
+> lived in the §0b *streaming* table, which is a different harness
+> (`bench_streaming_competitors.py`, pipe-fed) and is left untouched. Every
+> case exceeds 1.0×; the narrowest is heavy at 1.24–1.26×.
+>
+> Ratios are computed from the rounded table values, so they carry the same
+> precision as the rows above them. Raw per-run values and the CSVs are in
+> `raw/pool_executor_e2e_5m_2026-10-08.csv`.
+>
+> The prepartitioned figures are still produced and still published by the
+> harness as `executor-*-prepart` / `pool-*-prepart` — 1.54M / 764k / 91k
+> for Executor. They answer a real and different question ("how fast can an
+> executor chew through data already resident in memory?"), so they are
+> kept and clearly labelled rather than discarded. They are simply not
+> comparable to a file-path row, which is the mistake this corrects.
 
 
 > ### ⚠ §0 IS MEASURED CONTAMINATED — and the corrected light column is below

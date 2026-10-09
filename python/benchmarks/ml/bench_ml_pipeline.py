@@ -258,20 +258,33 @@ def _load_lines(path):
         return [l.decode() for l in fh.read().split(b"\n") if l.strip()]
 
 
-def _require_exact(n_out, n_records, system, variant, workers):
-    """Fail the run on a competitor output-count mismatch.
+def _require_exact(n_slots, n_in, system, variant, workers):
+    """Fail the run unless every input line produced exactly one slot.
 
     Competitor counts used to be recorded only as a note string
     ("out=4999/5000 records") with nothing checking them, so a system
     that silently dropped records still produced a throughput row. A
     benchmark that reports a rate for a wrong answer is worse than no
     benchmark, so this is a hard failure.
+
+    Note n_slots comes from count_total(), not count_results().
+    count_results() skips the "" placeholders that ml_payload._pool_chunk
+    emits for records the transform legitimately filters, so for a
+    5,000,000-line medium corpus it reports 4,997,892 even though every
+    line was processed. Using it here would flag correct filtering as
+    data loss. count_total() counts blanks too, so it measures the thing
+    that actually matters: one output slot per input line.
+
+    The expected value is the number of LINES IN THE FILE, which for a
+    byte-identical seeded corpus equals the --records request, but is
+    asserted against what was actually read rather than what was asked
+    for.
     """
-    if n_out != n_records:
+    if n_slots != n_in:
         raise AssertionError(
-            "%s/%s/%dw produced %d records, expected %d -- refusing to "
-            "report a throughput for a wrong answer"
-            % (system, variant, workers, n_out, n_records))
+            "%s/%s/%dw produced %d output slots for %d input lines -- "
+            "refusing to report a throughput for a wrong answer"
+            % (system, variant, workers, n_slots, n_in))
 
 
 def _chunk_and_map(pool_factory, payload, path, workers):
@@ -315,6 +328,7 @@ def bench_pool(ctx, path, n_records, input_bytes, variant, workers,
             lambda n: multiprocessing.Pool(n), payload, path, workers)
 
     lines = _load_lines(path)
+    n_in = len(lines)
     chunks = chunk_lines(lines, workers * 4)
 
     def run_prepart():
@@ -326,12 +340,15 @@ def bench_pool(ctx, path, n_records, input_bytes, variant, workers,
     # forkrun got a median of three -- and a single sample cannot be a
     # median.
     t_e2e, all_e2e = time_it(run_e2e, trials=trials, warmup=1)
-    n_out = count_results(run_e2e())
-    _require_exact(n_out, n_records, "pool", variant, workers)
+    _e2e = run_e2e()
+    n_out = count_results(_e2e)
+    n_slots = count_total(_e2e)
+    _require_exact(n_slots, n_in, "pool", variant, workers)
     ctx.record("pool-%s-%dw" % (variant, workers), "pool", "udf",
                n_records / t_e2e, rss_mb(),
-               "out=%d/%d records, end-to-end (input prep timed), "
-               "trials=%d" % (n_out, n_records, len(all_e2e)))
+               "in=%d lines -> %d slots (%d kept), end-to-end "
+               "(input prep timed), trials=%d"
+               % (n_in, n_slots, n_out, len(all_e2e)))
 
     t_pp, all_pp = time_it(run_prepart, trials=trials, warmup=1)
     ctx.record("pool-%s-%dw-prepart" % (variant, workers), "pool", "udf",
@@ -354,6 +371,7 @@ def bench_executor(ctx, path, n_records, input_bytes, variant, workers,
             workers)
 
     lines = _load_lines(path)
+    n_in = len(lines)
     chunks = chunk_lines(lines, workers * 4)
 
     def run_prepart():
@@ -361,12 +379,15 @@ def bench_executor(ctx, path, n_records, input_bytes, variant, workers,
             return list(ex.map(payload, chunks))
 
     t_e2e, all_e2e = time_it(run_e2e, trials=trials, warmup=1)
-    n_out = count_results(run_e2e())
-    _require_exact(n_out, n_records, "executor", variant, workers)
+    _e2e = run_e2e()
+    n_out = count_results(_e2e)
+    n_slots = count_total(_e2e)
+    _require_exact(n_slots, n_in, "executor", variant, workers)
     ctx.record("executor-%s-%dw" % (variant, workers), "executor", "udf",
                n_records / t_e2e, rss_mb(),
-               "out=%d/%d records, end-to-end (input prep timed), "
-               "trials=%d" % (n_out, n_records, len(all_e2e)))
+               "in=%d lines -> %d slots (%d kept), end-to-end "
+               "(input prep timed), trials=%d"
+               % (n_in, n_slots, n_out, len(all_e2e)))
 
     t_pp, all_pp = time_it(run_prepart, trials=trials, warmup=1)
     ctx.record("executor-%s-%dw-prepart" % (variant, workers),
