@@ -33,7 +33,13 @@ forkrun.map(clean, "events.jsonl", workers=8, order="index")
   or `"pkg.mod:func"` (imported post-fork in the worker,
   keeping the parent free of native imports).
 - Throughput (28 workers, 5M records): ~1.6M/s light,
-  ~700k/s medium — at parity with `ProcessPoolExecutor`.
+  ~700k/s medium. This was previously described as "at parity with
+  `ProcessPoolExecutor`", which was an artifact of the competitor
+  harness timing `map()` with input preparation outside the clock.
+  Measured end-to-end (prep included, as forkrun's timed call does),
+  medium `ProcessPoolExecutor` is 454k and `multiprocessing.Pool` 451k,
+  so forkrun's Python UDF path leads by ~1.7–1.9x rather than tying.
+  See `python/benchmarks/results/RELEASE_v3.6.0.md` §0.
 
 ## mode="spawn"
 

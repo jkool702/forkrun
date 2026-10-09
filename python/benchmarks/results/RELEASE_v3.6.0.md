@@ -238,22 +238,49 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 >
 > | System | **UMA `nodes=1`** | fake-NUMA `nodes=auto` (4 nodes) | vs Executor (UMA) |
 > |---|---|---|---|
-> | **★ forkrun C plugin (memoryview)** | **10.65M** | 13.52M | **6.66×** |
-> | **★ forkrun C plugin (bytes)** | **8.20M** | 9.81M | **5.13×** |
-> | **★ forkrun Python UDF (memoryview)** | **1.91M** | 1.92M | 1.19× |
-> | ProcessPoolExecutor | 1.6M | — | — |
-> | multiprocessing.Pool | 1.5M | — | — |
+> | **★ forkrun C plugin (memoryview)** | **10.65M** | 13.52M | **7.49×** |
+> | **★ forkrun C plugin (bytes)** | **8.20M** | 9.81M | **5.77×** |
+> | **★ forkrun Python UDF (memoryview)** | **1.91M** | 1.92M | 1.34× |
+> | ProcessPoolExecutor ‡‡‡ | 1.42M | — | — |
+> | multiprocessing.Pool ‡‡‡ | 1.38M | — | — |
 > | Ray Data | 368k | — | — |
 > | HuggingFace Datasets | 112k | — | — |
 > | (serial baseline) | 145k | — | — |
+
+> **‡‡‡ The two 20M competitor rows did not reproduce and are corrected
+> downward (2026-10-08).** Re-measured with `bench_streaming_competitors.py`
+> on a freshly generated, seeded 20M light corpus (2,130,842,196 B, 0%
+> malformed, 20,000,000 lines), 28 workers, median-of-3 after warmup — and
+> run twice end to end:
+>
+> | | measured | previously published | delta |
+> |---|---|---|---|
+> | ProcessPoolExecutor | 1.42M | 1.6M | −11.2% |
+> | multiprocessing.Pool | 1.38M | 1.5M | −8.2% |
+>
+> The old figures were not a different measurement so much as an
+> impossible one. These competitors are **ingest-bound** — instrumenting
+> the harness shows pipe read + split + decode consumes 97–98% of the
+> timed window — so throughput is a property of the *bytes per second* of
+> single-threaded ingest, not of the record count. Measured, that is flat:
+> **151.2 MB/s at 5M and 151.4 MB/s at 20M.** The published pair implied
+> 152.4 MB/s at 5M and **170.5 MB/s at 20M** — i.e. a 4× larger input
+> arriving 12% *faster* per byte, which the same code on the same payload
+> cannot do. The 5M rows in this study reproduce to within 1%
+> (1.43M → 1.419M, 1.34M → 1.338M), which is what makes the 20M
+> discrepancy a defect in the 20M numbers rather than in the method.
+>
+> This raises forkrun's margin in that table, so it is recorded rather
+> than swapped silently: `vs Executor (UMA)` 6.66× → **7.49×**,
+> 5.13× → **5.77×**, 1.19× → **1.34×**, and fake-NUMA 8.45× → **9.51×**.
 >
 > The plugin rows are ~21% / ~16% faster on the 4-node topology; the
 > UDF row is flat (−0.5%), which is the expected shape — the UDF row is
 > Python-callback bound and forks nothing, so the multi-node ingest path
 > has nothing to win. The plugin rows are the ones that engage it.
 >
-> **C plugin vs Executor is 6.66× on UMA (the release topology),
-> 8.45× on fake-NUMA — not the 6.19× printed in §0.**
+> **C plugin vs Executor is 7.49× on UMA (the release topology),
+> 9.51× on fake-NUMA — not the 6.19× printed in §0.**
 >
 > Re-measured 2026-10-06 on the v3.6.1 release branch after removing
 > the artificial worker-fork stall. Same protocol on both boots:
@@ -349,6 +376,51 @@ even the direction of a streaming comparison depend on topology. §0 and
 | **forkrun C bytes vs Executor**          | **5.29×** | **3.94×** | **9.60×** |
 | forkrun UDF bytes vs Executor            | 1.27× | 1.33× | 0.99× |
 | forkrun C bytes vs multiprocessing.Pool  | 5.64× | 4.17× | 9.66× |
+
+> **Streaming competitor rows re-verified 2026-10-08 — no change.** The
+> file-input harness was found to time Pool/Executor *without* their input
+> preparation (fixed in `036a24fb`), so the obvious worry was that the
+> streaming harness had the same defect. It does not, and that was
+> established by measurement rather than by reading the code.
+>
+> Instrumenting `bench_streaming_pipe.py` with a `time` shim and a tracing
+> wrapper on the batch iterator (without patching `os.read`, which breaks
+> multiprocessing's own IPC):
+>
+> | system | batches ingested inside `[t0, dt]` | ingest as share of window |
+> |---|---|---|
+> | ProcessPoolExecutor | 2442 / 2442 (100%) | 96.8% |
+> | multiprocessing.Pool | 2442 / 2442 (100%) | 98.4% |
+>
+> The pipe read, newline split and per-line decode all happen *inside* the
+> timed region, because `_iter_batches` is a lazy generator consumed by
+> `imap`/`map` within the window. The suspicion that these systems
+> "collect the whole stream first" is **half right, and worth recording
+> precisely**: `ProcessPoolExecutor.map` does eagerly materialise every
+> batch as a future before returning, whereas `pool.imap` streams lazily
+> with bounded memory. That is a real memory/scalability difference — but
+> the materialisation happens *inside* the clock, so it does not flatter
+> the timing. Both remain ingest-bound, with the workers largely waiting
+> on the single-threaded parent.
+>
+> Three further checks, all clean: trial parity (`TRIALS=3`, median, one
+> warmup on both sides, including `cell_var.py` for forkrun — no `trials//2`
+> equivalent anywhere); count convention (both sides use valid-record
+> counts, 5,000,000 / 4,997,892 / 4,997,982); and exactness (gated hard on
+> both — `if n != exp: FAIL` for competitors, `raise SystemExit` for
+> forkrun).
+>
+> One asymmetry does exist and is disclosed rather than corrected: forkrun's
+> `run_pipe()` spawns its producer *inside* the timed window, while the
+> competitors call `_spawn_producer()` *before* `t0`. Measured cost of that
+> spawn (pipe + fork + child open) is **0.4 ms** — 0.012% of a light
+> stream, 0.001% of heavy. It favours the competitors by ~0.01%, which is
+> immaterial; correcting it would marginally favour forkrun.
+>
+> Re-ran all three 5M variants: light 1.43M → **1.419M** and 1.34M →
+> **1.338M** (−0.7% / −0.2%), medium 0.62M → **0.610M** and 0.59M →
+> **0.578M**, heavy 0.10M → **0.096M** and 0.10M → **0.096M**. All within
+> run-to-run noise, so the rows above stand as printed.
 
 Ordered output and automatic failure recovery (bad-batch poisoning without
 killing the pipeline) are active on every forkrun row here, as in §0.

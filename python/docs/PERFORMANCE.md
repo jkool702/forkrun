@@ -18,14 +18,21 @@ microbenchmarks and why they read lower.
 | Tokenize (500k docs) | 305k docs/s | 139k | 168k | 160k |
 
 forkrun cells re-measured 2026-09-25 (engine v3.6.0, UMA,
-28w, exact totals); Executor/Pool cells are W-PY29-era and
-stable (those codebases didn't change — same standing:
-Python UDF at Executor parity, C plugin 2–4× the best
-UDF). absolutes carry ±10–20% run variance; relative order
-is the robust reading.
+28w, exact totals); Executor/Pool cells are W-PY29-era, and
+those codebases did not change. But the *harness* did: those
+competitor cells were timed with input preparation (read, split,
+decode, partition) outside the clock, which flatters Pool and
+Executor by ~40% on medium and more the larger the file. Re-measured
+end-to-end on the same configuration, medium `ProcessPoolExecutor`
+is 454k and `multiprocessing.Pool` 451k. So the older "Python UDF
+at Executor parity" standing was an artifact of the measurement:
+forkrun C wins 2.8–7.6×, and forkrun's Python UDF leads the best
+competitor UDF by ~1.7–1.9× rather than tying it. See
+`python/benchmarks/results/RELEASE_v3.6.0.md` §0 for the corrected
+table. Absolutes carry ±10–20% run variance; relative order is the
+robust reading.
 
-forkrun C wins 2.8–7.6×; forkrun Python runs at
-`ProcessPoolExecutor` parity. Cost model (profiled):
+Cost model (profiled):
 ~73% of cycles sit in payload work (e.g. `snprintf`
 formatting), <1% in the framework — make the payload
 faster before touching anything else.

@@ -6,6 +6,18 @@ each system runs its idiomatic best.
 
 ## Headline (medium, 2.2GB)
 
+> **Competitor rows in this table predate the 2026-10-08 timing-scope
+> fix and are therefore optimistic.** They were measured with input
+> preparation (read + split + decode + partition) *outside* the timed
+> region, which flatters Pool/Executor — by ~40% on medium, and more the
+> larger the file. Re-measured end-to-end on the same configuration
+> (28 workers, 5M records), ProcessPoolExecutor is **454k** and
+> multiprocessing.Pool **451k**, not the 755k/757k below. The forkrun rows
+> here are left as measured, because they come from a different study
+> (`numa_5m_study.md`) and mixing two studies in one table is the error
+> this note exists to prevent. For a single-study, like-for-like table
+> see `python/benchmarks/results/RELEASE_v3.6.0.md` §0.
+
 | System | records/s | Notes |
 |---|---|---|
 | forkrun C plugin | 2,023k–2,300k | yyjson single-pass, frozen ABI |

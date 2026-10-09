@@ -1,0 +1,19 @@
+# Streaming competitor rows (pipe-fed), re-measured 2026-10-08
+# bench_streaming_competitors.py via bench_streaming_pipe.py
+# 28 workers, BATCH_LINES=2048, IN_CHUNK=1MiB, median-of-3 after 1 warmup
+# one corpus per process; ingest (read+split+decode) INSIDE the timed window
+# exactness gated: valid-record counts 5000000/4997892/4997982/20000000
+# values are median seconds per trial; two independent harness invocations
+# variant,system,run,median_sec,valid,rec_s
+5M light,ProcessPoolExecutor,1,3.5261,5000000,1417997
+5M light,ProcessPoolExecutor,2,3.5189,5000000,1420899
+5M light,multiprocessing.Pool,1,3.7108,5000000,1347418
+5M light,multiprocessing.Pool,2,3.7635,5000000,1328551
+5M medium,ProcessPoolExecutor,1,8.1909,4997892,610176
+5M medium,multiprocessing.Pool,1,8.6477,4997892,577945
+5M heavy,ProcessPoolExecutor,1,51.8969,4997982,96306
+5M heavy,multiprocessing.Pool,1,51.8078,4997982,96472
+20M light,ProcessPoolExecutor,1,14.0828,20000000,1420172
+20M light,ProcessPoolExecutor,2,14.0569,20000000,1422789
+20M light,multiprocessing.Pool,1,14.4628,20000000,1382858
+20M light,multiprocessing.Pool,2,14.5734,20000000,1372363
