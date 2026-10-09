@@ -193,6 +193,28 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 > them by 3.94–10.76×. The advantage is not coming from withholding a
 > batching trick; it is in the engine underneath.
 >
+> **Where the tuning effort goes — and it is not pointed at forkrun.**
+> forkrun is called once, bare: `forkrun.map(payload, path,
+> workers=workers, order="index")`. Default engine, default batching, with
+> the reactor's recovery and ordering left on. Nothing is tuned for it,
+> because there is nothing to tune: on-the-fly batching is the engine's
+> own behaviour, so no competitor reaches it by configuration — only by
+> reimplementing it, which is the question above.
+>
+> The competitors get the attention. `bench_exectypes.py` exists for no
+> other purpose than to build the strongest Executor that can be built,
+> and carries an enumerated rulebook for it: workers `pread`
+> line-aligned ~4k-line byte ranges so **no input is ever pickled**,
+> per-worker cached descriptors, the plugin loaded post-fork so the parent
+> never touches the `.so`, and a coarse-chunking variant run alongside
+> for sensitivity. That effort pays off — the row measures 3.67M on
+> light, **2.3× the plain Python-UDF Executor** — and forkrun still leads
+> it by 2.77×. The main harness also inserts a settle delay between
+> systems for a stated reason: without it the framework that runs last
+> "measured half its isolated speed." (The worker sweep, for the record,
+> is symmetric — every system, forkrun included, is swept and reported at
+> its best count.)
+>
 > So the honest summary of §0 is: against statically-partitioned Python
 > process pools, forkrun's C plugin path is **6.36× / 3.39× / 9.04×** and
 > its Python UDF path is **1.19× / 1.08× / 1.06×** on light / medium /

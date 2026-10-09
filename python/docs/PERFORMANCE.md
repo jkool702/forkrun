@@ -30,7 +30,8 @@ that strategy and forkrun still wins by 3.94-10.76x, so nothing here
 depends on withholding it. So: forkrun C wins 6.4-9.0x, and the Python
 UDF runs 1.00-1.19x over the pools -- parity-plus, carrying ordered
 output and automatic failure recovery that static partitioning does
-not. Absolutes carry +/-10-20% run variance; relative order is the
+not.
+Competitors get the more attention in this harness: `bench_exectypes.py` exists to build the strongest possible Executor (no pickled input, `pread` byte ranges, post-fork plugin load) and reaches 2.3x the plain Python-UDF Executor, while forkrun is called bare with default args. See section 0. Absolutes carry +/-10-20% run variance; relative order is the
 robust reading.
 
 Cost model (profiled):
