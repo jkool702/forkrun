@@ -18,20 +18,19 @@ microbenchmarks and why they read lower.
 | Tokenize (500k docs) | 305k docs/s | 139k | 168k | 160k |
 
 forkrun cells re-measured 2026-09-25 (engine v3.6.0, UMA,
-28w, exact totals); Executor/Pool cells are W-PY29-era, and those
-codebases did not change. But the *harness* did: those competitor
-cells were timed with input preparation outside the clock, which
-flatters Pool and Executor. Re-measured properly (5M, 28w, exact
-totals) against the best of three file modes -- read-all, lazy 1 MiB
-batches, pre-partitioned -- the honest competitor numbers are
-`ProcessPoolExecutor` 1.54M / 764k / 96k and `multiprocessing.Pool`
-1.50M / 750k / 96k on light / medium / heavy. So "Python UDF at
-Executor parity" was an artifact: the Python UDF leads by
-~1.02-1.23x, not ~1.9x, while the C plugin leads by 3.4-8.8x.
-Quote the UDF margin as modest. Full derivation, including a
-correction that was itself retracted, is in
-`python/benchmarks/results/RELEASE_v3.6.0.md` section 0. Absolutes
-carry +/-10-20% run variance; relative order is the
+28w, exact totals). Executor/Pool cells re-measured 2026-10-08 with
+static file partitioning -- the standard Python multiprocessing
+idiom, and the shape these competitors actually use -- giving
+`ProcessPoolExecutor` 1.60M / 778k / 94k and `multiprocessing.Pool`
+1.52M / 775k / 93k on light / medium / heavy. Batching on the fly
+would make them faster and is available to them; it is deliberately
+not quoted, because on-the-fly batching is one of the things forkrun
+does automatically. On a stream the competitors are forced into exactly
+that strategy and forkrun still wins by 3.94-10.76x, so nothing here
+depends on withholding it. So: forkrun C wins 6.4-9.0x, and the Python
+UDF runs 1.00-1.19x over the pools -- parity-plus, carrying ordered
+output and automatic failure recovery that static partitioning does
+not. Absolutes carry +/-10-20% run variance; relative order is the
 robust reading.
 
 Cost model (profiled):

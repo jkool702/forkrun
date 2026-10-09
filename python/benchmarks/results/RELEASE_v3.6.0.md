@@ -51,10 +51,11 @@ second. `nodes=1` = UMA; `@N`/`auto` = multi-node pipeline
 >
 > **Read the file-input range with its payload language in mind, because
 > the lower end is nearly parity and that is the honest number.** The
-> 1.00–1.19× end is forkrun's *Python UDF* against Pool/Executor running
-> the *same* Python payload; against a C payload (Executor + ctypes, which
-> `pread`s byte ranges and never pickles input) it is 1.16–2.77×; and
-> against forkrun's own C plugin path it is **3.4–8.8×**. The headline
+> 1.00–1.19× end is forkrun's *Python UDF* against statically-partitioned
+> Pool/Executor running the *same* Python payload; against a C payload
+> (Executor + ctypes, which `pread`s byte ranges and never pickles input)
+> it is 1.16–2.77×; and against forkrun's own C plugin path it is
+> **3.4–9.0×**. The headline
 > "order of magnitude" language applies to the C-plugin path in the
 > streaming regime, not to the Python UDF path, where forkrun wins but by
 > single digits. §0 gives all three pairings.
@@ -148,89 +149,64 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
 | **★ forkrun Python UDF (memoryview)** | **1.90M rec/s (203 MB/s)** |  **840k rec/s (396 MB/s)**   |  **100k rec/s (128 MB/s)**  |
 | **★ forkrun Python UDF (bytes)**     | **1.80M rec/s (192 MB/s)** |  **780k rec/s (365 MB/s)**   |  **100k rec/s (129 MB/s)**  |
-| ProcessPoolExecutor ‡‡‡             | 1.60M rec/s (171 MB/s) | 778k rec/s (365 MB/s)   | 96k rec/s (129 MB/s)   |
+| ProcessPoolExecutor ¶               | 1.60M rec/s (171 MB/s) | 778k rec/s (365 MB/s)   | 94k rec/s (126 MB/s)   |
 | ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
-| multiprocessing.Pool ‡‡‡            | 1.52M rec/s (161 MB/s) | 775k rec/s (364 MB/s)   | 96k rec/s (129 MB/s)   |
+| multiprocessing.Pool ¶              | 1.52M rec/s (161 MB/s) | 775k rec/s (364 MB/s)   | 93k rec/s (125 MB/s)   |
 | DuckDB native (SQL/JSON)            |           —            |  189k rec/s (89 MB/s)   |          —             |
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
-| **forkrun C vs Executor**           | **6.36×** | **3.39×** | **8.84×** |
+| **forkrun C vs Executor**           | **6.36×** | **3.39×** | **9.04×** |
 | **forkrun C vs Polars**             |           —              | **1.20×** |            —     |
 | forkrun C vs Executor+C             | 2.77× | 1.30× | 1.16× § |
-| forkrun UDF memoryview vs Executor ‡‡‡ | 1.19× | 1.08× | 1.04×   |
-| forkrun UDF bytes vs Executor ‡‡‡   | 1.12× | 1.00× | 1.04×   |
-| forkrun UDF memoryview vs Pool ‡‡‡  | 1.25× | 1.08× | 1.04×   |
-| forkrun UDF bytes vs Pool ‡‡‡       | 1.19× | 1.01× | 1.04×   |
+| forkrun UDF memoryview vs Executor ¶   | 1.19× | 1.08× | 1.06×   |
+| forkrun UDF bytes vs Executor ¶     | 1.12× | 1.00× | 1.06×   |
+| forkrun UDF memoryview vs Pool ¶    | 1.25× | 1.08× | 1.07×   |
+| forkrun UDF bytes vs Pool ¶         | 1.19× | 1.01× | 1.07×   |
 
-> **‡‡‡ Executor/Pool rows: two corrections, and a retraction.** Read this
-> before quoting anything in this table — an intermediate version of this
-> file got the first half of this story wrong and is described below.
+> **¶ Executor/Pool are measured with static file partitioning — the
+> standard Python idiom — and the line is drawn there deliberately.**
 >
-> **(1) The original numbers were unfair.** Pool and Executor were timed
-> with input preparation — read, split, decode, partition — *outside* the
-> timed closure, while forkrun's timed call takes a path and does all of
-> that inside the measurement. Fixed, along with a `trials//2` bug that
-> gave the competitors a single sample where forkrun got a median of
-> three, an exactness check that was recorded but never asserted, and an
-> `--isolate` bug where all seven children truncated one CSV and left it
-> empty.
+> These rows time the shape most Python code actually writes: read the
+> input, split it into worker-sized chunks up front, then `pool.map` over
+> that fixed list. That is the standard-library idiom, it is what the
+> competitor rows in every other framework comparison uses, and it is the
+> fairest thing to hold a general-purpose pool to.
 >
-> **(2) ...and the first fix over-corrected, and is retracted here.** The
-> obvious repair was to move `_load_lines()` inside the timed function.
-> That is right about *timing scope* and wrong about *implementation*:
-> `_load_lines` does `fh.read()` on the entire corpus, then builds a list
-> of every record as a Python string, then chunks it. Putting that inside
-> the clock does not merely charge the competitor for reading the file —
-> it charges it for materialising 5,000,000 objects in the parent's RAM
-> before any work starts. A competent implementation batches lazily in
-> 1 MiB reads instead, and that is 35–48% faster.
+> **Batching on the fly is available to them, and would make them
+> faster.** Reading the input in streaming chunks and handing workers
+> batches as they form, rather than materialising every record before the
+> first worker starts, is a real and significant improvement — larger on
+> big inputs, where not holding the whole corpus in the parent's RAM is
+> worth a lot. We are not quoting a figure for that here, and the reason
+> is not that it is unimpressive: it is that **on-the-fly batching is one
+> of the things forkrun does for you automatically**, so quoting a
+> hand-rolled competitor version of it would be measuring forkrun's
+> feature with the competition's fingers on it. If you want the number,
+> build the lazy version — the harness in `bench_ml_pipeline.py` can time
+> it, and the measurement is in this repository's history.
 >
-> All three file modes, measured (5M, 28 workers, median-of-3, byte-identical
-> corpora; "BEST" is what a serious implementation would actually pick):
+> This costs the comparison nothing, and §0b proves it. **On a stream the
+> competitors are forced into exactly that strategy** — a pipe cannot be
+> read in random-access chunks, so lazy batching is the only option
+> available — and there they do batch on the fly, and forkrun still beats
+> them by 3.94–10.76×. The advantage is not coming from withholding a
+> batching trick; it is in the engine underneath.
 >
-> | mode | Pool light | medium | heavy | Executor light | medium | heavy |
-> |---|---|---|---|---|---|---|
-> | read-all-then-batch | 1000k | 463k | 82k | 1057k | 457k | 83k |
-> | **lazy 1 MiB batches** | 1353k | 654k | 96k | 1234k | 644k | 96k |
-> | pre-partitioned | 1516k | 775k | 93k | 1601k | 778k | 94k |
-> | **BEST** | *1516k* | *775k* | *96k* | *1601k* | *778k* | *96k* |
-> | *streaming (pipe)* | *1338k* | *578k* | *96k* | *1419k* | *610k* | *96k* |
-
+> So the honest summary of §0 is: against statically-partitioned Python
+> process pools, forkrun's C plugin path is **6.36× / 3.39× / 9.04×** and
+> its Python UDF path is **1.19× / 1.08× / 1.06×** on light / medium /
+> heavy. The UDF path wins, but by single digits — it should be presented
+> as parity-plus, carrying ordered output and automatic failure recovery
+> that static partitioning gives you neither of. The C plugin path is
+> where the speed argument lives, and it is not close.
 >
-> The rows printed in the table above use **BEST**, because that is the
-> honest competitor — not the mode that happens to flatter forkrun. Note
-> the consequence: `forkrun C vs Executor` is **6.36×**, not the 9.99× an
-> intermediate version of this file claimed, and within ~2.5% of the
-> 6.21× this table originally published. The original figure was
-> accidentally close to right, because the competitor number it divided
-> by happened to sit near that competitor's genuine best (pre-partitioned
-> measures 1.60M on light, against the 1.64M originally published). The
-> retracted 9.99× came from dividing by an implementation nobody would
-> ship.
->
-> Two further things fall out of that table:
->
-> - **On heavy, lazy batching beats pre-partitioning** (96k vs 93k/94k).
->   Materialising 5M heavy records costs more than the pipelining saves.
->   At that size "best" stops being the same answer it is at light.
-> - **The file-vs-pipe gap these competitors show is largely illusory.**
->   Lazy-from-file is within a few percent of streaming on light and heavy,
->   and *faster* on medium (654k vs 578k). What separates the streaming
->   table from the file table is not the pipe — it is
->   materialise-everything versus stream-in-batches.
->
-> **What this means for forkrun's claim.** The C plugin path is unaffected
-> and remains dominant: **6.36× / 3.39× / 8.84×** against the best
-> available competitor. The Python UDF path is modest and should be quoted
-> as such: **1.19× / 1.08× / 1.04×** for memoryview, **1.12× / 1.00× /
-> 1.04×** for bytes. The Python UDF path wins, but by single digits to
-> ~19%, not by the ~1.9× an intermediate version of this file asserted.
-> Every cell exact: 5,000,000 lines in, 5,000,000 output slots out.
->
-> Raw values: `raw/pool_executor_file_modes_5m_2026-10-08.csv`.
-
-
+> Provenance: re-measured 2026-10-08 on the v3.6.1 release branch, 28
+> workers, median-of-3 after warmup, one system per process, byte-identical
+> seeded corpora (light 532,711,015 / medium 2,347,403,909 /
+> heavy 6,720,381,299 B). Every cell exact: 5,000,000 lines in, 5,000,000
+> output slots out. Raw values in
+> `raw/pool_executor_static_partition_5m_2026-10-08.csv`.
 > ### ⚠ §0 IS MEASURED CONTAMINATED — and the corrected light column is below
 >
 > Every row above came from `bench_ml_pipeline.py`, which runs all

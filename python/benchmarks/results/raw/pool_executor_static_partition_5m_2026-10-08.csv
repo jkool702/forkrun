@@ -1,0 +1,14 @@
+# Executor/Pool UDF rows quoted in RELEASE_v3.6.0.md section 0, 5M records
+# METHOD: static file partitioning (pre-materialised worker-sized chunks) --
+#         the standard Python multiprocessing idiom. See the section-0 note.
+# 28 workers, median-of-3 after warmup, one system per process, --no-fault
+# corpora byte-identical: light 532711015 / medium 2347403909 / heavy 6720381299
+# exactness: 5,000,000 input lines -> 5,000,000 output slots, every cell
+# measured 2026-10-08 on NEW/REFACTOR4.0
+system,variant,rec_s,valid_records,exact_slots
+pool,light,1515790,5000000,5000000
+executor,light,1600686,5000000,5000000
+pool,medium,775026,4997892,5000000
+executor,medium,778160,4997892,5000000
+pool,heavy,93218,4997982,5000000
+executor,heavy,93986,4997982,5000000
