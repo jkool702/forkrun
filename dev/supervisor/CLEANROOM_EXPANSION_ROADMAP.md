@@ -303,6 +303,53 @@ reverting its own instrumentation.
 run and an injected-failure run; test parses them; children preserve the fd
 without weakening scrubbing; disabled by default and absent from benchmarks.
 
+**Status: Phase A DONE** (`forkrun_trace.h`, `forkrun_cleanroom.c`,
+`python/forkrun/run.py`, `python/tests/test_cleanroom_trace.py`). 29 records
+from a representative run; every role carries a balanced
+`fork_request → fork_return → child_entry → child_exit` story, and worker
+pids link back to the parent's `fork_return`.
+
+> **[V] Three defects found by building it, none of them visible by reading.**
+>
+> 1. **The Python parser's struct format was wrong in a way a size check
+>    could not see.** It read `I,B,B,H` where the C struct is `uint16,
+>    uint16`. Both spellings total 8 bytes, so the record-size guard passed
+>    and every field after `magic` was misaligned — `version` was read as
+>    two separate bytes. The fix was not to re-check sizes but to change
+>    what the guard asserts: a **round-trip test** where C emits a record
+>    with distinctive per-field values and every one must arrive intact in
+>    Python. Layout reasoning cannot substitute for that.
+> 2. **A parent-side record emitted before the `if (pid == 0)` branch is
+>    emitted by the child too**, so every fork produced two `fork_return`
+>    records and the trace claimed forks that never happened. Caught by a
+>    pairing assertion, added afterwards: `fork_request` and `fork_return`
+>    counts must match per role.
+> 3. **The trace descriptor is added inside `enter_child`, not at each of
+>    the five call sites.** Five copies of one line is five chances for a
+>    future fork site to scrub the trace away, and that failure would look
+>    like "the trace stopped working" in a facility that is off by default.
+>    Putting it in the scrub path makes the property structural.
+
+> **[V] Mutation-tested; five mutations, all caught.** Reintroducing the
+> exact `I,B,B,H` bug; swapping `role`/`event` in the parser's output; the
+> **same-width swap of `wid`/`wincarn`** (which leaves every offset check
+> green — the reason the round-trip test exists); dropping the trace fd
+> from the keep-list; and re-emitting `fork_return` before the child branch.
+
+> **[V] A stale `__pycache__` invalidated one whole round of those results.**
+> A scripted edit swapping two identifiers preserves the file size, and a
+> `.pyc` whose recorded mtime still matched was accepted — so the suite ran
+> the OLD bytecode. The symptom was a parser that provably could not swap
+> two fields, demonstrably swapping them, from source that demonstrably did
+> not. Recorded in the test module's docstring: clear the bytecode cache
+> before trusting any "impossible" result in this area.
+
+**Phase A found one packaging defect:** `forkrun_trace.h` was absent from
+`MANIFEST.in`, so the sdist could not rebuild the launcher and
+`test_sdist_installs_from_source` failed. Added to `MANIFEST.in` and to
+`release_check.py`'s `check_sdist` required-file list. A new header is a
+packaging obligation, not just a source file.
+
 #### Scope — established by inspection and measurement, not assumption
 
 **[V] HARD CONSTRAINT — the trace memfd MUST be `O_APPEND`.** Measured on
@@ -371,10 +418,59 @@ coverage; no engine (`forkrun_ring.c`) changes; no default-on; not in
 benchmarks.
 
 **Open decisions for review before implementation:**
-1. **Launcher-only v1** (recommended) vs covering the in-process path too.
+1. **Launcher-only v1** vs covering the in-process path too. — **DECIDED:
+   launcher-only for v1.**
 2. Whether the trace survives into the **fatal-teardown** path, where the
    launcher kills children under time pressure and every `write()` is latency
-   the boundedness budget pays for.
+   the boundedness budget pays for. — **DECIDED: instrument it**, accepting
+   the cost, because that is where the trace is most valuable. The cost is
+   bounded by keeping fatal-path records to the minimum set.
+
+---
+
+#### Phase A → Phase B: full coverage, and what the frozen gate costs
+
+Phase A is launcher-only. **Phase B adds the in-process path and the orderer,
+which means touching the frozen engine.** Decided in advance so Phase B is not
+a surprise: the work is planned, but it is gated, not skipped.
+
+**[V] The frozen-engine gate makes Phase B a policy decision, not just code.**
+`python/release_check.py:51` freezes:
+
+```python
+FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
+```
+
+and `check_engine_frozen` (release_check.py:469-483) asserts **two** things:
+the files are unmodified in the working tree, **and** the most recent commit
+touching any of them is **not** HEAD. So adding trace instrumentation to the
+orderer requires *both* modifying `forkrun_ring.c` and making that commit
+HEAD-adjacent — the check cannot be satisfied by accident, only by an explicit
+change to the freeze policy or a deliberate carve-out.
+
+That is the "unless explicitly revisited" clause of the §2 constraints being
+exercised for real. Phase B therefore carries its own gate:
+
+| step | what | why it is a gate |
+|---|---|---|
+| B0 | Add `forkrun_trace.h` (new file, **not** an edit to the frozen `forkrun_substrate.h`) | keeps Phase A already shippable against the unmodified freeze policy |
+| B1 | Amend `FROZEN_FILES` with a narrow, reviewed carve-out for trace-only engine hunks, or drop `forkrun_ring.c` from the freeze with a recorded rationale | the freeze is a release *policy*; changing it is a decision with its own evidence, not a side effect of adding instrumentation |
+| B2 | Orderer entry/exit/completion in `forkrun_ring.c`, plus the reactor's own fork sites | needs B1 first |
+| B3 | In-process worker/spill/drain paths, matching Phase A's event vocabulary | needs B2's record discipline to be proven in production first |
+
+**[V] Phase A is therefore built to be extensible rather than throwaway.** The
+record format, the `O_APPEND` discipline, and the emit helper live in a **new
+shared header**, `forkrun_trace.h`, included by `forkrun_cleanroom.c` in
+Phase A and by `forkrun_ring.c` in Phase B. A new header is required anyway:
+`forkrun_substrate.h` is itself frozen, so the format cannot live there.
+Phase B then becomes *additive* — new emit calls in a file that already
+includes the header — rather than a redefinition of the record format.
+
+**Phase A exit criterion for Phase B:** Phase A's record parser, event
+vocabulary and `O_APPEND` discipline must survive in the launcher long enough
+to be trusted before the engine inherits them. The roadmap's recurring lesson
+applies — seven review rounds found contradictions in *written* contracts; the
+Phase B risk is inheriting an untested one.
 
 ### C0.3 — UDF eligibility and import contract
 

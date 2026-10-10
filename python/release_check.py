@@ -412,6 +412,7 @@ def check_sdist():
         names = tf.getnames()
     top = "forkrun-%s/" % PY_VERSION
     needed = ["forkrun_ring.c", "forkrun_substrate.h",
+              "forkrun_trace.h",
               "substratestubs.c", "Makefile.substrate",
               "ring_loadables/forkrun_plugin.h",
               "python/forkrun/_shim.c", "python/README.md",

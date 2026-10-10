@@ -978,6 +978,31 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     os.set_inheritable(src_fd, True)
     os.set_inheritable(res_fd, True)
     os.set_inheritable(stats_fd, True)
+
+    # ---- C0.2 opt-in structured trace ----
+    #
+    # OFF unless FORKRUN_CLEANROOM_TRACE is set, and the fd is the ONLY
+    # switch: when it is -1 the launcher's emit helper is a single
+    # predictable branch, so a disabled trace costs no syscall and no
+    # allocation and never appears in a benchmark.
+    #
+    # O_APPEND IS LOAD-BEARING, NOT COSMETIC. Measured on this machine
+    # (os.fork, 16 children, one 64-byte record per write): a shared file
+    # offset recovered 25,962 of 320,000 records -- 92% silently lost --
+    # while O_APPEND recovered all 320,000 with zero torn records. The
+    # trace exists to diagnose CONCURRENT stalls, so without O_APPEND it
+    # would discard most of its evidence exactly when needed, and discard
+    # it SILENTLY: a short but well-formed file reads as "fewer events",
+    # not as "we lost data".
+    trace_fd = -1
+    if _cleanroom_trace_enabled():
+        trace_fd = os.memfd_create("fr_cleanroom_trace")
+        os.set_inheritable(trace_fd, True)
+        # Set O_APPEND on the SHARED open file description, before any
+        # fork, so every child inherits the append semantics.
+        _fcntl.fcntl(trace_fd, _fcntl.F_SETFL,
+                     _fcntl.fcntl(trace_fd, _fcntl.F_GETFL) | os.O_APPEND)
+
     argv = [launcher, "--so", so,
             "--plugin", plugin_path, "--func", plugin_func,
             "--workers", str(int(workers)),
@@ -990,6 +1015,8 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "--retry", str(int(_resolve_retry_limit())),
             "--src", str(src_fd), "--result", str(res_fd),
             "--stats-fd", str(stats_fd)]
+    if trace_fd >= 0:
+        argv += ["--trace-fd", str(trace_fd)]
 
     pid = os.fork()
     if pid == 0:
@@ -1014,6 +1041,11 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # off, which is why the cleanroom-OFF run alone never showed it.
     stats = _read_cleanroom_stats(stats_fd)
     os.close(stats_fd)
+    # Read the trace AFTER waitpid: the launcher and every child are gone
+    # by then, so the file is complete and its size is final.
+    if trace_fd >= 0:
+        _LAST_TRACE[:] = _read_cleanroom_trace(trace_fd)
+        os.close(trace_fd)
     if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
         os.close(res_fd)
         code, signum, label, pre_ingest = _decode_launcher_status(status)
@@ -1115,6 +1147,106 @@ def _stats_ftruncate(fd, size):
         os.ftruncate(fd, size)
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# C0.2: the cleanroom structured trace.
+#
+# The wire format is forkrun_trace.h. The constants are duplicated here
+# deliberately rather than generated: a build-time dependency from the
+# Python package on a C header would be a much larger coupling than 14
+# integers, and _test_trace_layout_matches_header asserts the two agree by
+# COMPILING the header, so a divergence fails the suite instead of
+# corrupting a diagnosis.
+# ---------------------------------------------------------------------------
+
+_TRACE_REC = 64
+_TRACE_MAGIC = 0x52544646          # 'F','T','R','F'
+_TRACE_VERSION = 1
+# The format is I,H,H,q,... because the C struct is uint32 magic then
+# uint16 version then uint16 rec_bytes. An earlier draft wrote I,B,B,H --
+# which totals the SAME 8 bytes, so the record-size check passed while
+# every field after magic was misaligned and version was read as two
+# bytes. _test_python_field_offsets_match_c now derives this format's
+# offsets and compares them to the compiler's offsetof, which is the
+# check that was missing and should have caught it.
+_TRACE_STRUCT = "<IHHqIbb2xiiii24x"
+
+_TRACE_ROLES = {
+    0: "launcher", 1: "worker", 2: "probe", 3: "spill",
+    4: "fallow", 5: "scan", 6: "drain", 7: "orderer",
+}
+
+_TRACE_EVENTS = {
+    1: "launcher_init", 2: "fork_request", 3: "fork_return",
+    4: "child_entry", 5: "child_exit", 6: "reap",
+    7: "sup_enter", 8: "sup_exit", 9: "sup_abort", 10: "sup_respawn",
+    11: "fatal_begin", 12: "fatal_kill", 13: "fatal_reap",
+    14: "fatal_end",
+}
+
+# The most recent launcher trace. Empty when tracing was off.
+_LAST_TRACE: list = []
+
+
+def _cleanroom_trace_enabled() -> bool:
+    """Is the opt-in trace on? Off unless the env var is set to a true-ish
+    value.
+
+    Deliberately NOT honoured when the value is present but falsy: a trace
+    left on by an inherited environment is exactly the kind of thing that
+    quietly perturbs a benchmark.
+    """
+    v = os.environ.get("FORKRUN_CLEANROOM_TRACE")
+    return bool(v) and v not in ("0", "false", "no", "off")
+
+
+def _read_cleanroom_trace(trace_fd):
+    """Parse the trace memfd into a list of dicts.
+
+    Returns [] on any doubt. The trace is an OBSERVATION channel: a parse
+    failure must never propagate into the run it was observing, and a
+    partial trace is worse than none because it invites conclusions from
+    missing evidence. Every record is checked for magic, version and
+    record size, so truncation or skew is detected rather than misparsed.
+    """
+    try:
+        size = os.fstat(trace_fd).st_size
+    except OSError:
+        return []
+    if size <= 0:
+        return []
+    # A trailing partial record means the file was cut mid-write. Report
+    # nothing rather than the complete prefix: the caller asked for a
+    # whole run, not a prefix of one.
+    if size % _TRACE_REC:
+        return []
+    try:
+        raw = os.pread(trace_fd, size, 0)
+    except OSError:
+        return []
+    out = []
+    for off in range(0, len(raw), _TRACE_REC):
+        (magic, ver, rec, t_ns, pid, role, event,
+         wid, wincarn, node, rc) = struct.unpack_from(
+            _TRACE_STRUCT, raw, off)
+        if magic != _TRACE_MAGIC or rec != _TRACE_REC:
+            return []
+        if ver != _TRACE_VERSION:
+            return []
+        out.append({
+            "t_ns": t_ns,
+            "pid": pid,
+            "role": _TRACE_ROLES.get(role, "role%d" % role),
+            "event": _TRACE_EVENTS.get(event, "event%d" % event),
+            # FR_TRACE_NA is -1, meaning "not applicable". Surfaced as
+            # None so a reader cannot mistake it for wid 0 or wincarn 0.
+            "wid": None if wid == -1 else wid,
+            "wincarn": None if wincarn == -1 else wincarn,
+            "node": node,
+            "rc": rc,
+        })
+    return out
 
 
 def _read_cleanroom_stats(stats_fd):

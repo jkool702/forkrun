@@ -10,6 +10,7 @@
 include forkrun_ring.c
 include forkrun_cleanroom.c
 include forkrun_substrate.h
+include forkrun_trace.h
 include substratestubs.c
 include Makefile.substrate
 include ring_loadables/forkrun_plugin.h

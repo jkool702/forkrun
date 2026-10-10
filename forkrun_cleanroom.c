@@ -42,6 +42,16 @@
 #include <time.h>
 #include <unistd.h>
 
+/* The structured trace (Phase A). A header, so Phase B can include the same
+ * record format from forkrun_ring.c without a link dependency. See
+ * forkrun_trace.h for the contract -- especially the O_APPEND requirement,
+ * which is measured, not assumed. */
+#include "forkrun_trace.h"
+
+/* Tracing is OFF unless the parent passes --trace-fd. -1 is the off state
+ * and every emit call is a single predictable branch against it. */
+int fr_trace_fd = -1;
+
 typedef int (*fn_init)(int lines, int bytes);
 typedef int (*fn_worker_plugin_loop)(int wid, const char *path,
                                      const char *func_name,
@@ -83,6 +93,7 @@ struct opts {
     int respawn_cap;
     int verbose;
     int fork_only;
+    int trace_fd;       /* opt-in structured trace; -1 = disabled */
 };
 
 static int fr_memfd_create(const char *name) {
@@ -324,8 +335,20 @@ static int selfcheck_required(const cr_keep *k) {
 }
 
 /* Single entry point for a child: build the keep-list, scrub, and (if
- * enabled) verify. `role` is only used for diagnostics. */
-static void enter_child(const char *role, const cr_keep *k) {
+ * enabled) verify. `role` is only used for diagnostics.
+ *
+ * The trace descriptor is added HERE rather than at each of the five call
+ * sites. Doing it per-site would mean five copies of the same line and a
+ * sixth fork site added later could silently scrub the trace away -- the
+ * failure would look like "the trace just stopped working", which is the
+ * hardest kind of bug to notice in a facility that is off by default.
+ * Adding it here makes "every scrubbing child keeps the trace" a property
+ * of the scrub path itself.
+ *
+ * The parameter is non-const because this function extends the keep-list;
+ * it was const before only because no caller needed to. */
+static void enter_child(const char *role, cr_keep *k) {
+    if (fr_trace_fd >= 0) keep_add(k, fr_trace_fd);
     if (scrub_apply(k) != 0) {
         fprintf(stderr,
                 "forkrun-cleanroom: %s child could not be given a "
@@ -399,6 +422,8 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
                        int retry_limit, int on_error,
                        const int *engine_fd, int n_engine,
                        int wincarn) {
+    fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FORK_REQUEST,
+                  (int32_t)wid, (int32_t)wincarn, 0, 0);
     pid_t p = fork();
     if (p < 0)
         return -1;
@@ -424,6 +449,8 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
          * exists to remove, so it is kept explicitly. */
         keep_add(&k, g_poison_stats_fd);
         enter_child("worker", &k);
+        fr_trace_emit(FR_ROLE_WORKER, FR_EV_CHILD_ENTRY,
+                      (int32_t)wid, (int32_t)wincarn, 0, 0);
         if (!wloop) _exit(70);
         /* wincarn MUST be this generation's number. It is not
          * diagnostic: fr_py_worker_init stores it in
@@ -446,8 +473,12 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
          * as the respawn generation of the calling worker. */
         int rc = wloop(wid, path, func, memfd, out_fd, sig_w, fall_w,
                        -1, -1, wincarn, retry_limit, on_error);
+        fr_trace_emit(FR_ROLE_WORKER, FR_EV_CHILD_EXIT,
+                      (int32_t)wid, (int32_t)wincarn, 0, rc);
         _exit(rc == 0 ? 0 : 1);
     }
+    fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FORK_RETURN,
+                  (int32_t)wid, (int32_t)wincarn, 0, (int32_t)p);
     return p;
 }
 
@@ -479,6 +510,8 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
  * skipped, so this is safe to call twice over the same table. */
 static void kill_slot(pid_t *slot) {
     if (slot && *slot > 0) {
+        fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FATAL_KILL,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)*slot);
         (void)kill(*slot, SIGKILL);
         *slot = -1;
     }
@@ -493,13 +526,25 @@ static void kill_slot(pid_t *slot) {
  * children always become reapable. A bounded spin guards against a
  * pathological kernel that never reports one. */
 static void kill_all(pid_t *slots, int nslots) {
+    /* Fatal teardown IS traced (an explicit decision), so this path pays
+     * a handful of extra write()s against its latency budget. The cost is
+     * bounded and deliberate: the minimum event set only, and one record
+     * per kill rather than one per spin. The alternative -- a trace that
+     * goes silent exactly when a run is going wrong -- is the failure mode
+     * the facility exists to prevent. */
+    fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FATAL_BEGIN,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, nslots);
     for (int i = 0; i < nslots; i++) kill_slot(&slots[i]);
 
     /* Harvest everything that is already gone. */
     for (;;) {
         int st = 0;
         pid_t p = waitpid(-1, &st, WNOHANG);
-        if (p > 0) continue;
+        if (p > 0) {
+            fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FATAL_REAP,
+                          FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)st);
+            continue;
+        }
         if (p < 0 && errno == EINTR) continue;
         break;
     }
@@ -509,10 +554,16 @@ static void kill_all(pid_t *slots, int nslots) {
         struct timespec ts = {0, 1000000L};   /* 1 ms */
         int st = 0;
         pid_t p = waitpid(-1, &st, WNOHANG);
-        if (p > 0) { spin = -1; continue; }
+        if (p > 0) {
+            fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FATAL_REAP,
+                          FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)st);
+            spin = -1; continue;
+        }
         if (p < 0 && errno == EINTR) { spin = -1; continue; }
         nanosleep(&ts, NULL);
     }
+    fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FATAL_END,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, 0);
 }
 
 int main(int argc, char **argv) {
@@ -521,6 +572,7 @@ int main(int argc, char **argv) {
     o.workers = 1; o.source_fd = -1; o.result_fd = -1; o.stats_fd = -1;
     o.drain_mode = 0; o.retry_limit = 3; o.on_error = 0;
     o.respawn_cap = 64;
+    o.trace_fd = -1;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--so") && i + 1 < argc)        o.so_path = argv[++i];
@@ -539,6 +591,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--verbose"))                o.verbose = 1;
         else if (!strcmp(argv[i], "--fork-only"))             o.fork_only = 1;
         else if (!strcmp(argv[i], "--fd-selfcheck"))         fd_selfcheck = 1;
+        else if (!strcmp(argv[i], "--trace-fd") && i + 1 < argc)
+            o.trace_fd = atoi(argv[++i]);
         else { fprintf(stderr, "forkrun-cleanroom: bad arg %s\n", argv[i]); return 64; }
     }
     if (!o.so_path || o.source_fd < 0 || !o.plugin_path) {
@@ -546,6 +600,22 @@ int main(int argc, char **argv) {
         return 64;
     }
     if (o.workers < 1) o.workers = 1;
+
+    /* Activate the trace BEFORE anything forks, so the launcher-init
+     * boundary is the first record and every child inherits an open fd.
+     *
+     * A bad --trace-fd disables tracing rather than failing the run: the
+     * trace is an observation channel and must never be able to break the
+     * pipeline it observes. That is the same rule as the emit helper's
+     * ignored write() result.
+     */
+    if (o.trace_fd >= 0) {
+        if (fcntl(o.trace_fd, F_GETFD) != -1) fr_trace_fd = o.trace_fd;
+        else fprintf(stderr, "forkrun-cleanroom: --trace-fd %d unusable; "
+                             "continuing without a trace\n", o.trace_fd);
+    }
+    fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_LAUNCHER_INIT,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, 0);
 
     /* Refuse a plugin the engine will NOT drive through the ctx
      * protocol. forkrun_use_ctx is the single capability-negotiation
@@ -588,6 +658,8 @@ int main(int argc, char **argv) {
                     strerror(errno));
             return 70;
         }
+        fr_trace_emit(FR_ROLE_PROBE, FR_EV_FORK_REQUEST,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, 0);
         pid_t probe = fork();
         if (probe < 0) {
             fprintf(stderr, "forkrun-cleanroom: fork(probe): %s\n",
@@ -596,6 +668,8 @@ int main(int argc, char **argv) {
         }
         if (probe == 0) {
             close(pp[0]);
+            fr_trace_emit(FR_ROLE_PROBE, FR_EV_CHILD_ENTRY,
+                          FR_TRACE_NA, FR_TRACE_NA, 0, 0);
             unsigned ver = 0;
             int ok = 0;
             void *ph = dlopen(o.plugin_path, RTLD_NOW | RTLD_LOCAL);
@@ -612,9 +686,13 @@ int main(int argc, char **argv) {
             ssize_t w = write(pp[1], payload, sizeof payload);
             (void)w;
             close(pp[1]);
+            fr_trace_emit(FR_ROLE_PROBE, FR_EV_CHILD_EXIT,
+                          FR_TRACE_NA, FR_TRACE_NA, 0, ok);
             _exit(0);
         }
         close(pp[1]);
+        fr_trace_emit(FR_ROLE_PROBE, FR_EV_FORK_RETURN,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)probe);
 
         /* Bounded read. A constructor that hangs must not hang the
          * launcher -- that would trade one hang for another. */
@@ -778,6 +856,8 @@ int main(int argc, char **argv) {
      * The eventfd poke per chunk stays -- that is what makes the
      * scanner's pre-flight block instead of spin-sleeping.
      */
+    fr_trace_emit(FR_ROLE_SPILL, FR_EV_FORK_REQUEST,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, 0);
     pid_t spill_pid = fork();
     if (spill_pid < 0) die("fork(spill)");
     if (spill_pid == 0) {
@@ -794,6 +874,8 @@ int main(int argc, char **argv) {
          * the documented mechanism silently does not execute. */
         keep_add_engine(&k, engine_fd, n_engine);
         enter_child("spill", &k);
+        fr_trace_emit(FR_ROLE_SPILL, FR_EV_CHILD_ENTRY,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, 0);
         static char sbuf[1 << 20];
         unsigned long long soff = 0;
         for (;;) {
@@ -834,13 +916,22 @@ int main(int argc, char **argv) {
                  * error: either way this chunk is now incomplete and the
                  * engine must not be told otherwise. */
                 if (p_abort) p_abort();
+                fr_trace_emit(FR_ROLE_SPILL, FR_EV_CHILD_EXIT,
+                              FR_TRACE_NA, FR_TRACE_NA, 0, -1);
                 _exit(1);
             }
             soff += (unsigned long long)want;
             p_ipost();
         }
-        _exit(p_idone() == 0 ? 0 : 1);
+        {
+            int rc = p_idone();
+            fr_trace_emit(FR_ROLE_SPILL, FR_EV_CHILD_EXIT,
+                          FR_TRACE_NA, FR_TRACE_NA, 0, rc);
+            _exit(rc == 0 ? 0 : 1);
+        }
     }
+    fr_trace_emit(FR_ROLE_SPILL, FR_EV_FORK_RETURN,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)spill_pid);
     close(o.source_fd);      /* only the spill child reads the source */
 
     int *out_fds = calloc((size_t)o.workers, sizeof(int));
@@ -874,6 +965,8 @@ int main(int argc, char **argv) {
     long t0 = now_ns();
 
     /* fallow reaper child */
+    fr_trace_emit(FR_ROLE_FALLOW, FR_EV_FORK_REQUEST,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, 0);
     pid_t fallow_pid = fork();
     if (fallow_pid < 0) die("fork(fallow)");
     if (fallow_pid == 0) {
@@ -891,8 +984,17 @@ int main(int argc, char **argv) {
          * lose them. */
         keep_add_engine(&k, engine_fd, n_engine);
         enter_child("fallow", &k);
-        _exit(p_fall(fallp[0], memfd) == 0 ? 0 : 1);
+        fr_trace_emit(FR_ROLE_FALLOW, FR_EV_CHILD_ENTRY,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, 0);
+        {
+            int rc = p_fall(fallp[0], memfd);
+            fr_trace_emit(FR_ROLE_FALLOW, FR_EV_CHILD_EXIT,
+                          FR_TRACE_NA, FR_TRACE_NA, 0, rc);
+            _exit(rc == 0 ? 0 : 1);
+        }
     }
+    fr_trace_emit(FR_ROLE_FALLOW, FR_EV_FORK_RETURN,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)fallow_pid);
 
     /* Poison relay: tell workers which fd to append batch indices to.
      * getenv-in-the-child is the established mechanism here (see
@@ -928,6 +1030,8 @@ int main(int argc, char **argv) {
     close(fallp[1]);
 
     /* scanner child: pre-flight, ramp, publish */
+    fr_trace_emit(FR_ROLE_SCAN, FR_EV_FORK_REQUEST,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, 0);
     pid_t scan_pid = fork();
     if (scan_pid < 0) die("fork(scan)");
     if (scan_pid == 0) {
@@ -948,8 +1052,17 @@ int main(int argc, char **argv) {
          * in the exit status: the run is correct, just slow and hot. */
         keep_add_engine(&k, engine_fd, n_engine);
         enter_child("scanner", &k);
-        _exit(p_scan(memfd) == 0 ? 0 : 1);
+        fr_trace_emit(FR_ROLE_SCAN, FR_EV_CHILD_ENTRY,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, 0);
+        {
+            int rc = p_scan(memfd);
+            fr_trace_emit(FR_ROLE_SCAN, FR_EV_CHILD_EXIT,
+                          FR_TRACE_NA, FR_TRACE_NA, 0, rc);
+            _exit(rc == 0 ? 0 : 1);
+        }
     }
+    fr_trace_emit(FR_ROLE_SCAN, FR_EV_FORK_RETURN,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)scan_pid);
 
     long t1 = now_ns();
 
@@ -965,6 +1078,8 @@ int main(int argc, char **argv) {
     }
 
     /* drain child: move worker output memfds -> result fd */
+    fr_trace_emit(FR_ROLE_DRAIN, FR_EV_FORK_REQUEST,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, 0);
     pid_t drain_pid = fork();
     if (drain_pid < 0) die("fork(drain)");
     if (drain_pid == 0) {
@@ -981,9 +1096,19 @@ int main(int argc, char **argv) {
          * spare_sig is simply not in this list. */
         for (int i = 0; i < o.workers; i++) keep_add(&k, out_fds[i]);
         enter_child("drain", &k);
-        _exit(p_drain(sigp[0], out_fds, o.workers, o.result_fd, o.drain_mode));
+        fr_trace_emit(FR_ROLE_DRAIN, FR_EV_CHILD_ENTRY,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, 0);
+        {
+            int rc = p_drain(sigp[0], out_fds, o.workers,
+                             o.result_fd, o.drain_mode);
+            fr_trace_emit(FR_ROLE_DRAIN, FR_EV_CHILD_EXIT,
+                          FR_TRACE_NA, FR_TRACE_NA, 0, rc);
+            _exit(rc);
+        }
     }
     close(sigp[0]);
+    fr_trace_emit(FR_ROLE_DRAIN, FR_EV_FORK_RETURN,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)drain_pid);
 
     int alive = o.workers + 2;   /* workers + scan + fallow (+drain) */
     (void)alive;
@@ -1020,6 +1145,8 @@ int main(int argc, char **argv) {
      *   4 RACE_DETECTED (died mid-transaction)   -> abort
      *   5 recovery failed (orphan revert/escrow)  -> abort
      */
+    fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_ENTER,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, live);
     while (live > 0 && !bad) {
         int st = 0;
         pid_t p = waitpid(-1, &st, 0);
@@ -1082,6 +1209,8 @@ int main(int argc, char **argv) {
                                 p == drain_pid);
             if (helper_death &&
                 !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) {
+                fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_ABORT,
+                              FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)st);
                 fprintf(stderr, "forkrun-cleanroom: %s child died "
                         "(status %d) -- aborting the engine\n",
                         p == scan_pid ? "scanner"
@@ -1094,6 +1223,13 @@ int main(int argc, char **argv) {
             continue;               /* drain, and clean helper exits */
         }
         live--;
+        /* The reap is the record that ties a worker's CHILD_ENTRY and
+         * CHILD_EXIT to a supervisor decision. `death_cause` is the
+         * DECODED status, not the raw wait status, because a raw 16-bit
+         * status (78 << 8 == 19968) tells a reader nothing. */
+        fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_REAP, (int32_t)wid,
+                      (int32_t)incarn[wid], 0,
+                      (int32_t)death_cause(st));
         /* CR-FIX1-B: the slot stops being live the moment we reap it.
          * Leaving a reaped pid in pids[wid] overstates the live set and
          * risks signalling a recycled number during fatal teardown. It
@@ -1120,6 +1256,9 @@ int main(int argc, char **argv) {
             fprintf(stderr, "forkrun-cleanroom: engine abort (reason %d) "
                     "after worker %d -- not respawning\n",
                     p_abort_reason(), wid);
+            fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_ABORT,
+                          (int32_t)wid, (int32_t)incarn[wid], 0,
+                          (int32_t)p_abort_reason());
             bad = 1;
             break;
         }
@@ -1130,6 +1269,9 @@ int main(int argc, char **argv) {
         if (o.respawn_cap >= 0 && incarn[wid] >= o.respawn_cap) {
             fprintf(stderr, "forkrun-cleanroom: worker %d hit respawn cap "
                     "(%d) -- aborting\n", wid, o.respawn_cap);
+            fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_ABORT,
+                          (int32_t)wid, (int32_t)incarn[wid], 0,
+                          (int32_t)o.respawn_cap);
             bad = 1;
             break;
         }
@@ -1152,10 +1294,14 @@ int main(int argc, char **argv) {
         if (np < 0) { bad = 1; break; }
         pids[wid] = np;
         live++;
+        fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_RESPAWN,
+                      (int32_t)wid, (int32_t)incarn[wid], 0, (int32_t)np);
         if (o.verbose)
             fprintf(stderr, "RESPAWN wid=%d incarn=%d rc=%d\n", wid,
                     incarn[wid], rc);
     }
+    fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_EXIT,
+                  FR_TRACE_NA, FR_TRACE_NA, 0, bad);
     if (o.verbose)
         fprintf(stderr, "LOOP_DONE live=%d bad=%d spill_done=%d\n", live,
                 bad, spill_done);
