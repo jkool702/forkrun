@@ -102,7 +102,11 @@ Unchanged and **not negotiable**:
   extending it "for a helper" would silently legalise the dependency for the
   zero-bash-linkage artifacts. New build products get their own variable and
   their own gate.
-* **The cleanroom stays opt-in** through W-EXP-1 and W-EXP-2.
+* **Each newly supported envelope stays opt-in until its OWN default-on gate
+  passes** (§8). W-EXP-1's envelope is gated by Decision 2, W-EXP-2's by
+  Decision 3, and the existing plugin envelope by Decision 1 — which is
+  **independent of both** and does not wait for the spawn-pipe performance
+  experiment (W-EXP-3). Nothing here makes the whole feature default-on at once.
 * **Batch-count variance is valid.** It is pre-existing and shared with the
   in-process path. Validation compares joined bytes or independently known
   record identities, never blob counts.
@@ -136,18 +140,32 @@ Unchanged and **not negotiable**:
                 │                └──────────┬───────────────┘
                 └────────┬───────────────────┘
                          │ requires both independently correct
-                ┌────────▼────────────┐
-                │ W-EXP-1.5 UDF+NUMA │
-                └────────┬────────────┘
-                         │
-                ┌────────▼────────────┐
-                │ W-EXP-3  spawn-pipe│   perf only
-                └────────┬────────────┘
-                         │
-                ┌────────▼────────────┐
-                │ W-EXP-4  default-on│   3 independent decisions
-                └─────────────────────┘
+┌────────▼────────────┐
+                 │ W-EXP-1.5 UDF+NUMA │   needs both to be correct
+                 └────────┬────────────┘
+                 ┌────────▼────────────┐
+                 │ W-EXP-3  spawn-pipe│   perf only
+                 └─────────────────────┘
+
+  DEFAULT-ON  (three decisions, each gated ONLY by its own evidence)
+
+    ┌──────────────────────────────────────────────────────┐
+    │ Decision 1 — plugin envelope   (evidence ALREADY in  │
+    │   hand: CR-FIX1 tests, RSS curve). Does NOT wait for  │
+    │   W-EXP-1, W-EXP-2, W-EXP-1.5 or W-EXP-3.            │
+    ├──────────────────────────────────────────────────────┤
+    │ Decision 2 — UDF envelope       gated by W-EXP-1      │
+    ├──────────────────────────────────────────────────────┤
+    │ Decision 3 — multi-node envelope gated by W-EXP-2     │
+    │                          (and real multi-socket)      │
+    └──────────────────────────────────────────────────────┘
 ```
+
+> **[V] The performance-only stage W-EXP-3 is not a prerequisite for any
+> default-on decision.** The previous diagram placed W-EXP-4 downstream of it,
+> which contradicted §8's independent-gates policy. Decision 1 is releasable as
+> soon as its own evidence gate passes; W-EXP-3 remains an independent
+> optimisation with its own kill switch.
 
 **[V] Workstreams have separate acceptance gates, but they are NOT independent
 in code.** The previous revision claimed W-EXP-1, W-EXP-2 and W-EXP-3 "share no
@@ -329,6 +347,44 @@ documented failure mode.
 > can differ observably from one parent import, and neither is required to
 > reproduce caller-process state.
 
+#### The eligible object kind, pinned
+
+> **[V] `callable()` — or even `inspect.isfunction()` — is not sufficient.**
+> Lambdas, closures and nested functions are **all** function objects and pass
+> both checks. The exclusions above cannot be enforced without a sharper rule.
+
+**[V] Verified discriminator** (tested against each case on this tree):
+
+```python
+def is_eligible_module_function(f, attr_name, module_name):
+    if not inspect.isfunction(f):          return False   # class, instance,
+                                                        # builtin, native
+    if f.__closure__ is not None:          return False   # closure over state
+    if f.__qualname__ != attr_name:        return False   # nested / <locals>
+    if f.__name__ != attr_name:            return False   # exported lambda
+    return True
+```
+
+Measured outcomes:
+
+| case | `callable()` | `isfunction()` | rule |
+|---|---|---|---|
+| module-level `def plain` | True | True | **ELIGIBLE** |
+| nested `def outer(): def inner()` | True | True | reject — `__qualname__ == 'outer.<locals>.inner'` |
+| module-exported closure | True | True | reject — `__qualname__ == '<lambda>'` |
+| lambda exported as a module attribute | True | True | reject — `__name__ == '<lambda>'` |
+| module-exported class | True | **False** | reject — not a function |
+| **re-exported `def` from another module** | True | True | **ELIGIBLE** — importable and stable; its defining module is irrelevant |
+
+**Stated decisions:** built-in and native functions are **excluded** from
+W-EXP-1 (conservative; they are stable objects but a first contract should not
+depend on their introspection behaviour). A function re-exported into the
+module's namespace **is** eligible. These are choices, not accidents; both are
+revisable in a later extension.
+
+**Tests:** one per row above, each asserting decline **before input
+consumption**.
+
 #### Import contract — defined per candidate, not once
 
 **[V] The previous revision's single contract was internally inconsistent.** It
@@ -400,7 +456,7 @@ exists at that fork — which differs by candidate.**
 | Launcher forks | an initialised interpreter is live in the launcher | **no initialised interpreter exists in the launcher** |
 | `PyOS_BeforeFork()` / `PyOS_AfterFork_Parent()` | required, in the main thread of the main interpreter | **not applicable** — there is no interpreter to prepare |
 | `PyOS_AfterFork_Child()` | required **only** for a child that will re-enter Python | required in each worker, **after** its own `fork()`, once it initialises |
-| Pairing | the parent hook is required whether `fork()` succeeds **or fails** | same, for any post-fork initialisation path |
+| Pairing | the parent hook is required whether `fork()` succeeds **or fails** | **no launcher-side hook exists at these forks** — there is no interpreter. Post-fork initialisation is inside the child, after its own `fork()`, and any pairing applies there |
 
 **[V] A helper that executes only C and immediately `_exit()`s is not a Python
 worker.** Treating all five launcher fork sites symmetrically would be wrong: it
@@ -433,11 +489,17 @@ is detected before the launcher forks its pipeline; no fork site is unclassified
 **Free-threaded CPython is out of scope** for the initial gate and the roadmap
 says so explicitly.
 
-Per-minor fork-lifecycle tests: successful UDF execution after the hooks;
-failure and cleanup around each fork site; an import that starts a background
-thread; a worker exiting abnormally during startup; UDF import failure; a
-bounded import hang; repeated invocations to catch stale interpreter state and
-thread/resource leakage.
+Per-minor fork-lifecycle tests, **scoped to the candidate under evaluation** —
+a pre-fork criterion is not inherited unchanged by the post-fork candidate:
+
+| Test | Pre-fork | Post-fork |
+|---|---|---|
+| successful UDF execution after the hooks | yes | yes, after the worker's own init |
+| failure and cleanup around each fork site | yes | yes, launcher-side forks take no hooks |
+| **import that starts a background thread detected before the launcher forks** | **yes** | **not applicable** — no launcher-side import precedes the forks; its obligation is the worker-side readiness barrier |
+| worker exiting abnormally during startup | yes | yes |
+| UDF import failure / bounded import hang | yes, pre-fork | yes, in-worker, before the readiness barrier |
+| repeated invocations (stale interpreter state, thread/resource leakage) | yes | yes, per worker |
 
 **This gate blocks W-EXP-1 implementation, not W-EXP-1 design.**
 
@@ -637,6 +699,26 @@ is present**, and **not** a prerequisite of `python-substrate`.
 rewrite. The launcher already reads `/proc/self/status` (`rss_kb`), so `/proc`
 is idiomatic here.
 
+**Caller-minor handoff — an explicit, validated argument.**
+
+> **[V] The launcher is entered by `exec` and cannot infer the initiating
+> interpreter's minor.** It is a different process with no `sys.modules` and no
+> CPython runtime of its own. Recording the helper's *build* minor is only half
+> the check — it says what the helper is, not who is calling.
+
+So the Python wrapper passes its own minor explicitly — `--caller-minor=3.12` on
+the launcher argv, alongside the existing `--so`/`--plugin` arguments — and the
+launcher validates it against the helper's recorded build minor **before any
+source bytes are consumed**.
+
+**[V] Do not shell out to `python3-config` at runtime.** It identifies a *build
+tool* on `PATH`, not necessarily the interpreter that initiated the call; with
+multiple installations (§5.4) it can name the wrong minor and would validate a
+mismatch as a match.
+
+Refusal must be loud and pre-consumption, with the same exit-code discipline as
+§5.3's absent-helper case.
+
 **Reuse `_worker` over a second Python loop in C.**
 
 > **[V]** `_worker.py` already owns the `Batch` type, the borrowed-memoryview
@@ -740,7 +822,9 @@ Three options, to be chosen:
       dependency both work, tested **from an installed package**.
 * [ ] Import failure is distinguished from an exception raised during batch
       execution; a bounded import hang terminates.
-* [ ] Import-time threading is detected before the launcher forks.
+* [ ] Import-time threading is detected before the launcher forks — **pre-fork
+      candidate only**; the post-fork candidate's obligation is the worker-side
+      readiness barrier (C0.4).
 * [ ] No duplicate side-effecting import occurs in the default protocol.
 * [ ] No `-lpython3` in the substrate link line; canary green.
 * [ ] Missing `python3-devel` degrades to in-process with a warning; no CI job
@@ -973,7 +1057,11 @@ baseline and retain a kill switch.
 
 ---
 
-## 8. W-EXP-4 — Default-on, three independent decisions
+## 8. Default-on — three independent decisions
+
+> **[V] These are the same three decisions redrawn in §3, stated here as gates.
+> Each envelope stays opt-in until ITS OWN gate passes.** None waits on another,
+> and none waits on the performance-only W-EXP-3.
 
 **[V] Plugin default-on does not technically depend on W-EXP-1 or W-EXP-2.**
 The previous draft said "eligible once W-EXP-1/2 are done", which contradicted
