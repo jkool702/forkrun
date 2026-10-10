@@ -696,6 +696,28 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
     # is CORRECT (just not accelerated), and is why narrowing here is
     # safe: a declined call falls back, it does not silently change
     # semantics.
+    # CR-FIX1-K: resume / checkpoint_file are refused for EVERY cleanroom
+    # call, and the check sits here -- ABOVE the streaming block -- rather
+    # than inside it.
+    #
+    # It used to live under `if streaming:`, which made the refusal
+    # unreachable for map(). The map() dispatch site did not pass these
+    # arguments either, so a call like
+    #
+    #     map(..., mode="plugin", order="index", orchestrator=True,
+    #          resume=..., checkpoint_file=...)
+    #
+    # was accepted by the envelope, took the launcher, and silently
+    # ignored both. Passing the arguments alone would not have fixed it:
+    # the predicate would still not have executed the check. An
+    # acceleration path must not accept an invocation it cannot honour,
+    # so this is a refusal (with the existing observable warning), not a
+    # silent ignore.
+    if resume is not None or checkpoint_file is not None:
+        return False, ("resume=/checkpoint_file= is not served; the "
+                       "launcher neither transports nor implements "
+                       "checkpoint/resume semantics")
+
     if streaming:
         if order != "none":
             return False, ("stream(order=%r) is not served; the stream "
@@ -704,8 +726,6 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
         if strict_poison:
             return False, ("stream(strict_poison=True) is not served; no "
                            "poison count reaches a streaming caller")
-        if resume is not None or checkpoint_file is not None:
-            return False, "stream(resume=/checkpoint_file=) is not served"
 
     # Sources: a materialized file, any already-open descriptor (int fd,
     # fifo, socket, file object), or a Python iterable. The last is fed
@@ -730,6 +750,135 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
         return False, ("source must be a path, an open descriptor, or "
                        "an iterable (got %r)" % (type(source),))
     return True, ""
+
+
+# ---------------------------------------------------------------------------
+# CR-FIX1-D/C: the launcher outcome contract.
+#
+# Two things the parent used to conflate, both of which could turn a
+# failure into silent data loss:
+#
+#   1. The wait status was reported RAW. os.waitpid() returns a 16-bit
+#      status, so a launcher that exits 78 with code 78 arrives here as
+#      19968 (78 << 8). "status 19968" tells a caller nothing. The
+#      contract below decodes it into a class with an ACTION.
+#
+#   2. Every non-zero exit fell into one generic branch that returned
+#      None, i.e. "fall back in-process". That is only safe when nothing
+#      was consumed. The launcher spills by read()ing the caller's
+#      descriptor, and for a caller-supplied fd that descriptor was
+#      reached through os.dup() -- which shares the open file
+#      description, and therefore the FILE OFFSET. So after ingestion the
+#      fallback resumes mid-stream and returns a truncated result with
+#      exit 0. That is the failure mode this contract exists to remove.
+# ---------------------------------------------------------------------------
+
+# Exit codes that the launcher is guaranteed to return BEFORE the spill
+# child is forked (forkrun_cleanroom.c:411), and therefore before any
+# byte of the caller's source can have been read:
+#
+#   64  argv validation            (:270-290)
+#   69  dlopen / missing symbol    (:321, :343, :96)
+#   71  fr_py_init failed          (:365-368)
+#   78  plugin lacks forkrun_use_ctx (:328-338)
+#
+# 70 is deliberately ABSENT. It is die(), which fires both before the
+# spill fork (:388) and after it (:498 fork(worker), :516 fork(scan),
+# :539 fork(drain)), so it cannot be classified either way.
+# 1 (supervision failure) is always post-ingestion. Any signal death is
+# indeterminate. Both are unsafe.
+_CR_EXIT_PRE_INGEST = frozenset((64, 69, 71, 78))
+
+# CR-FIX1-F: exits where falling back would REPRODUCE the hazard rather
+# than route around it. 79 means the launcher's capability probe of the
+# plugin never completed -- a constructor hung or crashed. The plugin's
+# load is itself unsafe, so retrying in-process would dlopen it in the
+# CALLER's process and reproduce the failure there, in a place with no
+# launcher to bound it. 78 is deliberately NOT in this set: the probe
+# completed and the plugin merely lacks the ctx protocol, which the
+# in-process path handles correctly.
+_CR_EXIT_NO_FALLBACK = frozenset((79,))
+
+_CR_EXIT_LABELS = {
+    64: "invalid invocation (bad arguments)",
+    69: "missing launcher dependency or substrate symbol "
+         "(is the substrate built and compatible with this launcher?)",
+    70: "launcher internal error -- may have occurred before or after "
+         "the input was consumed; treated as unsafe",
+    71: "engine initialization failed (fr_py_init)",
+    78: "unsupported plugin capability (no forkrun_use_ctx dialect v1/v2)",
+    79: "plugin capability probe did not complete (a constructor hung or "
+         "crashed); loading this plugin is unsafe, so no fallback is "
+         "attempted",
+    1: "runtime worker/helper failure",
+}
+
+
+def _decode_launcher_status(status):
+    """Decode a waitpid() status into (exit_code, signum, label, pre_ingest).
+
+    The fourth element is the whole point: it says whether falling back
+    to the in-process path is SAFE, which is a question about how far the
+    launcher got, not about how it failed.
+
+    "Conservative" means indeterminate is treated as consumed. A refused
+    fallback that turned out to have been fine costs one slow run; a
+    fallback that silently returns half the input costs correctness.
+
+    Codes in _CR_EXIT_NO_FALLBACK are reported with pre_ingest=True --
+    nothing was consumed -- but callers must additionally consult
+    _fallback_forbidden(code) before retrying."""
+    if os.WIFSIGNALED(status):
+        return (None, os.WTERMSIG(status),
+                "killed by signal %d" % (os.WTERMSIG(status),), False)
+    if os.WIFEXITED(status):
+        code = os.WEXITSTATUS(status)
+        label = _CR_EXIT_LABELS.get(code, "unknown exit code %d" % (code,))
+        if code in _CR_EXIT_NO_FALLBACK:
+            return (code, None, label, True)
+        return (code, None, label, code in _CR_EXIT_PRE_INGEST)
+    return (None, None, "unrecognised wait status %d" % (status,), False)
+
+
+def _fallback_forbidden(status):
+    """True when retrying in-process would recreate the original failure."""
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status) in _CR_EXIT_NO_FALLBACK
+    return False
+
+
+def _describe_launcher_failure(status):
+    """One human-readable line for a non-zero launcher exit."""
+    code, signum, label, _pre = _decode_launcher_status(status)
+    if code is not None:
+        return "exit %d (%s)" % (code, label)
+    if signum is not None:
+        return "signal %d (%s)" % (signum, label)
+    return label
+
+
+def _source_is_reopenable(source):
+    """True if a fallback can re-read the input from the beginning.
+
+    The distinction is OWNERSHIP, and it is decidable at the call site
+    without any runtime safety argument:
+
+      * a path -- _cleanroom_source_fd opens its own descriptor, and
+        _open_source opens another on fallback, so the two have
+        independent file offsets and the source is re-readable.
+      * a caller-supplied descriptor (int, or anything with fileno()) --
+        _cleanroom_source_fd os.dup()s it, which shares the open file
+        description with the descriptor the caller still holds. Once the
+        launcher has read from it, the caller's own descriptor is
+        advanced and cannot be rewound safely.
+
+    For paths this is still only as good as the file not changing under
+    us: a replaced, truncated or deleted path does not replay to the same
+    bytes. That is a documented assumption of the API, not a guarantee
+    this function can make -- see the fallback contract in the docs."""
+    if isinstance(source, (str, bytes, os.PathLike)):
+        return True
+    return False
 
 
 def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
@@ -1286,9 +1435,10 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
             if not (os.WIFEXITED(lstatus)
                     and os.WEXITSTATUS(lstatus) == 0):
                 raise RuntimeError(
-                    "forkrun: cleanroom launcher failed (status %r); the "
+                    "forkrun: cleanroom launcher failed (%s); the "
                     "stream is TRUNCATED and the records already yielded "
-                    "are incomplete" % (lstatus,))
+                    "are incomplete"
+                    % (_describe_launcher_failure(lstatus),))
         finished = True
     finally:
         try:
@@ -2674,7 +2824,13 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         _ok, _why = _cleanroom_eligible(
             source, raw_mode, num_nodes, order,
             kwargs.get("strict_poison", False), orchestrator,
-            bool(return_stats))
+            bool(return_stats),
+            # CR-FIX1-K: these were not passed here, so the envelope could
+            # not see them and a resume request was silently dropped.
+            # The predicate is the single authority for the refusal; the
+            # call sites only supply the facts.
+            resume=kwargs.get("resume"),
+            checkpoint_file=kwargs.get("checkpoint_file"))
         if _ok:
             # rpartition on the last colon, exactly as _coerce_payload
             # parses the spec. Deliberately NOT _c_plugin_spec(): that

@@ -259,6 +259,70 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
     return p;
 }
 
+/* ---- CR-FIX1-B: bounded fatal teardown ----
+ *
+ * Three defects the success path hid, all in the `bad` branch:
+ *
+ *  1. The SPILL child was never killed, and the join for it is a
+ *     blocking waitpid. The spill child sits in read() on the caller's
+ *     source. When that source is a pipe or socket whose producer stays
+ *     open -- which is every stream() caller that has not finished
+ *     writing, and every caller that abandons mid-run -- the join never
+ *     returns and a detected worker failure becomes a launcher hang.
+ *
+ *  2. Workers killed on the `bad` path were never reaped, so each left
+ *     a zombie for the launcher to exit on.
+ *
+ *  3. A reaped worker's pid stayed in pids[wid]. Signalling an already
+ *     reaped pid normally just fails, but the kernel is free to recycle
+ *     that number, and until then the array overstates the live set.
+ *
+ * The fix is to make "live" mean live: a slot is cleared the moment the
+ * parent reaps it and refilled only when a replacement is spawned. The
+ * fatal path then signals exactly the live set and reaps whatever is
+ * left. Reaping is bounded and non-blocking, so no wait in it can
+ * depend on upstream EOF or on a helper that has already stopped. */
+
+/* SIGKILL one live child and clear the slot. A slot already cleared is
+ * skipped, so this is safe to call twice over the same table. */
+static void kill_slot(pid_t *slot) {
+    if (slot && *slot > 0) {
+        (void)kill(*slot, SIGKILL);
+        *slot = -1;
+    }
+}
+
+/* Signal every live child in the table, then reap until none remain.
+ *
+ * The reap pass is non-blocking and loops on WNOHANG, so it terminates
+ * even for a child that ignores SIGKILL's delivery for a moment (a
+ * process in uninterruptible sleep, say): each pass either harvests a
+ * child or observes that none is currently reapable, and SIGKILLed
+ * children always become reapable. A bounded spin guards against a
+ * pathological kernel that never reports one. */
+static void kill_all(pid_t *slots, int nslots) {
+    for (int i = 0; i < nslots; i++) kill_slot(&slots[i]);
+
+    /* Harvest everything that is already gone. */
+    for (;;) {
+        int st = 0;
+        pid_t p = waitpid(-1, &st, WNOHANG);
+        if (p > 0) continue;
+        if (p < 0 && errno == EINTR) continue;
+        break;
+    }
+    /* Children killed above may not have been reapable on the first
+     * pass. Give the kernel a bounded number of further passes. */
+    for (int spin = 0; spin < 100; spin++) {
+        struct timespec ts = {0, 1000000L};   /* 1 ms */
+        int st = 0;
+        pid_t p = waitpid(-1, &st, WNOHANG);
+        if (p > 0) { spin = -1; continue; }
+        if (p < 0 && errno == EINTR) { spin = -1; continue; }
+        nanosleep(&ts, NULL);
+    }
+}
+
 int main(int argc, char **argv) {
     struct opts o;
     memset(&o, 0, sizeof o);
@@ -427,12 +491,36 @@ int main(int argc, char **argv) {
                 _exit(1);
             }
             if (n == 0) break;
-            ssize_t w = pwrite(memfd, sbuf, (size_t)n, (off_t)soff);
-            if (w != n) {
+            /* CR-FIX1-D2: positional write loop.
+             *
+             * This used to be one pwrite() with `w != n` treated as
+             * fatal. That aborted a healthy run on a legal outcome: a
+             * short write is permitted, and pwrite() is interruptible,
+             * so -1/EINTR took the same branch and killed the run over a
+             * signal. It did not silently skip the remainder of the
+             * chunk -- it aborted -- but either way a normal write
+             * should not end the run.
+             *
+             * The loop advances both the buffer and the memfd offset by
+             * what actually landed, so a chunk is complete only when
+             * every byte is in. The ingest notification below therefore
+             * still means "all of this chunk is readable", which is the
+             * contract the scanner's pre-flight backpressure relies on. */
+            size_t want = (size_t)n;
+            const char *p = sbuf;
+            size_t done = 0;
+            while (done < want) {
+                ssize_t w = pwrite(memfd, p + done, want - done,
+                                   (off_t)(soff + done));
+                if (w > 0) { done += (size_t)w; continue; }
+                if (w < 0 && errno == EINTR) continue;
+                /* Short write (w == 0 with bytes outstanding) or a hard
+                 * error: either way this chunk is now incomplete and the
+                 * engine must not be told otherwise. */
                 if (p_abort) p_abort();
                 _exit(1);
             }
-            soff += (unsigned long long)n;
+            soff += (unsigned long long)want;
             p_ipost();
         }
         _exit(p_idone() == 0 ? 0 : 1);
@@ -463,6 +551,7 @@ int main(int argc, char **argv) {
     if (!pids) die("calloc(pids)");
     int *incarn = calloc((size_t)o.workers, sizeof(int));
     if (!incarn) die("calloc(incarn)");
+    for (int i = 0; i < o.workers; i++) pids[i] = -1;
     int live = 0;
     int spill_done = 0;
 
@@ -659,6 +748,11 @@ int main(int argc, char **argv) {
             continue;               /* drain, and clean helper exits */
         }
         live--;
+        /* CR-FIX1-B: the slot stops being live the moment we reap it.
+         * Leaving a reaped pid in pids[wid] overstates the live set and
+         * risks signalling a recycled number during fatal teardown. It
+         * is refilled below only when a replacement is really forked. */
+        pids[wid] = -1;
         int rc = p_recover ? p_recover(wid, incarn[wid], out_fds[wid],
                                        death_cause(st))
                            : 5;    /* no core -> cannot vouch for it */
@@ -719,9 +813,58 @@ int main(int argc, char **argv) {
     if (o.verbose)
         fprintf(stderr, "LOOP_DONE live=%d bad=%d spill_done=%d\n", live,
                 bad, spill_done);
-    if (bad)
-        for (int i = 0; i < o.workers; i++)
-            if (pids[i] > 0) (void)kill(pids[i], SIGKILL);
+
+    /* ---- CR-FIX1-B: fatal teardown is bounded ----
+     *
+     * The old code killed the workers and then walked into FOUR blocking
+     * waitpids. Any of them could be blocked on a live upstream source:
+     * the spill child sits in read() on the caller's descriptor, and
+     * nothing in the `bad` path ever signalled it. A caller whose source
+     * pipe writer stays open -- the normal case for stream(), and any
+     * abandoned run -- turned a detected worker failure into a launcher
+     * that never returns.
+     *
+     * Fatal teardown now signals the whole live set (workers AND every
+     * helper, spill included) and reaps non-blockingly. It does not
+     * wait for ingestion to complete, does not drain output, and cannot
+     * be held hostage by a producer that is not going to write again.
+     * A failed run reports failure; it does not try to finish. */
+    if (bad) {
+        if (p_abort) p_abort();
+        int n_slots = o.workers + 4;
+        pid_t *slots = calloc((size_t)n_slots, sizeof(pid_t));
+        if (slots) {
+            for (int i = 0; i < o.workers; i++) slots[i] = pids[i];
+            slots[o.workers + 0] = spill_pid;
+            slots[o.workers + 1] = scan_pid;
+            slots[o.workers + 2] = fallow_pid;
+            slots[o.workers + 3] = drain_pid;
+            kill_all(slots, n_slots);
+            free(slots);
+        } else {
+            /* No memory for the table: fall back to signalling each
+             * group directly rather than skipping the kill entirely. */
+            for (int i = 0; i < o.workers; i++) kill_slot(&pids[i]);
+            kill_slot(&spill_pid);
+            kill_slot(&scan_pid);
+            kill_slot(&fallow_pid);
+            kill_slot(&drain_pid);
+        }
+        close(spare_sig);
+        close(spare_fall);
+        fprintf(stderr,
+                "forkrun-cleanroom: fatal -- terminated the pipeline "
+                "(workers and helpers signalled, all children reaped); "
+                "the input source may have been left partially read\n");
+        return 1;
+    }
+
+    /* Success path. Everything below preserves the original ordering
+     * guarantees: spares closed LAST (so the drain sees EOF only once
+     * no further respawn can occur), spill joined LAST (ingestion must
+     * be complete before we can call the run successful), and the stats
+     * record written only after every child has been joined so its count
+     * is final. */
     /* Spare closed LAST: while it is open no signal-pipe EOF can be
      * seen, which is what keeps the drain alive across respawns. */
     close(spare_sig);
