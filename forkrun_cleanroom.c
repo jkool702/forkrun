@@ -569,19 +569,104 @@ int main(int argc, char **argv) {
      * in-process path is slower and CORRECT, which beats fast and
      * empty.
      *
-     * dlopen is RTLD_LOCAL and closed immediately; the engine does its
-     * own dlopen later and this handle is only a probe.
+     * CR-FIX1-F: the probe runs in a DISPOSABLE SUBPROCESS, because
+     * dlopen executes the plugin's ELF constructors in whatever process
+     * calls it. A constructor that starts a thread leaves a thread in
+     * this process, and every fork() below then happens from a
+     * multi-threaded parent -- which is exactly the state a cleanroom
+     * exists to avoid. Measured with a constructor that spawns a
+     * thread: the launcher died with SIGSEGV during the first worker
+     * fork, before doing any work.
+     *
+     * The engine's own dlopen (fr_py_plugin_ensure, post-fork in each
+     * worker) is unaffected and remains the real load path.
      */
     {
-        void *ph = dlopen(o.plugin_path, RTLD_NOW | RTLD_LOCAL);
-        if (!ph) {
+        int pp[2];
+        if (pipe(pp) != 0) {
+            fprintf(stderr, "forkrun-cleanroom: pipe(probe): %s\n",
+                    strerror(errno));
+            return 70;
+        }
+        pid_t probe = fork();
+        if (probe < 0) {
+            fprintf(stderr, "forkrun-cleanroom: fork(probe): %s\n",
+                    strerror(errno));
+            return 70;
+        }
+        if (probe == 0) {
+            close(pp[0]);
+            unsigned ver = 0;
+            int ok = 0;
+            void *ph = dlopen(o.plugin_path, RTLD_NOW | RTLD_LOCAL);
+            if (ph) {
+                int *use_ctx = (int *)dlsym(ph, "forkrun_use_ctx");
+                ver = use_ctx ? (unsigned)*use_ctx : 0u;
+                ok = 1;
+            }
+            /* Report through the pipe, not through the exit status:
+             * a constructor that crashes or hangs takes this child with
+             * it, and the parent must be able to tell "no such symbol"
+             * from "the probe never finished". */
+            unsigned payload[2] = {ok, ver};
+            ssize_t w = write(pp[1], payload, sizeof payload);
+            (void)w;
+            close(pp[1]);
+            _exit(0);
+        }
+        close(pp[1]);
+
+        /* Bounded read. A constructor that hangs must not hang the
+         * launcher -- that would trade one hang for another. */
+        unsigned payload[2] = {0, 0};
+        ssize_t got = 0;
+        struct pollfd pfd = {.fd = pp[0], .events = POLLIN};
+        int waited = 0, probe_failed = 0;
+        while (waited < CR_PROBE_TIMEOUT_MS) {
+            int pr = poll(&pfd, 1, 50);
+            if (pr < 0 && errno == EINTR) continue;
+            if (pr > 0) {
+                got = read(pp[0], payload, sizeof payload);
+                break;
+            }
+            waited += 50;
+        }
+        close(pp[0]);
+        if (got != (ssize_t)sizeof payload) {
+            probe_failed = 1;
+            (void)kill(probe, SIGKILL);
+        }
+        /* Reap the probe: bounded, because we may have just killed it. */
+        for (int i = 0; i < 200; i++) {
+            int st = 0;
+            pid_t r = waitpid(probe, &st, WNOHANG);
+            if (r > 0) break;
+            if (r < 0 && errno == EINTR) continue;
+            struct timespec ts = {0, 1000000L};
+            nanosleep(&ts, NULL);
+        }
+        if (probe_failed) {
+            /* Distinct from 78 on purpose. 78 means "the plugin is fine,
+             * it just lacks the ctx protocol" -- a pre-ingestion refusal
+             * the caller may safely retry in-process. A probe that never
+             * completed means the plugin's LOAD is itself unsafe, and
+             * retrying in-process would dlopen it in the CALLER and
+             * reproduce the hazard there. run.py treats 79 as
+             * no-fallback; see _CR_EXIT_NO_FALLBACK. */
+            fprintf(stderr,
+                    "forkrun-cleanroom: capability probe of %s did not "
+                    "complete (a constructor may have hung or crashed). "
+                    "Refusing, and NOT falling back: an in-process retry "
+                    "would load the same plugin in the caller and "
+                    "reproduce the problem there.\n", o.plugin_path);
+            return 79;
+        }
+        if (!payload[0]) {
             fprintf(stderr, "forkrun-cleanroom: dlopen plugin: %s\n",
-                    dlerror());
+                    "could not be loaded");
             return 69;
         }
-        int *use_ctx = (int *)dlsym(ph, "forkrun_use_ctx");
-        unsigned ver = use_ctx ? (unsigned)*use_ctx : 0u;
-        dlclose(ph);
+        unsigned ver = payload[1];
         if ((ver & 0x3u) != 1u && (ver & 0x3u) != 2u) {
             fprintf(stderr,
                     "forkrun-cleanroom: plugin %s exports no "

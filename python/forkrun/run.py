@@ -994,10 +994,46 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     os.close(stats_fd)
     if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
         os.close(res_fd)
+        code, signum, label, pre_ingest = _decode_launcher_status(status)
+        # CR-FIX1-F: a failed capability probe means the plugin's LOAD is
+        # unsafe, so the in-process fallback -- which would dlopen it
+        # right here in the caller's process -- would reproduce the
+        # failure in a place with no launcher to bound it. Refuse.
+        forbidden = _fallback_forbidden(status)
+        replayable = pre_ingest or _source_is_reopenable(source)
+        may_fallback = replayable and not forbidden
         _warnings.warn(
-            "forkrun: cleanroom launcher failed (status %r) — using the "
-            "in-process path." % (status,), UserWarning, stacklevel=3)
-        return None
+            "forkrun: cleanroom launcher failed (%s) — %s"
+            % (_describe_launcher_failure(status),
+               "falling back to the in-process path" if may_fallback
+               else "NOT falling back"),
+            UserWarning, stacklevel=3)
+        if forbidden:
+            raise RuntimeError(
+                "forkrun: cleanroom launcher failed (%s). Retrying "
+                "in-process would load the same plugin in this process "
+                "and reproduce the failure here, so the call is refused "
+                "rather than retried. Load the plugin explicitly once to "
+                "confirm it is safe before using it with forkrun."
+                % (_describe_launcher_failure(status),))
+        if may_fallback:
+            return None
+        # CR-FIX1-C: the launcher may have consumed bytes out of a
+        # caller-supplied descriptor. os.dup() shares the open file
+        # description, so that descriptor is now advanced and the
+        # in-process path would resume mid-input and return a truncated
+        # result with exit 0. Refuse instead: a failed run that says so
+        # is strictly better than a successful-looking one that lost
+        # records. A caller who wants the retry can pass a PATH, which
+        # _source_is_reopenable accepts.
+        raise RuntimeError(
+            "forkrun: cleanroom launcher failed (%s) after the input may "
+            "have been consumed, and the supplied source is a descriptor "
+            "whose read position the launcher shares. Retrying in-process "
+            "would resume mid-input and silently return truncated output, "
+            "so this call is refused rather than completed incorrectly. "
+            "Pass a path (or seek the descriptor back to 0 yourself) if "
+            "you want a retry." % (_describe_launcher_failure(status),))
     if stats is None:
         # The counter record is missing, unreadable, or absent because the
         # launcher declined the payload. Refuse the
