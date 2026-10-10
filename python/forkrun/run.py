@@ -507,14 +507,45 @@ def _cleanroom_enabled():
         (close_range, /proc/self/fd fallback) and a truncated or failed
         snapshot fails the run rather than degrading it silently.
 
+    PARENT-RSS SCALING, re-measured after these fixes in both THP
+    regimes (bench_cleanroom.py, paired interleaved, medians, 28
+    workers, UMA, exact record counts asserted; i9-7940X 14c/28t):
+
+        parent RSS   startup THP=never   startup THP=always
+        30 MB        16.24 -> 6.34 (2.56x)   17.37 -> 11.05 (1.57x)
+        554 MB      118.88 -> 15.28 (7.78x)  200.58 -> 27.00 (7.43x)
+        2127 MB     454.68 -> 42.35 (10.74x) 734.83 -> 71.67 (10.25x)
+
+        parent RSS   e2e THP=never       e2e THP=always
+        30 MB        294.5 -> 203.8 (1.45x)   264.0 -> 168.9 (1.56x)
+        554 MB       330.6 -> 212.9 (1.55x)   349.9 -> 189.4 (1.85x)
+        2127 MB      665.6 -> 248.3 (2.68x)   863.3 -> 228.3 (3.78x)
+
+    THP cuts both ways and the two effects are separable. Absolute
+    startup is WORSE under shmem=always at every RSS (6.3 -> 11.1 ms at
+    the floor): allocating and zeroing a 2 MB huge page lands inside a
+    short run's critical path, and the in-process path overlaps that
+    charge with ~17 ms of other startup work -- which is why the 30 MB
+    ratio compresses from 2.56x to 1.57x while the 2 GB ratio barely
+    moves. Throughput is BETTER under THP everywhere, and the ratio
+    widens with parent size, because the in-process arm degrades faster
+    as the address space grows.
+
+    The 30 MB row is not a crossover, it is the FLOOR -- interpreter
+    plus substrate, the smallest parent a real caller has. The cleanroom
+    wins there, so the crossover sits at or below any real Python
+    process. W-CR6 predicted a "negative crossover" for the pre-CRFIX1
+    launcher; it is now reached rather than predicted. Any future claim
+    must still state its parent RSS and THP state, or it is not a claim.
+
     Remains OFF by default, for reasons that are still true:
       * It is narrower than the API: mode="plugin" only, UMA only,
-        orchestrator=True only. Everything else declines, so it is an
-        accelerator for a subset, not a transparent swap-in.
+        orchestrator=True only. Everything else declines to the
+        in-process path UNCHANGED, so enabling it would not alter
+        behaviour for any non-plugin caller -- only plugin callers
+        would change, and they would get 1.56x-3.78x on throughput.
       * Real multi-node hardware has never exercised it; NUMA validation
         here is fake-NUMA only.
-      * The W-CR6 parent-RSS win was measured before these fixes and has
-        NOT been re-measured after them. Do not quote it as current.
 
     The intent is that it eventually covers ALL modes and becomes the
     default: the envelope still needs widening (mode="python", multi-node)

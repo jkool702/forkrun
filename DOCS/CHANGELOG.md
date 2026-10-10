@@ -112,6 +112,43 @@ The symptom was both latency *and* a hot core: the scanner's pre-flight
 that path does not check for it, so the pre-flight spun rather than
 sleeping.
 
+### Parent-RSS scaling, re-measured after CR-FIX1
+
+The W-CR6 figures ("parent RSS is the dimension that matters") were taken
+*before* this pass and described a launcher with a fixed ~100 ms of
+overhead. That overhead is gone, so the curve moved and is recorded here
+in both THP regimes. Method: `python/benchmarks/bench_cleanroom.py`,
+paired interleaved A/B, medians, 28 workers, UMA, `--orchestrator`,
+exact record counts asserted on every pass; i9-7940X, 14c/28t.
+
+**Startup** (2000 records), and **end-to-end** (light_5M):
+
+| parent RSS | startup, THP=never | startup, THP=always | e2e, THP=never | e2e, THP=always |
+|---|---|---|---|---|
+| 30 MB | 16.24 -> 6.34 ms (2.56x) | 17.37 -> 11.05 ms (1.57x) | 294.5 -> 203.8 ms (1.45x) | 264.0 -> 168.9 ms (1.56x) |
+| 554 MB | 118.9 -> 15.3 ms (7.78x) | 200.6 -> 27.0 ms (7.43x) | 330.6 -> 212.9 ms (1.55x) | 349.9 -> 189.4 ms (1.85x) |
+| 2127 MB | 454.7 -> 42.4 ms (10.74x) | 734.8 -> 71.7 ms (10.25x) | 665.6 -> 248.3 ms (2.68x) | 863.3 -> 228.3 ms (3.78x) |
+
+Two findings worth separating, because they point in opposite directions:
+
+* **THP costs the launcher a fixed init charge.** Absolute startup gets
+  worse under `shmem=always` at every RSS level (6.3 -> 11.1 ms at the
+  floor). Allocating and zeroing a 2 MB huge page lands inside a short
+  run's critical path, and the in-process path overlaps that charge with
+  ~17 ms of other startup work, which is why the 30 MB *ratio* compresses
+  from 2.56x to 1.57x while the 2 GB ratio barely moves.
+* **THP saves the launcher proportional work.** Throughput is better
+  under THP everywhere, and the ratio *widens* with parent size
+  (2.68x -> 3.78x at 2 GB) because the in-process arm degrades faster as
+  the address space grows.
+
+The cleanroom wins in both regimes at every RSS measured. The 30 MB row
+is not a crossover but the **floor** -- interpreter plus substrate, the
+smallest parent a real caller has -- so the crossover sits at or below
+any real Python process. That is the "negative crossover" W-CR6 claimed
+for the pre-CRFIX1 launcher; it is now reached rather than predicted.
+
+
 ### Tests
 
 `python/tests/test_cleanroom.py` is self-contained. The primary fixture
