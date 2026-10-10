@@ -18,27 +18,103 @@ from fcntl import F_GETPIPE_SZ
 import time
 import unittest
 import warnings
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import forkrun  # noqa: E402
 from forkrun.run import (  # noqa: E402
     _cleanroom_collect, _cleanroom_eligible, _cleanroom_enabled,
-    _cleanroom_explicit, _cleanroom_launcher_path, _read_cleanroom_stats)
+    _cleanroom_explicit, _cleanroom_launcher_path, _read_cleanroom_stats,
+    _decode_launcher_status, _describe_launcher_failure,
+    _source_is_reopenable)
 
-PLUGIN = None
-for _cand in (
-        os.environ.get("FORKRUN_TEST_PLUGIN"),
-        "/tmp/opencode/mlbench/ml_plugin_light.so",
-):
-    if _cand and os.path.exists(_cand):
-        PLUGIN = _cand
-        break
-HAVE_PLUGIN = PLUGIN is not None
+# CR-FIX1-G: the fixture is BUILT HERE, AT MODULE SCOPE.
+#
+# This placement is load-bearing and is the bug this change exists to
+# fix. The old header pointed PLUGIN at a hardcoded
+# /tmp/opencode/mlbench/ml_plugin_light.so that no build target produces,
+# so HAVE_PLUGIN was False in a fresh checkout and 37 of 58 tests
+# skipped. The obvious repair -- compile the in-repo plugin in
+# setUpModule() -- does NOT work: @unittest.skipUnless decorators are
+# evaluated at CLASS-DEFINITION time, i.e. during import, which happens
+# before setUpModule() runs. HAVE_PLUGIN would still be frozen at False
+# and every gated test would still skip, while the suite looked green.
+# A test that cannot distinguish "worked" from "never ran" is not a test.
+#
+# So: compile first, then compute HAVE_PLUGIN, then define the classes.
+#
+# The fixture is the existing in-repo plugin (CR-FIX1-G: reuse, do not
+# invent another). test_plugin_v1.c already exports the dialect-2 ctx
+# protocol the launcher requires, plus the fault-injection entry points
+# the suite needs. Its output transform differs from the old fixture's,
+# which is immaterial: every parity test compares the cleanroom path
+# against the in-process path USING THE SAME PLUGIN, so the transform
+# cancels. The light_5M benchmark keeps its own plugin -- that number
+# measures realistic workload throughput, not fixture speed.
+PLUGINS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "plugins")
+PLUGIN_SRC = os.path.join(PLUGINS_DIR, "test_plugin_v1.c")
+PLUGIN = os.environ.get("FORKRUN_TEST_PLUGIN") or os.path.join(
+    PLUGINS_DIR, "test_plugin_v1.so")
+PLUGIN_FUNC = os.environ.get("FORKRUN_TEST_PLUGIN_FUNC") or "count_lines_v1"
+PLUGIN_HEADER = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "ring_loadables")
+
+# The v0 fixture, used by exactly one test: the launcher must REFUSE a
+# plugin with no forkrun_use_ctx (exit 78) rather than drive it via the
+# legacy stdout route it cannot collect. That test used to skip in a
+# fresh checkout because nothing here built it -- a skip caused by the
+# repo not building its own fixture is not an environmental limitation.
+LEGACY_SRC = os.path.join(PLUGINS_DIR, "test_plugin.c")
+LEGACY_SO = os.path.join(PLUGINS_DIR, "test_plugin.so")
+
+HAVE_GCC = shutil.which("gcc") is not None
+
+
+def _compile(src, out):
+    import subprocess
+    proc = subprocess.run(
+        ["gcc", "-shared", "-fPIC", "-O2", "-I", PLUGIN_HEADER,
+         "-o", out, src],
+        capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        raise AssertionError(
+            "cleanroom fixture build FAILED for %s (gcc is present, so this "
+            "is a defect, not an environmental skip):\n%s"
+            "command: gcc -shared -fPIC -O2 -I %s -o %s %s"
+            % (src, proc.stderr, PLUGIN_HEADER, out, src))
+
+
+def _build_fixture():
+    """Compile the in-repo plugins. Returns True when PLUGIN exists.
+
+    Module scope, NOT setUpModule: see the header. Fails loudly when
+    the compiler is present but the build fails -- that is a real defect,
+    not an environmental limitation, and a silent skip would hide it."""
+    if not HAVE_GCC:
+        return False
+    if not os.path.exists(PLUGIN):
+        _compile(PLUGIN_SRC, PLUGIN)
+    if not os.path.exists(LEGACY_SO):
+        _compile(LEGACY_SRC, LEGACY_SO)
+    return os.path.exists(PLUGIN)
+
+
+try:
+    HAVE_PLUGIN = _build_fixture()
+except AssertionError:
+    # Re-raised below from a test so it fails the suite rather than
+    # aborting collection; recorded here so the decorators see it.
+    HAVE_PLUGIN = False
+    _FIXTURE_BUILD_ERROR = sys.exc_info()[1]
+else:
+    _FIXTURE_BUILD_ERROR = None
 
 
 def _spec():
-    return "%s:ml_process_light" % PLUGIN
+    return "%s:%s" % (PLUGIN, PLUGIN_FUNC)
 
 
 def _make_input(n=2000, path=None):
@@ -92,6 +168,68 @@ def _descendants_of(pid):
                     out.add(k)
                     stack.append(k)
     return out
+
+
+class TestLauncherOutcomeContract(unittest.TestCase):
+    """CR-FIX1-D/C: exit-status decoding and the replay-safety rule.
+
+    Pure -- no plugin, no launcher. These two functions decide whether
+    a failed run silently returns half its input, which is the single
+    worst failure mode in this subsystem, so they are pinned directly
+    rather than only through an end-to-end run.
+    """
+
+    def test_exit_78_decodes_from_the_raw_wait_status(self):
+        # A normally exited process with code 78 arrives as 78 << 8.
+        # Reporting the raw number was the bug; a caller seeing 19968
+        # has no way to tell a capability refusal from a broken install.
+        code, sig, label, pre = _decode_launcher_status(78 << 8)
+        self.assertEqual(code, 78)
+        self.assertIsNone(sig)
+        self.assertIn("forkrun_use_ctx", label)
+        self.assertTrue(pre, "exit 78 is a pre-ingestion refusal")
+
+    def test_pre_ingestion_codes(self):
+        for code in (64, 69, 71, 78):
+            _, _, _, pre = _decode_launcher_status(code << 8)
+            self.assertTrue(pre, "exit %d must be pre-ingestion" % code)
+
+    def test_ambiguous_and_post_ingestion_codes_are_unsafe(self):
+        # 70 is die(), which fires both before the spill fork (:388) and
+        # after it (:498/:516/:539) -- so it cannot be classified either
+        # way and must be treated as consumed.
+        for code in (70, 1):
+            _, _, _, pre = _decode_launcher_status(code << 8)
+            self.assertFalse(pre, "exit %d must NOT be pre-ingestion" % code)
+
+    def test_signal_death_is_indeterminate_and_unsafe(self):
+        code, sig, label, pre = _decode_launcher_status(9)   # SIGKILL
+        self.assertIsNone(code)
+        self.assertEqual(sig, 9)
+        self.assertFalse(pre, "signal death must be treated as consumed")
+
+    def test_description_is_human_readable_not_a_raw_number(self):
+        # The whole point: a caller must not be handed a bare wait
+        # status. For an exited process the raw value is code << 8, which
+        # is distinctive, so assert it never appears. (For a signal death
+        # the raw status IS the signal number, so that case is excluded
+        # here rather than asserted against a coincidence.)
+        for code in (78, 64, 70, 71, 1):
+            raw = code << 8
+            d = _describe_launcher_failure(raw)
+            self.assertNotIn(str(raw), d,
+                             "raw wait status leaked into: %r" % d)
+            self.assertIn(str(code), d)
+        self.assertIn("signal", _describe_launcher_failure(9))
+
+    def test_replay_safety_is_decided_by_source_ownership(self):
+        self.assertTrue(_source_is_reopenable("/tmp/x.jsonl"))
+        self.assertTrue(_source_is_reopenable(b"/tmp/x.jsonl"))
+        # A caller-supplied descriptor shares the open file description
+        # with the launcher's dup, so it cannot be rewound after ingest.
+        self.assertFalse(_source_is_reopenable(7))
+        with tempfile.NamedTemporaryFile() as fh:
+            self.assertFalse(_source_is_reopenable(fh))
 
 
 class TestCleanroomHelpers(unittest.TestCase):
@@ -1205,11 +1343,9 @@ class TestCleanroomStreaming(unittest.TestCase):
         cannot collect. Previously that produced an empty stream and no
         error; it must now raise.
         """
-        legacy = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "tests", "plugins", "test_plugin.so")
+        legacy = LEGACY_SO
         if not os.path.exists(legacy):
-            self.skipTest("test_plugin.so not built")
+            self.skipTest("v0 fixture test_plugin.so not built")
         os.environ["FORKRUN_CLEANROOM"] = "1"
         with self.assertRaises(Exception):
             out = list(forkrun.stream(
@@ -1472,7 +1608,7 @@ class TestCleanroomWorkerDeath(unittest.TestCase):
         os.set_inheritable(rw, True)
         proc = subprocess.Popen(
             [launcher, "--so", find_substrate(), "--plugin", PLUGIN,
-             "--func", "ml_process_light", "--workers", "8",
+             "--func", PLUGIN_FUNC, "--workers", "8",
              "--lines", "0", "--src", str(sr), "--result", str(rw)],
             pass_fds=(sr, rw), stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE)
@@ -2079,6 +2215,216 @@ class TestCleanroomCollectBuffer(unittest.TestCase):
             after - before, set(),
             "cleanroom collect leaked descriptors: %r"
             % sorted(after - before))
+
+
+class TestFatalTeardownBounded(unittest.TestCase):
+    """CR-FIX1-B: a detected failure must never hang on a live producer.
+
+    This is a release blocker, not hardening. Before the fix the launcher
+    killed its workers and then walked into a BLOCKING waitpid for the
+    spill child -- which sits in read() on the caller's descriptor and is
+    never signalled on the fatal path. A caller whose source pipe writer
+    stays open (every streaming caller mid-run, every abandoned run)
+    therefore got a launcher that never returns.
+
+    The producer in this test deliberately NEVER closes the pipe. Closing
+    it to make the test finish would mask the defect exactly.
+    """
+
+    def setUp(self):
+        self.launcher = _cleanroom_launcher_path()
+        if self.launcher is None:
+            self.skipTest("launcher binary not built")
+        if _FIXTURE_BUILD_ERROR is not None:
+            raise AssertionError("fixture build failed: %s"
+                                 % (_FIXTURE_BUILD_ERROR,))
+        from forkrun._bindings import find_substrate
+        self.so = find_substrate()
+
+    def _run_with_live_producer(self, timeout=25):
+        import subprocess
+        from forkrun._bindings import find_substrate
+        sr, sw = os.pipe()
+        os.set_inheritable(sr, True)
+        res = os.memfd_create("cr_teardown")
+        os.set_inheritable(res, True)
+        # Enough data to start the pipeline. The write end stays OPEN for
+        # the whole run -- that is the point.
+        os.write(sw, b'{"eid":"e%d"}\n' * 4000)
+        proc = subprocess.Popen(
+            [self.launcher, "--so", find_substrate(),
+             "--plugin", PLUGIN, "--func", "always_fail_v1",
+             "--workers", "4", "--lines", "0", "--on-error", "2",
+             "--src", str(sr), "--result", str(res)],
+            pass_fds=(sr, res), stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE)
+        return proc, sr, sw, res
+
+    def test_fatal_failure_does_not_hang_with_the_producer_open(self):
+        proc, sr, sw, res = self._run_with_live_producer()
+        try:
+            try:
+                _, err = proc.communicate(timeout=25)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self.fail(
+                    "HANG: the launcher did not terminate in 25s while the "
+                    "source producer was still open. This is the CR-FIX1-B "
+                    "defect: fatal teardown waited on the spill child, "
+                    "which waits on a producer that is not going to write.")
+        finally:
+            os.close(sw)
+            os.close(sr)
+        self.assertNotEqual(proc.returncode, 0,
+                            "a fatal run must report failure")
+        self.assertIn(b"fatal", err.lower())
+        os.close(res)
+
+    def test_fatal_failure_leaves_no_surviving_descendants(self):
+        import subprocess
+        proc, sr, sw, res = self._run_with_live_producer()
+        try:
+            try:
+                proc.communicate(timeout=25)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self.fail("HANG: launcher did not terminate")
+        finally:
+            os.close(sw)
+            os.close(sr)
+            os.close(res)
+        # PDEATHSIG plus the explicit kill+reap in the fatal path must
+        # leave nothing behind. A leak here accumulates in a long-lived
+        # service, which is what PR_SET_PDEATHSIG was added for.
+        for _ in range(50):
+            if not _descendants_of(proc.pid):
+                break
+            time.sleep(0.1)
+        self.assertEqual(_descendants_of(proc.pid), set(),
+                         "launcher descendants survived a fatal run")
+
+    def test_successful_run_with_closed_producer_still_succeeds(self):
+        # The control: bounding fatal teardown must not break the success
+        # path, which legitimately waits for ingestion to finish.
+        import subprocess
+        from forkrun._bindings import find_substrate
+        path = _make_input(3000)
+        src = os.open(path, os.O_RDONLY)
+        os.set_inheritable(src, True)
+        res = os.memfd_create("cr_ok")
+        os.set_inheritable(res, True)
+        try:
+            rc = subprocess.call(
+                [self.launcher, "--so", find_substrate(), "--plugin", PLUGIN,
+                 "--func", PLUGIN_FUNC, "--workers", "4", "--lines", "0",
+                 "--src", str(src), "--result", str(res)],
+                pass_fds=(src, res), stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            self.assertEqual(rc, 0)
+            self.assertGreater(os.fstat(res).st_size, 3000)
+        finally:
+            os.close(src)
+            os.close(res)
+            os.unlink(path)
+
+
+class TestDescriptorInheritance(unittest.TestCase):
+    """CR-FIX1-A1/A2: engine descriptors and complete close-all-except.
+
+    Deterministic by construction: the launcher verifies its own
+    keep-list with F_GETFD in every child when --fd-selfcheck is passed,
+    so a lost descriptor fails loudly instead of silently degrading the
+    run to polling. Timing is NOT used as evidence here -- the A1
+    symptom (a 100 ms release delay, then a hot scanner) is invisible in
+    the exit status, which is precisely why it survived this long.
+    """
+
+    def setUp(self):
+        self.launcher = _cleanroom_launcher_path()
+        if self.launcher is None:
+            self.skipTest("launcher binary not built")
+        from forkrun._bindings import find_substrate
+        self.so = find_substrate()
+
+    def _launch(self, extra=(), plugin_func=None):
+        import subprocess
+        path = _make_input(3000)
+        src = os.open(path, os.O_RDONLY)
+        os.set_inheritable(src, True)
+        res = os.memfd_create("cr_fd")
+        os.set_inheritable(res, True)
+        argv = [self.launcher, "--so", self.so, "--plugin", PLUGIN,
+                "--func", plugin_func or PLUGIN_FUNC, "--workers", "4",
+                "--lines", "0", "--src", str(src), "--result", str(res)] + list(extra)
+        p = subprocess.run(argv, pass_fds=(src, res),
+                           capture_output=True, timeout=120)
+        nb = os.fstat(res).st_size
+        os.close(src)
+        os.close(res)
+        os.unlink(path)
+        return p, nb
+
+    def test_every_child_keeps_its_required_descriptors(self):
+        p, nb = self._launch(extra=["--fd-selfcheck", "--verbose"])
+        self.assertEqual(p.returncode, 0, p.stderr.decode()[-2000:])
+        self.assertNotIn(b"SELFCHECK FAILED", p.stderr)
+        self.assertGreater(nb, 0)
+        # The engine really did open descriptors: if the diff were empty
+        # the selfcheck would be vacuous, so assert it is non-trivial.
+        self.assertRegex(p.stderr.decode(), r"INIT_FDS pre=(\d+) post=(\d+)")
+
+    def test_engine_fd_set_is_non_empty(self):
+        p, _ = self._launch(extra=["--fd-selfcheck", "--verbose"])
+        m = re.search(r"INIT_FDS pre=(\d+) post=(\d+)", p.stderr.decode())
+        self.assertIsNotNone(m, p.stderr.decode()[-2000:])
+        pre, post = int(m.group(1)), int(m.group(2))
+        self.assertGreater(post, pre,
+                           "fr_py_init opened no descriptors: the engine-fd "
+                           "diff -- and therefore the keep-list -- is empty, "
+                           "which would make the selfcheck vacuous")
+
+    def test_unrelated_high_descriptor_does_not_survive_scrubbing(self):
+        # Pass a descriptor numbered above 1023 into the launcher. The
+        # old scrub looped 3..1023 and left it open in every child.
+        import subprocess
+        path = _make_input(3000)
+        src = os.open(path, os.O_RDONLY)
+        res = os.memfd_create("cr_fd")
+        noise = []
+        try:
+            for target in (1024, 1100, 1500):
+                try:
+                    fd = os.open("/dev/null", os.O_RDONLY)
+                except OSError:
+                    continue
+                try:
+                    os.dup2(fd, target)
+                except OSError:
+                    os.close(fd)
+                    continue
+                os.close(fd)
+                os.set_inheritable(target, True)
+                noise.append(target)
+            os.set_inheritable(src, True)
+            os.set_inheritable(res, True)
+            if not noise:
+                self.skipTest("cannot allocate a descriptor above 1023 here")
+            p = subprocess.run(
+                [self.launcher, "--so", self.so, "--plugin", PLUGIN,
+                 "--func", PLUGIN_FUNC, "--workers", "4", "--lines", "0",
+                 "--src", str(src), "--result", str(res), "--fd-selfcheck"],
+                pass_fds=tuple([src, res] + noise),
+                capture_output=True, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stderr.decode()[-2000:])
+        finally:
+            for fd in noise:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            os.close(src)
+            os.close(res)
+            os.unlink(path)
 
 
 if __name__ == "__main__":

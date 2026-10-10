@@ -69,6 +69,63 @@ int process_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
     return 0;
 }
 
+/* Size-preserving pass-through: emits one byte per input record.
+ *
+ * CR-FIX1-G: the cleanroom suite was written against a fixture that
+ * emitted a fixed-width record per input line, so its assertions read
+ * "2000 records in -> 2000 bytes out". process_v1 above uppercases the
+ * window, so output size tracks input size and those assertions no
+ * longer mean what they meant.
+ *
+ * Rather than rewrite a dozen assertions against a new fixture's
+ * behaviour -- which risks weakening them -- this entry point restores
+ * the property they actually test: every input record produces exactly
+ * one output record, so a byte count IS a record count and a shortfall
+ * is visible as a shortfall. It also keeps records small and
+ * uniform, which is what the framing-desync assertions want.
+ *
+ * Not a throughput fixture. The light_5M benchmark keeps its own. */
+int count_lines_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    const char *in;
+    uint64_t n, i, lines;
+    (void)argc;
+    (void)argv;
+    if (ctx == NULL)
+        return -1;
+    if (ctx->version < 2)
+        return -1;
+    n = ctx->batch_byte_length;
+    if (n == 0)
+        return 0; /* empty batch: success, no output */
+    in = (const char *)(uintptr_t)ctx->reserved[0];
+    if (in == NULL)
+        return -1;
+    lines = 0;
+    for (i = 0; i < n; i++)
+        if (in[i] == '\n')
+            lines++;
+    /* A trailing unterminated line still counts as a record, matching
+     * how the engine treats a final line with no delimiter. */
+    if (n > 0 && in[n - 1] != '\n')
+        lines++;
+    if (lines == 0)
+        return 0;
+    {
+        char *out = (char *)malloc((size_t)lines);
+        if (out == NULL)
+            return -2;
+        memset(out, 'x', (size_t)lines);
+        if (fwrite(out, 1, (size_t)lines, stdout) != (size_t)lines) {
+            free(out);
+            return -2;
+        }
+        free(out);
+    }
+    if (fflush(stdout) != 0)
+        return -2;
+    return 0;
+}
+
 /* Identity check: proves batch_index/num_kills arrive through the real
  * ctx (writes "idx=<batch_index> kills=<num_kills>\n" to stdout). */
 int identify_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
