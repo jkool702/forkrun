@@ -249,6 +249,37 @@ document. Where they disagree, one of them is a bug.
 **Acceptance:** matrix published; generated matrix compared against an
 independent expected-behaviour table; a test asserts they agree.
 
+**Status: DONE** (`tools/capability_oracle.py`, `tools/capability_matrix.py`,
+`python/tests/test_capability_matrix.py`, `dev/supervisor/CLEANROOM_CAPABILITY_MATRIX.md`).
+16,128 cells, 12 outcomes, 14 tests.
+
+> **Independence is structural, not editorial.** The oracle and the generator
+> are **separate modules**, and `tools/capability_oracle.py` imports nothing
+> from `forkrun`. A test asserts this **by AST**, so the independence cannot
+> rot into a comment — which is the failure mode the paragraph above warns
+> about. Splitting the files is what makes the oracle an independent check
+> rather than a restatement; had both halves lived in one module, the
+> independence claim would have been unfalsifiable.
+
+> **[V] The suite was mutation-tested, because a passing suite proves nothing
+> until it has been shown to fail.** Six mutations of the live predicate, all
+> caught: serving `orchestrator=False` (4 failures); deleting the resume
+> refusal (10); moving it below the streaming block — **the exact CR-FIX1-K
+> defect** (8); serving `strict_poison` on the stream path (4); reintroducing
+> the historical map/stream drift (6); and having the oracle import `forkrun`
+> (caught by the AST independence test). Green after restoring each.
+
+> **[V] Two corrections to the axis list above**, found by enumerating rather
+> than by reading. **`replayable` is not an eligibility axis at all** — it is
+> computed in the *outcome* contract at `run.py:1025` as
+> `replayable = pre_ingest or _source_is_reopenable(source)` and gates
+> `may_fallback`, so it answers "may we fall back?", not "may the launcher
+> serve this call?". And **`return_stats` is a real axis that the list above
+> omits** — it is a predicate parameter, currently *constant* (never
+> consulted, therefore always served). A currently-constant axis is kept in
+> the matrix precisely because it is what a future change would silently start
+> varying.
+
 ### C0.2 — Trace facility
 
 Opt-in via `FORKRUN_CLEANROOM_TRACE`; disabled by default; records to a memfd
