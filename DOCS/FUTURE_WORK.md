@@ -49,6 +49,34 @@
 
 ---
 
+## Tier 4b: Cleanroom Launcher — Envelope Widening
+
+CR-FIX1 hardened the UMA C-plugin cleanroom and made its tests
+self-contained. These items widen what it can serve. They are listed as
+a separate tier because they share one precondition: **each one widens
+an accelerator, so none may ship until the one before it is measured and
+honest.** Running the cleanroom at `0.17x` startup was worse than not
+running it; running a *slower* accelerator across more of the API is
+worse still.
+
+| # | Item | Source | Effort | Description |
+|---|------|--------|--------|-------------|
+| 44 | Re-measure the W-CR6 parent-RSS win | CR-FIX1 | Low | The 2x→10x startup / 1.2-1.5x end-to-end RSS scaling was measured **before** CR-FIX1. The fixed ~100 ms it was trying to amortise is now gone, so the crossover point moves. Any performance claim must state the parent RSS it was measured at, or it is not a claim. |
+| 45 | NUMA cleanroom execution | CR-FIX1 §1 | High | `fr_py_init_numa`, `fr_py_numa_ingest`, `fr_py_indexer_numa`, `fr_py_numa_scanner` and `fr_py_fallow_phys` all exist and are already wired in the in-process path — the port is orchestration, not engine work. **Blocked on a correctness prerequisite:** in NUMA the record header's `batch_idx` is a *per-node claim ticket* (`forkrun_ring.c:6364`), not a global sequence, so the launcher's parent-side sort by `batch_idx` is invalid. Requires forking the C orderer *and* teaching `_cleanroom_collect` not to re-sort its output. |
+| 46 | Python UDF mode in the launcher | CR-FIX1 §1 | High | `exec` destroys the interpreter object graph, so a UDF cannot be carried across the boundary — but it can be *recreated* on the far side, the way `frun.bash` recreates the shell. Requires embedding CPython in a separately-built helper `.so` (never in the substrate, which stays Python-free), plus a C→Python callback seam and exact `None`/`b""`/`str` return parity. **Supersedes** the "structurally impossible; do not attempt it" ruling in `CLEANROOM_DESIGN.md` §3 and `CLEANROOM_HANDOVER.md` §3. |
+| 47 | Spawn-pipe-driven worker spawning | CR-FIX1 §1 | Medium | The launcher forks all workers at t=0 with the spawn pipe disarmed, matching the in-process Python NUMA path. The scanner can already request workers (`forkrun_ring.c:4261`). Doing so in the launcher needs a `poll()` loop over the spawn pipe plus per-worker death pipes, and must reproduce `_spawn_quiescent`'s three conditions before closing the signal spare — getting that wrong is **silent data loss**, not a hang (`MEMORY.md` W-STREAMDRAIN). |
+| 48 | Real multi-socket validation | CR-FIX1 | External | Every NUMA claim to date is `numa=fake=N`. `set_mempolicy(MPOL_BIND)` is exercised but physically inert, and all SRAT distances are 10. Needs real multi-socket hardware. Flag it; do not fake a result. |
+
+### Known gaps left by CR-FIX1
+
+| # | Item | Source | Effort | Description |
+|---|------|--------|--------|-------------|
+| 49 | Opt-in tracing facility not implemented | CR-FIX1-E | Low | The spec exists (`FORKRUN_CLEANROOM_TRACE`, role/pid/event/monotonic-ts records to an inherited memfd) but was deliberately deferred behind the descriptor measurement, which resolved the question by direct experiment instead. Worth building before the next lifecycle investigation. |
+| 50 | `test_numa_recovery.py` is unreachable on UMA | CR-FIX1 | Low | Gated on `len(detect_numa_nodes()) >= 2`, so the NUMA crash/respawn lock-ins are skipped on a single-node box. Either boot `numa=fake=N` for the matrix (requires a **reboot**) or mark the cells required-manual in the release gate. |
+| 51 | Path-source replay assumes a stable file | CR-FIX1-C | — | A path is replayable by reopening, which assumes its contents do not change during the invocation. Documented as an API assumption rather than solved; do not spool sources to satisfy it. |
+
+---
+
 ## Tier 5: Distribution & Platform
 
 | # | Item | Source | Effort | Description |

@@ -79,24 +79,39 @@ One exec, then N cheap forks. That is the entire win.
 
 ## Coverage: what can and cannot cross an `exec`
 
-This is the hard limit, and it is not negotiable — `exec` destroys the
-Python interpreter's object graph.
+`exec` destroys the Python interpreter's object graph. A payload that is
+a live object therefore cannot be *carried* across the boundary.
 
-| mode | payload form | crosses exec? |
-|---|---|---|
-| `mode="plugin"` | `"/path/plugin.so:func"` | **yes** — a path string |
-| `c_spawn_loop=True` | `argv` list | **yes** — plain data |
-| Python UDF | a `callable`, or `"pkg.mod:func"` | **no** |
+| mode | payload form | carried across `exec`? | shipped status |
+|---|---|---|---|
+| `mode="plugin"` | `"/path/plugin.so:func"` | **yes** — a path string | **served** |
+| `c_spawn_loop=True` | `argv` list | **yes** — plain data | **not reachable**: `_cleanroom_eligible` requires `raw_mode == "plugin"` |
+| Python UDF | a `callable`, or `"pkg.mod:func"` | **no** — not shipped |
 
-`resolve_payload_parent()` documents this explicitly: payloads are
+`resolve_payload_parent()` documents the object-graph half: payloads are
 resolved in the parent and "cross by fork inheritance like the callable
-form always did". A callable cannot survive `exec`.
+form always did".
 
-So **the cleanroom covers the C plugin path and `c_spawn_loop`**, and
-Python UDF falls back to in-process forking. That is an acceptable
-boundary, and arguably the right one to draw: the plugin path is where
-the throughput numbers are, and it is the fastest path, so it is exactly
-where the fixed fork tax does the most relative damage.
+**CR-FIX1 correction to the ruling below.** The original text said the
+boundary was "hard ... not negotiable" and that Python UDF was
+"structurally impossible; do not attempt it". That is correct *about
+carrying* and incorrect *about reachability*: `exec` destroys the graph,
+but it does not prevent the far side from **re-creating** an interpreter
+and re-importing the module. That is exactly the technique `frun.bash`
+already uses for the shell (`exec -c bash --norc --noprofile` with
+`_FR_IN_CLEANROOM=1` as a recursion guard).
+
+What the "impossible" ruling failed to price is the set of seams that
+re-creation would require, none of which exists today: CPython linked
+into a **separately built** helper `.so` (never into the substrate, which
+stays Python-free and version-agnostic), a C→Python callback seam with
+GIL and exception marshalling, post-`exec` reconstruction of `sys.path`
+and module state, and exact `None`/`b""`/`str` return parity. That is a
+real project, not an impossibility.
+
+Until it is built, the shipped boundary is unchanged: **the cleanroom
+serves the C plugin path only**, and everything else declines to the
+in-process path. See `DOCS/FUTURE_WORK.md` Tier 4b item 46.
 
 A side benefit worth noting: the comment above `resolve_payload_parent`
 mentions that forking a threaded host can inherit a frozen import lock
@@ -122,7 +137,10 @@ what the engine sets itself, and every unrelated descriptor (the parent
 
 ## Rollback and rollout
 
-- Default **on**, opt out with `FORKRUN_CLEANROOM=0`, per owner decision.
+- Default **off**, opt in with `FORKRUN_CLEANROOM=1`. It was briefly on
+  and reversed. It stays off while the envelope is narrower than the
+  API and while NUMA validation is fake-only — not because it is slow,
+  which was true until CR-FIX1 and is not true now.
 - **No RSS threshold.** An earlier draft proposed gating on ~350 MB
   parent RSS; that number was wrong. It came from a PoC whose fixed
   cost was inflated by a synchronous whole-corpus ingest. With the

@@ -231,6 +231,150 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## Unreleased — CR-FIX1: the Python cleanroom launcher, hardened
+
+Scope: the UMA C-plugin cleanroom only. NUMA, Python UDF, a libpython
+helper and dynamic worker spawning are explicitly NOT implemented and
+remain future work.
+
+### Correctness
+
+**Fatal teardown is bounded (was: an unbounded hang).** On the failure
+path the launcher killed its workers and then walked into a *blocking*
+`waitpid` for the spill child, which is never signalled and sits in
+`read()` on the caller's descriptor. A caller whose source pipe writer
+stayed open — every streaming caller mid-run, every abandoned run —
+therefore got a launcher that never returned. Fatal teardown now
+signals the whole live set (workers *and* every helper, spill included)
+and reaps non-blocking. Measured, same source and producer state:
+
+| | outcome |
+|---|---|
+| pre-fix | **still running after 20 s** |
+| post-fix | exit 1 in **0.114 s** |
+
+Reaped worker PIDs are also invalidated in `pids[wid]` at the moment they
+are reaped and refilled only on a real respawn, so fatal cleanup signals
+only known-live children.
+
+**Fallback is replay-safe (was: silent truncation).** `os.dup()` shares
+the open file description, so after the launcher ingested from a
+caller-supplied descriptor, that descriptor was advanced and the
+in-process retry resumed mid-input — returning a truncated result with
+exit 0. Fallback is now refused with an explicit error unless the source
+is a path (reopenable) or the launcher provably failed before ingestion.
+The exit codes that mean "pre-ingestion" are enumerated: 64, 69, 71, 78.
+Exit 70 (`die()`) is deliberately excluded — it fires both before the
+spill fork and after it — and signal deaths are treated as indeterminate.
+
+**The capability probe no longer forks from an unsafe process.** `dlopen`
+runs a plugin's ELF constructors in whatever process calls it. The
+launcher's probe called it in-process, so a constructor that started a
+thread left a thread behind and every subsequent fork died. Measured with
+such a plugin: **SIGSEGV**. The probe now runs in a disposable
+subprocess with a bounded wait; that plugin now completes normally
+(exit 0, full output). A probe that never completes exits **79**, which
+*suppresses* fallback — the in-process path would `dlopen` the same
+plugin in the caller and reproduce the failure with no launcher to bound
+it.
+
+**`map()` can no longer silently ignore `resume=`/`checkpoint_file=`.**
+The shared predicate's refusal for both was nested under
+`if streaming:`, and the `map()` call site never passed the arguments —
+so the check could not execute. Both are now refused unconditionally,
+above the streaming block.
+
+**Spill writes complete or fail.** A single `pwrite()` treated any
+result other than a complete write — including `-1`/`EINTR` — as fatal.
+Now a positional-write loop: `EINTR` is retried and partial writes
+advance both buffer and offset, so a legal short write no longer
+terminates a healthy run.
+
+### Correctness of the descriptor model
+
+**Every child inherits the engine descriptors.** The spill, fallow and
+scanner children kept only their own data descriptors, so
+`fr_py_ingest_data_post()` and every scanner eventfd poke were writes to
+closed descriptors — silently dropped, because `sys_write` ignores its
+return value. The keep-list policy is now a single role-aware helper.
+
+**Scrubbing covers the whole descriptor space.** The old loop ran
+`for (fd = 3; fd < 1024; fd++)`, which is not a close-all-except policy.
+Now `close_range()` over the gaps between sorted keep-list entries
+(extending to `UINT_MAX`, the syscall's own argument ceiling), falling
+back to `/proc/self/fd` enumeration. `RLIMIT_NOFILE` is a cross-check,
+never the authority.
+
+**A truncated or failed descriptor snapshot fails the run.** `snap_fds`
+stopped at a fixed 64 entries and returned a count the caller could not
+distinguish from a complete snapshot; a short snapshot meant children
+silently lost eventfds. Truncation and `readdir` failure are now
+reported and fatal. The fixed table grew to 256.
+
+A new `--fd-selfcheck` flag makes each child verify its own keep-list
+with `F_GETFD` after scrubbing, so a lost descriptor fails loudly rather
+than degrading the run to polling.
+
+### Performance
+
+The fixed ~100 ms startup overhead is **gone**. Paired interleaved A/B,
+medians, 28 workers, UMA, byte-exact output asserted identical on both
+sides (5020240 bytes every run):
+
+| variant | startup (2000 recs) | light_5M throughput |
+|---|---|---|
+| pre-fix | 107.06 ms (44 ms cpu) | 232.2 ms (858 ms cpu) |
+| scanner descriptors only | 3.30 ms (21 ms cpu) | 227.9 ms (1652 ms cpu) |
+| full fix | 3.41 ms (21 ms cpu) | 192.9 ms (1840 ms cpu) |
+
+* **startup 32.5x faster** — the scanner omission accounted for all of it
+* **throughput 1.20x faster** — the spill omission gave the scanner back
+* **CPU 858 -> 1840 ms**, which is not a regression: effective cores rose
+  from 3.7 to 9.5 while finishing 20% sooner. That is the intended
+  behaviour — workers doing work instead of sleeping on a poll timeout.
+
+The previously recorded "circular wait" diagnosis (spare signal/fallow
+pipe write ends) is **refuted**: those spares are closed only after the
+supervision loop exits, and the loop exits when `live == 0`, i.e. after
+every worker has already terminated.
+
+The symptom was both latency *and* a hot core: the scanner's pre-flight
+`poll()` over a closed descriptor returns `POLLNVAL` immediately, and
+that path does not check for it, so the pre-flight spun rather than
+sleeping.
+
+### Tests
+
+`python/tests/test_cleanroom.py` is self-contained. The primary fixture
+pointed at a hardcoded `/tmp/opencode/mlbench/ml_plugin_light.so` that no
+build target produces, so **37 of 58 tests skipped** by default and one
+errored. It now builds the in-repo fixture at **module scope** — not in
+`setUpModule`, because `@skipUnless` decorators evaluate at import and
+the fix would have appeared to work while still skipping everything.
+
+* **58 tests, 37 skipped, 1 error** -> **70 tests, 0 skipped, 0 failures**
+
+New coverage: the exit-status contract and replay-safety rule; the
+open-pipe fatal-teardown regression (the producer deliberately never
+closes the pipe); descendant cleanup after a fatal run; descriptor
+self-check; unrelated descriptors above 1023.
+
+### Packaging
+
+The launcher is now listed in `package_data`, so it ships in the wheel.
+It previously shipped in neither wheel nor sdist, making `pip install
+forkrun` silently different from a source checkout. The `setup.py` gcc
+fallback builds it too — it used to stop at the substrate. The tracked
+binary is now gitignored and removed by `clean`/`clean-python`; it was a
+stale copy that could be run in place of the source it was built from.
+
+Two build gates fixed: `tools/check_canary_versions.py` concatenated a
+2-tuple with a list before formatting it with two numeric specifiers, so
+every above-floor finding raised `TypeError` instead of being reported —
+a gate that crashes is not a gate. `tools/gen_shim.py` hardcoded the
+extern count as `45` while the header carried `50`; the count is now
+derived from the same data the declarations come from.
+
 ## v3.6.1 — 2026-10-06
 
 ### Verification

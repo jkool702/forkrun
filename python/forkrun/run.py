@@ -430,78 +430,95 @@ def _require_plugin_loop_symbol():
 def _cleanroom_enabled():
     """W-CR1: is the exec-based cleanroom launcher requested?
 
-    WORK IN PROGRESS BETA. Opt-IN via FORKRUN_CLEANROOM, and the
-    default is OFF -- not out of caution, but because in the shape a
-    real caller actually uses, it is currently SLOWER than the in-process
-    path it replaces.
+    BETA. Opt-IN via FORKRUN_CLEANROOM; the default is deliberately OFF.
 
-    Integrated benchmark (benchmarks/bench_cleanroom.py, paired
-    interleaved A/B, exact counts asserted, 28 workers, UMA,
-    ml_process_light). Measured with --orchestrator, i.e. the reactor-
-    supervised shape that a plain forkrun.map() uses:
+    ---- CR-FIX1: status after the hardening pass ----
 
-        STARTUP    2000 records   17.91 ms -> 105.88 ms  0.17x (5.9x SLOWER)
-        THROUGHPUT light_5M      640.88 ms -> 719.53 ms  0.89x (11% SLOWER)
+    The "~100 ms fixed overhead" that used to dominate this path is
+    GONE. Root cause: the spill, fallow and scanner children did not
+    inherit the engine descriptors that fr_py_init opens, and their
+    keep-lists scrubbed them away.
 
-    The gap is a FIXED ~100 ms per run, not per-record work: 105.9 ms at
-    2000 records, 109.6 ms at 20000. Localised by instrumentation (all
-    reverted):
+        scanner : writes evfd_data_arr on every publish and blasts
+                  evfd_eof_arr at finalization. With those closed,
+                  sys_write returns EBADF and every caller ignores it,
+                  so the notifications vanish and workers are released
+                  only by the 100 ms timeout in do_lockfree_claim.
+                  Worse, the pre-flight poll over evfd_ingest_data does
+                  not check POLLNVAL, so a closed descriptor returns
+                  immediately and the pre-flight SPINS instead of
+                  sleeping. So the symptom was BOTH a fixed latency AND
+                  a hot core -- which is why the original triage
+                  concluded "nobody is spinning" and reached the wrong
+                  answer.
+        spill   : calls fr_py_ingest_data_post() per chunk so the
+                  scanner's pre-flight blocks rather than spin-sleeps.
+                  The descriptor was scrubbed four lines later, making
+                  the documented mechanism a silent no-op.
 
-      * not pre-main (0.9 ms), not dlopen (0.4 ms), not the final child
-        joins (~0.2 ms), not post-main (0.8 ms)
-      * it IS the supervision loop: LOOP_DONE at t=103 ms, and the loop
-        is a blocking waitpid, so it is waiting on a child
-      * per-child reap stamps show the scanner and spill exit at
-        t=0.9 ms and ALL FOUR WORKERS exit together at t=101.5-102.1 ms
-        -- they are not slow, they are all released at once
-      * total CPU for the whole run is ~13 ms (user 5.4, sys 18.8), so
-        nobody is spinning: the launcher and its workers are BLOCKED
-      * strace of the whole tree shows two workers sitting in
-        read() = 0 for ~95 ms -- a read waiting for EOF -- alongside one
-        poll() that times out at 100 ms
+    Measured, paired interleaved A/B, medians, 28 workers, UMA, byte-exact
+    output asserted identical on both sides (5020240 bytes every run):
 
-    So this is a CIRCULAR WAIT, not slow work and not a poll interval.
-    The most consistent reading: the launcher holds spare signal/fallow
-    pipe WRITE ends across the supervision loop (closed only after it,
-    so respawns can be handed a fresh end), while a worker blocks reading
-    for EOF; the loop cannot finish until the workers exit, and the
-    workers only wake when a 100 ms timeout breaks the tie.
+        variant              startup (2000 recs)      light_5M throughput
+        pre-fix (HEAD)       107.06 ms  (44 ms cpu)   232.2 ms  (858 ms cpu)
+        scanner-fd only        3.30 ms  (21 ms cpu)   227.9 ms (1652 ms cpu)
+        full fix               3.41 ms  (21 ms cpu)   192.9 ms (1840 ms cpu)
 
-    NOT yet fixed, and the next thing to try: release the spares as soon
-    as the last worker is spawned and no respawn can occur, or not hold
-    spares at all on the no-death path. Note that lowering the engine's
-    100 ms poll timeouts does NOT help (measured: 100 -> 10 ms changed
-    nothing), so the timeout is not the thing paying for the wait -- it
-    is only what ends it.
+        startup      32.5x faster   (the scanner omission was the whole
+                                   of it)
+        throughput    1.20x faster   (the spill omission is what gave the
+                                   scanner ingest backpressure)
+        cpu          858 -> 1840 ms  (NOT a regression: effective cores
+                                     rose from 3.7 to 9.5 while finishing
+                                     20% sooner. That is the whole thesis
+                                     -- all cores doing work instead of
+                                     sleeping on a poll timeout.)
 
-    An earlier version of this note advertised 1.91x-2.06x FASTER
-    startup and 1.03x throughput. Those were measured with
-    orchestrator=False, which the envelope now REJECTS (see
-    _cleanroom_eligible: the launcher supervises unconditionally and so
-    cannot honour a caller's request for legacy fail-fast). They
-    therefore described a configuration that can no longer take the
-    cleanroom at all. The figures above replace them; the benchmark
-    gained --orchestrator so the default shape can be measured directly.
+    The earlier diagnosis -- a "circular wait" on the spare signal/fallow
+    pipe write ends -- is REFUTED. Those spares are closed only after the
+    supervision loop exits, and the loop exits when live == 0, i.e. after
+    every worker has already terminated. A write end held open cannot
+    delay workers that have already died. The 1.91x-2.06x figures in
+    MEMORY.md were measured with orchestrator=False, which the envelope
+    now rejects, and describe a path the public API cannot reach.
 
-    The motivation is still sound: the launcher forks its workers from a
-    tiny exec'd process instead of from the possibly-very-large Python
-    parent, so per-fork page-table copy does not scale with host RSS.
-    The in-process path pays that cost on every fork. Fixing the fixed
-    overhead is what stands between the current beta and that win --
-    the idea is sound, the implementation is not there yet.
+    Correctness fixes in the same pass (see the module history and
+    DOCS/CLEANROOM_HANDOVER.md for the full disposition):
+      * Fatal teardown is bounded. It used to kill workers and then block
+        on a waitpid for the spill child, which is never signalled and
+        sits in read() on the caller's descriptor -- so a detected worker
+        failure became a HANG whenever the producer stayed open.
+      * Fallback is replay-safe. os.dup() shares the open file
+        description, so after ingestion a caller-supplied descriptor is
+        advanced and the in-process retry returned a TRUNCATED result
+        with exit 0. Now refused, with an explicit error.
+      * The capability probe runs in a disposable subprocess with a
+        bounded wait. dlopen runs the plugin's ELF constructors in
+        whatever process calls it; a constructor that starts a thread
+        left a thread in the launcher and every subsequent fork died
+        (measured: SIGSEGV). Exit 79 now means "loading this plugin is
+        unsafe" and SUPPRESSES fallback, because the fallback would
+        dlopen it in the caller and reproduce the failure there.
+      * resume=/checkpoint_file= are refused unconditionally in the
+        shared envelope. map() never passed them and the refusal was
+        nested under `if streaming:`, so a resume request was silently
+        ignored.
+      * Descriptor scrubbing covers the whole descriptor space
+        (close_range, /proc/self/fd fallback) and a truncated or failed
+        snapshot fails the run rather than degrading it silently.
 
-    OPT-IN, and the default is deliberately OFF. This was ON briefly
-    (commit 5ae0b0a0) and reversed.
+    Remains OFF by default, for reasons that are still true:
+      * It is narrower than the API: mode="plugin" only, UMA only,
+        orchestrator=True only. Everything else declines, so it is an
+        accelerator for a subset, not a transparent swap-in.
+      * Real multi-node hardware has never exercised it; NUMA validation
+        here is fake-NUMA only.
+      * The W-CR6 parent-RSS win was measured before these fixes and has
+        NOT been re-measured after them. Do not quote it as current.
 
-    (An earlier version of this note justified that with two claims that
-    are both now FALSE, kept here so they are not re-derived: it said the
-    envelope excluded orchestrator=True "so a plain forkrun.map() never
-    took the cleanroom", and that the launcher "runs no supervisor ...
-    W-CR4 is not landed". W-CR4 IS landed (branch NEW/REFACTOR3.9) and
-    the envelope now REQUIRES orchestrator=True. So neither the
-    reachability argument nor the missing-supervisor argument applies
-    any more, and neither should be used to argue for or against
-    defaulting this on.)
+    The intent is that it eventually covers ALL modes and becomes the
+    default: the envelope still needs widening (mode="python", multi-node)
+    and real-NUMA validation, in that order.
 
     NOT A CORRECTNESS BUG, despite appearances: the BATCH COUNT varies
     between runs of identical input, which looks alarming and is not.
@@ -515,35 +532,9 @@ def _cleanroom_enabled():
     Every run returns every record exactly once; only the grouping into
     batches differs, because batch boundaries depend on how much has been
     ingested when the scanner looks. This is pre-existing and shared with
-    the in-process path -- test_ctx_fields_identical already notes that
-    "batch counts legitimately differ run to run (pre-flight race sets
-    L)". It was mistaken here for record loss by counting BLOBS as
-    records, so do not repeat that: compare JOINED BYTES, which is what
-    test_matches_in_process_content does and why it is stable.
-
-    It stays OFF while it is a beta, for the reasons that are actually    It stays OFF while it is a beta, for the reasons that are actually
-    true today:
-
-    * It is SLOWER in the shape callers use (the fixed ~100 ms above).
-    * It is narrower than the API: mode="plugin" only, UMA only,
-      orchestrator=True only. Everything else declines, so it is an
-      accelerator for a subset, not a transparent swap-in.
-    * Real multi-node hardware has never exercised it; NUMA validation
-      here is fake-NUMA only.
-
-    The intent is that it eventually covers ALL modes and becomes the
-    default. That needs the fixed overhead gone, the envelope widened
-    (mode="python", multi-node), and real-NUMA validation -- in that
-    order, since widening an accelerator that is currently slower would
-    make things worse, not better.
-
-    For reference, the orchestrator=False configuration this feature was
-    originally tuned against measured 2.06x faster startup and 1.034x
-    throughput -- a genuine win, and the reason the idea is worth
-    finishing. That configuration is no longer reachable from the public
-    API (the envelope requires orchestrator=True), so those numbers
-    describe a path that cannot be taken today. Use --orchestrator for
-    the numbers that matter.
+    the in-process path. It was mistaken here for record loss by counting
+    BLOBS as records, so do not repeat that: compare JOINED BYTES, which
+    is what test_matches_in_process_content does and why it is stable.
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:
