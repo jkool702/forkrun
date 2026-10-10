@@ -1,8 +1,49 @@
 # DECISION-01 — How is the UDF helper shipped?
 
-**Blocks:** P1 (`mode="python"`), and therefore the largest coverage gap.
-**Needs:** maintainer + one or more external AI reviewers. Consensus before implementation.
-**Status:** open. No code written.
+**Status: DECIDED — Option A (per-minor wheels), Option C (source-only) as
+the documented fallback.**
+Blocks P1. Consensus: maintainer + external review round 1.
+Implementation carries three binding conditions — see §6.
+
+---
+
+## 0. Resolution of the open loose end (§2.4)
+
+The unexplained stall is **explained, and it was never a hang**.
+
+`PySys_SetArgv(0, NULL)` **segfaults** — CPython dereferences `argv`, and
+passing `NULL` with `argc == 0` faults. The original probe died there, before
+ever reaching `Py_Initialize`. Nothing about `abi3` was being tested at that
+point.
+
+Both real initialisation paths were then run under a **mandatory 20 s
+timeout**, staged with `fflush` so the last stage reached is observable:
+
+| path | result |
+|---|---|
+| plain `Py_Initialize()` | completes, exit 0 |
+| `PyConfig_InitIsolatedConfig` + `Py_InitializeFromConfig` | completes, exit 0 |
+| `Py_SetProgramName` + `PySys_SetArgv(0, NULL)` | **SIGSEGV** — the original failure |
+
+So §2.4's "cause unknown" is closed: it was a defect in my probe, not a
+property of embedded initialisation. **No evidence was ever lost.**
+
+### What isolation actually buys — measured
+
+Same binary, both paths, same interpreter:
+
+| | plain `Py_Initialize` | isolated `PyConfig` |
+|---|---|---|
+| `sys.path` entries | 8 | **5** |
+| `~/.local/lib/python3.14/site-packages` (user site) | **present** | **dropped** |
+| `/usr/lib64/python3.14/site-packages` | present | present |
+| `/usr/local/lib/python3.14/site-packages` | present | present |
+
+This is precisely the contract a UDF helper needs, and it is **not**
+achievable by clearing four environment variables: the user-site directory is
+reached through `site` processing, not through `PYTHONPATH`. A user's
+installed packages stay importable; environment-influenced paths do not leak
+in. That is a concrete vindication of Option A over Option B.
 
 ---
 
@@ -181,3 +222,65 @@ documented as a known limitation rather than presented as equivalent.
    plan's own priority argument puts P1 first for good reason.
 5. The hung runtime probe (§2.4) — is it worth chasing before deciding, or is
    it irrelevant to this choice?
+
+---
+
+## 6. Binding implementation conditions (from review round 1)
+
+The decision is Option A. These three conditions attach to it.
+
+### 6.1 Full, deliberate initialisation configuration
+
+`isolated = 1` is **not by itself a complete path contract.** CPython's
+isolated configuration still consults configuration files for path settings
+left unspecified. The helper must therefore configure, explicitly:
+
+* isolated configuration;
+* environment handling;
+* **site-import policy** — note `site_import = 0` means third-party paths do
+  **not** arrive via ordinary `site` processing, so they must be added
+  deliberately;
+* runtime `home` / prefix; and
+* explicit, **validated** module-search roots — received or derived, never
+  inherited as an uncontrolled search path.
+
+Tested against installed packages, not only the standard library.
+
+### 6.2 Honest runtime packaging
+
+Build each helper against its matching CPython minor, then **verify on a clean
+installation**:
+
+* inspect `DT_NEEDED` — the helper must request the *intended*
+  `libpython3.X`, not the build host's;
+* inspect `RPATH`/`RUNPATH` — no accidental dependence on build-machine
+  paths;
+* inspect `auditwheel` output rather than assuming its verdict.
+
+The current wheel is `manylinux`; whether `libpython3.X` is excluded (system
+library) or vendored is a policy question that must be *observed*, not
+predicted.
+
+### 6.3 Implementation sequence
+
+Prototype the helper against the **local** interpreter's headers and the full
+initialisation API (Option C as a development mechanism), establish the
+startup/runtime contract, then complete the six-minor wheel matrix for
+release. A toolchain must not become a requirement for users who have a
+supported wheel.
+
+---
+
+## 7. Recorded for the future, not decided now
+
+* **The Stable ABI is not inherently unsuitable for embedding.** PEP 384
+  explicitly covers applications that embed Python. Option B is rejected
+  **as specified**, not in principle. A future design using `Py_BytesMain()`
+  with isolated command-line options (`-I -S`) could revisit it — but that
+  would be a new design requiring its own isolation and portable-linking
+  proof, and it may constrain the pre-fork/post-fork choice, so it is not
+  assumed equivalent to Option A.
+* **Portable linking is a real abi3 obstacle**: the Stable-ABI shared library
+  is not present in every Python distribution, and Debian has documented
+  missing `libpython3.so` packages. A `cp310-abi3` tag alone does not
+  guarantee the launcher can load the interpreter library on the target.
