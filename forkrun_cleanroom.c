@@ -25,6 +25,9 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <limits.h>
+#include <poll.h>
+#include <sys/syscall.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -113,22 +116,226 @@ static long rss_kb(void) {
     return kb;
 }
 
-/* Close every descriptor except those in `keep`.
+/* Snapshot the open fd set.
  *
- * Python's fork helpers call scrub_fds(keep) before entering the C
- * loop. Without the equivalent here each worker inherits every OTHER
- * worker's out_fd and the shared signal write end, which is both an
- * fd-leak and -- because the drain tracks liveness through those
- * descriptors -- a correctness hazard.
- */
-static void scrub_closem_others(const int *keep, int nkeep) {
-    for (int fd = 3; fd < 1024; fd++) {
-        int keepit = 0;
-        for (int i = 0; i < nkeep; i++)
-            if (keep[i] == fd) { keepit = 1; break; }
-        if (!keepit)
-            close(fd);
+ * CR-FIX1-A2/D8: the old version had a fixed 64-entry table and stopped
+ * collecting at `n < max`, returning a count the caller could not
+ * distinguish from a complete snapshot. A truncated engine_fd[] means a
+ * child silently loses eventfds and degrades to polling -- exactly the
+ * failure this whole exercise is about. Truncation and enumeration
+ * failure are now reported, and both are fatal to the run.
+ *
+ * Returns the count written, or -1 on failure. *truncated is set when
+ * the caller's table could not hold the whole set. An EMPTY result is
+ * not an error: a program with nothing open above stderr legitimately
+ * has none, and the caller treats "no engine fds" and "enumeration
+ * failed" very differently. */
+static int snap_fds(int *out, int max, int *truncated) {
+    int n = 0;
+    DIR *d = opendir("/proc/self/fd");
+    *truncated = 0;
+    if (!d)
+        return -1;                       /* enumeration failed: distinct */
+    /* opendir() itself holds an fd, and that fd appears in the listing.
+     * Left in, it (a) becomes a bogus "engine fd" in the diff and
+     * (b) worse, it makes the pre/post diff unreliable so the real
+     * eventfds are dropped from the keep-set -- which is exactly what
+     * happened: workers were scrubbing away the ring data/EOF eventfds
+     * and then spinning at 100% CPU on POLLNVAL. Exclude it. */
+    int self = dirfd(d);
+    struct dirent *e;
+    errno = 0;
+    while ((e = readdir(d)) != NULL) {
+        int v = atoi(e->d_name);
+        if (v > 2 && v != self) {
+            if (n >= max) { *truncated = 1; break; }
+            out[n++] = v;
+        }
     }
+    /* readdir() signals both end-of-directory and error by returning
+     * NULL; errno distinguishes them. Ignoring it made a transient
+     * readdir error look like a complete (but short) snapshot. */
+    if (errno != 0) {
+        closedir(d);
+        return -1;
+    }
+    closedir(d);
+    return n;
+}
+
+/* ---- CR-FIX1-A2: complete close-all-except ----
+ *
+ * The old scrub looped `for (fd = 3; fd < 1024; fd++)`, which is not a
+ * close-all-except policy -- it is a policy for the descriptor range
+ * that happens to be small. Anything above 1023 survived into every
+ * child. The launcher exists to escape a bloated parent, so leaking
+ * descriptors into 30 children is contrary to its purpose even where
+ * (on the current Python-driven invocation) the parent's own
+ * descriptors are few and low-numbered.
+ *
+ * Two implementations, same contract:
+ *   - close_range(2) over the gaps between sorted keep-list entries,
+ *     with the last range running to UINT_MAX (the syscall's own
+ *     argument ceiling). RLIMIT_NOFILE is deliberately NOT the bound:
+ *     a process may hold descriptors above a limit that was lowered
+ *     after they were opened, so it cannot be trusted as an authority.
+ *     It is cross-checked, never trusted.
+ *   - otherwise: enumerate /proc/self/fd and close what is not kept.
+ *
+ * Either way, an incomplete enumeration is an error, never a silent
+ * success. */
+
+#define CR_MAX_KEEP 256
+
+typedef struct {
+    int fd[CR_MAX_KEEP];
+    int n;
+    int overflow;
+} cr_keep;
+
+static void keep_init(cr_keep *k) { k->n = 0; k->overflow = 0; }
+
+/* Duplicates are rejected rather than tolerated: a duplicated entry
+ * would shift nothing here, but silently absorbing one would hide a
+ * caller bug that shows up as an unreachable gap later. */
+static int keep_add(cr_keep *k, int fd) {
+    if (fd < 3)
+        return 0;
+    for (int i = 0; i < k->n; i++)
+        if (k->fd[i] == fd)
+            return 0;
+    if (k->n >= CR_MAX_KEEP) { k->overflow = 1; return -1; }
+    k->fd[k->n++] = fd;
+    return 0;
+}
+
+static void keep_add_engine(cr_keep *k, const int *eng, int n_eng) {
+    for (int i = 0; i < n_eng; i++)
+        (void)keep_add(k, eng[i]);
+}
+
+static int keep_cmp(const void *a, const void *b) {
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+#if defined(__linux__) && defined(SYS_close_range)
+static int have_close_range = -1;
+#endif
+
+/* Probe support without closing anything real.
+ *
+ * The obvious-looking probe -- close_range(~0U, ~0U, 0) -- is a landmine:
+ * on a kernel where it *works* it closes descriptors, and a probe that
+ * mutates process state is not a probe. UINT_MAX cannot name a live
+ * descriptor (RLIMIT_NOFILE is far below it), so a one-descriptor range
+ * at UINT_MAX returns 0 on a supporting kernel and ENOSYS/EINVAL on one
+ * without it, having closed nothing. */
+static int close_range_ok(unsigned lo, unsigned hi) {
+#if defined(__linux__) && defined(SYS_close_range)
+    if (have_close_range < 0) {
+        have_close_range =
+            (syscall(SYS_close_range, UINT_MAX, UINT_MAX, 0U) == 0);
+    }
+    if (!have_close_range)
+        return 0;
+    if (lo > hi)
+        return 1;
+    return syscall(SYS_close_range, (unsigned)lo, (unsigned)hi, 0U) == 0;
+#else
+    (void)lo; (void)hi;
+    return 0;
+#endif
+}
+
+/* Apply the keep-list. Returns 0 on success, -1 if the descriptor space
+ * could not be fully enumerated (never a silent partial scrub). */
+static int scrub_apply(const cr_keep *k) {
+    if (k->overflow)
+        return -1;
+
+    int sorted[CR_MAX_KEEP];
+    int n = k->n;
+    for (int i = 0; i < n; i++) sorted[i] = k->fd[i];
+    qsort(sorted, (size_t)n, sizeof(int), keep_cmp);
+
+    /* close_range path: close every gap. */
+    unsigned prev = 2;                   /* 0,1,2 are never touched */
+    int used_close_range = 1;
+    for (int i = 0; i <= n; i++) {
+        unsigned next = (i < n) ? (unsigned)sorted[i] : UINT_MAX;
+        if (next <= prev)
+            continue;                    /* duplicate guard */
+        if (next - 1 > prev) {
+            if (!close_range_ok(prev + 1, next - 1)) { used_close_range = 0; break; }
+        }
+        prev = next;
+        if (prev == UINT_MAX)
+            break;
+    }
+    if (used_close_range && (n == 0 || prev != UINT_MAX))
+        return 0;
+
+    /* Fallback: enumerate. The enumeration fd is itself in the
+     * listing and is excluded, exactly as snap_fds does. */
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return -1;
+    int self = dirfd(d);
+    int rc = 0;
+    struct dirent *e;
+    errno = 0;
+    while ((e = readdir(d)) != NULL) {
+        int v = atoi(e->d_name);
+        if (v <= 2 || v == self)
+            continue;
+        int keepit = 0;
+        for (int i = 0; i < n; i++)
+            if (sorted[i] == v) { keepit = 1; break; }
+        if (!keepit && close(v) != 0 && errno != EBADF)
+            rc = -1;
+    }
+    if (errno != 0)
+        rc = -1;
+    closedir(d);
+    return rc;
+}
+
+/* Test-only: after a scrub, confirm every required descriptor survived.
+ * A missing one is reported rather than quietly degrading to polling --
+ * the difference is invisible until someone measures why the run is
+ * 100 ms slower. Off unless --fd-selfcheck is passed. */
+static int fd_selfcheck = 0;
+
+static int selfcheck_required(const cr_keep *k) {
+    int sorted[CR_MAX_KEEP];
+    int n = k->n;
+    for (int i = 0; i < n; i++) sorted[i] = k->fd[i];
+    qsort(sorted, (size_t)n, sizeof(int), keep_cmp);
+    for (int i = 0; i < n; i++)
+        if (fcntl(sorted[i], F_GETFD) == -1) {
+            fprintf(stderr,
+                    "forkrun-cleanroom: SELFCHECK FAILED -- required "
+                    "descriptor %d did not survive scrubbing\\n",
+                    sorted[i]);
+            return -1;
+        }
+    return 0;
+}
+
+/* Single entry point for a child: build the keep-list, scrub, and (if
+ * enabled) verify. `role` is only used for diagnostics. */
+static void enter_child(const char *role, const cr_keep *k) {
+    if (scrub_apply(k) != 0) {
+        fprintf(stderr,
+                "forkrun-cleanroom: %s child could not be given a "
+                "complete descriptor set (enumeration or keep-list "
+                "failure) -- refusing to run with an unknown descriptor "
+                "state\\n", role);
+        _exit(72);
+    }
+    if (fd_selfcheck && selfcheck_required(k) != 0)
+        _exit(72);
 }
 
 static void raise_fd_limit(void) {
@@ -151,30 +358,17 @@ static void die_with_parent(void) {
     prctl(PR_SET_PDEATHSIG, SIGKILL);
 }
 
-/* Snapshot the open fd set. run.py computes engine_fds the same way:
- * diff the fds around fr_py_init. That set is what every child must
- * KEEP -- see scrub_closem_others below, which is the subtle part. */
-static int snap_fds(int *out, int max) {
-    int n = 0;
-    DIR *d = opendir("/proc/self/fd");
-    if (!d) return 0;
-    /* opendir() itself holds an fd, and that fd appears in the listing.
-     * Left in, it (a) becomes a bogus "engine fd" in the diff and
-     * (b) worse, it makes the pre/post diff unreliable so the real
-     * eventfds are dropped from the keep-set -- which is exactly what
-     * happened: workers were scrubbing away the ring data/EOF eventfds
-     * and then spinning at 100% CPU on POLLNVAL. Exclude it. */
-    int self = dirfd(d);
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL && n < max) {
-        int v = atoi(e->d_name);
-        if (v > 2 && v != self) out[n++] = v;
-    }
-    closedir(d);
-    return n;
-}
+/* Snapshot the open fd set is above (snap_fds). run.py computes
+ * engine_fds the same way: diff the fds around fr_py_init. That set is
+ * what EVERY child must KEEP -- see enter_child/scrub_apply, which is
+ * the subtle part. */
 
-#define MAX_TRACK_FDS 64
+#define MAX_TRACK_FDS CR_MAX_KEEP
+
+/* CR-FIX1-F: how long the capability probe may take before we conclude
+ * the plugin's load is unsafe. Bounded so a hanging constructor
+ * cannot hang the launcher -- that would trade one hang for another. */
+#define CR_PROBE_TIMEOUT_MS 5000
 
 /* Worker-death cause from a waitpid status (D-PORT3 parity with
  * _reactor._death_cause). Signal deaths map to the shell 128+signo
@@ -210,9 +404,10 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
         return -1;
     if (p == 0) {
         die_with_parent();
-        int keep[4 + MAX_TRACK_FDS];
-        keep[0] = memfd; keep[1] = out_fd;
-        keep[2] = sig_w;  keep[3] = fall_w;
+        cr_keep k;
+        keep_init(&k);
+        keep_add(&k, memfd); keep_add(&k, out_fd);
+        keep_add(&k, sig_w);  keep_add(&k, fall_w);
         /* KEEP THE ENGINE'S OWN FDS. Scrubbing them away looks tidy
          * and is catastrophic: do_lockfree_claim 3-way-polls the ring
          * data and EOF eventfds, and with those descriptors closed
@@ -221,17 +416,14 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
          * forever instead of blocking. It only shows up when the ring
          * is momentarily inconsistent -- which is exactly the state a
          * respawn creates -- so it hides completely in normal runs. */
-        for (int i = 0; i < n_engine; i++)
-            keep[4 + i] = engine_fd[i];
+        keep_add_engine(&k, engine_fd, n_engine);
         /* The poison relay needs this one too. Scrubbing it away is
          * silent -- the worker's relay just finds a closed fd and stops
          * recording, so poisoned_batches would come back empty with
          * poisoned still correct. Exactly the failure mode the relay
          * exists to remove, so it is kept explicitly. */
-        int n_keep = 4 + n_engine;
-        if (g_poison_stats_fd >= 0)
-            keep[n_keep++] = g_poison_stats_fd;
-        scrub_closem_others(keep, n_keep);
+        keep_add(&k, g_poison_stats_fd);
+        enter_child("worker", &k);
         if (!wloop) _exit(70);
         /* wincarn MUST be this generation's number. It is not
          * diagnostic: fr_py_worker_init stores it in
@@ -346,6 +538,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--respawn-cap") && i + 1 < argc) o.respawn_cap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--verbose"))                o.verbose = 1;
         else if (!strcmp(argv[i], "--fork-only"))             o.fork_only = 1;
+        else if (!strcmp(argv[i], "--fd-selfcheck"))         fd_selfcheck = 1;
         else { fprintf(stderr, "forkrun-cleanroom: bad arg %s\n", argv[i]); return 64; }
     }
     if (!o.so_path || o.source_fd < 0 || !o.plugin_path) {
@@ -425,17 +618,45 @@ int main(int argc, char **argv) {
      * etc. Every child must keep these. Snapshot the set by diffing
      * across the call, exactly as run.py derives ctx["engine_fds"]. */
     int pre_fd[MAX_TRACK_FDS], post_fd[MAX_TRACK_FDS];
-    int npre = snap_fds(pre_fd, MAX_TRACK_FDS);
+    int pre_trunc = 0, post_trunc = 0;
+    int npre = snap_fds(pre_fd, MAX_TRACK_FDS, &pre_trunc);
+    if (npre < 0) {
+        fprintf(stderr, "forkrun-cleanroom: cannot enumerate /proc/self/fd "
+                        "before fr_py_init -- refusing to guess which "
+                        "descriptors the engine will need\n");
+        return 72;
+    }
+    if (pre_trunc) {
+        fprintf(stderr, "forkrun-cleanroom: descriptor snapshot TRUNCATED "
+                        "before fr_py_init (more than %d descriptors open) "
+                        "-- refusing to guess the engine descriptor set\n",
+                MAX_TRACK_FDS);
+        return 72;
+    }
     if (p_init(o.lines, o.bytes) != 0) {
         fprintf(stderr, "forkrun-cleanroom: fr_py_init failed\n");
         return 71;
     }
-    int npost = snap_fds(post_fd, MAX_TRACK_FDS);
+    int npost = snap_fds(post_fd, MAX_TRACK_FDS, &post_trunc);
+    if (npost < 0 || post_trunc) {
+        /* CR-FIX1-A2/D8: a truncated or failed post-snapshot means the
+         * diff below cannot be trusted, and the diff is the ONLY way the
+         * children learn which eventfds the engine created. Carrying on
+         * would hand them an incomplete keep-list, they would scrub the
+         * engine's eventfds away, and the run would quietly degrade to
+         * polling -- correct output, unexplained latency. Fail instead. */
+        fprintf(stderr, "forkrun-cleanroom: descriptor snapshot after "
+                        "fr_py_init %s -- refusing to run with an unknown "
+                        "engine descriptor set\n",
+                (npost < 0) ? "could not be enumerated"
+                            : "was TRUNCATED (more than MAX_TRACK_FDS open)");
+        return 72;
+    }
     if (o.verbose)
         fprintf(stderr, "INIT_FDS pre=%d post=%d\n", npre, npost);
     int engine_fd[MAX_TRACK_FDS];
     int n_engine = 0;
-    if (n_engine == 0 && npost == 0)
+    if (npost == 0)
         fprintf(stderr, "forkrun-cleanroom: WARNING fd snapshot empty; "
                 "children will scrub the engine's eventfds\n");
     for (int i = 0; i < npost; i++) {
@@ -476,8 +697,18 @@ int main(int argc, char **argv) {
     if (spill_pid < 0) die("fork(spill)");
     if (spill_pid == 0) {
         die_with_parent();
-        int keep[2] = {o.source_fd, memfd};
-        scrub_closem_others(keep, 2);
+        cr_keep k;
+        keep_init(&k);
+        keep_add(&k, o.source_fd); keep_add(&k, memfd);
+        /* CR-FIX1-A1: the engine's eventfds too. This child calls
+         * fr_py_ingest_data_post() once per chunk, and the whole point
+         * of that poke is to let the scanner's pre-flight block instead
+         * of spin-sleeping (forkrun_ring.c:4472 polls evfd_ingest_data).
+         * Scrubbing it away made the poke a silent no-op -- sys_write
+         * ignores its return, so the write to a closed fd vanishes and
+         * the documented mechanism silently does not execute. */
+        keep_add_engine(&k, engine_fd, n_engine);
+        enter_child("spill", &k);
         static char sbuf[1 << 20];
         unsigned long long soff = 0;
         for (;;) {
@@ -562,8 +793,19 @@ int main(int argc, char **argv) {
     if (fallow_pid < 0) die("fork(fallow)");
     if (fallow_pid == 0) {
         die_with_parent();
-        int keep[2] = {fallp[0], memfd};
-        scrub_closem_others(keep, 2);
+        cr_keep k;
+        keep_init(&k);
+        keep_add(&k, fallp[0]); keep_add(&k, memfd);
+        /* CR-FIX1-A1 step 4: ring_fallow_main reads its packet pipe and
+         * punches holes in the ingress memfd. It touches no engine
+         * eventfd, so the engine set is deliberately NOT kept here --
+         * retaining descriptors for symmetry alone would re-introduce
+         * exactly the "inconsistent keep policy across roles" problem
+         * this refactor exists to remove. Kept anyway, so the role's
+         * contract is uniform and a future fallow change cannot silently
+         * lose them. */
+        keep_add_engine(&k, engine_fd, n_engine);
+        enter_child("fallow", &k);
         _exit(p_fall(fallp[0], memfd) == 0 ? 0 : 1);
     }
 
@@ -605,8 +847,22 @@ int main(int argc, char **argv) {
     if (scan_pid < 0) die("fork(scan)");
     if (scan_pid == 0) {
         die_with_parent();
-        int keep[1] = {memfd};
-        scrub_closem_others(keep, 1);
+        cr_keep k;
+        keep_init(&k);
+        keep_add(&k, memfd);
+        /* CR-FIX1-A1: this is the child that actually NEEDS them. The
+         * scanner writes evfd_data_arr on every publish
+         * (forkrun_ring.c:3848/3875/3885) and blasts evfd_eof_arr at
+         * finalization (:5897/:6081). With those descriptors closed,
+         * sys_write returns EBADF and every caller ignores it, so the
+         * notifications are silently dropped and workers are released
+         * only by the 100 ms timeout in do_lockfree_claim. Worse, the
+         * pre-flight's poll over evfd_ingest_data (:4472) does not check
+         * POLLNVAL, so a closed fd returns immediately and the pre-
+         * flight spins instead of sleeping. Both symptoms are invisible
+         * in the exit status: the run is correct, just slow and hot. */
+        keep_add_engine(&k, engine_fd, n_engine);
+        enter_child("scanner", &k);
         _exit(p_scan(memfd) == 0 ? 0 : 1);
     }
 
@@ -628,13 +884,18 @@ int main(int argc, char **argv) {
     if (drain_pid < 0) die("fork(drain)");
     if (drain_pid == 0) {
         die_with_parent();
-        int n = o.workers + 2;
-        int *keep = calloc((size_t)n, sizeof(int));
-        if (!keep) _exit(70);
-        keep[0] = sigp[0]; keep[1] = o.result_fd;
-        for (int i = 0; i < o.workers; i++) keep[i + 2] = out_fds[i];
-        scrub_closem_others(keep, n);
-        free(keep);
+        cr_keep k;
+        keep_init(&k);
+        keep_add(&k, sigp[0]); keep_add(&k, o.result_fd);
+        /* Every worker's out_fd must stay open: the drain reads the
+         * bytes that land there, and it tracks which worker is alive
+         * from the signal pipe. It deliberately does NOT keep the
+         * engine set -- it never calls into the ring -- and it must not
+         * keep spare_sig, or the pipe never EOFs and it waits forever.
+         * That exclusion is now structural rather than incidental:
+         * spare_sig is simply not in this list. */
+        for (int i = 0; i < o.workers; i++) keep_add(&k, out_fds[i]);
+        enter_child("drain", &k);
         _exit(p_drain(sigp[0], out_fds, o.workers, o.result_fd, o.drain_mode));
     }
     close(sigp[0]);
