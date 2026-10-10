@@ -2,7 +2,18 @@
 
 **Blocks:** P2 (the `stream()` half of coverage completion).
 **Needs:** maintainer + external AI review. Consensus before implementation.
-**Status:** open. No code written.
+**Status: DECIDED — GO WITH AMENDMENTS. Option B as originally specified is
+WITHDRAWN.** Replaced by an explicit typed terminal-disposition protocol.
+See §6.
+
+> **Amendment log.** External review round 1 returned *GO WITH AMENDMENTS* and
+> **refuted the recommendation**. I had proposed emitting a zero-length frame
+> for every empty batch, on the evidence that the parsers already tolerate
+> `len == 0`. That evidence was real but did not support the conclusion: the
+> codebase **already uses `len == 0` to mean something**, so a zero-length
+> frame is not free — it is *taken*. Details in §6. This was the same error
+> shape as the abi3 `PyConfig` claim: a true fact generalised one step too
+> far without checking what else already depended on it.
 
 ---
 
@@ -58,18 +69,37 @@ published_slots=100   emitted_records=0   total=0 completed=0 poisoned=0
 completed successfully and produced nothing. Returning `None` is ordinary
 Python.
 
-### 2.3 The parsers already tolerate a zero-length frame
+### 2.3 The parsers tolerate a zero-length frame — and that is a TRAP, not a
+### permission
 
-`_split_records_views` (`run.py:2451-2476`) does:
+`_split_records_views` (`run.py:2451-2476`) appends `(idx, view[off:off+ln])`
+unconditionally, so `ln == 0` parses without complaint.
 
-```python
-idx, ln = _HDR.unpack_from(view, off)
-...
-records.append((idx, view[off:off + ln]))
+**This is why Option B fails.** Mechanical tolerance is not semantic safety,
+because `len == 0` **already carries meaning** on this wire format:
+
+`fr_py_emit` (`_shim.c:1298-1300`), the v0-parity direct-write path:
+
+```
+ * - data == NULL   -> no record (payload returned None), signal only.
+ * - data != NULL, len == 0 -> header with len 0 IS written
+ *   (payload returned b"" - v0 emits an empty record; None-vs-b"" preserved).
 ```
 
-For `ln == 0` this appends `(idx, <empty>)`. **No parser change is needed to
-accept empty frames.** That makes one option much cheaper than expected.
+And that distinction is **tested**: `test_v1_emit.py:100`,
+`test_emit_empty_bytes_writes_empty_record`, asserts `fr_py_emit(out, w, 1,
+9, b"", 0)` writes a 16-byte frame whose header unpacks to `(9, 0)`.
+
+So the wire format already encodes:
+
+| UDF returns | wire representation |
+|---|---|
+| `b""` | a frame with `len == 0` |
+| `None` | **no frame at all** |
+
+Emitting a zero-length frame for empty batches would therefore **collapse a
+tested distinction**: `None` and `b""` become indistinguishable. Every parser
+would still parse it; every parser would also now be *wrong*.
 
 ### 2.4 This is the same problem C0.7 has
 
