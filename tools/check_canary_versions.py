@@ -122,8 +122,14 @@ def check(artifacts):
                   if isinstance(v, tuple) and len(v) == 2
                   and isinstance(v[0], int) and v > FLOOR)
     if over:
+        # Was: "%d.%d" % (FLOOR + tuple(over)). FLOOR is a 2-tuple and
+        # `over` is a list of strings, so that concatenation produced a
+        # 2+N tuple which then failed to match two numeric specifiers --
+        # i.e. the gate raised TypeError instead of reporting the finding
+        # it exists to report. A gate that crashes is not a gate: every
+        # stub-above-floor finding went unnoticed.
         failures.append("stubs above floor %d.%d: %s"
-                        % (FLOOR + tuple(over)))
+                        % (FLOOR[0], FLOOR[1], ", ".join(over)))
     if not artifacts:
         failures.append("no artifacts to check")
     for art in artifacts:

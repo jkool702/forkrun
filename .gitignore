@@ -31,6 +31,13 @@ __pycache__/
 python/forkrun/libforkrun_python.so
 /forkrun_python_shim.o
 
+# Cleanroom launcher (make -f Makefile.substrate cleanroom-launcher).
+# CR-FIX1-I: this was tracked at 100755. A committed executable is a
+# stale copy that can be run in place of the source it was built from,
+# and it is platform-specific besides. `make clean`/`clean-python`
+# now remove it, so nothing rebuilds it by hand.
+python/forkrun/_forkrun_cleanroom
+
 # Python packaging artifacts (pip wheel / setup.py build; never commit)
 python/forkrun.egg-info/
 python/build/

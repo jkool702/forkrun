@@ -130,7 +130,7 @@ reproducibility-check: python-substrate
 	@rm -f /tmp/fr_build1.sha /tmp/fr_build2.sha
 
 clean-python:
-	rm -f $(PY_SHIM_OBJ) $(PY_OUT) $(CCSTAMP)
+	rm -f $(PY_SHIM_OBJ) $(PY_OUT) $(CR_OUT) $(CCSTAMP)
 
 bench: python-substrate
 	python3 python/benchmarks/run_all.py --scale medium --trials 3
@@ -179,4 +179,4 @@ check: canary
 	python3 -m unittest discover -s python/tests
 
 clean:
-	rm -f *.o *.so $(CCSTAMP) $(PY_SHIM_OBJ) $(PY_OUT)
+	rm -f *.o *.so $(CCSTAMP) $(PY_SHIM_OBJ) $(PY_OUT) $(CR_OUT)

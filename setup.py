@@ -25,6 +25,10 @@ from setuptools.command.build_py import build_py
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG_DIR = os.path.join(REPO_ROOT, "python", "forkrun")
 SO_NAME = "libforkrun_python.so"
+# CR-FIX1-I: the cleanroom launcher. Sits beside the substrate .so;
+# forkrun.run._cleanroom_launcher_path() looks for exactly this name in
+# exactly this directory, and nothing used to ship it.
+CR_NAME = "_forkrun_cleanroom"
 
 # W-PY23/REL: PEP 600 manylinux policy floors, oldest first. A wheel
 # built against glibc G may claim the highest policy floor <= G:
@@ -166,6 +170,22 @@ class BuildSubstratePy(build_py):
         if not os.path.exists(so_path):
             raise RuntimeError("substrate build produced no %s" % SO_NAME)
 
+        # CR-FIX1-I: build the launcher on BOTH paths. The gcc fallback
+        # used to stop at the substrate, so behaviour silently diverged
+        # by host tooling -- and because the launcher was never listed in
+        # package_data, that divergence was invisible.
+        cr_path = os.path.join(PKG_DIR, CR_NAME)
+        self.announce("building cleanroom launcher %s" % CR_NAME)
+        if shutil.which("gcc") is None:
+            raise RuntimeError("need gcc to build the cleanroom launcher")
+        subprocess.run(
+            ["gcc", "-O2", "-o", cr_path,
+             os.path.join(REPO_ROOT, "forkrun_cleanroom.c"),
+             "-ldl", "-lrt"],
+            check=True, cwd=REPO_ROOT)
+        if not os.path.exists(cr_path):
+            raise RuntimeError("launcher build produced no %s" % CR_NAME)
+
 
 def read_readme():
     with open(os.path.join(REPO_ROOT, "python", "README.md")) as fh:
@@ -195,7 +215,14 @@ setup(
     ],
     package_dir={"": "python"},
     packages=["forkrun"],
-    package_data={"forkrun": [SO_NAME, "py.typed"]},
+    # CR-FIX1-I: the launcher ships too. It was listed NOWHERE, so a
+    # wheel install silently had no cleanroom at all: _cleanroom_
+    # launcher_path() resolves the binary relative to the substrate .so,
+    # and it simply was not there. That made `pip install forkrun`
+    # quietly different from a source checkout, which is exactly the
+    # kind of divergence the substrate .so being explicitly listed was
+    # meant to prevent.
+    package_data={"forkrun": [SO_NAME, CR_NAME, "py.typed"]},
     cmdclass={"build_py": BuildSubstratePy},
     # The wheel carries a compiled .so: tag it for this platform so
     # pip refuses it elsewhere (never py3-none-any). The tag is a
