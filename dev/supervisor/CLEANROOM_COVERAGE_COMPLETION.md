@@ -1,40 +1,66 @@
 # Cleanroom coverage completion plan
 
-**Status: PROPOSAL — for external review. Nothing here is implemented.**
+**Status: PROPOSAL — amendments from external review round 1 applied.
+Nothing here is implemented.**
 Companion to `CLEANROOM_EXPANSION_ROADMAP.md` (accepted, rounds 1–7), which
 defines the envelope, the contracts and the expansion work items W-EXP-1/2/3.
 
+> **Amendment log.** Review round 1 returned *GO WITH AMENDMENTS* with seven
+> required corrections. **Three of them refute errors in the previous draft of
+> this document**, each confirmed by direct test rather than accepted on
+> authority:
+>
+> | # | previous claim | verified finding |
+> |---|---|---|
+> | A | "`stream()` already does parent-side reassembly via `batch_idx`" | **Wrong.** The *cleanroom* stream path yields records as they arrive — its docstring reads "The parent only ever DRAINS". The in-process path reassembles; the cleanroom one does not. This conflation was mine. |
+> | A | "the streaming path merely discards the poison count" | **Wrong.** The cleanroom stream argv passes **no `--stats-fd`** at all (`run.py:1515`). The channel must be wired and consumed, not forwarded. |
+> | B | certificate = `emitted_records == published_slots` | **Wrong.** A UDF returning `None` for half the batches yields **0 records against 100 published slots** — not drift, collapse. Payload-record count is not the order-packet count. |
+> | D | "`PyConfig` is in the limited API as of 3.10" | **Wrong.** Compiling with `-DPy_LIMITED_API=0x030A0000` fails: `unknown type name 'PyConfig'`. The abi3 premise did not survive one compiler invocation. |
+>
+> The remaining corrections (reachability wording, oracle methodology,
+> frequency language, shim policy, P7 proof obligation) are accepted as stated.
+
 ---
 
-## 0. The goal, restated
+## 0. The goal, restated — and the end state
 
-The intent behind this work is **complete coverage**: the cleanroom launcher
-should serve the whole reachable public API, and every refusal should be a
-refusal the system can justify rather than a gap nobody has closed yet.
+The intent is **complete coverage**: the cleanroom launcher should serve the
+whole reachable public API, and every refusal should be one the system can
+justify rather than a gap nobody closed.
 
 The accepted roadmap does **not** deliver that. It covers
-`mode ∈ {plugin→python→spawn}` plus NUMA. It does not address
+`mode ∈ {plugin→python→spawn}` plus NUMA, and does not address
 `orchestrator=False`, `resume`/`checkpoint_file`, `mode="splice"`, or the two
 narrowed `stream()` gates. This plan closes all of it.
 
+**The end state, stated so the sequencing can be judged against it.** In the
+bash front end the exec cleanroom is the **only** path — there is no option to
+turn it off, only overrides for injecting bash variables/functions into it.
+The Python side should end up the same way. That is **not** this plan's
+deliverable: the deliverable is that coverage is as complete as feasible, and
+that each capability becomes **default where it is available and where both
+performance and correctness are proven** — independently, per capability, so
+one unproven axis never holds back another.
+
 ---
 
-## 1. Measured baseline — reachable API only
+## 1. Measured baseline — valid workload configurations
 
-The C0.1 capability matrix enumerates 16,128 cells, but two of its axes carry
-values the public API **cannot produce**, so it overstates the gap:
+The C0.1 capability matrix enumerates 16,128 cells, but its axes carry values
+that do not correspond to valid workloads. Two different corrections apply,
+and conflating them was the previous draft's error:
 
-| matrix axis value | reachable? | why |
+| case | status | why |
 |---|---|---|
-| `order` outside `("none","index")` | **no** | `_VALID_ORDERS` rejects it at `_api.py:168`, raising `ValueError` before the envelope is consulted. `DECLINE_ORDER` (224 cells) is a **defensive guard on an internal invariant**, not a user-reachable gap. |
-| source `missing` / `dir` / `bogus` | **no** | these are invalid calls. Declining them is correct and permanent. |
+| `order` outside `("none","index")` | **Unreachable.** Excluded from the denominator entirely. | `_VALID_ORDERS` rejects it at `_api.py:168` with `ValueError` before the envelope is consulted. `DECLINE_ORDER`'s 224 cells guard an internal invariant, not a path. |
+| source `missing` / `dir` / `bogus` | **Reachable, but invalid workloads.** Excluded from the coverage denominator; **retained as negative-input / error-conformance cases.** | These *are* reachable: a path-like string passes `_validate()`'s type check and `_cleanroom_eligible()` then rejects it on resource validity. They are error behaviour, not capability gaps, and must keep their own coverage. |
 
-Re-enumerated over the reachable surface only — the type surface at
-`_api.py:21-31`: `Mode = {python, spawn, plugin, splice}`,
-`Order = {none, index}`, `Nodes = int | str | None` (`"@N"`, `"0,1"`, `N`),
-`OnError = {retry, fail-fast, skip}` — plus four valid source kinds:
+Re-enumerated over **valid workload configurations** — the type surface at
+`_api.py:21-31` (`Mode = {python, spawn, plugin, splice}`,
+`Order = {none, index}`, `Nodes = int | str | None`, `OnError = {retry,
+fail-fast, skip}`) plus four valid source kinds:
 
-| outcome | cells | % of reachable |
+| outcome | cells | % of valid configs |
 |---|---|---|
 | `DECLINE_NODES` (NUMA) | 2048 | **50.0%** |
 | `DECLINE_MODE` (`python`/`spawn`/`splice`) | 1536 | **37.5%** |
@@ -44,240 +70,345 @@ Re-enumerated over the reachable surface only — the type surface at
 | `DECLINE_STREAM_POISON` | 8 | 0.2% |
 | **SERVED** | **40** | **0.98%** |
 
-**4,096 reachable cells; 40 served.**
+**4,096 valid configurations; 40 served.**
+
+**These percentages are refusal-category shares, not usage frequencies.**
+There is no production telemetry here. "P1 first" is a **prioritisation
+judgement** — `mode="python"` is the documented default, so it is the most
+likely to be encountered — not a measured ordering. Nothing downstream should
+read these numbers as demand data.
 
 ---
 
-## 2. Genuine gap vs. correct decline — the distinction this plan turns on
+## 2. Genuine gap vs. correct decline
 
-100% is the stated goal, but **100% is not automatically the correct target**.
-The envelope's contract is that it must not accept an invocation it cannot
-honour; declining is a feature, not only a failure. So each candidate gap is
-classified before any work is scheduled:
+100% of cells is **not** the right target: the envelope exists to avoid
+accepting invocations it cannot honour, so declining is a feature. Each
+candidate is classified before any work is scheduled.
 
 | candidate | classification | reasoning |
 |---|---|---|
-| `mode="python"` | **genuine gap** | The *default* mode. A plain `forkrun.map(fn, path)` never reaches the launcher today. This is the single largest gap by real-world frequency. |
-| NUMA (`nodes > 1`) | **genuine gap** | Publicly reachable (`nodes="@2"`, `N`, `"0,1"`); `detect_numa_nodes()` returns a real node list on NUMA hardware. Work exists but is unfinished (W-EXP-2). |
-| `orchestrator=False` | **genuine gap** | Reachable and meaningful: legacy fork-and-wait/fail-fast is a documented supervision *model*, not an error. |
-| `stream(order="index")` | **genuine gap** | Reachable; the stream path declines only because it has no collect step to sort with. |
-| `stream(strict_poison=True)` | **genuine gap** | Reachable; `map()` serves it via the counter channel, so the capability already exists and only the streaming path lacks it. |
-| `mode="spawn"` | **genuine gap, scope TBD** | Reachable. Dynamic worker spawning. W-EXP-3 exists but is thinly specified. |
-| `resume` / `checkpoint_file` | **genuine gap, hardest** | Reachable — but see §5. May require the frozen engine. |
-| `mode="splice"` | **CORRECT DECLINE — decide explicitly** | Splice is a kernel passthrough with **no payload hook** (`_api.py:204`): no UDF runs, no sink exists. There may be nothing to accelerate. "Always declines" must become a *recorded decision with a stated reason*, not an accident of never being looked at. |
+| `mode="python"` | **genuine gap** | The default mode. A plain `forkrun.map(fn, path)` never reaches the launcher. Largest gap by likelihood of being encountered. |
+| NUMA (`nodes > 1`) | **genuine gap** | Publicly reachable; `detect_numa_nodes()` returns a real node list on NUMA hardware. |
+| `orchestrator=False` | **genuine gap** | A documented supervision *model*, not an error. |
+| `stream(order="index")` | **genuine gap** | Reachable; declined only for want of a mechanism — see P2, which is **not** small. |
+| `stream(strict_poison=True)` | **genuine gap** | Reachable; requires wiring a channel the cleanroom stream path does not have. |
+| `mode="spawn"` | **genuine gap, scope TBD** | Reachable. W-EXP-3 is thinly specified. |
+| `resume` / `checkpoint_file` | **genuine gap, hardest** | Reachable. May require the frozen engine — see §5. |
+| `mode="splice"` | **DISPOSITION PENDING MEASUREMENT** | Previously called a correct decline. That was premature: the argument covered only the missing *Python payload hook*, and ignored that the cleanroom's other benefit — **not forking workers from an enormous Python parent** — may still apply to a C-only mode. Measure startup and throughput across representative parent RSS sizes (the existing results span ~30 MB to >2 GB). If negligible, or outside the feature's purpose, record the refusal **with that evidence**. |
 
-**Proposed target: 100% of genuine gaps, plus an explicit, reasoned decision
-for `splice`.** Not "100% of cells" — that would mean serving invocations the
-launcher cannot honour, which the envelope exists to prevent.
+**Proposed target: 100% of genuine gaps, plus an evidence-backed disposition
+for `splice`.**
 
 ---
 
-## 3. Sequencing, and why this order
+## 3. Sequencing
 
-Ordered by *real-world frequency × feasibility*, not by cell volume. NUMA has
-the largest volume but is last-ish because it cannot be validated without
-multi-socket hardware.
+Ordered by practical value and feasibility, not cell volume.
 
-| # | item | volume | needs frozen engine? | why here |
+| # | item | volume | frozen engine? | why here |
 |---|---|---|---|---|
-| **P1** | `mode="python"` (UDF) | 37.5% | no | The default mode. Highest frequency of any item; also unblocks the packaging decision (§6). |
-| **P2** | `stream` parity (index + strict_poison) | 0.6% | no | Small, and `map()` already proves both mechanisms. Cheap confidence. |
-| **P3** | `orchestrator=False` | 6.2% | no | A launcher flag plus a second supervision loop. Self-contained in `forkrun_cleanroom.c`. |
+| **P1** | `mode="python"` (UDF) | 37.5% | no | Default mode; developable and validatable on ordinary hardware; unblocks the packaging decision (§6). |
+| **P2** | `stream` parity | 0.6% | no | Small in volume, **not** small in design — see below. |
+| **P3** | `orchestrator=False` | 6.2% | no | Self-contained in `forkrun_cleanroom.c`. |
 | **P4** | `mode="spawn"` | 12.5%¹ | no | Depends on P1's worker plumbing being generalised. |
-| **P5** | NUMA | 50.0% | no¹ | Largest volume; needs node-taking loops (`_shim.c`, unfrozen) and multi-node validation. |
-| **P6** | `mode="splice"` | 12.5%¹ | no | Decision + record, not necessarily implementation. |
-| **P7** | `resume` / `checkpoint_file` | 4.7% | **LIKELY** | See §5. Deliberately last. |
+| **P5** | NUMA | 50.0% | no² | Largest volume, but fake NUMA does not prove physical placement, locality, or distance-scaled stealing. Later for **validation** reasons. |
+| **P6** | `mode="splice"` | 12.5%¹ | no | Measurement + decision, not necessarily implementation. |
+| **P7** | `resume` / `checkpoint_file` | 4.7% | **possibly** | See §5. Last, so the freeze decision rests on its own evidence. |
 
 ¹ per-mode share of the 37.5% `DECLINE_MODE` block.
+² **for the certificate**, see §5a.
 
 ---
 
-## 4. Items P1–P3, P6 (engine-free)
+## 4. Items P1–P4, P6
 
 ### P1 — `mode="python"`, UMA
 
-Serve the default mode. Requires a CPython-linked helper `.so`, `dlopen`ed by
-the launcher **only in UDF mode**; substrate and launcher stay Python-free
-(standing constraint §2). Everything in W-EXP-1 stands: module-level functions
-only, `__name__`/`__qualname__ == attr_name`, aliased re-exports rejected,
-per-candidate import contract, `--caller-minor` handoff, module-scope compile.
+Serve the default mode. A CPython-linked helper `.so`, `dlopen`ed by the
+launcher **only in UDF mode**; substrate and launcher stay Python-free. All of
+W-EXP-1 stands: module-level functions only, `__name__`/`__qualname__ ==
+attr_name`, aliased re-exports rejected, per-candidate import contract,
+`--caller-minor` handoff, module-scope compile.
 
-*Not a re-plan of W-EXP-1 — this is the item that makes it reachable.*
+**Blocked on §6**: packaging feasibility must be established before P1
+implementation, not assumed.
 
-### P2 — `stream()` parity
+### P2 — `stream()` parity — **re-specified; larger than previously stated**
 
-Two narrow declines, both already solved for `map()`:
-* `order="index"` — needs a collect/sort step. The roadmap notes the launcher
-  avoids the C orderer **for memory reasons**; P2 must not reintroduce that
-  cost, so the sort is parent-side (as `stream()` already does for
-  `order="none"` via `batch_idx` reassembly), not an orderer.
-* `strict_poison` — the counter channel already carries `[version][poisoned]`
-  to the parent; the streaming path simply discards it. Thread it to the
-  caller instead.
+The previous draft called this "small, and `map()` already proves both
+mechanisms". That was wrong on both counts, and the corrections matter because
+naively porting `map()`'s solutions would silently change streaming semantics.
 
-### P3 — `orchestrator=False`
+**`stream(order="index")`.** The cleanroom stream path today only *drains*:
+results are yielded as they arrive, unsorted and unreconstructed. Two options:
 
-The launcher supervises unconditionally (W-CR4 added death pipes, respawn and
-trap-ACK). Serving the legacy model means giving it a **non-supervised mode**:
-plain fork-and-wait, fail-fast, no `ring_recover_worker`. Declining it today is
-correct because "silently supervising anyway" hands a caller who asked for
-fail-fast a repaired run they cannot detect.
+* **Final parent-side sort** — correct ordering, but buffers the entire
+  result and delays all output until completion. That destroys streaming's
+  latency *and* memory characteristics. Acceptable **only** if that change is
+  explicit and stated.
+* **Incremental reassembly** — emit a contiguous ordered prefix as it becomes
+  available. This is the option that preserves streaming, and it is the harder
+  one: the parent must know **when a batch is legitimately complete with no
+  output**. Otherwise "no record" is ambiguous between *this batch produced
+  nothing* and *this batch has not arrived yet* — and choosing wrongly either
+  stalls forever or emits out of order.
 
-**Open design question:** a flag on the existing supervisor, or a genuinely
-separate code path? The second is safer (no risk of the flag being ignored in
-one branch) and is what this plan assumes.
+**No-output batches are real, not hypothetical.** Measured: a UDF returning
+`None` for half its batches produced **0 records against 100 published slots**
+(`total=0, completed=0, poisoned=0` — not poisoned-and-skipped; simply absent).
+Any incremental scheme must therefore carry explicit completion information
+per batch, and must give **poisoned batches and `on_error="skip"` the same
+explicit treatment** — a skipped batch is complete-with-no-output, not
+missing.
 
-### P6 — `mode="splice"`
+**`stream(strict_poison=True)`.** The cleanroom stream argv passes **no
+`--stats-fd`** (`run.py:1515`). This is not a dropped return value. P2 must:
+add the statistics descriptor to the streaming launch contract; read it when
+the launcher completes; and enforce strict-poison **without disguising a
+launcher failure as a normal EOF** — the poison count and the launcher's exit
+status are independent facts and conflating them would convert a crash into
+silent truncation, which is the exact failure class CR-FIX1-G removed.
 
-Decide and record. Proposed disposition: **remain declined, with the reason
-stated** — a passthrough with no payload hook has no per-batch work to place
-off the caller's thread, so acceleration would be the ordinary reactor wearing
-a different name. If the reviewer disagrees, this becomes an implementation
-item like P4.
+**`stream` may therefore turn out to require a protocol change, not just
+parent-side code.** That is a scope increase over the previous draft and is
+accepted.
+
+### P3 — `orchestrator=False` — separate supervision path, with a contract
+
+The launcher supervises unconditionally (W-CR4 added death pipes, respawn,
+trap-ACK). Declining `orchestrator=False` is currently correct: silently
+supervising hands a caller who asked for fail-fast a repaired run they cannot
+detect.
+
+Design: a **separate code path**, not a flag inside the existing supervisor.
+A flag is one missed branch away from applying recovery to a caller who
+declined it.
+
+**Required before implementation — an explicit behavioural contract** covering:
+worker death, exit status, retries, skipped batches, and cleanup. Tests must
+**pin the requested supervision model**, not merely demonstrate that the
+launcher returns an error.
+
+**`orchestrator` and `on_error` are different axes and must not be conflated.**
+`orchestrator` selects the *supervision model* (recovery-by-wid vs
+fail-fast). `on_error` selects the *payload error policy*
+(`retry` / `fail-fast` / `skip`). A `orchestrator=False` run may still use
+`on_error="retry"`, and an `orchestrator=True` run may still use
+`on_error="fail-fast"`. Naming both "fail-fast" is how they get accidentally
+merged.
+
+### P4 — `mode="spawn"`
+
+Unchanged in intent; scope still needs specifying. Depends on P1's worker
+plumbing being generalised rather than duplicated.
+
+### P6 — `mode="splice"` — measure, then decide
+
+Per §2: measure startup and throughput across representative parent RSS sizes
+before recording any refusal.
 
 ---
 
-## 5. P7 — resume/checkpoint: the one item that may need the frozen engine
-
-**This is the item most likely to force the freeze decision, and it is
-deliberately scheduled last so that decision is made on its own evidence
-rather than as a side effect of P1.**
+## 5. P7 — resume/checkpoint
 
 Current state, verified:
 
-* Resume is **not greenfield.** `python/forkrun/_resume.py` implements it for
+* **Not greenfield.** `python/forkrun/_resume.py` implements resume for
   in-process C-orderer paths: path gating, resume-begin, abort choreography
-  with bounded waits, and a fail-closed sidecar for already-committed output.
-* It carries a stated semantic contract: **engine commit is exactly-once**
-  (the C orderer's committed output frontier, byte coordinates, surviving
-  abort+resume without duplication); **Python consumption is not** (a crash
-  between commit and observation skips bytes the caller never received).
+  with bounded waits, fail-closed sidecar for already-committed output.
+* **Stated contract:** engine commit is exactly-once (the C orderer's
+  committed output frontier, byte coordinates, surviving abort+resume without
+  duplication); **Python consumption is not**.
 * `require_resume_path` (`_resume.py:72`) permits resume only for
   `num_nodes == 1`, `order == "index"`, non-splice, collect paths.
-* **`forkrun_cleanroom.c` contains zero references to resume.** The launcher
-  has no resume support at all.
+* **`forkrun_cleanroom.c` contains zero references to resume.**
 
-**The obstacle.** The exactly-once frontier is owned by the engine:
-`TRACK_COMPLETED_BATCH` in `ring_order_main` — inside `forkrun_ring.c`, which
-`release_check.py:51` freezes.
+**The obstacle.** The frontier is owned by `TRACK_COMPLETED_BATCH` in
+`ring_order_main` — inside frozen `forkrun_ring.c`.
 
-**The candidate engine-free route.** The cleanroom runs **no C orderer**;
-`order="index"` is satisfied by sorting in Python. So the cleanroom's resume
-semantics would be defined by a **launcher-owned ledger** rather than the
-orderer's, and `forkrun_cleanroom.c` is unfrozen. The launcher knows exactly
-what it emitted and in what order, so an equivalent "committed output
-frontier" is expressible.
+**The candidate engine-free route.** The cleanroom runs no C orderer, so its
+resume semantics could be defined by a **launcher-owned ledger**, and
+`forkrun_cleanroom.c` is unfrozen.
 
-**Why this is not simply "do it":** it would produce **two resume contracts** —
-the orderer's and the launcher's — that must be observably equivalent or the
-same public API means different things depending on which path served it.
-That is a correctness surface, not a plumbing detail.
+**But the previous draft's justification does not hold.** It said "the
+launcher knows exactly what it emitted and in what order". Knowing output
+records and their order is **not** the same as knowing which *input byte
+ranges* are durably committed. Those are different pieces of state, and the
+gap between them is exactly where resume goes wrong.
 
-**Questions for review, to be answered before P7 starts:**
-1. Is a launcher-owned ledger *provably* equivalent to the orderer's, or only
-   similar? What would "provably" require?
-2. If it cannot be equivalent, is a second documented contract acceptable, or
-   must resume stay in-process-only?
-3. Only if the answer to (2) is "must be equivalent" **and** (1) is "no" does
-   the frozen engine become unavoidable — and that is the explicit argument
-   §5 of C0.7 demands before the freeze is revisited.
+**Required before implementation — a feasibility prototype** must establish
+all of:
 
----
+1. Each committed batch maps to the same **byte-coordinate frontier and jagged
+   intervals** the existing checkpoint format uses.
+2. Complete records are distinguished from **partial writes and worker
+   deaths**.
+3. `None` output, `skip`, `poison`, and `retry` are each handled **without
+   advancing the frontier incorrectly**.
+4. The ledger and the committed-output sidecar survive each crash window the
+   current implementation supports.
+5. Checkpoints and resumed output are **observably equivalent** to the
+   in-process path, by direct comparison.
 
-## 6. Packaging — a decision to record before P1
-
-The substrate ships interpreter-agnostic because it is `ctypes`-loaded.
-`forkrun_cleanroom.c` and `_shim.c` do not include `Python.h`. A helper linked
-to the **builder's** `libpython3.X` is therefore not version-agnostic, and
-building it from the sdist does not make the wheel honest — the binary still
-carries the builder's minor under a tag claiming otherwise.
-
-**Proposed: build the helper against the CPython stable ABI (PEP 384).**
-One wheel, tag `cp310-abi3-<platform>`, covering 3.10–3.15, installable with
-no compiler, and the tag states its own constraint truthfully — which is the
-exact failure the per-minor and source-only options exist to avoid.
-
-Feasibility rests on the helper being **new code with no legacy constraints**,
-needing only `PyConfig`, `Py_Initialize`, `PyImport_ImportModule`,
-`PyObject_Call`, `PyBytes_AsStringAndSize`, `Py_DecRef` — all in the limited
-API as of 3.10.
-
-**Not yet proven.** No abi3 helper has been built. The C0.4 prototype is what
-would demonstrate it; if it fails, the fallback is per-minor wheels.
+This is a **proof obligation**, not an implementation commitment. Do not
+implement the ledger or advertise cleanroom resume until equivalence is
+demonstrated. **If it cannot be established without changing the frozen
+engine, keeping resume in-process-only is a justified final decision** — not a
+failure of the plan.
 
 ---
 
-## 7. A note on where the freeze is porous
+## 5a. P5 — the ordered-output certificate must be re-derived
 
-`python/forkrun/_shim.c:36` does:
+The C0.7 design proposed `emitted_records == published_slots` with `write_idx`
+from `fr_py_diag_node`. **That certificate is wrong as stated**, and the
+measurement above is why.
 
-```c
-#include "../../forkrun_ring.c"
+The correct unit is **order packets**, not payload records: an order packet
+certifies a batch's completion *even when its payload is empty*. The design
+must therefore specify:
+
+* the **one-order-packet-per-batch** completion contract;
+* how `None` output, `skip`, `poison`, and `retry` each appear — all of them
+  **completed-but-empty**, never silently absent;
+* that the certificate verifies the **expected key sequence**, not equal
+  totals. **A missing packet and a duplicate packet have the same total**, so
+  a count comparison cannot distinguish them and would pass a corrupted run.
+
+The underlying premise is sound and was measured: the orderer does **not**
+coalesce — the *scanner* does. Emitted-record count tracked `ceil(n/lines)`
+exactly across `lines=1/10/100`. That is why one record per published slot is
+the right shape; only the *observability* of that count was wrong.
+
+**P5 stays blocked** until the certificate proves completeness against the key
+sequence — with the frozen engine untouched, or with the freeze explicitly
+revisited.
+
+---
+
+## 6. Packaging — abi3 is an experiment, not the plan
+
+**The previous premise was false and is retracted.** It rested on `PyConfig`
+being in the limited API as of 3.10. Compiling with
+`-DPy_LIMITED_API=0x030A0000` fails outright:
+
+```
+error: unknown type name 'PyConfig'
 ```
 
-The shim **compiles the engine translation unit directly**. `forkrun_ring.c`
-stays byte-identical — so `check_engine_frozen` (which watches only that file's
-git status and history) passes — while `_shim.c`, being unfrozen, can still
-change engine *behaviour*.
+`PyConfig` is **not** part of the limited API. PEP 741's opaque
+initialisation API (`PyInitConfig`, new in 3.14) does not retroactively make
+the older structure API available under a 3.10 `abi3` target. Listing
+`PyConfig` among "stable symbols" was not a basis for anything.
 
-This matters for P5. The NUMA node-taking worker loops are planned for
-`_shim.c` precisely because it is unfrozen, and on the evidence above that is
-legitimate rather than a loophole **only if** the change is additive and
-engine-behaviour-preserving. It is not self-policing: nothing stops a later
-edit from altering engine semantics through the include.
+**Therefore:**
 
-**Recommendation:** treat `_shim.c` changes as engine changes for *review*
-purposes even where the freeze permits them, and say so in the commit message.
-If the reviewer prefers a hard boundary, the alternative is to extend
-`FROZEN_FILES` to include `_shim.c` — at the cost of P5.
+* **`abi3` is an experiment.** Before it can be the packaging path, a
+  prototype must compile under the **minimum** limited-API target and
+  demonstrate the required **isolated initialisation** semantics using only
+  Stable-ABI surface. That is genuinely hard: the obvious isolation levers
+  (`Py_SetProgramName`, `PySys_SetArgv`) are deprecated and removed in 3.13+.
+* **If it fails: interpreter-specific wheels.** Do not weaken the runtime
+  contract to make a tag fit.
 
-*Verified while writing this:* `_shim.c` contains **no** `Python.h` include
-(an apparent hit is the comment "Python had", matched by a regex where `.`
-acted as a wildcard). The shim is ctypes-facing and interpreter-agnostic, which
-is what makes §6's packaging constraint real.
+**A contract conflict to resolve.** The accepted roadmap requires refusing a
+caller/helper CPython-minor mismatch. That is correct for a minor-specific
+helper and **defeats the purpose of `abi3`** if applied unchanged to a helper
+that genuinely supports several minors. The runtime check must follow the
+selected model: **exact minor matching** for per-minor helpers, or **genuine
+ABI-compatibility checking** for a proven stable-ABI helper.
+
+**The build workflow does not yet run the claimed matrix.** `3.15.0` shipped
+2026-10-09, but `tools/build_wheel.sh:91-96` still selects from a hardcoded
+newest-first list of `cp314 / cp313 / cp312` with the comment "3.15 is an rc in
+this image — skip". So 3.15 is not exercised. **Prerequisite: add `cp315` to
+the candidate list and refresh the build image.** Note this becomes
+*load-bearing* only once a CPython-linked helper exists — today the wheel
+build's interpreter is irrelevant because the substrate is ctypes-loaded and
+interpreter-agnostic.
 
 ---
 
-## 8. Sequencing constraints carried forward
+## 7. Freeze policy — `_shim.c` is engine-affecting
+
+`python/forkrun/_shim.c:36` does `#include "../../forkrun_ring.c"`: the shim
+**compiles the engine translation unit directly**. `forkrun_ring.c` stays
+byte-identical, so `check_engine_frozen` passes, while unfrozen shim edits can
+still change engine behaviour.
+
+Unchanged bytes in `forkrun_ring.c` therefore **do not** prove that a
+`_shim.c` change is engine-behaviour-preserving.
+
+**Policy — stronger than a commit-message convention.** Every `_shim.c`
+change must state, in the change itself:
+
+1. **which existing engine operation it exposes**;
+2. **what engine behaviour must remain invariant**; and
+3. **what test demonstrates that invariant**.
+
+For P5 specifically, the new node-taking entry points must be **additive
+wrappers around the existing node-aware operation**, not incidental
+behaviour changes reaching the engine through the shared translation unit.
+
+This is a review requirement, not an argument that P5 is impossible. If a hard
+boundary is preferred instead, the alternative is extending `FROZEN_FILES` to
+`_shim.c`, at the cost of P5.
+
+*Verified:* `_shim.c` contains **no** `Python.h` include (an apparent hit is
+the comment "Python had", matched by a regex whose `.` acted as a wildcard).
+The shim is ctypes-facing and interpreter-agnostic, which is what makes §6's
+constraint real.
+
+---
+
+## 8. Sequencing constraints
 
 * The **shared launcher-supervision interface** (roadmap §3) must be specified
-  before P3 and P5 both begin — they both touch supervision. Starting them
-  without it recorded is how two branches end up rewriting the same supervisor.
-* The **ordered-output completion certificate** (C0.7, designed) must be in
-  place before P5 declares NUMA ordering complete. Its design needs **no engine
-  change**: `emitted_records == published_slots`, with `write_idx` from the
-  existing `fr_py_diag_node`.
-* Interpreter matrix is **3.10–3.15** (3.15.0 released 2026-10-09).
-* Every item keeps its own opt-in envelope until its own independent default-on
-  gate passes. Coverage is not default-on.
+  before **both** P3 and P5 begin — they each touch supervision.
+* The **ordered-output certificate** (§5a) must be correct before P5 declares
+  NUMA ordering complete.
+* Interpreter matrix is **3.10–3.15**, and must exist in the build/test
+  workflow (§6), not only on paper.
+* Every item keeps its own opt-in envelope until its own **independent**
+  default-on gate passes. Coverage is not default-on.
+* **The oracle must not define correctness by first-decline-reason.** A
+  configuration may have several unsupported properties; if the matrix records
+  only whichever reason `_cleanroom_eligible()` returns first, then reordering
+  the predicate **shifts the reported categories without improving coverage**.
+  The oracle establishes the *intended status* per configuration; decline
+  reasons are explanatory output, not the definition.
 
 ---
 
-## 9. What "done" means for this plan
+## 9. What "done" means
 
-* Every **genuine gap** in §2 is served, or has a recorded, reasoned refusal.
-* `mode="splice"` has an explicit recorded disposition.
-* The capability matrix, regenerated, shows only *justified* declines — and
-  the independent oracle in `tools/capability_oracle.py` is extended to match,
-  so "justified" means "agreed with a table written from the contract".
-* P7 either ships engine-free, or produces the explicit argument for revisiting
-  the freeze that the roadmap requires before the engine is touched.
+* Every **genuine gap** in §2 is served, or carries a recorded, evidenced
+  refusal.
+* `mode="splice"` has an explicit disposition backed by measurement.
+* The regenerated capability matrix shows only *justified* declines, with the
+  independent oracle in `tools/capability_oracle.py` extended to match —
+  "justified" meaning "agreed with a table written from the contract", and
+  **not** meaning "agreed with the predicate's own reason ordering".
+* Negative-input cases (missing path, directory, bad type) retain their own
+  error-conformance coverage, separate from the capability denominator.
+* P7 either ships engine-free with equivalence demonstrated, or produces the
+  explicit argument for revisiting the freeze.
 
 ---
 
-## 10. Questions for the reviewer
+## 10. Carried-forward questions
 
-1. **Is the genuine-gap / correct-decline split in §2 right?** Specifically:
-   is `mode="splice"` correctly a permanent decline, and is 100%-of-genuine-
-   gaps the right target rather than 100%-of-cells?
-2. **Is P1-before-P5 the right order?** The argument is frequency (the default
-   mode) over volume (NUMA). If NUMA's 50% should dominate, say so.
-3. **Is a launcher-owned resume ledger (§5) a sound idea to even prototype,**
-   or should P7 be scoped from the outset as "resume stays in-process unless the
-   freeze is revisited"?
-4. **Is the abi3 packaging proposal (§6) sound**, and is its risk properly
-   bounded by falling back to per-minor wheels?
-5. **Is P3's "separate supervision code path, not a flag" the right call?**
-6. Anything in §1's reachability analysis that is wrong — particularly whether
-   `order` outside `("none","index")` or the invalid-source rows can in fact be
-   reached and should be counted as gaps.
+Amendment round 1 answered the previous six. Remaining, for the next round:
+
+1. **Is P2's incremental reassembly feasible at all**, or does honest
+   streaming ordering require accepting whole-result buffering? The
+   no-output-batch ambiguity may force the latter.
+2. **Should `orchestrator=False` be its own launcher binary or mode?** A flag
+   is smaller; a separate path is safer. This plan assumes the latter.
+3. **Is `splice` measurement cheap enough to do early** rather than at P6? If
+   the answer is "splice should stay declined", that is worth knowing before
+   P1 rather than after.
+4. Does the §5a order-packet certificate remain engine-free once poison/skip
+   and duplicate-detection are handled — or does *that* requirement, rather
+   than resume, become the first genuine need to revisit the freeze?
