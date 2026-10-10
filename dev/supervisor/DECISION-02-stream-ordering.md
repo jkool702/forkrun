@@ -78,7 +78,7 @@ unconditionally, so `ln == 0` parses without complaint.
 **This is why Option B fails.** Mechanical tolerance is not semantic safety,
 because `len == 0` **already carries meaning** on this wire format:
 
-`fr_py_emit` (`_shim.c:1298-1300`), the v0-parity direct-write path:
+`fr_py_emit` (`_shim.c:1297-1309`), the v0-parity direct-write path:
 
 ```
  * - data == NULL   -> no record (payload returned None), signal only.
@@ -167,59 +167,108 @@ Assume a batch that hasn't arrived within N seconds produced nothing.
 
 ---
 
-## 4. Recommendation
+## 4. Recommendation — WITHDRAWN
 
-**Option B, gated to the ordered-streaming path — and only because it is the
-same fix C0.7 needs.**
+The recommendation below was **withdrawn by external review round 1**. It is
+kept only so the reasoning's failure is visible, not to be re-derived.
 
-The reasoning:
-
-1. **Options A and C both fail on cost, not correctness.** A gives up
-   streaming entirely, which is the feature. C adds a channel to deliver
-   information that Option B puts in a field the format already has.
-
-2. **B is cheap in the one place I expected it to be expensive.** The
-   parsers already accept `len == 0` (§2.3). The cost is not mechanical; it
-   is the semantic change to `map()`.
-
-3. **The semantic change is arguably a fix, not a break.** Today a
-   successfully-completed-but-empty batch is invisible. That is why my
-   §5a certificate was wrong when I first wrote it: *the system cannot tell
-   a correct run from a lossy one.* Making completion explicit removes an
-   ambiguity the API currently hides. But I hold this loosely — it is
-   observable, and whether to gate it is a real question, not a formality.
-
-4. **It unblocks P5.** C0.7's certificate and this are one requirement. A
-   solution that serves streaming but leaves the certificate unable to
-   distinguish completed-empty from missing has solved half of a problem the
-   plan treats as one.
-
-**What would change this:** if the compatibility analysis shows that gating
-B produces a runtime-selected dual format that is worse than the ambiguity it
-fixes, then **Option A plus reclassifying `stream(order="index")` as a
-correct decline** is the honest, cheaper answer — and the coverage plan
-should say so rather than leaving it listed as a gap.
+> ~~**Option B, gated to the ordered-streaming path — and only because it is
+> the same fix C0.7 needs.**~~
+>
+> The load-bearing claim was: *"B is cheap in the one place I expected it to
+> be expensive. The parsers already accept `len == 0` (§2.3)."*
+>
+> That is where it fails. The parsers accept `len == 0` **because `len == 0`
+> already has a meaning** — a real `b""` result (§2.3). Mechanical tolerance
+> was evidence of an existing convention, not of available capacity. The
+> correct acceptance criterion was never "the parser accepts it" but "the
+> consumer can tell a control disposition from an empty data result", and
+> Option B failed that test.
 
 ---
 
-## 5. Questions for reviewers
+## 5. Decision — explicit typed terminal dispositions
 
-1. **Is B's `map()` semantic change acceptable, gated or not?** My instinct is
-   that ungated is a genuine improvement (it removes a hidden ambiguity) and
-   gated is a compatibility dodge that leaves two runtime-selected formats.
-   I would like that challenged.
-2. **Is the "same fix as C0.7" claim correct**, or does the certificate need
-   something the streaming path does not — for example per-node attribution
-   that only the engine has?
-3. **Does Option C really require engine changes?** If per-batch completion
-   is reachable from the launcher or shim without touching frozen code, C
-   becomes more attractive than I have assessed, because it avoids the
-   compatibility question entirely.
-4. **Is Option A + reclassification the better answer** on the grounds that
-   streaming and total order are in genuine tension, and adding a
-   completion signal to the wire format is a larger architectural change than
-   this coverage gap warrants?
-5. `on_error="skip"` and poisoned batches also complete without output. Do
-   they belong in the same frame contract, and does treating them as
-   "completed-empty" weaken the poison accounting that `strict_poison` (§P2
-   strict-poison half) depends on?
+**Agreed.** The ordered-streaming path needs an authoritative completion
+signal, and that signal must be **typed**, because the wire format already
+uses an untyped `len == 0` to mean "a real empty result".
+
+### 5.1 The disposition set
+
+Every published batch reaches exactly one terminal disposition:
+
+| disposition | meaning to the ordering layer | meaning to the caller |
+|---|---|---|
+| `DATA` | completed; advance the prefix | yield payload (may legitimately be zero bytes) |
+| `NO_RESULT` | completed; advance the prefix | yield nothing |
+| `SKIPPED` | terminal skip disposition | yield nothing; skip semantics preserved |
+| `POISONED` | terminal poisoned state | yield nothing; poison accounting preserved |
+
+The ordering layer consumes dispositions in `batch_idx` order: it yields only
+`DATA`, advances past `NO_RESULT` without waiting for EOF, and advances past
+`SKIPPED`/`POISONED` **without converting those outcomes into successes**.
+
+`map()` filters control dispositions and returns exactly today's result list.
+**`None` remains distinct from an empty bytes result.**
+
+### 5.2 Binding conditions
+
+* **Exactly one final disposition per batch.** It is a terminal outcome, not an
+  attempt. It must be emitted only when the batch will not be retried, and
+  integrated with the existing output transaction and recovery semantics, so
+  that worker death, retries, respawn, partial writes and rollback can neither
+  duplicate nor lose one.
+* **The consumer must identify the type explicitly.** Parser tolerance is not
+  the acceptance criterion; being able to *tell* a control disposition from an
+  empty data result is.
+* **Prefer the existing framed result channel** with a tagged header, provided
+  that introduces no ambiguous framing and does not compromise backpressure.
+  A separate ledger (Option C) remains the fallback and must handle the case
+  where a completion arrives before its data record has drained.
+* **Poison accounting is unchanged.** The ordering layer may advance past a
+  poisoned batch; it must never reinterpret poison as successful empty output.
+  *A missing payload implies neither success nor poison.*
+
+### 5.3 Scope boundary with P5
+
+Shared invariant: **every published batch reaches exactly one authoritative
+terminal disposition, including those with no output.**
+
+P5's certificate must **independently** prove that every published batch is
+accounted for exactly once, with whatever per-node and sequence identity its
+scope requires. **P5 is not solved by P2 seeing markers.** The claim does not
+carry across.
+
+### 5.4 Decision boundary
+
+Proceed with the typed disposition protocol if it can satisfy 5.2 and be
+shared cleanly with P5. If the required changes prove disproportionate to the
+value of the acceleration, **Option A is the honest alternative**: keep
+declining `stream(order="index")` and classify it as a **correct decline**,
+recorded as such rather than left as an unresolved gap. What must not happen
+is the untyped shortcut being adopted in order to claim coverage.
+
+### 5.5 A discrepancy this surfaced — not part of the decision
+
+The two emit paths **already disagree** about the zero-length case:
+
+| path | zero-length behaviour |
+|---|---|
+| `fr_py_emit` (direct write, `_shim.c:1297-1309`) | writes a `len == 0` header — empty result preserved |
+| `fr_py_emit_record` (memfd copy, `_shim.c:575-576`) | `return 0` — **no record at all** |
+
+`fr_py_emit_record`'s comment claims "v0 parity", but v0 parity per
+`fr_py_emit`'s documentation and `test_v1_emit.py:100` is that a zero-length
+payload *does* produce a record.
+
+`fr_py_emit_record` receives only a `src_len` copied out of a memfd, so it
+**cannot distinguish an empty result from no output** — the information is
+gone before it is called. Whether that is a latent bug or an accepted
+limitation of the memfd path is **not established here**, and is recorded as
+an open question rather than a finding. It matters because the typed
+disposition protocol has to preserve whatever distinction the direct path
+already makes.
+
+**Open question for the next round:** should the memfd path gain the ability
+to express a zero-length result, and does that change belong in this work or
+in a separate item?
