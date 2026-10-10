@@ -14,14 +14,20 @@ the evidence.
 `NEW/REFACTOR4.1`). Function names are the authorities; line numbers are given
 as evidence and may drift.
 
-**Review history: five rounds completed, all amendments accepted.** Round 1
+**Review history: six rounds completed, all amendments accepted.** Round 1
 raised ten findings, all accepted. Round 2 accepted all ten, raised one blocking
 finding (the node-0 worker assignment), and made one scope correction. Round 3
-accepted the clarifications. Rounds 4 and 5 made targeted amendments for internal
+accepted the clarifications. Round 4 made targeted amendments for internal
 consistency — a resolver/coverage mismatch, an M2 import-contract contradiction,
 a false "share no code" claim, an incomplete dependency graph, an incomplete
-capability set, and four contract-preciseness fixes. No round requested a
-redesign; every finding was a correction to something specific.
+capability set, and four contract-preciseness fixes. Round 5 scoped lifecycle
+requirements by candidate and separated detectable exclusions from documented
+limitations. Round 6 made rollout gates independent, added the caller-minor
+handoff, and pinned the eligible-object rule. Round 7 added Python 3.15 to the
+interpreter gate and corrected two eligibility examples that testing — not
+reading — had shown wrong. **No round requested a redesign; every finding was a
+correction to something specific, and the recurring shape was internal
+contradiction rather than architectural disagreement.**
 
 ---
 
@@ -365,22 +371,43 @@ def is_eligible_module_function(f, attr_name, module_name):
     return True
 ```
 
-Measured outcomes:
+Measured outcomes — **each check catches a distinct thing**, so the table
+below names which:
 
-| case | `callable()` | `isfunction()` | rule |
-|---|---|---|---|
-| module-level `def plain` | True | True | **ELIGIBLE** |
-| nested `def outer(): def inner()` | True | True | reject — `__qualname__ == 'outer.<locals>.inner'` |
-| module-exported closure | True | True | reject — `__qualname__ == '<lambda>'` |
-| lambda exported as a module attribute | True | True | reject — `__name__ == '<lambda>'` |
-| module-exported class | True | **False** | reject — not a function |
-| **re-exported `def` from another module** | True | True | **ELIGIBLE** — importable and stable; its defining module is irrelevant |
+| check | catches |
+|---|---|
+| `inspect.isfunction` | classes, callable instances, built-in/native functions |
+| `__closure__ is not None` | **any closure over captured state**, named or anonymous |
+| `__qualname__ != attr_name` | **nested** definitions (`<locals>` in the qualname) |
+| `__name__ != attr_name` | **lambdas**, including a lambda exported as a module attribute |
+
+| case | `callable()` | `isfunction()` | rejected by | rule |
+|---|---|---|---|---|
+| module-level `def plain` | T | T | — | **ELIGIBLE** |
+| nested `def outer(): def inner()` | T | T | `__qualname__` | reject |
+| **named** closure over captured state | T | T | `__closure__` | reject |
+| lambda exported as a module attribute | T | T | `__name__` | reject |
+| module-exported class | T | **F** | `isfunction` | reject |
+| same-name re-export (`from other import plain`) | T | T | — | **ELIGIBLE** |
+| **aliased** re-export (`from other import plain as p2`) | T | T | `__name__` | **reject** |
+
+> **[V] Two corrections to an earlier draft of this table**, both found by
+> testing rather than reading. A **zero-capture lambda** has
+> `__closure__ is None` — the `__closure__` check does *not* catch it; the
+> `__name__` check does. And a **named** closure has
+> `__qualname__ == 'make.<locals>.inner'`, **not** `'<lambda>'` — the
+> `__qualname__` check catches nesting, not closure-ness. Conflating the two
+> made both rows wrong.
+
+**[V] Stated limitation — aliased re-exports are rejected.** Because the rule
+requires `__name__ == attr_name`, `from other import plain as p2` is refused
+even though the object is a perfectly good module-level function. This is a
+**known, deliberate** restriction of the first contract, not an oversight; it
+is revisable by relaxing the `__name__` check and adding a test.
 
 **Stated decisions:** built-in and native functions are **excluded** from
-W-EXP-1 (conservative; they are stable objects but a first contract should not
-depend on their introspection behaviour). A function re-exported into the
-module's namespace **is** eligible. These are choices, not accidents; both are
-revisable in a later extension.
+W-EXP-1 (conservative). A **same-name** re-export is eligible. These are
+choices, not accidents; both are revisable in a later extension.
 
 **Tests:** one per row above, each asserting decline **before input
 consumption**.
@@ -470,21 +497,41 @@ candidate**; pair correctly on the fork-failure path as well as success.
 Prototype against a minimal embedding **before** integrating the pipeline.
 **Prototype the candidate under evaluation, not a generic hybrid.**
 
-**Acceptance:** prototype passes on the matrix in C0.5; a thread-starting import
-is detected before the launcher forks its pipeline; no fork site is unclassified.
+**Acceptance — candidate-scoped, matching the table above.** Prototype passes on
+the matrix in C0.5, and **no fork site is left unclassified for the candidate
+under evaluation**.
+
+* **Pre-fork candidate:** a thread-starting import is detected **before** the
+  launcher forks its pipeline; the CPython hook pair is applied at every fork
+  site that has a live interpreter; failure and cleanup paths are exercised on
+  both fork success and fork failure.
+* **Post-fork candidate:** no launcher-side hook is applied, because no
+  interpreter exists there. Instead the worker-side equivalent is proven — a
+  worker whose startup import fails or hangs **prevents ingest** until the
+  readiness barrier succeeds or times out, and a worker exiting abnormally
+  during initialisation is detected.
 
 ### C0.5 — Interpreter matrix gate
 
-**Minimum gate: 3.10, 3.11, 3.12, 3.13 (the current CI matrix), plus 3.14.**
+**Minimum gate: 3.10, 3.11, 3.12, 3.13 (the current CI matrix), plus 3.14
+and 3.15.**
 
-> **[V] 3.14 is required because the M1 cost measurements were taken on 3.14.7**
-> `python_requires=">=3.10"` **[V]** (`setup.py:233`) sets no upper bound, so
-> shipping on 3.10–3.13 evidence alone would leave a material gap between
-> declared compatibility and tested behaviour.
->
-> **[V] CI currently tests 3.10–3.13 only.** Either add 3.14 to the matrix or
-> revise the project's supported-version policy explicitly. Default-on must not
-> infer 3.14 compatibility from 3.10–3.13 results.
+> **[V] 3.15.0 was released 2026-10-09** (Python.org release page; devguide
+> versions table lists 3.15 first release 2026-10-09). It is therefore part of
+> the support surface, and the same reasoning that required 3.14 applies
+> verbatim: `python_requires=">=3.10"` **[V]** (`setup.py:233`) sets no upper
+> bound, so **silently inferring 3.15 compatibility from 3.10–3.14 results
+> would reproduce the exact gap this gate exists to close.**
+
+> **[V] 3.15 is not a formality — two of its PEPs touch this design directly:**
+> **PEP 829 (package startup configuration files)** interacts with the
+> `PyConfig` and runtime-environment design in §5.3, and **PEP 810 (explicit
+> lazy imports)** changes import cost, which is a direct input to the M2
+> measurements. Both must be exercised on the matrix rather than reasoned about.
+
+CI currently tests 3.10–3.13 only. Either extend the matrix to 3.14 and 3.15 or
+revise the project's supported-version policy explicitly. Default-on must not
+infer 3.15 compatibility from 3.10–3.14 results.
 
 **Free-threaded CPython is out of scope** for the initial gate and the roadmap
 says so explicitly.
@@ -743,7 +790,12 @@ environment/`sys.path` handoff. Either way, `PyConfig.home`, prefix/executable
 handling, venv paths and native-extension search paths get specific tests —
 **from an installed package, not a source checkout.**
 
-**Return contract — bit-exact parity, non-negotiable. [V]**
+**Return contract — parity for deterministic, replay-safe fixtures. [V]**
+
+> **Scope of the parity claim.** Byte-identical output is required for the
+> **deterministic, replay-safe** category-3 fixtures (C0.3). It is **not**
+> claimed for every module-level function, and this heading does not override
+> C0.3's explicit restriction of parity to those fixtures.
 
 | return | behaviour |
 |---|---|
@@ -825,7 +877,12 @@ Three options, to be chosen:
 * [ ] Import-time threading is detected before the launcher forks — **pre-fork
       candidate only**; the post-fork candidate's obligation is the worker-side
       readiness barrier (C0.4).
-* [ ] No duplicate side-effecting import occurs in the default protocol.
+* [ ] **Duplicate side-effecting import — candidate-scoped.** The **pre-fork**
+      protocol must not probe-then-import or otherwise duplicate the
+      launcher-side import. The **post-fork** protocol imports **once per
+      worker by design**; its replicated side effects belong to that
+      candidate's separately documented execution contract and are not a
+      duplication defect.
 * [ ] No `-lpython3` in the substrate link line; canary green.
 * [ ] Missing `python3-devel` degrades to in-process with a warning; no CI job
       fails.
