@@ -284,3 +284,68 @@ supported wheel.
   is not present in every Python distribution, and Debian has documented
   missing `libpython3.so` packages. A `cp310-abi3` tag alone does not
   guarantee the launcher can load the interpreter library on the target.
+
+---
+
+## 8. Phase-1 prototype results (condition 6.1 evidence)
+
+`python/forkrun/fr_udf_helper.c` — a standalone probe, deliberately not yet
+wired into the launcher. Built against local headers, full API (Option C as
+the development mechanism). Its only job was to answer §6.1 with evidence.
+
+**All four contract points demonstrated on CPython 3.14.7:**
+
+| | result |
+|---|---|
+| (a) isolation holds | `isolated=1`, `safe_path=1`, `no_site=1`; `pytest` unreachable without an explicit root |
+| (b) installed packages importable | with all five site roots: `numpy` OK, `adjustText` OK |
+| (c) explicit validated roots | roots appear on `sys.path` in caller order, each `R_OK`-validated before the interpreter sees it |
+| (d) UDF resolve + invoke + convert | `udfmod:up` → `LINE000042` |
+| shutdown | `Py_FinalizeEx()` clean |
+
+### Five things reading the API would not have told me
+
+1. **`site_import = 0` drops *every* site-packages root, not just user site.**
+   The obvious reading is "it turns off user-site". In fact it turns off the
+   mechanism that adds `/usr/lib64/…/site-packages` too. The consequence is
+   concrete: a UDF's dependency chain routinely spans roots —
+   `adjustText` → `numpy` (system root) → `pyparsing` (a third root) — and
+   each must be added explicitly. **The root set must be derived from the
+   interpreter's own `site.getsitepackages()` + `site.getusersitepackages()`,
+   never hardcoded or guessed.** Review condition 6.1 called this; this is
+   what it looks like.
+
+2. **`PyConfig.module_search_paths` is a dead end.** Two distinct failures:
+   * appending and leaving `module_search_paths_set == 0` → initialisation
+     **recomputes and silently discards** the append. `sys.path` came back
+     with the root gone and no error. A quiet failure, which is the worst
+     kind.
+   * setting `module_search_paths_set = 1` → the flag means "this is the
+     *complete* path", so the stdlib disappears and
+     `Py_InitializeFromConfig` fails with `No module named 'encodings'`.
+
+   Roots are therefore installed by inserting into `sys.path` **after**
+   initialisation, before any user code has run.
+
+3. **String config fields must go through `PyConfig_SetString`.** Assigning a
+   literal (`cfg->program_name = L"forkrun-udf"`) compiles, initialises
+   correctly, then dies in `PyConfig_Clear()` with `free(): invalid size`,
+   because `Clear` frees a string literal.
+
+4. **`sys.flags` attribute names are not stable across minors.** On 3.14,
+   `site_import` and `user_site` are **absent**; `no_site` and `safe_path`
+   exist. Any test asserting isolation flags across the 3.10–3.15 matrix must
+   handle absence, and the names to assert differ per minor.
+
+5. **A bare "NOT importable" probe is close to useless.** It cost about an
+   hour: the root was correct, the module was present, and the real cause was
+   a transitive dependency in a different root. The probe now prints the
+   exception, which is what made finding (1) obvious.
+
+### What this does not yet establish
+
+No launcher integration, no `fork()`/`exec()`, no engine interaction, no
+worker lifecycle, no shutdown-under-signal behaviour, and no packaging
+(`DT_NEEDED`/RPATH/`auditwheel`) — condition 6.2 remains entirely open. The
+pre-fork vs post-fork question (C0.4) is untouched: this probe initialises in
+a single process, which corresponds to neither.
