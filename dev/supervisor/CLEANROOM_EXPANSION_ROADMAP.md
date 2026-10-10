@@ -144,17 +144,41 @@ Unchanged and **not negotiable**:
                 └─────────────────────┘
 ```
 
-**[V] W-EXP-1, W-EXP-2 and W-EXP-3 share no code and no acceptance gate.**
-They may run in parallel branches. They must not share one commit or one gate.
+**[V] Workstreams have separate acceptance gates, but they are NOT independent
+in code.** The previous revision claimed W-EXP-1, W-EXP-2 and W-EXP-3 "share no
+code", which its own later sections contradict:
 
-**Why this order.**
+* §6.3 — W-EXP-2 must add **per-worker death pipes** to the launcher.
+* §7 — W-EXP-3 requires `poll()` over the spawn pipe **plus per-worker death
+  pipes**, replacing the current blocking `waitpid(-1)` supervision.
+
+Those are shared launcher-supervision infrastructure. **Either the shared
+supervision interface is specified and frozen in Phase 0, or one branch is
+integrated and rebased before the other.** Which is decided in Phase 0; the
+acceptance gates stay separate either way.
+
+#### Hard dependency graph (corrected — the previous list was incomplete)
+
+* **Phase 0** contracts and measurements gate the expansion work they inform.
+* **The ordered-output completion defect gates W-EXP-2** (§4.7). It is live in
+  shipping code and W-EXP-2 may not proceed on a design that cannot establish
+  completeness.
+* **The shared launcher-supervision interface gates W-EXP-2 and W-EXP-3**
+  (§3, above).
+* **W-EXP-1.5 requires W-EXP-1 and W-EXP-2 to have passed independently.**
+
+The W-EXP-1-first preference is a **priority**, not a hard dependency: if
+parallel development is used, W-EXP-2 may proceed once the ordered-output item
+and the supervision interface are in place.
+
+**Why this priority order.**
 
 * **Phase 0 is contract work**, because every substantive design question
   downstream was answered by a measurement nobody had taken, and CR-FIX1 spent
   three rounds undoing a hypothesis that had hardened into a narrative.
-* **W-EXP-1 before W-EXP-2** on population: `mode="python"` is the default and
-  the largest user base. Until it is served, "default on" means an accelerator
-  the default path never uses.
+* **W-EXP-1 is prioritised first** on population: `mode="python"` is the
+  default and the largest user base. Until it is served, "default on" means an
+  accelerator the default path never uses.
 * **W-EXP-2 is gated on the live ordered-output fix** (§4.7) because that
   defect is reachable in shipping code today, independently of any cleanroom
   work.
@@ -162,8 +186,7 @@ They may run in parallel branches. They must not share one commit or one gate.
   it carries the roadmap's only *silent* failure mode (§7).
 
 **[H] This ordering is a judgement, not a derivation.** A reviewer who believes
-breadth-of-blast-radius should precede breadth-of-population should say so; the
-only hard dependency is Phase 0 → W-EXP-1.
+breadth-of-blast-radius should precede breadth-of-population should say so.
 
 ---
 
@@ -183,7 +206,19 @@ needs-fallback` for each cell: {materialized, streaming} × {path, descriptor} �
 The matrix must be **generated from `_cleanroom_eligible()` and the dispatch
 sites**, not hand-maintained. It is a deliverable, not an exercise.
 
-**Acceptance:** matrix published; a test asserts it still matches the predicate.
+> **[V] A generated matrix is documentation, not evidence.** A test that
+> regenerates the matrix from the predicate and compares it to the predicate
+> proves the generator is deterministic — it cannot show the predicate matches
+> the *intended* contract. A predicate that is wrong in both the code and the
+> generated table is self-consistent and still wrong.
+
+So: keep a **separate expected-behaviour oracle** — a hand-maintained table of
+what each combination *should* do, written from the API contract — and check the
+generated matrix against **it**. The oracle is the test; the generator is the
+document. Where they disagree, one of them is a bug.
+
+**Acceptance:** matrix published; generated matrix compared against an
+independent expected-behaviour table; a test asserts they agree.
 
 ### C0.2 — Trace facility
 
@@ -210,34 +245,92 @@ without weakening scrubbing; disabled by default and absent from benchmarks.
 
 ### C0.3 — UDF eligibility and import contract
 
-**Eligibility.** Only a **documented module function reference** —
-`"pkg.mod:func"` resolving to a module-level function, or a `staticmethod` /
-`classmethod` on an importable class.
+**Eligibility for W-EXP-1: module-level functions only.**
+
+A `"pkg.mod:func"` string resolving to a module-level function.
+
+> **[V] Class-qualified references are NOT in the W-EXP-1 contract.** The
+> existing shared resolver **[V]** (`_worker.py:136-137`) does
+> `mod = importlib.import_module(mod_name)` followed by a single
+> `fn = getattr(mod, func_name)`. There is no dotted traversal, so
+> `"pkg.mod:Class.method"` looks for a module attribute literally named
+> `"Class.method"` and cannot resolve. Claiming `staticmethod`/`classmethod`
+> support here would repeat this document's characteristic error — promising
+> what the code cannot deliver.
+>
+> Adding it is a **separate, later** change: it requires extending the
+> *shared* resolver, which also changes the in-process path's behaviour from
+> `TypeError` to working. That is a shipped-path behaviour change and is
+> justified on its own merits, not as cleanroom scope.
+>
+> Worth recording precisely: `"pkg.mod:Class"` **does** resolve today, because a
+> class object is callable — and would be invoked as a *constructor*, not as a
+> method. That is a different contract from "reference a method", and is not
+> part of W-EXP-1 either.
 
 Explicitly **not** eligible, with a loud observable decline when the cleanroom
-was explicitly requested: lambdas, closures, locally-defined functions, bound
-methods, callable instances carrying mutable state, and functions whose
-behaviour depends on caller-side mutation of their module globals.
+was explicitly requested: lambdas, closures, locally-defined functions,
+**caller-supplied bound methods**, callable instances carrying mutable state,
+class-qualified method references, and functions whose behaviour depends on
+caller-side mutation of their module globals.
 
-> **[V] Rationale.** `mode="python"` currently supports an arbitrary callable by
-> fork inheritance — the payload is a live `PyObject*` in the parent's heap.
-> `exec` cannot carry one. The proposal's first draft promised "the identical
-> UDF runs unchanged on both paths", which is unsatisfiable for closures; that
-> acceptance criterion is withdrawn.
+> **[V] Two different cases, kept distinct.** A *caller-supplied bound method*
+> is an object graph crossing `exec` — ineligible for the structural reason
+> below. A *classmethod deliberately resolved from an accepted string reference*
+> would be a different case entirely, governed by whether the resolver supports
+> it. Conflating them would misreport why something declines.
 
-**Import contract.** The UDF is resolved **once**, in the launcher, before
-`fr_py_init()` and before any source bytes are consumed.
+> **[V] Rationale for the structural limit.** `mode="python"` supports an
+> arbitrary callable by fork inheritance — the payload is a live `PyObject*` in
+> the parent's heap. `exec` cannot carry one. This document's first draft
+> promised "the identical UDF runs unchanged on both paths", which is
+> unsatisfiable for closures; that acceptance criterion is withdrawn.
+
+#### Import contract — defined per candidate, not once
+
+**[V] The previous revision's single contract was internally inconsistent.** It
+required the UDF to be resolved once in the launcher, while M2's post-fork
+candidate requires each worker to initialise its own interpreter. Those cannot
+both hold.
+
+| | **Pre-fork candidate** | **Post-fork candidate** |
+|---|---|---|
+| Before consuming input | validate **and resolve** the UDF in the launcher | validate the reference, then pass a **readiness barrier** |
+| Actual module import | **once**, in the launcher | **once per worker process** |
+| Fork lifecycle | CPython fork hooks where applicable | interpreter initialised *after* the worker fork |
+| Startup failure | refuse before source consumption | refuse before source consumption; **no ingest until the worker readiness barrier passes** |
+| Import side effects | occur once, before worker forks | **may occur independently in multiple workers** |
+
+**The rule shared by both: no source bytes are consumed until the selected
+architecture has resolved its startup requirements.** For the post-fork
+candidate this means an explicit readiness barrier — not a promise that workers
+eventually report status — before the spill or ingest path begins.
+
+**[M] Open question, settled in M2, not assumed here.** Whether the post-fork
+candidate can honour the *same* supported-UDF contract is unknown. Repeated
+per-worker imports can have observably different effects from one parent
+import, and module initialisation can depend on process-specific state. If
+they are not equivalent, post-fork is **a different execution contract**, not a
+faster variant of the same one, and the roadmap must say so. **Timing results
+from the two candidates must not be compared as if semantic equivalence had
+already been established.**
 
 > **[V] Do not probe-then-import.** A disposable probe followed by the real
 > import performs the import **twice**, and module imports can have observable
-> side effects — so merely requesting the accelerator would change behaviour.
-> A separate probe may exist as an opt-in diagnostic with that consequence
-> stated.
+> side effects — so merely requesting the accelerator would change behaviour. A
+> separate probe may exist as an opt-in diagnostic with that consequence stated.
 
-Requirements: bounded startup deadline so a hanging import cannot hang the API
-call; readiness/refusal reported to the supervising parent; pre-fork detection
-of import-created threads; **no automatic fallback after a post-import
-failure**, because falling back would re-enter the same unsafe path.
+Requirements in both candidates: bounded startup deadline so a hanging import
+cannot hang the API call; readiness/refusal reported to the supervising parent;
+pre-fork detection of import-created threads; **no automatic fallback after a
+startup failure**, because falling back would re-enter the same unsafe path.
+
+> **[V] Thread detection must not equate "no Python-managed threads" with "no
+> threads".** A native extension can start OS threads that never appear in
+> `threading.enumerate()`. Either specify an OS-level check (`/proc/self/task`
+> count versus a pre-import baseline) or document explicitly which cases the
+> detector cannot rule out. A detector that reports "no threads" from
+> `threading.enumerate()` alone is unsound.
 
 ### C0.4 — CPython fork-lifecycle prototype
 
@@ -304,10 +397,22 @@ is not paying for a `site` initialisation it does not use.
 "probably right"; that preference is **withdrawn** — it rested on an untested
 memory argument while paying an undesigned fork-lifecycle cost.
 
-| | serial cost | fleet memory | fork-time interpreter state |
+> **[H] The memory column below is a qualitative expectation, not a
+> measurement.** Pre-fork COW sharing depends on *which* pages workers dirty —
+> a worker writing its output dirties shared pages, and the saving is smaller
+> than "the interpreter is shared" suggests. Post-fork processes still share
+> file-backed library and code pages, so "~8 MB × N" overstates it too. Both
+> arrows are directionally right and numerically unverified. **Measured PSS/USS
+> establishes the actual fleet-memory curve; these rows do not.**
+
+| | serial cost | fleet memory **[H]** | fork-time interpreter state |
 |---|---|---|---|
-| **Pre-fork** (init in launcher, workers inherit) | +11.6–13.6 ms on the critical path | **~8 MB total**, COW-shared | live interpreter and possibly threads at every launcher fork |
-| **Post-fork** (each worker initialises) | ~0 ms serial; concurrent across workers | **~8 MB × N**, not shareable | none |
+| **Pre-fork** (init in launcher, workers inherit) | +11.6–13.6 ms on the critical path **[V]** | lower — one interpreter shared, COW, reduced by worker-dirtied pages | live interpreter and possibly threads at every launcher fork |
+| **Post-fork** (each worker initialises) | ~0 ms serial; concurrent across workers | higher — per-worker private pages, still sharing file-backed code and libraries | none |
+
+Semantic non-equivalence is possible and is tracked as **[M]** in C0.3: per-worker
+imports can differ observably from one parent import. **M2 measures both and
+reports the contract each satisfies, not just the timings.**
 
 Measure on the C0.5 matrix, with **the same UDF and dependency set**, across
 representative worker counts: complete API-entry-to-return wall time; time to
@@ -426,6 +531,15 @@ is present**, and **not** a prerequisite of `python-substrate`.
 > **[V] `python3-devel` is promised in `pyproject.toml:9` and
 > `python/docs/INSTALLATION.md:10` but installed in none of the six CI `dnf
 > install` lines.** Optionality is load-bearing, not cosmetic.
+
+> **[V] Presence of `python3-config` is not sufficient — its version must
+> match.** Multiple Python installations coexist in most environments, and
+> **[V]** `tools/build_wheel.sh` deliberately builds with
+> `/opt/python/cp31X-cp31X` interpreters rather than the system one. A helper
+> compiled against whichever `python3-config` happens to be first on `PATH`
+> would bind the wrong minor. The build must resolve and verify the intended
+> interpreter explicitly (version probe, not name), and the helper must record
+> the minor it was built against for the runtime check in §5.5.
 
 **Discovery.** Via `/proc/self/exe` — **[V]** not `argv[0]`, which `execv` can
 rewrite. The launcher already reads `/proc/self/status` (`rss_kb`), so `/proc`
@@ -678,13 +792,14 @@ Required:
 * [ ] `nodes=1` behaviour bit-identical to today.
 * [ ] `order="index"` **UMA** still parent-side sorts — a regression test, since
       the collector change is the risky part.
-* [ ] Capability probe covers all seven NUMA symbols (§6.6) and refuses the
-      cleanroom before input consumption if any is absent.
+* [ ] Capability probe refuses the cleanroom **before input consumption** when
+      any required symbol is absent, including the node-taking worker loop —
+      with a test for the missing-symbol case (§6.6).
 
 ### 6.6 Capability surface
 
 **[V]** `v1_available()["numa"]` **[V]** (`_bindings.py:486`) requires **seven**
-symbols. The previous draft listed five and omitted two.
+symbols. The first draft listed five and omitted two.
 
 ```
 fr_py_init_numa       _shim.c:1735      fr_py_fallow_phys      _shim.c:1847
@@ -693,10 +808,22 @@ fr_py_indexer_numa    _shim.c:1796      fr_py_ingest_eof_posted _shim.c:1989
 fr_py_numa_scanner    _shim.c:1820
 ```
 
+**And an eighth, which W-EXP-2 introduces.**
+
+> **[V] The seven-symbol check is a snapshot of today's substrate, and becomes
+> insufficient the moment W-EXP-2 lands.** The node-taking worker loop (§6.2)
+> does not exist yet; a stale or mismatched substrate would pass all seven
+> checks and then fail — after the launcher has begun work and possibly consumed
+> input.
+
+Required: a **separate `numa_plugin_loop` capability** covering the node-taking
+entry point, gated by the same refuse-before-consumption rule.
+
 **Rule: the launcher's capability probe is derived from what it calls, never
-hand-maintained.** If the design uses per-node spawn gating, backlog snapshots
-or a drain audit, those are declared required capabilities too. An incomplete
-probe refuses the cleanroom **before input consumption**.
+hand-maintained.** If the design uses per-node spawn gating, backlog snapshots,
+a drain audit or a node-taking worker loop, those are declared required
+capabilities too. **A capability set that has not been re-derived when the call
+set changes is a stale gate.**
 
 ### 6.7 The validation gap
 
