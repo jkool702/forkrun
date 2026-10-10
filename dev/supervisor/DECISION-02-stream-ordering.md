@@ -34,7 +34,7 @@ wait and the output is out of order.
 
 ### 2.1 Empty batches emit *no frame at all*
 
-`python/forkrun/_shim.c:574-575`, in `fr_py_emit_record`:
+`python/forkrun/_shim.c:575-576`, in `fr_py_emit_record`:
 
 ```c
 if (src_len == 0)
@@ -60,7 +60,7 @@ Python.
 
 ### 2.3 The parsers already tolerate a zero-length frame
 
-`_split_records_views` (`run.py:2460-2476`) does:
+`_split_records_views` (`run.py:2451-2476`) does:
 
 ```python
 idx, ln = _HDR.unpack_from(view, off)
