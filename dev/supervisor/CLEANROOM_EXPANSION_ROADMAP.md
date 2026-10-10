@@ -303,6 +303,79 @@ reverting its own instrumentation.
 run and an injected-failure run; test parses them; children preserve the fd
 without weakening scrubbing; disabled by default and absent from benchmarks.
 
+#### Scope — established by inspection and measurement, not assumption
+
+**[V] HARD CONSTRAINT — the trace memfd MUST be `O_APPEND`.** Measured on
+this machine with `os.fork()`, one 64-byte record per `write()`, 16
+concurrent children:
+
+| mode | records recovered | expected | verdict |
+|---|---|---|---|
+| shared offset | 25,962 | 320,000 | **CORRUPTED — 92% silently lost** |
+| `O_APPEND` | 320,000 | 320,000 | **ATOMIC**, 0 torn |
+
+A shared file offset loses records to the classic lost-update race. This is
+not a hypothetical: the trace's entire purpose is diagnosing **concurrent**
+stalls, so without `O_APPEND` it would drop most of its evidence precisely
+when it is most needed, and drop it *silently* — the parent would parse a
+short but well-formed file. `O_APPEND` is what makes one `write()` per
+record atomic on tmpfs. Every record must be a **single** `write()`; batching
+records into one buffer is fine only because the whole buffer still lands as
+one append (verified above), but per-record writes are the simpler contract.
+
+**[V] The launcher never forks the orderer.** `ring_order` / `orderer` have
+**zero** occurrences in `forkrun_cleanroom.c`; the predicate docstring already
+says the orderer "is forked only by the in-process reactor, for memory
+reasons". So the minimum-event list's *"orderer entry/exit and completion
+state"* **cannot be produced by a launcher trace**. Scope decision: **v1 is
+launcher-only**, and those events are dropped rather than stubbed. Ordering
+visibility for the in-process path is a separate item — it lives in the frozen
+engine, which C0.2 does not touch.
+
+**[V] `node` is constant (always 0) in v1.** The envelope requires
+`num_nodes == 1`, so the launcher is UMA-only. Keep the field — W-EXP-2 NUMA
+will need it — but state it carries no information yet. This is the same
+lesson as `return_stats` in C0.1: a constant field is kept precisely because
+it is what a future change would silently start varying.
+
+**Record format: binary, fixed-width, one `write()` per record.** This matches
+the existing `stats_fd` counter channel (`[version][poisoned]`, read back by
+`_read_cleanroom_stats`), so it introduces no new format to justify. Text or
+JSONL would require a formatter in C and buys nothing a test cannot do with
+`struct.unpack`.
+
+**[V] Integration points, all enumerated:**
+
+| what | where |
+|---|---|
+| `--trace-fd N` option | `forkrun_cleanroom.c:528-543`, beside `--stats-fd` |
+| `O_APPEND` on the fd | once, in the parent, before any fork |
+| timestamp source | `CLOCK_MONOTONIC`, already used at `forkrun_cleanroom.c:105` |
+| keep-list additions | **5** `keep_init(&k)` sites: `408`, `786`, `882`, `936`, `973` |
+| fork sites to instrument | **6**: `402` (worker), `591` (probe), `781` (spill), `877` (fallow), `931` (scan), `968` (drain) |
+| supervisor / reap events | `501`, `511` (`waitpid` loops), `642` (probe reap) |
+| parent-side memfd + read-back | `run.py:956-962` pattern; reader modelled on `_read_cleanroom_stats` (`run.py:1120`) |
+
+**The probe child does not scrub** — it has no `keep_init`, because it has no
+unrelated descriptors to scrub. It needs the trace fd *passed*, but not added
+to a keep-list. That is why 5 keep-lists cover 6 fork sites.
+
+**[V] Keep-list budget is not a constraint.** `CR_MAX_KEEP` is 256 and
+`keep_add` **fails closed** on overflow (`forkrun_cleanroom.c:207`), setting
+`overflow` and refusing to run rather than scrubbing partially. One
+additional descriptor is far inside budget, and the fail-closed behaviour
+means an over-budget child cannot silently lose the trace fd.
+
+**Non-goals for C0.2:** no user payload bytes; no in-process / reactor
+coverage; no engine (`forkrun_ring.c`) changes; no default-on; not in
+benchmarks.
+
+**Open decisions for review before implementation:**
+1. **Launcher-only v1** (recommended) vs covering the in-process path too.
+2. Whether the trace survives into the **fatal-teardown** path, where the
+   launcher kills children under time pressure and every `write()` is latency
+   the boundedness budget pays for.
+
 ### C0.3 — UDF eligibility and import contract
 
 **Eligibility for W-EXP-1: module-level functions only.**
