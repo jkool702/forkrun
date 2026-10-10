@@ -441,7 +441,8 @@ a surprise: the work is planned, but it is gated, not skipped.
 FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
 ```
 
-and `check_engine_frozen` (release_check.py:469-483) asserts **two** things:
+and `check_engine_frozen` (`python/release_check.py:471-485`) asserts **two**
+things:
 the files are unmodified in the working tree, **and** the most recent commit
 touching any of them is **not** HEAD. So adding trace instrumentation to the
 orderer requires *both* modifying `forkrun_ring.c` and making that commit
@@ -833,14 +834,125 @@ constraint.
 > Consequence: `map(..., nodes="@2", order="index")` **today** has no gate on
 > ordered-output completeness beyond a proxy for it.
 
-Required fault injection, each ending in loud nonzero failure — never a warning
-plus partial data, never exit 0: an interior `(major, minor)` packet missing
-with later packets present; **the final expected packet missing**; an
+> **[V] Correction to an earlier over-reading of this defect.** A first pass
+> described it as an unnoticed silent-success bug. Reading it properly, two
+> things that were missed make that framing wrong:
+>
+> * The inner `break` on `heap[0].key != expected_key` is the **designed**
+>   mechanism, not a defect. The heap exists to buffer out-of-order
+>   records, so gaps mid-stream are normal; breaking out of the drain loop
+>   returns to the outer read loop to read more, which is how a gap is
+>   filled. Mid-stream, the break is correct.
+> * The residual-heap-at-EOF condition is **already known and named** in
+>   the source: the diagnostic's own comment reads "Distinguishes gap loss
+>   (expected stuck, heap full) from early exit at a glance."
+>
+> What actually survives is narrower and should be stated as it is: there
+> is **no enforced** completeness certificate — only an *observed* one,
+> behind an env-gated diagnostic that nothing acts on. Whether
+> `exit 0` is contractually required to mean "complete" is a question of
+> intent the code does not settle, and the orderer passing substantial
+> testing is consistent with the condition being unreachable outside fault
+> injection. This was not established and is not claimed.
+
+Required fault injection, each ending in loud nonzero failure — never a
+warning plus partial data, never exit 0: an interior `(major, minor)`
+packet missing with later packets present; **the final expected packet missing**; an
 order-pipe writer dying before its final packet; the orderer dying or reporting
 an emit failure; per-node ring counters complete while ordered output is not.
 
 > **[V] "Successful drain plus empty heap" is not a certificate.** A missing
 > *terminal* packet leaves nothing in the heap to expose the gap.
+
+#### C0.7 design — the engine-free route, and the measurement that enables it
+
+**The premise was tested, not assumed.** The obvious counter-argument is
+that a completeness certificate must live inside the orderer, because the
+orderer is the only party that sees every packet. That is false, and the
+following measurement is why.
+
+**[V] The orderer does not coalesce — the SCANNER does.** Varying `lines=`
+(lines per published batch) on a 1000-line input, in-process,
+`order="index"`, one worker:
+
+| `lines` | emitted records | `ceil(1000/lines)` |
+|---|---|---|
+| 1 | 1000 | 1000 |
+| 10 | 100 | 100 |
+| 100 | 10 | 10 |
+
+The emitted-record count tracks `ceil(n/lines)` **exactly**. The number of
+output records is therefore fixed at scan time, and the orderer emits
+**one record per published slot**. Coalescing happens upstream of
+ordering and is not an ordering concern.
+
+*Corroboration:* the aggregating fixture `count_lines_v1` also yields one
+record per slot (13 records for 50 lines), identical to the pass-through
+UDF on the same input — so the invariant is **UDF-independent**, which is
+what makes it a system invariant rather than a caller convention.
+
+**Consequence: the certificate is a count comparison, not a heap
+inspection.**
+
+```
+expected_records = sum over nodes of write_idx   (slots published)
+actual_records   = framed records the parent collected
+certificate      = (actual_records == expected_records)
+```
+
+`write_idx` is exposed by the **existing** `fr_py_diag_node` symbol and
+read through ctypes. **No engine change is required** — which is the
+answer C0.7 asked for.
+
+**Why it catches what the heap cannot.** Each required fault injection
+drops at least one emitted record while leaving the ring's published
+count untouched, so each appears as `actual < expected`:
+
+| fault injection | caught because |
+|---|---|
+| interior `(major, minor)` missing, later packets present | emitted < published |
+| **final expected packet missing** | emitted < published — **and this is exactly the case heap-draining cannot catch**, since no residual heap exists |
+| order-pipe writer dies before its final packet | emitted < published |
+| orderer dies or reports an emit failure | emitted < published |
+| per-node ring counters complete, ordered output not | emitted < published |
+
+The last row matters most: the ring counters and the ordered output are
+independent facts, and this compares them.
+
+**[V] Obtaining `write_idx` has a real constraint.** `fr_py_diag_node`
+returns data only while the ring state is live — it must be called where
+`_numa_drain_audit` already calls it (after supervision returns, before
+the parent parses output). A probe issued after `map()` returns gets
+`rc == -1`, which is why an after-the-fact measurement reads zeros.
+
+**[V] `_numa_drain_audit` is NUMA-only today.** Its two call sites are
+`_execute_numa_locked` (`run.py:8967`) and one further NUMA path
+(`run.py:9482`). A UMA `order="index"` run invokes it **zero** times —
+measured by instrumenting the function across five input sizes. The
+claim-side guard is real but does not cover UMA, so extending the
+certificate means extending that call, which is a **Python-side** change.
+
+**Scope conditions — where the certificate must NOT be asserted:**
+
+* `stdout_broken` / emit failure: legitimately fewer records, but it also
+  pulls the fire alarm so the run already fails; the check must not
+  double-report it as a completeness violation.
+* `unordered` mode: no ordering, so no per-slot correspondence.
+* Under-covered pools (`workers < num_nodes`): the existing audit warns
+  rather than raising, by documented design; the certificate keeps that
+  disposition rather than escalating it.
+
+**Not established here, and belonging to the implementation item:** no
+fault injection has been run, so the check has not yet been *observed* to
+fire. The premise (`emitted == published`) is measured across five sizes
+and two batch granularities; the detection behaviour is design, not
+evidence.
+
+
+**Status: DESIGN DONE** (this subsection). Implementation, fault-injection
+tests and review remain a separate work item per the section's opening
+paragraph. The design requires **no engine change**, so it does not gate
+on the frozen-engine decision.
 
 ### C0.8 — Phase 0 exit gate
 
