@@ -14,9 +14,14 @@ the evidence.
 `NEW/REFACTOR4.1`). Function names are the authorities; line numbers are given
 as evidence and may drift.
 
-**Review history:** three rounds completed. Round 1 raised ten findings, all
-accepted. Round 2 raised one blocking finding, accepted in full, plus one scope
-correction. Round 3 accepted all clarifications. The disagreement set is empty.
+**Review history: five rounds completed, all amendments accepted.** Round 1
+raised ten findings, all accepted. Round 2 accepted all ten, raised one blocking
+finding (the node-0 worker assignment), and made one scope correction. Round 3
+accepted the clarifications. Rounds 4 and 5 made targeted amendments for internal
+consistency — a resolver/coverage mismatch, an M2 import-contract contradiction,
+a false "share no code" claim, an incomplete dependency graph, an incomplete
+capability set, and four contract-preciseness fixes. No round requested a
+redesign; every finding was a correction to something specific.
 
 ---
 
@@ -286,6 +291,44 @@ caller-side mutation of their module globals.
 > promised "the identical UDF runs unchanged on both paths", which is
 > unsatisfiable for closures; that acceptance criterion is withdrawn.
 
+#### Three categories, because not every restriction is detectable
+
+**[V] Narrowing the documented contract does not stop the implementation
+accepting what is outside it.** The resolver performs only a `callable()` check
+(**[V]** `_worker.py:138`), and a class object *is* callable — so
+`"pkg.mod:Class"` passes today's check and would be invoked as a constructor.
+W-EXP-1 needs an **explicit preflight kind check** on the resolved object, not a
+documented intention.
+
+| # | Category | Who is responsible | Contract |
+|---|---|---|---|
+| **1** | **Structurally ineligible references** — lambdas, closures, bound-method objects, **classes**, callable instances | **Implementation detects and declines**, before input consumption | A preflight check on the resolved object's kind; a test proving a class reference and other unsupported callable attributes are declined pre-consumption |
+| **2** | **Supported references with semantic preconditions** — importable module-level functions | **Caller**, and documented as a limitation | The caller must not rely on state the cleanroom process cannot inherit. **These are generally not detectable** and are not promised an observable decline |
+| **3** | **Parity fixtures** — deterministic, replay-safe UDFs | **Tests** | Byte-identical output across both paths, as an acceptance criterion for these fixtures |
+
+> **[V] Category 2 cannot be reduced to category 1.** Whether a function depends
+> on caller-mutated globals, process-local state, a caller-seeded random
+> generator, or the environment is **not a decidable property of an importable
+> reference**. A module-level UDF returning `os.getpid()` is structurally
+> perfect and will legitimately differ between paths; one using caller-seeded
+> randomness can diverge after a fresh import. **Promising automatic detection
+> here would be the same class of error as promising byte-identity for every
+> module-level function.** Document these as limitations; do not fake a
+> detector for them.
+
+**What "parity" therefore means.** Byte-identical output is required for
+**category 3** fixtures, and is the acceptance criterion for W-EXP-1's
+deterministic corpus. It is **not** claimed for every module-level function.
+The supported contract defines equivalence as *byte-identical for deterministic,
+replay-safe UDFs*; category-2 behaviour is a caller obligation with a
+documented failure mode.
+
+> **This closes the M2 question's first half.** The post-fork candidate cannot
+> be treated as a faster implementation of the pre-fork candidate until the
+> category-2 behavioural contract is established — because per-worker imports
+> can differ observably from one parent import, and neither is required to
+> reproduce caller-process state.
+
 #### Import contract — defined per candidate, not once
 
 **[V] The previous revision's single contract was internally inconsistent.** It
@@ -320,33 +363,56 @@ already been established.**
 > side effects — so merely requesting the accelerator would change behaviour. A
 > separate probe may exist as an opt-in diagnostic with that consequence stated.
 
-Requirements in both candidates: bounded startup deadline so a hanging import
-cannot hang the API call; readiness/refusal reported to the supervising parent;
-pre-fork detection of import-created threads; **no automatic fallback after a
-startup failure**, because falling back would re-enter the same unsafe path.
+Requirements in **both** candidates: bounded startup deadline so a hanging
+import cannot hang the API call; readiness/refusal reported to the supervising
+parent; **no automatic fallback after a startup failure**, because falling back
+would re-enter the same unsafe path.
+
+> **[V] Pre-fork thread detection is a PRE-FORK-candidate requirement only.**
+> The previous revision listed it under "both candidates", which is wrong: in
+> the post-fork candidate the launcher forks its workers **before** any worker
+> initialises Python or imports the UDF, so there is no launcher-side UDF import
+> whose resulting threads could need detecting before those forks. The
+> post-fork candidate's equivalent obligation is the **worker-side
+> initialisation/readiness contract**, not a pre-fork scan.
+
+| | Pre-fork candidate | Post-fork candidate |
+|---|---|---|
+| Import-time thread detection | **required**, before the launcher forks its pipeline | **not applicable** — no launcher-side UDF import precedes the forks |
+| Equivalent obligation | — | worker-side init + readiness barrier before any ingest |
 
 > **[V] Thread detection must not equate "no Python-managed threads" with "no
 > threads".** A native extension can start OS threads that never appear in
 > `threading.enumerate()`. Either specify an OS-level check (`/proc/self/task`
 > count versus a pre-import baseline) or document explicitly which cases the
 > detector cannot rule out. A detector that reports "no threads" from
-> `threading.enumerate()` alone is unsound.
+> `threading.enumerate()` alone is unsound. **[V] And the lifecycle prototype
+> and its acceptance tests must exercise the candidate actually being
+> evaluated** — a pre-fork hook test proves nothing about post-fork.
 
 ### C0.4 — CPython fork-lifecycle prototype
 
-`PyOS_BeforeFork()` and `PyOS_AfterFork_Parent()` belong around every launcher
-fork, in the main thread of the main interpreter. **`PyOS_AfterFork_Child()` is
-required only for a child that will re-enter Python.**
+**[V] The hook requirement is scoped by whether an initialised interpreter
+exists at that fork — which differs by candidate.**
 
-> **[V] A helper that executes only C and immediately `_exit()`s is not a Python
-> worker.** Treating all five launcher fork sites symmetrically would be wrong:
-> it adds hook cost to roles that never touch the Python API.
+| | Pre-fork candidate | Post-fork candidate |
+|---|---|---|
+| Launcher forks | an initialised interpreter is live in the launcher | **no initialised interpreter exists in the launcher** |
+| `PyOS_BeforeFork()` / `PyOS_AfterFork_Parent()` | required, in the main thread of the main interpreter | **not applicable** — there is no interpreter to prepare |
+| `PyOS_AfterFork_Child()` | required **only** for a child that will re-enter Python | required in each worker, **after** its own `fork()`, once it initialises |
+| Pairing | the parent hook is required whether `fork()` succeeds **or fails** | same, for any post-fork initialisation path |
+
+**[V] A helper that executes only C and immediately `_exit()`s is not a Python
+worker.** Treating all five launcher fork sites symmetrically would be wrong: it
+adds hook cost to roles that never touch the Python API — and in the post-fork
+candidate it would add hooks around forks for which no interpreter exists.
 
 Inventory every `fork()` in `forkrun_cleanroom.c`; classify each role as
-Python-using or not; specify the hook pair per site; **pair correctly on the
-fork-failure path as well as success**.
+Python-using or not **per candidate**; specify the hook pair per site **and per
+candidate**; pair correctly on the fork-failure path as well as success.
 
 Prototype against a minimal embedding **before** integrating the pipeline.
+**Prototype the candidate under evaluation, not a generic hybrid.**
 
 **Acceptance:** prototype passes on the matrix in C0.5; a thread-starting import
 is detected before the launcher forks its pipeline; no fork site is unclassified.
@@ -407,8 +473,16 @@ memory argument while paying an undesigned fork-lifecycle cost.
 
 | | serial cost | fleet memory **[H]** | fork-time interpreter state |
 |---|---|---|---|
-| **Pre-fork** (init in launcher, workers inherit) | +11.6–13.6 ms on the critical path **[V]** | lower — one interpreter shared, COW, reduced by worker-dirtied pages | live interpreter and possibly threads at every launcher fork |
+| **Pre-fork** (init in launcher, workers inherit) | **bare interpreter-init component only:** +11.6–13.6 ms **[V]** measured — **not** the complete pre-fork startup cost | lower — one interpreter shared, COW, reduced by worker-dirtied pages | live interpreter and possibly threads at every launcher fork |
 | **Post-fork** (each worker initialises) | ~0 ms serial; concurrent across workers | higher — per-worker private pages, still sharing file-backed code and libraries | none |
+
+> **[V] The pre-fork row is one component, not the total.** It measures
+> `Py_Initialize` alone. It **excludes** UDF import and its dependencies, runtime
+> environment resolution, and the rest of the integrated startup path — all of
+> which are measured in M2. The withdrawn projection error came from adding a
+> component to measured startup and presenting the sum as a measurement;
+> **the label must keep that distinction visible**, because startup crossover is
+> exactly where the earlier draft overreached.
 
 Semantic non-equivalence is possible and is tracked as **[M]** in C0.3: per-worker
 imports can differ observably from one parent import. **M2 measures both and
@@ -461,13 +535,31 @@ an emit failure; per-node ring counters complete while ordered output is not.
 
 ### C0.8 — Phase 0 exit gate
 
-- Capability matrix published and test-matched.
+- Capability matrix published and checked against the independent
+  expected-behaviour oracle (**C0.1**).
 - Trace facility working and documented.
-- UDF eligibility and import contracts documented, with the decline observable.
-- Fork-lifecycle prototype passing, or reported as not passing.
+- UDF eligibility and import contracts documented **per M2 candidate**
+  (**C0.3**), with the three categories separated and the decline observable
+  for category 1.
+- Fork-lifecycle prototype passing for **the candidate to be evaluated**, or
+  reported as not passing (**C0.4**).
 - Interpreter matrix decision recorded (add 3.14, or revise the policy).
 - M1/M2 curves published; crossover stated as a range or "not yet observed".
 - Ordered-output certificate designed, implementation tracked separately.
+
+**And two decisions that are prerequisites, not conclusions:**
+
+- **The shared launcher-supervision interface (§3) must be specified, and its
+  integration strategy recorded, before W-EXP-2 or W-EXP-3 begins.** Either it
+  is frozen in Phase 0, or one branch is designated for integration and rebased
+  before the other. Starting either workstream without this recorded is how two
+  branches end up rewriting the same supervisor.
+- **The packaging path (§5.4) must be chosen before W-EXP-1 implementation
+  begins**: source-only optional prototype, interpreter-specific release
+  wheels, or abandoning the CPython-linked helper for the bootstrap design.
+  **[V]** It does not force an `auditwheel` investigation if the choice is
+  source-only for the prototype — but it must be a **recorded decision**, not an
+  unresolved option that slips past Phase 0.
 
 ---
 
@@ -635,6 +727,13 @@ Three options, to be chosen:
 * [ ] Ineligible callables are detected **before input is consumed**, decline
       to in-process, and the decline is observable when the cleanroom was
       explicitly requested.
+* [ ] **A class reference and other unsupported callable attributes are declined
+      pre-consumption by an explicit kind check**, not merely undocumented
+      (**[V]** the resolver's `callable()` check at `_worker.py:138` admits
+      classes).
+* [ ] **A caller/helper CPython-minor mismatch is refused safely before input
+      consumption**, with the refusal observable. A helper built for 3.12 must
+      not be driven by a 3.14 caller.
 * [ ] A UDF raising an exception matches the in-process `on_error` behaviour for
       all three policies.
 * [ ] UDFs with a third-party pure-Python dependency and a native-extension
