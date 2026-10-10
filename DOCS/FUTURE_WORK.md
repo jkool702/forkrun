@@ -71,7 +71,7 @@ worse still.
 
 | # | Item | Source | Effort | Description |
 |---|------|--------|--------|-------------|
-| 49 | Opt-in tracing facility not implemented | CR-FIX1-E | Low | The spec exists (`FORKRUN_CLEANROOM_TRACE`, role/pid/event/monotonic-ts records to an inherited memfd) but was deliberately deferred behind the descriptor measurement, which resolved the question by direct experiment instead. Worth building before the next lifecycle investigation. |
+| 49 | ~~Opt-in tracing facility not implemented~~ — **DONE (C0.2 Phase A)** | CR-FIX1-E | — | Built as `FORKRUN_CLEANROOM_TRACE`: role/pid/event/monotonic-ts records to an inherited memfd, off by default. Covers the launcher only; the in-process path and the orderer are Phase B and require revisiting the frozen engine (see `dev/supervisor/CLEANROOM_EXPANSION_ROADMAP.md` §C0.2). The trace memfd **must** be `O_APPEND` — measured, a shared offset loses 92% of records under 16 concurrent writers. |
 | 50 | `test_numa_recovery.py` is unreachable on UMA | CR-FIX1 | Low | Gated on `len(detect_numa_nodes()) >= 2`, so the NUMA crash/respawn lock-ins are skipped on a single-node box. Either boot `numa=fake=N` for the matrix (requires a **reboot**) or mark the cells required-manual in the release gate. |
 | 51 | Path-source replay assumes a stable file | CR-FIX1-C | — | A path is replayable by reopening, which assumes its contents do not change during the invocation. Documented as an API assumption rather than solved; do not spool sources to satisfy it. |
 

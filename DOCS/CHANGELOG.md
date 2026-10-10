@@ -6,6 +6,32 @@ Scope: the UMA C-plugin cleanroom only. NUMA, Python UDF, a libpython
 helper and dynamic worker spawning are explicitly NOT implemented and
 remain future work.
 
+### Diagnostics
+
+**Opt-in structured trace of the launcher (C0.2 Phase A).** Set
+`FORKRUN_CLEANROOM_TRACE=1` and each run records a monotonic timestamp,
+pid, role, event, worker `wid`/`wincarn`, node and result code to a memfd
+inherited by every child — enough to reconstruct a stalled run as a
+pid/role/fork/reap/abort story instead of reverting the instrumentation
+that produced it. Off by default; with it off the emit path costs no
+syscall and no allocation. **No user payload bytes ever enter the
+channel**, asserted by a test that plants a marker in the input and
+searches the trace for it.
+
+The trace memfd **must** be opened `O_APPEND`, and that is measured rather
+than assumed: with `os.fork`, 16 children and one 64-byte record per
+`write`, a shared file offset recovered 25,962 of 320,000 records — 92%
+silently lost — while `O_APPEND` recovered all 320,000 with zero torn
+records. The facility exists to diagnose *concurrent* stalls, so without
+it the trace would discard most of its evidence exactly when needed, and
+discard it silently: a short well-formed file reads as "fewer events"
+rather than as data loss.
+
+Scope is the launcher only. The orderer is never forked by the launcher
+(`ring_order` has zero occurrences in `forkrun_cleanroom.c`), so its
+events cannot be produced here; the in-process path and orderer coverage
+are Phase B and require revisiting the frozen engine.
+
 ### Correctness
 
 **Fatal teardown is bounded (was: an unbounded hang).** On the failure

@@ -196,6 +196,210 @@ def _make_input(n=200):
     return path
 
 
+class _TracingEnvMixin:
+    """Sets and restores the two gates every end-to-end trace test needs.
+
+    Factored out because a class that forgets this does not fail loudly --
+    the run simply takes the in-process path and produces an empty trace,
+    which looks exactly like a broken trace.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._saved_env = {}
+        for k in ("FORKRUN_CLEANROOM", "FORKRUN_CLEANROOM_TRACE"):
+            self._saved_env[k] = os.environ.get(k)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        os.environ["FORKRUN_CLEANROOM_TRACE"] = "1"
+        frun._LAST_TRACE[:] = []
+
+    def tearDown(self):
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        super().tearDown()
+
+
+@unittest.skipUnless(HAVE_PLUGIN, "gcc absent or fixture build failed")
+class TestSupervisionAndTeardown(_TracingEnvMixin, unittest.TestCase):
+    """The failure paths -- the reason the facility exists.
+
+    Driven at the launcher level because the fatal teardown is only
+    reachable by exhausting the respawn budget, which the public API does
+    not expose directly. Reuses the in-repo fixture's die_always_v1.
+    """
+
+    def _launch(self, extra_argv, func="die_always_v1", lines=0):
+        src_path = _make_input(200)
+        src = os.open(src_path, os.O_RDONLY)
+        res = os.memfd_create("res")
+        stats = os.memfd_create("st")
+        tr = os.memfd_create("tr")
+        fcntl.fcntl(tr, fcntl.F_SETFL,
+                    fcntl.fcntl(tr, fcntl.F_GETFL) | os.O_APPEND)
+        for x in (src, res, stats, tr):
+            os.set_inheritable(x, True)
+        argv = [LAUNCHER, "--so",
+                os.path.join(_ROOT, "python", "forkrun",
+                             "libforkrun_python.so"),
+                "--plugin", _PLUGIN, "--func", func,
+                "--workers", "2", "--on-error", "0", "--retry", "0",
+                "--src", str(src), "--result", str(res),
+                "--stats-fd", str(stats), "--trace-fd", str(tr)]
+        argv += extra_argv
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=120,
+                                  pass_fds=(src, res, stats, tr))
+            size = os.fstat(tr).st_size
+            got = frun._read_cleanroom_trace(tr)
+            return proc, got, size
+        finally:
+            for fd in (src, res, stats, tr):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            os.unlink(src_path)
+
+    def test_fatal_teardown_is_traced(self):
+        """The bounded teardown must leave a record of what it killed.
+
+        This is the path where every extra write() is latency charged
+        against a boundedness budget, so the cost was accepted
+        deliberately. That only holds if the records are actually there.
+        """
+        proc, tr, _size = self._launch(["--respawn-cap", "1"])
+        self.assertNotEqual(0, proc.returncode,
+                            "the failing run was expected to fail")
+        events = {r["event"] for r in tr}
+        for want in ("sup_abort", "fatal_begin", "fatal_kill", "fatal_end"):
+            with self.subTest(event=want):
+                self.assertIn(want, events,
+                              "fatal teardown left no %s record; events: %s"
+                              % (want, sorted(events)))
+
+    def test_fatal_kill_names_the_pids_it_signalled(self):
+        """fatal_kill must carry the pid, or it cannot say what was killed."""
+        _proc, tr, _size = self._launch(["--respawn-cap", "1"])
+        kills = [r for r in tr if r["event"] == "fatal_kill"]
+        self.assertTrue(kills, "no fatal_kill records")
+        for k in kills:
+            self.assertGreater(k["rc"], 0,
+                               "fatal_kill record carried no pid (rc=%r)"
+                               % (k["rc"],))
+
+    def test_respawn_is_traced(self):
+        """A respawn must record the new incarnation and its pid."""
+        path = _make_input(200)
+        try:
+            _out, tr = self._e2e(path, func="die_once_v1")
+        finally:
+            os.unlink(path)
+        respawns = [r for r in tr if r["event"] == "sup_respawn"]
+        self.assertTrue(respawns, "die_once_v1 produced no sup_respawn; "
+                                  "events: %s" % sorted({r["event"] for r in tr}))
+        for r in respawns:
+            self.assertIsNotNone(r["wid"], "respawn record has no wid")
+            self.assertIsNotNone(r["wincarn"], "respawn record has no wincarn")
+            self.assertGreater(r["rc"], 0, "respawn record has no new pid")
+
+    def _e2e(self, path, func):
+        import forkrun
+        spec = "%s:%s" % (_PLUGIN, func)
+        out = forkrun.map(spec, path, workers=2, nodes=1,
+                          mode="plugin", order="index",
+                          orchestrator=True, output="bytes")
+        return out, list(frun._LAST_TRACE)
+
+
+@unittest.skipUnless(HAVE_PLUGIN, "gcc absent or fixture build failed")
+class TestNoPayloadLeak(_TracingEnvMixin, unittest.TestCase):
+    """The trace must carry control-plane facts and nothing else."""
+
+    def test_user_payload_never_appears_in_the_trace(self):
+        """A marker planted in the INPUT must not appear in the trace.
+
+        The roadmap states 'no user payload bytes' as a safety property,
+        so it is asserted rather than assumed. A distinctive marker is
+        planted in every input line; if any batching or payload path ever
+        wrote into the trace, this fails.
+        """
+        marker = "ZZPAYLOADMARKERZZ"
+        src_path = _make_input(200)
+        with open(src_path, "w") as fh:
+            for i in range(200):
+                fh.write('{"eid":"%s%d","uid":1,"iid":2,"ts":1700000000,'
+                         '"et":"view","dev":"ios","dur":5}\n' % (marker, i))
+        raw_trace = bytearray()
+        saved = os.environ.get("FORKRUN_CLEANROOM_TRACE")
+        try:
+            os.environ["FORKRUN_CLEANROOM"] = "1"
+            os.environ["FORKRUN_CLEANROOM_TRACE"] = "1"
+            frun._LAST_TRACE[:] = []
+            import forkrun
+            forkrun.map("%s:%s" % (_PLUGIN, _PLUGIN_FUNC), src_path,
+                        workers=2, nodes=1, mode="plugin", order="index",
+                        orchestrator=True, output="bytes")
+            self.assertTrue(frun._LAST_TRACE, "no trace produced")
+            # Re-serialise every field as text and search it.
+            for r in frun._LAST_TRACE:
+                for v in r.values():
+                    raw_trace += str(v).encode()
+        finally:
+            os.unlink(src_path)
+            if saved is None:
+                os.environ.pop("FORKRUN_CLEANROOM_TRACE", None)
+            else:
+                os.environ["FORKRUN_CLEANROOM_TRACE"] = saved
+        self.assertNotIn(marker.encode(), bytes(raw_trace),
+                         "user payload leaked into the trace")
+
+
+class TestAbsentFromBenchmarks(unittest.TestCase):
+    """The acceptance criterion: absent from benchmarks.
+
+    Checked as a property of the repository rather than of a benchmark
+    run, because a benchmark that is never perturbed needs no timing
+    measurement to prove it.
+    """
+
+    _BENCH_DIRS = ("BENCHMARKS", "tools")
+
+    def test_no_benchmark_enables_the_trace(self):
+        offenders = []
+        for d in self._BENCH_DIRS:
+            base = os.path.join(_ROOT, d)
+            if not os.path.isdir(base):
+                continue
+            for dirpath, _dirs, files in os.walk(base):
+                for fn in files:
+                    if not fn.endswith((".py", ".bash", ".sh")):
+                        continue
+                    p = os.path.join(dirpath, fn)
+                    try:
+                        with open(p, "r", errors="replace") as fh:
+                            text = fh.read()
+                    except OSError:
+                        continue
+                    if "FORKRUN_CLEANROOM_TRACE" in text:
+                        offenders.append(os.path.relpath(p, _ROOT))
+        self.assertEqual([], offenders,
+                         "benchmark tooling enables the trace: %s"
+                         % offenders)
+
+    def test_trace_is_off_unless_explicitly_requested(self):
+        """The default state, which is what every benchmark runs under."""
+        saved = os.environ.pop("FORKRUN_CLEANROOM_TRACE", None)
+        try:
+            self.assertFalse(frun._cleanroom_trace_enabled())
+        finally:
+            if saved is not None:
+                os.environ["FORKRUN_CLEANROOM_TRACE"] = saved
+
+
 class TestLayout(unittest.TestCase):
     """The C record and the Python parser must be the same format."""
 
@@ -481,28 +685,13 @@ class TestConcurrentAppendDiscipline(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_PLUGIN, "gcc absent or fixture build failed")
-class TestEndToEnd(unittest.TestCase):
+class TestEndToEnd(_TracingEnvMixin, unittest.TestCase):
     """The acceptance criterion: records reconstruct the run.
 
     "Reconstruct pid/role/fork/reap/abort for a successful run and an
     injected-failure run." That is a claim about a real run, so these
     drive the real launcher through the real public API.
     """
-
-    def setUp(self):
-        self._saved = {}
-        for k in ("FORKRUN_CLEANROOM", "FORKRUN_CLEANROOM_TRACE"):
-            self._saved[k] = os.environ.get(k)
-        os.environ["FORKRUN_CLEANROOM"] = "1"
-        os.environ["FORKRUN_CLEANROOM_TRACE"] = "1"
-        frun._LAST_TRACE[:] = []
-
-    def tearDown(self):
-        for k, v in self._saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
     def _run(self, path, func=None, **kw):
         """One real run through the public API, returning its trace."""
