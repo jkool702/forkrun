@@ -69,85 +69,169 @@ S1–S3 are what `test_data_publication_leak.py` currently fails.
 
 ---
 
-## 3. Candidate protocols
+## 3. Protocol evaluation (review amendment 2)
 
-### 3.1 Commit-gated forwarding
+The review supplied a concrete direction — **write → commit → signal** —
+and asked whether it works engine-free. Worked against the source:
 
-The drain buffers records until it can confirm the corresponding
-transaction committed.
+### 3.1 The commit linearization point exists and is already durable
 
-*Difficulty, and why this is not free:* the drain is a separate process
-and would need to observe commit state. The ring clears and reuses
-per-worker transaction state, so a transient read is not evidence — the
-drain could observe a slot that has already been recycled by the next
-batch. This needs either a durable generation/epoch counter per
-transaction or an explicit commit notification that the drain
-correlates against a `(worker, batch_idx)` it has not yet delivered.
+`fr_py_ack_direct` → the ring's ack path (`forkrun_ring.c`):
 
-*Cost:* the drain holds forwarded records until commit, reintroducing the
-memory question of §2.4 of the proposal. It must be bounded, and the
-bounding argument is the same unproven one ordered streaming is waiting
-on.
+```
+worker_txn_begin_commit()   → TXN_COMMITTING   (before any ack side effect)
+  ... fallow/order packets written to their pipes ...
+worker_last_cnt = 0
+worker_txn_clear()          → TXN_IDLE         ("TXN_IDLE means fully committed")
+return EXECUTION_SUCCESS
+```
 
-### 3.2 Ack-then-publish, with recovery-driven re-signal
+**Linearization point: successful return of `fr_py_ack_direct`**, which
+is ordered after `worker_txn_clear`'s release store
+(`forkrun_ring.c:6504`). Every ack side effect is already on its pipe at
+that point. This requires **no engine change** — it is an existing,
+already-ordered transition that the shim can simply observe.
 
-Ack first, then signal. A committed-but-unsignalled batch is found and
-re-signalled during recovery.
+`g_state` is `MAP_SHARED` (`forkrun_ring.c:2513`), so the parent — and
+therefore the drain — can read `g_state->worker_txn[wid].state`.
 
-*Difficulty:* recovery must enumerate committed batches whose records
-were never announced. It needs the set of committed-but-unannounced
-records to be durable, not reconstructable by scanning (the memfd may be
-reused). And re-signal must be idempotent under repeated recovery, or a
-batch is delivered twice.
+### 3.2 But "signal after ack" alone is NOT sufficient
 
-*This is the direction with fewer unsolved questions, but "fewer" is not
-"none", and the idempotency requirement is exactly where a naive patch
-reintroduces a duplicate.*
+The drain is **size-driven, not signal-driven**. On any wakeup it does
+`fstat` and forwards everything from its cursor to the memfd's **current
+size** (`_shim.c:2439`, `size <= offset` is the only bound).
 
-### 3.3 Recommendation
+So reordering the signal alone does **not** close the hole: the record
+is written *before* the ack, so between write and ack it sits in the
+memfd, and **any** queued or stale signal for that worker publishes it —
+uncommitted. Moving the signal later narrows the window without closing
+it.
 
-**Neither, yet.** §3.1 inherits the unresolved boundedness problem;
-§3.2 inherits an idempotency problem of comparable difficulty. The
-honest next step is to determine whether either can be made correct
-without touching the frozen engine, and to report that before coding.
+### 3.3 The design that does close it: carry the committed frontier
 
-Per the standing instruction, this goes back to external review. No
-implementation begins until one is chosen with its failure cut points
-enumerated.
+**Signal payload becomes `(wid, committed_offset)` instead of
+`(wid, batch_idx)`.** Same 16 bytes, same pipe, no wire growth.
+
+* Worker: write record → `fr_py_ack_direct` → on success, signal
+  `(wid, worker_output_end)`, the post-commit frontier.
+* Drain: forward `[offsets[wid], committed_offset)` and set
+  `offsets[wid] = committed_offset`. **Never reads past a committed
+  boundary**, so no wakeup can publish uncommitted bytes.
+* One signal per committed batch on the common path — no added round
+  trip (S4 preserved).
+
+This is the piece the reviewer's sketch was missing, and it is why the
+direction is worth taking rather than deferring again.
+
+### 3.4 Recovery: the IDLE ambiguity is benign
+
+The review asked how recovery distinguishes committed-but-unsignalled
+from uncommitted. Source answer: **it cannot, and it does not need to.**
+
+`ring_recover_worker_core` branches on `state`:
+
+| state at death | meaning | action |
+|---|---|---|
+| `TXN_CLAIMED` | batch published, not committed | roll back output to `output_start`; **never wake the drain** |
+| `TXN_COMMITTING` | ack in flight, ambiguous | conservative abort (existing behaviour); **never wake the drain** |
+| `TXN_IDLE` | committed **or** nothing in flight | drain wakeup is **safe in both cases** |
+
+The `IDLE` case conflates two situations, but **every byte in the memfd
+is committed whenever no `CLAIMED`/`COMMITTING` transaction owns it**, so
+forwarding to size at `IDLE` cannot publish anything uncommitted. That
+benign ambiguity is what makes the recovery path sound without new ring
+state.
+
+Answering the reviewer's other audit points:
+
+* **Synthetic wakeup vs queued signals / advanced cursor** — the drain
+  already tolerates empty wakeups (`size <= offset → continue`), and
+  ordering is preserved because all records carry `batch_idx` and the
+  consumer sorts. An out-of-order record is held by `ReassemblyBuffer`,
+  never yielded early.
+* **Commit succeeds, signal write fails** — state is `IDLE`, so recovery
+  takes the "nothing in flight" branch and **does not retry**. The batch
+  is committed exactly once. An EPIPE means the parent abandoned the
+  stream, already fatal.
+* **Respawn / memfd reuse** — `WorkerTxn.incarnation` is the existing
+  worker generation ("stale-record detection"). The drain uses it to
+  detect that a `wid` now points at a fresh memfd and **resets its
+  cursor**, instead of stranding the new generation behind a stale
+  offset. Respawns reuse the same `wid` (`forkrun_cleanroom.c:414`), so
+  this check is required, not optional.
+* **EOF / teardown / abandonment** — a wakeup after drain EOF must not
+  resurrect it; wakeups are issued only from the supervise loop while
+  the drain is live.
+
+### 3.5 Every emitter that must conform
+
+The review's point that `fr_py_emit_disposition` signals independently is
+correct — reordering only `fr_py_complete` would leave dispositions
+racing. Full audit of the current signal sites:
+
+| emitter | site | conforms? |
+|---|---|---|
+| `fr_py_emit` (payload) | `_shim.c:1570`, signals at 1645 | must move signal after ack |
+| `fr_py_emit_disposition` | `_shim.c:801`, signals at 825 | **must move too** |
+| disposition call sites | `_shim.c:1715, 3244, 3302, 3500, 3554, 3672, 3731` | all inherit the fix; each must ack before signalling |
+
+Two signal sites total, eight disposition call sites across the four
+loops. All must conform or S1 stays false for dispositions — which is
+precisely the class of record ordered reassembly depends on.
+
+### 3.6 Engine-free
+
+Every change is in `_shim.c` (emit ordering, signal payload, drain loop)
+and `forkrun_cleanroom.c` (recovery wakeup). `forkrun_ring.c` is **read
+but never modified** — the existing `TXN_IDLE` transition and
+`incarnation` field are sufficient. The frozen-engine exemption is
+therefore not invoked.
+
+### 3.7 Status
+
+Viable on the source evidence, with the committed-frontier signal being
+the load-bearing correction to the reviewer's sketch. **Still returns for
+review before implementation**, now with a concrete protocol rather than
+two candidate descriptions.
 
 ---
 
-## 4. Interim safety policy (review point 1)
+## 4. Interim safety policy (review amendment 1)
 
-The defect is reachable today by ordinary worker death, with `rc=0`.
-Withholding `Auto` does not protect users who already select the
-cleanroom path explicitly, so **a mitigation is required now**, not after
-Stage 0 ships.
+**Revision 2 — the original Option A was insufficient and is corrected
+below.**
 
-Options, in preference order:
+The flaw: `stream()` may already have yielded the abandoned attempt's
+`DATA` when recovery later detects the conflict. **An exception after a
+yield cannot retract a value the application has already observed.** So
+post-hoc detection satisfies S1 for materialized results and fails
+completely for streaming. Calling that "fail closed" was wrong.
 
-**A — Fail closed.** Treat a batch whose recovery changed a
-previously-published outcome as a hard failure rather than returning the
-stale record. Detectable: recovery knows the batch was retried, and the
-consumer can detect that a batch was already delivered. Cost: a rare
-legitimate retry becomes a loud failure. Given the defect currently
-returns **wrong data with success status**, trading that for a rare loud
-failure is clearly correct.
+Policy is therefore **per API**:
 
-**B — Document and accept.** State the risk in the release notes and
-declare it a deliberate decision. Honest, but it leaves a confirmed
-wrong-result path available in a shipped executor.
+| API | interim policy |
+|---|---|
+| materialized `map()` | a detected publication conflict **must** prevent returning a successful collection — raise instead |
+| `stream()` | **the cleanroom streaming envelope is disabled** until a commit barrier exists |
 
-**C — Defer.** Keep `Auto` off and rely on that. **Insufficient** — it
-does not address users who already select cleanroom.
+Disabling is preferred over post-hoc failure for streaming precisely
+because the failure is detected too late to be a safety measure; a loud
+error after a wrong value has been handed to the caller is an
+availability problem, not a safety one.
 
-**Recommendation: A, implemented as a narrow guard, with B recorded as
-the fallback if A proves to require more than a contained change.**
-This needs external review before implementation, like §3.
+**The fallback is no longer "document and accept".** The review is right
+that leaving a confirmed wrong-result path available in a shipped
+executor is the wrong default. If containment turns out to exceed a
+contained change, the decision is to **disable the affected envelope**,
+not to accept the risk.
+
+Note the disable applies to the **streaming envelope specifically**. The
+materialized `map()` path keeps working with the guard, since a
+collection is returned atomically and can still be refused.
 
 ---
 
-## 5. Determinism of the regression test (review point 2)
+## 5. Determinism of the regression test
 
 The reviewer is right that `FORKRUN_TEST_DIE_AFTER_SIGNAL` alone does not
 prove the drain forwarded before the kill — the signal can be written and
@@ -189,24 +273,70 @@ ack, commit-state publication, notification recovery.
 The same-size/different-content row is called out by the reviewer and is
 currently unmeasured; the mechanism predicts stale content survives.
 
+### 5.2 Required failure-cut matrix
+
+Each row states the expected outcome on all four axes the review asked
+for. "Public API" means what `stream()`/`map()` hands the caller.
+
+| # | cut point | safety | completeness | public API | run status |
+|---|---|---|---|---|---|
+| 1 | death during record write (partial) | no partial record | retried | nothing yielded | ok |
+| 2 | death after full write, before ack | not published | retried | nothing yielded | ok |
+| 3 | death after commit, before signal | n/a | wakeup at `IDLE` | value yielded once | ok |
+| 4 | death during ack (`COMMITTING`) | not published | conservative abort | nothing yielded | per policy |
+| 5 | signal write fails after commit | n/a | **no retry** (state `IDLE`) | — | fatal (parent gone) |
+| 6 | rollback truncates memfd under drain | not published | retried | nothing yielded | ok |
+| 7 | same-size retry, different content | not published | committed content wins | committed content once | ok |
+| 8 | different-size retry | not published | committed record wins | committed record once | ok |
+| 9 | repeated recovery | not published | delivered once | exactly once | ok |
+| 10 | respawn reuses `wid` | n/a | fresh memfd | `incarnation` resets cursor | ok |
+
+Rows 7–9 are the cases the current source is predicted to fail, and which
+`test_data_publication_leak.py` already exposes on row 7/8.
+
+The handshake in §5 is **required** for rows 3 and 6 — both are "the
+drain must have forwarded before the worker dies" scenarios.
+
 ---
 
-## 6. Reproducibility (review point 4)
+## 6. Reproducibility
 
-The pinned base `c72d27c6` predates all Stage 0 artifacts. The exact
-tree that produces the evidence is:
+The pinned base `c72d27c6` predates all Stage 0 artifacts. Exact trees:
 
-* **`0341c9b4`** — `fr_py_maybe_die_after_signal`, both publication-race
-  tests, regenerated shim artifacts, ABI pin 53/16.
-* Reproduce: `make -f Makefile.substrate python-substrate` then
-  `python3 -m unittest test_data_publication_leak` from `python/tests`
-  (expects 1 expected failure, suite OK).
-* `c72d27c6` is the **defect base** — the commit against which the bug is
-  reported, and the last commit without the Stage 0 hooks.
+* **defect base `c72d27c6`** — the commit the bug is reported against,
+  and the last commit without the Stage 0 hooks.
+* **evidence `0341c9b4`** — `fr_py_maybe_die_after_signal`, both
+  publication-race tests, regenerated shim artifacts, ABI pin 53/16.
+* **this note `2f616450`** — first design revision.
+* **design revision 2** — the commit adding this section (protocol
+  evaluation, interim-policy correction, failure-cut matrix).
+
+**All are now pushed to `origin/NEW/REFACTOR4.2`.** The previous review
+could not resolve `0341c9b4` because it was unpushed at the time; that is
+fixed, and the SHAs above are directly fetchable.
+
+Reproduce:
+
+```
+make -f Makefile.substrate python-substrate
+cd python/tests
+python3 -m unittest test_data_publication_leak   # 1 expected failure
+python3 -m unittest test_drain_publication_race  # passes
+```
 
 ---
 
-## 7. Scope guard
+## 7. Strengthened acceptance gate (review amendment 3)
+
+**S4 is demoted from invariant to performance objective.** It should be
+preserved where practical, but it must not veto a necessary
+synchronisation step if no equally safe alternative exists.
+
+**S1–S3 remain correctness requirements.** Stages may be researched in
+isolated branches in parallel, but nothing may be **integrated or
+activated** on the current publication protocol.
+
+## 8. Scope guard
 
 * The ring engine stays frozen unless a source-backed demonstration
   shows no engine-free correction exists.
