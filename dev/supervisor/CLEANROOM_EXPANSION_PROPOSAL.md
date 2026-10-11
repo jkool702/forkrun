@@ -1,12 +1,19 @@
 # Proposal — expanding cleanroom exec beyond its current envelope
 
-**Revision 2** — consensus with external review. Supersedes revision 1.
+**Revision 3** — consensus with external review, round 2. Supersedes
+revisions 1 and 2.
 
-Items **1, 2, 4, 5**, re-sequenced. Out of scope by request: item 3
-(`mode="python"` parity), item 6 (NUMA), item 7 (resume).
+Items **1, 2, 4, 5**, re-sequenced.
 
-Base SHA for this revision: **`c72d27c6`** (see §7 — the review was
-inspected against a stale tree).
+**Future work orders (not in this scope, but will be implemented):**
+item 3 (`mode="python"` parity), item 6 (NUMA), item 7 (resume). This
+document defers them to keep the immediate work order focused, NOT
+because they are cancelled. Everything below is written with that in
+mind: §5's `Auto` reaches its full default-mode meaning only once item
+3 lands, and §8 records what must be revisited when it does.
+
+Base SHA for this revision: **`c72d27c6`** (see §7 — the round-1 review
+was inspected against a stale tree).
 
 Status: **proposal**. Nothing here is implemented.
 
@@ -14,27 +21,105 @@ Status: **proposal**. Nothing here is implemented.
 
 ## 0. Consensus summary
 
-The review returned **GO WITH AMENDMENTS on the plan, NO-GO on
-implementing ordered streaming under the revision-1 boundedness design.**
+Round 1 returned **GO WITH AMENDMENTS on the plan, NO-GO on implementing
+ordered streaming under the revision-1 boundedness design.** Accepted in
+full; see §2.
 
-That is accepted in full. One claim was added on our side: the review's
-deadlock chain applies to **streaming specifically**, and that precision
-is what makes the finding decisive rather than merely cautionary — see
-§2.1.
+Round 2 accepted the revision-2 corrections and added a new finding: a
+**publication/commit race** in the output-drain protocol, reported as
+blocking. That finding was investigated first, as asked.
 
-| review point | disposition |
+**Result: the reported failure mode does not reproduce.** The window is
+real and was forced open deterministically; the exactly-once invariant
+held. Details, and the narrower question that remains open, are in §1.
+
+| round-2 point | disposition |
 |---|---|
-| §1 all four dispositions must reach the buffer; don't rewrite `_split_records` globally; gaps are a protocol failure | **accepted** — §2.2 |
-| §2 signal-pipe argument proves neither byte-boundedness nor liveness | **accepted** — §2.1, and the decline **stands** |
-| §3 ordered-stream test invariants were wrong | **accepted** — §2.3; this was my error |
-| §4 spawn is not signature-compatible; `spawn_wid` cannot be reused unchanged | **accepted** — §3.1; my "same signature" claim was wrong |
-| §5 splice measurement is circular without a prototype; exactly-once is in scope | **accepted** — §4 |
-| §6 decouple map Auto from stream ordering; `FORKRUN_CLEANROOM=1` must not acquire `required` semantics | **accepted** — §5.3 |
-| §7 strict-poison decline still present | **resolved** — §7 |
+| §1 terminal record can be published before commit → duplicate/contradictory terminal records | **investigated — not reproduced.** Window forced open; invariant holds. Residual narrower risk recorded in §1.3 |
+| §2 stage 1 needs a per-producer coverage contract | **accepted** — §2.5 |
+| §3 spawn contract must state the limit of the guarantee | **accepted, Option A** — §3.3 |
+| §4 automatic rollout needs a performance gate, not just correctness | **accepted** — §5.2 |
+| §5 dependency picture | **accepted** — §6 |
 
 ---
 
-## 1. The dependency correction stands
+## 0a. The publication/commit race — investigated, not reproduced
+
+The round-2 review raised this as a potential **pre-existing
+exactly-once weakness**, not merely a gap in the new work:
+
+> `fr_py_emit_disposition()` writes the record and signals; the drain
+> forwards and punches independently; a death in that window leaves a
+> record published that rollback cannot retract, so the retry produces a
+> second, possibly contradictory, terminal outcome for the same batch.
+
+**This was tested before anything else, as instructed.** The result:
+
+### 1.1 The window is real
+
+`fr_py_drain_loop` (`_shim.c:2357`) reads a signal, copies whole records
+to `results_fd` and punches the source memfd. It never consults the
+worker's ack. So publication genuinely precedes commit. The reviewer is
+right about the mechanism.
+
+The existing tests cannot see it, and that part of the review is also
+right: `FORKRUN_TEST_DIE_BEFORE_ACK` fires immediately after the signal,
+so whether the drain has forwarded yet is a scheduler race. When the
+worker usually wins, the record is still in the memfd, the rollback is
+clean, and the test passes — **for the wrong reason**.
+
+### 1.2 Forcing the window open
+
+`FORKRUN_TEST_DIE_AFTER_DRAIN_MS` (added in this revision, inert unless
+set) delays the kill after the signal so the drain provably forwards
+first. Verified by observation, not assumed: the probe
+(`python/tests/test_drain_publication_race.py` plus a byte-level dump)
+watches the results fd **while the launcher is still running** and sees
+24 bytes — exactly one record — already published downstream mid-run.
+
+With that window genuinely open, over 5 batches × repeated death:
+
+* **5 records for 5 batches — no duplicates.**
+* **Exactly one terminal outcome per batch — no contradictions.**
+* **Stream fully consumed, zero tail** (120 bytes = 5 × 24-byte
+  `POISONED` records; the `<QQII` header is 24 bytes, not 16).
+* An unfaulted control through the same drain yields 5 clean `DATA`
+  records (175 bytes, zero tail).
+
+So the invariant the existing exactly-once tests claim **does hold under
+the forced window**. The specific failure mode is not present.
+
+### 1.3 What remains open — narrower, and honestly uncharacterised
+
+I have **not** produced a full mechanistic proof of *why* it holds. The
+most likely mechanism is that the drain's per-worker cursor
+`offsets[wid]` (`_shim.c:2400,2519`) is monotonic and never rewound, so
+a retry that rewrites the same byte range after rollback produces no
+new forwarded bytes. That is consistent with the observation, but I did
+not verify it end to end.
+
+One genuinely untested case remains, and it is the one worth closing
+before dispositions are treated as an authoritative ordered protocol:
+
+> **If a retry produces a record of a DIFFERENT SIZE than the attempt
+> already forwarded** — e.g. attempt 1 forwarded `DATA` (24+len bytes)
+> and the retry ends `POISONED` (24 bytes, zero payload) — then the
+> committed outcome and the published outcome may disagree. Not a
+> duplicate, but an ordered consumer could advance a batch on a `DATA`
+> the transaction later poisoned.
+
+The current producer paths emit exactly one record per batch
+(`fr_py_complete` with `data == NULL` emits nothing), so this did not
+trigger here. It is a **Stage-1 test obligation**, not a known bug, and
+it must not be silently assumed away by anyone reading §1.2 as "the
+protocol is proven".
+
+**Definition of done for this item:** a documented mechanism (or an
+engine-free protocol change) plus a test that forces the differing-size
+retry. Until then, dispositions are "observed correct under forced
+window", not "proven consistent with the commit point".
+
+---
 
 `order="index"` is **already served** for `map()`: oracle R4 admits it
 and `test_order_index_takes_cleanroom_and_matches_in_process` proves the
@@ -156,6 +241,30 @@ If neither holds, the decline is the correct permanent answer. A soft
 warning is not an enforced cap, and dropping a result to honour a memory
 threshold would be worse than not shipping the feature.
 
+### 2.5 Producer-coverage contract (round-2 §2)
+
+Adding a terminal-aware parser does **not** give every producer a
+complete terminal history. The guarantee must be stated per producer,
+not merely per consumer implementation:
+
+* Audit every record reader that feeds ordered streaming:
+  `_drain_records()`, `_make_results_pump()`, the cleanroom stream
+  parser, and `_cleanroom_collect`.
+* For each producer mode, record which of `DATA` / `NO_RESULT` /
+  `SKIPPED` / `POISONED` are **guaranteed** to be emitted. The ordinary
+  Python worker path acknowledges poisoned batches silently, and
+  `on_error="skip"` acknowledges without a `SKIPPED` record in some
+  paths; the C loops differ again.
+* Where a producer cannot distinguish "legitimately produced no output"
+  from "record missing", the unresolved-gap-is-a-protocol-error rule
+  **must not** be applied to it. Legacy paths keep today's finalisation
+  behaviour until their protocol is explicitly upgraded.
+
+Stage 1's acceptance is therefore per-protocol, not global: *all four
+dispositions advance the contiguous prefix, only `DATA` yields, and a
+genuine `b""` is `DATA` — never conflated with `NO_RESULT`* — for the
+protocols that actually provide them.
+
 ---
 
 ## 3. Spawn in the launcher (`item 4`) — design corrected
@@ -189,16 +298,33 @@ mismatch.
 * Validate the command vector and its limits **before** launching the
   cleanroom or reading any source bytes.
 
-### 3.3 Process ownership — the real risk
+### 3.3 Process ownership — Option A (managed process group)
 
-A SIGKILLed spawn worker orphans its child. Process-group signalling is
-necessary but **not sufficient**: the launcher has no `waitpid()`
-ownership of grandchildren, so a subreaper arrangement or an explicit
-reaping design may be required. Scope the guarantee explicitly — including
-what happens to a command that deliberately detaches into its own session.
+Round 2 asked for the guarantee's limit to be stated rather than
+implied. **Option A is selected**, and the reviewer is right that it is
+the honest, smaller contract:
 
-Cover: worker death mid-batch, recovery and respawn, fail-fast abort, and
-**launcher teardown/parent abandonment** — not just the normal path.
+> Cleanup is guaranteed for the command and for descendants that remain
+> in the **managed process group** of the worker generation that owns
+> them. A descendant that deliberately daemonises, calls `setsid`, or
+> otherwise escapes into its own session or process group is **outside
+> the guarantee**.
+
+Rationale: a subreaper adopts orphans and makes them waitable, but does
+not guarantee they are *killed*, and no amount of group signalling
+reaches a process that has left the group. Promising universal
+descendant cleanup would require an external supervisor — a materially
+larger commitment than the accidental-orphan case item 4 actually
+addresses.
+
+The boundary is **tested, not implied**: one test with a child that
+stays in the group (must be gone by PID) and one that `setsid`s away
+(must be *documented* as surviving, so a future regression that starts
+killing it, or loses it silently, is visible).
+
+Covered events for in-group cleanup: worker death mid-batch, recovery
+and respawn, fail-fast abort, and launcher teardown / parent
+abandonment.
 
 **Definition of done:** a known long-lived child is gone by PID after each
 of those four events; infrastructure failure still reaches `on_error` and
@@ -266,6 +392,27 @@ Revision 1 tied Stage B to item 5. That was wrong:
   implemented and tested. Do not imply streaming spawn if only
   materialized `map()` was integrated.
 
+### 5.2 Evidence gate: correctness **and** performance
+
+Byte-identity against the in-process path is necessary but not
+sufficient to justify making the cleanroom automatic. Each envelope
+needs both:
+
+* **Plugin Auto** — may reuse existing cleanroom benchmark evidence,
+  provided it corresponds to the pinned release candidate and the exact
+  served envelope. Re-measure if either moves.
+* **UDF Auto** — needs its own correctness *and* performance evidence
+  for **every CPython minor** proposed as verified. A minor is not
+  enabled merely because the generic launcher works on it.
+* **What to measure** — the user-visible path: startup, end-to-end wall
+  time, and representative parent RSS/workload sizes. **Regressions are
+  reported, not just wins.**
+
+Existing measurements may satisfy this; the point is that the gate must
+say what counts as adequate evidence rather than naming byte-identity as
+the sole criterion. A new benchmark campaign is only required where
+adequate evidence does not already exist.
+
 ### 5.3 Backward compatibility
 
 `FORKRUN_CLEANROOM=1` must **not** silently acquire `required`
@@ -318,6 +465,25 @@ launcher-entry test are both present.
 * **Non-representable callables** — a closure cannot cross `exec`. Belongs
   to item 3's contract, but `Auto` must reject **before input is
   consumed**.
+* **Differing-size retry** — the untested case in §1.3. A Stage-1 test
+  obligation.
+
+## 8a. Deferred to future work orders — explicitly still wanted
+
+These are out of scope for *this* work order, not cancelled:
+
+* **Item 3 — `mode="python"` parity.** The largest remaining capability
+  gap, and the one that makes `Auto` meaningful for the *default* path.
+  When it lands, revisit §5: the policy surface, the representable-
+  callable rejection rule, and the default-mode claims all change.
+* **Item 6 — NUMA.** A socket-topology claim that needs hardware this
+  environment does not have. The decline stays correct until measured.
+* **Item 7 — resume.** Recovery is currently per-run; durable resume
+  needs its own transaction model.
+
+Ordering consequences for the present work: `Auto` must not *claim*
+default-mode coverage it does not have (§5), and `stream(order="index")`
+must not become load-bearing for anything the other two depend on (§2).
 
 ## 9. Not established by this proposal
 

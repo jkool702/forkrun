@@ -607,7 +607,14 @@ static int fr_py_signal_write(int signal_fd, uint64_t wid,
  * supervision: a respawned generation starts over, so each generation
  * supplies exactly one more death to survive, rather than every worker
  * dying on its first action forever until the respawn cap aborts the
- * run. Inert unless the variable is set. */
+ * run. Inert unless the variable is set.
+ *
+ * FORKRUN_TEST_DIE_AFTER_DRAIN_MS=ms widens that same window: sleep ms
+ * after the record is signalled but before raising, so the drain has
+ * demonstrably forwarded the record downstream BEFORE the worker dies.
+ * Without it, whether the drain got there first is a scheduler race, so
+ * a passing test proves less than it appears to -- the uncommitted record
+ * can only be rolled back if it is still in the worker's memfd. */
 static void fr_py_maybe_die_before_ack(void)
 {
     const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_ACK");
@@ -615,8 +622,15 @@ static void fr_py_maybe_die_before_ack(void)
         static unsigned seq = 0;
         unsigned want = (unsigned)atoi(n);
         seq++;
-        if (want && seq == want)
+        if (want && seq == want) {
+            const char *d = getenv("FORKRUN_TEST_DIE_AFTER_DRAIN_MS");
+            if (d != NULL && *d) {
+                unsigned long ms = strtoul(d, NULL, 10);
+                if (ms)
+                    usleep((useconds_t)(ms * 1000));
+            }
             raise(SIGKILL);
+        }
     }
 }
 
