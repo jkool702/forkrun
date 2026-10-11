@@ -292,3 +292,80 @@ scenarios remain unverified, and the 3.10–3.15 matrix stays deferred.
 Still **OPEN**, unchanged: no `fr_py_worker_udf_loop`, no launcher
 integration, no parity tests across the existing loops. Those remain
 conditions, not partial credit.
+
+---
+
+## 12. P1-3 implementation status (in progress)
+
+### 12.1 Landed
+
+**The fifth loop** (`_shim.c`):
+- `fr_py_worker_udf_loop` — same lifecycle as the other four modes,
+  reusing `fr_py_claim` / `fr_py_complete` / `fr_py_escrow_deposit` /
+  `fr_py_abort`. No new retry, ack, or poison policy.
+- `fr_py_udf_invoke` — the invoke body: batch window → `fr_udf_call` →
+  framed result.
+- `fr_py_emit_record_buf` — frames an **in-memory** payload with an
+  **explicit** disposition. Required because `fr_py_emit_record` takes
+  its payload from an fd *and* infers NO_RESULT from `src_len == 0`;
+  using it here would have collapsed `None` and `b""` — the exact
+  conflation DECISION-02 exists to remove, reintroduced through the
+  back door of a helper nobody had looked at.
+- `fr_py_udf_bind` — the launcher hands over `fr_udf_call`/`fr_udf_free`
+  so the shim never links libpython.
+
+Its signature is **identical** to `fr_py_worker_plugin_loop`, with
+`path`/`func_name` reinterpreted as `module`/`attr`. `spawn_wid` needed
+no new parameter, and the respawn path is untouched.
+
+**The launcher** (`forkrun_cleanroom.c`):
+- `--udf-helper`, `--udf`, `--udf-attr`, `--udf-roots`.
+- `setup_udf_helper()` — disposable-subprocess probe, then dlopen, then
+  `fr_udf_init` **before any fork**, then bind.
+- `fr_fork()` — the single fork site. All six launcher forks route
+  through it, so no individual call site can forget the choreography.
+- The plugin probe is skipped in UDF mode (it tests the C plugin ABI,
+  which a UDF has no concept of).
+
+### 12.2 The guard the launcher needed, and did not have before
+
+CR-FIX1-F documents the launcher dying with **SIGSEGV** during the first
+worker fork because `dlopen` runs ELF constructors and one started a
+thread — which breaks the single-threaded-fork precondition that the
+entire pre-fork design rests on.
+
+So loading the helper is guarded twice: a disposable probe subprocess
+first, and then, **after loading for real, the launcher reads its own
+thread count from `/proc/self/status` and refuses to continue unless it
+is exactly 1.** An unreadable count is treated as unsafe, not safe.
+
+This is the one place where loading the helper could have quietly broken
+the property the whole design depends on.
+
+### 12.3 NOT yet verified — stated plainly
+
+**The UDF path has not been run end-to-end.** The loop, the launcher
+wiring and all the guards are written; the suite is green; but no run has
+taken a batch through `fr_py_worker_udf_loop` and produced a result.
+
+The blocker is not the code but the harness: invoking the launcher by
+hand does not reproduce the descriptor setup `run.py` performs (result
+fd flags, `pass_fds`, stats memfd), and a hand-rolled invocation failed
+on the *plugin* path too — at HEAD, before any of this — which is how it
+was confirmed to be a harness problem rather than a regression.
+
+So the next step is wiring UDF mode into `run.py` and testing through
+the real path, rather than continuing to fight a synthetic one.
+
+**Parity tests (the reviewer's standing condition) are still unwritten**,
+because a loop that has never executed cannot be parity-tested against
+anything.
+
+### 12.4 Verified so far
+
+* Full suite: 840 passing, 7 skipped, 1 known failure (tag v3.6.1).
+* No regression in any existing mode (cleanroom 75/75).
+* ABI surface 50→52 extern, 11→13 static — additive only, justified in
+  `test_shim_abi.py`.
+* Refusals fire and are clean: `--udf` without `--udf-helper`, an
+  unloadable helper, and `--plugin` with `--udf` together.

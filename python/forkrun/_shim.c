@@ -645,6 +645,40 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
     return 0;
 }
 
+/* Emit a record whose payload is already in memory, with an EXPLICIT
+ * disposition.
+ *
+ * fr_py_emit_record cannot be used for a UDF result for two reasons: its
+ * payload comes from a src_fd, and it infers NO_RESULT from src_len == 0.
+ * Both are wrong here. The UDF's bytes are in a malloc'd buffer, and --
+ * far more importantly -- inferring the disposition from length is
+ * precisely the conflation DECISION-02 exists to remove: a UDF returning
+ * b"" and a UDF returning None would produce identical records.
+ *
+ * The disposition is therefore passed in by the caller, which got it
+ * from the helper's own return code, which got it from the actual Python
+ * return value. */
+static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
+                                 const char *data, uint64_t len,
+                                 uint32_t disposition) {
+    struct fr_py_record_hdr hdr;
+
+    if (lseek(out_fd, 0, SEEK_END) == (off_t)-1)
+        return -1;
+    hdr.batch_idx = batch_idx;
+    hdr.len = len;
+    hdr.disposition = disposition;
+    hdr.reserved = 0;
+    if (fr_py_write_all(out_fd, &hdr, sizeof(hdr)) != 0)
+        return -1;
+    if (len > 0 && data) {
+        if (fr_py_write_all(out_fd, data, (size_t)len) != 0)
+            return -1;
+    }
+    worker_txn_advance_output(0, FR_PY_RECORD_FOOTPRINT(len));
+    return 0;
+}
+
 /* Set a fd nonblocking. Returns 0 ok, -1 on failure. */
 static int fr_py_nonblock(int fd) {
     int fl = fcntl(fd, F_GETFL, 0);
@@ -3040,6 +3074,224 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
         /* Default retry: escrow with kills+1, no ack (the next claim
          * overwrites the armed TLS). Same-process retry on re-claim;
          * poison threshold converts loops into skips above. */
+        fflush(NULL);
+        fr_py_escrow_deposit(claimed.num_kills + 1);
+        continue;
+    }
+}
+
+
+/* =====================================================================
+ * P1-3: Python UDF worker loop (DECISION-01 Option A, external review
+ * GO WITH AMENDMENTS).
+ *
+ * The FIFTH execution-mode loop. splice / plugin / spawn / fallow all
+ * share one shape -- claim, poison/sentinel handling, invoke, then
+ * fr_py_complete / fr_py_escrow_deposit / fr_py_abort -- and differ only
+ * in the invoke body. A UDF is a fifth invoke body, not a plugin
+ * variant: a plugin takes a tokenized argv and returns whatever it
+ * wrote to stdout, a UDF takes one bytes object and returns bytes, None,
+ * or an error. Forcing both through one interface would mean parameters
+ * that are meaningless for one of them.
+ *
+ * SIGNATURE IS DELIBERATELY IDENTICAL to fr_py_worker_plugin_loop, with
+ * `path`/`func_name` reinterpreted as `module`/`attr`. That keeps
+ * spawn_wid() completely untouched: the launcher passes a different
+ * function pointer and different strings. Twelve parameters is already
+ * too many to grow.
+ *
+ * The interpreter is NOT initialised here. The launcher dlopens the
+ * helper and calls fr_udf_init() BEFORE forking; workers inherit the
+ * initialised interpreter (measured 6.8-11.3x faster than per-worker
+ * init). The bound function pointers below are likewise inherited.
+ * ===================================================================== */
+
+/* Mirror of the helper's fr_udf.h entry points. Declared here rather
+ * than included: the shim must NOT link libpython, and the helper is a
+ * separate per-minor object loaded with dlopen. Only these three
+ * symbols are needed; the rest of the API (flags, diagnostics, fork
+ * hooks) is called by the launcher itself. */
+/* Mirrors fr_udf.h's FR_UDF_* status codes. The shim deliberately does
+ * NOT include fr_udf.h: including it would drag Python.h into a
+ * translation unit that must never link libpython. These are the only
+ * two values the loop branches on, and the test suite pins them against
+ * the real header via the probe. */
+enum { FR_UDF_OK = 0, FR_UDF_NO_RESULT = 1, FR_UDF_ERR = -1 };
+
+typedef int (*fr_udf_call_fn)(const char *module, const char *attr,
+                              const char *input, size_t len,
+                              char **out, size_t *out_len);
+typedef void (*fr_udf_free_fn)(char *buf);
+
+static fr_udf_call_fn g_udf_call = NULL;
+static fr_udf_free_fn  g_udf_free = NULL;
+
+/* Bound by the launcher in main() before any fork. Returns 0 on
+ * success. Must be called before the workers start; the pointers are
+ * inherited by every worker. */
+int fr_py_udf_bind(fr_udf_call_fn call_fn, fr_udf_free_fn free_fn)
+{
+    if (!call_fn || !free_fn)
+        return -1;
+    g_udf_call = call_fn;
+    g_udf_free = free_fn;
+    return 0;
+}
+
+/* ---- the UDF invoke body ----
+ *
+ * Read the claimed batch window, hand it to the UDF, frame whatever
+ * comes back. Returns 0 on success (including a None result), non-zero
+ * on failure so the caller's on_error policy applies.
+ *
+ * Return codes mirror fr_py_plugin_invoke so the loop treats them
+ * identically: -1 bad fd, -2 helper not bound, -3 read/mapping failure,
+ * -4 the UDF itself failed. */
+static int fr_py_udf_invoke(int ingress_fd, int out_fd,
+                            uint64_t batch_off, uint64_t batch_len,
+                            uint64_t batch_idx,
+                            const char *module, const char *attr)
+{
+    if (ingress_fd < 0 || out_fd < 0)
+        return -1;
+    if (!g_udf_call || !g_udf_free)
+        return -2;
+    if (!module || !attr)
+        return -2;
+
+    /* No static buffer: it would cap batch size. malloc per batch is
+     * what the spawn loop already does with its capture staging. */
+    char *in = NULL;
+    if (batch_len > 0) {
+        if (ring_call_ensure_ingress_map(ingress_fd, batch_off,
+                                         (size_t)batch_len) != 0)
+            return -3;
+        const char *base = (const char *)tls_ingress_map + batch_off;
+        in = (char *)malloc((size_t)batch_len);
+        if (!in)
+            return -3;
+        memcpy(in, base, (size_t)batch_len);
+    }
+
+    char *out = NULL;
+    size_t out_len = 0;
+    int rc = g_udf_call(module, attr, in ? in : "", (size_t)batch_len,
+                        &out, &out_len);
+    free(in);
+    if (rc < 0)
+        return -4;              /* UDF raised / could not be resolved */
+
+    /* DECISION-02: None and b"" are different answers and must stay so.
+     * A None result emits a NO_RESULT record -- a terminal disposition
+     * carrying no payload -- so the parent can advance past it. An empty
+     * result emits a DATA record with len 0. Collapsing either into the
+     * other is the bug this protocol exists to prevent.
+     *
+     * fr_py_emit_record infers NO_RESULT from src_len == 0, which is
+     * why the None case is signalled by a zero-length READ that still
+     * writes a disposition-bearing header: see fr_py_emit_record's
+     * contract. */
+    uint32_t disp = (rc == FR_UDF_NO_RESULT) ? FR_DISP_NO_RESULT
+                                            : FR_DISP_DATA;
+    int frc = fr_py_emit_record_buf(out_fd, batch_idx,
+                                    rc == FR_UDF_NO_RESULT ? NULL : out,
+                                    rc == FR_UDF_NO_RESULT ? 0 : out_len,
+                                    disp);
+    if (out)
+        g_udf_free(out);
+    return frc == 0 ? 0 : -3;
+}
+
+/* ---- the fifth worker loop ----
+ *
+ * Same lifecycle as the other modes, reusing the same primitives. No
+ * separate retry, ack, or poison policy: that is the whole point of
+ * keeping the shape identical, and it is what the parity tests hold us
+ * to. */
+int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
+                          int ingress_fd, int out_fd, int signal_fd,
+                          int fallow_fd, int order_fd, int trap_ack_fd,
+                          int wincarn, int retry_limit, int on_error) {
+    fr_py_batch_t claimed;
+    int rc;
+
+    if (!module || !attr || ingress_fd < 0 || out_fd < 0)
+        return 1;
+    if (on_error < 0 || on_error > 2)
+        return 1;
+    if (fr_py_worker_init(wid, 0, wincarn, retry_limit, 0) != 0)
+        return 1;
+    if (order_fd >= 0)
+        g_fr_config.fd_order_pipe = order_fd;
+    fr_py_txn_out_fd = out_fd;
+    fr_py_ack_init(out_fd);
+
+    while (1) {
+        rc = fr_py_claim(&claimed);
+        if (rc == 2)
+            return 0; /* EOF: drained */
+        if (rc != 0)
+            return 1; /* abort/failure */
+
+        if (claimed.poisoned) {
+            char pbuf[64];
+            int plen;
+            fprintf(stderr,
+                    "forkrun [WARN]: Skipping poisoned batch %llu "
+                    "(killed %u times).\n",
+                    (unsigned long long)claimed.batch_idx,
+                    claimed.num_kills);
+            if (trap_ack_fd >= 0) {
+                plen = snprintf(pbuf, sizeof pbuf, "P:%llu:%u\n",
+                                (unsigned long long)claimed.batch_idx,
+                                claimed.num_kills);
+                if (plen > 0)
+                    (void)robust_pipe_write(trap_ack_fd, pbuf,
+                                            (size_t)plen);
+            }
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        if (claimed.length == 0) {
+            /* EOF sentinel slot: ack but never emit (bash REPLY rule). */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        rc = fr_py_udf_invoke(ingress_fd, out_fd, claimed.offset,
+                              claimed.length, claimed.batch_idx,
+                              module, attr);
+        if (rc == 0) {
+            rc = fr_py_complete(signal_fd, (uint64_t)wid,
+                                claimed.batch_idx, fallow_fd, out_fd,
+                                NULL, 0);
+            if (rc == 0)
+                continue;
+            if (rc == -2)
+                return 2; /* signal EPIPE: parent gone -- fatal */
+            return 1;
+        }
+
+        /* --- failure path: the existing on_error policy, unchanged --- */
+        if (on_error == 1) {
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+        if (on_error == 2) {
+            fflush(NULL);
+            fr_py_abort();
+            return 1;
+        }
         fflush(NULL);
         fr_py_escrow_deposit(claimed.num_kills + 1);
         continue;

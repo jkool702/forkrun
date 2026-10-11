@@ -326,6 +326,21 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # P1-3: UDF helper entry points, bound by the launcher pre-fork.
+        # The C types mirror fr_udf.h exactly; see test_shim_abi, which
+        # checks arity against the generated signature table.
+        lib.fr_py_udf_bind.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p]
+        lib.fr_py_udf_bind.restype = ctypes.c_int
+        lib.fr_py_worker_udf_loop.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int]
+        lib.fr_py_worker_udf_loop.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
         # W-PY21-B: C descriptor parsing (map() collect path).
         lib.fr_py_parse_descriptors.argtypes = [
             ctypes.c_char_p, ctypes.c_uint64,

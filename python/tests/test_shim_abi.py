@@ -164,7 +164,25 @@ class TestShimBindings(unittest.TestCase):
                     if v["linkage"] == "extern")
         n_st = sum(1 for v in table.values()
                    if v["linkage"] == "static")
-        self.assertEqual((n_ext, n_st), (50, 11),
+        # 50->52 extern, 11->13 static (P1-3, 2026-10-11):
+        #   extern  fr_py_udf_bind        launcher binds the helper's
+        #                                 fr_udf_call/fr_udf_free so the
+        #                                 shim never links libpython.
+        #   extern  fr_py_worker_udf_loop the fifth execution-mode loop.
+        #                                 Same signature as the plugin
+        #                                 loop, so spawn_wid is unchanged.
+        #   static  fr_py_emit_record_buf frames an in-memory payload with
+        #                                 an EXPLICIT disposition. Needed
+        #                                 because fr_py_emit_record infers
+        #                                 NO_RESULT from src_len == 0,
+        #                                 which would collapse None and
+        #                                 b"" -- the exact conflation
+        #                                 DECISION-02 removes.
+        #   static  fr_py_udf_invoke     the UDF invoke body.
+        # Behavior delta: additive only. No existing symbol changed
+        # arity, signature or semantics; the plugin/splice/spawn/fallow
+        # loops are untouched.
+        self.assertEqual((n_ext, n_st), (52, 13),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

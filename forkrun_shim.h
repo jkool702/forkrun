@@ -8,8 +8,8 @@
  *
  * Scope: declarations, argument types, return types only.
  * No semantic contracts (see test_invariant_gate.py §3/§6/§9).
- * Extern entries are the dlsym-visible ABI surface (50);
- * static entries are internal (11, listed with linkage in
+ * Extern entries are the dlsym-visible ABI surface (52);
+ * static entries are internal (13, listed with linkage in
  * shim_signatures.json, omitted here).
  *
  * Header hygiene (substrate rules): self-contained (no includes
@@ -73,11 +73,13 @@ int fr_py_set_order_pipe(int fd);
 int fr_py_set_output_fd(int fd);
 int fr_py_set_resume_state(uint64_t horizon, uint64_t stdout_bytes, const struct FrPyInterval *jagged, uint32_t jagged_count);
 int64_t fr_py_spill_sequential(int src_fd, int dst_fd, uint64_t max_bytes);
+int fr_py_udf_bind(fr_udf_call_fn call_fn, fr_udf_free_fn free_fn);
 void fr_py_unmap(uint64_t addr, uint64_t length);
 const char * fr_py_version(void);
 int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit, int debug);
 int fr_py_worker_plugin_loop(int wid, const char *path, const char *func_name, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error);
 int fr_py_worker_spawn_loop(int wid, char **argv, int argc, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error);
 int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd, int signal_fd, int fallow_fd);
+int fr_py_worker_udf_loop(int wid, const char *module, const char *attr, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error);
 
 #endif /* FORKRUN_SHIM_H */

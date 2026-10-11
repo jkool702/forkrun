@@ -81,6 +81,10 @@ struct opts {
     const char *so_path;
     const char *plugin_path;
     const char *plugin_func;
+    const char *udf_helper;   /* per-minor _fr_udf*.so (P1-3) */
+    const char *udf_module;
+    const char *udf_attr;
+    const char *udf_roots;    /* space-separated, from the interpreter */
     int workers;
     int lines;
     int bytes;
@@ -411,11 +415,240 @@ static int death_cause(int status) {
  * which keeps the wid -> out_fd -> ring binding stable across
  * generations. Takes the pointer the parent already resolved: dlopen
  * after fork is a classic post-fork hazard. */
+
+/* =====================================================================
+ * P1-3: UDF helper lifecycle -- loaded and INITIALISED BEFORE any fork.
+ *
+ * The launcher is the only process that may hold the interpreter: the
+ * helper cannot be loaded into a process that already runs Python, and
+ * the Python parent is out of scope by construction (the launcher is
+ * exec'd). Workers inherit the initialised interpreter by fork, which
+ * measures 6.8-11.3x faster than initialising per worker on CPython
+ * 3.14.7 with a single-threaded launcher.
+ *
+ * That last clause is the whole safety argument, and the launcher can
+ * BREAK it: dlopen() runs the object's ELF constructors, and a
+ * constructor that starts a thread makes every subsequent fork()
+ * multi-threaded. That is not hypothetical -- CR-FIX1-F documents the
+ * launcher dying with SIGSEGV during the first worker fork because of
+ * exactly this, in the plugin path.
+ *
+ * So loading the helper is guarded twice:
+ *   1. a disposable probe subprocess dlopens it first, exactly as the
+ *      plugin path does, so a constructor that crashes or hangs does not
+ *      take the launcher down;
+ *   2. AFTER loading for real, the launcher reads its own thread count
+ *      and REFUSES to continue if it is no longer single-threaded.
+ *      A pre-fork interpreter initialised from a multi-threaded parent
+ *      is the exact state the cleanroom exists to prevent, so we fail
+ *      closed rather than hope.
+ * ===================================================================== */
+
+static void *g_udf_handle = NULL;
+static int   g_udf_ready  = 0;
+static void *g_so_handle  = NULL;   /* substrate, for fr_py_udf_bind */
+
+/* Bound helper entry points, resolved once before any fork. */
+typedef int  (*fn_udf_init)(const char *const *, int);
+typedef int  (*fn_udf_before_fork)(void);
+typedef int  (*fn_udf_after_fork_parent)(void);
+typedef int  (*fn_udf_after_fork_child)(void);
+typedef int  (*fn_udf_hooks_avail)(void);
+typedef int  (*fn_udf_bind)(void *, void *);
+
+static fn_udf_before_fork       g_before_fork = NULL;
+static fn_udf_after_fork_parent g_after_parent = NULL;
+static fn_udf_after_fork_child  g_after_child  = NULL;
+
+/* How many threads does THIS process have? Read from /proc/self/status
+ * because there is no portable alternative, and fail closed if it cannot
+ * be read -- an unknown thread count is not evidence of a safe one. */
+static int self_thread_count(void)
+{
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    char line[256];
+    int n = -1;
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "Threads:", 8) == 0) {
+            n = atoi(line + 8);
+            break;
+        }
+    }
+    fclose(f);
+    return n;
+}
+
+/* THE fork site. Every fork in this launcher goes through here.
+ *
+ * Once the interpreter is up, a fork must be choreographed or the child
+ * can deadlock on internal locks when it calls back into Python. Keeping
+ * this in one function is the point: the external review was explicit
+ * that an individual call site must not be able to forget, and there are
+ * seven fork sites here.
+ *
+ * The parent hook runs on the FAILURE path too -- PyOS_BeforeFork()
+ * already took locks that must be released.
+ *
+ * Before the interpreter exists this is a plain fork(), which is what
+ * every non-UDF run does. */
+static pid_t fr_fork(void)
+{
+    if (!g_udf_ready)
+        return fork();
+
+    if (g_before_fork && g_before_fork() != 0)
+        return -1;                  /* fail closed, do not fork */
+    pid_t p = fork();
+    if (p == 0) {
+        /* CHILD. Must run before any Python call here, and must NOT be
+         * paired with the parent hook -- running the parent hook in the
+         * child unlocks a mutex the child hook owns, and CPython aborts
+         * with "PyMutex_Unlock: unlocking mutex that is not locked". */
+        if (g_after_child) g_after_child();
+        return 0;
+    }
+    if (g_after_parent) g_after_parent();   /* parent only, incl. p < 0 */
+    return p;
+}
+
 /* Stats fd the workers append poisoned batch indices to. Set once in
  * main() before any fork so it is inherited; -1 disables the relay. Read
  * inside spawn_wid to keep it out of that signature, which already has
  * twelve parameters. */
 static int g_poison_stats_fd = -1;
+
+
+/* Load, bind and INITIALISE the UDF helper. Must run before any fork.
+ *
+ * Returns 0 on success. On failure returns non-zero and the caller
+ * treats the cleanroom as unavailable for this call -- run.py warns and
+ * falls back to the in-process path, which is slower and CORRECT. Fast
+ * and empty is the failure mode this avoids.
+ *
+ * Roots: derived from the INTERPRETER's own site configuration by
+ * run.py and handed to us on stdin-free argv. site_import is 0 for
+ * isolation, which drops EVERY site root including the system one, so a
+ * UDF whose dependency chain spans roots (adjustText -> numpy -> a third
+ * root) needs all of them passed explicitly. Never hardcoded here. */
+static int setup_udf_helper(const char *helper_path, const char *roots_spec)
+{
+    void *hu;
+    fn_udf_init init_fn;
+    fn_udf_hooks_avail hooks_avail;
+    fn_udf_bind bind_fn;
+    void *call_fn, *free_fn;
+
+    if (!helper_path || !*helper_path)
+        return -1;
+
+    /* (1) Disposable probe first, mirroring the plugin path: dlopen
+     * runs ELF constructors, and a constructor that crashes or hangs
+     * must not take the launcher with it. */
+    {
+        int pp[2];
+        if (pipe(pp) != 0)
+            return -1;
+        pid_t probe = fr_fork();
+        if (probe < 0) { close(pp[0]); close(pp[1]); return -1; }
+        if (probe == 0) {
+            close(pp[0]);
+            void *ph = dlopen(helper_path, RTLD_NOW | RTLD_LOCAL);
+            char ok = ph ? 1 : 0;
+            ssize_t w = write(pp[1], &ok, 1);
+            (void)w;
+            close(pp[1]);
+            _exit(0);
+        }
+        close(pp[1]);
+        char ok = 0;
+        ssize_t got = read(pp[0], &ok, 1);
+        close(pp[0]);
+        int wst = 0;
+        waitpid(probe, &wst, 0);
+        if (got != 1 || !ok) {
+            fprintf(stderr, "forkrun-cleanroom: UDF helper probe failed "
+                            "(%s)\n", helper_path);
+            return -1;
+        }
+    }
+
+    /* (2) Load for real. */
+    hu = dlopen(helper_path, RTLD_NOW | RTLD_LOCAL);
+    if (!hu) {
+        fprintf(stderr, "forkrun-cleanroom: dlopen UDF helper: %s\n",
+                dlerror());
+        return -1;
+    }
+
+    /* (3) THE GUARD. dlopen just ran this library's ELF constructors,
+     * which may have started a thread. If this process is no longer
+     * single-threaded, the pre-fork initialisation below would create an
+     * interpreter in exactly the state the cleanroom exists to prevent.
+     * Fail closed: an unreadable thread count is not a safe one. */
+    int nthreads = self_thread_count();
+    if (nthreads != 1) {
+        fprintf(stderr, "forkrun-cleanroom: refusing UDF mode -- this "
+                        "process has %s%d thread(s) after loading the "
+                        "helper; pre-fork interpreter init requires "
+                        "exactly 1.\n",
+                nthreads < 0 ? "an unknown number of " : "", 
+                nthreads < 0 ? 0 : nthreads);
+        return -1;
+    }
+
+    init_fn     = (fn_udf_init)      sym(hu, "fr_udf_init");
+    hooks_avail = (fn_udf_hooks_avail) sym(hu, "fr_udf_fork_hooks_available");
+    call_fn     = sym(hu, "fr_udf_call");
+    free_fn     = sym(hu, "fr_udf_free");
+    g_before_fork = (fn_udf_before_fork) sym(hu, "fr_udf_before_fork");
+    g_after_parent = (fn_udf_after_fork_parent) sym(hu, "fr_udf_after_fork_parent");
+    g_after_child  = (fn_udf_after_fork_child)  sym(hu, "fr_udf_after_fork_child");
+    if (!init_fn || !call_fn || !free_fn || !hooks_avail) {
+        fprintf(stderr, "forkrun-cleanroom: UDF helper is missing required "
+                        "symbols\n");
+        return -1;
+    }
+    if (!hooks_avail()) {
+        fprintf(stderr, "forkrun-cleanroom: this CPython has no fork hooks "
+                        "(HAVE_FORK); refusing pre-fork interpreter init\n");
+        return -1;
+    }
+
+    /* (4) Initialise, in the launcher, before any fork. Roots come from
+     * the interpreter's own site configuration (space-separated). */
+    const char *roots[16];
+    int nroots = 0;
+    if (roots_spec && *roots_spec) {
+        char buf[4096];
+        snprintf(buf, sizeof buf, "%s", roots_spec);
+        for (char *tok = strtok(buf, " "); tok && nroots < 16;
+             tok = strtok(NULL, " "))
+            if (*tok) roots[nroots++] = tok;
+    }
+    if (init_fn(roots, nroots) != 0) {
+        const char *msg = (const char *)sym(hu, "fr_udf_last_error");
+        fprintf(stderr, "forkrun-cleanroom: fr_udf_init failed: %s\n",
+                msg ? msg : "(no detail)");
+        return -1;
+    }
+
+    /* (5) Hand the loop its two entry points. The shim must not link
+     * libpython, so it cannot resolve these itself; binding here means
+     * both the pointers and the initialised interpreter are inherited by
+     * every worker through plain fork. */
+    bind_fn = (fn_udf_bind) sym(g_so_handle, "fr_py_udf_bind");
+    if (!bind_fn || bind_fn(call_fn, free_fn) != 0) {
+        fprintf(stderr, "forkrun-cleanroom: fr_py_udf_bind failed\n");
+        return -1;
+    }
+
+    g_udf_handle = hu;
+    g_udf_ready  = 1;
+    return 0;
+}
+
+
 
 static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
                        int fall_w, fn_worker_plugin_loop wloop,
@@ -425,7 +658,7 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
                        int wincarn) {
     fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FORK_REQUEST,
                   (int32_t)wid, (int32_t)wincarn, 0, 0);
-    pid_t p = fork();
+    pid_t p = fr_fork();
     if (p < 0)
         return -1;
     if (p == 0) {
@@ -580,6 +813,10 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--so") && i + 1 < argc)        o.so_path = argv[++i];
         else if (!strcmp(argv[i], "--plugin") && i + 1 < argc) o.plugin_path = argv[++i];
         else if (!strcmp(argv[i], "--func") && i + 1 < argc) o.plugin_func = argv[++i];
+        else if (!strcmp(argv[i], "--udf-helper") && i + 1 < argc) o.udf_helper = argv[++i];
+        else if (!strcmp(argv[i], "--udf") && i + 1 < argc) o.udf_module = argv[++i];
+        else if (!strcmp(argv[i], "--udf-attr") && i + 1 < argc) o.udf_attr = argv[++i];
+        else if (!strcmp(argv[i], "--udf-roots") && i + 1 < argc) o.udf_roots = argv[++i];
         else if (!strcmp(argv[i], "--workers") && i + 1 < argc) o.workers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lines") && i + 1 < argc)  o.lines = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bytes") && i + 1 < argc)  o.bytes = atoi(argv[++i]);
@@ -604,8 +841,24 @@ int main(int argc, char **argv) {
         }
         else { fprintf(stderr, "forkrun-cleanroom: bad arg %s\n", argv[i]); return 64; }
     }
-    if (!o.so_path || o.source_fd < 0 || !o.plugin_path) {
-        fprintf(stderr, "forkrun-cleanroom: --so --src --plugin required\n");
+    if (!o.so_path || o.source_fd < 0) {
+        fprintf(stderr, "forkrun-cleanroom: --so --src required\n");
+        return 64;
+    }
+    /* Either a C plugin or a Python UDF selects the execution mode.
+     * Both supply two strings that the loop reinterprets as
+     * (path, func) or (module, attr). */
+    if (!o.plugin_path && !o.udf_module) {
+        fprintf(stderr, "forkrun-cleanroom: --plugin or --udf required\n");
+        return 64;
+    }
+    if (o.udf_helper && !o.udf_module) {
+        fprintf(stderr, "forkrun-cleanroom: --udf-helper needs --udf\n");
+        return 64;
+    }
+    if (o.plugin_path && o.udf_module) {
+        fprintf(stderr, "forkrun-cleanroom: --plugin and --udf are "
+                        "mutually exclusive\n");
         return 64;
     }
     if (o.workers < 1) o.workers = 1;
@@ -659,8 +912,14 @@ int main(int argc, char **argv) {
      *
      * The engine's own dlopen (fr_py_plugin_ensure, post-fork in each
      * worker) is unaffected and remains the real load path.
+     *
+     * P1-3: skipped entirely in UDF mode. This probe is about the C
+     * plugin ABI (does it export forkrun_use_ctx?), which a Python UDF
+     * has no concept of; running it with no --plugin would reject the
+     * run for a dialect problem that cannot occur. The UDF helper gets
+     * its own probe inside setup_udf_helper().
      */
-    {
+    if (!o.udf_module) {
         int pp[2];
         if (pipe(pp) != 0) {
             fprintf(stderr, "forkrun-cleanroom: pipe(probe): %s\n",
@@ -669,7 +928,7 @@ int main(int argc, char **argv) {
         }
         fr_trace_emit(FR_ROLE_PROBE, FR_EV_FORK_REQUEST,
                       FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-        pid_t probe = fork();
+        pid_t probe = fr_fork();
         if (probe < 0) {
             fprintf(stderr, "forkrun-cleanroom: fork(probe): %s\n",
                     strerror(errno));
@@ -770,8 +1029,14 @@ int main(int argc, char **argv) {
 
     void *h = dlopen(o.so_path, RTLD_NOW | RTLD_LOCAL);
     if (!h) { fprintf(stderr, "forkrun-cleanroom: dlopen: %s\n", dlerror()); return 69; }
+    g_so_handle = h;
     fn_init                p_init  = (fn_init)                sym(h, "fr_py_init");
     fn_worker_plugin_loop  p_wloop = (fn_worker_plugin_loop)  sym(h, "fr_py_worker_plugin_loop");
+    /* The UDF loop takes the SAME argument list as the plugin loop --
+     * (path, func_name) reinterpreted as (module, attr) -- so spawn_wid
+     * needs no new parameter and the respawn path stays identical. */
+    fn_worker_plugin_loop  u_wloop = o.udf_module
+        ? (fn_worker_plugin_loop) sym(h, "fr_py_worker_udf_loop") : NULL;
     fn_scan                p_scan  = (fn_scan)                sym(h, "fr_py_scan");
     fn_ingest_done         p_idone = (fn_ingest_done)         sym(h, "fr_py_ingest_done");
     fn_ingest_data_post    p_ipost = (fn_ingest_data_post)    sym(h, "fr_py_ingest_data_post");
@@ -782,6 +1047,35 @@ int main(int argc, char **argv) {
     p_abort_reason         = (fn_abort_reason_fn)     sym(h, "fr_py_abort_reason");
     p_poisoned             = (fn_poisoned_count)      sym(h, "fr_py_poisoned_count");
     p_abort                = (fn_abort_fn)               sym(h, "fr_py_abort");
+
+    /* ---- P1-3: UDF mode ----
+     *
+     * Load and INITIALISE the interpreter here, before any fork. This is
+     * deliberately BEFORE fr_py_init rather than after: the interpreter
+     * and the engine are independent, and every fork below inherits
+     * both.
+     *
+     * On failure we return non-zero. run.py treats a non-zero launcher
+     * exit as "unavailable for this call", warns, and falls back to the
+     * in-process path -- slower and CORRECT, which beats fast and
+     * empty. */
+    if (o.udf_module) {
+        if (!o.udf_helper) {
+            fprintf(stderr, "forkrun-cleanroom: --udf needs --udf-helper\n");
+            return 64;
+        }
+        if (!u_wloop) {
+            fprintf(stderr, "forkrun-cleanroom: substrate lacks "
+                            "fr_py_worker_udf_loop\n");
+            return 69;
+        }
+        if (setup_udf_helper(o.udf_helper, o.udf_roots) != 0)
+            return 71;
+        /* The loop reinterprets its two strings; nothing else changes. */
+        p_wloop = u_wloop;
+        o.plugin_path  = o.udf_module;
+        o.plugin_func  = o.udf_attr;
+    }
 
     /* Init HERE, after exec. This is the whole point: the state mapping
      * is created in this small address space and inherited by every
@@ -867,7 +1161,7 @@ int main(int argc, char **argv) {
      */
     fr_trace_emit(FR_ROLE_SPILL, FR_EV_FORK_REQUEST,
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-    pid_t spill_pid = fork();
+    pid_t spill_pid = fr_fork();
     if (spill_pid < 0) die("fork(spill)");
     if (spill_pid == 0) {
         die_with_parent();
@@ -976,7 +1270,7 @@ int main(int argc, char **argv) {
     /* fallow reaper child */
     fr_trace_emit(FR_ROLE_FALLOW, FR_EV_FORK_REQUEST,
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-    pid_t fallow_pid = fork();
+    pid_t fallow_pid = fr_fork();
     if (fallow_pid < 0) die("fork(fallow)");
     if (fallow_pid == 0) {
         die_with_parent();
@@ -1041,7 +1335,7 @@ int main(int argc, char **argv) {
     /* scanner child: pre-flight, ramp, publish */
     fr_trace_emit(FR_ROLE_SCAN, FR_EV_FORK_REQUEST,
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-    pid_t scan_pid = fork();
+    pid_t scan_pid = fr_fork();
     if (scan_pid < 0) die("fork(scan)");
     if (scan_pid == 0) {
         die_with_parent();
@@ -1089,7 +1383,7 @@ int main(int argc, char **argv) {
     /* drain child: move worker output memfds -> result fd */
     fr_trace_emit(FR_ROLE_DRAIN, FR_EV_FORK_REQUEST,
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-    pid_t drain_pid = fork();
+    pid_t drain_pid = fr_fork();
     if (drain_pid < 0) die("fork(drain)");
     if (drain_pid == 0) {
         die_with_parent();

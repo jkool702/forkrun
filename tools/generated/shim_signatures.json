@@ -94,6 +94,11 @@
     "linkage": "static",
     "return": "int"
   },
+  "fr_py_emit_record_buf": {
+    "args": "int out_fd, uint64_t batch_idx, const char *data, uint64_t len, uint32_t disposition",
+    "linkage": "static",
+    "return": "int"
+  },
   "fr_py_escrow_deposit": {
     "args": "unsigned int kills",
     "linkage": "extern",
@@ -264,6 +269,16 @@
     "linkage": "extern",
     "return": "int64_t"
   },
+  "fr_py_udf_bind": {
+    "args": "fr_udf_call_fn call_fn, fr_udf_free_fn free_fn",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_udf_invoke": {
+    "args": "int ingress_fd, int out_fd, uint64_t batch_off, uint64_t batch_len, uint64_t batch_idx, const char *module, const char *attr",
+    "linkage": "static",
+    "return": "int"
+  },
   "fr_py_unmap": {
     "args": "uint64_t addr, uint64_t length",
     "linkage": "extern",
@@ -291,6 +306,11 @@
   },
   "fr_py_worker_splice_loop": {
     "args": "int wid, int ingress_fd, int out_fd, int signal_fd, int fallow_fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_worker_udf_loop": {
+    "args": "int wid, const char *module, const char *attr, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error",
     "linkage": "extern",
     "return": "int"
   },
