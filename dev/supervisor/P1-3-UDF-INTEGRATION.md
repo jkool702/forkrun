@@ -357,9 +357,8 @@ was confirmed to be a harness problem rather than a regression.
 So the next step is wiring UDF mode into `run.py` and testing through
 the real path, rather than continuing to fight a synthetic one.
 
-**Parity tests (the reviewer's standing condition) are still unwritten**,
-because a loop that has never executed cannot be parity-tested against
-anything.
+**Parity tests (the reviewer's standing condition) are now written** --
+see section 13.
 
 ### 12.4 Verified so far
 
@@ -369,3 +368,82 @@ anything.
   `test_shim_abi.py`.
 * Refusals fire and are clean: `--udf` without `--udf-helper`, an
   unloadable helper, and `--plugin` with `--udf` together.
+
+---
+
+## 13. Parity across the worker loops — the reviewer's standing condition
+
+The review approved the fifth loop on this condition:
+
+> "If the fifth loop copies the whole existing state machine, every future
+> fix to poison handling, transaction completion, or acknowledgement
+> ordering has another place to land. I would require parity tests for all
+> shared lifecycle behavior."
+
+**`python/tests/test_loop_parity.py`** implements it mechanically rather
+than behaviourally, and that choice matters. A behavioural test has to be
+re-derived per mode and can be satisfied by loops that are wrong in the
+*same* way everywhere. Comparing the lifecycle **source** across modes
+catches the actual failure mode: a fix applied to four loops and
+forgotten in the fifth.
+
+Mutation-checked for exactly that: changing the UDF loop's poison trap
+(`claimed.num_kills` → `claimed.num_kills + 1`) while leaving the other
+loops alone fails `test_every_mode_shares_one_lifecycle`. That is the
+reviewer's scenario, reproduced and caught.
+
+### 13.1 What is compared
+
+The poison-skip branch, the zero-length sentinel branch, and the whole
+`on_error` ladder — skip, fail-fast, escrow with `kills+1` and no ack.
+Byte-identical across the three payload-failure modes after normalizing
+the per-mode differences (invoke call, plugin-only `ensure`, argument
+guard spelling, `sizeof` parens, comments).
+
+Also asserted directly, not just implicitly: signal-`EPIPE` is fatal in
+every mode, and `wincarn` is threaded through every `fr_py_worker_init`
+— the latter is load-bearing, not diagnostic, because the engine
+refuses to reclaim a batch whose incarnation does not match the one
+passed to recovery.
+
+### 13.2 Two real divergences, pinned rather than hidden
+
+A parity test that quietly normalizes away a semantic difference stops
+protecting anything, because the next reader cannot tell which
+normalizations were cosmetic and which were load-bearing. Both
+divergences therefore get their own test.
+
+**spawn separates infrastructure failure from payload failure.**
+`fr_py_exec_spawn` reports `rc < 0` for a pipe/spawn/wait/output
+failure, and spawn treats it as fatal rather than feeding it to
+`on_error`. That is correct: a spawn that never happened is not a
+payload error, and routing it to `on_error="skip"` would silently drop
+the batch. The plugin and UDF invokes have no such category. Pinned by
+`test_spawn_is_the_only_mode_that_separates_infra_failure`, so a mode
+gaining or losing that guard is noticed.
+
+**splice is excluded from parity by design.** It does not invoke user
+code — it moves bytes out of the ingress spool — so its retry rule is
+"always", not the `on_error` ladder. The plugin loop's own comment says
+so. `TestSpliceIsExcludedOnPurpose` asserts that reason still holds, so
+if splice ever adopts the ladder the exclusion stops hiding a real
+difference.
+
+### 13.3 A correction I made mid-way
+
+I initially asserted that all three modes take the same parameter types.
+They do not, at the front: spawn takes `(argv, argc)` where plugin takes
+`(path, func_name)` and UDF `(module, attr)`. The counts match, the
+leading types do not. What actually must agree is the **transport
+tail** from `ingress_fd` onward, because `spawn_wid` passes one
+positional argument list to whichever loop it was handed. That is now
+what the test asserts.
+
+### 13.4 Status
+
+The review's conditions for P1-3 are now **met**: fifth loop, pre-fork
+initialisation with CPython fork hooks, structured exceptions, parent
+purity, and parity tests across all shared lifecycle behaviour.
+
+P5 remains open: `SKIPPED`/`POISONED` dispositions and the
+exactly-once proof.
