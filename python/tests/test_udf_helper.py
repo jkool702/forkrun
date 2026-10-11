@@ -49,6 +49,15 @@ def empty(b):
 def raises(b):
     raise ValueError("udf exploded")
 
+STATE = {"touched": False}
+
+def touch(b):
+    STATE["touched"] = True
+    return b
+
+def is_touched(b):
+    return b"yes" if STATE["touched"] else b"no"
+
 def wrong_type(b):
     return 42
 '''
@@ -271,6 +280,32 @@ class TestPreForkSurvivesFork(_UDFFixture):
         self.assertNotEqual(0, r.returncode,
                             "a None result must not be scored as a pass")
         self.assertIn("FAILED", r.stdout + r.stderr)
+
+    def test_a_respawned_generation_does_not_inherit_interpreter_state(self):
+        """P1-3 section 5, supervision question.
+
+        Supervision respawns a worker onto the same wid after a death. If
+        a respawned generation inherited the dead one's Python-level
+        state, two batches could observe each other's mutations -- a
+        correctness bug nothing else in the suite would catch.
+
+        Under pre-fork every generation is a fresh fork of the launcher,
+        which still holds the PRISTINE interpreter, so the dirt dies with
+        the child that made it.
+        """
+        r = _run([_FORK, self.root, "myudf:up", "1", "1", "--respawn"])
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("respawn : CLEAN", r.stdout)
+
+    def test_the_respawn_probe_is_not_vacuous(self):
+        """The control: dirt in ONE process must be detected.
+
+        Without this, the CLEAN verdict above would be unfalsifiable --
+        a probe that can only ever report CLEAN would pass it forever.
+        """
+        r = _run([_FORK, self.root, "myudf:up", "1", "1", "--control"])
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("probe is not vacuous", r.stdout)
 
 
 if __name__ == "__main__":

@@ -52,6 +52,12 @@ static double run(int pre_fork, int nchildren, int iters,
 
     double t0 = now_s();
     for (int c = 0; c < nchildren; c++) {
+        /* Flush before every fork. A child that calls Py_FinalizeEx()
+         * flushes stdio, and it has inherited THIS process's buffer --
+         * so without this each child re-prints the header on the way
+         * out. Cosmetic, but it makes the output look like the run
+         * happened N times. */
+        fflush(stdout);
         int fds[2];
         if (pipe(fds) != 0) { perror("pipe"); exit(1); }
         pid_t pid = fork();
@@ -115,12 +121,118 @@ static double run(int pre_fork, int nchildren, int iters,
     return elapsed;
 }
 
+/* Respawn probe (P1-3 section 5): does a RESPAWNED generation inherit
+ * dirty interpreter state?
+ *
+ * The question matters because supervision respawns a worker onto the
+ * same wid after a death. Under pre-fork every generation is a fresh
+ * fork of the launcher, which still holds the PRISTINE pre-fork
+ * interpreter -- the dead child's mutations died with it. Under
+ * post-fork each generation initialises its own, which is also clean.
+ * So the prediction is "clean" either way, and the reason to test it is
+ * that a wrong answer here would mean respawned workers share mutable
+ * Python state, which is a correctness bug nothing else would catch.
+ *
+ * Child A dirties interpreter state then dies simulating a crash.
+ * Child B (the respawn) asks whether the state is still dirty.
+ *
+ * Returns 0 if the respawned generation is CLEAN, 1 if it is dirty. */
+static int run_respawn(const char *module, const char *touch_attr,
+                       const char *check_attr, const char *batch)
+{
+    int fds[2];
+    if (pipe(fds) != 0) { perror("pipe"); return 1; }
+
+    /* Generation 1: dirty the interpreter, then die without finalising. */
+    pid_t p1 = fork();
+    if (p1 == 0) {
+        close(fds[0]);
+        char *out = NULL; size_t n = 0;
+        (void)fr_udf_call(module, touch_attr, batch, strlen(batch), &out, &n);
+        fr_udf_free(out);
+        _exit(0);                      /* "died": no cleanup, no finalize */
+    }
+    int w = 0; waitpid(p1, &w, 0);
+
+    /* Generation 2: the respawn, onto the same interpreter. */
+    pid_t p2 = fork();
+    if (p2 == 0) {
+        close(fds[0]);
+        char status = 0;
+        char *out = NULL; size_t n = 0;
+        int rc = fr_udf_call(module, check_attr, batch, strlen(batch),
+                             &out, &n);
+        if (rc != FR_UDF_OK || n < 2) {
+            status = 1;
+        } else if (out[0] == 'y') {    /* "yes" -> state survived the death */
+            status = 2;
+        }
+        fr_udf_free(out);
+        ssize_t ignored = write(fds[1], &status, 1);
+        (void)ignored;
+        _exit(0);
+    }
+    close(fds[1]);
+    char status = -1;
+    ssize_t got = read(fds[0], &status, 1);
+    close(fds[0]);
+    waitpid(p2, &w, 0);
+
+    if (got != 1) { fprintf(stderr, "  respawn probe: no status\n"); return 1; }
+    if (status == 2) {
+        printf("  respawn : DIRTY  (a respawned generation inherited "
+               "interpreter state from the dead one)\n");
+        return 1;
+    }
+    if (status != 0) {
+        printf("  respawn : INCONCLUSIVE (status %d)\n", (int)status);
+        return 1;
+    }
+    printf("  respawn : CLEAN  (a respawned generation does NOT inherit "
+           "interpreter state)\n");
+    return 0;
+}
+
+/* Negative control for run_respawn.
+ *
+ * run_respawn answering CLEAN is only evidence if it is capable of
+ * answering DIRTY. So dirty and check in ONE process, where the state
+ * certainly survives: this MUST report DIRTY. If it ever reports CLEAN,
+ * the probe is vacuous and its verdict on a real respawn means nothing.
+ *
+ * Returns 0 when it correctly detects the dirt (the control passes). */
+static int run_control(const char *module, const char *batch)
+{
+    char *out = NULL; size_t n = 0;
+    int rc = fr_udf_call(module, "touch", batch, strlen(batch), &out, &n);
+    fr_udf_free(out);
+    if (rc != FR_UDF_OK) {
+        printf("  control : SETUP FAILED (%s)\n", fr_udf_last_error());
+        return 1;
+    }
+    out = NULL; n = 0;
+    rc = fr_udf_call(module, "is_touched", batch, strlen(batch), &out, &n);
+    if (rc != FR_UDF_OK) {
+        printf("  control : CHECK FAILED (%s)\n", fr_udf_last_error());
+        return 1;
+    }
+    int dirty = (n > 0 && out && out[0] == 'y');
+    fr_udf_free(out);
+    printf("  control : %s (in-process dirt must be detected)\n",
+           dirty ? "DIRTY, as required -- probe is not vacuous"
+                 : "CLEAN -- PROBE IS VACUOUS");
+    return dirty ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *root  = (argc > 1) ? argv[1] : NULL;
     const char *spec  = (argc > 2) ? argv[2] : "myudf:up";
     int nchildren     = (argc > 3) ? atoi(argv[3]) : 4;
     int iters         = (argc > 4) ? atoi(argv[4]) : 50;
+    const char *mode  = (argc > 5) ? argv[5] : NULL;
+    int respawn_only  = mode && !strcmp(mode, "--respawn");
+    int control_only  = mode && !strcmp(mode, "--control");
     const char *batch = "line000042\n";
 
     char mbuf[256];
@@ -141,6 +253,21 @@ int main(int argc, char **argv)
            nchildren, iters, strlen(batch));
 
     int fail_pre = 0, fail_post = 0;
+
+    if (control_only || respawn_only) {
+        /* Pre-fork, because that is the candidate under test: the
+         * interesting case is a respawn onto an INHERITED interpreter. */
+        if (fr_udf_init(roots, nroots) != FR_UDF_OK) {
+            fprintf(stderr, "respawn: init failed: %s\n", fr_udf_last_error());
+            return 3;
+        }
+        fflush(stdout);
+        int rc = control_only
+            ? run_control(module, batch)
+            : run_respawn(module, "touch", "is_touched", batch);
+        fr_udf_finalize();
+        return rc;
+    }
 
     /* POST-FORK first, so the shared-interpreter path is not already
      * warm when the pre-fork number is taken. */

@@ -90,10 +90,41 @@ and which should be decided with evidence rather than assumed:
   bypassed. **This is the part worth review.**
 * **Interaction with supervision.** Under `recover`, a worker that dies
   mid-UDF is respawned; under `fail-fast` the run aborts. A UDF has
-  Python-level state and can leave imported modules half-initialised. Does
-  the respawned generation inherit a *dirty* interpreter (post-fork init
-  gives each generation a clean one)? This is exactly the kind of
-  question that needs a test written to answer it, not a paragraph.
+  Python-level state and can leave imported modules half-initialised.
+  *RESOLVED by measurement — see §5.1.*
+
+### 5.1 Respawn inheritance — MEASURED, and the answer is reassuring
+
+`fr_udf_fork --respawn` dirties interpreter state in one generation, kills
+it without cleanup, then forks the next generation and asks whether the
+state survived.
+
+**Result: CLEAN.** A respawned generation does **not** inherit the dead
+generation's interpreter state. Under pre-fork each generation is a fresh
+fork of the launcher, which still holds the *pristine* pre-fork
+interpreter, so the dirt dies with the child that made it.
+
+This was worth measuring rather than arguing, because the failure would be
+silent and shared: two batches observing each other's mutated module
+globals, non-deterministically, only on the recovery path.
+
+**The probe carries its own negative control** (`--control`), and this is
+the part that makes the CLEAN verdict mean anything: it dirties and checks
+in a *single* process, where the state certainly survives, and must
+report DIRTY. A probe capable of only ever answering CLEAN would pass the
+respawn test forever while detecting nothing. Both directions are pinned
+by tests, and the DIRTY side is mutation-checked.
+
+Two bugs surfaced while building it, both mine and both the kind that
+produce a confident wrong answer:
+
+* The respawn branch ran *after* `fr_udf_finalize()`, so every call
+  returned "not initialized" and the probe reported **INCONCLUSIVE** —
+  which looks like "no evidence" rather than like "the harness is
+  broken".
+* Children inherited the parent's unflushed `stdout` buffer, and a child
+  that finalises Python flushes stdio on the way out. Each child
+  re-printed the header, making one run look like four.
 
 ## 6. What "done" means for P1-3
 
