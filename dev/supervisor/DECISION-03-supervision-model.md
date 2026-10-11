@@ -318,6 +318,14 @@ A caller wanting maximum throughput at the cost of a permanently smaller
 worker pool has no option; that is an acceptable gap, and adding (a) later
 is additive rather than a semantic change to (b).
 
+**CLOSED: (a) is not being built.** The maintainer's assessment is that
+"don't respawn a dead worker but keep going" has little practical use: most
+of what it would do is already available via `orchestrator=True` plus
+`FORKRUN_RETRY_LIMIT=0`, and the genuinely distinct part is narrow. If it is
+ever wanted it must arrive as an explicit opt-in flag, never as a default,
+and **it is not on the roadmap**. Recorded so the question is closed rather
+than perpetually open.
+
 ### 7.4a ACCEPTED — the failure semantics must be specified, not inherited
 
 The in-process executor records worker failures while reaping and raises
