@@ -136,8 +136,16 @@ class TestCoverage(_MatrixBase):
                         "lost its effect" % frac)
 
     def test_matrix_size_is_stable(self):
-        """Pins the cell count so an axis cannot be dropped unnoticed."""
-        self.assertEqual(16128, len(cells()))
+        """Pins the cell count so an axis cannot be dropped unnoticed.
+
+        16128 -> 20160 when P1-3 added mode="udf" (a fifth mode value,
+        16128 / 4 * 5). The point of the pin is that this number is
+        EXPECTED to move when an axis legitimately changes -- and to
+        fail loudly if it moves because something was dropped. udf was
+        missing here while the oracle already admitted it, so the matrix
+        was undercounting what the launcher actually serves.
+        """
+        self.assertEqual(20160, len(cells()))
 
 
 class TestRegressions(_MatrixBase):

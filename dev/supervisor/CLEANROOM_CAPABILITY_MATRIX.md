@@ -11,9 +11,9 @@ neither alone would be.
 
 | | |
 |---|---|
-| Cells enumerated | 16128 |
-| Served by the launcher | 80 (0.50%) |
-| Declined | 16048 |
+| Cells enumerated | 20160 |
+| Served by the launcher | 160 (0.79%) |
+| Declined | 20000 |
 | Distinct outcomes | 10 |
 
 ---
@@ -26,7 +26,7 @@ The axes are the facts a call carries to the envelope:
 |---|---|
 | `kind` | 'map', 'stream' |
 | `source_kind` | 'path', 'fd', 'fileobj', 'iterable', 'missing', 'dir', 'bogus' |
-| `mode` | 'plugin', 'python', 'spawn', 'splice' |
+| `mode` | 'plugin', 'udf', 'python', 'spawn', 'splice' |
 | `nodes` | 1, 2, 4 |
 | `order` | 'none', 'index', 'sorted' |
 | `orchestrator` | True, False |
@@ -60,16 +60,16 @@ the enumeration produces no `UNCLASSIFIED` cell.
 
 | # | outcome | cells | example |
 |---|---|---|---|
-| 1 | `DECLINE_NODES` | 10752 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=2, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 1 | `DECLINE_NODES` | 13440 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=2, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 | 2 | `DECLINE_MODE` | 4032 | `Facts(kind='map', source_kind='path', mode='python', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 3 | `DECLINE_RESUME` | 672 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
-| 4 | `DECLINE_ORDER` | 448 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 5 | `SERVED` | 80 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 6 | `DECLINE_STREAM_ORDER` | 56 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 7 | `DECLINE_STREAM_POISON` | 28 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 8 | `DECLINE_SOURCE_MISSING` | 20 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 9 | `DECLINE_SOURCE_DIR` | 20 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 10 | `DECLINE_SOURCE_TYPE` | 20 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 3 | `DECLINE_RESUME` | 1344 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
+| 4 | `DECLINE_ORDER` | 896 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 5 | `SERVED` | 160 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 6 | `DECLINE_STREAM_ORDER` | 112 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 7 | `DECLINE_STREAM_POISON` | 56 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 8 | `DECLINE_SOURCE_MISSING` | 40 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 9 | `DECLINE_SOURCE_DIR` | 40 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 10 | `DECLINE_SOURCE_TYPE` | 40 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 
 ## The oracle's rules
 

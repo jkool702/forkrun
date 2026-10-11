@@ -34,7 +34,10 @@ MATRIX = os.path.join(ROOT, "dev", "supervisor",
 AXES = [
     ("kind", ("map", "stream")),
     ("source_kind", oracle.SOURCE_KINDS),
-    ("mode", ("plugin", "python", "spawn", "splice")),
+    # P1-3 added mode="udf" (embedded-CPython worker loop, DECISION-01
+    # Option A). Without it here the axis undercounts what is actually
+    # served: the oracle admits udf but no cell is ever generated for it.
+    ("mode", ("plugin", "udf", "python", "spawn", "splice")),
     ("nodes", (1, 2, 4)),
     ("order", ("none", "index", "sorted")),
     ("orchestrator", (True, False)),
