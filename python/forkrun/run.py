@@ -869,6 +869,51 @@ def _fallback_forbidden(status):
     return False
 
 
+def _cleanroom_may_fallback(status):
+    """DECISION-03 section 7.2 -- may this launcher failure fall back?
+
+    Extracted as a named function rather than left inline, because the
+    policy is the thing worth testing and an inline expression cannot be
+    tested without re-implementing it -- which is exactly the mistake that
+    made the first version of this test vacuous: it passed identically with
+    and without the fix.
+
+    Fallback is permitted ONLY for a failure the launcher confirms happened
+    before execution could begin.
+
+    It USED to be:
+
+        replayable   = pre_ingest or _source_is_reopenable(source)
+        may_fallback = replayable and not forbidden
+
+    which is wrong, and was demonstrably wrong before it was changed:
+
+        launcher exit 1 ("runtime worker/helper failure")
+          PATH source : pre_ingest=False reopenable=True  -> MAY FALL BACK
+          FD source   : pre_ingest=False reopenable=False -> no fallback
+
+    The `or` answers "can the INPUT be re-read?" and then uses that answer
+    for a different question: "is it SAFE to run the whole workload
+    again?". Re-readable input makes replay POSSIBLE; it says nothing about
+    user-code side effects already committed. Exit 1 is a runtime failure --
+    workers ran, user code ran -- so replaying from batch zero re-executes
+    side effects the caller has already been charged for.
+
+    The old rule also made the decision depend on the SHAPE of the source:
+    a path replayed, a caller-supplied descriptor did not, for one identical
+    failure. That is not a safety property.
+
+    This is deliberately conservative. A failure that happened early but is
+    *reported* as a runtime failure now propagates instead of falling back.
+    Slow is recoverable; double-executing a side effect is not. The launcher
+    should eventually report "execution began" explicitly rather than have
+    the parent infer it from an exit code.
+    """
+    _code, _signum, _label, pre_ingest = _decode_launcher_status(status)
+    forbidden = _fallback_forbidden(status)
+    return bool(pre_ingest) and not forbidden
+
+
 def _describe_launcher_failure(status):
     """One human-readable line for a non-zero launcher exit."""
     code, signum, label, _pre = _decode_launcher_status(status)
@@ -1054,8 +1099,9 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         # right here in the caller's process -- would reproduce the
         # failure in a place with no launcher to bound it. Refuse.
         forbidden = _fallback_forbidden(status)
-        replayable = pre_ingest or _source_is_reopenable(source)
-        may_fallback = replayable and not forbidden
+        # DECISION-03 section 7.2: the replay policy lives in a named
+        # function so it can be tested without re-implementing it.
+        may_fallback = _cleanroom_may_fallback(status)
         _warnings.warn(
             "forkrun: cleanroom launcher failed (%s) — %s"
             % (_describe_launcher_failure(status),
@@ -1072,14 +1118,18 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                 % (_describe_launcher_failure(status),))
         if may_fallback:
             return None
-        # CR-FIX1-C: the launcher may have consumed bytes out of a
-        # caller-supplied descriptor. os.dup() shares the open file
-        # description, so that descriptor is now advanced and the
-        # in-process path would resume mid-input and return a truncated
-        # result with exit 0. Refuse instead: a failed run that says so
-        # is strictly better than a successful-looking one that lost
-        # records. A caller who wants the retry can pass a PATH, which
-        # _source_is_reopenable accepts.
+        # CR-FIX1-C: the launcher may have consumed bytes out of the
+        # source, so the in-process path could resume mid-input and return
+        # a truncated result with exit 0. Refuse instead: a failed run that
+        # says so is strictly better than a successful-looking one that
+        # lost records.
+        #
+        # NOTE this used to tell callers that passing a PATH would permit a
+        # retry. That advice is WITHDRAWN. It was the bug: re-readable
+        # input makes replay possible, not safe, and on a path source a
+        # runtime failure replayed the whole workload -- re-executing user
+        # side effects that had already been committed. See
+        # _cleanroom_may_fallback.
         raise RuntimeError(
             "forkrun: cleanroom launcher failed (%s) after the input may "
             "have been consumed, and the supplied source is a descriptor "
