@@ -200,7 +200,9 @@ class TestShimBindings(unittest.TestCase):
         # them as results; what changes is that a terminal outcome now
         # has a representation on the wire instead of being inferred from
         # a counter. No existing symbol changed arity or signature.
-        self.assertEqual((n_ext, n_st), (53, 13),
+        # 13->14 static: fr_py_signal_write, factored out of fr_py_emit
+        # so the disposition emitter can announce its record.
+        self.assertEqual((n_ext, n_st), (53, 14),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

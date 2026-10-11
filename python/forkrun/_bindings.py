@@ -343,7 +343,8 @@ def _setup_signatures(lib) -> None:
     try:
         # P5: terminal control dispositions (SKIPPED / POISONED).
         lib.fr_py_emit_disposition.argtypes = [
-            ctypes.c_int, ctypes.c_uint64, ctypes.c_uint32]
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+            ctypes.c_uint64, ctypes.c_uint32]
         lib.fr_py_emit_disposition.restype = ctypes.c_int
     except AttributeError:
         pass

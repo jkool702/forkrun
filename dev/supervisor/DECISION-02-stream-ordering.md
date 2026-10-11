@@ -357,15 +357,16 @@ one.
 
 ---
 
-## 7. OPEN: exactly-once through a real launcher run
+## 7. Exactly-once through a real launcher run
 
 DECISION-02 section 6.4 listed this as the remaining gap: the engine
-primitives are proven, and the plugin/UDF loops are covered structurally
-by the parity test, but **no test drives an exec'd launcher run into
-multiple deaths and then inspects the resulting stream.** This section
-records the attempt and why it is still open. It is written up because a
-negative result with a clear diagnosis is worth more than a silently
-abandoned task.
+primitives were proven, and the plugin/UDF loops covered structurally by
+the parity test, but **no test drove an exec'd launcher run into
+multiple deaths and then inspected the stream.** `test_udf_exactly_once.py`
+now does, and it found a second real defect (section 7.3).
+
+The intermediate negative result is kept below because the diagnosis is
+the useful part.
 
 ### 7.1 What was tried
 
@@ -404,31 +405,67 @@ Both speculative hooks were **removed** rather than shipped. An unproven
 fault-injection hook is dead surface: it would suggest coverage that does
 not exist.
 
-### 7.3 The open question this exposed
+### 7.3 RESOLVED — a second real defect: control records were never signalled
 
-Why a poisoned batch's terminal record does not reach the parent is not
-yet understood, and it is a real question in its own right — P5's whole
-purpose is that a terminal outcome has a wire representation. Candidates,
-none yet investigated:
+The question in 7.3 had an answer, and it was a genuine bug of the same
+family as the cursor defect.
 
-* the poison-skip `fr_py_complete(-1, ...)` path commits through a
-  different fd or cursor than the success path;
-* the respawned generation's `fr_py_ack_init(out_fd)` re-seeks, and the
-  commit lands past where the drain reads;
-* the drain discards records for batches it believes were never
-  published.
+`fr_py_drain_loop` blocks on the signal pipe and then inspects **only the
+worker id the signal names**:
 
-**This is the next thing to investigate**, and it may well be another
-real defect of the same family as the cursor bug: a terminal outcome that
-the parent cannot see. Note that `map()`'s result was correct in every
-case tried — no duplicates, no wrong payloads — so nothing user-visible
-is currently wrong; what is missing is the *evidence* that a poisoned
-batch reached a terminal state on the wire.
+```c
+n = fr_py_read_full(signal_r, sig, sizeof(sig));
+...
+wid = sig[0];
+size = fstat(out_fds[wid]) ...
+```
 
-### 7.4 What is NOT claimed
+There is no sweep. A record written by a worker that never signals is
+never moved to the results stream, however correct it is in that
+worker's memfd.
 
-No claim is made that exactly-once holds through a real launcher run.
-What is proven is narrower and still valuable: the engine primitives
-satisfy it under retry, repeated retry, death-then-rollback,
-death-after-commit, respawn, and mixed sequences, and doing so found and
-fixed a real pre-existing bug that broke it after the first recovery.
+Poison-skip and `on_error=skip` both complete **ack-silent** —
+`fr_py_complete(-1, ...)`, signal fd `-1`. That was correct for the
+acknowledgement semantics: nothing had been emitted in the payload
+sense, so there was nothing to announce. But P5 changed that. Those
+branches now emit a `POISONED`/`SKIPPED` record, and the record was
+**never signalled**. Every poison and skip disposition was written
+perfectly and delivered to nobody.
+
+So the defect P5 existed to cure — "a terminal outcome with no wire
+representation" — was still present one layer up, for a different
+reason: the representation existed and was invisible.
+
+Measured, with the launcher killed before every ack so every batch
+poisons:
+
+| | records reaching the parent |
+|---|---|
+| before | **0** |
+| after | **5**, all `POISONED`, one per batch, no duplicates |
+
+**The fix.** `fr_py_emit_disposition` now signals, record first then
+signal, so the drain can never be told about bytes that are not there
+yet. The completion that *follows* stays ack-silent: that governs the
+fallow and order acknowledgements, and changing it would alter v0 ack
+parity for no gain — the bytes are announced; the acknowledgement
+semantics are untouched.
+
+`fr_py_signal_write` is factored out of `fr_py_emit` so both paths share
+one implementation rather than two that could drift.
+
+### 7.4 What IS and is NOT claimed
+
+**Proven** (`test_udf_exactly_once.py`, UDF mode, exec'd launcher):
+every batch is killed after framing its record but before acking,
+repeatedly, until it poisons; every batch reaches **exactly one**
+terminal record on the wire; every one of those records is `POISONED`;
+and there are no duplicates. Mutation-checked: removing the signal fails
+two of the three tests.
+
+**Still not claimed:** the same through the *spawn* and *splice* loops
+in situ. The engine primitives and the shared lifecycle are covered —
+primitives by `test_exactly_once.py`, lifecycle by the parity test — but
+no launcher run drives those two modes into repeated deaths. The
+injection hook currently lives in the UDF invoke path, so extending it
+means relocating it into shared code and re-proving.

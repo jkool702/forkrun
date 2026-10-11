@@ -350,8 +350,10 @@ class TestControlDispositionsAreTerminalToo(_Engine):
         idx = b.batch_idx
         # The REAL emitter, so the frontier advance -- the part that
         # makes rollback remove the record -- is genuinely exercised.
+        # signal_fd -1: this harness has no drain, and the test asserts
+        # on the bytes in the worker's own output fd.
         self.assertEqual(0, lib.fr_py_emit_disposition(
-            self.out_fd, idx, DISP_SKIPPED))
+            self.out_fd, -1, 0, idx, DISP_SKIPPED))
         self.assertEqual(0, lib.fr_py_ack_direct(-1, -1))
         recs = self.stream()
         self.assert_exactly_once(recs, [idx])
@@ -373,7 +375,7 @@ class TestControlDispositionsAreTerminalToo(_Engine):
         idx = b.batch_idx
         self.assertTrue(b.poisoned, "the batch should now be at its limit")
         self.assertEqual(0, lib.fr_py_emit_disposition(
-            self.out_fd, idx, DISP_POISONED))
+            self.out_fd, -1, 0, idx, DISP_POISONED))
         self.assertEqual(0, lib.fr_py_ack_direct(-1, -1))
         recs = self.stream()
         self.assert_exactly_once(recs, [idx])

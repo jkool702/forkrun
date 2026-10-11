@@ -587,6 +587,11 @@ struct fr_py_record_hdr {
 #define FR_PY_RECORD_FOOTPRINT(payload_len) \
     (sizeof(struct fr_py_record_hdr) + (payload_len))
 
+/* Write one keyed "bytes are visible" signal. Defined below, declared
+ * here because the disposition emitter (earlier in this file) needs it. */
+static int fr_py_signal_write(int signal_fd, uint64_t wid,
+                              uint64_t batch_idx);
+
 /* Full-write loop (regular files / memfds: no SIGPIPE, short writes only
  * on EINTR/error). Returns 0 ok, -1 on failure. */
 static int fr_py_write_all(int fd, const void *buf, size_t count) {
@@ -713,10 +718,31 @@ static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
  * back with everything else and the retry re-emits it. Emitting outside
  * the transaction would leak a disposition for a batch about to run
  * again. */
-int fr_py_emit_disposition(int out_fd, uint64_t batch_idx,
-                           uint32_t disposition)
+int fr_py_emit_disposition(int out_fd, int signal_fd, uint64_t wid,
+                           uint64_t batch_idx, uint32_t disposition)
 {
-    return fr_py_emit_record_buf(out_fd, batch_idx, NULL, 0, disposition);
+    /* Record first, then signal -- in that order, so the drain can
+     * never be told about bytes that are not there yet.
+     *
+     * The signal is what makes the record REACHABLE. fr_py_drain_loop
+     * blocks on the signal pipe and only inspects the worker id it
+     * names, so an ack-silently written record sits in the worker's
+     * memfd forever: correct, and invisible to the parent.
+     *
+     * That is not a cosmetic gap. DECISION-02's premise is that every
+     * published batch has an authoritative terminal disposition, and a
+     * disposition the parent cannot observe is not one -- it is the same
+     * failure as never emitting it, which is what POISONED/SKIPPED
+     * replaced.
+     *
+     * The completion that FOLLOWS stays ack-silent (fr_py_complete(-1,
+     * ...)): that governs the fallow and order acknowledgements, whose
+     * v0 parity is "nothing was emitted for this batch" in the payload
+     * sense. The bytes now exist, so they are announced; the
+     * acknowledgement semantics are unchanged. */
+    if (fr_py_emit_record_buf(out_fd, batch_idx, NULL, 0, disposition) != 0)
+        return -1;
+    return fr_py_signal_write(signal_fd, wid, batch_idx);
 }
 
 /* Set a fd nonblocking. Returns 0 ok, -1 on failure. */
@@ -1407,6 +1433,38 @@ uint64_t fr_py_data_ready(void) {
     return found;
 }
 
+/* Write one keyed "bytes are visible" signal (wid, batch_idx).
+ *
+ * fr_py_drain_loop blocks on this and only ever inspects the worker id
+ * it names -- so a record written WITHOUT a signal is never moved to the
+ * results stream, however correct it is in the worker's memfd. */
+static int fr_py_signal_write(int signal_fd, uint64_t wid, uint64_t batch_idx)
+{
+    uint64_t sig[2];
+    const char *sp;
+    size_t sleft;
+
+    if (signal_fd < 0)
+        return 0;
+    sig[0] = wid;
+    sig[1] = batch_idx;
+    sp = (const char *)sig;
+    sleft = sizeof(sig);
+    while (sleft > 0) {
+        ssize_t n = write(signal_fd, sp, sleft);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -2;
+        }
+        if (n == 0)
+            return -2;
+        sp += n;
+        sleft -= (size_t)n;
+    }
+    return 0;
+}
+
 /* =====================================================================
  * W-PY14: C-level output emit (fr_py_emit).
  *
@@ -1434,9 +1492,6 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
     struct fr_py_record_hdr hdr;
     struct iovec iov[2];
     int niov;
-    uint64_t sig[2];
-    const char *sp;
-    size_t sleft;
 
     if (data != NULL && out_fd >= 0) {
         hdr.batch_idx = batch_idx;
@@ -1507,23 +1562,7 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
 
     if (signal_fd < 0)
         return 0;
-    sig[0] = wid;
-    sig[1] = batch_idx;
-    sp = (const char *)sig;
-    sleft = sizeof(sig);
-    while (sleft > 0) {
-        ssize_t n = write(signal_fd, sp, sleft);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            return -2;
-        }
-        if (n == 0)
-            return -2;
-        sp += n;
-        sleft -= (size_t)n;
-    }
-    return 0;
+    return fr_py_signal_write(signal_fd, wid, batch_idx);
 }
 
 /* Flush C stdio before ack/deposit points in the splice loop (it has
@@ -1593,7 +1632,8 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
             /* DECISION-02: terminal POISONED disposition, emitted
              * BEFORE the ack, so a death in between rolls it back
              * with the rest of the batch. */
-            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                       claimed.batch_idx,
                                        FR_DISP_POISONED) != 0)
                 return 1;
             if (fr_py_ack(fallow_fd, -1) != 0)
@@ -3112,7 +3152,8 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
             /* DECISION-02: terminal POISONED disposition, emitted
              * BEFORE the ack, so a death in between rolls it back
              * with the rest of the batch. */
-            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                       claimed.batch_idx,
                                        FR_DISP_POISONED) != 0)
                 return 1;
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
@@ -3154,7 +3195,8 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
             /* DECISION-02: terminal SKIPPED disposition. Emitted
              * before the ack, inside the transaction, so a death
              * in between rolls it back and the retry re-emits it. */
-            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                      claimed.batch_idx,
                                       FR_DISP_SKIPPED) != 0)
                 return 1;
             /* skip: ack-silent like poison (no signal — nothing emitted). */
@@ -3298,6 +3340,31 @@ static int fr_py_udf_invoke(int ingress_fd, int out_fd,
     if (out)
         g_udf_free(out);
 
+    /* Test hook: die AFTER the record is framed but BEFORE the ack --
+     * the only state where recovery is both possible and necessary: the
+     * transaction is CLAIMED and an orphan sits in the output, so
+     * recovery must roll it back and escrow the batch for retry.
+     *
+     * The pre-existing hooks cannot reach this window. DIE_AT_CLAIM
+     * fires before any output exists (nothing to roll back);
+     * DIE_AT_COMMIT fires after worker_txn_begin_commit, leaving the
+     * transaction COMMITTING, which recovery reports as RACE_DETECTED
+     * rather than guessing.
+     *
+     * Counted per process, so each respawned generation supplies
+     * exactly one more death to survive. Guarded on frc == 0 so a
+     * batch that failed to emit does not die having produced nothing. */
+    {
+        const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_ACK");
+        if (n != NULL && *n) {
+            static unsigned emit_seq = 0;
+            unsigned want = (unsigned)atoi(n);
+            emit_seq++;
+            if (want && emit_seq == want && frc == 0)
+                raise(SIGKILL);
+        }
+    }
+
     return frc == 0 ? 0 : -3;
 }
 
@@ -3351,7 +3418,8 @@ int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
             /* DECISION-02: terminal POISONED disposition, emitted
              * BEFORE the ack, so a death in between rolls it back
              * with the rest of the batch. */
-            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                       claimed.batch_idx,
                                        FR_DISP_POISONED) != 0)
                 return 1;
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
@@ -3389,7 +3457,8 @@ int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
             /* DECISION-02: terminal SKIPPED disposition. Emitted
              * before the ack, inside the transaction, so a death
              * in between rolls it back and the retry re-emits it. */
-            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                      claimed.batch_idx,
                                       FR_DISP_SKIPPED) != 0)
                 return 1;
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
@@ -3506,7 +3575,8 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
             /* DECISION-02: terminal POISONED disposition, emitted
              * BEFORE the ack, so a death in between rolls it back
              * with the rest of the batch. */
-            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                       claimed.batch_idx,
                                        FR_DISP_POISONED) != 0)
                 return 1;
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
@@ -3549,7 +3619,8 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
             /* DECISION-02: terminal SKIPPED disposition. Emitted
              * before the ack, inside the transaction, so a death
              * in between rolls it back and the retry re-emits it. */
-            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                      claimed.batch_idx,
                                       FR_DISP_SKIPPED) != 0)
                 return 1;
             /* skip: ack (order target derived, no signal — v0 parity). */

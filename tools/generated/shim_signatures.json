@@ -90,7 +90,7 @@
     "return": "int"
   },
   "fr_py_emit_disposition": {
-    "args": "int out_fd, uint64_t batch_idx, uint32_t disposition",
+    "args": "int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx, uint32_t disposition",
     "linkage": "extern",
     "return": "int"
   },
@@ -267,6 +267,11 @@
   "fr_py_set_resume_state": {
     "args": "uint64_t horizon, uint64_t stdout_bytes, const struct FrPyInterval *jagged, uint32_t jagged_count",
     "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_signal_write": {
+    "args": "int signal_fd, uint64_t wid, uint64_t batch_idx",
+    "linkage": "static",
     "return": "int"
   },
   "fr_py_spill_sequential": {
