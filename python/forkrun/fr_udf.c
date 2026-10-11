@@ -255,6 +255,20 @@ int fr_udf_call(const char *module, const char *attr,
             Py_DECREF(m);
             return FR_UDF_ERR;
         }
+        /* Non-callable is its own defined failure, not a call error.
+         * Without this check the failure surfaces later, inside
+         * PyObject_CallFunctionObjArgs, as a bare
+         * "TypeError: 'int' object is not callable" traceback -- which
+         * names neither the module nor the attribute, so a UDF wired up
+         * as `mod:CONSTANT` instead of `mod:fn` reported as though the
+         * call itself had gone wrong. */
+        if (!PyCallable_Check(fn)) {
+            set_error("%s.%s is not callable (%s)", module, attr,
+                      Py_TYPE(fn)->tp_name);
+            Py_DECREF(fn);
+            Py_DECREF(m);
+            return FR_UDF_ERR;
+        }
         clear_cache();
         cached_module = m;      /* strong: keeps the module alive */
         cached_fn = fn;

@@ -60,6 +60,8 @@ def is_touched(b):
 
 def wrong_type(b):
     return 42
+
+NOT_CALLABLE = 42
 '''
 
 
@@ -208,6 +210,18 @@ class TestUDFInvocation(_UDFFixture):
         r = self.probe("myudf:raises")
         self.assertIn("call FAILED", r.stdout)
         self.assertIn("udf exploded", r.stdout + r.stderr)
+
+    def test_non_callable_attribute_is_a_defined_error(self):
+        """Named explicitly, not as a stray TypeError from the call.
+
+        Otherwise a UDF wired as `mod:CONSTANT` instead of `mod:fn`
+        reports as though the invocation failed, naming neither the
+        module nor the attribute.
+        """
+        r = self.probe("myudf:NOT_CALLABLE")
+        self.assertIn("call FAILED", r.stdout)
+        self.assertIn("is not callable", r.stdout)
+        self.assertIn("myudf.NOT_CALLABLE", r.stdout)
 
     def test_non_bytes_return_is_refused(self):
         """A UDF returning an int is a contract violation, not a result."""
