@@ -592,6 +592,34 @@ struct fr_py_record_hdr {
 static int fr_py_signal_write(int signal_fd, uint64_t wid,
                               uint64_t batch_idx);
 
+/* Fault injection for the exactly-once tests: SIGKILL this worker
+ * after its record is framed but before it acks.
+ *
+ * That window is the only one where a rollback is both POSSIBLE and
+ * NECESSARY: the transaction is still CLAIMED and an orphan sits in the
+ * output fd. The pre-existing hooks cannot reach it --
+ * DIE_AT_CLAIM fires before any output exists, and DIE_AT_COMMIT fires
+ * after worker_txn_begin_commit, leaving the transaction COMMITTING,
+ * which recovery reports as RACE_DETECTED rather than guessing.
+ *
+ * FORKRUN_TEST_DIE_BEFORE_ACK=n kills on the n-th attempt in THIS
+ * process. Counting per process is what makes it usable under
+ * supervision: a respawned generation starts over, so each generation
+ * supplies exactly one more death to survive, rather than every worker
+ * dying on its first action forever until the respawn cap aborts the
+ * run. Inert unless the variable is set. */
+static void fr_py_maybe_die_before_ack(void)
+{
+    const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_ACK");
+    if (n != NULL && *n) {
+        static unsigned seq = 0;
+        unsigned want = (unsigned)atoi(n);
+        seq++;
+        if (want && seq == want)
+            raise(SIGKILL);
+    }
+}
+
 /* Full-write loop (regular files / memfds: no SIGPIPE, short writes only
  * on EINTR/error). Returns 0 ok, -1 on failure. */
 static int fr_py_write_all(int fd, const void *buf, size_t count) {
@@ -1722,6 +1750,14 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
             }
         }
 
+        /* Splice's success path: record framed and signalled above.
+         * Hooked here because splice does not call fr_py_complete, and
+         * the other two fr_py_ack sites in this loop are the
+         * poison/sentinel branches. Splice is excluded from the loop
+         * parity test by design (it moves bytes rather than invoking
+         * user code), so a loop-local hook cannot desynchronise it. */
+        fr_py_maybe_die_before_ack();
+
         if (fr_py_ack(fallow_fd, -1) != 0)
             return 1;
         continue;
@@ -2701,6 +2737,15 @@ int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx,
     int rc;
     int target;
 
+    /* signal_fd >= 0 identifies the SUCCESS path: the invoke has
+     * already framed this batch's record, and this call is what acks
+     * it. Poison-skip and sentinel pass -1 because they emit nothing,
+     * so gating on it keeps the injected death out of those branches
+     * -- which mattered: firing there meant a poisoned batch could
+     * never be skipped and the run never converged. */
+    if (signal_fd >= 0)
+        fr_py_maybe_die_before_ack();
+
     rc = fr_py_emit(out_fd, signal_fd, wid, batch_idx, data, data_len);
     if (rc != 0)
         return rc;
@@ -3339,31 +3384,6 @@ static int fr_py_udf_invoke(int ingress_fd, int out_fd,
                                     disp);
     if (out)
         g_udf_free(out);
-
-    /* Test hook: die AFTER the record is framed but BEFORE the ack --
-     * the only state where recovery is both possible and necessary: the
-     * transaction is CLAIMED and an orphan sits in the output, so
-     * recovery must roll it back and escrow the batch for retry.
-     *
-     * The pre-existing hooks cannot reach this window. DIE_AT_CLAIM
-     * fires before any output exists (nothing to roll back);
-     * DIE_AT_COMMIT fires after worker_txn_begin_commit, leaving the
-     * transaction COMMITTING, which recovery reports as RACE_DETECTED
-     * rather than guessing.
-     *
-     * Counted per process, so each respawned generation supplies
-     * exactly one more death to survive. Guarded on frc == 0 so a
-     * batch that failed to emit does not die having produced nothing. */
-    {
-        const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_ACK");
-        if (n != NULL && *n) {
-            static unsigned emit_seq = 0;
-            unsigned want = (unsigned)atoi(n);
-            emit_seq++;
-            if (want && emit_seq == want && frc == 0)
-                raise(SIGKILL);
-        }
-    }
 
     return frc == 0 ? 0 : -3;
 }

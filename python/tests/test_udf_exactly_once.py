@@ -201,5 +201,65 @@ class TestLauncherExactlyOnce(unittest.TestCase):
             self.assertEqual("LINE%06d" % idx, payload.decode().strip())
 
 
+@unittest.skipUnless(os.path.exists(os.path.join(
+    _ROOT, "python", "tests", "plugins", "test_plugin_v1.so")),
+    "test_plugin_v1.so not built")
+class TestPluginLauncherExactlyOnce(TestLauncherExactlyOnce):
+    """The same proof for the C plugin loop, which the launcher also
+    serves.
+
+    Worth having as a separate class rather than a parameterised one:
+    the plugin loop reaches its fault through fr_py_complete, the UDF
+    loop through the same call, and the parity test asserts those bodies
+    are identical -- so if the two ever diverge, this failing is the
+    signal.
+
+    spawn and splice are deliberately NOT here. The launcher serves only
+    the plugin and UDF loops (forkrun_cleanroom.c selects exactly those
+    two); spawn and splice run their loops in-process from run.py, with
+    no launcher, no drain and no supervision loop. For those two the
+    exactly-once property rests on test_exactly_once.py (primitives) and
+    the parity test (shared lifecycle), and there is no launcher-level
+    claim to make.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+    def run_launcher(self, die=True):
+        env = dict(os.environ)
+        if die:
+            env["FORKRUN_TEST_DIE_BEFORE_ACK"] = "1"
+        else:
+            env.pop("FORKRUN_TEST_DIE_BEFORE_ACK", None)
+        plugin = os.path.join(_ROOT, "python", "tests", "plugins",
+                              "test_plugin_v1.so")
+        src_fd = os.open(self.src, os.O_RDONLY)
+        out_fd = os.open(self.out, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            argv = [_launcher(),
+                    "--so", _substrate(),
+                    "--workers", "2", "--lines", "1", "--bytes", "0",
+                    "--on-error", "0", "--retry", "3",
+                    "--src", str(src_fd), "--result", str(out_fd),
+                    "--stats-fd", "-1",
+                    "--plugin", plugin, "--func", "count_lines_v1"]
+            proc = subprocess.run(argv, env=env, pass_fds=(src_fd, out_fd),
+                                  capture_output=True, timeout=180)
+        finally:
+            os.close(src_fd)
+            os.close(out_fd)
+        with open(self.out, "rb") as fh:
+            return proc, fh.read()
+
+    def test_an_unfaulted_run_still_delivers_its_data(self):
+        _proc, blob = self.run_launcher(die=False)
+        recs = parse(blob)
+        self.assertEqual(BATCHES, len(recs))
+        for _idx, disp, _payload in recs:
+            self.assertEqual(DISP_DATA, disp)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -463,9 +463,25 @@ terminal record on the wire; every one of those records is `POISONED`;
 and there are no duplicates. Mutation-checked: removing the signal fails
 two of the three tests.
 
-**Still not claimed:** the same through the *spawn* and *splice* loops
-in situ. The engine primitives and the shared lifecycle are covered —
-primitives by `test_exactly_once.py`, lifecycle by the parity test — but
-no launcher run drives those two modes into repeated deaths. The
-injection hook currently lives in the UDF invoke path, so extending it
-means relocating it into shared code and re-proving.
+The fault hook now lives in **shared** code — `fr_py_complete`, gated on
+`signal_fd >= 0`, which is what distinguishes the success path from the
+poison/skip and sentinel branches — with a loop-local call in splice,
+whose loop frames and acks inline and never calls `fr_py_complete`. So
+every mode is now injectable, not just UDF.
+
+**The launcher serves only the plugin and UDF loops.** `spawn` and
+`splice` run their loops in-process from `run.py`: no launcher, no
+drain, no supervision loop. For those two the launcher's supervision is
+simply not in their path, so a launcher-level claim would be about a
+pipeline they do not use. What covers them:
+
+* `test_exactly_once.py` — the engine primitives (retry, repeated
+  retry, death/rollback, death-after-commit, respawn, mixed);
+* `test_loop_parity.py` — the shared lifecycle, asserted identical
+  across plugin/spawn/UDF, with splice excluded by design;
+* the fault hook — now reachable from both, so an in-process driver can
+  exercise it.
+
+What is **not** claimed: an end-to-end exactly-once run for `spawn` and
+`splice` specifically. That needs a driver for the in-process executors,
+which is a different harness from the launcher's.
