@@ -201,11 +201,20 @@ class TestShimBindings(unittest.TestCase):
         # has a representation on the wire instead of being inferred from
         # a counter. No existing symbol changed arity or signature.
         # static additions: fr_py_signal_write (factored out of
-        # fr_py_emit so the disposition emitter can announce its record)
-        # and fr_py_maybe_die_before_ack (the shared fault-injection
+        # fr_py_emit so the disposition emitter can announce its record),
+        # fr_py_maybe_die_before_ack (the shared fault-injection
         # hook, so every worker loop is injectable and not just the UDF
-        # one).
-        self.assertEqual((n_ext, n_st), (53, 15),
+        # one), and fr_py_maybe_die_after_signal (fault injection in the
+        # interval the before-ack hook structurally cannot reach --
+        # after a DATA record is written AND signalled, before the ack).
+        # Inert unless the env var is set; it exists to expose the
+        # pre-existing publication/commit defect documented in
+        # dev/supervisor/CLEANROOM_EXPANSION_PROPOSAL.md section 0a,
+        # which is otherwise untestable because a DATA record is never
+        # signalled before the before-ack hook fires. Extern count is
+        # unchanged at 53: no dlsym-visible entry was added or changed,
+        # so this is a fault-injection-only addition.
+        self.assertEqual((n_ext, n_st), (53, 16),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

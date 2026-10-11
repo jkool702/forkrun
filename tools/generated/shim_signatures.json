@@ -169,6 +169,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_maybe_die_after_signal": {
+    "args": "uint64_t data_len",
+    "linkage": "static",
+    "return": "void"
+  },
   "fr_py_maybe_die_before_ack": {
     "args": "void",
     "linkage": "static",

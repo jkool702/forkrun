@@ -35,89 +35,110 @@ held. Details, and the narrower question that remains open, are in §1.
 
 | round-2 point | disposition |
 |---|---|
-| §1 terminal record can be published before commit → duplicate/contradictory terminal records | **investigated — not reproduced.** Window forced open; invariant holds. Residual narrower risk recorded in §1.3 |
+| §1 terminal record can be published before commit → duplicate/contradictory terminal records | **CONFIRMED — reproduced.** Poisoned batches return data and the run reports success. Pre-existing; now **Stage 0** — §0a |
 | §2 stage 1 needs a per-producer coverage contract | **accepted** — §2.5 |
 | §3 spawn contract must state the limit of the guarantee | **accepted, Option A** — §3.3 |
 | §4 automatic rollout needs a performance gate, not just correctness | **accepted** — §5.2 |
 | §5 dependency picture | **accepted** — §6 |
 
+**Revision 3's claim that this was "observed correct under a forced
+window" is retracted.** The experiment it rested on never reached the
+DATA publication path — see §0a.2.
+
 ---
 
-## 0a. The publication/commit race — investigated, not reproduced
+## 0a. The publication/commit defect — CONFIRMED, and it is pre-existing
 
-The round-2 review raised this as a potential **pre-existing
-exactly-once weakness**, not merely a gap in the new work:
+Round-2 reported a blocking race. Round 2 of review supplied a concrete
+source-derived counterexample. **Both were correct, and revision 3's
+conclusion was wrong.**
 
-> `fr_py_emit_disposition()` writes the record and signals; the drain
-> forwards and punches independently; a death in that window leaves a
-> record published that rollback cannot retract, so the retry produces a
-> second, possibly contradictory, terminal outcome for the same batch.
+### 0a.1 The defect, reproduced
 
-**This was tested before anything else, as instructed.** The result:
+Identical fault — worker dies before its batch is acked, so recovery
+retries and then poisons the batch. The *only* difference is whether the
+worker's record had been signalled before the death:
 
-### 1.1 The window is real
+| hook point | published stream | correct? |
+|---|---|---|
+| kill **before** the signal | 4 × `POISONED` | yes — matches the committed outcome |
+| kill **after** the signal | 4 × `DATA` (`LINE00000N`) | **no** — abandoned attempt's result |
 
-`fr_py_drain_loop` (`_shim.c:2357`) reads a signal, copies whole records
-to `results_fd` and punches the source memfd. It never consults the
-worker's ack. So publication genuinely precedes commit. The reviewer is
-right about the mechanism.
+Both exit `rc=0` with empty stderr. **A batch the engine poisoned
+returns data, and the run reports success.**
 
-The existing tests cannot see it, and that part of the review is also
-right: `FORKRUN_TEST_DIE_BEFORE_ACK` fires immediately after the signal,
-so whether the drain has forwarded yet is a scheduler race. When the
-worker usually wins, the record is still in the memfd, the rollback is
-clean, and the test passes — **for the wrong reason**.
+The published outcome is decided by whether the drain happened to win a
+race with the worker's death — not by what the engine committed.
 
-### 1.2 Forcing the window open
+### 0a.2 Why revision 3 wrongly concluded it was fine
 
-`FORKRUN_TEST_DIE_AFTER_DRAIN_MS` (added in this revision, inert unless
-set) delays the kill after the signal so the drain provably forwards
-first. Verified by observation, not assumed: the probe
-(`python/tests/test_drain_publication_race.py` plus a byte-level dump)
-watches the results fd **while the launcher is still running** and sees
-24 bytes — exactly one record — already published downstream mid-run.
+Revision 3's forced-window experiment used `DIE_BEFORE_ACK`, which sits
+**between** the record write and the signal (`fr_py_emit_record_buf`
+writes without signalling; `fr_py_complete` does the signalling). So
+under that hook a `DATA` record was written, **never signalled, never
+forwarded**, and rolled back cleanly. The experiment only ever forwarded
+`POISONED` records — all 24 bytes, all the same size, all correctly
+suppressed on retry. "Exactly one record" held because **the DATA path
+was never exercised at all.**
 
-With that window genuinely open, over 5 batches × repeated death:
+Reaching the real interval needed a new hook, ``FORKRUN_TEST_DIE_AFTER_SIGNAL``
+(`FORKRUN_TEST_DIE_AFTER_SIGNAL`), placed inside `fr_py_complete`
+between `fr_py_emit` and `fr_py_ack_direct`, gated on `data_len > 0` so
+it fires only where a payload record was genuinely emitted and signalled.
 
-* **5 records for 5 batches — no duplicates.**
-* **Exactly one terminal outcome per batch — no contradictions.**
-* **Stream fully consumed, zero tail** (120 bytes = 5 × 24-byte
-  `POISONED` records; the `<QQII` header is 24 bytes, not 16).
-* An unfaulted control through the same drain yields 5 clean `DATA`
-  records (175 bytes, zero tail).
+The lesson generalises: a fault test that passes may be passing because
+it never reached the code it claims to cover. Coverage of the *path* has
+to be demonstrated, not assumed from a hook name.
 
-So the invariant the existing exactly-once tests claim **does hold under
-the forced window**. The specific failure mode is not present.
+### 0a.3 Mechanism
 
-### 1.3 What remains open — narrower, and honestly uncharacterised
+1. Worker writes a `DATA` record and signals.
+2. `fr_py_drain_loop` forwards it to `results_fd`, advances its
+   per-worker cursor `offsets[wid]` to `s + 24 + n`, and punches the
+   source range.
+3. Worker dies before ack. `ring_recover_worker_core` `ftruncate`s the
+   output memfd back to the transaction's `output_start` (`s`) and
+   re-deposits the batch.
+4. The retry ends `POISONED` — a 24-byte record, zero payload.
+5. The drain's cursor lives in the **drain process** and is never
+   rewound by the worker's rollback. Memfd size is now `s + 24`, so the
+   drain's `size <= offset` check suppresses the retry's record.
+6. The abandoned `DATA` is already downstream and nothing can recall it.
 
-I have **not** produced a full mechanistic proof of *why* it holds. The
-most likely mechanism is that the drain's per-worker cursor
-`offsets[wid]` (`_shim.c:2400,2519`) is monotonic and never rewound, so
-a retry that rewrites the same byte range after rollback produces no
-new forwarded bytes. That is consistent with the observation, but I did
-not verify it end to end.
+The same argument applies to a **same-length** retry whose payload
+differs: the cursor suppresses it too, so the first attempt's bytes stay
+visible. Matching size does not imply the published content belongs to
+the committed attempt.
 
-One genuinely untested case remains, and it is the one worth closing
-before dispositions are treated as an authoritative ordered protocol:
+### 0a.4 Status and consequence
 
-> **If a retry produces a record of a DIFFERENT SIZE than the attempt
-> already forwarded** — e.g. attempt 1 forwarded `DATA` (24+len bytes)
-> and the retry ends `POISONED` (24 bytes, zero payload) — then the
-> committed outcome and the published outcome may disagree. Not a
-> duplicate, but an ordered consumer could advance a batch on a `DATA`
-> the transaction later poisoned.
+* **This is pre-existing**, present at `c72d27c6`, in the shipped
+  plugin/UDF launcher path. The expansion work did not introduce it —
+  but `Auto` would make it far more reachable.
+* It is **not** an engine defect. The ring's rollback semantics are
+  sound; the gap is that publication is not coupled to commit.
+* Repro preserved as `python/tests/test_data_publication_leak.py`. The
+  leak assertion is `@unittest.expectedFailure`, not `skip`: it flips to
+  an **unexpected success** the moment the protocol is fixed, so the bug
+  cannot be quietly forgotten.
 
-The current producer paths emit exactly one record per batch
-(`fr_py_complete` with `data == NULL` emits nothing), so this did not
-trigger here. It is a **Stage-1 test obligation**, not a known bug, and
-it must not be silently assumed away by anyone reading §1.2 as "the
-protocol is proven".
+**This becomes Stage 0** and gates everything below. Two properties must
+both hold, and neither alone is sufficient:
 
-**Definition of done for this item:** a documented mechanism (or an
-engine-free protocol change) plus a test that forces the differing-size
-retry. Until then, dispositions are "observed correct under forced
-window", not "proven consistent with the commit point".
+* **Safety** — nothing from an uncommitted attempt is ever visible.
+* **Completeness** — a committed batch's record is always delivered
+  (so "signal after ack" alone is *not* a fix: a death between ack and
+  signal loses the record outright).
+
+Candidate directions, none yet chosen: gate forwarding on commit status
+so the drain only publishes committed transactions; or publish after ack
+**and** make recovery re-signal any committed-but-unpublished batch.
+The choice is a design decision, not a patch, and per the standing
+instruction it goes to external review before implementation.
+
+Until Stage 0 is closed: `stream(order="index")` stays declined, no
+disposition may be treated as an authoritative terminal outcome, and
+`Auto` must not be enabled for any envelope.
 
 ---
 
@@ -429,6 +450,7 @@ contract is more load-bearing once `Auto` is the default.
 
 | # | Stage | Gate to proceed |
 |---|---|---|
+| **0** | **Publication/commit protocol** (§0a) | nothing uncommitted is visible; nothing committed is lost. **Gates everything below.** |
 | 1 | Terminal-record parser + disposition-aware `ReassemblyBuffer` (§2.2) | all four dispositions advance the prefix; gaps detectable |
 | 2 | **Design note + prototype** for bounded, live ordered streaming (§2.4) | both properties proven; **decline stands until then** |
 | 3 | Spawn integration (§3) | no orphaned children on death, respawn, fail-fast, teardown |
@@ -438,6 +460,13 @@ contract is more load-bearing once `Auto` is the default.
 Stages 1, 3 and 4 are independent and can run in parallel. Stage 5's map
 Auto does not wait on 1 or 2. Stage 2 gates only ordered streaming, and
 may never conclude "ship it".
+
+**Stage 0 precedes all of them.** It is a pre-existing correctness
+defect in the shipped plugin/UDF path, it is reachable today by ordinary
+worker death, and every later stage builds on the assumption that a
+published record belongs to a committed batch. Stage 1's whole premise —
+dispositions as authoritative terminal outcomes — is exactly the
+assumption that is currently false.
 
 ---
 

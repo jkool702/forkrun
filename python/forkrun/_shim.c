@@ -634,6 +634,44 @@ static void fr_py_maybe_die_before_ack(void)
     }
 }
 
+/* Fault injection: SIGKILL this worker AFTER its payload record has been
+ * written AND signalled, but BEFORE the ack.
+ *
+ * This is the interval the before-ack hook cannot reach, and it is the
+ * one that matters. fr_py_emit_record_buf writes a DATA record WITHOUT
+ * signalling; the signal happens later, inside fr_py_complete. The
+ * before-ack hook sits between those two points, so under it a DATA
+ * record is never signalled, the drain never learns of it, and a DATA
+ * record is never forwarded -- which means a test driven by that hook
+ * exercises ONLY the disposition path and silently proves nothing about
+ * DATA publication, however many POISONED records it forwards.
+ *
+ * Gated on data_len > 0 so it fires only where a real payload record was
+ * actually emitted and signalled; the ack-silent disposition path passes
+ * NULL/0 and is deliberately not reached here.
+ *
+ * Honours FORKRUN_TEST_DIE_AFTER_DRAIN_MS to let the drain forward the
+ * record first, which is what makes the publication/commit window real
+ * rather than theoretical. */
+static void fr_py_maybe_die_after_signal(uint64_t data_len)
+{
+    const char *n = getenv("FORKRUN_TEST_DIE_AFTER_SIGNAL");
+    if (n != NULL && *n && data_len > 0) {
+        static unsigned seq = 0;
+        unsigned want = (unsigned)atoi(n);
+        seq++;
+        if (want && seq == want) {
+            const char *d = getenv("FORKRUN_TEST_DIE_AFTER_DRAIN_MS");
+            if (d != NULL && *d) {
+                unsigned long ms = strtoul(d, NULL, 10);
+                if (ms)
+                    usleep((useconds_t)(ms * 1000));
+            }
+            raise(SIGKILL);
+        }
+    }
+}
+
 /* Full-write loop (regular files / memfds: no SIGPIPE, short writes only
  * on EINTR/error). Returns 0 ok, -1 on failure. */
 static int fr_py_write_all(int fd, const void *buf, size_t count) {
@@ -2754,6 +2792,7 @@ int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx,
     rc = fr_py_emit(out_fd, signal_fd, wid, batch_idx, data, data_len);
     if (rc != 0)
         return rc;
+    fr_py_maybe_die_after_signal(data_len);
     target = (g_fr_config.fd_order_pipe >= 0 && out_fd >= 0) ? out_fd : -1;
     if (fr_py_ack_direct(fallow_fd, target) != EXECUTION_SUCCESS)
         return -3;
