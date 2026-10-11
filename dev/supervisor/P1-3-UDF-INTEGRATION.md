@@ -82,12 +82,16 @@ Three reasons, in order of weight:
 Option A settles *where init happens*. Two things it does **not** settle,
 and which should be decided with evidence rather than assumed:
 
-* **The per-batch call site.** `fr_py_worker_plugin_loop` is the natural
-  home, but it is a *plugin* loop (built for C plugins, with its own
-  `forkrun_use_ctx` handshake at `forkrun_ring.c:9741`). Is the Python UDF
-  a plugin that happens to embed an interpreter, or a distinct path? This
-  affects whether the existing plugin dlopen machinery is reused or
-  bypassed. **This is the part worth review.**
+* **The per-batch call site.** Now much better constrained by the code
+  itself: there are four worker loops (`splice`, `plugin`, `spawn`, plus
+  `fallow`), all identical in shape — claim → invoke → `fr_py_complete` /
+  `fr_py_escrow_deposit` / `fr_py_abort` — differing **only** in the invoke
+  step. A UDF therefore looks like a fifth loop by the codebase's own
+  convention, not a special case. Routed for external review as
+  `P1-3-EXTERNAL-REVIEW.md`, together with the one genuine tension:
+  the plugin loop deliberately dlopens **post-fork** ("a parent-handle
+  pointer would dangle on dlclose and entangle refcounts across fork"),
+  which sits against the measured 4–8× win for pre-fork init.
 * **Interaction with supervision.** Under `recover`, a worker that dies
   mid-UDF is respawned; under `fail-fast` the run aborts. A UDF has
   Python-level state and can leave imported modules half-initialised.
