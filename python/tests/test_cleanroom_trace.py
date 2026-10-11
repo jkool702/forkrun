@@ -204,6 +204,16 @@ class _TracingEnvMixin:
     which looks exactly like a broken trace.
     """
 
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._tmp = tempfile.TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+        super().tearDownClass()
+
     def setUp(self):
         super().setUp()
         self._saved_env = {}
@@ -292,11 +302,22 @@ class TestSupervisionAndTeardown(_TracingEnvMixin, unittest.TestCase):
                                % (k["rc"],))
 
     def test_respawn_is_traced(self):
-        """A respawn must record the new incarnation and its pid."""
+        """A respawn must record the new incarnation and its pid.
+
+        Uses FORKRUN_TEST_DIE_FILE so the fixture's kill happens EXACTLY
+        once across all workers. Without it, die_once_v1 falls back to a
+        `static int once` guard, which is per-process -- so with two workers
+        it dies twice, and the run intermittently exhausted the respawn cap
+        and raised instead of completing. The test was flaky because it
+        declined to use the determinism the fixture offers.
+        """
         path = _make_input(200)
+        die_file = os.path.join(self._tmp.name, "die_once.marker")
+        os.environ["FORKRUN_TEST_DIE_FILE"] = die_file
         try:
             _out, tr = self._e2e(path, func="die_once_v1")
         finally:
+            os.environ.pop("FORKRUN_TEST_DIE_FILE", None)
             os.unlink(path)
         respawns = [r for r in tr if r["event"] == "sup_respawn"]
         self.assertTrue(respawns, "die_once_v1 produced no sup_respawn; "
