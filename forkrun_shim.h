@@ -9,7 +9,7 @@
  * Scope: declarations, argument types, return types only.
  * No semantic contracts (see test_invariant_gate.py §3/§6/§9).
  * Extern entries are the dlsym-visible ABI surface (52);
- * static entries are internal (13, listed with linkage in
+ * static entries are internal (14, listed with linkage in
  * shim_signatures.json, omitted here).
  *
  * Header hygiene (substrate rules): self-contained (no includes

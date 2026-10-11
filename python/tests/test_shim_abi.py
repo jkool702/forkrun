@@ -179,10 +179,20 @@ class TestShimBindings(unittest.TestCase):
         #                                 b"" -- the exact conflation
         #                                 DECISION-02 removes.
         #   static  fr_py_udf_invoke     the UDF invoke body.
-        # Behavior delta: additive only. No existing symbol changed
-        # arity, signature or semantics; the plugin/splice/spawn/fallow
-        # loops are untouched.
-        self.assertEqual((n_ext, n_st), (52, 13),
+        #   static  fr_py_emit_disposition SKIPPED/POISONED terminal
+        #                                 records (P5). Zero payload --
+        #                                 an empty DATA record would make
+        #                                 poison indistinguishable from a
+        #                                 UDF returning b"".
+        # Behavior delta: this one is NOT purely additive in effect.
+        # fr_py_emit_disposition adds two new records to the stream --
+        # a POISONED record per poison-skipped batch and a SKIPPED record
+        # per on_error=skip batch, in all four worker loops. Readers
+        # already filtered every non-DATA disposition, so no caller sees
+        # them as results; what changes is that a terminal outcome now
+        # has a representation on the wire instead of being inferred from
+        # a counter. No existing symbol changed arity or signature.
+        self.assertEqual((n_ext, n_st), (52, 14),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

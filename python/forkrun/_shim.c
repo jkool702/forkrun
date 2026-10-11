@@ -561,6 +561,14 @@ unsigned int fr_py_poisoned_count(void) {
  */
 #define FR_DISP_DATA      0u
 #define FR_DISP_NO_RESULT 1u
+/* DECISION-02 5.1: the four terminal dispositions. Every PUBLISHED batch
+ * reaches exactly one. SKIPPED and POISONED carry no payload -- their
+ * entire content is that the batch reached a terminal state which is NOT
+ * a success, so an ordered consumer can advance the prefix past it
+ * without that advance implying success. A missing payload implies
+ * neither success nor poison. */
+#define FR_DISP_SKIPPED   2u
+#define FR_DISP_POISONED  3u
 
 struct fr_py_record_hdr {
     uint64_t batch_idx;
@@ -677,6 +685,31 @@ static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
     }
     worker_txn_advance_output(0, FR_PY_RECORD_FOOTPRINT(len));
     return 0;
+}
+
+
+/* Emit a terminal control disposition for a batch that produced no
+ * payload: SKIPPED (on_error=skip) or POISONED (retry limit reached).
+ *
+ * DECISION-02 5.1. Before this those two outcomes were indistinguishable
+ * from a worker that died: no record at all, so the parent's only
+ * evidence was the poison counter, and an ordered consumer could not
+ * advance the prefix -- the batch looked like a hole and the consumer
+ * waited for a record that was never coming.
+ *
+ * Zero payload BY DESIGN. An empty DATA record instead would make poison
+ * indistinguishable from a UDF that legitimately returned b"", which is
+ * exactly the conflation the disposition exists to remove.
+ *
+ * The frontier advance matters as much as the write: the record is part
+ * of the batch's output transaction, so a death before the ack rolls it
+ * back with everything else and the retry re-emits it. Emitting outside
+ * the transaction would leak a disposition for a batch about to run
+ * again. */
+static int fr_py_emit_disposition(int out_fd, uint64_t batch_idx,
+                                  uint32_t disposition)
+{
+    return fr_py_emit_record_buf(out_fd, batch_idx, NULL, 0, disposition);
 }
 
 /* Set a fd nonblocking. Returns 0 ok, -1 on failure. */
@@ -1550,6 +1583,12 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
                     "(killed %u times).\n",
                     (unsigned long long)claimed.batch_idx,
                     claimed.num_kills);
+            /* DECISION-02: terminal POISONED disposition, emitted
+             * BEFORE the ack, so a death in between rolls it back
+             * with the rest of the batch. */
+            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+                                       FR_DISP_POISONED) != 0)
+                return 1;
             if (fr_py_ack(fallow_fd, -1) != 0)
                 return 1;
             continue;
@@ -3023,6 +3062,12 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
             }
             /* Ack-silent (no signal — v0 parity) but ordered: the
              * C orderer still expects its contiguous packet. */
+            /* DECISION-02: terminal POISONED disposition, emitted
+             * BEFORE the ack, so a death in between rolls it back
+             * with the rest of the batch. */
+            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+                                       FR_DISP_POISONED) != 0)
+                return 1;
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
@@ -3059,6 +3104,12 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
 
         /* --- failure path (bash -E analogue, _worker.py parity) --- */
         if (on_error == 1) {
+            /* DECISION-02: terminal SKIPPED disposition. Emitted
+             * before the ack, inside the transaction, so a death
+             * in between rolls it back and the retry re-emits it. */
+            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+                                      FR_DISP_SKIPPED) != 0)
+                return 1;
             /* skip: ack-silent like poison (no signal — nothing emitted). */
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
@@ -3249,6 +3300,12 @@ int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
                     (void)robust_pipe_write(trap_ack_fd, pbuf,
                                             (size_t)plen);
             }
+            /* DECISION-02: terminal POISONED disposition, emitted
+             * BEFORE the ack, so a death in between rolls it back
+             * with the rest of the batch. */
+            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+                                       FR_DISP_POISONED) != 0)
+                return 1;
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
@@ -3281,6 +3338,12 @@ int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
 
         /* --- failure path: the existing on_error policy, unchanged --- */
         if (on_error == 1) {
+            /* DECISION-02: terminal SKIPPED disposition. Emitted
+             * before the ack, inside the transaction, so a death
+             * in between rolls it back and the retry re-emits it. */
+            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+                                      FR_DISP_SKIPPED) != 0)
+                return 1;
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
@@ -3392,6 +3455,12 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
             }
             /* Ack-silent (no signal — v0 parity) but ordered: the
              * C orderer still expects its contiguous packet. */
+            /* DECISION-02: terminal POISONED disposition, emitted
+             * BEFORE the ack, so a death in between rolls it back
+             * with the rest of the batch. */
+            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+                                       FR_DISP_POISONED) != 0)
+                return 1;
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
@@ -3429,6 +3498,12 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
 
         /* --- failure path (command exit code; _worker.py parity) --- */
         if (on_error == 1) {
+            /* DECISION-02: terminal SKIPPED disposition. Emitted
+             * before the ack, inside the transaction, so a death
+             * in between rolls it back and the retry re-emits it. */
+            if (fr_py_emit_disposition(out_fd, claimed.batch_idx,
+                                      FR_DISP_SKIPPED) != 0)
+                return 1;
             /* skip: ack (order target derived, no signal — v0 parity). */
             rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);

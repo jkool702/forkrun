@@ -322,3 +322,115 @@ class TestDuplicationIsGone(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTerminalControlDispositions(unittest.TestCase):
+    """SKIPPED and POISONED (P5, DECISION-02 section 5.1).
+
+    Before these, a skipped or poisoned batch produced NO record at all,
+    which made it indistinguishable on the wire from a worker that died --
+    and left an ordered consumer unable to advance the prefix past it,
+    because the batch looked like a hole with a record still to come.
+    """
+
+    POISONED = 3
+    SKIPPED = 2
+
+    def test_the_four_dispositions_are_all_distinct(self):
+        vals = {DISP_DATA, DISP_NO_RESULT, self.SKIPPED, self.POISONED}
+        self.assertEqual(4, len(vals), "disposition codes must not collide")
+
+    def test_control_records_carry_no_payload(self):
+        """Zero length, and NOT DATA. An empty DATA record would make
+        poison indistinguishable from a UDF that returned b""."""
+        for disp in (self.SKIPPED, self.POISONED):
+            with self.subTest(disposition=disp):
+                raw = _HDR.pack(3, 0, disp, 0)
+                idx, ln, got, _r = _HDR.unpack(raw)
+                self.assertEqual(0, ln)
+                self.assertNotEqual(DISP_DATA, got)
+
+    def _parse(self, blob):
+        mod = importlib.import_module("forkrun.run")
+        return mod._parse_records(blob)
+
+    def test_all_control_dispositions_are_filtered_from_results(self):
+        """The caller must never see them. map() returns results; a
+        poisoned batch is not a result, and surfacing it as b"" is
+        exactly the failure DECISION-02 exists to prevent."""
+        blob = b"".join(
+            _HDR.pack(i, 0, d, 0)
+            for i, d in ((0, self.POISONED), (1, self.SKIPPED),
+                         (2, DISP_NO_RESULT)))
+        blob += _HDR.pack(3, 2, DISP_DATA, 0) + b"ok"
+        got = self._parse(blob)
+        self.assertEqual([(3, b"ok")], got,
+                         "only DATA may reach the caller")
+
+    def test_every_loop_emits_poisoned(self):
+        """All four worker loops, including splice.
+
+        A loop that skipped poison silently would leave splice's batches
+        unrepresentable on the wire while the other modes were fine.
+        """
+        with open(os.path.join(_ROOT, "python", "forkrun", "_shim.c")) as fh:
+            shim = fh.read()
+        for loop in ("fr_py_worker_splice_loop",
+                     "fr_py_worker_plugin_loop",
+                     "fr_py_worker_spawn_loop",
+                     "fr_py_worker_udf_loop"):
+            body = _loop_body(shim, loop)
+            with self.subTest(loop=loop):
+                self.assertIn("claimed.poisoned", body)
+                self.assertIn("FR_DISP_POISONED", body)
+
+    def test_the_payload_failure_loops_emit_skipped(self):
+        """Splice has no skip arm -- it retries always, by design -- so
+        it is deliberately excluded rather than counted as a gap."""
+        with open(os.path.join(_ROOT, "python", "forkrun", "_shim.c")) as fh:
+            shim = fh.read()
+        for loop in ("fr_py_worker_plugin_loop",
+                     "fr_py_worker_spawn_loop",
+                     "fr_py_worker_udf_loop"):
+            body = _loop_body(shim, loop)
+            with self.subTest(loop=loop):
+                self.assertIn("on_error == 1", body)
+                self.assertIn("FR_DISP_SKIPPED", body)
+        splice = _loop_body(shim, "fr_py_worker_splice_loop")
+        self.assertNotIn("FR_DISP_SKIPPED", splice,
+                         "splice does not skip; if it gained on_error, "
+                         "revisit this expectation")
+
+    def test_sentinel_slots_stay_silent(self):
+        """A zero-length slot is an EOF marker, not a batch outcome.
+
+        Emitting SKIPPED for it would put a terminal disposition on the
+        wire for a batch that never existed.
+        """
+        with open(os.path.join(_ROOT, "python", "forkrun", "_shim.c")) as fh:
+            shim = fh.read()
+        for loop in ("fr_py_worker_splice_loop",
+                     "fr_py_worker_plugin_loop",
+                     "fr_py_worker_spawn_loop",
+                     "fr_py_worker_udf_loop"):
+            body = _loop_body(shim, loop)
+            sentinel = body.split("EOF sentinel slot")
+            self.assertGreaterEqual(len(sentinel), 2, loop)
+            branch = sentinel[1][:400]
+            with self.subTest(loop=loop):
+                self.assertNotIn("fr_py_emit_disposition", branch,
+                                 "the EOF sentinel must not emit a record")
+
+
+def _loop_body(shim, name):
+    start = shim.index("int %s(" % name)
+    brace = shim.index("{", start)
+    depth = 0
+    for i in range(brace, len(shim)):
+        if shim[i] == "{":
+            depth += 1
+        elif shim[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return shim[start:i + 1]
+    raise AssertionError("unbalanced braces in %s" % name)
