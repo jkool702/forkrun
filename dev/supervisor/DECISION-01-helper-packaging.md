@@ -349,3 +349,91 @@ worker lifecycle, no shutdown-under-signal behaviour, and no packaging
 (`DT_NEEDED`/RPATH/`auditwheel`) — condition 6.2 remains entirely open. The
 pre-fork vs post-fork question (C0.4) is untouched: this probe initialises in
 a single process, which corresponds to neither.
+
+---
+
+## 9. Phase-2 results — the shipped-shape artifact, and C0.4 answered
+
+`python/forkrun/fr_udf.c` + `fr_udf.h` — the per-minor helper as a
+**dlopen-able shared object**, built by `make -f Makefile.substrate udf`.
+`fr_udf_helper.c` survives as the Phase-1 probe but now *drives the library*
+rather than reimplementing it, so the diagnostic and the shipped path
+cannot drift apart.
+
+### 9.1 Why a `.so` and not part of the substrate
+
+The helper is the only artifact here that **links libpython**. Every other
+target is built so that it does not (`release_check`'s canary asserts the
+substrate has no bash linkage; the same reasoning applies to libpython).
+Keeping the interpreter behind a separate `dlopen`-able object means a
+non-UDF run never maps libpython at all and its `DT_NEEDED` set is
+unchanged — the blast radius of adding Python support is one `dlopen` in
+one mode, not a new dependency for every user.
+
+### 9.2 The constraint that dictated the test strategy
+
+The helper initialises the interpreter, so it **cannot be loaded into a
+process that already has one**. A test runner is itself a running Python;
+`dlopen`ing the helper there and calling `fr_udf_init` means calling
+`Py_InitializeFromConfig` on a live interpreter. That is undefined and in
+practice core-dumps.
+
+This is not a testing inconvenience — it is the helper's actual contract,
+and it independently justifies the whole architecture: the interpreter
+lives in a process the launcher `exec`s, never in the Python parent. The
+tests therefore drive the binaries as subprocesses, which is also what
+ships.
+
+### 9.3 C0.4 (pre-fork vs post-fork) — measured, not assumed
+
+`fr_udf_fork.c` runs both candidates and **checks every child's outcome
+before reporting a timing**. That check earned its place immediately: the
+first run reported a 25× speedup for pre-fork against a post-fork
+baseline of 4/4 *failures*, because the post-fork children were
+initialised with no import roots and so could not import the UDF at all.
+A harness that printed only timings would have recorded that as a result.
+
+Correctness first, then speed:
+
+* **Pre-fork works.** A forked child inherits the initialised interpreter
+  and runs the UDF correctly. This was the open risk: CPython's runtime
+  is not fork-safe in general, and it would have made post-fork the only
+  option by default. It is safe here because the launcher is
+  single-threaded at the moment it forks — a precondition, now stated in
+  `fr_udf.h` rather than left implicit.
+* **Pre-fork is 4–8× faster**, consistently, across 1/2/4/8 children
+  (post-fork pays a full interpreter start per worker; pre-fork pays one).
+
+Neither candidate is wired into the launcher yet. This settles *which*
+to build; it does not claim the integration is done.
+
+### 9.4 Two more things running them produced
+
+6. **A flag that does not exist is not a violated flag.** The probe
+   computed `sys.flags.use_environment` and, on 3.14, found it **absent**,
+   while the flags table printed it as `= 0` — because the helper returned
+   0 for "absent" and the report printed the substituted value instead of
+   the absence. The same run then printed the property as *both* `0` and
+   `VIOLATED`. Finding 4 of section 8 said the names differ per minor; the
+   report now distinguishes ABSENT from a value, and an uncheckable
+   property is reported as uncheckable rather than as a breach.
+
+7. **`None` survives to the UDF boundary as its own outcome.**
+   `fr_udf_call` returns `FR_UDF_NO_RESULT` for `None` and `FR_UDF_OK`
+   with a non-NULL zero-length buffer for `b""`. The caller never has to
+   infer which it got from a buffer length — which is the same invariant
+   DECISION-02 established for the record channel, now held at the point
+   where a Python callable's return value becomes a frame.
+
+### 9.5 Still open
+
+* Launcher integration (the `dlopen` in UDF mode, and the per-batch call
+  site) — not started.
+* Packaging proof under condition 6.2: `DT_NEEDED`/RPATH/`auditwheel` for
+  the helper, and a clean-install run on all six minors. `fr_udf.c` and
+  `fr_udf.h` are in `MANIFEST.in` and asserted by `release_check`, but
+  the wheel matrix does not yet build the helper.
+* Per-minor verification: measured here on **3.14.7 only** (this machine
+  has no `/opt/python/cp3xx` interpreters). Findings 4 and 6 above are
+  exactly the kind of thing that differs per minor, so the other five
+  minors are unverified.

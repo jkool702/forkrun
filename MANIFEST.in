@@ -16,7 +16,12 @@ include Makefile.substrate
 include ring_loadables/forkrun_plugin.h
 
 # Python package (modules + shim source + type marker)
-recursive-include python/forkrun *.py *.c
+# *.h as well as *.c: the UDF helper (DECISION-01 Phase 2) is built from
+# python/forkrun/fr_udf.c, which includes python/forkrun/fr_udf.h from
+# its own directory, so shipping the sources without the header would
+# make the source-only helper build fail for exactly the users it exists
+# to serve.
+recursive-include python/forkrun *.py *.c *.h
 include python/forkrun/py.typed
 
 # Documentation and license (PyPI page + legal)

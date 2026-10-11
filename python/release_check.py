@@ -415,7 +415,13 @@ def check_sdist():
               "forkrun_trace.h",
               "substratestubs.c", "Makefile.substrate",
               "ring_loadables/forkrun_plugin.h",
-              "python/forkrun/_shim.c", "python/README.md",
+              "python/forkrun/_shim.c",
+              # P1 (DECISION-01) Phase 2: the UDF helper is built from
+              # source by users on the source-only path, so both the .c
+              # and the .h it includes must ship.
+              "python/forkrun/fr_udf.c",
+              "python/forkrun/fr_udf.h",
+              "python/README.md",
               "LICENSE", "setup.py", "pyproject.toml"]
     for rel in needed:
         assert top + rel in names, "sdist missing %s" % rel

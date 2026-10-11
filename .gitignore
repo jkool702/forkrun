@@ -38,6 +38,19 @@ python/forkrun/libforkrun_python.so
 # now remove it, so nothing rebuilds it by hand.
 python/forkrun/_forkrun_cleanroom
 
+# P1 (DECISION-01) embedded-CPython UDF helper
+# (make -f Makefile.substrate udf). Built artifacts only: the .so carries
+# an EXT_SUFFIX for the minor it was compiled against, so a committed one
+# is both platform-specific AND interpreter-specific -- it would be loaded
+# by the wrong Python and silently "work" against the wrong libpython.
+# The sources (fr_udf.c/.h, fr_udf_fork.c) ARE tracked.
+python/forkrun/_fr_udf*.so
+python/forkrun/fr_udf_helper
+python/forkrun/fr_udf_fork
+/fr_udf.o
+/fr_udf_fork.o
+/fr_udf_helper_probe.o
+
 # Python packaging artifacts (pip wheel / setup.py build; never commit)
 python/forkrun.egg-info/
 python/build/
