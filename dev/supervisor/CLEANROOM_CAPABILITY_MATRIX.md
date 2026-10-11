@@ -78,7 +78,7 @@ Evaluated **first-match-wins**. Each is the contract's own words.
 - **R1 `nodes`** &rarr; `DECLINE_NODES`  
   docstring: 'UMA single node -- no multi-node rings'
 - **R2 `mode`** &rarr; `DECLINE_MODE`  
-  docstring: 'mode=plugin -- it dlopens an object and calls an entry point'; and the plugin must export forkrun_use_ctx, since a plugin without it is driven by the legacy ARGV/stdout route whose output lands on the worker's stdout, not the memfd -- exit 78, not silent success with an empty result set
+  docstring: 'mode=plugin -- it dlopens an object and calls an entry point'; and the plugin must export forkrun_use_ctx, since a plugin without it is driven by the legacy ARGV/stdout route whose output lands on the worker's stdout, not the memfd -- exit 78, not silent success with an empty result set. P1-3 adds mode='udf', served wherever plugin is: the launcher dlopens a per-minor helper, initialises the interpreter before forking, and selects fr_py_worker_udf_loop, which has the same signature and the same lifecycle. The refusal reason does not transfer -- a UDF has no ctx dialect to be mismatched on -- but the envelope is identical, so the outcome is too.
 - **R4 `order`** &rarr; `DECLINE_ORDER`  
   docstring: 'order in (none, index)'. The launcher forks no C orderer, but does not need to: collect_records sorts by index for map, and stream reassembles parent-side from the batch_idx already in the framing
 - **R5 `resume/checkpoint`** &rarr; `DECLINE_RESUME`  

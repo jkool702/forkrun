@@ -25,7 +25,7 @@ OnError = Literal["retry", "fail-fast", "skip"]
 # "0,1" (explicit physicals), "@N" (forced logical nodes).
 Nodes = Union[int, str, None]
 
-_VALID_MODES = ("python", "spawn", "plugin", "splice")
+_VALID_MODES = ("python", "spawn", "plugin", "splice", "udf")
 _VALID_ORDERS = ("none", "index")
 _VALID_ON_ERROR = ("retry", "fail-fast", "skip")
 

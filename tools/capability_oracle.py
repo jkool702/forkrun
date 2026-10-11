@@ -76,7 +76,13 @@ SERVED = "SERVED"
 OUTCOMES = {
     SERVED: None,
     "DECLINE_NODES": "UMA single-node only",
-    "DECLINE_MODE": "mode='plugin' only",
+    # Anchor is a SUBSTRING of the predicate's refusal text, so it must
+    # track it. Widened with P1-3 when mode='udf' was admitted alongside
+    # mode='plugin'; a stale anchor here shows up as UNCLASSIFIED on
+    # every non-served mode, which is a loud failure rather than a quiet
+    # one -- but it reads as "the oracle is wrong", not "the anchor
+    # drifted".
+    "DECLINE_MODE": "only (got",
     "DECLINE_ORDER": "is not served; the launcher relies on downstream",
     "DECLINE_RESUME": "resume=/checkpoint_file= is not served",
     "DECLINE_STREAM_ORDER": "the stream path has no collect step",
@@ -110,13 +116,19 @@ RULES = [
      "docstring: 'UMA single node -- no multi-node rings'"),
 
     ("R2", "mode",
-     lambda f: f.mode != "plugin",
+     lambda f: f.mode not in ("plugin", "udf"),
      "DECLINE_MODE",
      "docstring: 'mode=plugin -- it dlopens an object and calls an entry "
      "point'; and the plugin must export forkrun_use_ctx, since a plugin "
      "without it is driven by the legacy ARGV/stdout route whose output "
      "lands on the worker's stdout, not the memfd -- exit 78, not silent "
-     "success with an empty result set"),
+     "success with an empty result set. "
+     "P1-3 adds mode='udf', served wherever plugin is: the launcher "
+     "dlopens a per-minor helper, initialises the interpreter before "
+     "forking, and selects fr_py_worker_udf_loop, which has the same "
+     "signature and the same lifecycle. The refusal reason does not "
+     "transfer -- a UDF has no ctx dialect to be mismatched on -- but the "
+     "envelope is identical, so the outcome is too."),
 
     # R3 (orchestrator) REMOVED. It used to decline orchestrator=False with
     # "the launcher supervises unconditionally, so serving False would hand a

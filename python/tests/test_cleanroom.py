@@ -2497,10 +2497,21 @@ class TestCleanroomStreamStrictPoison(unittest.TestCase):
 
     def setUp(self):
         self.path = _make_input(400)
+        # Save and RESTORE rather than set-then-pop. An unconditional
+        # pop in tearDown deletes a value the environment already had,
+        # so every test that ran afterwards saw the cleanroom disabled.
+        # That is invisible in the default suite -- where the var starts
+        # unset, so set-then-pop happens to restore -- and wrong the
+        # moment anyone runs with FORKRUN_CLEANROOM=1, which is how it
+        # hid until test_udf_mode ran later in discovery order.
+        self._old_cr = os.environ.get("FORKRUN_CLEANROOM")
         os.environ["FORKRUN_CLEANROOM"] = "1"
 
     def tearDown(self):
-        os.environ.pop("FORKRUN_CLEANROOM", None)
+        if getattr(self, "_old_cr", None) is None:
+            os.environ.pop("FORKRUN_CLEANROOM", None)
+        else:
+            os.environ["FORKRUN_CLEANROOM"] = self._old_cr
         try:
             os.unlink(self.path)
         except OSError:

@@ -62,6 +62,9 @@ from ._resume import (ORDERER_REAP_TIMEOUT, WORKER_REAP_TIMEOUT,
                        resume_begin)
 from ._signals import guard as _signal_guard
 from ._spawn import make_spawn_payload
+from ._udf import (roots_spec as _udf_roots_spec,
+                   udf_payload as _make_udf_payload)
+from ._udf import helper_path as _udf_helper_path
 from ._worker import _HDR, _c_plugin_spec, _c_spawn_spec, \
     _fork_c_plugin_worker, _fork_c_spawn_worker, resolve_payload_parent, \
     worker_main
@@ -697,8 +700,12 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
     """
     if num_nodes != 1:
         return False, "UMA single-node only (got nodes=%r)" % (num_nodes,)
-    if raw_mode != "plugin":
-        return False, "mode='plugin' only (got %r)" % (raw_mode,)
+    # mode="udf" is served wherever mode="plugin" is: same launcher, same
+    # envelope, same supervision. It differs only in WHICH loop the
+    # launcher selects (fr_py_worker_udf_loop) and that an interpreter is
+    # initialised pre-fork. P1-3.
+    if raw_mode not in ("plugin", "udf"):
+        return False, "mode='plugin' or mode='udf' only (got %r)" % (raw_mode,)
     # DECISION-03: orchestrator=False is now SERVED, via the launcher's
     # fail-fast supervision policy (--supervise fail-fast).
     #
@@ -964,7 +971,9 @@ def _source_is_reopenable(source):
 
 def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                        plugin_func, on_error, views, strict_poison=False,
-                       order="none", orchestrator=True):
+                       order="none", orchestrator=True,
+                       udf_helper=None, udf_module=None, udf_attr=None,
+                       udf_roots=None):
     """W-CR1: materialized file + C plugin, orchestrated entirely in C.
 
     Everything (fr_py_init, spill to the ingress memfd, per-worker output
@@ -1063,7 +1072,6 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                      _fcntl.fcntl(trace_fd, _fcntl.F_GETFL) | os.O_APPEND)
 
     argv = [launcher, "--so", so,
-            "--plugin", plugin_path, "--func", plugin_func,
             "--workers", str(int(workers)),
             "--lines", str(int(lines or 0)),
             "--bytes", str(int(bytes_ or 0)),
@@ -1074,6 +1082,17 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "--retry", str(int(_resolve_retry_limit())),
             "--src", str(src_fd), "--result", str(res_fd),
             "--stats-fd", str(stats_fd)]
+    if udf_helper:
+        # P1-3: the launcher initialises the interpreter BEFORE forking
+        # and selects fr_py_worker_udf_loop. --plugin/--func are NOT sent
+        # in this mode; the launcher rejects the combination.
+        argv += ["--udf-helper", udf_helper,
+                 "--udf", udf_module,
+                 "--udf-attr", udf_attr]
+        if udf_roots:
+            argv += ["--udf-roots", udf_roots]
+    else:
+        argv += ["--plugin", plugin_path, "--func", plugin_func]
     if trace_fd >= 0:
         argv += ["--trace-fd", str(trace_fd)]
     # `orchestrator is False`, NOT `not orchestrator`: map() defaults
@@ -1533,7 +1552,9 @@ def _cleanroom_source_fd(source):
 
 def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                               plugin_path, plugin_func, on_error,
-                              strict_poison=False):
+                              strict_poison=False,
+                              udf_helper=None, udf_module=None,
+                              udf_attr=None, udf_roots=None):
     """W-CR3: STREAMING cleanroom -- yield results as they arrive.
 
     Same envelope as the map() path (materialised-vs-streaming aside),
@@ -1598,7 +1619,6 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     os.set_inheritable(stats_fd, True)
 
     argv = [launcher, "--so", so,
-            "--plugin", plugin_path, "--func", plugin_func,
             "--workers", str(int(workers)),
             "--lines", str(int(lines or 0)),
             "--bytes", str(int(bytes_ or 0)),
@@ -1607,6 +1627,14 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
             "--src", str(src_fd if src_fd is not None else sr),
             "--result", str(rw),
             "--stats-fd", str(stats_fd)]
+    if udf_helper:
+        argv += ["--udf-helper", udf_helper,
+                 "--udf", udf_module,
+                 "--udf-attr", udf_attr]
+        if udf_roots:
+            argv += ["--udf-roots", udf_roots]
+    else:
+        argv += ["--plugin", plugin_path, "--func", plugin_func]
 
     launch_pid = os.fork()
     if launch_pid == 0:
@@ -2762,6 +2790,16 @@ def _coerce_payload(payload, mode):
                 "mode='plugin' payload must be 'path:function' format, "
                 "got %r" % (payload,))
         return make_plugin_payload(path, func_name), "python"
+    if mode == "udf":
+        # Unlike mode="plugin", the spec is NOT resolved here. Importing
+        # the user's module in this process would put their state into
+        # the parent that forks every worker -- the exact inheritance the
+        # cleanroom exists to prevent. Resolution happens in the worker.
+        if callable(payload):
+            raise ValueError(
+                "mode='udf' requires a 'module:attribute' string, not a "
+                "callable.")
+        return _make_udf_payload(payload), "udf"
     if mode == "spawn":
         if callable(payload):
             raise ValueError(
@@ -3134,7 +3172,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     raw_mode = mode
     raw_payload = payload
     order = kwargs.get("order", "none")
-    if _cleanroom_enabled() and raw_mode == "plugin":
+    if _cleanroom_enabled() and raw_mode in ("plugin", "udf"):
         _ok, _why = _cleanroom_eligible(
             source, raw_mode, num_nodes, order,
             kwargs.get("strict_poison", False), orchestrator,
@@ -3164,8 +3202,26 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             # A plugin without forkrun_use_ctx is refused by the launcher
             # (see its dlopen probe); _cleanroom_eligible's docstring
             # covers why.
+            #
+            # A UDF needs its helper built for THIS minor; if it is not,
+            # fall through to the in-process path rather than refusing --
+            # slower and correct beats fast and missing.
             _p, _sep, _f = raw_payload.rpartition(":")
-            if _p and _f:
+            _udf_args = {}
+            if raw_mode == "udf" and _p and _f:
+                # Helper missing for this minor -> fall through to the
+                # in-process path. Slower and correct beats fast and
+                # missing, and an absent build artifact is not a reason
+                # to fail the caller's program.
+                _helper = _udf_helper_path()
+                if _helper:
+                    _udf_args = {
+                        "udf_helper": _helper,
+                        "udf_module": _p,
+                        "udf_attr": _f,
+                        "udf_roots": _udf_roots_spec(_p),
+                    }
+            if _p and _f and (raw_mode != "udf" or _udf_args):
                 with _signal_guard(
                         kwargs.get("signal_policy", "default")) as _sg:
                     with _RUN_LOCK:
@@ -3180,7 +3236,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                             strict_poison=bool(
                                 kwargs.get("strict_poison", False)),
                             order=order,
-                            orchestrator=orchestrator)
+                            orchestrator=orchestrator,
+                            **_udf_args)
                     _sg.check()
                 if out is not None:
                     return _map_return(out, return_stats)
@@ -3506,7 +3563,7 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
         # an unserved call is the overwhelmingly common case and
         # warning on each would be noise. An explicit request that cannot
         # be honoured still warns, as it does for map().
-        if _cleanroom_enabled() and raw_mode == "plugin":
+        if _cleanroom_enabled() and raw_mode in ("plugin", "udf"):
             _ok, _why = _cleanroom_eligible(
                 source, raw_mode, num_nodes,
                 kwargs.get("order", "none"),
@@ -3518,7 +3575,19 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                 _p, _sep, _f = (
                     raw_payload.rpartition(":")
                     if isinstance(raw_payload, str) else ("", "", ""))
-                if _p and _f:
+                # Same UDF wiring as map(): helper for this minor, or
+                # fall through to the in-process path.
+                _udf_args = {}
+                if raw_mode == "udf" and _p and _f:
+                    _helper = _udf_helper_path()
+                    if _helper:
+                        _udf_args = {
+                            "udf_helper": _helper,
+                            "udf_module": _p,
+                            "udf_attr": _f,
+                            "udf_roots": _udf_roots_spec(_p),
+                        }
+                if _p and _f and (raw_mode != "udf" or _udf_args):
                     return _guarded_gen(
                         _signal_guard(
                             kwargs.get("signal_policy", "default")),
@@ -3531,7 +3600,8 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                             plugin_path=_p, plugin_func=_f,
                             on_error=kwargs.get("on_error", "retry"),
                             strict_poison=bool(
-                                kwargs.get("strict_poison", False))))
+                                kwargs.get("strict_poison", False)),
+                            **_udf_args))
             elif _cleanroom_explicit() and _why:
                 import warnings as _warnings
                 _warnings.warn(
