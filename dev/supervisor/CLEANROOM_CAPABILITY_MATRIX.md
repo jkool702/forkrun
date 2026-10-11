@@ -12,9 +12,9 @@ neither alone would be.
 | | |
 |---|---|
 | Cells enumerated | 20160 |
-| Served by the launcher | 160 (0.79%) |
-| Declined | 20000 |
-| Distinct outcomes | 10 |
+| Served by the launcher | 192 (0.95%) |
+| Declined | 19968 |
+| Distinct outcomes | 9 |
 
 ---
 
@@ -64,12 +64,11 @@ the enumeration produces no `UNCLASSIFIED` cell.
 | 2 | `DECLINE_MODE` | 4032 | `Facts(kind='map', source_kind='path', mode='python', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 | 3 | `DECLINE_RESUME` | 1344 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
 | 4 | `DECLINE_ORDER` | 896 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 5 | `SERVED` | 160 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 5 | `SERVED` | 192 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 | 6 | `DECLINE_STREAM_ORDER` | 112 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 7 | `DECLINE_STREAM_POISON` | 56 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 8 | `DECLINE_SOURCE_MISSING` | 40 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 9 | `DECLINE_SOURCE_DIR` | 40 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 10 | `DECLINE_SOURCE_TYPE` | 40 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 7 | `DECLINE_SOURCE_MISSING` | 48 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 8 | `DECLINE_SOURCE_DIR` | 48 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 9 | `DECLINE_SOURCE_TYPE` | 48 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 
 ## The oracle's rules
 
@@ -85,8 +84,6 @@ Evaluated **first-match-wins**. Each is the contract's own words.
   CR-FIX1-K: the launcher neither transports nor implements checkpoint/resume. The check sits ABOVE the streaming block, so it applies to map() too -- it used to live under `if streaming:`, which made the refusal unreachable for map(), and the map() dispatch site did not pass the arguments, so a resume request was silently dropped on an accelerated path
 - **R6 `stream+order`** &rarr; `DECLINE_STREAM_ORDER`  
   docstring + inline note: the stream path has no collect step to sort with, and its parent-side reassembly handles order='none' only. NOTE the asymmetry with R4: map SERVES order='index', stream does not. A single predicate holds both, deliberately
-- **R7 `stream+strict_poison`** &rarr; `DECLINE_STREAM_POISON`  
-  docstring: strict_poison is served for map via the counter channel ([version][poisoned] written to a memfd after the join, relying on g_state being SHARED). But no poison count reaches a streaming caller, so stream declines it
 - **R8 `source missing`** &rarr; `DECLINE_SOURCE_MISSING`  
   inline: a path that does not exist is not servable
 - **R9 `source directory`** &rarr; `DECLINE_SOURCE_DIR`  

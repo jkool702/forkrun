@@ -86,7 +86,6 @@ OUTCOMES = {
     "DECLINE_ORDER": "is not served; the launcher relies on downstream",
     "DECLINE_RESUME": "resume=/checkpoint_file= is not served",
     "DECLINE_STREAM_ORDER": "the stream path has no collect step",
-    "DECLINE_STREAM_POISON": "no poison count reaches a streaming caller",
     "DECLINE_SOURCE_MISSING": "source is not an existing file",
     "DECLINE_SOURCE_DIR": "source is a directory",
     "DECLINE_SOURCE_TYPE": "source must be a path, an open descriptor, or",
@@ -163,13 +162,17 @@ RULES = [
      "NOTE the asymmetry with R4: map SERVES order='index', stream does "
      "not. A single predicate holds both, deliberately"),
 
-    ("R7", "stream+strict_poison",
-     lambda f: f.kind == "stream" and f.strict_poison,
-     "DECLINE_STREAM_POISON",
-     "docstring: strict_poison is served for map via the counter channel "
-     "([version][poisoned] written to a memfd after the join, relying on "
-     "g_state being SHARED). But no poison count reaches a streaming "
-     "caller, so stream declines it"),
+    # R7 REMOVED. It declined stream(strict_poison=True) on the grounds
+    # that "no poison count reaches a streaming caller" -- true when
+    # written, and false since P2 (c3c321af) wired a statistics memfd
+    # through the cleanroom stream launch. The launcher writes the poison
+    # count, the parent consumes it after a CONFIRMED-CLEAN launcher
+    # exit, and _LAST_STATS carries it to the caller.
+    #
+    # The predicate was never updated to match, so the capability existed
+    # and was unreachable, and the tests disagreed with the gate. Removing
+    # the rule rather than editing its outcome keeps the oracle honest:
+    # there is no longer a distinct refusal to describe.
 
     ("R8", "source missing",
      lambda f: f.source_kind == "missing",

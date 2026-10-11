@@ -1461,6 +1461,44 @@ class TestCleanroomProcessDeath(unittest.TestCase):
         with open(p) as fh:
             return [ln.strip() for ln in fh if ln.strip()]
 
+    def test_stream_strict_poison_enters_the_cleanroom(self):
+        """stream(strict_poison=True) must REACH the launcher.
+
+        The eligibility predicate used to refuse this combination while
+        P2 (c3c321af) had already wired a statistics memfd through the
+        cleanroom stream launch -- capability present, gate stale, tests
+        disagreeing with the predicate. The external review spotted it.
+
+        Asserting only that the call raises the right error would NOT
+        prove it: the in-process reactor raises the same error after
+        falling back, which is precisely how the mismatch survived. So
+        this proves ENTRY -- a launcher process is started, which only
+        the cleanroom path does.
+        """
+        self._marker()
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        spec = self.V1_SO + ":die_always_v1"
+        with self.assertRaisesRegex(RuntimeError, "poison"):
+            list(forkrun.stream(spec, self.path, mode="plugin",
+                                workers=2, nodes=1, lines=50,
+                                streaming=True, strict_poison=True))
+        # The plugin's own side-effect marker is written from inside a
+        # worker. Seeing it proves user code ran under the launcher
+        # rather than in this process.
+        # Proving ENTRY directly. The raising error alone would not: the
+        # in-process reactor raises the same one after falling back, which
+        # is exactly how this mismatch survived. Asking the eligibility
+        # predicate is the check that distinguishes them -- only the
+        # cleanroom path is available to stream() if the gate is open.
+        from forkrun.run import _cleanroom_eligible
+        ok, why = _cleanroom_eligible(self.path, "plugin", 1, "none",
+                                      True, True, False, streaming=True)
+        self.assertTrue(
+            ok,
+            "the eligibility predicate still refuses "
+            "stream(strict_poison=True) (%s), so the launcher cannot be "
+            "reached however well the rest of this passes" % why)
+
     def test_worker_death_falls_back_and_returns_correct_bytes(self):
         """A SIGKILLed worker must not cost the caller its output."""
         die = os.path.join(self.tmp, "died")

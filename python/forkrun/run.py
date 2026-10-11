@@ -766,9 +766,24 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
             return False, ("stream(order=%r) is not served; the stream "
                            "path has no collect step to sort with"
                            % (order,))
-        if strict_poison:
-            return False, ("stream(strict_poison=True) is not served; no "
-                           "poison count reaches a streaming caller")
+        # strict_poison IS served for stream() now. The decline said "no
+        # poison count reaches a streaming caller" -- true when it was
+        # written, and false since P2 (c3c321af) wired a statistics
+        # memfd through the cleanroom stream launch: the launcher writes
+        # the poison count, the parent consumes it AFTER a confirmed-clean
+        # launcher exit, and _LAST_STATS carries it to the caller.
+        #
+        # The gate was simply never lifted, so the capability existed and
+        # was unreachable -- the predicate and the tests disagreed. The
+        # external review caught this by noting that tests existed for
+        # streaming poison behaviour while the predicate still refused the
+        # combination.
+        #
+        # Verified by forcing this gate open and running it end to end:
+        # the cleanroom is entered and raises
+        #   "3 poisoned batch(es) skipped in a streaming run and
+        #    strict_poison=True"
+        # which is the intended error, not a fallback artefact.
 
     # Sources: a materialized file, any already-open descriptor (int fd,
     # fifo, socket, file object), or a Python iterable. The last is fed
@@ -2765,6 +2780,40 @@ def _resolve_workers_numa(workers, num_nodes=1):
     return base
 
 
+def _udf_as_inprocess(fn):
+    """Adapt a mode="udf" callable to the in-process UDF contract.
+
+    THE TWO MODES DO NOT CALL USER CODE THE SAME WAY, which is why a bare
+    fallback is not safe:
+
+    * mode="udf" (embedded CPython in the launcher) hands the callable
+      one ``bytes`` object -- fr_udf_call does PyBytes_FromStringAndSize
+      -- and reads back ``bytes`` or None.
+    * mode="python" hands it a ``forkrun._batch.Batch``, which carries
+      offsets, line counts and metadata as well as the data.
+
+    So without this adapter the "fallback" would silently change the
+    contract: a UDF written for mode="udf" would be handed a Batch,
+    ``b.upper()`` would raise AttributeError, every batch would retry
+    and poison, and the caller would see an empty result with no error
+    naming the cause. That failure was reproduced here before the
+    adapter existed.
+
+    The adapter restores the mode="udf" contract exactly: bytes in,
+    bytes-or-None out. The Batch's own fields are discarded -- a mode="udf"
+    callable has no way to observe them, and synthesising them would be a
+    second, subtler contract change.
+    """
+    def _wrapped(batch):
+        data = batch.data
+        raw = bytes(data) if data is not None else b""
+        out = fn(raw)
+        return out            # bytes passes through; None means no result
+    _wrapped.__name__ = getattr(fn, "__name__", "udf")
+    _wrapped.__doc__ = getattr(fn, "__doc__", None)
+    return _wrapped
+
+
 def _coerce_payload(payload, mode):
     """Normalize the payload + mode for the engine path (W-PY8, eager).
 
@@ -2791,15 +2840,35 @@ def _coerce_payload(payload, mode):
                 "got %r" % (payload,))
         return make_plugin_payload(path, func_name), "python"
     if mode == "udf":
-        # Unlike mode="plugin", the spec is NOT resolved here. Importing
-        # the user's module in this process would put their state into
-        # the parent that forks every worker -- the exact inheritance the
-        # cleanroom exists to prevent. Resolution happens in the worker.
         if callable(payload):
             raise ValueError(
                 "mode='udf' requires a 'module:attribute' string, not a "
                 "callable.")
-        return _make_udf_payload(payload), "udf"
+        # A helper for this minor is what makes the isolated in-launcher
+        # interpreter possible. If it is not built, the call must STILL
+        # work -- mode="udf" is not an error, and the documented
+        # fallback is the in-process path, which runs the UDF in THIS
+        # interpreter.
+        #
+        # This used to return ("udf") unconditionally and rely on the
+        # ordinary executors to cope. They cannot: the reactor accepts
+        # only "python" and "splice", so with no helper built (and the
+        # cleanroom flag off, which is the default) the promise of a
+        # fallback ended in
+        #     NotImplementedError: v0 supports mode='python' only
+        # A fallback that raises is not a fallback.
+        #
+        # The trade is isolation, not correctness: resolved here, the UDF
+        # runs in the parent's interpreter instead of an isolated one.
+        # Same "slower and correct beats fast and empty" doctrine the
+        # cleanroom fallback already uses.
+        if _udf_helper_path() is not None:
+            # Like mode="plugin", the spec is NOT resolved when the
+            # cleanroom will serve it: importing the user's module in
+            # this process would put their state into the parent that
+            # forks every worker.
+            return _make_udf_payload(payload), "udf"
+        return _udf_as_inprocess(resolve_payload_parent(payload)), "python"
     if mode == "spawn":
         if callable(payload):
             raise ValueError(

@@ -56,23 +56,17 @@ def _cleanroom_on():
     return os.environ.get("FORKRUN_CLEANROOM") == "1"
 
 
-class TestUDFModeEndToEnd(unittest.TestCase):
-    """Skipped in setUpClass, not by a module-level decorator.
+class _UDFFixture(unittest.TestCase):
+    """Fixture only: a UDF module and an input file. No cleanroom gate.
 
-    FORKRUN_CLEANROOM is process-global and other test modules mutate
-    it; a decorator evaluated at IMPORT time can therefore be True while
-    the value is False by the time the test RUNS, and the test then fails
-    with a confusing NotImplementedError from the in-process path
-    instead of skipping.
+    Split out from TestUDFModeEndToEnd because the FALLBACK tests are
+    about the path where the cleanroom is NOT used -- gating them on
+    FORKRUN_CLEANROOM would skip exactly the tests that matter most,
+    since the default configuration has the flag off.
     """
 
     @classmethod
     def setUpClass(cls):
-        if not _cleanroom_on():
-            raise unittest.SkipTest(
-                "cleanroom is opt-in via FORKRUN_CLEANROOM=1")
-        if not _helper_built():
-            raise unittest.SkipTest("UDF helper not built")
         cls._tmp = tempfile.TemporaryDirectory()
         cls.root = cls._tmp.name
         with open(os.path.join(cls.root, "forkrun_udf_fixture.py"), "w") as fh:
@@ -98,6 +92,26 @@ class TestUDFModeEndToEnd(unittest.TestCase):
         return self.forkrun.map(
             "forkrun_udf_fixture:" + attr, self.src,
             mode="udf", output="bytes", **kw)
+
+
+class TestUDFModeEndToEnd(_UDFFixture):
+    """Skipped in setUpClass, not by a module-level decorator.
+
+    FORKRUN_CLEANROOM is process-global and other test modules mutate
+    it; a decorator evaluated at IMPORT time can be True while the value
+    is False by the time the test RUNS, and the test then fails with a
+    confusing NotImplementedError from the in-process path instead of
+    skipping.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not _cleanroom_on():
+            raise unittest.SkipTest(
+                "cleanroom is opt-in via FORKRUN_CLEANROOM=1")
+        if not _helper_built():
+            raise unittest.SkipTest("UDF helper not built")
 
     # -- the path works at all ------------------------------------------
 
@@ -156,6 +170,74 @@ class TestUDFModeEndToEnd(unittest.TestCase):
             "forkrun_udf_fixture:sys_exit", self.src, mode="udf",
             output="bytes", workers=1, lines=5, on_error="skip")
         self.assertEqual([], got)
+
+
+class TestUDFFallbackWithoutHelper(_UDFFixture):
+    """The path taken when no per-minor helper is built.
+
+    Deliberately NOT gated on FORKRUN_CLEANROOM: this is the in-process
+    path, and the default configuration has the flag OFF. Gating these on
+    it would skip exactly the tests that matter.
+    """
+
+    def test_a_missing_helper_falls_back_and_still_produces_results(self):
+        """The fallback has to actually EXECUTE the UDF.
+
+        For a long time the code claimed a fallback and did not have one:
+        _coerce_payload returned mode "udf", but the ordinary executors
+        accept only "python" and "splice", so with no helper built -- and
+        FORKRUN_CLEANROOM off, which is the default -- the promised
+        fallback ended in
+
+            NotImplementedError: v0 supports mode='python' only
+
+        A fallback that raises is not a fallback.
+        """
+        import forkrun.run
+        R = sys.modules["forkrun.run"]
+        saved = R._udf_helper_path
+        R._udf_helper_path = lambda: None      # "not built for this minor"
+        try:
+            got = forkrun.map("forkrun_udf_fixture:up", self.src,
+                              mode="udf", output="bytes",
+                              workers=1, lines=2)
+        finally:
+            R._udf_helper_path = saved
+        self.assertTrue(got, "the in-process fallback produced nothing")
+        self.assertTrue(got[0].startswith(b"LINE000000"), got[0][:40])
+
+    def test_the_fallback_adapts_the_differing_udf_contracts(self):
+        """mode='udf' and mode='python' do NOT call user code the same way.
+
+        The embedded helper hands the callable one `bytes` object
+        (fr_udf_call does PyBytes_FromStringAndSize); the in-process
+        executor hands it a `forkrun._batch.Batch` carrying offsets,
+        line counts and metadata as well as data.
+
+        So the fallback needs an adapter, or it silently changes the
+        contract under the user: a mode='udf' callable handed a Batch
+        raises AttributeError on b.upper(), every batch retries and
+        poisons, and the caller sees an empty result with nothing naming
+        the cause. That is exactly what happened before the adapter.
+        """
+        import forkrun.run
+        R = sys.modules["forkrun.run"]
+        saved = R._udf_helper_path
+        R._udf_helper_path = lambda: None
+        try:
+            none = forkrun.map("forkrun_udf_fixture:to_none", self.src,
+                               mode="udf", output="bytes",
+                               workers=1, lines=2)
+            empty = forkrun.map("forkrun_udf_fixture:empty", self.src,
+                                mode="udf", output="bytes",
+                                workers=1, lines=2)
+        finally:
+            R._udf_helper_path = saved
+        # The DECISION-02 distinction must survive the fallback too, or
+        # it holds only on the cleanroom path.
+        self.assertEqual([], none, "None must not become an empty record")
+        self.assertTrue(empty, "b'' must still produce a record")
+        self.assertTrue(all(len(x) == 0 for x in empty))
 
 
 @unittest.skipUnless(_helper_built(), "UDF helper not built")
