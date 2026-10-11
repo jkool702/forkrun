@@ -433,7 +433,37 @@ to build; it does not claim the integration is done.
   the helper, and a clean-install run on all six minors. `fr_udf.c` and
   `fr_udf.h` are in `MANIFEST.in` and asserted by `release_check`, but
   the wheel matrix does not yet build the helper.
-* Per-minor verification: measured here on **3.14.7 only** (this machine
-  has no `/opt/python/cp3xx` interpreters). Findings 4 and 6 above are
-  exactly the kind of thing that differs per minor, so the other five
-  minors are unverified.
+
+### 9.6 DEFERRED (scope decision, 2026-10-11): multi-minor verification
+
+**Decision: verify the UDF helper on CPython 3.14.7 only, and treat the
+3.10–3.15 matrix as outstanding work rather than as a claim.**
+
+Evidence for why this is deferred rather than merely inconvenient: the
+development machine has exactly one interpreter (`/usr/bin/python3.14`),
+no `docker`/`podman` daemon, and no network access. `tools/build_wheel.sh`
+expects interpreters at `/opt/python/cp3xx-cp3xx`, and no provisioning for
+them exists in the repo — the build assumes a prepared image. The matrix
+therefore cannot be produced here by any means, and no amount of further
+work in this tree would change that.
+
+**What "deferred" means precisely:**
+
+* Verified: the helper builds, initialises, isolates, installs roots,
+  resolves and invokes a UDF, distinguishes `None` from `b""`, finalises
+  cleanly, and survives fork — on 3.14.7.
+* NOT claimed: that any of that holds on 3.10, 3.11, 3.12, 3.13 or 3.15.
+
+**Why this must not be quietly forgotten.** Section 8 finding 4 and
+section 9.4 finding 6 are both about `sys.flags` attribute names and
+absence differing by minor — §9.4 was found *only because* 3.14 lacks
+`use_environment` and `site_import`. A per-minor difference of exactly
+that shape is precisely what a single-minor test cannot catch. Until the
+matrix runs, the isolation contract is verified on one minor and
+extrapolated to six.
+
+**Consequence for release.** `cp310`–`cp315` wheel tags must not be
+published on the strength of the 3.14 result. The helper is not yet part
+of the wheel matrix build at all (condition 6.2, above), so nothing is
+currently mis-tagged — but the first release that adds the helper to the
+matrix needs the full six-minor contract run before the tags go out.
