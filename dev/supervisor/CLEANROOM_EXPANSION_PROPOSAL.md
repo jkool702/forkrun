@@ -1,292 +1,329 @@
 # Proposal — expanding cleanroom exec beyond its current envelope
 
-Covers items **1, 2, 4, 5** of the expansion review, re-sequenced per the
-"default is `order='index'`, so ordering is a prerequisite" argument.
+**Revision 2** — consensus with external review. Supersedes revision 1.
 
-**Out of scope by request:** item 3 (`mode="python"` parity), item 6
-(NUMA), item 7 (resume/checkpoint). Those are named as dependencies
-where they block something here, but not planned.
+Items **1, 2, 4, 5**, re-sequenced. Out of scope by request: item 3
+(`mode="python"` parity), item 6 (NUMA), item 7 (resume).
 
-Status: **proposal**. Nothing in it is implemented.
+Base SHA for this revision: **`c72d27c6`** (see §7 — the review was
+inspected against a stale tree).
 
----
-
-## 0. First: one premise in the discussion does not survive the code
-
-The argument was *"default is `orchestrator=True, order='index'`, so
-getting `order='index'` working is REQUIRED to make cleanroom exec work on
-the default mode."*
-
-That is **true for streaming and false for `map()`**, and the distinction
-matters because it changes what item 5 is for.
-
-| | `order="index"` | evidence |
-|---|---|---|
-| `map()` / collect | **already served** | oracle R4 admits `index`; `test_order_index_takes_cleanroom_and_matches_in_process` proves the launcher is entered and the parent sorts |
-| `stream()` | **declined** | oracle R6, `DECLINE_STREAM_ORDER` |
-
-So ordered `map()` is done. Item 5 is *not* a prerequisite for the
-default `map()` path — **`mode="python"` (item 3) is.**
-
-What item 5 *is* a prerequisite for is the honest version of "cleanroom as
-the default backend": if the default surface includes `stream()`, then
-ordered streaming is required before `Auto` can be the default policy.
-That is a real goal, and item 5 is genuinely valuable — but it should be
-scheduled as **default-surface breadth**, not as an unblocker.
-
-**Revised dependency picture:**
-
-```
-item 5 (ordered stream)  ─┐
-item 4 (spawn)           ─┼─→ expand the served envelope
-item 2b (splice)         ─┘
-item 1 (Auto policy)     ──→ deliver it; full form needs item 3
-```
+Status: **proposal**. Nothing here is implemented.
 
 ---
 
-## 1. What unblocks everything else: the disposition-aware prefix
+## 0. Consensus summary
 
-Before any stage below, one small change to `ReassemblyBuffer` removes
-its single worst documented limitation.
+The review returned **GO WITH AMENDMENTS on the plan, NO-GO on
+implementing ordered streaming under the revision-1 boundedness design.**
 
-`_reassembly.py` says:
+That is accepted in full. One claim was added on our side: the review's
+deadlock chain applies to **streaming specifically**, and that precision
+is what makes the finding decisive rather than merely cautionary — see
+§2.1.
 
-> "Gaps (poisoned/skipped batches never emit signals) do NOT stall
-> termination … **Mid-stream head-of-line blocking behind a hole is the
-> inherent cost of ordered streaming — documented, not fixed (the parent
-> has no poisoned-index channel; only a scalar count).**"
-
-That parenthetical was true when written. It is false now. DECISION-02
-P5 emits a `POISONED` and a `SKIPPED` record — on the wire, in order, for
-exactly those batches.
-
-So the buffer can advance the prefix over a hole the moment it is told
-about it, instead of stalling until EOF. Without this, ordered streaming
-inherits a head-of-line stall that a single repeatedly-retried early batch
-can hold open for the whole run.
-
-**Change:** `add_disposition(batch_idx, disposition)` alongside `add()`;
-`drain()` advances past `SKIPPED`/`POISONED` without yielding a payload.
-`DATA`/`NO_RESULT` behave as today.
-
-**Gate:** adversarial tests — delayed early batch, poisoned *first* batch
-with later batches complete, `None` first batch, empty `b""` first batch.
-Each must show the later batches flowing, not waiting for EOF. Falsifiable
-by asserting progress *before* the hole resolves.
-
-**This is the highest-leverage item in the plan.** It is small, and it
-converts the ordered-streaming item from "implement a reorder engine" into
-"reuse a proven one, correctly".
+| review point | disposition |
+|---|---|
+| §1 all four dispositions must reach the buffer; don't rewrite `_split_records` globally; gaps are a protocol failure | **accepted** — §2.2 |
+| §2 signal-pipe argument proves neither byte-boundedness nor liveness | **accepted** — §2.1, and the decline **stands** |
+| §3 ordered-stream test invariants were wrong | **accepted** — §2.3; this was my error |
+| §4 spawn is not signature-compatible; `spawn_wid` cannot be reused unchanged | **accepted** — §3.1; my "same signature" claim was wrong |
+| §5 splice measurement is circular without a prototype; exactly-once is in scope | **accepted** — §4 |
+| §6 decouple map Auto from stream ordering; `FORKRUN_CLEANROOM=1` must not acquire `required` semantics | **accepted** — §5.3 |
+| §7 strict-poison decline still present | **resolved** — §7 |
 
 ---
 
-## 2. Item 5 — ordered streaming on the cleanroom path
+## 1. The dependency correction stands
 
-**Why it's cheaper than it looks:** `ReassemblyBuffer` already ships and
-already runs the in-process stream path (`run.py:3889`). The work is
-plumbing, not invention.
+`order="index"` is **already served** for `map()`: oracle R4 admits it
+and `test_order_index_takes_cleanroom_and_matches_in_process` proves the
+launcher is entered and the parent sorts. Only `stream()` declines it
+(R6).
 
-**Scope**
-
-1. Lift oracle R6 / the `_cleanroom_eligible` decline for
-   `stream(order="index")`.
-2. Route the launcher's drained records — including control dispositions —
-   into `ReassemblyBuffer` on the parent side, exactly as the in-process
-   stream path does.
-3. Extend the buffer per §1.
-
-**The real design question is boundedness, not sorting.** The review was
-right that this is the crux, and right that "just sort" is not the answer:
-
-* If batch *k* is slow or retrying and batches *k+1…* complete, the buffer
-  grows without bound.
-* Simply withholding the drain until *k* arrives converts that into a
-  pipeline stall instead.
-
-So the proposal is:
-
-* **Bounded by a byte budget, enforced by backpressure, not by dropping.**
-  When the buffer exceeds its budget the parent stops reading the signal
-  pipe. That is the existing mechanism — the 16-byte keyed signal pipe
-  caps outstanding un-drained completions — so backpressure propagates to
-  the workers through signalling, and memory is bounded by construction.
-* **Progress argument:** every non-`DATA` batch advances the prefix; a
-  `POISONED` batch therefore *cannot* stall indefinitely. The only
-  unbounded wait is a genuinely live `DATA` batch, which is bounded by the
-  engine's retry limit (poison converts it to `POISONED`).
-* **`reassembly_limit`** becomes the enforced cap, not a diagnostic. That
-  is a behaviour change to the in-process path too, and should be made
-  deliberately and separately.
-
-**Definition of done**
-
-* `stream(order="index")` enters the cleanroom, and the in-process
-  results are byte-identical to `mode="none"` reordered.
-* Tests: delayed first batch, poisoned first batch, `None` first batch,
-  empty first batch, slow consumer (proves backpressure, not unbounded
-  growth), retry-then-succeed.
-* RSS under a skewed-arrival adversarial run stays within budget.
-* Declining loudly remains available if any of the above is not met.
-
-**Risk: moderate.** The backpressure argument is the deliverable, not the
-code. If it can't be made, the decline should stand — shipping ordered
-streaming with an unbounded buffer would be worse than not shipping it.
+So ordered streaming is default-surface **breadth**, not a prerequisite
+for the default `map()` path. **`mode="python"` (item 3) is the blocker
+there**, and is out of scope here.
 
 ---
 
-## 3. Item 4 — `mode="spawn"` in the launcher
+## 2. Ordered streaming (`item 5`) — DECLINE STANDS
+
+**`stream(order="index")` remains declined.** Revision 1 proposed
+implementing it; that proposal is withdrawn.
+
+### 2.1 Why the revision-1 boundedness argument was wrong
+
+It claimed: *"the 16-byte keyed signal pipe caps outstanding un-drained
+completions … so memory is bounded by construction"*, and *"every
+non-`DATA` batch advances the prefix; the only unbounded wait is a
+genuinely live `DATA` batch, which is bounded by the engine's retry
+limit."*
+
+Both halves fail.
+
+**It is a count bound, not a byte bound.** A signal names a worker and a
+batch; the payload it announces is arbitrarily large. The current parser
+also retains an incomplete framed record in `tail` until the advertised
+length is available, so one large result can exceed any budget before it
+is ever a buffer entry. `reassembly_limit` was a *diagnostic*, not an
+enforced cap.
+
+**And stopping the read can deadlock the batch that would unblock the
+prefix.** One precision the review did not have, and which sharpens its
+finding rather than softening it:
+
+* `map()` uses a **memfd** for results (`run.py:1039`) — writes never
+  block, so none of this applies. That is exactly why `map(order="index")`
+  needs none of this machinery today.
+* `stream()` uses a **pipe** (`run.py:1621`) — and that is the path under
+  dispute.
+
+So on the streaming path: parent stops reading → the C drain blocks
+writing → the drain stops consuming worker signals → the signal pipe
+fills → workers block announcing completions → the missing head batch's
+terminal record cannot reach the buffer → the prefix cannot advance while
+the parent waits for it to. A cycle with the head batch inside it.
+
+**And the retry limit does not bound it.** The retry limit bounds
+retries *after a failure*. A hung or long-running invocation is not
+bounded by it. The claim that a live `DATA` batch is bounded was simply
+false.
+
+### 2.2 What must be built first regardless
+
+`ReassemblyBuffer` documents mid-stream head-of-line blocking as inherent
+because *"the parent has no poisoned-index channel; only a scalar
+count"*. That is no longer true — P5 emits `POISONED` and `SKIPPED` on
+the wire. But the fix is **larger than revision 1 assumed**, and this is
+verified, not hypothetical:
+
+* `_split_records` / `_split_records_views` (`run.py:2629,2661`) filter
+  every non-`DATA` record. So does the cleanroom stream loop
+  (`run.py:1706`) and `_cleanroom_collect` (`run.py:1514`).
+* Therefore a batch returning `None`, skipped, or poisoned is **invisible**
+  to the buffer and reads as a hole. Adding `SKIPPED`/`POISONED` to the
+  wire did not fix ordered streaming — it made the records *available*
+  and the pipeline then discards them.
+
+Required:
+
+* A **dedicated terminal-record parser** carrying `(batch_idx,
+  disposition, payload)`, rather than changing `_split_records` globally —
+  its filtering is load-bearing for several other callers.
+* `add_disposition(batch_idx, disposition)`; **all four** dispositions
+  advance the contiguous prefix, only `DATA` yields a payload. `b""` must
+  be recorded as a real empty `DATA`, not treated as absence.
+* **Finalization contract:** after a successful run, an unresolved gap
+  inside the emitted index range is a protocol failure, not something to
+  paper over with `final_drain()` sorting the remainder. Legacy paths
+  that genuinely lack terminal records keep today's behaviour until their
+  protocol is upgraded.
+
+This is worth doing on its own merits — it is the precondition for any
+ordered path — but it does **not** by itself justify lifting the decline.
+
+### 2.3 Test invariants (corrected — revision 1 had these wrong)
+
+Revision 1 said later batches should flow *"before the hole resolves"*,
+which contradicts strict index ordering. Correct invariants:
+
+1. A later batch is **never** yielded out of order while an earlier index
+   is unresolved.
+2. On the head's `DATA`, yield it, then drain the contiguous prefix.
+3. On the head's `NO_RESULT`/`SKIPPED`/`POISONED`, advance without
+   yielding, then drain the newly contiguous prefix.
+4. Advancement happens **promptly**, not at EOF.
+5. No deadlock when the budget is reached.
+
+Ordering, advancement-after-terminal, progress-after-head-resolution and
+budget-reached-no-deadlock are four separate assertions.
+
+### 2.4 What would unlock it
+
+A design note plus an adversarial prototype, proving **both** properties:
+
+* *Byte-boundedness* — accounting for max record size, parser-tail
+  memory, buffered out-of-order payloads, and the transport.
+* *Liveness* — the earliest unresolved batch can always publish its
+  terminal record even at the budget limit.
+
+Candidate directions: spooling out-of-order results to a temp file
+(bounds RAM, **not** total temporary storage — must be stated), or an
+explicit credit/window protocol guaranteeing the head can publish.
+
+If neither holds, the decline is the correct permanent answer. A soft
+warning is not an enforced cap, and dropping a result to honour a memory
+threshold would be worse than not shipping the feature.
+
+---
+
+## 3. Spawn in the launcher (`item 4`) — design corrected
 
 `fr_py_worker_spawn_loop` already exists and is parity-tested. The
-launcher selects only the plugin and UDF loops. The work is *lifecycle
-ownership*, not the loop.
+integration is not a function-pointer substitution.
 
-**Why it is more than a fourth function pointer:** spawn runs a **child
-process per batch**. Three things the plugin and UDF loops do not have to
-reason about:
+### 3.1 The signature claim was wrong
 
-1. **Command transport.** `spawn_wid` passes `(path, func)` as
-   fork-inherited strings. Spawn needs `argv[]` and `argc`. They must
-   cross `exec` unambiguously — argv with embedded newlines/NULs is the
-   obvious hazard.
-2. **Subprocess ownership on worker death.** If a worker is SIGKILLed
-   mid-batch, its spawned child is orphaned and keeps running. The
-   launcher must reap or signal the whole process group, or a killed
-   worker leaks live subprocesses. **This is the main correctness risk in
-   this item** and it has no analogue in the other two modes.
-3. **Payload failure vs worker death.** Spawn has a genuine
-   infrastructure-failure category (`rc < 0` from `fr_py_exec_spawn`: pipe,
-   spawn, wait, output) that the other loops do not — already pinned by
-   `test_spawn_is_the_only_mode_that_separates_infra_failure`. That
-   distinction must survive the move into the launcher's supervision.
+Verified:
 
-**Scope**
+```
+fr_py_worker_plugin_loop  arity=12  (int wid, const char*, const char*, int×9)
+fr_py_worker_udf_loop     arity=12  (int wid, const char*, const char*, int×9)
+fr_py_worker_spawn_loop   arity=12  (int wid, char **argv, int,       int×8)
+```
 
-1. `--spawn-argv` transport through the launcher, validated before `exec`.
-2. Process-group setup for workers; kill/reap the group on abort, respawn
-   and fail-fast paths.
-3. Select `fr_py_worker_spawn_loop` in the launcher, reusing `spawn_wid`
-   unchanged (same signature).
-4. Parity tests stay the invariant for the shared lifecycle — the spawn
-   loop must not diverge.
+Same arity, **incompatible types** at positions 2–3. Revision 1 said
+"reusing `spawn_wid` unchanged (same signature)"; that was wrong, and the
+parity test missed it because it checked arity and stripped signatures.
 
-**Definition of done**
+**So:** an explicit mode-specific worker descriptor carrying the correct
+arguments and dispatching the right loop. No cast that disguises the
+mismatch.
 
-* Spawn is launcher-served, both supervision policies.
-* No orphaned child survives a worker death: test asserts the child is
-  gone by PID after the launcher aborts.
-* Infra failure still reaches `on_error`, not the death path.
-* The parity test still passes unmodified.
+### 3.2 Command transport
 
----
+* Preserve arguments as distinct argv elements — no shell-word parsing,
+  no ambiguous newline encoding. (Newlines are legal inside an argv
+  element; only NUL is not representable in POSIX argv, so reject NUL.)
+* Validate the command vector and its limits **before** launching the
+  cleanroom or reading any source bytes.
 
-## 4. Item 2b — measure `splice` before implementing it
+### 3.3 Process ownership — the real risk
 
-`fr_py_worker_splice_loop` exists and is excluded from parity by design
-(it moves bytes rather than invoking user code). Measurement first,
-implementation only if the numbers justify it.
+A SIGKILLed spawn worker orphans its child. Process-group signalling is
+necessary but **not sufficient**: the launcher has no `waitpid()`
+ownership of grandchildren, so a subreaper arrangement or an explicit
+reaping design may be required. Scope the guarantee explicitly — including
+what happens to a command that deliberately detaches into its own session.
 
-**Measure:** cleanroom vs in-process wall time and peak parent RSS across
-input sizes and worker counts, for the byte-batch path specifically.
-Report the break-even point, not a single ratio.
+Cover: worker death mid-batch, recovery and respawn, fail-fast abort, and
+**launcher teardown/parent abandonment** — not just the normal path.
 
-**Decision rule:** implement only if the cleanroom wins at the sizes
-callers actually use. A win confined to large inputs is still a win, but
-it changes the priority and should be recorded as such.
-
-**Explicitly out of scope:** end-to-end exactly-once for splice. It moves
-bytes, has no per-batch subprocess, and is excluded from parity by
-design. The launcher's existing generic machinery (drain, framing,
-supervision) applies without mode-specific work.
-
-*(Item 2a — `stream(strict_poison=True)` — is already closed in `c72d27c6`:*
-*capability was implemented by P2, the eligibility gate was stale, both are*
-*now fixed, and the test asserts the launcher is entered rather than just*
-*that the call raises.)*
+**Definition of done:** a known long-lived child is gone by PID after each
+of those four events; infrastructure failure still reaches `on_error` and
+not the death path; the parity test still passes unmodified.
 
 ---
 
-## 5. Item 1 — automatic backend selection
+## 4. Splice (`item 2b`) — prototype, then measure
 
-**Deliverable:** users stop setting `FORKRUN_CLEANROOM=1`.
+The measurement plan was circular: it asked for cleanroom-vs-in-process
+splice performance before the launcher dispatches
+`fr_py_worker_splice_loop` at all.
 
-**One important scope limit up front:** full `Auto` for the *default* path
-requires `mode="python"` (item 3, out of scope here). This stage can make
-cleanroom automatic **for the envelope that is already served** — plugin
-and UDF, `map()` and `stream()`, both supervision policies, ordered `map()`
-— and must not imply the default mode is covered.
+**Bounded prototype first** — expose the existing loop through the
+launcher on a scratch branch with the minimum hooks to produce valid
+benchmark numbers. Then measure wall time and peak parent RSS across
+input sizes and worker counts, and report the break-even point rather
+than a ratio. Implement only if the numbers justify it.
 
-**Replace the boolean with three policies**, as the review argues:
+**Withdrawing an earlier claim:** exactly-once is **not** out of scope.
+Splice has no external command to orphan, but it still emits output
+records under worker supervision; a death around publication/ack must not
+produce duplicates, stale output, or missing output. The invariant
+applies.
+
+`fr_py_worker_splice_loop` is also not signature-compatible with the
+launcher callback (arity 5). The launcher's generic spill, drain,
+framing and supervision code is reusable; that is not the same as
+"no mode-specific work".
+
+---
+
+## 5. Automatic backend selection (`item 1`)
+
+Users stop setting `FORKRUN_CLEANROOM=1`.
+
+**Scope limit, unchanged and explicit:** full `Auto` for the *default* path
+needs item 3. This delivers the already-served envelope — plugin, UDF,
+`map()` including `order="index"`, both supervision policies — and must
+not imply the default mode is covered.
+
+### 5.1 Three policies
 
 | policy | behaviour |
 |---|---|
-| `auto` (default) | use cleanroom when it can honour the call; otherwise the in-process backend |
+| `auto` (default) | cleanroom when it can honour the call, else in-process |
 | `off` | force in-process; diagnosis and rollback |
 | `required` | demand cleanroom and **error** if unsupported — never silently fall back |
 
-The `required` policy is what makes this safe to ship: it is the escape
-hatch for anyone who needs to *prove* a call ran cleanroomed, and it
-turns "unsupported" from a silent behaviour change into a loud one.
+`required` is what makes this safe to ship: it turns "unsupported" from a
+silent behaviour change into a loud one.
 
-**Staged rollout, each stage independently gated by evidence:**
+### 5.2 Staging decoupled from streaming
 
-* **Stage A** — `auto` for plugin and UDF. Measure that results are
-  identical to in-process across the existing corpus before defaulting.
-* **Stage B** — `auto` for the `map()` envelope including `order="index"`
-  and `strict_poison`, once item 5 is in. **This is the stage that
-  actually changes what most callers get**, subject to item 3 for
-  `mode="python"`.
-* **Stage C** — `auto` for spawn, once item 4 is in.
+Revision 1 tied Stage B to item 5. That was wrong:
 
-**Fallback safety must be proven, not assumed.** The existing rule —
-only confirmed pre-execution launcher failures may fall back — gets a
-harder test now that a run may fall back from a *successful-looking*
-launcher. Specifically: a launcher that consumed input, or that may have
-executed user code, must not fall back to re-running in-process. This is
-the CR-FIX1 replay contract and `Auto` puts more weight on it.
+* **Policy foundation + Stage A** (plugin/UDF) — independent of ordered
+  streaming. Gate: identical results to in-process across the corpus.
+  UDF restricted to **verified** CPython minors.
+* **Map envelope Auto** (incl. `order="index"`, strict-poison where
+  supported) — **independent of stage 2**, because map ordering already
+  works.
+* **Stream envelope index-order Auto** — depends on §2.
+* **Spawn Auto** — depends on §3, and only for the envelope actually
+  implemented and tested. Do not imply streaming spawn if only
+  materialized `map()` was integrated.
 
-**Kill switch:** `off` must be honoured for every stage, and a run that
-falls back must say so, once, with the reason — never silently.
+### 5.3 Backward compatibility
 
----
+`FORKRUN_CLEANROOM=1` must **not** silently acquire `required`
+semantics — it previously permitted safe fallback. Spell that out and
+test it.
 
-## 6. Sequencing
-
-| # | Stage | Item | Gate to proceed |
-|---|---|---|---|
-| 1 | Disposition-aware `ReassemblyBuffer` | §1 | holes no longer stall the prefix |
-| 2 | Ordered streaming | 5 | backpressure argument + adversarial tests |
-| 3 | Spawn in the launcher | 4 | no orphaned children on worker death |
-| 4 | Splice measurement | 2b | measure; implement only if justified |
-| 5 | `auto`/`off`/`required` policies | 1 | per-envelope stage gates; replay contract proven |
-
-Stages 3 and 4 are independent of 1–2 and can run in parallel. Stage 5's
-Stage B depends on stage 2.
-
-**Sequence 1–2 → 3 → 5 is the path to the biggest user-visible change
-within this scope.** Stage 4 is a decision, not a commitment.
+Contract under **any** policy: never replay a source or user payload
+after an uncertain or potentially post-ingest failure. The fallback
+contract is more load-bearing once `Auto` is the default.
 
 ---
 
-## 7. Carried-forward items (not planned here)
+## 6. Revised sequencing
 
-* **`_RUN_LOCK` under `orchestrator=False`.** The Python dispatch holds
-  it around the cleanroom call; the legacy path does not acquire it. That
-  concurrency difference is currently incidental. It should be declared
-  intentional or removed before `Auto` multiplies the paths that take it.
-* **CPython matrix.** The UDF helper is verified on 3.14.7 only. `Auto`
-  must key the UDF route on a *verified* minor, or it will offer a helper
-  built against an untested interpreter. This is a release gate on stage
-  5, not a research item.
-* **Non-representable callables.** A closure cannot cross `exec`. This
-  belongs to item 3's contract, but `Auto` must reject before input is
-  consumed — never discover it mid-run.
+| # | Stage | Gate to proceed |
+|---|---|---|
+| 1 | Terminal-record parser + disposition-aware `ReassemblyBuffer` (§2.2) | all four dispositions advance the prefix; gaps detectable |
+| 2 | **Design note + prototype** for bounded, live ordered streaming (§2.4) | both properties proven; **decline stands until then** |
+| 3 | Spawn integration (§3) | no orphaned children on death, respawn, fail-fast, teardown |
+| 4 | Splice prototype → measure (§4) | measurement, then a go/no-go decision |
+| 5 | `auto`/`off`/`required` (§5) | per-envelope gates; map Auto not blocked by 1–2 |
 
-## 8. What this proposal does not establish
+Stages 1, 3 and 4 are independent and can run in parallel. Stage 5's map
+Auto does not wait on 1 or 2. Stage 2 gates only ordered streaming, and
+may never conclude "ship it".
 
-* Whether `Auto` is safe for every source kind. The matrix declines
-  iterables and several descriptor shapes; `Auto` inherits those
-  refusals and the fallback contract applies to all of them.
+---
+
+## 7. Source-version discrepancy — resolved
+
+The review reported the `stream(strict_poison=True)` decline still
+present in `_cleanroom_eligible()`, while revision 1 cited `c72d27c6` as
+removing it.
+
+Verified against the pushed branch: `git show
+origin/NEW/REFACTOR4.2:python/forkrun/run.py` contains **zero**
+occurrences of that refusal string, and no mutation marker. HEAD is
+`c72d27c6`. The reviewed tree predated the push; the fix and its
+launcher-entry test are both present.
+
+---
+
+## 8. Carried forward
+
+* **`_RUN_LOCK` under `orchestrator=False`** — the dispatch holds it, the
+  legacy path does not. Required policy review *before* `Auto` multiplies
+  the paths that take it.
+* **CPython matrix** — helper verified on 3.14.7 only. `Auto` must key
+  the UDF route on a *verified* minor. A release gate on stage 5.
+* **Non-representable callables** — a closure cannot cross `exec`. Belongs
+  to item 3's contract, but `Auto` must reject **before input is
+  consumed**.
+
+## 9. Not established by this proposal
+
+* Whether `Auto` is safe for every source kind — the matrix declines
+  iterables and several descriptor shapes; the fallback contract applies
+  to all of them.
 * Anything about NUMA or resume. Both stay declines.
-* That ordered streaming is worth shipping if the backpressure argument
-  cannot be made rigorous. In that case the decline stands.
+* That ordered streaming is worth shipping if §2.4 cannot be made
+  rigorous. The decline is then the correct permanent answer.
