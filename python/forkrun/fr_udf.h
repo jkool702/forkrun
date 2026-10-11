@@ -24,10 +24,16 @@
  *   FR_UDF_ERR rather than re-initialising, because a second
  *   Py_InitializeFromConfig on a live interpreter is undefined.
  *
- *   Because CPython's runtime is not fork-safe in general, this is only
- *   safe when the forking process is single-threaded at the moment of
- *   the fork. That holds for the launcher (it forks before starting any
- *   worker threads) and is a precondition, not an accident.
+ *   PRECISE PRECONDITION: at the moment the launcher calls fork(), the
+ *   launcher process has exactly ONE thread. That is the whole
+ *   condition, and it holds because the launcher forks before starting
+ *   any threads of its own.
+ *
+ *   Note what is NOT part of it: a UDF spawning threads inside its own
+ *   worker child is irrelevant, because that happens strictly AFTER the
+ *   fork and cannot make the launcher multithreaded. An earlier draft of
+ *   our docs cited it as a reason the hooks matter; that was wrong, and
+ *   the external review caught it.
  */
 #ifndef FR_UDF_H
 #define FR_UDF_H

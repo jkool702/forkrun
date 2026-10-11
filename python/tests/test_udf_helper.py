@@ -62,6 +62,9 @@ def wrong_type(b):
     return 42
 
 NOT_CALLABLE = 42
+
+def raises_systemexit(b):
+    raise SystemExit(3)
 '''
 
 
@@ -210,6 +213,27 @@ class TestUDFInvocation(_UDFFixture):
         r = self.probe("myudf:raises")
         self.assertIn("call FAILED", r.stdout)
         self.assertIn("udf exploded", r.stdout + r.stderr)
+
+    def test_systemexit_is_a_batch_error_not_a_worker_death(self):
+        """A UDF calling sys.exit() must not kill the process.
+
+        PyErr_Print() EXITS for SystemExit rather than returning, so the
+        first implementation turned an ordinary batch-level failure into
+        a worker death: the batch was lost and escrow/retry/skip/
+        fail-fast were all bypassed, because the process was gone before
+        any of them could run. Structured extraction fixes it.
+        """
+        r = self.probe("myudf:raises_systemexit")
+        self.assertEqual(0, r.returncode,
+                         "SystemExit must not terminate the helper")
+        self.assertIn("call FAILED", r.stdout)
+        self.assertIn("SystemExit", r.stdout)
+
+    def test_exception_diagnostic_names_the_type(self):
+        """str(SystemExit(3)) is just "3"; without the type name the
+        diagnostic says nothing about what actually happened."""
+        r = self.probe("myudf:raises_systemexit")
+        self.assertIn("udf raised: SystemExit:", r.stdout)
 
     def test_non_callable_attribute_is_a_defined_error(self):
         """Named explicitly, not as a stray TypeError from the call.

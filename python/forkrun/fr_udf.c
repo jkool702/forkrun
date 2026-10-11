@@ -26,6 +26,10 @@
 static int initialized = 0;
 static char last_error[512] = "";
 
+/* Defined further down, next to the rest of the exception handling;
+ * declared here because the config path below also reports through it. */
+static void take_exception(char *buf, size_t bufsz, const char *prefix);
+
 static void set_error(const char *fmt, ...)
 {
     va_list ap;
@@ -65,7 +69,8 @@ static int append_root(PyConfig *cfg, const char *root)
     PyMem_RawFree(w);
     if (PyStatus_Exception(st)) {
         set_error("root rejected %s (exitcode %d)", root, st.exitcode);
-        if (PyErr_Occurred()) PyErr_Print();
+        if (PyErr_Occurred())
+            take_exception(last_error, sizeof last_error, "root: ");
         return -1;
     }
     return 0;
@@ -107,7 +112,8 @@ static int configure(PyConfig *cfg)
                                          L"forkrun-udf");
         if (PyStatus_Exception(st)) {
             set_error("program_name rejected");
-            if (PyErr_Occurred()) PyErr_Print();
+            if (PyErr_Occurred())
+                take_exception(last_error, sizeof last_error, "program_name: ");
             return -1;
         }
     }
@@ -149,13 +155,109 @@ static int install_roots(const char *const *roots, int nroots)
     for (int i = nroots - 1; i >= 0; i--) {
         if (!roots[i] || !*roots[i]) continue;
         PyObject *w = PyUnicode_DecodeFSDefault(roots[i]);
-        if (!w) { PyErr_Print(); return -1; }
+        if (!w) {
+            take_exception(last_error, sizeof last_error, "decode root: ");
+            return -1;
+        }
         if (PyList_Insert(path, 0, w) != 0) {
-            Py_DECREF(w); PyErr_Print(); return -1;
+            Py_DECREF(w);
+            take_exception(last_error, sizeof last_error, "sys.path insert: ");
+            return -1;
         }
         Py_DECREF(w);
     }
     return 0;
+}
+
+
+/* ------------------------------------------------------------------------ */
+/* Exception handling                                                        */
+/* ------------------------------------------------------------------------ */
+
+/* Fold the pending exception into a concise one-line diagnostic and CLEAR
+ * it. Never prints. Never exits.
+ *
+ * Why this exists instead of PyErr_Print():
+ *
+ *  1. PyErr_Print() writes a full traceback to stderr for EVERY failing
+ *     batch, interleaved across workers.
+ *  2. Far worse: for SystemExit it EXITS THE PROCESS rather than
+ *     returning. A UDF calling sys.exit(3) therefore killed the worker
+ *     outright -- the batch was lost and escrow/retry/skip/fail-fast were
+ *     all bypassed, because the process died before any of them could
+ *     run. That is a worker death manufactured out of what should be an
+ *     ordinary batch-level payload error.
+ *
+ * Everything must be cleared, never left pending: a lingering exception
+ * contaminates the next fr_udf_call() in ways that look like unrelated
+ * bugs.
+ *
+ * PyErr_Fetch() is deprecated since 3.12 in favour of
+ * PyErr_GetRaisedException(); both are handled so the helper builds
+ * across the 3.10-3.15 target.
+ *
+ * Full tracebacks are opt-in via FR_UDF_TRACEBACK=1 for debugging. */
+static void take_exception(char *buf, size_t bufsz, const char *prefix)
+{
+#if PY_VERSION_HEX >= 0x030C0000
+    /* Clears the error and returns a NEW reference (3.12+). */
+    PyObject *exc = PyErr_GetRaisedException();
+#else
+    PyObject *type = NULL, *val = NULL, *tb = NULL;
+    PyErr_Fetch(&type, &val, &tb);            /* also clears */
+    PyObject *exc = val ? val : type;
+    Py_XINCREF(exc);
+    Py_XDECREF(type);
+#endif
+    if (exc == NULL) {
+        snprintf(buf, bufsz, "%s (no exception set)", prefix);
+        return;
+    }
+    if (PyObject_IsTrue(PyObject_GetAttrString(exc, "__suppress_context__")) < 0)
+        PyErr_Clear();
+
+    PyObject *s = PyObject_Str(exc);
+    const char *msg = "";
+    if (s != NULL && PyUnicode_Check(s)) {
+        const char *u = PyUnicode_AsUTF8(s);
+        if (u != NULL) msg = u;
+    }
+    Py_XDECREF(s);
+
+    /* Include the exception TYPE. str(SystemExit(3)) is just "3", so
+     * without this a UDF calling sys.exit() reported "udf raised: 3" --
+     * which says nothing about what went wrong. The type is the part
+     * that tells an operator whether this is a bug in the UDF or a
+     * deliberate early return. */
+    const char *tn = Py_TYPE(exc)->tp_name;
+
+    /* One line: a multi-line exception message would break the "concise
+     * diagnostic" contract and, in a worker, interleave with other
+     * workers' output. */
+    char *tmp = (char *)malloc(bufsz);
+    if (tmp) {
+        size_t j = 0;
+        for (size_t i = 0; prefix[i] && j + 1 < bufsz; i++)
+            tmp[j++] = prefix[i];
+        for (size_t i = 0; tn[i] && j + 2 < bufsz; i++)
+            tmp[j++] = tn[i];
+        if (j + 2 < bufsz) { tmp[j++] = ':'; tmp[j++] = ' '; }
+        for (size_t i = 0; msg[i] && j + 1 < bufsz; i++)
+            tmp[j++] = (msg[i] == '\n' || msg[i] == '\r') ? ' ' : msg[i];
+        tmp[j] = '\0';
+        snprintf(buf, bufsz, "%s", tmp);
+        free(tmp);
+    } else {
+        snprintf(buf, bufsz, "%s%s: %s", prefix, tn, msg);
+    }
+    Py_XDECREF(exc);
+    PyErr_Clear();   /* belt and braces: nothing pending on any path */
+}
+
+static int tracebacks_requested(void)
+{
+    const char *v = getenv("FR_UDF_TRACEBACK");
+    return v && *v && strcmp(v, "0") != 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -194,7 +296,8 @@ int fr_udf_init(const char *const *roots, int nroots)
     PyConfig_Clear(&cfg);
     if (PyStatus_Exception(st)) {
         set_error("Py_InitializeFromConfig failed (exitcode %d)", st.exitcode);
-        if (PyErr_Occurred()) PyErr_Print();
+        if (PyErr_Occurred())
+            take_exception(last_error, sizeof last_error, "init: ");
         return FR_UDF_ERR;
     }
     if (install_roots(roots, nroots) != 0) {
@@ -244,14 +347,14 @@ int fr_udf_call(const char *module, const char *attr,
     if (!cached_fn || strcmp(spec, cached_spec) != 0) {
         PyObject *m = PyImport_ImportModule(module);
         if (!m) {
-            set_error("import of %s failed", module);
-            PyErr_Print();
+            take_exception(last_error, sizeof last_error,
+                           "import failed: ");
             return FR_UDF_ERR;
         }
         PyObject *fn = PyObject_GetAttrString(m, attr);
         if (!fn) {
-            set_error("no attribute %s in %s", attr, module);
-            PyErr_Print();
+            take_exception(last_error, sizeof last_error,
+                           "attribute lookup failed: ");
             Py_DECREF(m);
             return FR_UDF_ERR;
         }
@@ -276,12 +379,16 @@ int fr_udf_call(const char *module, const char *attr,
     }
 
     PyObject *arg = PyBytes_FromStringAndSize(input ? input : "", (Py_ssize_t)len);
-    if (!arg) { set_error("argument allocation failed"); PyErr_Print(); return FR_UDF_ERR; }
+    if (!arg) { take_exception(last_error, sizeof last_error, "arg failed: "); return FR_UDF_ERR; }
     PyObject *res = PyObject_CallFunctionObjArgs(cached_fn, arg, NULL);
     Py_DECREF(arg);
     if (!res) {
-        set_error("call to %s raised", spec);
-        PyErr_Print();
+        /* The important one. A SystemExit here used to END THE PROCESS
+         * (PyErr_Print exits for SystemExit), turning an ordinary batch
+         * error into a worker death that bypassed on_error entirely. */
+        take_exception(last_error, sizeof last_error, "udf raised: ");
+        if (tracebacks_requested() && PyErr_Occurred())
+            PyErr_Print();       /* opt-in debugging only */
         return FR_UDF_ERR;
     }
 
@@ -293,8 +400,9 @@ int fr_udf_call(const char *module, const char *attr,
     }
 
     if (!PyBytes_Check(res)) {
-        set_error("%s returned %s, not bytes", spec, Py_TYPE(res)->tp_name);
+        /* Clear first: the type probe below can itself set an error. */
         PyErr_Clear();
+        set_error("%s returned %s, not bytes", spec, Py_TYPE(res)->tp_name);
         Py_DECREF(res);
         return FR_UDF_ERR;
     }
@@ -350,7 +458,7 @@ int fr_udf_import_ok(const char *module)
         /* Do NOT swallow this silently: a bare "not importable" probe is
          * close to useless, because the usual cause is a transitive
          * dependency in a different root, not the root itself. */
-        PyErr_Print();
+        take_exception(last_error, sizeof last_error, "import probe: ");
         return 0;
     }
     Py_DECREF(m);

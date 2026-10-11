@@ -182,11 +182,20 @@ implementation that earned those measurements may not be the one that
 should ship") was aimed at exactly this class of thing.
 
 **The hooks are not load-bearing *here*, and we are not going to claim
-they are.** `fr_udf_fork --hooks` deliberately violates the choreography
+they are.**
+
+> **Correction (external review, second pass).** An earlier draft of this
+> paragraph justified the hooks partly by "a UDF that spawns a thread".
+> That was wrong and overstated. A UDF spawning threads inside its own
+> worker child happens strictly *after* the fork, so it cannot make the
+> launcher multithreaded and is irrelevant to the precondition. The
+> precondition is precise and narrow: **at the moment the launcher calls
+> `fork()`, the launcher process itself has exactly one thread.** Threads
+> created later, inside a worker, do not bear on it. `fr_udf_fork --hooks` deliberately violates the choreography
 and reports the outcome. On this single-threaded, contention-free machine
 the unhooked child **survives**. So on this configuration the hooks change
 no observable behaviour; they protect cases this harness never creates
-(another thread at fork time, a UDF that spawns one). They stay because
+another thread existing in the LAUNCHER at fork time. They stay because
 CPython documents them as mandatory for this embedding pattern — not
 because a test here proves it. Recorded rather than buried, because
 "we added the hooks and it fixed a bug" would be false.
@@ -210,3 +219,76 @@ No launcher or shim integration code. `fr_py_worker_udf_loop` does not
 exist yet. Parity tests for shared lifecycle behaviour (required by the
 reviewer once the loop is written) are not written, because there is no
 loop to test. Conditions of approval therefore remain **open**.
+
+---
+
+## 11. External review, confirmation pass — closed with two corrections
+
+Answers received on `P1-3-CONFIRMATION.md`. The design was **not**
+reopened. Two items required action; both are done.
+
+### 11.1 Confirmed as-is
+
+Our reading that the SIGABRT was *our* wiring error rather than evidence
+the earlier hookless measurements were invalidated: **accepted**. The
+new hook-enabled table is the result to report for the implementation
+being considered.
+
+### 11.2 CORRECTION 1 — the fork-time precondition was stated wrongly
+
+We had justified the hooks partly by "a UDF that spawns a thread". That
+was wrong and overstated: a UDF spawning threads inside its own worker
+child happens strictly *after* the fork, so it cannot make the launcher
+multithreaded.
+
+The precondition is now stated precisely in `fr_udf.h` and here:
+
+> **At the moment the launcher calls `fork()`, the launcher process has
+> exactly one thread.**
+
+Threads created later, inside a worker, do not bear on it. Corrected in
+both places.
+
+### 11.3 CORRECTION 2 — `PyErr_Print()` was a real bug, not just noise
+
+The review flagged that `PyErr_Print()` **exits the process for
+`SystemExit`** rather than returning. Confirmed on our own code before
+changing anything: a UDF calling `sys.exit(3)` terminated the entire
+helper with exit code 3.
+
+The consequence was worse than a noisy traceback. A `SystemExit` is an
+ordinary batch-level payload failure — the kind `on_error` exists to
+handle — but it was becoming a **worker death**, so the batch was lost
+and retry/skip/fail-fast were all bypassed, because the process was gone
+before any of them could run. One line of user code in a UDF could
+silently convert a recoverable batch error into a fatal worker loss.
+
+Replaced with structured extraction (`take_exception`):
+extract → clear → one-line diagnostic; full traceback opt-in via
+`FR_UDF_TRACEBACK=1`. Version-compatible across the 3.10–3.15 target:
+`PyErr_GetRaisedException()` on 3.12+, `PyErr_Fetch()` below that (it is
+deprecated since 3.12).
+
+The diagnostic includes the **exception type**, because
+`str(SystemExit(3))` is just `"3"` — without the type,
+`udf raised: 3` says nothing about what happened:
+
+```
+udf raised: SystemExit: 3
+```
+
+Both directions are mutation-checked: restoring `PyErr_Print()` fails
+`test_systemexit_is_a_batch_error_not_a_worker_death` and
+`test_exception_diagnostic_names_the_type`.
+
+### 11.4 Speedup scope, as instructed
+
+Reported as: **6.8–11.3× measured on CPython 3.14.7, single-threaded
+launcher, hooks enabled.** Other minor versions and multithreaded-fork
+scenarios remain unverified, and the 3.10–3.15 matrix stays deferred.
+
+### 11.5 Approval status
+
+Still **OPEN**, unchanged: no `fr_py_worker_udf_loop`, no launcher
+integration, no parity tests across the existing loops. Those remain
+conditions, not partial credit.
