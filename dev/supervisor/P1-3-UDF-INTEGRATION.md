@@ -139,3 +139,74 @@ produce a confident wrong answer:
   path, not by new special-casing.
 * A respawn test that proves a fresh generation does not inherit dirty
   interpreter state.
+---
+
+## 10. External review outcome: GO WITH AMENDMENTS — accepted, with one correction
+
+Reviewed against `P1-3-EXTERNAL-REVIEW.md`. Verdict: Option A, dedicated
+fifth loop, pre-fork init — **conditional on integrating CPython's fork
+lifecycle hooks**. That condition was real and we had missed it.
+
+### 10.1 Accepted amendments
+
+1. **CPython fork hooks are now implemented** (`fr_udf_before_fork`,
+   `fr_udf_after_fork_parent`, `fr_udf_after_fork_child`), fail closed,
+   and are centralised in ONE `udf_fork()` helper in the driver so no call
+   site can omit them.
+2. **`HAVE_FORK` guard** — the hooks live behind CPython's own conditional.
+   They do **not** degrade to no-ops when absent; they return
+   `FR_UDF_ERR` and `fr_udf_fork_hooks_available()` reports the fact.
+3. **A raising UDF is a batch-level payload failure**, routed to the
+   existing `on_error` policy (retry/escrow → skip → fail-fast), *not* a
+   worker death. `fr_udf_call` already cleared the pending exception via
+   `PyErr_Print`; this is now stated as a contract.
+4. **Buffer ownership** — `fr_udf_free()` already existed and is now
+   documented as mandatory, not optional.
+5. **Parent must not import or invoke the UDF** — user-module state stays
+   worker-local.
+6. **State model documented** — module globals persist across batches
+   within a worker; a respawned generation starts clean and may repeat
+   module-import side effects.
+7. **DECISION-02 limitation preserved and stated** — a `None` result
+   acks without a data record, so the ordered parent cannot infer
+   completion. No completion-coverage claim until dispositions land.
+
+### 10.2 Two findings from implementing the amendment
+
+**The first hook wiring aborted every pre-fork child.**
+`PyMutex_Unlock: unlocking mutex that is not locked`, SIGABRT. Cause was
+ours: `udf_fork()` ran the parent hook in *both* processes, so the child
+unlocked the mutex that `PyOS_AfterFork_Child()` owns. Found by the hooks,
+not by inspection — and a reminder that the reviewer's caution ("the
+implementation that earned those measurements may not be the one that
+should ship") was aimed at exactly this class of thing.
+
+**The hooks are not load-bearing *here*, and we are not going to claim
+they are.** `fr_udf_fork --hooks` deliberately violates the choreography
+and reports the outcome. On this single-threaded, contention-free machine
+the unhooked child **survives**. So on this configuration the hooks change
+no observable behaviour; they protect cases this harness never creates
+(another thread at fork time, a UDF that spawns one). They stay because
+CPython documents them as mandatory for this embedding pattern — not
+because a test here proves it. Recorded rather than buried, because
+"we added the hooks and it fixed a bug" would be false.
+
+### 10.3 Re-measured with hooks (reviewer required this)
+
+| children | post-fork | pre-fork | speedup | failures |
+|---|---|---|---|---|
+| 1 | 0.0118 s | 0.0010 s | 11.29× | 0 |
+| 2 | 0.0099 s | 0.0012 s | 8.22× | 0 |
+| 4 | 0.0097 s | 0.0014 s | 6.93× | 0 |
+| 8 | 0.0123 s | 0.0018 s | 6.81× | 0 |
+
+Respawn probe: still CLEAN. Negative control: still detects dirt. The
+reviewer asked for these to be re-run against the hook-aware build; they
+are, and the result strengthened rather than weakened.
+
+### 10.4 Still not done
+
+No launcher or shim integration code. `fr_py_worker_udf_loop` does not
+exist yet. Parity tests for shared lifecycle behaviour (required by the
+reviewer once the loop is written) are not written, because there is no
+loop to test. Conditions of approval therefore remain **open**.

@@ -121,6 +121,16 @@ int main(int argc, char **argv)
     printf("  [ok] interpreter initialised, %d validated root(s) installed\n",
            nroots);
 
+    /* Fork choreography availability. Reported rather than assumed: the
+     * hooks are compiled only under CPython's HAVE_FORK, and a caller
+     * that forks an initialised interpreter needs to know which it has. */
+    printf("  -- fork --\n");
+    printf("      CPython fork hooks    : %s\n",
+           fr_udf_fork_hooks_available()
+             ? "available (PyOS_BeforeFork/AfterFork_*)"
+             : "UNAVAILABLE (CPython built without HAVE_FORK)");
+    printf("\n");
+
     printf("  -- flags --\n");  report_flags();  printf("\n");
     printf("  -- path --\n");   report_syspath(); printf("\n");
 

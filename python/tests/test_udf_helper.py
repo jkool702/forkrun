@@ -217,6 +217,63 @@ class TestUDFInvocation(_UDFFixture):
 
 
 @unittest.skipUnless(_have(_PROBE), "udf artifacts not built")
+class TestForkHooks(_UDFFixture):
+    """CPython's fork lifecycle hooks (review amendment).
+
+    `fr_udf_init` before `fork()` obliges the launcher to choreograph every
+    fork: `PyOS_BeforeFork()` before, `PyOS_AfterFork_Parent()` after (even
+    when fork fails), `PyOS_AfterFork_Child()` in the child before any
+    Python call. These are compiled only under CPython's `HAVE_FORK`, so
+    availability is reported rather than assumed.
+    """
+
+    def test_hooks_are_available_on_this_build(self):
+        self.assertIn("CPython fork hooks    : available",
+                      self.probe().stdout)
+
+    def test_they_are_not_optional_silence(self):
+        """An unavailable build must SAY so.
+
+        The hooks fail closed rather than degrading to no-ops: a caller
+        that believes it choreographed its forks when it did not is the
+        silent-corruption case they exist to prevent.
+        """
+        out = self.probe().stdout
+        self.assertNotIn("UNAVAILABLE (CPython built without HAVE_FORK)",
+                         out, "this build reports the hooks are missing")
+
+
+@unittest.skipUnless(_have(_FORK), "udf artifacts not built")
+class TestHooksAreLoadBearing(_UDFFixture):
+    """Are the hooks actually doing anything, or is pre-fork merely
+    happening to work?
+
+    Asked deliberately, because the answer is not the flattering one. The
+    probe deliberately violates the choreography -- takes BeforeFork,
+    forks, and omits AfterFork_Child -- and reports what happened. On this
+    single-threaded, contention-free machine the unhooked child SURVIVES.
+
+    That is recorded rather than buried. It means the hooks are not
+    currently earning their keep here: they protect contention cases this
+    harness never creates (another thread at fork time, a UDF that spawns
+    a thread). They stay because CPython documents them as mandatory for
+    exactly this embedding pattern -- not because this test proves it.
+    """
+
+    def test_unhooked_child_is_probed_and_reported(self):
+        r = _run([_FORK, self.root, "myudf:up", "1", "1", "--hooks"])
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"hooks\s+:\s+(LOAD-BEARING|unhooked)")
+
+    def test_correctly_hooked_children_still_work(self):
+        """The control for the above: proper choreography must not break
+        anything, or 'load-bearing' would be indistinguishable from
+        'hooks break forks'."""
+        r = _run([_FORK, self.root, "myudf:up", "2", "10"])
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("pre-fork works", r.stdout)
+
+
 class TestLifecycle(_UDFFixture):
 
     def test_clean_finalisation(self):

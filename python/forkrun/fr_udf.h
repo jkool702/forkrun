@@ -85,6 +85,42 @@ void fr_udf_free(char *buf);
 /* Shut the interpreter down. Returns FR_UDF_OK or FR_UDF_ERR. */
 int fr_udf_finalize(void);
 
+/* ------------------------------------------------------------------------ */
+/* CPython fork lifecycle (mandatory when initialising pre-fork)              */
+/* ------------------------------------------------------------------------ */
+/*
+ * If fr_udf_init() is called BEFORE fork() -- the pre-fork candidate, which
+ * is the fast one -- then every fork must be choreographed:
+ *
+ *     parent:  fr_udf_before_fork()
+ *     parent:  pid = fork()
+ *     child:   fr_udf_after_fork_child()   <- BEFORE any Python C API call
+ *     parent:  fr_udf_after_fork_parent()  <- even if fork() FAILED
+ *
+ * CPython documents this in c-api/threads.html: an embedding application
+ * that calls fork() directly and then returns into the interpreter can
+ * deadlock on internal locks. PyOS_AfterFork_Child() attempts to repair
+ * that state; it is not a guarantee that an unsafe fork is recoverable.
+ *
+ * Each returns FR_UDF_OK, or FR_UDF_ERR if the call is made out of order
+ * (no interpreter, or the sequence is wrong) -- fail CLOSED, because
+ * skipping the choreography silently is precisely the failure it exists
+ * to prevent.
+ *
+ * The parent-side calls are required at EVERY launcher fork once the
+ * interpreter is up, not just worker creation: the launcher also forks
+ * helpers and later worker generations.
+ *
+ * These are compiled only when CPython was built with HAVE_FORK. Without
+ * them we cannot do the choreography correctly, so the calls return
+ * FR_UDF_ERR rather than pretending to succeed. Check
+ * fr_udf_fork_hooks_available() to find out at runtime.
+ */
+int fr_udf_before_fork(void);
+int fr_udf_after_fork_parent(void);
+int fr_udf_after_fork_child(void);
+int fr_udf_fork_hooks_available(void);
+
 /* Diagnostics, used by the contract tests. These report rather than
  * assert: sys.flags attribute NAMES differ across minors (on 3.14,
  * site_import and user_site are absent while no_site and safe_path

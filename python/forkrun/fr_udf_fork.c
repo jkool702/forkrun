@@ -31,6 +31,52 @@
 #include <time.h>
 #include <unistd.h>
 
+/* The ONE fork site for this driver.
+ *
+ * Centralised deliberately. CPython requires every fork of an
+ * initialised interpreter to be choreographed (see fr_udf.h), and the
+ * whole point of a helper is that an individual call site cannot forget.
+ * Three separate forks here (post-fork run, pre-fork run, respawn) each
+ * had to be correct -- three chances to get one wrong.
+ *
+ *   parent: fr_udf_before_fork() / fork() / fr_udf_after_fork_parent()
+ *   child:  fr_udf_after_fork_child() before any Python C API call
+ *
+ * The parent hook runs even when fork() FAILS, which is why it sits
+ * after the call rather than inside the success branch.
+ *
+ * When the parent has no interpreter (the post-fork measurement run),
+ * there is nothing to choreograph and the hooks correctly refuse. */
+static pid_t udf_fork(void)
+{
+    int have = fr_udf_is_initialized();
+    if (have && fr_udf_before_fork() != FR_UDF_OK) {
+        fprintf(stderr, "  udf_fork: before_fork failed: %s\n",
+                fr_udf_last_error());
+        return -1;
+    }
+    pid_t p = fork();
+    if (p == 0) {
+        if (have) {
+            /* CHILD. Must precede any other Python call here, and must
+             * NOT be paired with the parent hook: running
+             * PyOS_AfterFork_Parent() in the child unlocks the mutex that
+             * PyOS_AfterFork_Child() is responsible for, which aborts
+             * with "PyMutex_Unlock: unlocking mutex that is not locked".
+             * That is exactly what happened here -- the first wiring ran
+             * both hooks in both processes. */
+            fr_udf_after_fork_child();
+        }
+        return p;
+    }
+    if (have) {
+        /* PARENT only. Runs on the failure path too (p < 0), because
+         * PyOS_BeforeFork() already took locks that must be released. */
+        fr_udf_after_fork_parent();
+    }
+    return p;
+}
+
 static double now_s(void)
 {
     struct timespec ts;
@@ -60,7 +106,7 @@ static double run(int pre_fork, int nchildren, int iters,
         fflush(stdout);
         int fds[2];
         if (pipe(fds) != 0) { perror("pipe"); exit(1); }
-        pid_t pid = fork();
+        pid_t pid = udf_fork();
         if (pid < 0) { perror("fork"); exit(1); }
         if (pid == 0) {
             /* Child. Report one status byte; never write to stdout, which
@@ -111,8 +157,21 @@ static double run(int pre_fork, int nchildren, int iters,
         int wstatus = 0;
         waitpid(-1, &wstatus, 0);
         if (got != 1 || status != 0) {
-            fprintf(stderr, "  child %d FAILED (status %d, exit %d)\n",
-                    c, (int)status, WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : -1);
+            /* Say WHICH signal. "exit -1" is what this printed for a
+             * while and it distinguishes nothing between SIGABRT (a
+             * fatal Python error), SIGSEGV, and a hang-kill -- which is
+             * the difference between "the hook is wrong" and "the hook
+             * exposed a real bug". */
+            if (WIFSIGNALED(wstatus))
+                fprintf(stderr, "  child %d FAILED (status %d, killed by "
+                                "signal %d %s)\n", c, (int)status,
+                        WTERMSIG(wstatus), strsignal(WTERMSIG(wstatus)));
+            else if (WIFEXITED(wstatus))
+                fprintf(stderr, "  child %d FAILED (status %d, exit %d)\n",
+                        c, (int)status, WEXITSTATUS(wstatus));
+            else
+                fprintf(stderr, "  child %d FAILED (status %d, no status)\n",
+                        c, (int)status);
             (*failures)++;
         }
     }
@@ -144,7 +203,7 @@ static int run_respawn(const char *module, const char *touch_attr,
     if (pipe(fds) != 0) { perror("pipe"); return 1; }
 
     /* Generation 1: dirty the interpreter, then die without finalising. */
-    pid_t p1 = fork();
+    pid_t p1 = udf_fork();
     if (p1 == 0) {
         close(fds[0]);
         char *out = NULL; size_t n = 0;
@@ -155,7 +214,7 @@ static int run_respawn(const char *module, const char *touch_attr,
     int w = 0; waitpid(p1, &w, 0);
 
     /* Generation 2: the respawn, onto the same interpreter. */
-    pid_t p2 = fork();
+    pid_t p2 = udf_fork();
     if (p2 == 0) {
         close(fds[0]);
         char status = 0;
@@ -224,6 +283,64 @@ static int run_control(const char *module, const char *batch)
     return dirty ? 0 : 1;
 }
 
+/* Are the fork hooks LOAD-BEARING, or decoration?
+ *
+ * Without this, "pre-fork works" is unfalsifiable in the wrong direction:
+ * the prototype ran green for a long time with NO hooks at all, purely
+ * because nothing was contending for the locks. That is exactly the
+ * situation the review amendment is about -- correctness that happens to
+ * hold until it does not.
+ *
+ * So: deliberately violate the choreography (take BeforeFork, fork, and
+ * omit AfterFork_Child in the child) and see whether the child breaks.
+ * If it breaks, the hooks are doing real work and the correct wiring is
+ * load-bearing. If it survives, this mode says so honestly rather than
+ * letting us claim the hooks matter on faith.
+ *
+ * The abort is contained in the child, so the driver still reports. */
+static int run_hooks_misuse(const char *module, const char *batch)
+{
+    if (!fr_udf_fork_hooks_available()) {
+        printf("  hooks   : UNAVAILABLE on this CPython build (no HAVE_FORK)\n");
+        return 2;
+    }
+    int fds[2];
+    if (pipe(fds) != 0) { perror("pipe"); return 1; }
+
+    if (fr_udf_before_fork() != FR_UDF_OK) {
+        fprintf(stderr, "  before_fork failed: %s\n", fr_udf_last_error());
+        return 1;
+    }
+    pid_t p = fork();                 /* deliberately NO hooks at all */
+    if (p == 0) {
+        close(fds[0]);
+        char status = 0;
+        char *out = NULL; size_t n = 0;
+        int rc = fr_udf_call(module, "up", batch, strlen(batch), &out, &n);
+        if (rc != FR_UDF_OK || n == 0) status = 1;
+        fr_udf_free(out);
+        ssize_t ignored = write(fds[1], &status, 1);
+        (void)ignored;
+        _exit(0);
+    }
+    /* Parent: release what BeforeFork took, so this process can exit. */
+    fr_udf_after_fork_parent();
+    close(fds[1]);
+    char status = -1;
+    ssize_t got = read(fds[0], &status, 1);
+    close(fds[0]);
+    int w = 0; waitpid(p, &w, 0);
+
+    int signalled = WIFSIGNALED(w) ? WTERMSIG(w) : 0;
+    printf("  hooks   : %s\n",
+           (got != 1 || status != 0 || signalled)
+             ? "LOAD-BEARING -- an unhooked child breaks, so the "
+               "choreography is required, not decorative"
+             : "unhooked child SURVIVED -- the hooks may not matter here, "
+               "but do not read that as permission to omit them");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *root  = (argc > 1) ? argv[1] : NULL;
@@ -233,6 +350,7 @@ int main(int argc, char **argv)
     const char *mode  = (argc > 5) ? argv[5] : NULL;
     int respawn_only  = mode && !strcmp(mode, "--respawn");
     int control_only  = mode && !strcmp(mode, "--control");
+    int hooks_only    = mode && !strcmp(mode, "--hooks");
     const char *batch = "line000042\n";
 
     char mbuf[256];
@@ -253,6 +371,17 @@ int main(int argc, char **argv)
            nchildren, iters, strlen(batch));
 
     int fail_pre = 0, fail_post = 0;
+
+    if (hooks_only) {
+        if (fr_udf_init(roots, nroots) != FR_UDF_OK) {
+            fprintf(stderr, "init failed: %s\n", fr_udf_last_error());
+            return 3;
+        }
+        fflush(stdout);
+        int rc = run_hooks_misuse(module, batch);
+        fr_udf_finalize();
+        return rc;
+    }
 
     if (control_only || respawn_only) {
         /* Pre-fork, because that is the candidate under test: the

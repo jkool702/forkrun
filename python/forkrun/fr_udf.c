@@ -346,3 +346,71 @@ int fr_udf_import_ok(const char *module)
 const char *fr_udf_last_error(void) { return last_error; }
 
 const char *fr_udf_version(void) { return PY_VERSION; }
+
+/* ------------------------------------------------------------------------ */
+/* CPython fork lifecycle                                                   */
+/* ------------------------------------------------------------------------ */
+
+/* The hooks live behind CPython's own HAVE_FORK guard (intrcheck.h), so
+ * on a build without fork support they do not exist at all. We do NOT
+ * degrade them into no-ops: a caller that believes it choreographed its
+ * forks when it did not is exactly the silent-corruption case these
+ * functions exist to prevent. Fail closed instead, and let the caller ask
+ * first with fr_udf_fork_hooks_available(). */
+#if defined(HAVE_FORK)
+#define FR_UDF_FORK_HOOKS 1
+#else
+#define FR_UDF_FORK_HOOKS 0
+#endif
+
+int fr_udf_fork_hooks_available(void) { return FR_UDF_FORK_HOOKS; }
+
+int fr_udf_before_fork(void)
+{
+    if (!initialized) {
+        set_error("before_fork: interpreter not initialized");
+        return FR_UDF_ERR;
+    }
+#if FR_UDF_FORK_HOOKS
+    /* Takes the import lock and marks other threads as blocked. Must be
+     * paired with after_fork_parent on EVERY path out, including a
+     * failed fork() -- hence the caller's obligation, not ours. */
+    PyOS_BeforeFork();
+    return FR_UDF_OK;
+#else
+    set_error("before_fork: CPython built without fork support");
+    return FR_UDF_ERR;
+#endif
+}
+
+int fr_udf_after_fork_parent(void)
+{
+    if (!initialized) {
+        set_error("after_fork_parent: interpreter not initialized");
+        return FR_UDF_ERR;
+    }
+#if FR_UDF_FORK_HOOKS
+    PyOS_AfterFork_Parent();
+    return FR_UDF_OK;
+#else
+    set_error("after_fork_parent: CPython built without fork support");
+    return FR_UDF_ERR;
+#endif
+}
+
+int fr_udf_after_fork_child(void)
+{
+    if (!initialized) {
+        set_error("after_fork_child: interpreter not initialized");
+        return FR_UDF_ERR;
+    }
+#if FR_UDF_FORK_HOOKS
+    /* Reinitialises interpreter and thread state in the child. Must be
+     * the FIRST thing the child does if it will touch Python again. */
+    PyOS_AfterFork_Child();
+    return FR_UDF_OK;
+#else
+    set_error("after_fork_child: CPython built without fork support");
+    return FR_UDF_ERR;
+#endif
+}
