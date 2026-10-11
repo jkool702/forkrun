@@ -280,7 +280,45 @@ Option B (two loops) remains an acceptable fallback if this separation proves
 awkward — but the reap/cleanup machinery must not be duplicated merely to
 separate the policy.
 
-### 7.4 ACCEPTED — the failure semantics must be specified, not inherited
+### 7.4 DECIDED — (b) "no recovery, immediate abort"
+
+The maintainer's proposal was (b), on the grounds that (a) is already
+covered: *"if you want 'don't retry but finish the pipeline' semantics that's
+already provided by orchestrator=true and setting the max retry count to 0
+... Given that is already possible, I don't see much use for option (a)."*
+
+**The premise is verified, but it does not transfer** — and the difference
+matters for how this is recorded.
+
+*Verified:* `orchestrator=True` with `FORKRUN_RETRY_LIMIT=0` **completes the
+pipeline** — measured: 20 batches poisoned and skipped, no exception raised.
+So "don't retry a batch, but finish" is genuinely already available, and the
+"bonus of not permanently losing workers" is real.
+
+*Why it does not transfer:* `FORKRUN_RETRY_LIMIT` governs **batch** retries.
+`respawn_cap` governs **worker** respawns. They are different knobs
+(`forkrun_cleanroom.c:590`, `_reactor.py:144`). `orchestrator=False` is about
+**worker death**, which retry_limit does not govern. Mapping the three
+semantics:
+
+| semantics | available today |
+|---|---|
+| don't retry a **batch**, finish the pipeline | `orchestrator=True` + `FORKRUN_RETRY_LIMIT=0` |
+| don't respawn a dead **worker**, abort | `orchestrator=True` + `respawn_cap=0` (cap reached → no respawn → abort) |
+| don't respawn a dead **worker**, but **keep going** | **nothing** |
+
+So (a) is the one option not already provided. Recording it as "already
+covered by retry=0" would be wrong reasoning that misleads later readers.
+
+**Decision: (b).** The reasoning is not "(a) is useless" but that (a)'s
+residual meaning is narrow — *"a worker died; do not re-execute its in-flight
+work on a replacement, but finish the rest"* — and (b) is the safe choice for
+side-effecting payloads, since aborting executes no further user code at all.
+A caller wanting maximum throughput at the cost of a permanently smaller
+worker pool has no option; that is an acceptable gap, and adding (a) later
+is additive rather than a semantic change to (b).
+
+### 7.4a ACCEPTED — the failure semantics must be specified, not inherited
 
 The in-process executor records worker failures while reaping and raises
 **after** its collection phase; it does not necessarily abort every remaining
