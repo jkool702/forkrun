@@ -54,8 +54,13 @@ neither candidate in §3 satisfies them on its own.
 **S1 — Safety.** No record from an uncommitted attempt is ever visible
 through the public API, in any executor.
 
-**S2 — Completeness.** Every committed batch's record is delivered
-exactly once.
+**S2 — Completeness.** *A run that reports successful completion
+delivers every committed record exactly once.* An **aborted** run must
+never report success and must never re-execute already-committed work; a
+streaming run may already have yielded earlier committed results before a
+subsequent fatal error. S2 does not require an aborted or abandoned
+consumer to receive everything committed — it requires that failure never
+masquerade as success.
 
 **S3 — Consistency.** The record a consumer observes for batch *k* is
 the record belonging to the attempt the engine committed for batch *k*.
@@ -138,6 +143,7 @@ from uncommitted. Source answer: **it cannot, and it does not need to.**
 
 | state at death | meaning | action |
 |---|---|---|
+| `TXN_CLAIMING` | claim in flight; ticket unattributable | **ambiguous — conservative/fatal. Never synthesize a successful publication wakeup.** |
 | `TXN_CLAIMED` | batch published, not committed | roll back output to `output_start`; **never wake the drain** |
 | `TXN_COMMITTING` | ack in flight, ambiguous | conservative abort (existing behaviour); **never wake the drain** |
 | `TXN_IDLE` | committed **or** nothing in flight | drain wakeup is **safe in both cases** |
@@ -229,17 +235,20 @@ violation introduced by the fix itself.
 Required: a **distinct outcome** for *committed but notification failed*,
 distinct from pre-commit execution failure, audited across every
 `fr_py_complete()` caller and all eight disposition-emission paths. Its
-only permitted responses are:
+only permitted responses, following the **actual state-dependent**
+recovery behavior — `ring_recover_worker_core` classifies `TXN_IDLE`
+differently from `TXN_CLAIMED`, so a nonzero worker exit must not be
+assumed to re-execute the same batch:
 
-* trigger recovery notification, when that can be done safely; or
+* trigger recovery notification, where the state shows the batch committed
+  and the notification is safely recoverable; or
 * abort the run **without claiming successful completion**.
 
-An abandoned consumer or an unrecoverable notification failure must
-**never** become a retry of committed work. Because the state is already
-`TXN_IDLE` when the signal is written, recovery naturally classifies this
-as "committed, nothing in flight" and does not re-execute — but the
-emitters must not convert it into an error return that the loop turns
-into a retry.
+The required outcome is unambiguous regardless of which path the engine
+takes: **no duplicate execution of committed work, no false success, and
+either successful notification recovery or a fatal run result.** An
+abandoned consumer or unrecoverable notification failure must never
+become a retry of committed work.
 
 ### 3.7 Every emitter that must conform
 
@@ -251,11 +260,37 @@ racing. Full audit of the current signal sites:
 |---|---|---|
 | `fr_py_emit` (payload) | `_shim.c:1570`, signals at 1645 | move signal after commit; distinguish post-commit failure |
 | `fr_py_emit_disposition` | `_shim.c:801`, signals at 825 | **same**, plus no-retry outcome |
-| disposition call sites | `_shim.c:1715, 3244, 3302, 3500, 3554, 3672, 3731` | all inherit; each must commit before signalling |
+| disposition call sites | `_shim.c:1715, 3244, 3302, 3500, 3554, 3672, 3731` | **must be rewritten — see below** |
 
-Two signal sites, eight disposition call sites across the four loops. All
-must conform or S1 stays false for dispositions — exactly the record
-class ordered reassembly depends on.
+#### 3.7.1 The disposition sequence must be changed at every call site
+
+This is **not** inherited. Verified: the disposition sites emit and then
+call `fr_py_complete(-1, ...)`, and `fr_py_emit` returns immediately when
+`signal_fd < 0` (`_shim.c:1644`) — so the acknowledgement is silent. If
+`fr_py_emit_disposition` stops signalling and these calls are left alone,
+**POISONED and SKIPPED records are committed but never notified to the
+drain**: committed, invisible, silently stranding any consumer waiting on
+that batch's terminal outcome.
+
+Every disposition path must therefore be rewritten to:
+
+1. write the complete terminal record into the output memfd, **without
+   signalling**;
+2. complete the acknowledgement and **reach the commit point**
+   (`TXN_IDLE`);
+3. send the post-commit notification carrying the committed frontier.
+
+Concretely: route each disposition path through the revised completion
+helper **with the real signal descriptor** (which guarantees
+write → commit → signal), or call a dedicated post-commit notifier after
+acknowledgement. All eight call sites are audited individually; a shared
+helper is preferred so a new loop cannot silently reintroduce the
+silent-ack pattern.
+
+Tests must prove every committed `POISONED`/`SKIPPED` record remains
+observable **exactly once**, and that a death between writing the
+disposition and its acknowledgement rolls the record back and retries or
+aborts per existing policy.
 
 ### 3.8 Engine-free
 
@@ -385,7 +420,7 @@ for. "Public API" means what `stream()`/`map()` hands the caller.
 | 7 | same-size retry, different content | not published | committed content wins | committed content once | ok |
 | 8 | different-size retry | not published | committed record wins | committed record once | ok |
 | 9 | repeated recovery | not published | delivered once | exactly once | ok |
-| 10 | respawn reuses `wid` | n/a | fresh memfd | `incarnation` resets cursor | ok |
+| 10 | **respawn reuses `wid` *and its memfd*** | n/a | absolute cursor retained; append at committed frontier | never reset or replay consumed bytes | ok |
 
 Rows 7–9 are the cases the current source is predicted to fail, and which
 `test_data_publication_leak.py` already exposes on row 7/8.
