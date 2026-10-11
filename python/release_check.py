@@ -53,8 +53,22 @@ FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
 CHECKS = []
 
 
-def check(name):
+def check(name, only_if=None):
+    """Register a release check.
+
+    `only_if` gates a check that is only MEANINGFUL in some situations.
+    A gated check is reported as [SKIP] with its condition, never silently
+    omitted -- a check that disappears is indistinguishable from a check
+    that was never written.
+
+    Currently used by exactly one check, the tag-is-free guard, which is
+    only applicable in the moments before tagging. See its decorator.
+    """
     def deco(fn):
+        # The gate rides on the function rather than as a third tuple
+        # element: CHECKS is unpacked as (name, fn) elsewhere, and
+        # widening the tuple would silently break those consumers.
+        fn.only_if = only_if
         CHECKS.append((name, fn))
         return fn
     return deco
@@ -191,7 +205,27 @@ def check_unreleased_untagged():
     return True
 
 
-@check("Tag: %s not already taken" % PROJECT_VERSION)
+def _tag_checks_enabled():
+    """Gating predicate for the tag-is-free guard.
+
+    This guard answers "may I tag v3.6.1 right now?", which is only the
+    question in the moments before tagging. Once the tag exists -- which
+    it does, and legitimately so, for the whole of a normal development
+    day -- the guard can only ever report failure, and a permanently red
+    check trains people to ignore the whole report.
+
+    So it is off by default and switched on explicitly for a release:
+
+        FORKRUN_RELEASE_CHECK_TAGS=1 python3 python/release_check.py
+
+    Gating it does not weaken it: the same command a tagger runs now
+    includes it, and it still refuses to pass when the tag is taken.
+    """
+    return os.environ.get("FORKRUN_RELEASE_CHECK_TAGS") == "1"
+
+
+@check("Tag: %s not already taken" % PROJECT_VERSION,
+       only_if=_tag_checks_enabled)
 def check_tag_free():
     # W-REL5-F (F6.1): tagging over an existing tag would move/fail
     # it. Local tags only (offline-safe); pushing the tag is the
@@ -497,6 +531,20 @@ def main(argv=None):
     print("=" * 60)
     failures = 0
     for name, fn in CHECKS:
+        only_if = getattr(fn, "only_if", None)
+        if only_if is not None:
+            try:
+                if not only_if():
+                    print("  [SKIP] %s\n         "
+                          "(not applicable here; set "
+                          "FORKRUN_RELEASE_CHECK_TAGS=1 to include)"
+                          % name)
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                print("  [ERROR] %s\n         gate failed: %s"
+                      % (name, exc))
+                failures += 1
+                continue
         try:
             fn()
         except AssertionError as exc:
