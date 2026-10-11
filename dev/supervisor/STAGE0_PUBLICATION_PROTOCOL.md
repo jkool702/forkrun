@@ -1,6 +1,6 @@
 # Stage 0 — publication/commit protocol design note
 
-**Status: for external review before implementation.**
+**Status: design revision 3 — for external review before implementation.**
 
 Companion to `CLEANROOM_EXPANSION_PROPOSAL.md` §0a. That section records
 the defect; this note is the design work the review asked for before any
@@ -76,24 +76,30 @@ and asked whether it works engine-free. Worked against the source:
 
 ### 3.1 The commit linearization point exists and is already durable
 
-`fr_py_ack_direct` → the ring's ack path (`forkrun_ring.c`):
+**Linearization point: the `TXN_IDLE` release-store inside
+`worker_txn_clear()` (`forkrun_ring.c:6504`) — not the successful return
+from `fr_py_ack_direct()`.**
+
+That distinction is load-bearing and was previously stated wrong here: a
+worker can die *after* the release store but *before* returning to its
+caller. That batch is committed and recovery must treat it as such.
+Defining the point by the call's return would misclassify exactly the
+case the protocol exists to handle.
+
+The ring's ack path:
 
 ```
 worker_txn_begin_commit()   → TXN_COMMITTING   (before any ack side effect)
   ... fallow/order packets written to their pipes ...
 worker_last_cnt = 0
-worker_txn_clear()          → TXN_IDLE         ("TXN_IDLE means fully committed")
-return EXECUTION_SUCCESS
+worker_txn_clear()          → TXN_IDLE         ← COMMIT POINT (release store)
+return EXECUTION_SUCCESS                       (may never execute)
 ```
 
-**Linearization point: successful return of `fr_py_ack_direct`**, which
-is ordered after `worker_txn_clear`'s release store
-(`forkrun_ring.c:6504`). Every ack side effect is already on its pipe at
-that point. This requires **no engine change** — it is an existing,
-already-ordered transition that the shim can simply observe.
-
-`g_state` is `MAP_SHARED` (`forkrun_ring.c:2513`), so the parent — and
-therefore the drain — can read `g_state->worker_txn[wid].state`.
+Every ack side effect is already on its pipe at the store. This requires
+**no engine change** — it is an existing, already-ordered transition the
+shim can observe. `g_state` is `MAP_SHARED` (`forkrun_ring.c:2513`), so
+the parent and the drain can read `g_state->worker_txn[wid].state`.
 
 ### 3.2 But "signal after ack" alone is NOT sufficient
 
@@ -153,17 +159,89 @@ Answering the reviewer's other audit points:
   takes the "nothing in flight" branch and **does not retry**. The batch
   is committed exactly once. An EPIPE means the parent abandoned the
   stream, already fatal.
-* **Respawn / memfd reuse** — `WorkerTxn.incarnation` is the existing
-  worker generation ("stale-record detection"). The drain uses it to
-  detect that a `wid` now points at a fresh memfd and **resets its
-  cursor**, instead of stranding the new generation behind a stale
-  offset. Respawns reuse the same `wid` (`forkrun_cleanroom.c:414`), so
-  this check is required, not optional.
+* **Respawn / memfd reuse — the cursor is PERSISTENT, not
+  generation-reset.** Revision 2 of this note wrongly proposed using
+  `WorkerTxn.incarnation` to detect a fresh memfd and reset the cursor.
+  **That was incorrect**, and the source says so: `out_fds[i]` is created
+  **once** at `forkrun_cleanroom.c:1245` and the *same* fd is passed to
+  `spawn_wid()` on every respawn (`:1621`); the drain inherited those same
+  descriptors when it was forked. The memfd is **reused across worker
+  generations**, so there is no fresh-memfd handoff to detect, and
+  resetting the cursor to zero would re-read already-consumed,
+  hole-punched records.
+
+  Correct model: a **persistent, monotonically advancing per-worker byte
+  cursor** for the lifetime of the reused memfd, with absolute committed
+  offsets. A respawned worker appends at the memfd's current end
+  (`worker_txn_init_output_cursor` is the only cursor lseek), which is
+  exactly the committed frontier, so both sides agree.
+
+  This is sound because of an invariant verified in the source:
+  `worker_output_end` advances **only after a complete emit**
+  (`forkrun_ring.c:1320`), `txn.output_start` snapshots it at claim
+  (`:6461`), and rollback truncates to precisely that value (`:7163`).
+  **Rollback therefore never truncates past the committed frontier** —
+  which is the precondition the persistent cursor depends on. It should
+  be asserted by a test rather than left as a comment.
 * **EOF / teardown / abandonment** — a wakeup after drain EOF must not
   resurrect it; wakeups are issued only from the supervise loop while
   the drain is live.
 
-### 3.5 Every emitter that must conform
+### 3.5 Synthetic wakeup — required in EVERY supervisor path
+
+**Revision 2 of this note treated the IDLE wakeup as if it followed from
+the recovery state machine. It does not. The supervisor never sends it.**
+
+Verified: `forkrun_cleanroom.c:1578-1582` calls `p_recover(...)` and then
+executes `if (rc == 2) continue;` — and `2` is `NORMAL_EXIT`, returned
+when the work has drained. **No synthetic notification is sent on that
+path, or on any path.**
+
+That is precisely the completeness case the protocol must close: a worker
+commits its final record, dies before signalling, recovery sees an idle /
+drained worker, and the supervisor concludes there is nothing to do. The
+record stays in the memfd and the drain may never learn it should forward
+it.
+
+Required control flow in the supervisor:
+
+1. Observe the worker's death.
+2. Run recovery and let any rollback finish.
+3. **Capture the stable committed frontier *after* recovery completes.**
+4. Issue a synthetic `(wid, committed_offset)` wakeup for every nonfatal
+   outcome where that frontier is well-defined — **before** any early
+   `continue` that bypasses recovery handling, and **including `rc == 2`**.
+5. **Never** synthesize successful publication for ambiguous or fatal
+   outcomes (`COMMITTING`, or `rc` in the fatal set).
+
+A normal-exit classification must not silently strand a
+committed-but-unsignalled record.
+
+### 3.6 Post-commit notification failure must not re-execute
+
+Verified hazard: every loop treats a nonzero `fr_py_complete` as
+`return 1` (`_shim.c:3506`) — the worker exits, supervision recovers, and
+the batch is retried. After reordering, a **signal-write failure occurs
+post-commit**, so routing it through that generic path would
+**re-execute an already-committed batch**. That is a new exactly-once
+violation introduced by the fix itself.
+
+Required: a **distinct outcome** for *committed but notification failed*,
+distinct from pre-commit execution failure, audited across every
+`fr_py_complete()` caller and all eight disposition-emission paths. Its
+only permitted responses are:
+
+* trigger recovery notification, when that can be done safely; or
+* abort the run **without claiming successful completion**.
+
+An abandoned consumer or an unrecoverable notification failure must
+**never** become a retry of committed work. Because the state is already
+`TXN_IDLE` when the signal is written, recovery naturally classifies this
+as "committed, nothing in flight" and does not re-execute — but the
+emitters must not convert it into an error return that the loop turns
+into a retry.
+
+### 3.7 Every emitter that must conform
 
 The review's point that `fr_py_emit_disposition` signals independently is
 correct — reordering only `fr_py_complete` would leave dispositions
@@ -171,30 +249,29 @@ racing. Full audit of the current signal sites:
 
 | emitter | site | conforms? |
 |---|---|---|
-| `fr_py_emit` (payload) | `_shim.c:1570`, signals at 1645 | must move signal after ack |
-| `fr_py_emit_disposition` | `_shim.c:801`, signals at 825 | **must move too** |
-| disposition call sites | `_shim.c:1715, 3244, 3302, 3500, 3554, 3672, 3731` | all inherit the fix; each must ack before signalling |
+| `fr_py_emit` (payload) | `_shim.c:1570`, signals at 1645 | move signal after commit; distinguish post-commit failure |
+| `fr_py_emit_disposition` | `_shim.c:801`, signals at 825 | **same**, plus no-retry outcome |
+| disposition call sites | `_shim.c:1715, 3244, 3302, 3500, 3554, 3672, 3731` | all inherit; each must commit before signalling |
 
-Two signal sites total, eight disposition call sites across the four
-loops. All must conform or S1 stays false for dispositions — which is
-precisely the class of record ordered reassembly depends on.
+Two signal sites, eight disposition call sites across the four loops. All
+must conform or S1 stays false for dispositions — exactly the record
+class ordered reassembly depends on.
 
-### 3.6 Engine-free
+### 3.8 Engine-free
 
-Every change is in `_shim.c` (emit ordering, signal payload, drain loop)
-and `forkrun_cleanroom.c` (recovery wakeup). `forkrun_ring.c` is **read
-but never modified** — the existing `TXN_IDLE` transition and
-`incarnation` field are sufficient. The frozen-engine exemption is
-therefore not invoked.
+Every change is in `_shim.c` (emit ordering, signal payload, post-commit
+outcome), `forkrun_cleanroom.c` (recovery wakeup in all paths,
+frontier capture), and the drain loop. `forkrun_ring.c` is **read but
+never modified** — the existing `TXN_IDLE` transition, `output_start`
+snapshot and cursor semantics are sufficient. The frozen-engine exemption
+is not invoked.
 
-### 3.7 Status
+### 3.9 Status
 
-Viable on the source evidence, with the committed-frontier signal being
-the load-bearing correction to the reviewer's sketch. **Still returns for
-review before implementation**, now with a concrete protocol rather than
-two candidate descriptions.
-
----
+Core direction accepted by review. Recovery wakeup lifecycle (§3.5),
+cursor model (§3.4) and the post-commit outcome (§3.6) are now specified
+concretely rather than assumed. **Still returns for approval before
+implementation.**
 
 ## 4. Interim safety policy (review amendment 1)
 
@@ -211,8 +288,26 @@ Policy is therefore **per API**:
 
 | API | interim policy |
 |---|---|
-| materialized `map()` | a detected publication conflict **must** prevent returning a successful collection — raise instead |
+| materialized `map()` | **fail on any worker death that is recovered and retried** — not merely on a detected contradiction |
 | `stream()` | **the cleanroom streaming envelope is disabled** until a commit barrier exists |
+
+**Revision 3 corrects the `map()` guard.** The earlier policy proposed
+failing only when a poisoned batch also produced `DATA`. That is **not a
+comprehensive detector**: a retry can *succeed* without ever incrementing
+the poison count, leaving the abandoned attempt's record visible with no
+contradiction to detect. A partial detector is worse than none, because
+it looks like a safety measure.
+
+The only sound narrow policy without the commit barrier is to refuse the
+materialized result whenever a recovered worker death occurred in that
+run. This is viable for `map()` specifically because the collection is
+returned only after the run completes, so the whole result can still be
+refused — unlike `stream()`, which has already handed values to the
+caller.
+
+If that proves too blunt in practice, the alternative is to **disable the
+recovery-enabled cleanroom `map()` envelope** — not to narrow the
+detector.
 
 Disabling is preferred over post-hoc failure for streaming precisely
 because the failure is detected too late to be a safety measure; a loud
@@ -282,9 +377,10 @@ for. "Public API" means what `stream()`/`map()` hands the caller.
 |---|---|---|---|---|---|
 | 1 | death during record write (partial) | no partial record | retried | nothing yielded | ok |
 | 2 | death after full write, before ack | not published | retried | nothing yielded | ok |
-| 3 | death after commit, before signal | n/a | wakeup at `IDLE` | value yielded once | ok |
+| 3 | death after `TXN_IDLE` store, before signal | n/a | synthetic wakeup incl. `rc == 2` (§3.5) | value yielded once | ok |
+| 3b | same, input queue already drained | n/a | `rc == 2` must still wake | value yielded once | ok |
 | 4 | death during ack (`COMMITTING`) | not published | conservative abort | nothing yielded | per policy |
-| 5 | signal write fails after commit | n/a | **no retry** (state `IDLE`) | — | fatal (parent gone) |
+| 5 | signal write fails after commit | n/a | **no retry** (§3.6 distinct outcome) | — | recovery-notify or abort |
 | 6 | rollback truncates memfd under drain | not published | retried | nothing yielded | ok |
 | 7 | same-size retry, different content | not published | committed content wins | committed content once | ok |
 | 8 | different-size retry | not published | committed record wins | committed record once | ok |
