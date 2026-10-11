@@ -179,7 +179,15 @@ class TestShimBindings(unittest.TestCase):
         #                                 b"" -- the exact conflation
         #                                 DECISION-02 removes.
         #   static  fr_py_udf_invoke     the UDF invoke body.
-        #   static  fr_py_emit_disposition SKIPPED/POISONED terminal
+        #   extern  fr_py_emit_disposition SKIPPED/POISONED terminal
+        #                                 records (P5). Exported rather
+        #                                 than static so the exactly-once
+        #                                 proof exercises the REAL
+        #                                 emitter; a test that re-wrote
+        #                                 the record would skip the
+        #                                 frontier advance and pass while
+        #                                 the shipped path leaked a
+        #                                 duplicate on every retry.
         #                                 records (P5). Zero payload --
         #                                 an empty DATA record would make
         #                                 poison indistinguishable from a
@@ -192,7 +200,7 @@ class TestShimBindings(unittest.TestCase):
         # them as results; what changes is that a terminal outcome now
         # has a representation on the wire instead of being inferred from
         # a counter. No existing symbol changed arity or signature.
-        self.assertEqual((n_ext, n_st), (52, 14),
+        self.assertEqual((n_ext, n_st), (53, 13),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

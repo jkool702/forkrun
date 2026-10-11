@@ -272,3 +272,85 @@ already makes.
 **Open question for the next round:** should the memfd path gain the ability
 to express a zero-length result, and does that change belong in this work or
 in a separate item?
+
+---
+
+## 6. P5b — the exactly-once proof, and what it found
+
+DECISION-02 section 5.2 binds the design on one point: *"worker death,
+retries, respawn, partial writes and rollback can neither duplicate nor
+lose one."* That is a claim about failure behaviour, so
+`python/tests/test_exactly_once.py` establishes it by driving the fault
+sequences and parsing the actual output stream, rather than trusting
+return codes.
+
+**The invariant:** for every batch that reached a terminal state, the
+stream contains *exactly one* record with that `batch_idx`. Zero is a
+lost disposition; two is a duplicated one — and a duplicate is worse than
+a loss, because it shifts every subsequent batch by one position.
+
+### 6.1 A real, pre-existing bug the proof was built to find
+
+Driving four deaths in one worker session produced:
+
+```
+FINAL batch ids: [0, 1, 2, 2, 3, 4, 4, 5]
+```
+
+Duplicates at 2 and 4. **Only the first recovery in a worker session
+rolled anything back.** Every later one returned `RECOVERED` while
+leaving its orphan in the stream.
+
+Root cause: `ring_recover_worker_core` truncates the output fd back to
+`txn->output_start` but does not move the TLS `worker_output_end` cursor
+— which is what the *next* claim snapshots as the new batch's rollback
+frontier. After a truncation that cursor is stale: it still holds the
+pre-truncation position, so the next batch's `output_start` points past
+the real end of the file, and the engine's own "never grow a file by
+truncating" guard (`st_size >= output_start`) then **refuses** the
+rollback. The guard that exists to prevent data loss was silently
+preventing data recovery, and reporting success while doing it.
+
+**Pre-existing, not introduced here.** Verified by stashing every change
+in this series, rebuilding the substrate, and re-running the same probe at
+HEAD: identical `[0, 1, 2, 2, 3, 4, 4, 5]`.
+
+### 6.2 Where it is fixed, and why there
+
+In `fr_py_recover_worker` (`_shim.c`), which re-syncs the cursor on the
+`rc == 0` path only. Two reasons for not putting it in the engine:
+
+* `forkrun_ring.c` is **frozen**; the fix is not worth a freeze-policy
+  exception for.
+* `_shim.c` textually includes it, so the translation unit can see the
+  TLS cursor directly. The change is a cursor resync — it does not touch
+  the engine's state machine or its recovery *decisions*, only the
+  cursor's agreement with the file it describes.
+
+Resyncing only on `RECOVERED` is deliberate: any other return means the
+engine declined to roll back, and moving the cursor then would assert an
+end-of-output position that does not exist.
+
+Result after the fix: `[0, 1, 2, 3, 4, 5]`.
+
+### 6.3 Coverage
+
+Retry-then-succeed, five consecutive retries, death-then-rollback, death
+*after* commit, respawn onto a new generation, and a mixed six-batch run
+combining all three outcome kinds in one stream — each asserting
+exactly-once. `SKIPPED` and `POISONED` are covered by the same invariant,
+using the real exported emitter so the frontier advance is genuinely
+exercised.
+
+Mutation-checked: removing the cursor resync fails both
+`test_a_SECOND_death_in_the_same_session_still_rolls_back` and
+`test_one_record_per_batch_across_every_outcome`.
+
+### 6.4 What this does not yet establish
+
+Exactly-once for the **stream** and **spawn** modes in situ. The engine
+primitives are shared and proven here, and the plugin/UDF loops are
+covered structurally by the parity test, but no test drives a real
+launcher run into multiple deaths and then inspects the stream. That is
+the remaining gap, and it is an integration gap rather than a protocol
+one.

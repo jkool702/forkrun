@@ -8,8 +8,8 @@
  *
  * Scope: declarations, argument types, return types only.
  * No semantic contracts (see test_invariant_gate.py §3/§6/§9).
- * Extern entries are the dlsym-visible ABI surface (52);
- * static entries are internal (14, listed with linkage in
+ * Extern entries are the dlsym-visible ABI surface (53);
+ * static entries are internal (13, listed with linkage in
  * shim_signatures.json, omitted here).
  *
  * Header hygiene (substrate rules): self-contained (no includes
@@ -44,6 +44,7 @@ int fr_py_destroy(void);
 int fr_py_diag_node(int node, uint64_t *out);
 int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers, int results_fd, int drain_mode);
 int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx, const char *data, uint64_t data_len);
+int fr_py_emit_disposition(int out_fd, uint64_t batch_idx, uint32_t disposition);
 int fr_py_escrow_deposit(unsigned int kills);
 int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len, int ingress_fd, int out_fd, uint64_t batch_idx);
 int fr_py_fallow_loop(int pipe_r, int memfd);

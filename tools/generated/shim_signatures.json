@@ -91,7 +91,7 @@
   },
   "fr_py_emit_disposition": {
     "args": "int out_fd, uint64_t batch_idx, uint32_t disposition",
-    "linkage": "static",
+    "linkage": "extern",
     "return": "int"
   },
   "fr_py_emit_record": {

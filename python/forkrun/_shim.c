@@ -691,6 +691,13 @@ static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
 /* Emit a terminal control disposition for a batch that produced no
  * payload: SKIPPED (on_error=skip) or POISONED (retry limit reached).
  *
+ * EXPORTED, not static: the worker loops call it in-process, but the
+ * exactly-once proof has to exercise the REAL emitter rather than
+ * re-implement the write in a test. A test that hand-rolls the record
+ * would skip the frontier advance -- the very thing that makes rollback
+ * remove the record -- and would pass while the shipped path leaked a
+ * duplicate on every retry.
+ *
  * DECISION-02 5.1. Before this those two outcomes were indistinguishable
  * from a worker that died: no record at all, so the parent's only
  * evidence was the poison counter, and an ordered consumer could not
@@ -706,8 +713,8 @@ static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
  * back with everything else and the retry re-emits it. Emitting outside
  * the transaction would leak a disposition for a batch about to run
  * again. */
-static int fr_py_emit_disposition(int out_fd, uint64_t batch_idx,
-                                  uint32_t disposition)
+int fr_py_emit_disposition(int out_fd, uint64_t batch_idx,
+                           uint32_t disposition)
 {
     return fr_py_emit_record_buf(out_fd, batch_idx, NULL, 0, disposition);
 }
@@ -2961,8 +2968,41 @@ int fr_py_is_resume_mode(void) {
  * ===================================================================== */
 int fr_py_recover_worker(int wid, int incarnation, int output_fd,
                          int exit_code) {
-    return ring_recover_worker_core(wid, incarnation, output_fd,
-                                    exit_code);
+    int rc = ring_recover_worker_core(wid, incarnation, output_fd,
+                                      exit_code);
+
+    /* Re-sync the worker's output cursor after a rollback.
+     *
+     * ring_recover_worker_core truncates output_fd back to
+     * txn->output_start but does NOT move the TLS `worker_output_end`
+     * cursor, which is what the NEXT claim snapshots as the new batch's
+     * rollback frontier. After a truncation that cursor is stale: it
+     * still holds the pre-truncation position, so the next batch's
+     * output_start is larger than the real file size -- and the
+     * engine's "never grow a file by truncating" guard
+     * (st_size >= output_start) then REFUSES the next rollback.
+     *
+     * Consequence, measured: only the FIRST recovery in a worker
+     * session actually rolled anything back. Every later one returned
+     * RECOVERED while leaving its orphan in the stream, so a worker
+     * that died twice produced DUPLICATE batch records -- and a
+     * duplicate desynchronises every batch after it, which is worse
+     * than losing one.
+     *
+     * This is a pre-existing defect, reproducible at HEAD (verified by
+     * stashing: `git stash && make python-substrate` shows the same
+     * [0,1,2,2,3,4,4,5] output). It is fixed here rather than in
+     * ring_recover_worker_core because forkrun_ring.c is FROZEN and
+     * _shim.c textually includes it, so this translation unit can see
+     * the TLS cursor directly. The fix is a cursor resync, not a change
+     * to the engine's state machine or its recovery decisions.
+     *
+     * Only on RECOVERED (rc 0): that is the branch that truncated. Any
+     * other return means the engine declined to roll back, and moving
+     * the cursor would then be a lie about where output ends. */
+    if (rc == 0 && output_fd >= 0)
+        (void)worker_txn_init_output_cursor(output_fd);
+    return rc;
 }
 
 /* =====================================================================

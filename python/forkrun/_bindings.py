@@ -341,6 +341,13 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # P5: terminal control dispositions (SKIPPED / POISONED).
+        lib.fr_py_emit_disposition.argtypes = [
+            ctypes.c_int, ctypes.c_uint64, ctypes.c_uint32]
+        lib.fr_py_emit_disposition.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
         # W-PY21-B: C descriptor parsing (map() collect path).
         lib.fr_py_parse_descriptors.argtypes = [
             ctypes.c_char_p, ctypes.c_uint64,
