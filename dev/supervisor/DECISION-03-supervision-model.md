@@ -2,7 +2,16 @@
 
 **Blocks:** P3 (the supervision-model item in coverage completion).
 **Needs:** maintainer + external AI review. Consensus before implementation.
-**Status:** open. No code written.
+**Status: DECIDED — GO WITH AMENDMENTS.** Option B as written is superseded:
+shared lifecycle layer with **distinct worker-exit policies**, plus a hard
+prerequisite on the failure/fallback contract that did not previously exist.
+See §7.
+
+> **Amendment log.** Review round 1 found (a) a concurrency claim in this
+> brief that is **false**, (b) a **live defect** in the fallback contract that
+> is a prerequisite for widening eligibility at all, and (c) a better
+> architecture than the one recommended here. All three accepted. Details and
+> evidence in §7.
 
 ---
 
@@ -172,3 +181,156 @@ Reasoning:
    self-contained, but it touches the same supervisor that P5 (NUMA) also
    touches, and the coverage plan already requires the shared
    supervision interface to be specified before both begin.
+
+---
+
+## 7. Amendments from review round 1
+
+### 7.1 RETRACTED — the `_RUN_LOCK` claim was wrong
+
+This brief asserted that `orchestrator=True` takes `_RUN_LOCK` and
+`orchestrator=False` does not, making concurrency part of the difference
+between the models. **That is false.** Both take it:
+
+| | takes `_RUN_LOCK` |
+|---|---|
+| `_execute_reactor_locked` (dispatch site, `run.py:2825`) | yes |
+| `_execute` → `_execute_locked` (`run.py:5204-5205`) | **yes — the callee locks** |
+| `_execute_ingest` (`run.py:4735`) | **yes** |
+
+The dispatch sites for the legacy path do not lock, which is what I read —
+but the callee they invoke does. **The two models do not differ in
+concurrency semantics**, and **Option D is withdrawn** as a live decision.
+
+*Why it matters beyond this brief:* I asserted it from a partial read, having
+checked the call site without following the call. That is the fourth instance
+of this shape in this work (cf. `PyConfig`, `len == 0`, the flaky test), and
+the consistent fix is to treat "I read the call site" as insufficient evidence
+about a callee's behaviour.
+
+### 7.2 ACCEPTED — and promoted to a hard prerequisite: no fallback after user code may have run
+
+This is the serious finding, and it is **not created by P3 — it exists today**.
+
+`_execute_cleanroom` treats a nonzero launcher exit as "accelerator
+unavailable", warns, returns `None`, and the caller continues into the
+in-process path. Whether that is safe is decided by:
+
+```python
+replayable  = pre_ingest or _source_is_reopenable(source)   # run.py:1057
+may_fallback = replayable and not forbidden                  # run.py:1058
+```
+
+with `_CR_EXIT_PRE_INGEST = {64, 69, 71, 78}` (`run.py:812`) and
+`_CR_EXIT_NO_FALLBACK = {79}` (`run.py:822`). Exit **1** ("runtime
+worker/helper failure") is in **neither** set, and
+`_source_is_reopenable` returns `True` for any path source (`run.py:901`).
+
+So for a **path source** and a **runtime worker failure**:
+
+| | value |
+|---|---|
+| `pre_ingest` | `False` (1 not in PRE_INGEST) |
+| `_source_is_reopenable(path)` | `True` |
+| `may_fallback` | **True** → the whole workload reruns in-process |
+
+**The `or` conflates two different questions.** "Can the input be re-read?"
+and "has anything already happened that must not be repeated?" are not the
+same. Re-readable input makes replay *possible*; it says nothing about
+**user-code side effects** that already occurred. A run that executed half
+its batches and then lost a worker is restarted from batch zero.
+
+**Evidence status — read this honestly.** The above is **code reading, not a
+demonstration.** I attempted to show it empirically using the fixture's
+`FORKRUN_TEST_SIDE_EFFECT_FILE` counter with `die_always_v1`, and the result
+was **confounded**: the recovering supervisor's respawn multiplies execution
+far more than any fallback would, so the measurement could not separate them.
+I am therefore claiming the defect on the logic, which is sound, and **not**
+claiming to have observed it fire. Establishing that belongs with the fix.
+
+**Required outcome contract, and it must fail closed:**
+
+| launcher outcome | may fall back? |
+|---|---|
+| confirmed decline / failure **before any worker could execute user code** | **yes** |
+| failure **after execution may have begun** | **no — propagate to the caller** |
+| missing or ambiguous final status after execution started | **no — fail closed** |
+
+"After execution may have begun" is a property the launcher must *report*,
+not something the parent infers from an exit code. This is a prerequisite for
+**any** widening of cleanroom eligibility, not only for P3.
+
+### 7.3 ACCEPTED — shared lifecycle, distinct policies (supersedes Option B)
+
+Two fully independent supervision loops duplicate exactly the machinery
+CR-FIX1 existed to get right. Preferred structure:
+
+* **Shared lifecycle layer** — `waitpid`, child classification, status
+  decoding, helper-death handling, live-worker tracking, bounded teardown.
+* **Recovering policy** — invokes recovery for eligible deaths, classifies the
+  result, respawns when allowed.
+* **Fail-fast policy** — never recovers, never respawns.
+
+The `ring_recover_worker` / `p_recover` capability lives **only** in the
+recovering handler; the fail-fast handler should not even *receive* a recovery
+callback, so the property is structural rather than a branch someone must not
+miss. A regression test asserts recovery was never invoked under fail-fast.
+
+Option B (two loops) remains an acceptable fallback if this separation proves
+awkward — but the reap/cleanup machinery must not be duplicated merely to
+separate the policy.
+
+### 7.4 ACCEPTED — the failure semantics must be specified, not inherited
+
+The in-process executor records worker failures while reaping and raises
+**after** its collection phase; it does not necessarily abort every remaining
+worker on the first observed death.
+
+**`orchestrator=False` must be specified as one of:**
+
+* **"no recovery"** — dead workers are not recovered or respawned, but the run
+  continues to completion and raises at the end; or
+* **"no recovery, immediate abort"** — the first worker death tears the run
+  down at once.
+
+These are **observably different** for payloads with side effects, and the
+launcher must not drift from whichever is chosen.
+
+### 7.5 ACCEPTED — `on_error` stays orthogonal, and needs cross-tests
+
+Batch-level `retry` / `skip` / `fail-fast` remains a worker/engine
+responsibility. A payload failure retried inside the worker must **not**
+surface as a supervisor-level worker death. A worker that actually dies must
+not be transparently recovered under fail-fast.
+
+Required matrix: **both supervision modes × all three `on_error` values ×
+injected worker deaths.** Assertions must cover not just returned bytes and
+exception type, but: whether recovery ran, whether fallback occurred, and
+**whether already-executed user code ran a second time**. An intentional
+engine abort from `on_error="fail-fast"` must not be misclassified as a worker
+crash.
+
+### 7.6 ACCEPTED — sequencing
+
+The shared supervision contract and the execution-outcome contract (§7.2) must
+be specified **before** P1 or P3 implementation, as the coverage plan already
+requires. P3 settles before P5 reuses the interface. P1's packaging and
+initialisation probes may proceed independently, but **P1's launcher
+integration must not assume supervision is unconditionally recovery-based.**
+
+---
+
+## 8. Revised recommendation
+
+1. **Fix the failure/fallback contract first** (§7.2). It gates all eligibility
+   widening, and it is a live defect independent of P3.
+2. **Then P3** as a fail-fast *policy* over the shared lifecycle layer (§7.3),
+   with the "no recovery" vs "immediate abort" question answered explicitly
+   (§7.4).
+3. **Do not** re-introduce a concurrency difference — there isn't one (§7.1).
+4. Sequence P1's launcher integration after both, and keep P1 and P3 in
+   separate reviewable changes (§7.6).
+
+**Until (1) lands, retain the correct decline.** Enabling fail-fast while a
+nonzero exit can still trigger a blind in-process replay would trade a
+correct refusal for a silent one.
