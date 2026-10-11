@@ -94,6 +94,7 @@ struct opts {
     int verbose;
     int fork_only;
     int trace_fd;       /* opt-in structured trace; -1 = disabled */
+    int supervise;      /* 1 = recover+respawn, 0 = fail-fast (DECISION-03) */
 };
 
 static int fr_memfd_create(const char *name) {
@@ -573,6 +574,7 @@ int main(int argc, char **argv) {
     o.drain_mode = 0; o.retry_limit = 3; o.on_error = 0;
     o.respawn_cap = 64;
     o.trace_fd = -1;
+    o.supervise = 1;   /* recovering is the historical behaviour */
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--so") && i + 1 < argc)        o.so_path = argv[++i];
@@ -593,6 +595,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--fd-selfcheck"))         fd_selfcheck = 1;
         else if (!strcmp(argv[i], "--trace-fd") && i + 1 < argc)
             o.trace_fd = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--supervise") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (!strcmp(m, "recover"))        o.supervise = 1;
+            else if (!strcmp(m, "fail-fast")) o.supervise = 0;
+            else { fprintf(stderr, "forkrun-cleanroom: --supervise must be "
+                            "recover|fail-fast, got %s\n", m); return 64; }
+        }
         else { fprintf(stderr, "forkrun-cleanroom: bad arg %s\n", argv[i]); return 64; }
     }
     if (!o.so_path || o.source_fd < 0 || !o.plugin_path) {
@@ -1235,6 +1244,43 @@ int main(int argc, char **argv) {
          * risks signalling a recycled number during fatal teardown. It
          * is refilled below only when a replacement is really forked. */
         pids[wid] = -1;
+        /* DECISION-03 section 7.3 -- the worker-exit POLICY.
+         *
+         * The fail-fast branch RETURNS before the recovery call is ever
+         * reached. That ordering is the whole point: "fail-fast must never
+         * recover" is enforced by control flow rather than by a boolean
+         * guarding a call, so there is no branch to get wrong in a later
+         * edit. test_fail_fast_never_recovers asserts p_recover is not
+         * entered under this policy.
+         */
+        if (!o.supervise) {
+            /* A worker that finished its work exits 0; that is completion,
+             * not death, and must not abort the run. Only an ABNORMAL exit
+             * is a death.
+             *
+             * This classification is deliberately made from the raw wait
+             * status rather than by calling p_recover, because the point of
+             * the fail-fast policy is that it never reaches the recovery
+             * capability at all. Getting it from p_recover would have been
+             * the easy way and would have put recovery back on the path
+             * this policy exists to keep off it.
+             */
+            int completed_normally = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+            if (completed_normally)
+                continue;           /* drained to EOF; keep going */
+            /* No recovery, no respawn, immediate abort (DECISION-03 7.4b).
+             * The worker died; its in-flight batch is abandoned rather than
+             * reclaimed and re-executed by a replacement, which is the whole
+             * point for a side-effecting payload. */
+            fprintf(stderr, "forkrun-cleanroom: worker %d died (status %d) "
+                    "under fail-fast supervision -- not recovering, "
+                    "aborting\n", wid, death_cause(st));
+            fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_ABORT,
+                          (int32_t)wid, (int32_t)incarn[wid], 0,
+                          (int32_t)death_cause(st));
+            bad = 1;
+            break;
+        }
         int rc = p_recover ? p_recover(wid, incarn[wid], out_fds[wid],
                                        death_cause(st))
                            : 5;    /* no core -> cannot vouch for it */

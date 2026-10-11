@@ -695,11 +695,21 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
         return False, "UMA single-node only (got nodes=%r)" % (num_nodes,)
     if raw_mode != "plugin":
         return False, "mode='plugin' only (got %r)" % (raw_mode,)
-    if not orchestrator:
-        return False, ("orchestrator=False asks for legacy "
-                       "fork-and-wait/fail-fast, but the launcher "
-                       "supervises unconditionally and would recover a "
-                       "dead worker's batch instead of failing the run")
+    # DECISION-03: orchestrator=False is now SERVED, via the launcher's
+    # fail-fast supervision policy (--supervise fail-fast).
+    #
+    # It was declined because "the launcher supervises unconditionally and
+    # would recover a dead worker's batch instead of failing the run" --
+    # i.e. a caller asking for fail-fast would silently get recovery, and
+    # could not tell from the result. That is fixed structurally rather than
+    # by promising it will not happen: the launcher's fail-fast branch
+    # RETURNS before the recovery call, so there is no flag guarding it.
+    #
+    # Semantics are DECISION-03 section 7.4(b): no recovery, no respawn,
+    # immediate abort on the first worker death. The abandoned option 7.4(a)
+    # ("no recovery but keep going") is NOT implemented and is not on the
+    # roadmap; a caller wanting "don't retry a batch but finish" uses
+    # orchestrator=True with FORKRUN_RETRY_LIMIT=0.
     if order not in ("none", "index"):
         return False, ("order=%r is not served; the launcher relies on "
                        "downstream ordering (collect_records sort for "
@@ -950,7 +960,7 @@ def _source_is_reopenable(source):
 
 def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                        plugin_func, on_error, views, strict_poison=False,
-                       order="none"):
+                       order="none", orchestrator=True):
     """W-CR1: materialized file + C plugin, orchestrated entirely in C.
 
     Everything (fr_py_init, spill to the ingress memfd, per-worker output
@@ -1062,6 +1072,12 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "--stats-fd", str(stats_fd)]
     if trace_fd >= 0:
         argv += ["--trace-fd", str(trace_fd)]
+    # `orchestrator is False`, NOT `not orchestrator`: map() defaults
+    # orchestrator to None (meaning "ride the reactor"), and None is falsy.
+    # Using `not` here sent --supervise fail-fast for EVERY default call,
+    # which broke the cleanroom for the ordinary path.
+    if orchestrator is False:
+        argv += ["--supervise", "fail-fast"]
 
     pid = os.fork()
     if pid == 0:
@@ -3105,7 +3121,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                             views=base["views"],
                             strict_poison=bool(
                                 kwargs.get("strict_poison", False)),
-                            order=order)
+                            order=order,
+                            orchestrator=orchestrator)
                     _sg.check()
                 if out is not None:
                     return _map_return(out, return_stats)

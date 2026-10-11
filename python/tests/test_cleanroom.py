@@ -303,17 +303,15 @@ class TestCleanroomHelpers(unittest.TestCase):
         ok, why = _cleanroom_eligible(p, "plugin", 1, "none", False, True)
         self.assertTrue(ok, "the basic envelope case must be eligible: %s"
                              % (why,))
-        # Served today. Every entry passes orchestrator=True, because
-        # that is now a REQUIREMENT rather than an accepted no-op: the
-        # launcher supervises unconditionally, so it cannot honour the
-        # legacy fail-fast model. Keeping it in the accept list (as
-        # "orchestrator is accepted and ignored" claimed) would assert
-        # the wrong thing.
+        # Served today. Both supervision models are accepted: the launcher
+        # grew a fail-fast policy (DECISION-03), so orchestrator=False is
+        # served under --supervise fail-fast rather than declined.
         for args in (
                 (p, "plugin", 1, "none", False, True),    # baseline
                 (p, "plugin", 1, "index", False, True),   # ordered map
                 (p, "plugin", 1, "none", True, True),     # strict_poison
                 (p, "plugin", 1, "none", False, True, True),   # + stats
+                (p, "plugin", 1, "none", False, False),  # fail-fast policy
         ):
             ok, why = _cleanroom_eligible(*args)
             self.assertTrue(ok, "should accept %r (%s)" % (args, why))
@@ -332,13 +330,19 @@ class TestCleanroomHelpers(unittest.TestCase):
             self.assertFalse(ok, "should reject %r" % (args,))
             self.assertTrue(why)
 
-        # The orchestrator gate itself, and specifically that it is about
-        # SUPERVISION SEMANTICS rather than tidiness: the launcher has a
-        # supervisor, so a caller who asked for fail-fast would get
-        # recovery instead -- a different answer, not a slower one.
+        # orchestrator=False is now SERVED. This used to assert the
+        # opposite, and the reason it was ever declined is the reason it is
+        # safe now: a caller asking for fail-fast would have been given
+        # recovery -- a different answer, not a slower one, and one they
+        # could not detect. DECISION-03 fixes that STRUCTURALLY: the
+        # launcher's fail-fast branch returns before the recovery call, so
+        # there is no flag guarding it that a later edit could get wrong.
+        #
+        # The behavioural half of that promise is asserted in
+        # test_fail_fast_never_recovers, which checks that recovery is not
+        # entered -- this test only pins that the envelope admits it.
         ok, why = _cleanroom_eligible(p, "plugin", 1, "none", False, False)
-        self.assertFalse(ok, "orchestrator=False must decline the cleanroom")
-        self.assertIn("fail-fast", why)
+        self.assertTrue(ok, "orchestrator=False must now be served: %s" % (why,))
 
 
 @unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
@@ -551,17 +555,25 @@ class TestCleanroomExecutes(unittest.TestCase):
         os.environ["FORKRUN_CLEANROOM"] = "1"
         self.assertEqual(_joined(out), _joined(ref))
 
-    def test_orchestrator_false_falls_back_rather_than_supervise(self):
-        """orchestrator=False must NOT be silently upgraded to recovery.
+    def test_orchestrator_false_now_takes_the_launcher_under_fail_fast(self):
+        """orchestrator=False is SERVED, and must not recover.
 
-        The launcher supervises unconditionally. If the envelope kept
-        accepting orchestrator=False, a caller who explicitly asked for
-        legacy fail-fast supervision would get worker-death RECOVERY
-        instead -- a different answer, not merely a slower one -- and
-        could not tell from the result.
+        This test USED TO assert the opposite -- that orchestrator=False
+        falls back rather than supervise -- and the reason it was ever
+        declined is the reason it is safe now. A caller who explicitly
+        asked for legacy fail-fast supervision would have been given
+        worker-death RECOVERY instead: a different answer, not merely a
+        slower one, and one they could not detect from the result.
 
-        Asserted end to end: the call warns, the launcher is not taken,
-        and the bytes are still correct.
+        DECISION-03 fixes that STRUCTURALLY rather than by promising it
+        will not happen. The launcher's fail-fast branch RETURNS before the
+        recovery call, so "fail-fast never recovers" is a property of
+        control flow, not of a boolean guarding a call site that a later
+        edit could get wrong.
+
+        Asserted end to end: the launcher IS taken (no fallback warning),
+        the bytes are still correct, and the run did not warn that it
+        declined.
         """
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -569,10 +581,38 @@ class TestCleanroomExecutes(unittest.TestCase):
                               mode="plugin", output="bytes",
                               orchestrator=False)
         self.assertEqual(len(_joined(out)), 2000)
+        declined = [str(w.message) for w in caught
+                    if "not using the launcher" in str(w.message)
+                    or "FORKRUN_CLEANROOM" in str(w.message)]
+        self.assertEqual(
+            [], declined,
+            "orchestrator=False is served now and must NOT warn that it "
+            "declined the launcher: %r" % (declined,))
+
+    def test_fail_fast_aborts_and_does_not_replay(self):
+        """A worker death under fail-fast must RAISE, not silently replay.
+
+        This is the behaviour half of DECISION-03 7.4(b): no recovery, no
+        respawn, immediate abort. Combined with the fallback contract fix,
+        the caller must see a failure -- never a second execution of a
+        workload whose user code already ran.
+        """
+        marker = os.path.join(tempfile.mkdtemp(), "side_effects.txt")
+        os.environ["FORKRUN_TEST_SIDE_EFFECT_FILE"] = marker
+        try:
+            with self.assertRaises(RuntimeError):
+                forkrun.map("python/tests/plugins/test_plugin_v1.so:"
+                            "die_always_v1", self.path, workers=2,
+                            nodes=1, mode="plugin", order="index",
+                            output="bytes", orchestrator=False)
+            seen = (open(marker).read().split()
+                    if os.path.exists(marker) else [])
+        finally:
+            os.environ.pop("FORKRUN_TEST_SIDE_EFFECT_FILE", None)
         self.assertTrue(
-            any("FORKRUN_CLEANROOM" in str(w.message) for w in caught),
-            "orchestrator=False must say it was not using the launcher; "
-            "warnings=%r" % ([str(w.message) for w in caught],))
+            len(seen) <= 4,
+            "fail-fast must abort promptly rather than churning: %d plugin "
+            "invocations recorded" % (len(seen),))
 
     def test_default_map_call_needs_no_kwargs(self):
         """A plain map() call -- all defaults -- must be eligible.

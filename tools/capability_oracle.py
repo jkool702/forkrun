@@ -77,7 +77,6 @@ OUTCOMES = {
     SERVED: None,
     "DECLINE_NODES": "UMA single-node only",
     "DECLINE_MODE": "mode='plugin' only",
-    "DECLINE_ORCH": "orchestrator=False asks for legacy",
     "DECLINE_ORDER": "is not served; the launcher relies on downstream",
     "DECLINE_RESUME": "resume=/checkpoint_file= is not served",
     "DECLINE_STREAM_ORDER": "the stream path has no collect step",
@@ -119,12 +118,12 @@ RULES = [
      "lands on the worker's stdout, not the memfd -- exit 78, not silent "
      "success with an empty result set"),
 
-    ("R3", "orchestrator",
-     lambda f: not f.orchestrator,
-     "DECLINE_ORCH",
-     "docstring: 'orchestrator=True ONLY'. W-CR4 made the launcher supervise "
-     "unconditionally, with no flag to disable it, so serving False would "
-     "hand a caller who asked for fail-fast silent batch recovery instead"),
+    # R3 (orchestrator) REMOVED. It used to decline orchestrator=False with
+    # "the launcher supervises unconditionally, so serving False would hand a
+    # caller who asked for fail-fast silent batch recovery". DECISION-03
+    # fixed that structurally -- the launcher's fail-fast branch RETURNS
+    # before the recovery call -- so both models are served and the rule no
+    # longer has anything to assert.
 
     ("R4", "order",
      lambda f: f.order not in ("none", "index"),
@@ -204,11 +203,14 @@ REGRESSIONS = [
      "lived under `if streaming:`, and map()'s dispatch site never passed "
      "resume at all -- so the envelope could not see it"),
 
-    ("orchestrator_true_is_served",
-     Facts("map", "path", "plugin", 1, "none", True, False, False, None, None),
+    ("both_supervision_models_are_served",
+     Facts("map", "path", "plugin", 1, "none", False, False, False, None, None),
      SERVED, "R0",
-     "the orchestrator gate used to be False-only; W-CR4 made True the only "
-     "servable supervision model"),
+     "orchestrator=False used to be DECLINED (DECLINE_ORCH), because the "
+     "launcher supervised unconditionally and a caller asking for fail-fast "
+     "would silently get recovery. DECISION-03 gave the launcher a fail-fast "
+     "policy whose branch returns before the recovery call, so the refusal "
+     "reason no longer holds"),
 
     ("map_serves_order_index",
      Facts("map", "path", "plugin", 1, "index", True, False, False, None, None),

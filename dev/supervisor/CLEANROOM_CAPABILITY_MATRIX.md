@@ -12,9 +12,9 @@ neither alone would be.
 | | |
 |---|---|
 | Cells enumerated | 16128 |
-| Served by the launcher | 40 (0.25%) |
-| Declined | 16088 |
-| Distinct outcomes | 11 |
+| Served by the launcher | 80 (0.50%) |
+| Declined | 16048 |
+| Distinct outcomes | 10 |
 
 ---
 
@@ -62,15 +62,14 @@ the enumeration produces no `UNCLASSIFIED` cell.
 |---|---|---|---|
 | 1 | `DECLINE_NODES` | 10752 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=2, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 | 2 | `DECLINE_MODE` | 4032 | `Facts(kind='map', source_kind='path', mode='python', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 3 | `DECLINE_ORCH` | 672 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=False, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 4 | `DECLINE_RESUME` | 336 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
-| 5 | `DECLINE_ORDER` | 224 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 6 | `SERVED` | 40 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 7 | `DECLINE_STREAM_ORDER` | 28 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 8 | `DECLINE_STREAM_POISON` | 14 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 9 | `DECLINE_SOURCE_MISSING` | 10 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 10 | `DECLINE_SOURCE_DIR` | 10 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 11 | `DECLINE_SOURCE_TYPE` | 10 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 3 | `DECLINE_RESUME` | 672 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
+| 4 | `DECLINE_ORDER` | 448 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 5 | `SERVED` | 80 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 6 | `DECLINE_STREAM_ORDER` | 56 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 7 | `DECLINE_STREAM_POISON` | 28 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 8 | `DECLINE_SOURCE_MISSING` | 20 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 9 | `DECLINE_SOURCE_DIR` | 20 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 10 | `DECLINE_SOURCE_TYPE` | 20 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 
 ## The oracle's rules
 
@@ -80,8 +79,6 @@ Evaluated **first-match-wins**. Each is the contract's own words.
   docstring: 'UMA single node -- no multi-node rings'
 - **R2 `mode`** &rarr; `DECLINE_MODE`  
   docstring: 'mode=plugin -- it dlopens an object and calls an entry point'; and the plugin must export forkrun_use_ctx, since a plugin without it is driven by the legacy ARGV/stdout route whose output lands on the worker's stdout, not the memfd -- exit 78, not silent success with an empty result set
-- **R3 `orchestrator`** &rarr; `DECLINE_ORCH`  
-  docstring: 'orchestrator=True ONLY'. W-CR4 made the launcher supervise unconditionally, with no flag to disable it, so serving False would hand a caller who asked for fail-fast silent batch recovery instead
 - **R4 `order`** &rarr; `DECLINE_ORDER`  
   docstring: 'order in (none, index)'. The launcher forks no C orderer, but does not need to: collect_records sorts by index for map, and stream reassembles parent-side from the batch_idx already in the framing
 - **R5 `resume/checkpoint`** &rarr; `DECLINE_RESUME`  
@@ -118,7 +115,7 @@ rule check would not catch a regression in any of them.
 | assertion | expected | why it matters |
 |---|---|---|
 | `resume_is_refused_for_map_not_just_stream` | `DECLINE_RESUME` | CR-FIX1-K: the refusal was unreachable for map() because the check lived under `if streaming:`, and map()'s dispatch site never passed resume at all -- so the envelope could not see it |
-| `orchestrator_true_is_served` | `SERVED` | the orchestrator gate used to be False-only; W-CR4 made True the only servable supervision model |
+| `both_supervision_models_are_served` | `SERVED` | orchestrator=False used to be DECLINED (DECLINE_ORCH), because the launcher supervised unconditionally and a caller asking for fail-fast would silently get recovery. DECISION-03 gave the launcher a fail-fast policy whose branch returns before the recovery call, so the refusal reason no longer holds |
 | `map_serves_order_index` | `SERVED` | ordering is applied downstream by shared code, so the launcher needs no C orderer to honour it |
 | `map_serves_strict_poison` | `SERVED` | served via the counter channel; both were previously declined and return_stats was a live P0 bug reporting poisoned=0 for a run that had poisoned batches |
 | `stream_declines_order_index_that_map_serves` | `DECLINE_STREAM_ORDER` | asymmetry is intentional; a second hand-written predicate at the stream() dispatch site had already drifted from the map() one once, requiring not-orchestrator while this one required orchestrator |
