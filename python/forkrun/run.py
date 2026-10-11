@@ -1524,7 +1524,8 @@ def _cleanroom_source_fd(source):
 
 
 def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
-                              plugin_path, plugin_func, on_error):
+                              plugin_path, plugin_func, on_error,
+                              strict_poison=False):
     """W-CR3: STREAMING cleanroom -- yield results as they arrive.
 
     Same envelope as the map() path (materialised-vs-streaming aside),
@@ -1578,6 +1579,16 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
         os.set_inheritable(src_fd, True)
     os.set_inheritable(rw, True)
 
+    # DECISION-02 / P2 strict_poison: the streaming launch contract had NO
+    # statistics channel at all, so strict_poison could not be honoured here
+    # -- it was not a dropped return value, the descriptor was never passed.
+    # Same memfd convention as the map path, pre-sized so every worker owns a
+    # real slot.
+    stats_fd = os.memfd_create("fr_cleanroom_stream_stats")
+    _stats_ftruncate(stats_fd, _STATS_HEADER_BYTES
+                     + max(int(workers), 1) * _STATS_SLOT_U32 * 4)
+    os.set_inheritable(stats_fd, True)
+
     argv = [launcher, "--so", so,
             "--plugin", plugin_path, "--func", plugin_func,
             "--workers", str(int(workers)),
@@ -1586,7 +1597,8 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
             "--on-error", str(_ON_ERROR_CODES.get(on_error, 0)),
             "--retry", str(int(_resolve_retry_limit())),
             "--src", str(src_fd if src_fd is not None else sr),
-            "--result", str(rw)]
+            "--result", str(rw),
+            "--stats-fd", str(stats_fd)]
 
     launch_pid = os.fork()
     if launch_pid == 0:
@@ -1695,6 +1707,28 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                     "stream is TRUNCATED and the records already yielded "
                     "are incomplete"
                     % (_describe_launcher_failure(lstatus),))
+            # DECISION-02: consume the poison count ONLY now, and ONLY
+            # after a confirmed-clean exit.
+            #
+            # The ordering is the safety property. A launcher that failed
+            # may have written a partial or absent count, and reading it
+            # anyway would report "0 poisoned" for a run that died -- i.e.
+            # it would disguise a failure as a clean stream. Reading it
+            # after the status check means the two facts stay independent.
+            # _read_cleanroom_stats returns (poisoned, poisoned_batches,
+            # truncated) -- a tuple, not a mapping.
+            stats = _read_cleanroom_stats(stats_fd)
+            if stats is not None:
+                npois, batch_idx, _trunc = stats
+                _LAST_STATS["poisoned"] = npois
+                _LAST_STATS["poisoned_batches"] = list(batch_idx or [])
+                _LAST_STATS["poisoned_batches_truncated"] = _trunc
+            else:
+                npois = 0
+            if npois and strict_poison:
+                raise RuntimeError(
+                    "forkrun: %d poisoned batch(es) skipped in a "
+                    "streaming run and strict_poison=True" % (npois,))
         finished = True
     finally:
         try:
@@ -3471,7 +3505,9 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                             workers=_resolve_workers_numa(
                                 kwargs.get("workers"), num_nodes),
                             plugin_path=_p, plugin_func=_f,
-                            on_error=kwargs.get("on_error", "retry")))
+                            on_error=kwargs.get("on_error", "retry"),
+                            strict_poison=bool(
+                                kwargs.get("strict_poison", False))))
             elif _cleanroom_explicit() and _why:
                 import warnings as _warnings
                 _warnings.warn(

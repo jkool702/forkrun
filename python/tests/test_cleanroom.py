@@ -2469,3 +2469,88 @@ class TestDescriptorInheritance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
+class TestCleanroomStreamStrictPoison(unittest.TestCase):
+    """P2 strict_poison for the streaming cleanroom path.
+
+    The streaming launch contract had NO statistics channel at all -- not a
+    dropped return value, the descriptor was never passed -- so
+    strict_poison could not be honoured there. Two properties matter and are
+    opposite in spirit:
+
+      1. a genuinely poisoned stream RAISES;
+      2. a FAILED launcher does NOT get read as a clean stream with zero
+         poison, which would disguise a failure as success.
+    """
+
+    def setUp(self):
+        self.path = _make_input(400)
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("FORKRUN_CLEANROOM", None)
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def _drain(self, spec, **kw):
+        return list(forkrun.stream(spec, self.path, streaming=True,
+                                  mode="plugin", workers=2, nodes=1,
+                                  output="bytes", **kw))
+
+    def test_stream_stats_channel_is_now_passed(self):
+        """The descriptor must actually reach the launcher.
+
+        Cheap structural check: without --stats-fd the channel cannot exist,
+        and the enforcement tests below would pass vacuously.
+        """
+        import re
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "forkrun", "run.py")).read()
+        body = src[src.index("def _execute_cleanroom_stream"):]
+        body = body[:body.index("\ndef ")]
+        self.assertIn('"--stats-fd"', body,
+                      "the streaming launch contract still omits the "
+                      "statistics descriptor")
+
+    def test_poisoned_stream_raises_under_strict_poison(self):
+        from forkrun.exceptions import ForkrunPoisonSkip
+        with self.assertRaises((ForkrunPoisonSkip, RuntimeError)):
+            self._drain("python/tests/plugins/test_plugin_v1.so:"
+                        "always_fail_v1", strict_poison=True)
+
+    def test_clean_stream_does_not_raise_under_strict_poison(self):
+        """The other direction: wiring the channel must not manufacture
+        failures. A clean stream with strict_poison=True must pass."""
+        out = self._drain(_spec(), strict_poison=True)
+        self.assertTrue(len(out) > 0)
+
+    def test_poison_stats_are_read_after_the_launcher_status_check(self):
+        """The ordering IS the safety property.
+
+        Reading the poison count before judging the launcher's exit status
+        would report 0 for a run that died -- turning a failure into a
+        clean-looking stream. So the status check must come first, and the
+        stats read must be inside the branch that only runs once the exit
+        has been confirmed clean.
+
+        Asserted structurally rather than by provoking a launcher failure:
+        the fixture available here poisons batches through the retry path
+        rather than failing the launcher, so an end-to-end version of this
+        would have had to assert something weaker than it claims.
+        """
+        import os as _os
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        src = open(_os.path.join(here, _os.pardir, "forkrun",
+                                  "run.py")).read()
+        body = src[src.index("def _execute_cleanroom_stream"):]
+        body = body[:body.index("\ndef ")]
+        status_at = body.index("cleanroom launcher failed")
+        stats_at = body.index("_read_cleanroom_stats(stats_fd)")
+        self.assertLess(
+            status_at, stats_at,
+            "the poison count must be read only AFTER the launcher exit has "
+            "been confirmed clean, or a failed run reports as zero poison")
