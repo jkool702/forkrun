@@ -35,7 +35,10 @@ try:
 except FileNotFoundError:
     HAVE_LIB = False
 
-_HDR = struct.Struct("<QQ")
+# DECISION-02: import the REAL header rather than redeclaring it. This
+# module duplicated the layout, which is why the disposition change broke
+# its parity tests instead of being picked up automatically.
+from forkrun._worker import _HDR  # noqa: E402
 
 
 def _up(batch):
@@ -164,7 +167,7 @@ class TestDescriptorParsing(unittest.TestCase):
     def _blob(self, sizes, tail=b""):
         parts = []
         for i, s in enumerate(sizes):
-            parts.append(_HDR.pack(i, s) + b"x" * s)
+            parts.append(_HDR.pack(i, s, 0, 0) + b"x" * s)
         return b"".join(parts) + tail
 
     def test_parity_basic(self):
@@ -173,7 +176,7 @@ class TestDescriptorParsing(unittest.TestCase):
                          _split_records(blob)[0])
 
     def test_parity_truncated_tail(self):
-        blob = self._blob([5, 10]) + _HDR.pack(2, 100) + b"short"
+        blob = self._blob([5, 10]) + _HDR.pack(2, 100, 0, 0) + b"short"
         self.assertEqual(_parse_records_c(blob),
                          _split_records(blob)[0])
 
@@ -195,10 +198,17 @@ class TestDescriptorParsing(unittest.TestCase):
         arr = (RD * 8)()
         cnt = lib.fr_py_parse_descriptors(blob, len(blob), arr, 8)
         self.assertEqual(cnt, 3)
+        # Offsets are DERIVED from the header size, not written out. The
+        # previous literal [(0,16,4),(1,36,0),(2,52,9)] encoded the 16-byte
+        # stride in the test itself, which is how the disposition change
+        # broke this test instead of being absorbed here.
+        h = _HDR.size
         self.assertEqual(
             [(arr[i].batch_idx, arr[i].offset, arr[i].length)
              for i in range(cnt)],
-            [(0, 16, 4), (1, 36, 0), (2, 52, 9)])
+            [(0, h, 4),                      # hdr@0,  data@h
+             (1, 2 * h + 4, 0),               # hdr@h+4, data after it
+             (2, 3 * h + 4, 9)])
 
     def test_max_bound_truncates_descriptors_not_input(self):
         from forkrun._bindings import RecordDescriptor as RD

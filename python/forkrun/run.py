@@ -75,6 +75,10 @@ from typing import Any, Callable, Iterator, List, Optional
 # W-PY18: default byte-batch for mode="splice" (bash -b default).
 _SPLICE_DEFAULT_BYTES = 512 * 1024
 
+# DECISION-02 terminal dispositions (must match FR_DISP_* in _shim.c).
+_DISP_DATA = 0
+_DISP_NO_RESULT = 1
+
 # D-PORT3: parent-side SIGINT translation (Bash exit 130). Every
 # `except KeyboardInterrupt` site below aborts first, then raises
 # ForkrunInterrupted chained from the original — which IS a
@@ -1449,7 +1453,7 @@ def _cleanroom_collect(res_fd, views, order="none"):
 
         base = 0
         while size - base >= _HDR.size:
-            _bidx, blen = _HDR.unpack_from(buf, base)
+            _bidx, blen, _disp, _res = _HDR.unpack_from(buf, base)
             start = base + _HDR.size
             if size - start < blen:
                 # A header whose payload is not fully there is a torn
@@ -1470,7 +1474,11 @@ def _cleanroom_collect(res_fd, views, order="none"):
                     "for a worker death mid-record."
                     % (blen - (size - start)), UserWarning, stacklevel=3)
                 break
-            out.append((_bidx, buf[start:start + blen]))
+            # DECISION-02: control records carry no payload; skip them
+            # (see _split_records for why surfacing them as b"" would be
+            # a wrong answer rather than a cosmetic one).
+            if _disp == _DISP_DATA:
+                out.append((_bidx, buf[start:start + blen]))
             base = start + blen
         if order == "index":
             out.sort(key=lambda kv: kv[0])
@@ -1647,11 +1655,13 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                 tail = b""
             base = 0
             while len(data) - base >= _HDR.size:
-                _bidx, blen = _HDR.unpack_from(data, base)
+                _bidx, blen, _disp, _res = _HDR.unpack_from(data, base)
                 start = base + _HDR.size
                 if len(data) - start < blen:
                     break
-                yield data[start:start + blen]
+                # DECISION-02: skip control dispositions (see _split_records).
+                if _disp == _DISP_DATA:
+                    yield data[start:start + blen]
                 base = start + blen
             tail = data[base:]
         # The pipe hit EOF. That is only a legitimate END OF INPUT if the
@@ -2564,11 +2574,18 @@ def _split_records_views(blob):
         rec_start = off
         if off + _HDR.size > n:
             break
-        idx, ln = _HDR.unpack_from(view, off)
+        idx, ln, disp, _res = _HDR.unpack_from(view, off)
         off += _HDR.size
         if off + ln > n:
             off = rec_start
             break
+        # DECISION-02: a NO_RESULT record is a control signal, not data.
+        # It must NOT surface as an empty payload, or a UDF returning None
+        # would hand map()'s caller a spurious b"" -- a new class of wrong
+        # answer in exactly the place that decides what a call returns.
+        if disp != _DISP_DATA:
+            off += ln
+            continue
         records.append((idx, view[off:off + ln]))
         off += ln
     tail = view[off:]
@@ -2589,11 +2606,18 @@ def _split_records(blob: bytes) -> tuple:
         rec_start = off
         if off + _HDR.size > n:
             break
-        idx, ln = _HDR.unpack_from(blob, off)
+        idx, ln, disp, _res = _HDR.unpack_from(blob, off)
         off += _HDR.size
         if off + ln > n:
             off = rec_start
             break
+        # DECISION-02: NO_RESULT is a control signal, not data. Surfacing it
+        # as an empty payload would hand map()'s caller a spurious b"" for
+        # a UDF that returned None -- a new class of wrong answer in exactly
+        # the place that decides what a call returns.
+        if disp != _DISP_DATA:
+            off += ln
+            continue
         records.append((idx, blob[off:off + ln]))
         off += ln
     return records, blob[off:]
@@ -2623,7 +2647,7 @@ def _parse_records_c(blob: bytes) -> list | None:
     import ctypes as _ct
 
     n = len(blob)
-    bound = n // 16  # records are >= 16 bytes: always terminates
+    bound = n // _HDR.size  # records are >= one header: always terminates
     if bound == 0:
         return []
     # Bound transient memory (24MB/round); grow-and-retry only when

@@ -36,7 +36,11 @@ from ._batch import Batch
 from ._plugin import PluginError
 from ._spawn import SpawnError
 
-_HDR = struct.Struct("<QQ")  # batch_idx u64, payload length u64
+# DECISION-02: batch_idx u64, payload length u64, disposition u32,
+# reserved u32. The disposition is EXPLICIT because len == 0 already means
+# "a real empty result" -- overloading it for "completed with no result"
+# would collapse None and b"".
+_HDR = struct.Struct("<QQII")  # batch_idx, len, disposition, reserved
 # v1 streaming signal: (worker_id u64, batch_idx u64). Indices only — never
 # payload bytes (<= PIPE_BUF, so one write is atomic across workers).
 _SIG = struct.Struct("<QQ")
@@ -717,8 +721,14 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         except OSError:
                             _emit_end = -1
                         try:
+                            # DECISION-02: disposition is explicit.
+                            # len(blob) == 0 with blob == b"" is a REAL
+                            # empty result (DATA); blob is None/empty
+                            # because the UDF produced nothing
+                            # (NO_RESULT).
                             _write_all(out_fd, _HDR.pack(
-                                batch.batch_index, len(blob)))
+                                batch.batch_index, len(blob or b""),
+                                1 if blob is None else 0, 0))
                             if blob:
                                 _write_all(out_fd, blob)
                         except OSError:

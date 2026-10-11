@@ -27,7 +27,14 @@ try:
 except FileNotFoundError:
     HAVE_LIB = False
 
-_HDR = struct.Struct("<QQ")
+# DECISION-02: the record header gained an explicit disposition field.
+# The v0 contract this file pins is EXTENDED, not changed: a zero-length
+# payload is still a real empty result, and it is now distinguishable from
+# "completed with no result" by an explicit tag rather than by absence.
+_HDR = struct.Struct("<QQII")   # batch_idx, len, disposition, reserved
+_HDR_BYTES = _HDR.size          # was 16
+_DISP_DATA = 0
+_DISP_NO_RESULT = 1
 _SIG = struct.Struct("<QQ")
 
 
@@ -67,11 +74,11 @@ class TestFrPyEmit(unittest.TestCase):
             os.close(w)
             w = -1
             os.lseek(out, 0, 0)
-            idx, ln = _HDR.unpack(_read_all(out)[:16])
+            idx, ln, disp, _res = _HDR.unpack(_read_all(out)[:_HDR_BYTES])
             os.lseek(out, 0, 0)
             raw = _read_all(out)
             self.assertEqual((idx, ln), (7, 5))
-            self.assertEqual(raw[16:16 + ln], b"hello")
+            self.assertEqual(raw[_HDR_BYTES:_HDR_BYTES + ln], b"hello")
             sig = os.read(r, 16)
             self.assertEqual(_SIG.unpack(sig), (3, 7))
         finally:
@@ -108,8 +115,11 @@ class TestFrPyEmit(unittest.TestCase):
             w = -1
             os.lseek(out, 0, 0)
             raw = _read_all(out)
-            self.assertEqual(len(raw), 16)
-            self.assertEqual((9, 0), _HDR.unpack(raw))
+            self.assertEqual(len(raw), _HDR_BYTES)
+            # b"" is a REAL empty result, so it stays DATA -- NOT
+            # NO_RESULT. This is the distinction DECISION-02 exists to
+            # preserve: len == 0 was already spoken for.
+            self.assertEqual((9, 0, _DISP_DATA, 0), _HDR.unpack(raw))
             self.assertEqual(_SIG.unpack(os.read(r, 16)), (1, 9))
         finally:
             os.close(out)
@@ -126,7 +136,7 @@ class TestFrPyEmit(unittest.TestCase):
             self.assertEqual(lib.fr_py_emit(out, -1, 1, 10, b"xy", 2), 0)
             os.lseek(out, 0, 0)
             raw = _read_all(out)
-            self.assertEqual(raw, _HDR.pack(10, 2) + b"xy")
+            self.assertEqual(raw, _HDR.pack(10, 2, _DISP_DATA, 0) + b"xy")
             import select
             self.assertEqual(select.select([r], [], [], 0.0)[0], [])
         finally:
@@ -159,9 +169,9 @@ class TestFrPyEmit(unittest.TestCase):
             w = -1
             os.lseek(out, 0, 0)
             raw = _read_all(out)
-            idx, ln = _HDR.unpack_from(raw, 0)
+            idx, ln, disp, _res = _HDR.unpack_from(raw, 0)
             self.assertEqual((idx, ln), (0, len(big)))
-            self.assertEqual(raw[16:], big)
+            self.assertEqual(raw[_HDR_BYTES:], big)
         finally:
             os.close(out)
             os.close(r)

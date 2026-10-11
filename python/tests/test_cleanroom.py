@@ -523,7 +523,7 @@ class TestCleanroomExecutes(unittest.TestCase):
         blob = b""
         for i in order_in:
             payload = b"payload-%d" % i
-            blob += hdr.pack(i, len(payload)) + payload
+            blob += hdr.pack(i, len(payload), 0, 0) + payload
         os.write(fd, blob)
         got = R._cleanroom_collect(fd, False, "index")
         self.assertEqual([bytes(x) for x in got],
@@ -1781,13 +1781,18 @@ class TestCleanroomWorkerDeath(unittest.TestCase):
         # documented drop, a malformed middle is not.
         pos = 0
         recs = 0
-        while pos + 16 <= len(out):
-            _b, blen = struct.unpack_from("<QQ", out, pos)
-            self.assertLessEqual(pos + 16 + blen, len(out),
+        # DECISION-02: stride from the real header, not a literal 16.
+        # sys.modules, NOT `import forkrun.run as R` -- the package
+        # re-exports a `run` FUNCTION that shadows the submodule name.
+        _R = sys.modules["forkrun.run"]
+        _H = _R._HDR.size
+        while pos + _H <= len(out):
+            _b, blen, _d, _r = _R._HDR.unpack_from(out, pos)
+            self.assertLessEqual(pos + _H + blen, len(out),
                                  "record %d claims %d bytes but only %d "
                                  "remain -- framing desync"
-                                 % (recs, blen, len(out) - pos - 16))
-            pos += 16 + blen
+                                 % (recs, blen, len(out) - pos - _H))
+            pos += _H + blen
             recs += 1
         if rc == 0:
             # A recovered run must have delivered whole records.
@@ -2134,17 +2139,19 @@ class TestCleanroomTornTail(unittest.TestCase):
     the second time as an exception the caller did not ask for.
     """
 
-    # Must match forkrun._worker._HDR exactly (batch_idx u64, len u64).
-    # An <IQ> guess here desyncs from record 0 and looks like a
-    # production bug when it is only the test building bad framing.
-    HDR = struct.Struct("<QQ")
+    # DECISION-02: this USED to redeclare the layout as <QQ> with the
+    # comment "must match forkrun._worker._HDR exactly" -- an admission
+    # that it was a duplicate. Duplicating it is precisely why the
+    # disposition change broke these tests instead of being absorbed. It now
+    # imports the real header, so the two cannot drift again.
+    from forkrun._worker import _HDR as HDR
 
     def _result_memfd(self, records, truncate_last_by=0):
         """A result memfd holding `records`, last one optionally torn."""
         fd = os.memfd_create("res", 0)
         blob = b""
         for bidx, payload in records:
-            blob += self.HDR.pack(bidx, len(payload)) + payload
+            blob += self.HDR.pack(bidx, len(payload), 0, 0) + payload
         if truncate_last_by:
             blob = blob[:-truncate_last_by]
         os.write(fd, blob)
@@ -2201,11 +2208,14 @@ class TestCleanroomCollectBuffer(unittest.TestCase):
         written twice.
     """
 
-    HDR = struct.Struct("<QQ")
+    # Same reasoning as the sibling class: import the real header rather
+    # than redeclaring the layout.
+    from forkrun._worker import _HDR as HDR
 
     def _result(self, recs):
         fd = os.memfd_create("res", 0)
-        blob = b"".join(self.HDR.pack(i, len(p)) + p for i, p in recs)
+        blob = b"".join(self.HDR.pack(i, len(p), 0, 0) + p
+                       for i, p in recs)
         os.write(fd, blob)
         return fd
 

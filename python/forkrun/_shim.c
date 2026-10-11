@@ -538,10 +538,46 @@ unsigned int fr_py_poisoned_count(void) {
  * ===================================================================== */
 
 /* Little-endian 16-byte emitter header shared with run.py:_HDR. */
+/* DECISION-02 section 5.1 -- TYPED terminal dispositions.
+ *
+ * Every published batch reaches exactly one of these. The field is
+ * EXPLICIT rather than inferred from `len` because `len == 0` is already
+ * spoken for: fr_py_emit's v0 contract (and test_v1_emit.py) define a
+ * zero-length payload as a real empty result. Overloading it for "this
+ * batch completed with no result" would collapse a tested distinction
+ * between None and b"".
+ *
+ *   DATA      - completed with a result. `len` may legitimately be 0.
+ *   NO_RESULT - completed successfully with no result (payload returned
+ *               None). This is the case that previously emitted NOTHING,
+ *               leaving the parent unable to tell "produced nothing" from
+ *               "has not arrived yet" -- the ambiguity that made ordered
+ *               streaming stall.
+ *
+ * SKIPPED and POISONED are NOT emitted on this channel: those batches are
+ * never emitted at all, so the worker has no emit site for them. The parent
+ * learns their INDICES from the poison relay on the stats channel, which is
+ * available after the join. See the note in run.py.
+ */
+#define FR_DISP_DATA      0u
+#define FR_DISP_NO_RESULT 1u
+
 struct fr_py_record_hdr {
     uint64_t batch_idx;
     uint64_t len;
+    uint32_t disposition;
+    uint32_t reserved;      /* explicit tail; keeps the struct 8-aligned */
 };
+
+/* DECISION-02: the on-wire record footprint. Every rollback-frontier
+ * advance MUST use this, never a literal 16. The frontier is what
+ * recovery truncates the output fd back to, so a site that still said
+ * "16 + len" under-counted by the 8 bytes the disposition added -- and
+ * rollback would then leave 8 bytes of stale output behind for EVERY
+ * record. That is silent data corruption on the retry path, which is
+ * exactly what the exactly-once invariant forbids. */
+#define FR_PY_RECORD_FOOTPRINT(payload_len) \
+    (sizeof(struct fr_py_record_hdr) + (payload_len))
 
 /* Full-write loop (regular files / memfds: no SIGPIPE, short writes only
  * on EINTR/error). Returns 0 ok, -1 on failure. */
@@ -572,13 +608,25 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
     uint64_t left;
     off_t woff;
 
-    if (src_len == 0)
-        return 0; /* v0 parity: empty output emits no record (None). */
+    /* DECISION-02: a completed batch ALWAYS gets a record now.
+     *
+     * This used to `return 0` on src_len == 0, under the comment "v0
+     * parity: empty output emits no record (None)". The parity claim was
+     * wrong: fr_py_emit's documented v0 contract and test_v1_emit.py both
+     * say a zero-length payload IS emitted. The early return therefore
+     * matched only the None case and silently dropped a legitimate empty
+     * result.
+     *
+     * Now the disposition distinguishes them explicitly: src_len == 0 is
+     * NO_RESULT, and a real empty DATA result is carried as DATA with
+     * len == 0. */
     woff = lseek(out_fd, 0, SEEK_END);
     if (woff == (off_t)-1)
         return -1;
     hdr.batch_idx = batch_idx;
     hdr.len = src_len;
+    hdr.disposition = (src_len == 0) ? FR_DISP_NO_RESULT : FR_DISP_DATA;
+    hdr.reserved = 0;
     if (fr_py_write_all(out_fd, &hdr, sizeof(hdr)) != 0)
         return -1;
     left = src_len;
@@ -915,7 +963,7 @@ int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len,
                 erc = -3;
             else if (cap_len > 0)
                 /* W-PY29: complete record durable — advance frontier. */
-                worker_txn_advance_output(-1, 16 + cap_len);
+                worker_txn_advance_output(-1, FR_PY_RECORD_FOOTPRINT(cap_len));
             return erc;
         }
         return code; /* retryable command failure */
@@ -1141,7 +1189,7 @@ static int fr_py_plugin_invoke(int ingress_fd, int out_fd,
             return -1;
         }
         /* W-PY29: complete record durable — advance frontier. */
-        worker_txn_advance_output(wid, 16 + cap_len);
+        worker_txn_advance_output(wid, FR_PY_RECORD_FOOTPRINT(cap_len));
     }
 
     /* ring_call truncation rule: nonzero → &0xFF, never silent 0. */
@@ -1318,6 +1366,13 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
 
     if (data != NULL && out_fd >= 0) {
         hdr.batch_idx = batch_idx;
+        /* This path is reached only when data != NULL, and its contract
+         * already treats a zero-length payload as a REAL empty result
+         * (test_v1_emit.py). So it is always DATA -- never NO_RESULT,
+         * which would be the case the caller signals by passing NULL and
+         * therefore not reaching here at all. */
+        hdr.disposition = FR_DISP_DATA;
+        hdr.reserved = 0;
         hdr.len = data_len;
         iov[0].iov_base = &hdr;
         iov[0].iov_len = sizeof(hdr);
@@ -1370,10 +1425,10 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
                 }
             }
         }
-        /* W-PY29: the COMPLETE record (16B framing + payload) is
+        /* W-PY29: the COMPLETE record (header framing + payload) is
          * durable — advance the rollback frontier. Partial writes
          * return -1 above before reaching here. */
-        worker_txn_advance_output((int)wid, 16 + data_len);
+        worker_txn_advance_output((int)wid, FR_PY_RECORD_FOOTPRINT(data_len));
     }
 
     if (signal_fd < 0)
@@ -1481,6 +1536,15 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
             struct fr_py_record_hdr hdr;
             hdr.batch_idx = claimed.batch_idx;
             hdr.len = claimed.length;
+            /* DECISION-02: set disposition/reserved EXPLICITLY. Leaving
+             * them unset makes the record carry uninitialized stack bytes,
+             * which the reader then treats as a control disposition and
+             * drops -- so every record from this path vanished and splice
+             * mode returned empty output. This is the same defect as the
+             * uint64_t/4-byte mismatch in the parser, in the other
+             * direction: an unset field on the wire is undefined. */
+            hdr.disposition = FR_DISP_DATA;
+            hdr.reserved = 0;
             end = lseek(out_fd, 0, SEEK_END);
             if (end == (off_t)-1)
                 goto payload_error;
@@ -1513,7 +1577,7 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
             /* W-PY29: header + full body durable (both the sendfile
              * and the emit_record-fallback sub-paths converge here on
              * success) — advance the rollback frontier once. */
-            worker_txn_advance_output(wid, 16 + claimed.length);
+            worker_txn_advance_output(wid, FR_PY_RECORD_FOOTPRINT(claimed.length));
         }
 
         if (signal_fd >= 0) {
@@ -2613,16 +2677,43 @@ int64_t fr_py_parse_descriptors(const char *input, uint64_t input_len,
      * data_len > input_len` wraps on huge data_len and skips the
      * truncation break (bogus giant descriptor -> caller-side OOB).
      * Subtraction form cannot wrap (off <= input_len is the loop
-     * invariant: 0 at entry, off+16+data_len <= input_len preserved). */
+     * invariant: 0 at entry, off+HDR+data_len <= input_len preserved).
+     *
+     * DECISION-02: the stride is now sizeof(struct fr_py_record_hdr) (24),
+     * not 16 -- the header carries an explicit disposition. The
+     * disposition is deliberately NOT surfaced in the descriptor array:
+     * it carries batch_idx/offset/length for slicing, and adding a field
+     * there would change a second ABI for no gain. Control dispositions
+     * are SKIPPED below rather than surfaced, which keeps this path
+     * result-for-result identical to the Python splitter. */
     while (count < max_descriptors && off <= input_len &&
-           input_len - off >= 16) {
+           input_len - off >= (uint64_t)sizeof(struct fr_py_record_hdr)) {
         uint64_t batch_idx, data_len;
+        /* uint32_t, NOT uint64_t: the memcpy below fills 4 bytes, so a
+         * wider variable leaves the top half UNINITIALIZED. That garbage
+         * then compares unequal to FR_DISP_DATA and silently skips every
+         * record -- which is what it did: the C fast path returned zero
+         * descriptors for every input, and because the garbage came from
+         * the stack it even looked nondeterministic (a large zeroed
+         * buffer happened to make it work). */
+        uint32_t disposition;
 
         memcpy(&batch_idx, input + off, 8);
         memcpy(&data_len, input + off + 8, 8);
-        off += 16;
+        memcpy(&disposition, input + off + 16, 4);
+        off += (uint64_t)sizeof(struct fr_py_record_hdr);
         if (data_len > input_len - off)
             break; /* truncated record — stop here */
+        /* DECISION-02: skip control dispositions, exactly as the Python
+         * splitter does. Without this the C fast path returns MORE
+         * records than _split_records for the same blob, so map() would
+         * yield a spurious b"" for a UDF that returned None — and only
+         * when FORKRUN_C_PARSE=1, i.e. a divergence no default test
+         * would catch. The descriptor array still needs no new field. */
+        if (disposition != (uint32_t)FR_DISP_DATA) {
+            off += data_len;
+            continue;
+        }
         descriptors[count].batch_idx = batch_idx;
         descriptors[count].offset = off;
         descriptors[count].length = data_len;

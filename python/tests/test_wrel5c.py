@@ -14,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from forkrun import _bindings as _b  # noqa: E402
+from forkrun._worker import _HDR  # noqa: E402
 from _helpers import assert_no_zombies  # noqa: E402
 
 try:
@@ -128,11 +129,10 @@ class TestC2OffMainThreadLoud(unittest.TestCase):
 
 
 def _framed(*pairs):
-    import struct  # noqa: PLC0415
-
     out = []
     for idx, blob in pairs:
-        out.append(struct.pack("<QQ", idx, len(blob)) + blob)
+        # DECISION-02: use the real header (it carries a disposition).
+        out.append(_HDR.pack(idx, len(blob), 0, 0) + blob)
     return b"".join(out)
 
 

@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import (FrPyBatch, RC_OK, find_substrate,  # noqa: E402
                                get)
+from forkrun._worker import _HDR  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
                       lines_of, write_lines)
@@ -329,7 +330,9 @@ class TestPythonOutputRollback(unittest.TestCase):
                                         d0, len(d0)), 0)
         self.assertEqual(lib.fr_py_ack_direct(-1, -1), 0)
         end0 = os.fstat(out_fd).st_size
-        self.assertEqual(end0, 16 + len(d0))
+        # DECISION-02: the header now carries a disposition, so the
+        # per-record footprint is _HDR.size, not a literal 16.
+        self.assertEqual(end0, _HDR.size + len(d0))
 
         # Batch 1: emit D1 + ack → end1.
         c1 = FrPyBatch()
@@ -339,7 +342,7 @@ class TestPythonOutputRollback(unittest.TestCase):
                                         d1, len(d1)), 0)
         self.assertEqual(lib.fr_py_ack_direct(-1, -1), 0)
         end1 = os.fstat(out_fd).st_size
-        self.assertEqual(end1, end0 + 16 + len(d1))
+        self.assertEqual(end1, end0 + _HDR.size + len(d1))
 
         # Simulated respawn: fresh generation on the reused fd. The
         # cursor must restart at the live end (one lseek at init).
