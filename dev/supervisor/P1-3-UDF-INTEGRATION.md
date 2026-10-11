@@ -447,3 +447,60 @@ purity, and parity tests across all shared lifecycle behaviour.
 
 P5 remains open: `SKIPPED`/`POISONED` dispositions and the
 exactly-once proof.
+
+---
+
+## 14. Spawn-mode exactly-once: attempted, and why it cannot discriminate
+
+The reviewer's condition was parity tests; DECISION-02 section 7 wanted a
+launcher-level exactly-once run. Both are done for the loops the
+launcher serves. Spawn is not one of them, so this records what
+attempting it actually showed.
+
+### 14.1 The hook relocation (kept)
+
+The injection hook moved from `fr_py_complete` (gated on
+`signal_fd >= 0`) to each loop's **success site**. That gate was wrong:
+the in-process `map()` executor runs the signal pipe **disarmed** (`-1`)
+on the success path too, because there is no drain there. So the gate
+fired under the launcher and never for a plain `map()` call. Placing it
+structurally at the success site means one hook per loop
+(`splice`, `plugin`, `udf`, `spawn`) and, as a bonus, keeps the loop
+bodies textually equal — which is what the parity test exists to
+preserve.
+
+With it, `map(mode="spawn", c_spawn_loop=True)` under repeated death
+really does die: batches poison, and the run still completes.
+
+### 14.2 Why it cannot prove anything
+
+Through `map()` the test is **not discriminating**. With the cursor fix
+in place a faulted run returns 0 records; with the fix removed it also
+returns 0. A test that passes either way proves nothing, and the
+earlier launcher test was accepted only because it demonstrably
+separated the two cases (5 records vs 0).
+
+The reason is structural, not a tuning problem: `map()` parses the
+result and returns only `DATA`. Leaked orphans are exactly the records
+the in-process collect does not surface, so a leak is invisible through
+this API by construction.
+
+Making it discriminate needs a **direct driver**: fork the spawn worker
+via `_fork_c_spawn_worker`, recover it in the parent, respawn, and parse
+`out_fd` itself — a mini-supervisor in the test. That is a real harness,
+and it would cover the spawn-specific invoke (`fr_py_exec_spawn`'s
+`posix_spawnp` plus capture-memfd staging) under death, which nothing
+else does today.
+
+### 14.3 Status
+
+* **Proven:** engine primitives under repeated death; the shared
+  lifecycle (parity); end-to-end exactly-once for the plugin and UDF
+  loops through a real exec'd launcher.
+* **Not proven, not claimed:** an end-to-end exactly-once run for
+  `spawn`. Its lifecycle is asserted identical to plugin/UDF and its
+  primitives are proven; its per-batch subprocess invoke under death is
+  uncovered.
+* **Splice:** no end-to-end exactly-once run is proposed. It moves
+  bytes rather than invoking user code, has no per-batch subprocess, and
+  is excluded from parity by design.

@@ -2737,15 +2737,6 @@ int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx,
     int rc;
     int target;
 
-    /* signal_fd >= 0 identifies the SUCCESS path: the invoke has
-     * already framed this batch's record, and this call is what acks
-     * it. Poison-skip and sentinel pass -1 because they emit nothing,
-     * so gating on it keeps the injected death out of those branches
-     * -- which mattered: firing there meant a poisoned batch could
-     * never be skipped and the run never converged. */
-    if (signal_fd >= 0)
-        fr_py_maybe_die_before_ack();
-
     rc = fr_py_emit(out_fd, signal_fd, wid, batch_idx, data, data_len);
     if (rc != 0)
         return rc;
@@ -3225,6 +3216,21 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
             /* Success: record already framed by the invoke — signal
              * + fallow + order + ack in one call (no output: data
              * NULL skips the writev, signal still honored). */
+            /* Fault injection (exactly-once tests): this batch's record IS
+             * framed -- the invoke wrote it -- and the ack below has NOT
+             * happened. That is the orphan window recovery must handle.
+             *
+             * Placed at the success site rather than inside
+             * fr_py_complete because "success" cannot be identified by the
+             * signal argument: the in-process map() executor runs the
+             * signal pipe DISARMED (-1) on the success path as well, since
+             * there is no drain there, so a signal_fd >= 0 gate fires
+             * under the launcher but never for a plain map() call.
+             * Structural placement also keeps the injected death out of
+             * the poison/skip and sentinel branches, where firing meant a
+             * poisoned batch could never be skipped. */
+            fr_py_maybe_die_before_ack();
+
             rc = fr_py_complete(signal_fd, (uint64_t)wid,
                                 claimed.batch_idx, fallow_fd, out_fd,
                                 NULL, 0);
@@ -3462,6 +3468,21 @@ int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
                               claimed.length, claimed.batch_idx,
                               module, attr);
         if (rc == 0) {
+            /* Fault injection (exactly-once tests): this batch's record IS
+             * framed -- the invoke wrote it -- and the ack below has NOT
+             * happened. That is the orphan window recovery must handle.
+             *
+             * Placed at the success site rather than inside
+             * fr_py_complete because "success" cannot be identified by the
+             * signal argument: the in-process map() executor runs the
+             * signal pipe DISARMED (-1) on the success path as well, since
+             * there is no drain there, so a signal_fd >= 0 gate fires
+             * under the launcher but never for a plain map() call.
+             * Structural placement also keeps the injected death out of
+             * the poison/skip and sentinel branches, where firing meant a
+             * poisoned batch could never be skipped. */
+            fr_py_maybe_die_before_ack();
+
             rc = fr_py_complete(signal_fd, (uint64_t)wid,
                                 claimed.batch_idx, fallow_fd, out_fd,
                                 NULL, 0);
@@ -3622,6 +3643,21 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
             /* Success: record already framed by the exec — signal
              * + fallow + order + ack in one call (no output: data
              * NULL skips the writev, signal still honored). */
+            /* Fault injection (exactly-once tests): this batch's record IS
+             * framed -- the invoke wrote it -- and the ack below has NOT
+             * happened. That is the orphan window recovery must handle.
+             *
+             * Placed at the success site rather than inside
+             * fr_py_complete because "success" cannot be identified by the
+             * signal argument: the in-process map() executor runs the
+             * signal pipe DISARMED (-1) on the success path as well, since
+             * there is no drain there, so a signal_fd >= 0 gate fires
+             * under the launcher but never for a plain map() call.
+             * Structural placement also keeps the injected death out of
+             * the poison/skip and sentinel branches, where firing meant a
+             * poisoned batch could never be skipped. */
+            fr_py_maybe_die_before_ack();
+
             rc = fr_py_complete(signal_fd, (uint64_t)wid,
                                 claimed.batch_idx, fallow_fd, out_fd,
                                 NULL, 0);
