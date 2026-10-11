@@ -354,3 +354,81 @@ covered structurally by the parity test, but no test drives a real
 launcher run into multiple deaths and then inspects the stream. That is
 the remaining gap, and it is an integration gap rather than a protocol
 one.
+
+---
+
+## 7. OPEN: exactly-once through a real launcher run
+
+DECISION-02 section 6.4 listed this as the remaining gap: the engine
+primitives are proven, and the plugin/UDF loops are covered structurally
+by the parity test, but **no test drives an exec'd launcher run into
+multiple deaths and then inspects the resulting stream.** This section
+records the attempt and why it is still open. It is written up because a
+negative result with a clear diagnosis is worth more than a silently
+abandoned task.
+
+### 7.1 What was tried
+
+Driving repeated deaths through the launcher needs a hook that kills a
+worker in the window where a rollback is both **possible and necessary**:
+after the batch's record is framed, before the ack. The two existing
+hooks cannot reach it.
+
+| hook | fires at | state left | why it cannot be used |
+|---|---|---|---|
+| `FORKRUN_TEST_DIE_AT_CLAIM` | inside `fr_py_claim` | nothing emitted | no output to roll back |
+| `FORKRUN_TEST_DIE_AT_COMMIT` | after `worker_txn_begin_commit` | txn COMMITTING | recovery reports RACE_DETECTED (rc 4) rather than guessing, and the launcher treats that as fatal — observed directly |
+| *(tried)* `FORKRUN_TEST_DIE_ON_ACK=<n>` | counted variant of the above | txn COMMITTING | same fatal rc 4 |
+| *(tried)* `FORKRUN_TEST_DIE_BEFORE_ACK=<n>` | after the UDF record is framed | txn CLAIMED, orphan present | **correct window**, but see 7.2 |
+
+A counted variant is necessary because the unconditional hooks kill every
+worker on its first action, and under supervision that exhausts the
+respawn cap (observed: `worker 0 hit respawn cap (64) -- aborting`)
+before any batch completes.
+
+### 7.2 Where it stopped
+
+`FORKRUN_TEST_DIE_BEFORE_ACK` in the correct window did produce the
+intended fault sequence — batches died, were escrowed, retried, and
+poisoned (`Skipping poisoned batch 4 (killed 3 times)`), with recoveries
+succeeding rather than reporting rc 4.
+
+But the run then produced **zero records on the wire**, where a clean
+run of the same input produces five. The poisoned-skip `POISONED`
+dispositions were not reaching the result fd. The integration harness
+was therefore **not discriminating**: it returned the same answer with
+and without the cursor fix, so it could not have caught the bug it was
+built to catch — and a test that cannot fail is worse than no test.
+
+Both speculative hooks were **removed** rather than shipped. An unproven
+fault-injection hook is dead surface: it would suggest coverage that does
+not exist.
+
+### 7.3 The open question this exposed
+
+Why a poisoned batch's terminal record does not reach the parent is not
+yet understood, and it is a real question in its own right — P5's whole
+purpose is that a terminal outcome has a wire representation. Candidates,
+none yet investigated:
+
+* the poison-skip `fr_py_complete(-1, ...)` path commits through a
+  different fd or cursor than the success path;
+* the respawned generation's `fr_py_ack_init(out_fd)` re-seeks, and the
+  commit lands past where the drain reads;
+* the drain discards records for batches it believes were never
+  published.
+
+**This is the next thing to investigate**, and it may well be another
+real defect of the same family as the cursor bug: a terminal outcome that
+the parent cannot see. Note that `map()`'s result was correct in every
+case tried — no duplicates, no wrong payloads — so nothing user-visible
+is currently wrong; what is missing is the *evidence* that a poisoned
+batch reached a terminal state on the wire.
+
+### 7.4 What is NOT claimed
+
+No claim is made that exactly-once holds through a real launcher run.
+What is proven is narrower and still valuable: the engine primitives
+satisfy it under retry, repeated retry, death-then-rollback,
+death-after-commit, respawn, and mixed sequences, and doing so found and
+fixed a real pre-existing bug that broke it after the first recovery.

@@ -2468,7 +2468,14 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
     /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_COMMIT=1 makes
      * the worker SIGKILL itself inside the ack→clear window
      * (deterministic race injection). Inert unless set; read fresh
-     * per ack (see DIE_AT_CLAIM note on fork inheritance). */
+     * per ack (see DIE_AT_CLAIM note on fork inheritance).
+     *
+     * It fires on EVERY ack, which is correct for a race-window probe
+     * but unusable under launcher supervision: every worker would die
+     * on its first ack forever, and the run would exhaust the respawn
+     * cap before anything completed. A counted variant was tried and
+     * removed -- see P1-3 section 14 for why the launcher-level
+     * exactly-once test is still open. */
     if (getenv("FORKRUN_TEST_DIE_AT_COMMIT") != NULL)
         raise(SIGKILL);
     sa_ign.sa_handler = SIG_IGN;
@@ -3290,6 +3297,7 @@ static int fr_py_udf_invoke(int ingress_fd, int out_fd,
                                     disp);
     if (out)
         g_udf_free(out);
+
     return frc == 0 ? 0 : -3;
 }
 
