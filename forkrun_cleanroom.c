@@ -60,6 +60,43 @@ typedef int (*fn_worker_plugin_loop)(int wid, const char *path,
                                      int order_fd, int trap_ack_fd,
                                      int wincarn, int retry_limit,
                                      int on_error);
+/* Spawn's entry point takes an argv VECTOR, not two strings:
+ *   spawn : (wid, char **argv, int argc, ingress, out, sig, fallow,
+ *            order, trap, wincarn, retry, on_error)
+ *   plugin: (wid, const char *path, const char *func, ingress, out, ...)
+ *   udf   : (wid, const char *module, const char *attr, ingress, ...)
+ *
+ * Same arity, INCOMPATIBLE types at positions 2 and 3. Casting spawn's
+ * symbol to the plugin callback type is undefined behaviour: it would
+ * pass a char** and an int where two const char* are expected, and on
+ * any sane ABI the callee would read the argv POINTER as a string.
+ *
+ * So the loops are never invoked through one type. A worker descriptor
+ * names the mode and carries that mode's own arguments, and a
+ * dispatcher calls the matching prototype. */
+typedef int (*fn_worker_spawn_loop)(int wid, char **argv, int argc,
+                                    int ingress_fd, int out_fd,
+                                    int signal_fd, int fallow_fd,
+                                    int order_fd, int trap_ack_fd,
+                                    int wincarn, int retry_limit,
+                                    int on_error);
+
+typedef enum {
+    WK_PLUGIN = 0,
+    WK_UDF,
+    WK_SPAWN
+} worker_kind;
+
+/* Mode-specific worker invocation. Carries exactly the arguments that
+ * mode's prototype declares, so no call site can pass the wrong shape. */
+typedef struct {
+    worker_kind kind;
+    const char *a;          /* WK_PLUGIN: path,  WK_UDF: module */
+    const char *b;          /* WK_PLUGIN: func,  WK_UDF: attr   */
+    char **argv;            /* WK_SPAWN: NULL-terminated vector  */
+    int argc;               /* WK_SPAWN: element count          */
+} worker_desc;
+
 typedef int (*fn_scan)(int fd);
 typedef int (*fn_ingest_done)(void);
 typedef int (*fn_ingest_data_post)(void);
@@ -80,6 +117,12 @@ typedef int (*fn_drain_loop)(int signal_r, const int *out_fds,
 struct opts {
     const char *so_path;
     const char *plugin_path;
+    /* WK_SPAWN command vector, kept as DISTINCT argv elements. Never
+     * assembled with shell-word parsing: a newline is a legal character
+     * inside a single argument, and any newline-delimited encoding would
+     * be ambiguous against one. */
+    char **spawn_argv;
+    int spawn_argc;
     const char *plugin_func;
     const char *udf_helper;   /* per-minor _fr_udf*.so (P1-3) */
     const char *udf_module;
@@ -650,9 +693,80 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec)
 
 
 
+/* Invoke a worker loop through ITS OWN prototype.
+ *
+ * The switch is the whole point: each arm calls the signature that
+ * mode actually declares. A single cast-and-call would compile and
+ * produce nonsense at runtime, which is the failure this replaces. */
+/* Validate a worker descriptor BEFORE anything is executed.
+ *
+ * Argument transport rules (Stage 3):
+ *   - arguments stay distinct argv elements, never re-parsed;
+ *   - newlines are legal inside an element, so no line-based encoding;
+ *   - NUL cannot be represented in a POSIX argv element at all, so it is
+ *     rejected here rather than silently truncating the command.
+ *
+ * Runs before the first fork and before the source is read, so an
+ * unusable command cannot consume input and then fail. */
+static int fr_validate_worker_desc(const worker_desc *d) {
+    if (d == NULL)
+        return -1;
+    if (d->kind == WK_SPAWN) {
+        if (d->argv == NULL || d->argc <= 0)
+            return -1;
+        if (d->argv[d->argc] != NULL)
+            return -1;               /* must be NULL-terminated */
+        for (int i = 0; i < d->argc; i++) {
+            if (d->argv[i] == NULL)
+                return -1;
+        }
+        /* NUL needs no check HERE and cannot be: a C string is
+         * NUL-terminated by definition, so an embedded NUL is not
+         * representable and would have truncated the argument before it
+         * ever reached this function. The rejection therefore happens at
+         * the point user input becomes an argv element -- run.py, before
+         * the vector is built and before any input is read. Checking for
+         * it again at this layer would be theatre. */
+    } else {
+        if (d->a == NULL || d->b == NULL)
+            return -1;
+    }
+    return 0;
+}
+
+static int fr_run_worker(const worker_desc *d,
+                         fn_worker_plugin_loop p_wloop,
+                         fn_worker_spawn_loop s_wloop,
+                         int wid, int ingress_fd, int out_fd,
+                         int signal_fd, int fallow_fd, int trap_ack_fd,
+                         int wincarn, int retry_limit, int on_error) {
+    switch (d->kind) {
+    case WK_SPAWN:
+        if (!s_wloop)
+            return -1;
+        return s_wloop(wid, d->argv, d->argc, ingress_fd, out_fd,
+                       signal_fd, fallow_fd, -1, trap_ack_fd,
+                       wincarn, retry_limit, on_error);
+    case WK_UDF:
+        if (!p_wloop)
+            return -1;
+        return p_wloop(wid, d->a, d->b, ingress_fd, out_fd, signal_fd,
+                       fallow_fd, -1, trap_ack_fd, wincarn, retry_limit,
+                       on_error);
+    case WK_PLUGIN:
+    default:
+        if (!p_wloop)
+            return -1;
+        return p_wloop(wid, d->a, d->b, ingress_fd, out_fd, signal_fd,
+                       fallow_fd, -1, trap_ack_fd, wincarn, retry_limit,
+                       on_error);
+    }
+}
+
 static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
                        int fall_w, fn_worker_plugin_loop wloop,
-                       const char *path, const char *func,
+                       fn_worker_spawn_loop s_wloop,
+                       const worker_desc *desc,
                        int retry_limit, int on_error,
                        const int *engine_fd, int n_engine,
                        int wincarn) {
@@ -662,6 +776,18 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
     if (p < 0)
         return -1;
     if (p == 0) {
+        /* Stage 3: the worker becomes a PROCESS GROUP LEADER, so the
+         * launcher can signal the whole group on worker death. A SIGKILLed
+         * worker whose command had spawned children would otherwise leave
+         * them orphaned and running.
+         *
+         * Option A contract: cleanup covers the command and descendants
+         * that REMAIN in this group. A descendant that calls setsid() or
+         * otherwise leaves is explicitly outside the guarantee -- a
+         * subreaper would make such a process waitable but would not kill
+         * it, so promising universal descendant cleanup would be a lie.
+         * That boundary is tested rather than left implied. */
+        setpgid(0, 0);
         die_with_parent();
         cr_keep k;
         keep_init(&k);
@@ -685,7 +811,7 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
         enter_child("worker", &k);
         fr_trace_emit(FR_ROLE_WORKER, FR_EV_CHILD_ENTRY,
                       (int32_t)wid, (int32_t)wincarn, 0, 0);
-        if (!wloop) _exit(70);
+        if (!desc) _exit(70);
         /* wincarn MUST be this generation's number. It is not
          * diagnostic: fr_py_worker_init stores it in
          * g_fr_config.ring_wincarn, the engine stamps every transaction
@@ -705,8 +831,11 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
          *
          * It is also plugin-ABI-visible: ctx->worker_incarn is defined
          * as the respawn generation of the calling worker. */
-        int rc = wloop(wid, path, func, memfd, out_fd, sig_w, fall_w,
-                       -1, -1, wincarn, retry_limit, on_error);
+        int rc = fr_run_worker(desc, wloop, s_wloop, wid,
+                               memfd, out_fd, sig_w, fall_w,
+                               -1, wincarn, retry_limit, on_error);
+        if (rc < 0)
+            _exit(70);   /* no loop for this mode -- infrastructure */
         fr_trace_emit(FR_ROLE_WORKER, FR_EV_CHILD_EXIT,
                       (int32_t)wid, (int32_t)wincarn, 0, rc);
         _exit(rc == 0 ? 0 : 1);
@@ -746,6 +875,33 @@ static void kill_slot(pid_t *slot) {
     if (slot && *slot > 0) {
         fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FATAL_KILL,
                       FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)*slot);
+        (void)kill(*slot, SIGKILL);
+        *slot = -1;
+    }
+}
+
+/* Stage 3: kill a WORKER's whole process group, not just the worker.
+ *
+ * Workers call setpgid(0,0) in the child, so pgid == worker pid and the
+ * negative-pid form addresses exactly this worker's descendants.
+ *
+ * Applied ONLY to worker slots. The spill, scanner, fallow and drain
+ * children are NOT group leaders, and signalling -pid for one of those
+ * would target whatever group happens to carry that id -- a different,
+ * unrelated process tree. So this is deliberately a separate function
+ * from kill_slot() rather than a flag on it.
+ *
+ * Orphan scenario this prevents: the worker's command forks a long-lived
+ * child, then the worker is SIGKILLed. The child is reparented and keeps
+ * running, and nothing in the run can ever observe it again. */
+static void kill_worker_group(pid_t *slot) {
+    if (slot && *slot > 0) {
+        fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FATAL_KILL,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)*slot);
+        /* Group first: descendants must die even if the leader has
+         * already exited and been reaped, since kill(-pgid) still works
+         * while the group has members. */
+        (void)kill(-(*slot), SIGKILL);
         (void)kill(*slot, SIGKILL);
         *slot = -1;
     }
@@ -865,6 +1021,21 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--so") && i + 1 < argc)        o.so_path = argv[++i];
         else if (!strcmp(argv[i], "--plugin") && i + 1 < argc) o.plugin_path = argv[++i];
+        else if (!strcmp(argv[i], "--spawn-argc") && i + 1 < argc)
+            o.spawn_argc = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--spawn-argv") && i + 1 < argc) {
+            /* Collected in order into a contiguous vector; each element
+             * stays a distinct argv entry. No joining, no re-parsing. */
+            int n = o.spawn_argc > 0 ? o.spawn_argc : 16;
+            if (o.spawn_argv == NULL || o.spawn_argc >= n) {
+                int cap = n > o.spawn_argc ? n : o.spawn_argc * 2 + 1;
+                char **grown = realloc(o.spawn_argv,
+                                       (size_t)cap * sizeof(char *));
+                if (!grown) die("realloc(spawn argv)");
+                o.spawn_argv = grown;
+            }
+            o.spawn_argv[o.spawn_argc++] = argv[++i];
+        }
         else if (!strcmp(argv[i], "--func") && i + 1 < argc) o.plugin_func = argv[++i];
         else if (!strcmp(argv[i], "--udf-helper") && i + 1 < argc) o.udf_helper = argv[++i];
         else if (!strcmp(argv[i], "--udf") && i + 1 < argc) o.udf_module = argv[++i];
@@ -1090,6 +1261,9 @@ int main(int argc, char **argv) {
      * needs no new parameter and the respawn path stays identical. */
     fn_worker_plugin_loop  u_wloop = o.udf_module
         ? (fn_worker_plugin_loop) sym(h, "fr_py_worker_udf_loop") : NULL;
+    /* Resolved as its OWN type, never cast to the plugin callback. */
+    fn_worker_spawn_loop   s_wloop = o.spawn_argc > 0
+        ? (fn_worker_spawn_loop) sym(h, "fr_py_worker_spawn_loop") : NULL;
     fn_scan                p_scan  = (fn_scan)                sym(h, "fr_py_scan");
     fn_ingest_done         p_idone = (fn_ingest_done)         sym(h, "fr_py_ingest_done");
     fn_ingest_data_post    p_ipost = (fn_ingest_data_post)    sym(h, "fr_py_ingest_data_post");
@@ -1363,10 +1537,33 @@ int main(int argc, char **argv) {
         g_poison_stats_fd = o.stats_fd;
     }
 
+    /* The worker descriptor names the mode and carries that mode's own
+     * arguments. Validated BEFORE any worker is forked and before the
+     * source is read, so an unusable command vector cannot consume
+     * input and then fail. */
+    worker_desc wd;
+    memset(&wd, 0, sizeof wd);
+    if (o.spawn_argc > 0) {
+        wd.kind = WK_SPAWN;
+        wd.argv = o.spawn_argv;
+        wd.argc = o.spawn_argc;
+    } else if (o.udf_module) {
+        wd.kind = WK_UDF;
+        wd.a = o.udf_module;
+        wd.b = o.udf_attr;
+    } else {
+        wd.kind = WK_PLUGIN;
+        wd.a = o.plugin_path;
+        wd.b = o.plugin_func;
+    }
+    if (fr_validate_worker_desc(&wd) != 0) {
+        die("invalid worker arguments");
+    }
+
     /* workers */
     for (int i = 0; i < o.workers; i++) {
         pid_t p = spawn_wid(i, memfd, out_fds[i], sigp[1], fallp[1],
-                            p_wloop, o.plugin_path, o.plugin_func,
+                            p_wloop, s_wloop, &wd,
                             o.retry_limit, o.on_error,
                             engine_fd, n_engine, /*wincarn=*/0);
         if (p < 0) die("fork(worker)");
@@ -1722,7 +1919,7 @@ int main(int argc, char **argv) {
         int rs = dup(spare_sig), rf = dup(spare_fall);
         if (rs < 0 || rf < 0) { bad = 1; break; }
         pid_t np = spawn_wid(wid, memfd, out_fds[wid], rs, rf, p_wloop,
-                             o.plugin_path, o.plugin_func,
+                             s_wloop, &wd,
                              o.retry_limit, o.on_error,
                              engine_fd, n_engine, incarn[wid]);
         /* The child inherited its own copy of rs/rf; the launcher's must
@@ -1779,7 +1976,10 @@ int main(int argc, char **argv) {
         } else {
             /* No memory for the table: fall back to signalling each
              * group directly rather than skipping the kill entirely. */
-            for (int i = 0; i < o.workers; i++) kill_slot(&pids[i]);
+            /* Workers go by GROUP so a command's children die with the
+             * worker; the helpers below are not group leaders and must
+             * never be signalled by negative pid. */
+            for (int i = 0; i < o.workers; i++) kill_worker_group(&pids[i]);
             kill_slot(&spill_pid);
             kill_slot(&scan_pid);
             kill_slot(&fallow_pid);

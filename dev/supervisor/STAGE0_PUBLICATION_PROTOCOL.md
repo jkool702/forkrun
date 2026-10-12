@@ -527,6 +527,72 @@ and that the ordered-streaming decline is intact.
 
 ---
 
+## 8b. Stage 3 — spawn in the launcher (plumbing landed, envelope still declined)
+
+Stage 3's integration is in place. **The spawn envelope remains
+declined**, because activation is gated on lifecycle tests that do not
+exist yet, and activating before them is exactly the mistake this plan
+keeps warning about.
+
+**Mode-specific worker descriptor.** `fr_py_worker_spawn_loop` takes
+`(wid, char **argv, int argc, …)`; plugin and UDF take
+`(wid, const char *, const char *, …)`. Same arity, incompatible types at
+positions 2–3. The launcher previously carried one callback type, so
+serving spawn through it meant a cast that would pass a `char**` and an
+`int` where two `const char*` are expected. It now carries a
+`worker_desc` naming the mode and that mode's own arguments, and
+`fr_run_worker()` dispatches through each loop's real prototype. `spawn`
+is resolved as `fn_worker_spawn_loop`, never as the plugin callback.
+
+**Command transport.** Arguments stay distinct argv elements — no
+shell-word parsing, and no newline-delimited encoding, since a newline
+is a legal character inside a single argument. NUL is rejected in
+`run.py`, at the point user input becomes an argv element, before the
+launcher starts and before the source is read. It *cannot* be rejected in
+C: a C string is NUL-terminated by definition, so an embedded NUL would
+have been truncated before the launcher saw it. Re-checking it in C would
+be theatre, and the code says so.
+
+**Process ownership (Option A).** Workers `setpgid(0, 0)`, so pgid ==
+worker pid and `kill_worker_group()` can signal a whole worker
+generation's descendants. Applied only to worker slots: the spill,
+scanner, fallow and drain children are not group leaders, so signalling
+`-pid` for one would target whatever unrelated group carries that id.
+That is why it is a separate function rather than a flag on
+`kill_slot()`.
+
+The documented boundary — descendants that `setsid()` away are **outside**
+the guarantee — is stated in the code but **not yet tested**, which is
+the main reason the envelope stays declined.
+
+Still owed before activation: an orphaned-child test (known child gone
+by PID) after worker death, after recovery/respawn, under fail-fast,
+and at launcher teardown; the escaping-descendant boundary test;
+infrastructure-vs-command failure distinction; and parity against the
+in-process spawn loop.
+
+### Two mistakes worth recording
+
+Both were mine, both were caught by tests within minutes, and both are
+the kind a passing suite would have hidden:
+
+* A local `spawn_argv = None` in `map()` **shadowed** the new parameter
+  of the same name, so every cleanroom call raised `UnboundLocalError`.
+  Renamed the local to `c_spawn_argv`. The follow-on mistake was worse:
+  a blind `sed` rename left `if spawn_argv is None:` pointing at a name
+  that no longer existed, and — because the suite was already red — the
+  real signal got lost among 34 unrelated-looking errors.
+* `from forkrun import run` yields the exported **function**, not the
+  module. Attribute lookups then fail with a confusing
+  `AttributeError`. Needed `importlib.import_module("forkrun.run")`.
+
+Practical note: I ran the suite with `timeout 3000`, which is fifty
+minutes. A deadlock would have sat there looking like progress. The
+suite takes ~230s, so anything past a few minutes is a real stall — use
+a few hundred seconds, and bisect per file when it wedges.
+
+---
+
 ## 9. As-built
 
 Implementation: **`06235e11`** and the follow-up test commits on

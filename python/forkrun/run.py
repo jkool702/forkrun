@@ -630,6 +630,28 @@ def _cleanroom_launcher_path():
     return cand if os.path.exists(cand) else None
 
 
+def _validate_spawn_argv(spawn_argv):
+    """Reject a command vector the launcher could not honour faithfully.
+
+    Runs before the launcher starts and before any source byte is read,
+    so an invalid command costs no input. Mirrors the launcher's own
+    descriptor validation, but the NUL rule lives only here -- C cannot
+    see an embedded NUL at all.
+    """
+    if not spawn_argv:
+        raise ValueError("spawn command vector is empty")
+    for i, el in enumerate(spawn_argv):
+        if not isinstance(el, str):
+            raise TypeError("spawn argv[%d] is %s, not str"
+                            % (i, type(el).__name__))
+        if "\0" in el:
+            raise ValueError(
+                "spawn argv[%d] contains NUL, which cannot be represented "
+                "in a POSIX argument; it would be silently truncated"
+                % i)
+    return list(spawn_argv)
+
+
 def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
                         orchestrator, return_stats=False, *, streaming=False,
                         resume=None, checkpoint_file=None):
@@ -988,7 +1010,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                        plugin_func, on_error, views, strict_poison=False,
                        order="none", orchestrator=True,
                        udf_helper=None, udf_module=None, udf_attr=None,
-                       udf_roots=None):
+                       udf_roots=None, spawn_argv=None):
     """W-CR1: materialized file + C plugin, orchestrated entirely in C.
 
     Everything (fr_py_init, spill to the ingress memfd, per-worker output
@@ -1014,6 +1036,11 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     from ._api import _resolve_retry_limit
     from ._worker import _ON_ERROR_CODES
     so = find_substrate()
+
+    # Validated BEFORE the source is opened or read, so an invalid
+    # command vector costs no input.
+    if spawn_argv is not None:
+        spawn_argv = _validate_spawn_argv(spawn_argv)
 
     # Source resolution, matching the stream() path exactly:
     #   * already a descriptor (int fd, fifo, socket, file object) --
@@ -1108,6 +1135,22 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             argv += ["--udf-roots", udf_roots]
     else:
         argv += ["--plugin", plugin_path, "--func", plugin_func]
+    if spawn_argv:
+        # Stage 3: the command vector travels as DISTINCT elements.
+        #
+        # No shell-word parsing and no newline-delimited encoding: a
+        # newline is a legal character inside a single argument, so any
+        # line-based encoding is ambiguous against one.
+        #
+        # NUL is rejected HERE, at the point user input becomes an argv
+        # element. It cannot be rejected in C: a C string is
+        # NUL-terminated by definition, so an embedded NUL would have
+        # silently truncated the argument before the launcher ever saw
+        # it. This runs before the launcher starts and before the source
+        # is read, so a rejected command costs no input.
+        argv += ["--spawn-argc", str(len(spawn_argv))]
+        for _el in spawn_argv:
+            argv += ["--spawn-argv", _el]
     if trace_fd >= 0:
         argv += ["--trace-fd", str(trace_fd)]
     # `orchestrator is False`, NOT `not orchestrator`: map() defaults
@@ -3442,13 +3485,17 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 "c_worker_loop=True needs a dialect-1/2 frozen-ABI "
                 "plugin (forkrun_use_ctx opting into 1 or 2) — this "
                 "payload negotiates no ctx; use c_worker_loop=False")
-    spawn_argv = None
+    # NOTE: named c_spawn_argv, not spawn_argv. A bare spawn_argv here
+    # shadowed _execute_cleanroom's parameter of the same name for the
+    # whole module scope of that call, so every cleanroom invocation
+    # raised UnboundLocalError before reaching the launcher.
+    c_spawn_argv = None
     if c_spawn_loop:
         # Coerced spawn payloads carry the argv list on the wrapper
         # (make_spawn_payload tags _forkrun_spawn_argv); the C loop
         # replays exactly this argv per batch (no shell).
-        spawn_argv = _c_spawn_spec(payload)
-        if spawn_argv is None:
+        c_spawn_argv = _c_spawn_spec(payload)
+        if c_spawn_argv is None:
             raise RuntimeError(
                 "c_spawn_loop=True needs a spawn argv payload "
                 "(mode='spawn') — use c_spawn_loop=False")
@@ -3472,7 +3519,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     c_worker_loop=c_worker_loop,
                     plugin_spec=plugin_spec,
                     c_spawn_loop=c_spawn_loop,
-                    spawn_argv=spawn_argv,
+                    spawn_argv=c_spawn_argv,
                     **base)
             _sg.check()
             return _map_return(out, return_stats)
@@ -3484,7 +3531,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             c_worker_loop=c_worker_loop,
             plugin_spec=plugin_spec,
             c_spawn_loop=c_spawn_loop,
-            spawn_argv=spawn_argv,
+            spawn_argv=c_spawn_argv,
             **base)
         _sg.check()
     return _map_return(results, return_stats)
