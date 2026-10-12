@@ -538,6 +538,16 @@ per-attempt varying payload so they are not vacuous:
 `stream()` and `map()`**, not an internal descriptor, because the review
 was explicit that "visible" means what the caller sees.
 
+`test_stage0_notify_failure.py` closes the last asserted-but-untested
+link. `FR_PY_ERR_NOTIFY` is returned when the commit succeeded but the
+drain was never notified, and every worker loop treats a nonzero return
+as "worker died" — so recovery has to classify that death as IDLE and
+decline to retry. **Measured: 5 injected post-commit notification
+failures across 5 respawned generations, and every batch still executed
+exactly once and was delivered.** The injection writes a marker the test
+asserts, because a duplicate-execution assertion also holds trivially in
+a run where nothing was injected.
+
 **The handshake.** The sleep-based window was rejected as vacuous, so the
 drain now publishes `(worker, cursor)` on a FIFO for every wakeup it
 processes — including ones that legitimately forward nothing — and the
@@ -576,6 +586,10 @@ is to **disable the affected envelope**, not to narrow the detector.
 
 * Ordered streaming (stage 2) — untouched, still declined.
 * The CPython matrix and the remaining expansion stages — untouched.
-* Whether the notification-failure path (-4) is exercised in production:
-  it is tested directly, but no test forces a post-commit signal write to
-  fail through the real launcher.
+* `FORKRUN_TEST_NOTIFY_FAIL_ONCE` makes `fr_py_notify_committed` return
+  -4 without attempting the write. It therefore proves the CALLER
+  handles the code correctly, but not that a real signal-write failure
+  (EPIPE/EBADF) routes to it. Covering that needs a signal fd that fails
+  only at the post-commit moment, which a closing reader cannot provide —
+  if the read end goes, the drain stops publishing and the run is
+  aborting regardless. Left as a known limit rather than papered over.
