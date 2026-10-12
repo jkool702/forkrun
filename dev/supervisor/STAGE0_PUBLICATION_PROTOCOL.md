@@ -666,6 +666,65 @@ a few hundred seconds, and bisect per file when it wedges.
 
 ---
 
+## 8c. Stage 4 — splice measurement: GO
+
+`tools/bench_splice.py`. Median of 5 trials, peak parent RSS
+(`ru_maxrss`, not current RSS — current understates a peak, and the
+high-water mark never decreases, so every variant runs in a fresh
+process). Only representable, byte-moving paths are compared: the C
+splice loop, and `spawn cat` / `spawn tr` through the launcher. A
+python-mode lambda is deliberately **not** a baseline — it is not
+exec-representable, so it poisons every batch and times a failure.
+
+| input | workers | splice | spawn cat | ratio |
+|---|---|---|---|---|
+| 2.6 MB | 1 | 0.0170s | 0.0807s | **4.9x faster** |
+| 2.6 MB | 4 | 0.0130s | 0.0337s | **2.6x faster** |
+| 26.5 MB | 1 | 0.0481s | 0.5622s | **11.7x faster** |
+| 26.5 MB | 4 | 0.0330s | 0.1753s | **5.3x faster** |
+
+**Peak parent RSS is essentially flat across all four variants** — the
+26.5 MB run peaks around 50–70 MB whichever path moves the bytes, so the
+gain is throughput, not memory.
+
+Two findings worth stating plainly:
+
+* **The advantage is largest exactly where it matters least**: 11.7x on
+  the biggest, single-worker case. But that case is also the slowest
+  absolute (0.56s for a plain byte copy), so the user-visible saving is
+  ~0.5s. Where a real call would actually wait — a command doing work,
+  not `cat` — the margin is unknown.
+* **`spawn tr` is ~1.00x of `spawn cat`** at every size, i.e. the
+  transform is free next to the copy. So the dominant cost is *moving
+  bytes across the process boundary at all*, not the work done on them.
+  That is precisely the cost splice removes, and it is why the ratio is
+  so large.
+
+**Recommendation: retain the C splice loop, and do NOT wire it into the
+launcher.** The measurement answers the question the design posed — is
+the loop worth keeping — with a decisive yes. It does not answer whether
+launcher integration is worth the mode-specific dispatch and supervision
+work, because the win comes from bypassing the per-batch payload
+invocation, which splice already does in-process. Adding a third launcher
+mode to capture a path that is already 2.6–11.7x ahead of the boundary it
+would cross is not justified by these numbers.
+
+Caveat, stated because it bounds the result: this compares in-process
+splice against launcher-spawn. It does **not** compare against a
+launcher-splice integration, which does not exist. If that is built
+later, it must be measured against `spawn cat` before retention.
+
+### A benchmarking mistake worth recording
+
+The first run passed only `tr` to the spawn path, omitting `a-z A-Z`.
+Spawn transports arguments as distinct argv elements, so it faithfully ran
+a different, failing command — and the harness reported poison
+summaries while still printing timings. Comparing timings of FAILED runs
+is the exact shape of a measurement that looks fine and means nothing.
+Every row above now asserts the delivered record count.
+
+---
+
 ## 9. As-built
 
 Implementation: **`06235e11`** and the follow-up test commits on
