@@ -565,11 +565,38 @@ The documented boundary — descendants that `setsid()` away are **outside**
 the guarantee — is stated in the code but **not yet tested**, which is
 the main reason the envelope stays declined.
 
-Still owed before activation: an orphaned-child test (known child gone
-by PID) after worker death, after recovery/respawn, under fail-fast,
-and at launcher teardown; the escaping-descendant boundary test;
-infrastructure-vs-command failure distinction; and parity against the
-in-process spawn loop.
+### What the lifecycle tests actually found
+
+Spawn now runs end-to-end through the launcher, and two of the three
+gates hold:
+
+* the **escaping-descendant boundary** passes — a child that `setsid()`s
+  away survives, exactly as Option A promises, so the limit is pinned
+  rather than implied;
+* the **mode is genuinely served** (a sanity test, so the others cannot
+  pass on a path that never ran).
+
+The third fails, and the cause is **larger than the process group**:
+
+> Killing a worker that is blocked mid-batch produces **no respawn at
+> all** across a 5-second observation window. The launcher never reaches
+> the code that would signal the group, because its supervision loop does
+> not appear to cover a worker that is still executing when it dies.
+
+So the orphan is not reachable until *something notices the death* — and
+nothing does. Group-kill has been wired into both the supervision path
+and the fail-fast path, but neither is entered. That test is marked
+`expectedFailure` so it flips to unexpected success when fixed.
+
+This is why the envelope stays declined, and it is a bigger finding than
+the item-4 risk the design anticipated: the design worried about a
+SIGKILLed worker orphaning a child, and the real gap is that such a
+worker may not be observed as having died at all.
+
+Still owed before activation: in-group descendant cleanup on worker
+death (blocked above), cleanup after recovery/respawn and at launcher
+teardown, the infrastructure-vs-command failure distinction, and parity
+against the in-process spawn loop.
 
 ### Two mistakes worth recording
 

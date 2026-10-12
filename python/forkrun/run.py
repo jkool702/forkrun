@@ -1148,7 +1148,6 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         # silently truncated the argument before the launcher ever saw
         # it. This runs before the launcher starts and before the source
         # is read, so a rejected command costs no input.
-        argv += ["--spawn-argc", str(len(spawn_argv))]
         for _el in spawn_argv:
             argv += ["--spawn-argv", _el]
     if trace_fd >= 0:

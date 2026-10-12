@@ -123,6 +123,7 @@ struct opts {
      * be ambiguous against one. */
     char **spawn_argv;
     int spawn_argc;
+    int spawn_argv_cap;
     const char *plugin_func;
     const char *udf_helper;   /* per-minor _fr_udf*.so (P1-3) */
     const char *udf_module;
@@ -1021,18 +1022,18 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--so") && i + 1 < argc)        o.so_path = argv[++i];
         else if (!strcmp(argv[i], "--plugin") && i + 1 < argc) o.plugin_path = argv[++i];
-        else if (!strcmp(argv[i], "--spawn-argc") && i + 1 < argc)
-            o.spawn_argc = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--spawn-argv") && i + 1 < argc) {
-            /* Collected in order into a contiguous vector; each element
-             * stays a distinct argv entry. No joining, no re-parsing. */
-            int n = o.spawn_argc > 0 ? o.spawn_argc : 16;
-            if (o.spawn_argv == NULL || o.spawn_argc >= n) {
-                int cap = n > o.spawn_argc ? n : o.spawn_argc * 2 + 1;
+            /* Each element stays a distinct argv entry: collected in
+             * order into one contiguous vector, never joined and never
+             * re-parsed. */
+            int cap = o.spawn_argv_cap;
+            if (o.spawn_argc + 1 >= cap) {
+                cap = cap ? cap * 2 : 8;
                 char **grown = realloc(o.spawn_argv,
-                                       (size_t)cap * sizeof(char *));
+                                       (size_t)(cap + 1) * sizeof(char *));
                 if (!grown) die("realloc(spawn argv)");
                 o.spawn_argv = grown;
+                o.spawn_argv_cap = cap;
             }
             o.spawn_argv[o.spawn_argc++] = argv[++i];
         }
@@ -1069,12 +1070,27 @@ int main(int argc, char **argv) {
         fprintf(stderr, "forkrun-cleanroom: --so --src required\n");
         return 64;
     }
-    /* Either a C plugin or a Python UDF selects the execution mode.
-     * Both supply two strings that the loop reinterprets as
-     * (path, func) or (module, attr). */
-    if (!o.plugin_path && !o.udf_module) {
-        fprintf(stderr, "forkrun-cleanroom: --plugin or --udf required\n");
+    /* The execution mode is selected by exactly one of three shapes:
+     * a C plugin (two strings), a Python UDF (two strings), or a spawn
+     * command vector (an argv list). Stage 3 added the third, and it
+     * deliberately does NOT reuse the plugin's two-string shape -- that
+     * is the whole reason for the worker descriptor. */
+    if (!o.plugin_path && !o.udf_module && o.spawn_argc <= 0) {
+        fprintf(stderr, "forkrun-cleanroom: one of --plugin, --udf or "
+                "--spawn-argv required\n");
         return 64;
+    }
+    /* Exactly one mode: mixing them would leave the descriptor's union
+     * ambiguous, and silently preferring one would run a command the
+     * caller did not ask for. */
+    {
+        int modes = (o.plugin_path != NULL) + (o.udf_module != NULL)
+                  + (o.spawn_argc > 0);
+        if (modes > 1) {
+            fprintf(stderr, "forkrun-cleanroom: --plugin, --udf and "
+                    "--spawn-argv are mutually exclusive\n");
+            return 64;
+        }
     }
     if (o.udf_helper && !o.udf_module) {
         fprintf(stderr, "forkrun-cleanroom: --udf-helper needs --udf\n");
@@ -1143,7 +1159,11 @@ int main(int argc, char **argv) {
      * run for a dialect problem that cannot occur. The UDF helper gets
      * its own probe inside setup_udf_helper().
      */
-    if (!o.udf_module) {
+    /* The capability probe applies to a PLUGIN only. It was guarded by
+     * "not a UDF", which let a spawn invocation fall through into
+     * dlopen(NULL) -- the launcher would have probed a library named
+     * "(null)". Now guarded on the plugin actually being present. */
+    if (!o.udf_module && o.plugin_path) {
         int pp[2];
         if (pipe(pp) != 0) {
             fprintf(stderr, "forkrun-cleanroom: pipe(probe): %s\n",
@@ -1537,6 +1557,15 @@ int main(int argc, char **argv) {
         g_poison_stats_fd = o.stats_fd;
     }
 
+    /* NULL-terminate the collected vector. posix_spawnp and the worker's
+     * own argv walk both rely on the terminator, and the descriptor
+     * validator checks for it rather than assuming it. */
+    if (o.spawn_argv != NULL) {
+        if (o.spawn_argc >= o.spawn_argv_cap)
+            die("spawn argv capacity");
+        o.spawn_argv[o.spawn_argc] = NULL;
+    }
+
     /* The worker descriptor names the mode and carries that mode's own
      * arguments. Validated BEFORE any worker is forked and before the
      * source is read, so an unusable command vector cannot consume
@@ -1816,6 +1845,11 @@ int main(int argc, char **argv) {
              * The worker died; its in-flight batch is abandoned rather than
              * reclaimed and re-executed by a replacement, which is the whole
              * point for a side-effecting payload. */
+            /* STAGE3: a dead worker generation takes its command
+             * descendants with it, even on the fail-fast path where no
+             * recovery follows. Otherwise a long-lived grandchild would
+             * outlive the run that started it. */
+            kill_worker_group(&pids[wid]);
             fprintf(stderr, "forkrun-cleanroom: worker %d died (status %d) "
                     "under fail-fast supervision -- not recovering, "
                     "aborting\n", wid, death_cause(st));
@@ -1825,6 +1859,18 @@ int main(int argc, char **argv) {
             bad = 1;
             break;
         }
+        /* STAGE3: the dead generation's process group goes with it,
+         * BEFORE recovery and respawn.
+         *
+         * The group survives the worker's death as long as any descendant
+         * is still in it, and kill(-pgid) reaches those members even
+         * though the leader is already gone -- which is exactly the case
+         * that matters, because the orphan IS the surviving member.
+         *
+         * Ordering matters: this must precede the respawn, or the new
+         * generation's pid could be mistaken for the old group. */
+        kill_worker_group(&pids[wid]);
+
         int rc = p_recover ? p_recover(wid, incarn[wid], out_fds[wid],
                                        death_cause(st))
                            : 5;    /* no core -> cannot vouch for it */
