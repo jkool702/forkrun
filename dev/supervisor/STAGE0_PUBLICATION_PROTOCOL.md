@@ -496,6 +496,7 @@ Implementation: **`06235e11`** and the follow-up test commits on
 | zero-length sentinel stays ack-silent | done — it writes no record |
 | `FR_PY_ERR_NOTIFY` (-4), distinct from pre-commit codes | done, exported |
 | synthetic recovery wakeup, `rc` 0/1/2 only | done, before any early `continue` |
+| failed synthetic wakeup fails the run closed | done, returns status and aborts |
 | persistent cursor, no respawn reset | done (no code needed — it was already correct) |
 
 **Two emitters beyond the design's list.** The `fr_py_emit` /
@@ -510,6 +511,15 @@ Implementation: **`06235e11`** and the follow-up test commits on
   `fr_py_complete(-1, …)`, verified to return immediately when
   `signal_fd < 0`. Left alone, `POISONED`/`SKIPPED` would have been
   committed and never announced.
+* A **fifth output writer**: the legacy direct-write path in
+  `_worker.py` advanced the frontier by a hardcoded `16 + len(blob)` while
+  `_HDR` is a **24-byte** `<QQII>` header — 8 bytes short per record,
+  accumulating until recovery truncated into committed output. It was
+  masked in `order="index"` coverage because ordered-ACK processing
+  resynchronises the cursor to the true file end; unordered runs had no
+  such correction. Now derived from `_HDR.size`, which also fixed a
+  silent skip: `len(blob)` raised on `None`, swallowed by the bare
+  `except`, so `NO_RESULT` batches advanced nothing at all.
 * A **fourth output writer**: `fr_py_exec_spawn()` advanced the frontier
   only `if (cap_len > 0)`, while `fr_py_emit_record()` always writes a
   header. Two sites in that one function were wrong in opposite ways —
@@ -627,6 +637,34 @@ So the interim restriction set is unchanged from the proposal and does
 
 If external review rejects the protocol, the containment to fall back on
 is to **disable the affected envelope**, not to narrow the detector.
+
+### 9.3a Why fail-closed on the synthetic wakeup is safe
+
+Making `fr_wake_drain_committed()` fail-closed initially looked unsafe: a
+synthetic wakeup that hits `EPIPE` cannot, by itself, distinguish "the
+drain finished after consuming everything" from "the drain never saw
+these bytes". Aborting on it appeared to risk failing legitimate runs.
+
+It does not, and the reason is structural: **`spare_sig` stays open for
+the whole supervision loop** — "spare closed LAST ... keeps the drain
+alive across respawns" — so the signal pipe cannot reach EOF while the
+supervisor is supervising, and the drain cannot have exited. The write
+therefore cannot fail because the drain is gone.
+
+Verified directly rather than assumed: instrumented runs of both a clean
+launcher run and one with injected worker deaths reported no wakeup
+failure at all.
+
+> An earlier conclusion in this work stated that fail-closed "aborts
+> legitimate runs", based on 58 failing tests. That was **wrong** — the
+> failures were a cwd artifact (plugin fixtures resolved from the wrong
+> directory) plus a stale build. The correction matters because the
+> "obvious" conclusion here was to fall back to best-effort and document a
+> limitation, which would have left a real completeness hole in place.
+
+`FORKRUN_TEST_BREAK_DRAIN_WAKEUP` closes the spare just before recovery
+so the undeliverable case can be tested: the run must exit non-zero and
+must not present a short stream as complete.
 
 ### 9.4 Still open
 

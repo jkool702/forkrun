@@ -822,34 +822,35 @@ static void kill_all(pid_t *slots, int nslots) {
  * so the conservative choice is to skip it. Publishing a frontier above
  * the committed boundary is precisely the defect Stage 0 removes, so a
  * doubtful case must stay silent rather than guess. */
-static void fr_wake_drain_committed(int sig_w, int wid, int out_fd)
+static int fr_wake_drain_committed(int sig_w, int wid, int out_fd)
 {
-uint64_t sig[2];
-off_t frontier;
-size_t left;
-const char *p;
+    uint64_t sig[2];
+    off_t frontier;
+    size_t left;
+    const char *p;
 
-if (sig_w < 0 || out_fd < 0 || wid < 0)
-    return;
-frontier = lseek(out_fd, 0, SEEK_END);
-if (frontier == (off_t)-1)
-    return;
-sig[0] = (uint64_t)wid;
-sig[1] = (uint64_t)frontier;
-p = (const char *)sig;
-left = sizeof(sig);
-while (left > 0) {
-    ssize_t n = write(sig_w, p, left);
-    if (n < 0) {
-        if (errno == EINTR)
-            continue;
-        return; /* drain gone: nothing left to notify */
+    if (sig_w < 0 || out_fd < 0 || wid < 0)
+        return -1;
+    frontier = lseek(out_fd, 0, SEEK_END);
+    if (frontier == (off_t)-1)
+        return -1;
+    sig[0] = (uint64_t)wid;
+    sig[1] = (uint64_t)frontier;
+    p = (const char *)sig;
+    left = sizeof(sig);
+    while (left > 0) {
+        ssize_t n = write(sig_w, p, left);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            return -1;
+        p += n;
+        left -= (size_t)n;
     }
-    if (n == 0)
-        return;
-    p += n;
-    left -= (size_t)n;
-}
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -1631,14 +1632,54 @@ int main(int argc, char **argv) {
                                        death_cause(st))
                            : 5;    /* no core -> cannot vouch for it */
 
+        /* STAGE0 TEST-ONLY: simulate the synthetic wakeup being
+         * undeliverable by closing the supervisor's spare signal writer
+         * just before recovery. spare_sig is otherwise held open for the
+         * whole supervision loop, which is what makes the real
+         * fail-closed path safe; closing it here forces the failure that
+         * path exists to catch, so the abort can be tested rather than
+         * assumed. Inert unless the variable is set. */
+        if (getenv("FORKRUN_TEST_BREAK_DRAIN_WAKEUP") != NULL &&
+            spare_sig >= 0) {
+            close(spare_sig);
+            spare_sig = -1;
+        }
+
         /* STAGE0: notify the drain of anything committed that its
          * notification may have lost. This must happen BEFORE the early
          * continues below -- a NORMAL_EXIT classification in particular
          * used to skip straight past, silently stranding a committed
          * record. Only nonfatal, non-ambiguous rc values are woken for;
          * see fr_wake_drain_committed. */
-        if (rc == 0 || rc == 1 || rc == 2)
-            fr_wake_drain_committed(spare_sig, wid, out_fds[wid]);
+        if ((rc == 0 || rc == 1 || rc == 2) &&
+            fr_wake_drain_committed(spare_sig, wid, out_fds[wid]) != 0) {
+            /* STAGE0: fail CLOSED.
+             *
+             * This worker committed output whose ordinary notification was
+             * lost, and the synthetic wakeup is the only remaining way to
+             * deliver it. If the wakeup cannot be sent, the run cannot
+             * deliver its committed results -- continuing would report
+             * success with records the caller never receives, which is the
+             * exact failure the completeness invariant exists to prevent.
+             *
+             * Safe to abort on, rather than risk aborting legitimate runs:
+             * spare_sig stays open for the whole supervision loop ("spare
+             * closed LAST ... keeps the drain alive across respawns"), so
+             * the signal pipe cannot reach EOF and this write cannot fail
+             * because the drain already finished. Verified on clean runs
+             * and on runs with injected worker deaths; both succeed.
+             *
+             * Ambiguous outcomes (rc 3, 4, 5) are deliberately not woken
+             * for: their output state is not a trustworthy committed
+             * frontier, and rc 4/5 are already fatal below. */
+            fprintf(stderr, "forkrun-cleanroom: worker %d committed output "
+                    "but the post-recovery drain wakeup failed -- aborting "
+                    "rather than dropping committed records\n", wid);
+            fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_ABORT,
+                          (int32_t)wid, (int32_t)incarn[wid], 0, 0);
+            bad = 1;
+            break;
+        }
 
         if (rc == 2)
             continue;               /* NORMAL_EXIT: drained to EOF */

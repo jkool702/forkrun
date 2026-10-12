@@ -214,5 +214,59 @@ class TestPostCommitNotifyFailure(unittest.TestCase):
                          "once (got %d bytes)" % len(joined))
 
 
+    def test_undeliverable_synthetic_wakeup_fails_the_run_closed(self):
+        """A committed record whose synthetic wakeup cannot be sent must
+        NOT produce a successful-looking run.
+
+        spare_sig is normally held open for the whole supervision loop,
+        which is what makes the real fail-closed path safe. This closes it
+        so the wakeup genuinely cannot be delivered.
+        """
+        import subprocess
+        import tempfile
+        launcher = os.path.join(_ROOT, "python", "forkrun",
+                                "_forkrun_cleanroom")
+        if not os.path.exists(launcher):
+            self.skipTest("launcher not built")
+        from forkrun._bindings import find_substrate
+        plugin = os.path.join(_HERE, "plugins", "test_plugin_v1.so")
+        if not os.path.exists(plugin):
+            self.skipTest("plugin fixture not built")
+
+        out = os.path.join(self.d, "wakeup.bin")
+        sfd = os.open(self.src, os.O_RDONLY)
+        ofd = os.open(out, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+        env = dict(os.environ)
+        env["FORKRUN_TEST_DIE_BEFORE_ACK"] = "1"
+        env["FORKRUN_TEST_BREAK_DRAIN_WAKEUP"] = "1"
+        try:
+            proc = subprocess.run(
+                [launcher, "--so", find_substrate(),
+                 "--workers", "1", "--lines", "1", "--bytes", "0",
+                 "--on-error", "0", "--retry", "2",
+                 "--src", str(sfd), "--result", str(ofd),
+                 "--stats-fd", "-1", "--plugin", plugin,
+                 "--func", "die_once_v1"],
+                env=env, pass_fds=(sfd, ofd), capture_output=True, timeout=120)
+        finally:
+            os.close(sfd)
+            os.close(ofd)
+
+        err = proc.stderr.decode(errors="replace")
+        self.assertNotEqual(
+            0, proc.returncode,
+            "the run reported SUCCESS despite being unable to deliver "
+            "committed output: that is exactly the silent-loss failure "
+            "fail-closed exists to prevent")
+        self.assertIn("post-recovery drain wakeup failed", err,
+                      "expected the fail-closed abort; stderr was: %r"
+                      % err[-400:])
+        # And the run must not have delivered a short stream as if whole.
+        with open(out, "rb") as fh:
+            blob = fh.read()
+        self.assertLess(len(blob), 24 * BATCHES,
+                        "stream unexpectedly complete for an aborted run")
+
+
 if __name__ == "__main__":
     unittest.main()

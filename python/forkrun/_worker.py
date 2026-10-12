@@ -741,9 +741,25 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         # W-PY29: complete record durable — advance the
                         # rollback frontier (best-effort; emit/ordered
                         # paths advance in C anyway).
+                        #
+                        # The size MUST be the real framed size:
+                        # _HDR.size is 24 (batch_idx u64, len u64,
+                        # disposition u32, reserved u32), not 16. A hard
+                        # 16 undercounted the frontier by 8 bytes per
+                        # record, which accumulated across batches until
+                        # recovery truncated INTO already-committed
+                        # output. It was masked in order="index" runs
+                        # because ordered-ACK processing resynchronised the
+                        # cursor to the true file end; unordered runs have
+                        # no such correction and were vulnerable.
+                        #
+                        # Deriving it from _HDR.size rather than repeating
+                        # a literal is the whole point: the C emitters now
+                        # advance inside their framer, and this is the
+                        # matching Python one.
                         if _advanced_fn is not None:
                             try:
-                                _advanced_fn(16 + len(blob))
+                                _advanced_fn(_HDR.size + len(blob or b""))
                             except Exception:
                                 pass
             except BaseException as exc:  # noqa: BLE001

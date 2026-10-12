@@ -1304,8 +1304,6 @@ int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len,
             int erc = 0;
             if (fstat(cap_fd, &st) == 0 && st.st_size > 0)
                 cap_len = (uint64_t)st.st_size;
-            /* fr_py_emit_record with len 0 emits nothing (v0 parity:
-             * empty output is no record, not an empty record). */
             /* STAGE0: emitted unconditionally. cap_len == 0 is a real
              * completed batch with no output, and it gets a NO_RESULT
              * terminal record -- without one, an ordered consumer waits
