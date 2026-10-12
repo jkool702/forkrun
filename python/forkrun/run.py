@@ -1160,6 +1160,18 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                  "--udf-attr", udf_attr]
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
+    elif plugin_path is None and plugin_func is None:
+        # Spawn mode: there is NO plugin to dlopen, and this must not
+        # claim otherwise.
+        #
+        # This sent `--plugin None --func None`, so the launcher
+        # dlopen()ed the literal four-character string "None", failed,
+        # and the run died in the spill child with exit 1 -- surfaced
+        # to the caller as a generic "launcher failed (exit 127)".
+        # Spawn's own argv then still travelled correctly, which is why
+        # the symptom looked like an exec failure rather than a
+        # descriptor mix-up.
+        pass
     else:
         argv += ["--plugin", plugin_path, "--func", plugin_func]
     if spawn_argv:
@@ -3418,7 +3430,16 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 # the launcher starts and before the source is read, so a
                 # malformed command costs no input.
                 from ._worker import _c_spawn_spec as _spawn_argv_of
-                _coerced = _coerce_payload(raw_payload, "spawn")
+                _coerced, _coerced_mode = _coerce_payload(
+                    raw_payload, "spawn")
+                # _coerce_payload returns (payload_fn, engine_mode) and
+                # _c_spawn_spec reads the argv off the FUNCTION's tag.
+                # Passing the TUPLE made getattr() return None, so _sargv
+                # was falsy, the whole launcher branch below was dead
+                # code, and every public map(mode="spawn") call quietly
+                # fell through to the in-process executor -- while
+                # test_map_spawn_routes_through_the_launcher passed,
+                # because it could only check that the OUTPUT was right.
                 _sargv = _spawn_argv_of(_coerced)
                 if _sargv:
                     _sargv = _validate_spawn_argv(_sargv)

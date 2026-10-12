@@ -75,6 +75,69 @@ now rests on the right measurement.
 Peak parent RSS is flat (~94–95 MB) across all variants, so the gain is
 throughput, not memory.
 
+## 3b. Round 8: two review items completed, and a new engine bug found
+
+The round-7 handoff listed two items as outstanding — **recovery output
+integrity** and **in-process/cleanroom parity**. Both are now done, and
+implementing them exposed a serious engine-level defect.
+
+### Parity (`python/tests/test_stage3_parity.py`)
+
+Asserts the launcher and the in-process executor produce identical bytes,
+across argv shapes, worker counts, and both fresh interpreters and one
+shared one. Determinism is asserted *before* parity on purpose: without
+it a mismatch has two possible causes and the failure names the wrong one.
+
+The first version of this file passed `"cat"` with `mode="plugin"` and
+got 33 subTest errors, because plugin takes a `path:function` spec and is
+not a shell command.
+
+### A guard that immediately earned its keep
+
+`TestParityIsNotVacuous` counts calls into `_execute_cleanroom` and
+asserts the cleanroom arm reaches it. It failed on the first run — and
+found that **public `map(mode="spawn")` still did not reach the
+launcher.** Two stacked causes:
+
+1. `_c_spawn_spec` reads the argv off the *function*, but the call site
+   passed the `(fn, engine_mode)` tuple, so `getattr` returned `None`,
+   the launcher branch was dead code, and every public spawn call fell
+   through in-process.
+2. With the branch live, the launcher still died at exit 127. The cause
+   was `--plugin None --func None` being sent for spawn — the launcher
+   `dlopen`ed the literal string `"None"` and died in the spill child.
+
+Note the shape: round 7 shipped a fix and a test
+(`test_map_spawn_routes_through_the_launcher`) that passed, because the
+test could only observe that the *output* was right. Both rounds in a row
+the failure mode was the same — correct results from the wrong engine.
+
+**Also required a rebuild.** `fr_py_worker_spawn_loop` was not exported
+from a stale `libforkrun_python.so`, so the launcher could not resolve
+its spawn worker at all. Artifacts are gitignored, so a stale build is an
+ordinary state, not an anomaly.
+
+### B-01: silent data loss on worker death — `dev/supervisor/BUGS.md`
+
+The recovery integrity test found a bug worth more than the test.
+
+A worker SIGKILLed mid-batch causes that batch's **consumed prefix to be
+lost**. The batch is reclaimed and redelivered, but the redelivery
+begins partway through, so only the unconsumed tail is processed. At 20
+lines / 128-byte batches the run returns **14 of 20 lines and exits
+cleanly** — no error, no poison record. The first record delivered is
+the 4-byte fragment `LOAD`.
+
+It is **engine-core**, not cleanroom: identical under both
+`FORKRUN_CLEANROOM` settings and both supervision policies.
+
+The two integrity tests are landed as `@unittest.expectedFailure` — green,
+self-documenting, and they flip to **unexpected success** the moment the
+bug is fixed. The cause is **not established** and `BUGS.md` says so
+explicitly, with the candidate mechanisms listed as hypotheses. The fix
+is expected in frozen `forkrun_ring.c`, so it is a maintainer decision,
+not something to patch opportunistically.
+
 ## 4. Invariant chosen for benchmark output, and why
 
 Output is compared as a **byte multiset**. Both simpler invariants are
