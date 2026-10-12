@@ -492,7 +492,7 @@ Implementation: **`06235e11`** and the follow-up test commits on
 | `fr_py_emit` / `fr_py_emit_disposition` no longer signal | done |
 | `fr_py_complete` orders write → commit → notify | done |
 | drain forwards `[cursor, committed_offset)` | done |
-| six disposition call sites commit *and* notify | done |
+| all seven disposition call sites commit *and* notify | done — see below |
 | zero-length sentinel stays ack-silent | done — it writes no record |
 | `FR_PY_ERR_NOTIFY` (-4), distinct from pre-commit codes | done, exported |
 | synthetic recovery wakeup, `rc` 0/1/2 only | done, before any early `continue` |
@@ -506,10 +506,16 @@ Implementation: **`06235e11`** and the follow-up test commits on
   frontier semantics it forwarded almost nothing — the C drain began
   returning an empty stream. Caught by a failing test, not by review,
   because splice calls neither emitter.
-* The **six disposition sites** all committed through
+* The **six worker-loop disposition sites** all committed through
   `fr_py_complete(-1, …)`, verified to return immediately when
   `signal_fd < 0`. Left alone, `POISONED`/`SKIPPED` would have been
   committed and never announced.
+* The **splice POISONED branch** was missed by that scan *twice*: once
+  when the splice conversion was lost to a truncation-and-restore, and
+  once because the branch uses `fr_py_ack` rather than
+  `fr_py_complete(-1, …)`, so a scan keyed on the completion helper never
+  saw it. It shipped committing a `POISONED` record without notifying
+  the drain. Fixed, and all seven sites are now asserted to notify.
 
 An emitter audit is only as good as the set it enumerates. "Every caller
 of the two known entry points" is weaker than "every site that writes to
@@ -537,6 +543,25 @@ per-attempt varying payload so they are not vacuous:
 `test_stage0_public_api.py` asserts the same properties **through
 `stream()` and `map()`**, not an internal descriptor, because the review
 was explicit that "visible" means what the caller sees.
+
+`test_stage0_matrix.py` also covers the complementary content case: with
+a one-shot, cross-generation death (`FORKRUN_TEST_DIE_BEFORE_ACK_ONCE`),
+attempt 1 dies before commit and attempt 2 succeeds with different
+bytes. Exactly one extra invocation is counted, and the abandoned first
+attempt's payload is asserted never to appear — for both same-sized and
+differing-sized payloads. The per-process attempt counter resets on
+respawn, so it could never produce a *successful* retry; that gap is why
+the earlier version of these tests only covered the poison case.
+
+The lost-notification test's handshake is **non-publishing**: the worker
+wakes the drain with frontier 0, which excludes the record just
+committed, waits for confirmation that the drain is alive, and only then
+dies. No notification carrying that record's bytes is ever sent before
+the death, so the synthetic recovery wakeup is the *only* path that can
+deliver it. The earlier version published the record's real frontier,
+which proved an ordinary notification works — the opposite of the
+property under test — and a lost-notification test that sends the
+notification cannot fail when the notification is lost.
 
 `test_stage0_notify_failure.py` closes the last asserted-but-untested
 link. `FR_PY_ERR_NOTIFY` is returned when the commit succeeded but the

@@ -697,7 +697,34 @@ static void fr_py_maybe_die_before_ack(int wid, int signal_fd)
         static unsigned seq = 0;
         unsigned want = (unsigned)atoi(n);
         seq++;
-        if (want && seq == want) {
+
+        /* STAGE0 one-shot variant. The attempt counter above is a
+         * per-process static, so after a respawn it starts over and the
+         * first-attempt death repeats in EVERY generation until the batch
+         * poisons. That makes it impossible to observe the case that
+         * matters most for content correctness: attempt 1 dies, attempt
+         * 2 SUCCEEDS with different bytes, and the caller must receive
+         * attempt 2's payload.
+         *
+         * With FORKRUN_TEST_DIE_BEFORE_ACK_ONCE naming a path, the death
+         * fires only if that file does not yet exist, and creates it when
+         * it fires. The file outlives the process, so exactly one
+         * attempt in the whole run dies and recovery gets to succeed. */
+        if (seq == want) {
+            const char *once = getenv("FORKRUN_TEST_DIE_BEFORE_ACK_ONCE");
+            if (once != NULL && *once) {
+                int seen = open(once, O_RDONLY);
+                if (seen >= 0) {
+                    close(seen);
+                    return;         /* already fired once; let this run */
+                }
+                {
+                    int mk = open(once, O_WRONLY | O_CREAT | O_EXCL, 0600);
+                    if (mk < 0)
+                        return;     /* lost the race; do not double-fire */
+                    close(mk);
+                }
+            }
             /* STAGE0 handshake: wake the drain with frontier 0, which
              * EXCLUDES the record just written uncommitted. If the
              * protocol is correct the drain wakes, sees nothing
@@ -759,16 +786,34 @@ static void fr_py_maybe_die_before_notify(int signal_fd,
                 if (ms)
                     usleep((useconds_t)(ms * 1000));
             }
-            /* Prefer a real handshake over a sleep: wait until the
-             * drain confirms it processed a wakeup for this worker, so
-             * the death provably happens AFTER the drain had its chance
-             * rather than merely probably after. */
-            /* STAGE0 handshake: the record IS committed, so publish its
-             * real frontier and wait for the drain to confirm it
-             * forwarded, and only then allow the worker to die. */
+            /* STAGE0 handshake, NON-PUBLISHING.
+             *
+             * This hook used to publish the record's real frontier and
+             * wait for the drain to forward it. That proved an ordinary
+             * notification works -- the opposite of what this interval
+             * is for. A lost-notification test that sends the
+             * notification cannot fail when the notification is lost.
+             *
+             * Instead, wake the drain with frontier 0, which is at or
+             * below the PREVIOUS committed boundary and so excludes the
+             * record just committed. The drain wakes, has nothing new to
+             * move, and acknowledges. That proves it is alive and
+             * processing while being told nothing about this record.
+             *
+             * The worker then dies having sent no notification that
+             * reaches this record's bytes, so the supervisor's synthetic
+             * post-recovery wakeup is the ONLY path that can deliver it. */
             if (getenv("FORKRUN_TEST_DRAIN_ACK_FIFO") != NULL) {
-                (void)fr_py_notify_committed(signal_fd, out_fd,
-                                             (uint64_t)wid);
+                const char *m = getenv("FORKRUN_TEST_DIE_BEFORE_NOTIFY_MARK");
+                if (m != NULL && *m) {
+                    int mf = open(m, O_WRONLY | O_CREAT | O_APPEND, 0600);
+                    if (mf >= 0) {
+                        ssize_t ig = write(mf, "N\n", 2);
+                        (void)ig;
+                        close(mf);
+                    }
+                }
+                (void)fr_py_signal_write(signal_fd, (uint64_t)wid, 0);
                 fr_drain_test_wait_ack((uint64_t)wid);
             }
             raise(SIGKILL);
@@ -1926,8 +1971,18 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
                                        claimed.batch_idx,
                                        FR_DISP_POISONED) != 0)
                 return 1;
+            /* STAGE0: notify AFTER the ack. This branch uses fr_py_ack
+             * rather than fr_py_complete, so a scan keyed on
+             * fr_py_complete would not have found it -- which is exactly
+             * how the splice POISONED path shipped without a notify
+             * while the DATA path beside it was migrated. A committed
+             * POISONED record that is never announced leaves the
+             * consumer missing a terminal outcome. */
             if (fr_py_ack(fallow_fd, -1) != 0)
                 return 1;
+            if (fr_py_notify_committed(signal_fd, out_fd,
+                                      (uint64_t)wid) != 0)
+                return 2; /* committed, unnotified: must not be retried */
             continue;
         }
 

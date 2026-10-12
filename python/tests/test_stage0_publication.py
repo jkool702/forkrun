@@ -118,6 +118,9 @@ class TestStage0Publication(unittest.TestCase):
                   "FORKRUN_TEST_DIE_AFTER_DRAIN_MS",
                   "FORKRUN_TEST_DRAIN_ACK_FIFO"):
             env.pop(k, None)
+        # NOT popped: the caller sets it deliberately to prove the
+        # death-before-notification was actually injected. Popping it here
+        # silently defeated exactly the check it was meant to support.
         if handshake:
             env["FORKRUN_TEST_DRAIN_ACK_FIFO"] = self._handshake_env(
                 self._tmp.name)
@@ -155,6 +158,12 @@ class TestStage0Publication(unittest.TestCase):
         path = os.path.join(tmpdir, "drain_ack.fifo")
         if not os.path.exists(path):
             os.mkfifo(path)
+        return path
+
+    def _fresh_marker(self, name):
+        path = os.path.join(self._tmp.name, name)
+        if os.path.exists(path):
+            os.unlink(path)
         return path
 
     # -- control ------------------------------------------------------
@@ -243,25 +252,55 @@ class TestStage0Publication(unittest.TestCase):
         the supervisor does not synthesize a wakeup after recovery, the
         committed result is stranded and the stream is short.
 
-        This is the S2 case; it is expected to FAIL until the recovery
-        wakeup lands, and is marked expectedFailure so it flips to
-        unexpected success when it does.
+        The handshake here is deliberately NON-PUBLISHING: the worker
+        wakes the drain with frontier 0, which excludes the record just
+        committed, waits for the drain to confirm it is alive and has
+        nothing new to move, and only then dies. No notification carrying
+        this record's bytes is ever sent before the death, so the
+        supervisor's synthetic post-recovery wakeup is the ONLY path that
+        can deliver it.
+
+        An earlier version of this test published the record's real
+        frontier and waited for the drain to forward it. That proved an
+        ordinary notification works -- the opposite of the property under
+        test -- and a lost-notification test that sends the notification
+        cannot fail when the notification is lost.
         """
-        proc, blob = self.run_launcher("before_notify", handshake=True)
+        marker = self._fresh_marker("before_notify.marker")
+        old = os.environ.get("FORKRUN_TEST_DIE_BEFORE_NOTIFY_MARK")
+        os.environ["FORKRUN_TEST_DIE_BEFORE_NOTIFY_MARK"] = marker
+        try:
+            proc, blob = self.run_launcher("before_notify", handshake=True)
+        finally:
+            if old is None:
+                os.environ.pop("FORKRUN_TEST_DIE_BEFORE_NOTIFY_MARK", None)
+            else:
+                os.environ["FORKRUN_TEST_DIE_BEFORE_NOTIFY_MARK"] = old
+
         recs = parse(blob)
+        print("\n  before_notify stream: %r"
+              % ([(i, NAME.get(d, d)) for i, d, _p in recs],))
+
+        # Positive evidence the injected death-before-notification
+        # actually happened. Without it this test passes whenever the
+        # ordinary notification works, which is the case it must exclude.
+        self.assertTrue(os.path.exists(marker),
+                        "the death-before-notification was never injected, "
+                        "so this run cannot demonstrate lost-notification "
+                        "recovery")
+
         self.assertNotEqual(
             97, proc.returncode,
             "handshake never completed (rc 97): the drain was never "
-            "confirmed to have forwarded the committed record")
-        print("\n  before_notify stream: %r"
-              % ([(i, NAME.get(d, d)) for i, d, _p in recs],))
+            "confirmed alive, so the test did not exercise the window")
+
         by_batch = {i for i, _d, _p in recs}
         missing = sorted(set(range(BATCHES)) - by_batch)
         self.assertEqual(
             [], missing,
             "COMPLETENESS VIOLATION: batches %r committed but were never "
-            "delivered. The commit succeeded and the notification was lost, "
-            "so recovery must issue a synthetic wakeup for this worker."
+            "delivered. No notification ever carried their bytes, so the "
+            "supervisor's synthetic post-recovery wakeup must have."
             % (missing,))
 
 

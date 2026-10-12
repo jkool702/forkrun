@@ -242,6 +242,93 @@ class TestStage0Matrix(unittest.TestCase):
         self.assertEqual(sorted(range(BATCHES)), sorted(seen),
                          "batches missing a terminal record")
 
+    def _run_one_shot(self, func):
+        """Kill EXACTLY ONE attempt in the whole run, before its commit,
+        then let recovery succeed. Returns (proc, records, invocations)."""
+        self.setUp() if not hasattr(self, "d") else None
+        once = os.path.join(self.d, "died_once.marker")
+        if os.path.exists(once):
+            os.unlink(once)
+        env_backup = os.environ.get("FORKRUN_TEST_DIE_BEFORE_ACK_ONCE")
+        os.environ["FORKRUN_TEST_DIE_BEFORE_ACK_ONCE"] = once
+        try:
+            proc, blob = self.run_launcher(func, mode="before_ack",
+                                           delay_ms=0)
+        finally:
+            if env_backup is None:
+                os.environ.pop("FORKRUN_TEST_DIE_BEFORE_ACK_ONCE", None)
+            else:
+                os.environ["FORKRUN_TEST_DIE_BEFORE_ACK_ONCE"] = env_backup
+        # Positive evidence the one-shot death actually happened.
+        self.assertTrue(os.path.exists(once),
+                        "the one-shot death never fired, so this run cannot "
+                        "show a successful retry winning")
+        return proc, parse(blob), self._attempts()
+
+    # -- complementary case: the SUCCESSFUL retry's content wins -------
+
+    def test_successful_retry_content_wins_same_size(self):
+        """Attempt 1 writes a distinct same-sized payload and dies before
+        commit. Attempt 2 commits a different payload of the SAME length.
+        The caller must receive attempt 2's bytes -- a drain keyed on size
+        rather than the committed frontier would suppress attempt 2 and
+        leave attempt 1's visible.
+        """
+        proc, recs, attempts = self._run_one_shot("same_len")
+        # Exactly one extra invocation: the attempt that died. If the
+        # death never fired there would be BATCHES invocations, and the
+        # "retry won" claim below would be vacuous.
+        self.assertEqual(BATCHES + 1, attempts,
+                         "expected exactly one killed attempt (%d "
+                         "invocations for %d batches)" % (attempts, BATCHES))
+        data = [(i, p) for i, d, p in recs if d == DISP_DATA]
+        self.assertTrue(data, "no DATA delivered at all")
+        by_batch = {}
+        for i, _d, p in recs:
+            by_batch.setdefault(i, []).append(p)
+        dupes = {i: len(v) for i, v in by_batch.items() if len(v) > 1}
+        self.assertEqual({}, dupes,
+                         "a batch was delivered more than once: %r" % dupes)
+        for i, payloads in by_batch.items():
+            self.assertEqual(1, len(payloads))
+        # The abandoned attempt's bytes must never reach the caller. The
+        # UDF encodes its attempt number, so the FIRST attempt's payload
+        # is identifiable -- and it is the one that died uncommitted.
+        first = [p for _i, p in data if p.startswith(b"attempt0001")]
+        self.assertEqual(
+            [], first,
+            "STALE CONTENT: the abandoned first attempt's payload %r was "
+            "published. Its bytes were written before the commit and must "
+            "never become visible." % (first,))
+
+    def test_successful_retry_content_wins_different_size(self):
+        """Same, with a payload whose LENGTH changes per attempt."""
+        proc, recs, attempts = self._run_one_shot("diff_len")
+        self.assertEqual(BATCHES + 1, attempts,
+                         "expected exactly one killed attempt (%d "
+                         "invocations for %d batches)" % (attempts, BATCHES))
+        first = [p for _i, _d, p in recs if p == b"x" * 4 + b"!"]
+        self.assertEqual(
+            [], first,
+            "STALE CONTENT: the abandoned first attempt's payload %r was "
+            "published; the retry's differently-sized record should have "
+            "replaced it" % (first,))
+        total = sum(_HDR.size + len(p) for _i, _d, p in recs)
+        self.assertEqual(len(self._read_out()), total,
+                         "stream not exactly consumed -- the suppressed or "
+                         "duplicated record left a framing artifact")
+        dupes = {}
+        seen = {}
+        for i, _d, p in recs:
+            seen.setdefault(i, []).append(p)
+        dupes = {i: len(v) for i, v in seen.items() if len(v) > 1}
+        self.assertEqual({}, dupes,
+                         "a batch was delivered more than once: %r" % dupes)
+
+    def _read_out(self):
+        with open(self.out, "rb") as fh:
+            return fh.read()
+
     # -- rollback frontier invariant ----------------------------------
 
     def test_rollback_never_truncates_past_the_committed_frontier(self):
