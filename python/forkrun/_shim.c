@@ -1698,6 +1698,41 @@ int fr_py_notify_committed(int signal_fd, int out_fd, uint64_t wid)
         return 0;
     if (out_fd < 0)
         return -1;
+
+    /* STAGE0 fault injection: fail the notification once per process,
+     * AFTER the commit. This is the interval where a batch is committed
+     * but the drain was never told, and it is the one case where a
+     * caller mishandling the return value re-executes committed work --
+     * a duplicate-execution bug introduced by the fix itself. The
+     * recovery state machine must classify the worker's death as IDLE
+     * ("committed, nothing in flight") and NOT retry the batch.
+     *
+     * Inert unless the variable is set. */
+    {
+        const char *f = getenv("FORKRUN_TEST_NOTIFY_FAIL_ONCE");
+        if (f != NULL && *f) {
+            static int fired = 0;
+            if (!fired) {
+                fired = 1;
+                /* Leave positive evidence the fault fired. A test that
+                 * cannot tell whether it injected anything is the exact
+                 * vacuous shape that produced a wrong conclusion earlier
+                 * in this work. */
+                {
+                    const char *m = getenv("FORKRUN_TEST_NOTIFY_FAIL_MARK");
+                    if (m != NULL && *m) {
+                        int mf = open(m, O_WRONLY | O_CREAT | O_APPEND, 0600);
+                        if (mf >= 0) {
+                            ssize_t ig = write(mf, "F\n", 2);
+                            (void)ig;
+                            close(mf);
+                        }
+                    }
+                }
+                return FR_PY_ERR_NOTIFY;   /* committed, unnotified */
+            }
+        }
+    }
     frontier = lseek(out_fd, 0, SEEK_END);
     if (frontier == (off_t)-1)
         return -1;
