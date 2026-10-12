@@ -286,6 +286,7 @@ class TestStage0Matrix(unittest.TestCase):
         by_batch = {}
         for i, _d, p in recs:
             by_batch.setdefault(i, []).append(p)
+        seen = set(by_batch)
         dupes = {i: len(v) for i, v in by_batch.items() if len(v) > 1}
         self.assertEqual({}, dupes,
                          "a batch was delivered more than once: %r" % dupes)
@@ -300,6 +301,26 @@ class TestStage0Matrix(unittest.TestCase):
             "STALE CONTENT: the abandoned first attempt's payload %r was "
             "published. Its bytes were written before the commit and must "
             "never become visible." % (first,))
+
+        # ...and the complementary claim: the SUCCESSFUL attempt's exact
+        # payload IS delivered. Asserting only that the abandoned bytes are
+        # absent would pass in a run where the retried batch's record was
+        # simply missing, as long as other batches supplied some DATA.
+        winning = [p for _i, p in data if p == b"attempt0002."]
+        self.assertEqual(
+            1, len(winning),
+            "the successful retry's payload b'attempt0002.' was not "
+            "delivered exactly once (got %r). Proving the abandoned "
+            "attempt lost is not the same as proving the committed one "
+            "won." % (data,))
+        for i, disp, p in recs:
+            if p == b"attempt0002.":
+                self.assertEqual(DISP_DATA, disp,
+                                 "the winning payload must be DATA, got %s"
+                                 % NAME.get(disp))
+        self.assertEqual(sorted(range(BATCHES)), sorted(seen),
+                         "batch-index set incomplete: %r"
+                         % (sorted(seen),))
 
     def test_successful_retry_content_wins_different_size(self):
         """Same, with a payload whose LENGTH changes per attempt."""
@@ -317,13 +338,25 @@ class TestStage0Matrix(unittest.TestCase):
         self.assertEqual(len(self._read_out()), total,
                          "stream not exactly consumed -- the suppressed or "
                          "duplicated record left a framing artifact")
-        dupes = {}
         seen = {}
         for i, _d, p in recs:
             seen.setdefault(i, []).append(p)
         dupes = {i: len(v) for i, v in seen.items() if len(v) > 1}
         self.assertEqual({}, dupes,
                          "a batch was delivered more than once: %r" % dupes)
+        self.assertEqual(sorted(range(BATCHES)), sorted(seen),
+                         "batch-index set incomplete: %r" % (sorted(seen),))
+        # The successful retry's exact, differently-sized payload must be
+        # present -- absence of the abandoned one is not enough.
+        winning = [(i, d, p) for i, d, p in recs
+                   if p == b"x" * 8 + b"!"]
+        self.assertEqual(
+            1, len(winning),
+            "the successful retry's payload b'xxxxxxxx!' was not delivered "
+            "exactly once (got %r)" % ([(i, NAME.get(d, d), p)
+                                        for i, d, p in recs],))
+        self.assertEqual(DISP_DATA, winning[0][1],
+                         "the winning payload must be DATA")
 
     def _read_out(self):
         with open(self.out, "rb") as fh:

@@ -884,6 +884,24 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
             return -1;
         left -= (uint64_t)n;
     }
+
+    /* W-PY29: the COMPLETE record is durable -- header AND body.
+     *
+     * Advanced HERE, not by the caller, and unconditionally. Two caller
+     * shapes got this wrong:
+     *   - one advanced only `if (cap_len > 0)` while this framer ALWAYS
+     *     writes a header, so a zero-payload NO_RESULT record left the
+     *     rollback frontier behind. Recovery then truncated to a stale
+     *     output_start and destroyed an already-committed terminal
+     *     record -- which the drain's cursor had already moved past.
+     *   - one skipped the emit entirely on cap_len == 0, so a successful
+     *     command with empty stdout produced NO terminal record at all,
+     *     and an ordered consumer waited forever on a batch that had in
+     *     fact finished.
+     *
+     * Making the framer responsible removes the whole class: a caller
+     * cannot forget an advance it no longer performs. */
+    worker_txn_advance_output(-1, FR_PY_RECORD_FOOTPRINT(src_len));
     return 0;
 }
 
@@ -1288,11 +1306,13 @@ int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len,
                 cap_len = (uint64_t)st.st_size;
             /* fr_py_emit_record with len 0 emits nothing (v0 parity:
              * empty output is no record, not an empty record). */
+            /* STAGE0: emitted unconditionally. cap_len == 0 is a real
+             * completed batch with no output, and it gets a NO_RESULT
+             * terminal record -- without one, an ordered consumer waits
+             * forever on a batch that has finished. The frontier advance
+             * lives inside the framer. */
             if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0)
                 erc = -3;
-            else if (cap_len > 0)
-                /* W-PY29: complete record durable — advance frontier. */
-                worker_txn_advance_output(-1, FR_PY_RECORD_FOOTPRINT(cap_len));
             return erc;
         }
         return code; /* retryable command failure */
@@ -1513,12 +1533,12 @@ static int fr_py_plugin_invoke(int ingress_fd, int out_fd,
 
     if (fstat(cap_fd, &st) == 0 && st.st_size > 0)
         cap_len = (uint64_t)st.st_size;
-    if (cb_ret == 0 && cap_len > 0) {
-        if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0) {
+    /* STAGE0: emitted unconditionally on success, so an empty-stdout
+     * command still gets its NO_RESULT terminal record. The frontier
+     * advance lives inside the framer. */
+    if (cb_ret == 0) {
+        if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0)
             return -1;
-        }
-        /* W-PY29: complete record durable — advance frontier. */
-        worker_txn_advance_output(wid, FR_PY_RECORD_FOOTPRINT(cap_len));
     }
 
     /* ring_call truncation rule: nonzero → &0xFF, never silent 0. */
@@ -1740,9 +1760,7 @@ int fr_py_notify_committed(int signal_fd, int out_fd, uint64_t wid)
     int rc;
 
     if (signal_fd < 0)
-        return 0;
-    if (out_fd < 0)
-        return -1;
+        return 0;         /* no notification requested: nothing to do */
 
     /* STAGE0 fault injection: fail the notification once per process,
      * AFTER the commit. This is the interval where a batch is committed
@@ -1778,9 +1796,39 @@ int fr_py_notify_committed(int signal_fd, int out_fd, uint64_t wid)
             }
         }
     }
+    /* Every failure below is POST-COMMIT: the transaction is already
+     * TXN_IDLE, so each is "committed, unnotified" and must be reported
+     * as FR_PY_ERR_NOTIFY. Returning a plain -1 would let it be confused
+     * with a pre-commit failure, and a caller that retries on those would
+     * re-execute committed work. */
+    if (out_fd < 0)
+        return FR_PY_ERR_NOTIFY;
+
+    /* STAGE0 TEST-ONLY: exercise the REAL signal-write failure instead of
+     * a synthetic return. Closing only THIS process's duplicate of
+     * signal_fd makes write() fail with EBADF while the drain and the
+     * launcher's spare writer stay open -- so the supervisor can still
+     * send its synthetic recovery wakeup, which is the entire point of
+     * the case. Nothing is killed here; the real notifier runs and fails
+     * on its own.
+     *
+     * Inert unless the variable is set. */
+    if (getenv("FORKRUN_TEST_CLOSE_SIGNAL_FD") != NULL) {
+        const char *m = getenv("FORKRUN_TEST_NOTIFY_FAIL_MARK");
+        if (m != NULL && *m) {
+            int mf = open(m, O_WRONLY | O_CREAT | O_APPEND, 0600);
+            if (mf >= 0) {
+                ssize_t ig = write(mf, "C\n", 2);
+                (void)ig;
+                close(mf);
+            }
+        }
+        close(signal_fd);
+    }
+
     frontier = lseek(out_fd, 0, SEEK_END);
     if (frontier == (off_t)-1)
-        return -1;
+        return FR_PY_ERR_NOTIFY;
     rc = fr_py_signal_write(signal_fd, wid, (uint64_t)frontier);
     if (rc != 0)
         return FR_PY_ERR_NOTIFY;
@@ -1949,6 +1997,9 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
     fr_py_ack_init(out_fd);
     while (1) {
         off_t end = (off_t)-1;
+        /* STAGE0: set when the sendfile sub-path fell back to the
+         * framer, which then owns the frontier advance. */
+        int via_framer = 0;
         off_t woff;
         uint64_t left;
 
@@ -2033,16 +2084,25 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
                                           ingress_fd, claimed.offset,
                                           claimed.length) != 0)
                         goto payload_error;
+                    /* The framer advanced the frontier itself (STAGE0);
+                     * suppress the sendfile sub-path's advance below so
+                     * it is not counted twice. */
+                    via_framer = 1;
                     break;
                 }
                 if (n == 0)
                     goto payload_error; /* short: retry, don't emit */
                 left -= (uint64_t)n;
             }
-            /* W-PY29: header + full body durable (both the sendfile
-             * and the emit_record-fallback sub-paths converge here on
-             * success) — advance the rollback frontier once. */
-            worker_txn_advance_output(wid, FR_PY_RECORD_FOOTPRINT(claimed.length));
+            /* The sendfile sub-path framed its own header inline, so it
+             * advances here. The fr_py_emit_record fallback advances
+             * inside the framer since STAGE0 -- advancing again would
+             * double-count and leave the frontier pointing PAST the real
+             * end of the memfd, which is worse than the stale-frontier
+             * bug it replaced. */
+            if (!via_framer)
+                worker_txn_advance_output(wid,
+                                          FR_PY_RECORD_FOOTPRINT(claimed.length));
         }
 
         /* STAGE0: no signal here.

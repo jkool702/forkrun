@@ -94,25 +94,42 @@ class TestPostCommitNotifyFailure(unittest.TestCase):
         with open(self.log) as fh:
             return [ln.strip() for ln in fh if ln.strip()]
 
-    def _run(self, fail_notify):
+    def _run(self, fail_notify, real_write_failure=False):
         old = self._set(FORKRUN_CLEANROOM="1")
         self.mark = os.path.join(self.d, "notify_fail.marker")
         if os.path.exists(self.mark):
             os.unlink(self.mark)
-        if fail_notify:
+        # The two faults are alternatives, not stacked: FAIL_ONCE returns
+        # before attempting the write, so leaving it set alongside
+        # CLOSE_SIGNAL_FD would mean the real write path is never reached.
+        if fail_notify and not real_write_failure:
             os.environ["FORKRUN_TEST_NOTIFY_FAIL_ONCE"] = "1"
             os.environ["FORKRUN_TEST_NOTIFY_FAIL_MARK"] = self.mark
         else:
             os.environ.pop("FORKRUN_TEST_NOTIFY_FAIL_ONCE", None)
+        if fail_notify:
+            os.environ["FORKRUN_TEST_NOTIFY_FAIL_MARK"] = self.mark
+        else:
+            os.environ.pop("FORKRUN_TEST_NOTIFY_FAIL_ONCE", None)
             os.environ.pop("FORKRUN_TEST_NOTIFY_FAIL_MARK", None)
+        if real_write_failure:
+            # Close only the worker's duplicate of signal_fd, so the REAL
+            # write() fails with EBADF while the drain and the launcher's
+            # spare writer stay alive and the supervisor can still send
+            # its synthetic recovery wakeup.
+            os.environ["FORKRUN_TEST_CLOSE_SIGNAL_FD"] = "1"
+        else:
+            os.environ.pop("FORKRUN_TEST_CLOSE_SIGNAL_FD", None)
         try:
             return list(forkrun.stream(
                 "px_udf:up", self.src, streaming=True, mode="udf",
                 workers=1, nodes=1, output="bytes", lines=1))
         finally:
             self._restore(old)
-            os.environ.pop("FORKRUN_TEST_NOTIFY_FAIL_ONCE", None)
-            os.environ.pop("FORKRUN_TEST_NOTIFY_FAIL_MARK", None)
+            for k in ("FORKRUN_TEST_NOTIFY_FAIL_ONCE",
+                      "FORKRUN_TEST_NOTIFY_FAIL_MARK",
+                      "FORKRUN_TEST_CLOSE_SIGNAL_FD"):
+                os.environ.pop(k, None)
 
     # -- control -------------------------------------------------------
 
@@ -157,6 +174,44 @@ class TestPostCommitNotifyFailure(unittest.TestCase):
                          joined,
                          "not every batch was delivered to the caller "
                          "(got %d bytes)" % len(joined))
+
+
+    def test_real_signal_write_failure_is_recovered_not_retried(self):
+        """The REAL write() path, not a synthetic return.
+
+        FORKRUN_TEST_CLOSE_SIGNAL_FD closes only this worker's duplicate of
+        signal_fd, so fr_py_notify_committed() performs a genuine write
+        that fails with EBADF. The drain and the launcher's spare writer
+        remain open, so the supervisor's synthetic post-recovery wakeup can
+        still deliver the committed record.
+
+        Requires the same outcome as the synthetic case: the committed
+        batch is delivered exactly once and never re-executed.
+        """
+        got = self._run(fail_notify=True, real_write_failure=True)
+        inv = self._invocations()
+        self.assertTrue(inv, "the UDF never ran; nothing was exercised")
+
+        # Positive evidence the REAL failure path was taken: the notifier
+        # writes 'C' (as opposed to 'F' for the synthetic early return).
+        with open(self.mark) as fh:
+            marks = fh.read()
+        self.assertIn("C", marks,
+                      "the real signal-write failure was never exercised; "
+                      "marker held only %r" % marks)
+
+        dupes = sorted({ln for ln in inv if inv.count(ln) > 1})
+        self.assertEqual(
+            [], dupes,
+            "DUPLICATE EXECUTION after a real notification write failure: "
+            "%r appeared more than once. The commit had already happened, "
+            "so the batch must not run again." % (dupes,))
+
+        joined = b"".join(g for g in got if g).decode()
+        self.assertEqual("".join("LINE%06d\n" % i for i in range(BATCHES)),
+                         joined,
+                         "the committed batch was not delivered exactly "
+                         "once (got %d bytes)" % len(joined))
 
 
 if __name__ == "__main__":

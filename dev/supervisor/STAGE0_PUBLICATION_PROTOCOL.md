@@ -510,6 +510,15 @@ Implementation: **`06235e11`** and the follow-up test commits on
   `fr_py_complete(-1, …)`, verified to return immediately when
   `signal_fd < 0`. Left alone, `POISONED`/`SKIPPED` would have been
   committed and never announced.
+* A **fourth output writer**: `fr_py_exec_spawn()` advanced the frontier
+  only `if (cap_len > 0)`, while `fr_py_emit_record()` always writes a
+  header. Two sites in that one function were wrong in opposite ways —
+  one emitted a zero-payload `NO_RESULT` record without advancing, so
+  recovery truncated to a stale `output_start` and destroyed an
+  already-committed record; the other skipped the emit entirely, so a
+  successful command with empty stdout produced **no terminal record at
+  all**. The advance is now **centralised inside the framer**, so no
+  caller can omit one it no longer performs.
 * The **splice POISONED branch** was missed by that scan *twice*: once
   when the splice conversion was lost to a truncation-and-restore, and
   once because the branch uses `fr_py_ack` rather than
@@ -519,7 +528,19 @@ Implementation: **`06235e11`** and the follow-up test commits on
 
 An emitter audit is only as good as the set it enumerates. "Every caller
 of the two known entry points" is weaker than "every site that writes to
-an output memfd".
+an output memfd" — and the spawn defect was worse than a missing
+notification: it was a **wrong frontier**, which corrupts rollback rather
+than merely losing a wakeup.
+
+**Coverage limit stated plainly.** `test_stage0_spawn_frontier.py` proves
+the silent-command record exists and is framed. It does **not** observe
+the frontier itself: `worker_output_end` is worker-local TLS with no
+accessor, and reverting the advance leaves those tests passing. The
+advance is guaranteed structurally (centralised in the framer) and
+behaviourally by the launcher-backed suites that do observe rollback. A
+true end-to-end spawn-rollback test needs the C spawn loop under
+supervision with a real drain; the launcher serves plugin and UDF only,
+so that harness does not exist yet.
 
 ### 9.2 Test evidence
 
