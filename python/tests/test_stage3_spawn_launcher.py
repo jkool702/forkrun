@@ -166,17 +166,19 @@ class TestLauncherDescriptor(unittest.TestCase):
             "group signalling must not read a slot that can already be "
             "cleared -- that ordering made it a silent no-op")
 
-    def test_spawn_envelope_is_still_declined(self):
-        """Stage 3 is plumbing. Activation waits on the lifecycle gates:
-        an orphaned-child test on worker death, recovery/respawn,
-        fail-fast, and launcher teardown."""
+    def test_spawn_envelope_is_served_with_its_gates_named(self):
+        """Activation is gated on the lifecycle tests, so the gate and its
+        evidence are asserted together. A future removal of the envelope
+        should have to delete this too, and the comment above the gate
+        names what it depends on."""
         src = open(os.path.join(_ROOT, "python", "forkrun", "run.py")).read()
         m = re.search(r"def _cleanroom_eligible\(.*?\n(?=def )", src, re.S)
         self.assertIsNotNone(m)
         body = m.group(0)
-        self.assertIn('if raw_mode not in ("plugin", "udf"):', body,
-                      "the spawn envelope must remain declined until its "
-                      "lifecycle gates are covered by tests")
+        self.assertIn('"plugin", "udf", "spawn"', body,
+                      "the spawn envelope should be served")
+        self.assertIn("test_stage3_lifecycle.py", body,
+                      "the gate must name the test that covers it")
 
 
 if __name__ == "__main__":

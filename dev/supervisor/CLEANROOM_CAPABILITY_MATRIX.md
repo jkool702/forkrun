@@ -12,8 +12,8 @@ neither alone would be.
 | | |
 |---|---|
 | Cells enumerated | 20160 |
-| Served by the launcher | 192 (0.95%) |
-| Declined | 19968 |
+| Served by the launcher | 288 (1.43%) |
+| Declined | 19872 |
 | Distinct outcomes | 9 |
 
 ---
@@ -61,14 +61,14 @@ the enumeration produces no `UNCLASSIFIED` cell.
 | # | outcome | cells | example |
 |---|---|---|---|
 | 1 | `DECLINE_NODES` | 13440 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=2, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 2 | `DECLINE_MODE` | 4032 | `Facts(kind='map', source_kind='path', mode='python', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 3 | `DECLINE_RESUME` | 1344 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
-| 4 | `DECLINE_ORDER` | 896 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 5 | `SERVED` | 192 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 6 | `DECLINE_STREAM_ORDER` | 112 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 7 | `DECLINE_SOURCE_MISSING` | 48 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 8 | `DECLINE_SOURCE_DIR` | 48 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 9 | `DECLINE_SOURCE_TYPE` | 48 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 2 | `DECLINE_MODE` | 2688 | `Facts(kind='map', source_kind='path', mode='python', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 3 | `DECLINE_RESUME` | 2016 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
+| 4 | `DECLINE_ORDER` | 1344 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 5 | `SERVED` | 288 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 6 | `DECLINE_STREAM_ORDER` | 168 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 7 | `DECLINE_SOURCE_MISSING` | 72 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 8 | `DECLINE_SOURCE_DIR` | 72 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 9 | `DECLINE_SOURCE_TYPE` | 72 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 
 ## The oracle's rules
 
@@ -77,7 +77,7 @@ Evaluated **first-match-wins**. Each is the contract's own words.
 - **R1 `nodes`** &rarr; `DECLINE_NODES`  
   docstring: 'UMA single node -- no multi-node rings'
 - **R2 `mode`** &rarr; `DECLINE_MODE`  
-  docstring: 'mode=plugin -- it dlopens an object and calls an entry point'; and the plugin must export forkrun_use_ctx, since a plugin without it is driven by the legacy ARGV/stdout route whose output lands on the worker's stdout, not the memfd -- exit 78, not silent success with an empty result set. P1-3 adds mode='udf', served wherever plugin is: the launcher dlopens a per-minor helper, initialises the interpreter before forking, and selects fr_py_worker_udf_loop, which has the same signature and the same lifecycle. The refusal reason does not transfer -- a UDF has no ctx dialect to be mismatched on -- but the envelope is identical, so the outcome is too.
+  docstring: 'mode=plugin -- it dlopens an object and calls an entry point'; and the plugin must export forkrun_use_ctx, since a plugin without it is driven by the legacy ARGV/stdout route whose output lands on the worker's stdout, not the memfd -- exit 78, not silent success with an empty result set. P1-3 adds mode='udf', served wherever plugin is: the launcher dlopens a per-minor helper, initialises the interpreter before forking, and selects fr_py_worker_udf_loop, which has the same signature and the same lifecycle. The refusal reason does not transfer -- a UDF has no ctx dialect to be mismatched on -- but the envelope is identical, so the outcome is too. Stage 3 adds mode='spawn', whose worker loop takes an argv VECTOR rather than the plugin's two strings. Same arity, incompatible types, so the launcher routes it through a mode-specific worker descriptor instead of casting. It is served only once the process-lifecycle gates held: in-group descendant cleanup on worker death, a tested setsid-escape boundary, observed respawn, teardown cleanup, and command failure handled by on_error with an explicit SKIPPED record rather than an infrastructure abort. All six are in test_stage3_lifecycle.py.
 - **R4 `order`** &rarr; `DECLINE_ORDER`  
   docstring: 'order in (none, index)'. The launcher forks no C orderer, but does not need to: collect_records sorts by index for map, and stream reassembles parent-side from the batch_idx already in the framing
 - **R5 `resume/checkpoint`** &rarr; `DECLINE_RESUME`  

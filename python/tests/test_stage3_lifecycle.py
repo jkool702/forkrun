@@ -244,6 +244,157 @@ class TestProcessGroupLifecycle(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 proc.kill()
 
+    def _children(self, pid):
+        try:
+            return [int(k) for k in
+                    open("/proc/%d/task/%d/children" % (pid, pid)).read().split()]
+        except OSError:
+            return []
+
+    def _worker_pids(self, launcher_pid):
+        """Every child that leads its own process group, i.e. workers."""
+        out = []
+        for k in self._children(launcher_pid):
+            try:
+                if os.getpgid(k) == k:
+                    out.append(k)
+            except OSError:
+                pass
+        return out
+
+    def test_supervisor_respawns_after_a_worker_death(self):
+        """Separate from cleanup, and worth proving on its own.
+
+        The reviewer asked for explicit evidence of death OBSERVATION
+        and the respawn decision, separate from whether descendants were
+        cleaned up. My earlier diagnosis conflated the two and was wrong:
+        the supervisor does observe the death (waitpid(-1, &st, 0)) and
+        does respawn -- it was the group signal that no-oped.
+
+        So this asserts supervision directly: after a worker is killed, a
+        DIFFERENT worker pid appears in the same launcher.
+        """
+        proc = self._launch(SPAWNER, extra=["--supervise", "recover"])
+        first = None
+        try:
+            pid = self._read_pid()
+            self.assertIsNotNone(pid, "the command never ran")
+            workers = self._worker_pids(proc.pid)
+            self.assertTrue(workers, "no worker found in the launcher")
+            first = workers[0]
+
+            os.kill(first, signal.SIGKILL)
+
+            deadline = time.time() + 15.0
+            replacement = None
+            while time.time() < deadline:
+                for w in self._worker_pids(proc.pid):
+                    if w != first:
+                        replacement = w
+                        break
+                if replacement:
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(
+                replacement,
+                "no replacement worker appeared: the supervisor did not "
+                "observe the death of pid %d" % first)
+            self.assertNotEqual(first, replacement)
+        finally:
+            for w in self._worker_pids(proc.pid):
+                self._cleanup(w)
+            self._cleanup(pid)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def test_teardown_kills_the_command_descendant(self):
+        """At launcher teardown, a still-running command's descendants
+        must not outlive the run."""
+        proc = self._launch(SPAWNER, extra=["--supervise", "recover"])
+        pid = None
+        try:
+            pid = self._read_pid()
+            self.assertIsNotNone(pid, "the command never ran")
+            # Tear the run down while the command is mid-sleep.
+            for w in self._worker_pids(proc.pid):
+                self._cleanup(w)
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+            deadline = time.time() + 10.0
+            gone = False
+            while time.time() < deadline:
+                if not _pid_alive(pid):
+                    gone = True
+                    break
+                time.sleep(0.05)
+            self.assertTrue(
+                gone,
+                "command pid %d outlived the launcher" % pid)
+        finally:
+            self._cleanup(pid)
+
+    def test_infrastructure_failure_is_distinct_from_command_failure(self):
+        """A command that cannot be executed must surface as a command
+        failure (poison/skip per on_error), not as an infrastructure
+        abort of the whole run.
+
+        Without a binary at that path the spawn loop's exec fails; the
+        batch should be handled by the ordinary on_error policy rather
+        than taking the launcher down.
+        """
+        # A REAL result descriptor. An earlier version passed --result -2
+        # as a placeholder, which made the drain fail immediately with
+        # "drain child died" -- so the test was measuring a broken
+        # harness and reporting it as a command-failure escalation.
+        out = os.path.join(self.d, "infra.bin")
+        sfd = os.open(self.src, os.O_RDONLY)
+        ofd = os.open(out, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            proc = subprocess.run(
+                [LAUNCHER, "--so", find_substrate(),
+                 "--workers", "1", "--lines", "1", "--bytes", "0",
+                 "--on-error", "1", "--retry", "1",
+                 "--src", str(sfd), "--result", str(ofd),
+                 "--stats-fd", "-1",
+                 "--spawn-argv", "/nonexistent/forkrun-no-such-binary"],
+                pass_fds=(sfd, ofd), capture_output=True, timeout=90)
+        finally:
+            os.close(sfd)
+            os.close(ofd)
+        # What must hold, precisely:
+        #   * it is NOT escalated to an infrastructure abort;
+        #   * each skipped batch carries an explicit SKIPPED terminal
+        #     record, so a consumer can tell "skipped" from "never ran"
+        #     and from "produced no output";
+        #   * the run completes under on_error=skip, which is the
+        #     DOCUMENTED policy for a failing command.
+        #
+        # An earlier version asserted a nonzero exit, which was wrong:
+        # skip semantics mean the run succeeds with those batches
+        # skipped. Asserting otherwise would have demanded that a command
+        # failure be reported as a run failure -- the opposite of the
+        # on_error contract.
+        self.assertEqual(0, proc.returncode,
+                         "on_error=skip should let the run complete: %r"
+                         % proc.stderr[-300:])
+        self.assertNotIn(b"fatal", proc.stderr.lower(),
+                         "a command failure was escalated to an "
+                         "infrastructure abort: %r" % proc.stderr[-300:])
+        expected = sum(1 for _ in open(self.src))
+        with open(out, "rb") as fh:
+            recs = _records(fh.read())
+        self.assertEqual(expected, len(recs),
+                         "every batch must reach a terminal outcome")
+        for i, disp, _p in recs:
+            self.assertEqual(2, disp,
+                             "batch %d should be SKIPPED, got disposition %d"
+                             % (i, disp))
+
     # -- positive output -----------------------------------------------
 
     def test_spawn_through_the_launcher_produces_records(self):

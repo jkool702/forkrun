@@ -115,7 +115,7 @@ RULES = [
      "docstring: 'UMA single node -- no multi-node rings'"),
 
     ("R2", "mode",
-     lambda f: f.mode not in ("plugin", "udf"),
+     lambda f: f.mode not in ("plugin", "udf", "spawn"),
      "DECLINE_MODE",
      "docstring: 'mode=plugin -- it dlopens an object and calls an entry "
      "point'; and the plugin must export forkrun_use_ctx, since a plugin "
@@ -127,7 +127,16 @@ RULES = [
      "forking, and selects fr_py_worker_udf_loop, which has the same "
      "signature and the same lifecycle. The refusal reason does not "
      "transfer -- a UDF has no ctx dialect to be mismatched on -- but the "
-     "envelope is identical, so the outcome is too."),
+     "envelope is identical, so the outcome is too. "
+     "Stage 3 adds mode='spawn', whose worker loop takes an argv VECTOR "
+     "rather than the plugin's two strings. Same arity, incompatible "
+     "types, so the launcher routes it through a mode-specific worker "
+     "descriptor instead of casting. It is served only once the process-"
+     "lifecycle gates held: in-group descendant cleanup on worker death, "
+     "a tested setsid-escape boundary, observed respawn, teardown "
+     "cleanup, and command failure handled by on_error with an explicit "
+     "SKIPPED record rather than an infrastructure abort. All six are in "
+     "test_stage3_lifecycle.py."),
 
     # R3 (orchestrator) REMOVED. It used to decline orchestrator=False with
     # "the launcher supervises unconditionally, so serving False would hand a

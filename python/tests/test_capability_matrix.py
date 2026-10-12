@@ -127,11 +127,20 @@ class TestCoverage(_MatrixBase):
 
         Guards against an axis silently losing its effect, which would make
         the entire matrix resolve to SERVED and pass every other test here.
+        The question it asks is "did something stop constraining the
+        matrix?", not "is this number small?".
+
+        The bound was raised from 1% to 5% when Stage 3 served
+        mode='spawn', taking the fraction from 0.95% to 1.43%. Three
+        served execution modes out of a nine-axis cross-product is not an
+        axis losing its effect -- the remaining axes (multi-node, ordered
+        STREAMING, resume, NUMA, ...) still decline, and a genuine loss of
+        one would push the fraction far higher than 5%.
         """
         all_cells = cells()
         served = sum(1 for c in all_cells if c[1])
         frac = served / len(all_cells)
-        self.assertTrue(0 < frac < 0.01,
+        self.assertTrue(0 < frac < 0.05,
                         "served fraction %.4f looks wrong; an axis may have "
                         "lost its effect" % frac)
 

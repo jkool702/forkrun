@@ -726,8 +726,26 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
     # envelope, same supervision. It differs only in WHICH loop the
     # launcher selects (fr_py_worker_udf_loop) and that an interpreter is
     # initialised pre-fork. P1-3.
-    if raw_mode not in ("plugin", "udf"):
-        return False, "mode='plugin' or mode='udf' only (got %r)" % (raw_mode,)
+    # Stage 3: spawn is served for materialized sources too, alongside
+    # plugin and udf. Its worker loop takes an argv VECTOR, not the
+    # plugin's two strings, so the launcher routes it through a
+    # mode-specific descriptor rather than the plugin callback -- same
+    # arity, incompatible types, and a cast would be undefined behaviour.
+    #
+    # Served only once the lifecycle gates held:
+    #   - a killed worker's command descendants die with its process
+    #     group (in-group cleanup);
+    #   - a descendant that calls setsid() is explicitly OUTSIDE that
+    #     guarantee, and that boundary is pinned by a test;
+    #   - the supervisor observes the death and respawns;
+    #   - teardown kills the group;
+    #   - a command failure is handled by the on_error policy with an
+    #     explicit SKIPPED record, not escalated to an infrastructure
+    #     abort.
+    # All six are in test_stage3_lifecycle.py.
+    if raw_mode not in ("plugin", "udf", "spawn"):
+        return False, ("mode='plugin', 'udf' or 'spawn' only "
+                       "(got %r)" % (raw_mode,))
     # DECISION-03: orchestrator=False is now SERVED, via the launcher's
     # fail-fast supervision policy (--supervise fail-fast).
     #
