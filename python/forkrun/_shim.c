@@ -589,8 +589,83 @@ struct fr_py_record_hdr {
 
 /* Write one keyed "bytes are visible" signal. Defined below, declared
  * here because the disposition emitter (earlier in this file) needs it. */
+
+/* STAGE0 TEST-ONLY: drain-forward handshake.
+ *
+ * A fault-injection test that sleeps "long enough" for the drain proves
+ * nothing: it cannot distinguish "the drain forwarded, then the worker
+ * died" from "the drain never ran, so the test never exercised the
+ * window at all". That ambiguity already cost one wrong conclusion in
+ * this codebase.
+ *
+ * When FORKRUN_TEST_DRAIN_ACK_FIFO names a FIFO, the drain writes
+ * (worker, cursor) after EVERY wakeup it processes -- including wakeups
+ * that legitimately forward nothing -- so a test can wait for proof that
+ * the drain was awake and acting at a precise moment.
+ *
+ * The write end is opened O_NONBLOCK: with no reader the open fails with
+ * ENXIO and the ack is skipped, so this is inert by default and changes
+ * no production path. */
+static void fr_drain_test_ack(uint64_t wid, uint64_t cursor)
+{
+    const char *path = getenv("FORKRUN_TEST_DRAIN_ACK_FIFO");
+    uint64_t rec[2];
+    int fd;
+
+    if (path == NULL || *path == 0)
+        return;
+    fd = open(path, O_WRONLY | O_NONBLOCK);
+    if (fd < 0)
+        return;                 /* no reader: nobody is testing */
+    rec[0] = wid;
+    rec[1] = cursor;
+    (void)!write(fd, rec, sizeof(rec));
+    close(fd);
+}
+
+/* STAGE0 TEST-ONLY: block until the drain confirms it processed a wakeup
+ * for this worker, so an injected death provably happens AFTER the drain
+ * had its chance. Bounded, so a broken build fails the test rather than
+ * hanging it. */
+static void fr_drain_test_wait_ack(uint64_t wid)
+{
+    const char *path = getenv("FORKRUN_TEST_DRAIN_ACK_FIFO");
+    uint64_t rec[2];
+    int fd, spins;
+
+    if (path == NULL || *path == 0)
+        return;
+    fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0)
+        return;
+    for (spins = 0; spins < 3000; spins++) {
+        ssize_t n = read(fd, rec, sizeof(rec));
+        if (n == (ssize_t)sizeof(rec)) {
+            if (rec[0] == wid) {
+                close(fd);
+                return;
+            }
+            continue;
+        }
+        usleep(1000);
+    }
+    close(fd);
+    /* The handshake was requested and never completed. Abort rather than
+     * fall through and die anyway: silently timing out would make the
+     * test indistinguishable from one where the drain never ran, which
+     * is precisely the vacuous case the handshake exists to rule out. */
+    {
+        static const char msg[] =
+            "forkrun: FORKRUN_TEST_DRAIN_ACK_FIFO set but no drain ack\n";
+        ssize_t ignored = write(2, msg, sizeof(msg) - 1);
+        (void)ignored;
+        _exit(97);
+    }
+}
+
 static int fr_py_signal_write(int signal_fd, uint64_t wid,
                               uint64_t batch_idx);
+int fr_py_notify_committed(int signal_fd, int out_fd, uint64_t wid);
 
 /* Fault injection for the exactly-once tests: SIGKILL this worker
  * after its record is framed but before it acks.
@@ -615,7 +690,7 @@ static int fr_py_signal_write(int signal_fd, uint64_t wid,
  * Without it, whether the drain got there first is a scheduler race, so
  * a passing test proves less than it appears to -- the uncommitted record
  * can only be rolled back if it is still in the worker's memfd. */
-static void fr_py_maybe_die_before_ack(void)
+static void fr_py_maybe_die_before_ack(int wid, int signal_fd)
 {
     const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_ACK");
     if (n != NULL && *n) {
@@ -623,12 +698,26 @@ static void fr_py_maybe_die_before_ack(void)
         unsigned want = (unsigned)atoi(n);
         seq++;
         if (want && seq == want) {
+            /* STAGE0 handshake: wake the drain with frontier 0, which
+             * EXCLUDES the record just written uncommitted. If the
+             * protocol is correct the drain wakes, sees nothing
+             * committed to move, and confirms -- proving it was awake
+             * and declined to publish without ever being told the
+             * uncommitted record exists. */
+            if (getenv("FORKRUN_TEST_DRAIN_ACK_FIFO") != NULL)
+                (void)fr_py_signal_write(signal_fd, (uint64_t)wid, 0);
             const char *d = getenv("FORKRUN_TEST_DIE_AFTER_DRAIN_MS");
             if (d != NULL && *d) {
                 unsigned long ms = strtoul(d, NULL, 10);
                 if (ms)
                     usleep((useconds_t)(ms * 1000));
             }
+            /* Prefer a real handshake over a sleep: wait until the
+             * drain confirms it processed a wakeup for this worker, so
+             * the death provably happens AFTER the drain had its chance
+             * rather than merely probably after. */
+            if (getenv("FORKRUN_TEST_DRAIN_ACK_FIFO") != NULL)
+                fr_drain_test_wait_ack((uint64_t)wid);
             raise(SIGKILL);
         }
     }
@@ -655,7 +744,8 @@ static void fr_py_maybe_die_before_ack(void)
  * Honours FORKRUN_TEST_DIE_AFTER_DRAIN_MS to let the drain forward the
  * record first, which is what makes the publication/commit window real
  * rather than theoretical. */
-static void fr_py_maybe_die_before_notify(int signal_fd)
+static void fr_py_maybe_die_before_notify(int signal_fd,
+                                              int out_fd, int wid)
 {
     const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_NOTIFY");
     if (n != NULL && *n && signal_fd >= 0) {
@@ -668,6 +758,18 @@ static void fr_py_maybe_die_before_notify(int signal_fd)
                 unsigned long ms = strtoul(d, NULL, 10);
                 if (ms)
                     usleep((useconds_t)(ms * 1000));
+            }
+            /* Prefer a real handshake over a sleep: wait until the
+             * drain confirms it processed a wakeup for this worker, so
+             * the death provably happens AFTER the drain had its chance
+             * rather than merely probably after. */
+            /* STAGE0 handshake: the record IS committed, so publish its
+             * real frontier and wait for the drain to confirm it
+             * forwarded, and only then allow the worker to die. */
+            if (getenv("FORKRUN_TEST_DRAIN_ACK_FIFO") != NULL) {
+                (void)fr_py_notify_committed(signal_fd, out_fd,
+                                             (uint64_t)wid);
+                fr_drain_test_wait_ack((uint64_t)wid);
             }
             raise(SIGKILL);
         }
@@ -1873,7 +1975,7 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
          * poison/sentinel branches. Splice is excluded from the loop
          * parity test by design (it moves bytes rather than invoking
          * user code), so a loop-local hook cannot desynchronise it. */
-        fr_py_maybe_die_before_ack();
+        fr_py_maybe_die_before_ack((int)wid, signal_fd);
 
         if (fr_py_ack(fallow_fd, -1) != 0)
             return 1;
@@ -2523,8 +2625,14 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
             continue; /* memfd went away: nothing to move, keep going */
         size = (uint64_t)st.st_size;
         offset = offsets[wid];
-        if (frontier <= offset)
-            continue; /* duplicate/stale wakeup, or nothing committed yet */
+        if (frontier <= offset) {
+            /* Awake and processing, but nothing committed to move. The
+             * handshake still fires: proving the drain SAW this wakeup
+             * and declined to forward is exactly what makes the safety
+             * test non-vacuous. */
+            fr_drain_test_ack(wid, offset);
+            continue;
+        }
         if (frontier > size)
             frontier = size; /* clamp: never read past the memfd */
         if (frontier <= offset)
@@ -2650,6 +2758,7 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
          * jump to; they now fail the drain instead, so nothing branches
          * here any more and the label only drew -Wunused-label. */
         offsets[wid] = offset;
+        fr_drain_test_ack(wid, offset);
     }
 
 drain_done:
@@ -2902,7 +3011,7 @@ int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx,
      * Publication therefore happens strictly after commit, so a record
      * the drain forwards always belongs to a transaction the engine
      * kept. */
-    fr_py_maybe_die_before_notify(signal_fd);
+    fr_py_maybe_die_before_notify(signal_fd, out_fd, (int)wid);
     return fr_py_notify_committed(signal_fd, out_fd, wid);
     return 0;
 }
@@ -3396,7 +3505,7 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
              * Structural placement also keeps the injected death out of
              * the poison/skip and sentinel branches, where firing meant a
              * poisoned batch could never be skipped. */
-            fr_py_maybe_die_before_ack();
+            fr_py_maybe_die_before_ack((int)wid, signal_fd);
 
             rc = fr_py_complete(signal_fd, (uint64_t)wid,
                                 claimed.batch_idx, fallow_fd, out_fd,
@@ -3660,7 +3769,7 @@ int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
              * Structural placement also keeps the injected death out of
              * the poison/skip and sentinel branches, where firing meant a
              * poisoned batch could never be skipped. */
-            fr_py_maybe_die_before_ack();
+            fr_py_maybe_die_before_ack((int)wid, signal_fd);
 
             rc = fr_py_complete(signal_fd, (uint64_t)wid,
                                 claimed.batch_idx, fallow_fd, out_fd,
@@ -3847,7 +3956,7 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
              * Structural placement also keeps the injected death out of
              * the poison/skip and sentinel branches, where firing meant a
              * poisoned batch could never be skipped. */
-            fr_py_maybe_die_before_ack();
+            fr_py_maybe_die_before_ack((int)wid, signal_fd);
 
             rc = fr_py_complete(signal_fd, (uint64_t)wid,
                                 claimed.batch_idx, fallow_fd, out_fd,

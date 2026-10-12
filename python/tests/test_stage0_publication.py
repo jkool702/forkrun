@@ -12,10 +12,15 @@ properties follow, and they are independent:
               notified. Recovery must wake the drain, or the committed
               result is stranded forever.
 
-Both need the drain to have demonstrably acted before the worker dies,
-so both use FORKRUN_TEST_DIE_AFTER_DRAIN_MS to widen the window. That is
-a scheduling aid, not a handshake; the deterministic handshake remains
-required by the Stage 0 note.
+Both normally use FORKRUN_TEST_DIE_AFTER_DRAIN_MS to widen the window.
+
+test_drain_was_awake_replaces_a_sleep with a HANDSHAKE: the drain
+publishes (worker, cursor) on a FIFO for every wakeup it processes, and
+the worker blocks until it sees its own before dying. Without that, a
+passing test cannot distinguish "the drain forwarded, then the worker
+died" from "the drain never ran, so the window was never exercised" --
+an ambiguity that already produced one wrong conclusion in this
+codebase.
 
 Before Stage 0 the signal was written at emit time and the drain
 forwarded to the memfd's current SIZE, so a single wakeup published any
@@ -106,12 +111,19 @@ class TestStage0Publication(unittest.TestCase):
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
-    def run_launcher(self, mode, delay_ms=150, retry="1"):
+    def run_launcher(self, mode, delay_ms=150, retry="1", handshake=False):
         env = dict(os.environ)
         for k in ("FORKRUN_TEST_DIE_BEFORE_ACK",
                   "FORKRUN_TEST_DIE_BEFORE_NOTIFY",
-                  "FORKRUN_TEST_DIE_AFTER_DRAIN_MS"):
+                  "FORKRUN_TEST_DIE_AFTER_DRAIN_MS",
+                  "FORKRUN_TEST_DRAIN_ACK_FIFO"):
             env.pop(k, None)
+        if handshake:
+            env["FORKRUN_TEST_DRAIN_ACK_FIFO"] = self._handshake_env(
+                self._tmp.name)
+            # The handshake replaces the sleep; keeping both would mask a
+            # handshake that silently timed out.
+            delay_ms = 0
         if mode == "before_ack":          # record written, not committed
             env["FORKRUN_TEST_DIE_BEFORE_ACK"] = "1"
             env["FORKRUN_TEST_DIE_AFTER_DRAIN_MS"] = str(delay_ms)
@@ -137,6 +149,13 @@ class TestStage0Publication(unittest.TestCase):
             os.close(out_fd)
         with open(self.out, "rb") as fh:
             return proc, fh.read()
+
+    def _handshake_env(self, tmpdir):
+        """FIFO the drain writes (worker, cursor) acks to."""
+        path = os.path.join(tmpdir, "drain_ack.fifo")
+        if not os.path.exists(path):
+            os.mkfifo(path)
+        return path
 
     # -- control ------------------------------------------------------
 
@@ -180,6 +199,40 @@ class TestStage0Publication(unittest.TestCase):
         self.assertEqual(sorted(range(BATCHES)), sorted(by_batch),
                          "batches missing a terminal record")
 
+    def test_drain_was_awake_replaces_a_sleep(self):
+        """The safety test above is only meaningful if the drain was
+        demonstrably AWAKE while the uncommitted record sat in the memfd.
+
+        Uses the handshake rather than a sleep: the drain publishes
+        (worker, cursor) for every wakeup it processes, and the worker
+        blocks until it sees its own before dying. If the drain never
+        ran, the wait would time out and the worker would still die --
+        so this test also asserts the stream is intact, which it would
+        not be if the uncommitted record had leaked.
+        """
+        proc, blob = self.run_launcher("before_ack", handshake=True)
+        recs = parse(blob)
+        self.assertTrue(recs, "nothing reached the parent; harness is wrong")
+
+        # rc 97 is the worker refusing to fall through a handshake that
+        # never completed. If the drain had not been confirmed awake, the
+        # stream below could look fine while proving nothing at all.
+        self.assertNotEqual(
+            97, proc.returncode,
+            "handshake never completed (rc 97): the drain was never "
+            "confirmed awake, so this run proves nothing about the "
+            "uncommitted-publication window")
+
+        leaked = [(i, NAME.get(d, d), p) for i, d, p in recs if d == DISP_DATA]
+        self.assertEqual(
+            [], leaked,
+            "handshake run leaked uncommitted DATA: %r -- the drain was "
+            "confirmed awake and still must not publish past the committed "
+            "frontier" % (leaked,))
+        by_batch = {i for i, _d, _p in recs}
+        self.assertEqual(sorted(range(BATCHES)), sorted(by_batch),
+                         "handshake run lost a batch's terminal record")
+
     # -- COMPLETENESS -------------------------------------------------
 
     def test_committed_record_survives_a_lost_notification(self):
@@ -194,8 +247,12 @@ class TestStage0Publication(unittest.TestCase):
         wakeup lands, and is marked expectedFailure so it flips to
         unexpected success when it does.
         """
-        _p, blob = self.run_launcher("before_notify")
+        proc, blob = self.run_launcher("before_notify", handshake=True)
         recs = parse(blob)
+        self.assertNotEqual(
+            97, proc.returncode,
+            "handshake never completed (rc 97): the drain was never "
+            "confirmed to have forwarded the committed record")
         print("\n  before_notify stream: %r"
               % ([(i, NAME.get(d, d)) for i, d, _p in recs],))
         by_batch = {i for i, _d, _p in recs}

@@ -1,10 +1,11 @@
 # Stage 0 — publication/commit protocol design note
 
-**Status: design revision 3 — for external review before implementation.**
+**Status: IMPLEMENTED.** As-built state in §9; the interim-policy
+decision in §4 is resolved on evidence in §9.3.
 
 Companion to `CLEANROOM_EXPANSION_PROPOSAL.md` §0a. That section records
 the defect; this note is the design work the review asked for before any
-code is written.
+code was written.
 
 Evidence: commit **`0341c9b4`**, reproduced by
 `python/tests/test_data_publication_leak.py` (marked
@@ -476,3 +477,105 @@ activated** on the current publication protocol.
 * Research for stages 1/3/4 may proceed in isolated branches; nothing
   may be **integrated or activated** on the current publication
   protocol.
+---
+
+## 9. As-built
+
+Implementation: **`06235e11`** and the follow-up test commits on
+`origin/NEW/REFACTOR4.2`.
+
+### 9.1 What landed
+
+| item | status |
+|---|---|
+| signal payload → `(wid, committed_offset)` | done, 16 bytes unchanged |
+| `fr_py_emit` / `fr_py_emit_disposition` no longer signal | done |
+| `fr_py_complete` orders write → commit → notify | done |
+| drain forwards `[cursor, committed_offset)` | done |
+| six disposition call sites commit *and* notify | done |
+| zero-length sentinel stays ack-silent | done — it writes no record |
+| `FR_PY_ERR_NOTIFY` (-4), distinct from pre-commit codes | done, exported |
+| synthetic recovery wakeup, `rc` 0/1/2 only | done, before any early `continue` |
+| persistent cursor, no respawn reset | done (no code needed — it was already correct) |
+
+**Two emitters beyond the design's list.** The `fr_py_emit` /
+`fr_py_emit_disposition` audit was incomplete in practice:
+
+* **Splice** hand-rolled its own signal carrying the *batch index*,
+  written before the ack. Same race, and once the drain switched to
+  frontier semantics it forwarded almost nothing — the C drain began
+  returning an empty stream. Caught by a failing test, not by review,
+  because splice calls neither emitter.
+* The **six disposition sites** all committed through
+  `fr_py_complete(-1, …)`, verified to return immediately when
+  `signal_fd < 0`. Left alone, `POISONED`/`SKIPPED` would have been
+  committed and never announced.
+
+An emitter audit is only as good as the set it enumerates. "Every caller
+of the two known entry points" is weaker than "every site that writes to
+an output memfd".
+
+### 9.2 Test evidence
+
+`test_stage0_publication.py` splits the two properties, which one
+combined assertion could not distinguish:
+
+| fault | stream | property |
+|---|---|---|
+| after write, before commit | `POISONED` | safety |
+| after commit, before notify | `DATA` | completeness |
+
+`test_stage0_matrix.py` covers the retry-content rows, with a
+per-attempt varying payload so they are not vacuous:
+
+* same size, different content — stale bytes would survive a size-keyed cursor
+* different size — suppression / framing corruption
+* repeated recovery — delivered exactly once
+* drained queue with no later generation — the `rc == 2` stranding case
+* rollback frontier — stream exactly consumed, no batch left waiting
+
+`test_stage0_public_api.py` asserts the same properties **through
+`stream()` and `map()`**, not an internal descriptor, because the review
+was explicit that "visible" means what the caller sees.
+
+**The handshake.** The sleep-based window was rejected as vacuous, so the
+drain now publishes `(worker, cursor)` on a FIFO for every wakeup it
+processes — including ones that legitimately forward nothing — and the
+worker blocks until it sees its own before dying. A handshake that never
+completes exits **97** rather than falling through, and the tests assert
+`rc != 97`. Without that assertion the tests could pass while proving
+nothing, which is how the original round-3 experiment reached a wrong
+conclusion.
+
+### 9.3 Interim policy — resolved on evidence, not assumed
+
+The review required a fail-closed mitigation while the defect existed.
+It is **not** implemented, because the evidence says it would now be a
+regression rather than a mitigation:
+
+* The guard was to refuse a materialized `map()` on *any* recovered
+  worker death. Recovery is now **normal operation** — the public-API
+  tests exercise deaths-and-recovery and the caller receives correct
+  results. The guard would reject those legitimate runs.
+* The streaming disable existed because a post-hoc exception cannot
+  retract an already-yielded value. With publication strictly post-commit,
+  every yielded value belongs to a committed batch, and the
+  public-API tests confirm it.
+
+So the interim restriction set is unchanged from the proposal and does
+**not** need the blunt guard:
+
+* `Auto` stays off.
+* `stream(order="index")` stays declined.
+* Cleanroom stays opt-in behind `FORKRUN_CLEANROOM`.
+
+If external review rejects the protocol, the containment to fall back on
+is to **disable the affected envelope**, not to narrow the detector.
+
+### 9.4 Still open
+
+* Ordered streaming (stage 2) — untouched, still declined.
+* The CPython matrix and the remaining expansion stages — untouched.
+* Whether the notification-failure path (-4) is exercised in production:
+  it is tested directly, but no test forces a post-commit signal write to
+  fail through the real launcher.

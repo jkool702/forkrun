@@ -170,12 +170,12 @@
     "return": "int"
   },
   "fr_py_maybe_die_before_ack": {
-    "args": "void",
+    "args": "int wid, int signal_fd",
     "linkage": "static",
     "return": "void"
   },
   "fr_py_maybe_die_before_notify": {
-    "args": "int signal_fd",
+    "args": "int signal_fd, int out_fd, int wid",
     "linkage": "static",
     "return": "void"
   },
