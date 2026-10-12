@@ -78,14 +78,61 @@ else:
     payload = sys.argv[6:]
     kw = dict(mode="spawn", bytes=batch)
 
+# The launcher is forced ON so mode="spawn" genuinely routes through it.
+# Without this the benchmark measured the ordinary in-process executor
+# while its labels claimed launcher-spawn -- the disconnect the review
+# identified between the predicate and the dispatch.
+os.environ["FORKRUN_CLEANROOM"] = "1"
+
+want = open(path, "rb").read()
+if payload is not None and payload[0] == "tr":
+    # tr a-z A-Z: faithful byte translation, not a targeted replace.
+    # An earlier version only uppercased the literal "line", so a correct
+    # run "failed" on content the command genuinely changes.
+    want = want.translate(bytes.maketrans(
+        b"abcdefghijklmnopqrstuvwxyz", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+
 t0 = time.perf_counter()
 out = forkrun.map(payload, path, workers=workers, nodes=1,
                   output="bytes", **kw)
-n = sum(1 for _ in out)
+got = b"".join(bytes(x) for x in out if x is not None)
 dt = time.perf_counter() - t0
 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+# OUTPUT INTEGRITY, checked on every trial.
+#
+# Counting records is not enough: batch grouping varies, so a count
+# asserts an implementation detail, and a failed run under skip/poison
+# semantics exits 0 having produced nothing at all -- which is how the
+# first version of this harness timed runs that returned no output.
+#
+# Compared as a BYTE MULTISET, not concatenated and not line-wise.
+#
+# Both simpler invariants are wrong here:
+#   * concatenation -- with order="none" and >1 worker the batches
+#     complete out of order by design, so this "fails" a correct run on
+#     ordering alone;
+#   * line splitting -- splice moves BYTES, and a 32768-byte batch does
+#     not align to line boundaries, so it reports 500001 lines where
+#     the input has 500000.
+#
+# The multiset answers only what this benchmark should care about: every
+# byte arrived, and no byte was invented. Ordering is a separate promise,
+# covered by the order="index" suites, and is NOT claimed here.
+if sorted(got) != sorted(want):
+    from collections import Counter
+    cg, cw = Counter(got), Counter(want)
+    diff = (cw - cg) or (cg - cw)
+    sys.stderr.write("OUTPUT MISMATCH: %%d bytes got vs %%d want; "
+                     "first differing byte 0x%%02x (%%d vs %%d)\n"
+                     %% (len(got), len(want),
+                        min(diff) if diff else 0,
+                        diff.get(min(diff), 0) if diff else 0,
+                        cw.get(min(diff), 0) if diff else 0))
+    sys.exit(3)
+
 print("%%.6f" %% dt)
-print("records=%%d rss_kb=%%d" %% (n, rss), file=sys.stderr)
+print("bytes=%%d rss_kb=%%d" %% (len(got), rss), file=sys.stderr)
 '''
 
 CODE = BODY % {"root": os.path.join(_ROOT, "python")}
@@ -106,10 +153,20 @@ def measure(path, mode, workers, lines, c_drain, cmd=None):
         if proc.returncode != 0:
             last_err = proc.stderr.decode()[-200:]
             continue
+        if proc.returncode != 0 or not proc.stdout.strip():
+            last_err = (proc.stderr.decode()[-200:]
+                        or "trial exited %d with no timing" % proc.returncode)
+            return None, None, last_err
         times.append(float(proc.stdout.decode().strip()))
         last_meta = proc.stderr.decode().strip()
     if not times:
         return None, None, last_err
+    # A median over the trials that happened to succeed is exactly the
+    # shape of a benchmark that flatters the thing being measured. Any
+    # failed trial discards the whole configuration.
+    if len(times) != TRIALS:
+        return None, None, ("only %d/%d trials succeeded -- %s"
+                            % (len(times), TRIALS, last_err or ""))
     times.sort()
     return times[len(times) // 2], last_meta, None
 

@@ -123,26 +123,59 @@ class TestCoverage(_MatrixBase):
                          "oracle rules that never fire: %s" % sorted(unfired))
 
     def test_served_fraction_is_plausibly_small(self):
-        """Sanity floor, not a correctness claim.
+        """Coarse tripwire, NOT a per-axis guard.
 
-        Guards against an axis silently losing its effect, which would make
-        the entire matrix resolve to SERVED and pass every other test here.
-        The question it asks is "did something stop constraining the
-        matrix?", not "is this number small?".
+        Its only job is catching a gross expansion -- something that turns
+        the matrix overwhelmingly SERVED, which would make every other
+        test here pass for the wrong reason.
 
-        The bound was raised from 1% to 5% when Stage 3 served
-        mode='spawn', taking the fraction from 0.95% to 1.43%. Three
-        served execution modes out of a nine-axis cross-product is not an
-        axis losing its effect -- the remaining axes (multi-node, ordered
-        STREAMING, resume, NUMA, ...) still decline, and a genuine loss of
-        one would push the fraction far higher than 5%.
+        The ceiling is 2%, chosen by MEASURING what a lost axis would
+        produce rather than by feel. Losing the `nodes != 1` guard alone
+        serves every currently-served cell across all three node values:
+
+            288 x 3 = 864 of 20160 = 4.29%
+
+        So the earlier 5% ceiling would have PASSED a lost `nodes` guard
+        -- it was not doing the job its comment claimed. 2% sits well
+        clear of that while leaving room to serve a further mode at
+        today's 1.43%.
+
+        Per-axis loss is caught by the ORACLE agreement tests, which
+        resolve every cell independently. This bound is a backstop for
+        wholesale change, and is documented as such rather than dressed up
+        as stronger than it is.
         """
         all_cells = cells()
         served = sum(1 for c in all_cells if c[1])
         frac = served / len(all_cells)
-        self.assertTrue(0 < frac < 0.05,
-                        "served fraction %.4f looks wrong; an axis may have "
-                        "lost its effect" % frac)
+        self.assertTrue(0 < frac < 0.02,
+                        "served fraction %.4f exceeds the coarse 2%% "
+                        "ceiling; a wholesale expansion would let every "
+                        "other test here pass for the wrong reason" % frac)
+
+    def test_a_lost_nodes_guard_would_be_caught(self):
+        """Check the arithmetic the ceiling was sized against.
+
+        Stated directly rather than by monkeypatching the predicate: an
+        earlier version tried to patch `_cleanroom_eligible` and the
+        patch silently did not take, so the test "passed" by measuring
+        the unmutated matrix -- which would have made a guard against a
+        lost guard vacuous.
+
+        Losing `nodes != 1` serves every currently-served cell across all
+        three node values, tripling the served count. If that breaches
+        the ceiling, the bound does the job claimed.
+        """
+        all_cells = cells()
+        served = sum(1 for c in all_cells if c[1])
+        total = len(all_cells)
+        node_values = 3          # 1, 2, 4
+        grew = served * node_values / total
+        self.assertGreater(
+            grew, 0.02,
+            "dropping the nodes guard would reach only %.4f, which the 2%% "
+            "ceiling would NOT catch -- the bound must be re-derived"
+            % grew)
 
     def test_matrix_size_is_stable(self):
         """Pins the cell count so an axis cannot be dropped unnoticed.

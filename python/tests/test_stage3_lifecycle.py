@@ -216,6 +216,24 @@ class TestProcessGroupLifecycle(unittest.TestCase):
 
     # -- the documented boundary ---------------------------------------
 
+    def _children(self, pid):
+        try:
+            return [int(k) for k in
+                    open("/proc/%d/task/%d/children" % (pid, pid)).read().split()]
+        except OSError:
+            return []
+
+    def _worker_pids(self, launcher_pid):
+        """Every child that leads its own process group, i.e. workers."""
+        out = []
+        for k in self._children(launcher_pid):
+            try:
+                if os.getpgid(k) == k:
+                    out.append(k)
+            except OSError:
+                pass
+        return out
+
     def test_escaping_descendant_is_outside_the_guarantee(self):
         """A descendant that calls setsid() leaves the managed group.
 
@@ -243,24 +261,6 @@ class TestProcessGroupLifecycle(unittest.TestCase):
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-
-    def _children(self, pid):
-        try:
-            return [int(k) for k in
-                    open("/proc/%d/task/%d/children" % (pid, pid)).read().split()]
-        except OSError:
-            return []
-
-    def _worker_pids(self, launcher_pid):
-        """Every child that leads its own process group, i.e. workers."""
-        out = []
-        for k in self._children(launcher_pid):
-            try:
-                if os.getpgid(k) == k:
-                    out.append(k)
-            except OSError:
-                pass
-        return out
 
     def test_supervisor_respawns_after_a_worker_death(self):
         """Separate from cleanup, and worth proving on its own.
@@ -310,21 +310,41 @@ class TestProcessGroupLifecycle(unittest.TestCase):
                 proc.kill()
 
     def test_teardown_kills_the_command_descendant(self):
-        """At launcher teardown, a still-running command's descendants
-        must not outlive the run."""
+        """At launcher teardown, a live command's descendants must not
+        outlive the run.
+
+        The previous version killed the WORKER first, which already
+        triggers the separately-tested worker-death group cleanup. It
+        then let the supervisor respawn (possibly starting a fresh long
+        -running command) and finally checked the ORIGINAL pid -- so it
+        could pass with a replacement's child still alive, and it never
+        exercised launcher teardown at all.
+
+        This one tears the launcher down with worker and child BOTH
+        alive, and checks that child's pid specifically.
+        """
         proc = self._launch(SPAWNER, extra=["--supervise", "recover"])
         pid = None
         try:
             pid = self._read_pid()
             self.assertIsNotNone(pid, "the command never ran")
-            # Tear the run down while the command is mid-sleep.
-            for w in self._worker_pids(proc.pid):
-                self._cleanup(w)
+            worker = self._find_worker(proc.pid)
+            self.assertIsNotNone(worker, "no worker process")
+            self.assertTrue(_pid_alive(pid),
+                            "the command child should be alive before "
+                            "teardown")
+
+            # Tear the LAUNCHER down. The worker and its child are both
+            # still running; this is the path under test, so no forced
+            # worker kill precedes it and no post-timeout SIGKILL of the
+            # launcher is the mechanism being observed.
+            proc.terminate()
             try:
                 proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=10)
+                self.fail("the launcher did not exit on SIGTERM; teardown "
+                          "cleanup cannot be observed")
+
             deadline = time.time() + 10.0
             gone = False
             while time.time() < deadline:
@@ -333,10 +353,11 @@ class TestProcessGroupLifecycle(unittest.TestCase):
                     break
                 time.sleep(0.05)
             self.assertTrue(
-                gone,
-                "command pid %d outlived the launcher" % pid)
+                gone, "command pid %d outlived launcher teardown" % pid)
         finally:
             self._cleanup(pid)
+            if proc.poll() is None:
+                proc.kill()
 
     def test_infrastructure_failure_is_distinct_from_command_failure(self):
         """A command that cannot be executed must surface as a command

@@ -12,9 +12,9 @@ neither alone would be.
 | | |
 |---|---|
 | Cells enumerated | 20160 |
-| Served by the launcher | 288 (1.43%) |
-| Declined | 19872 |
-| Distinct outcomes | 9 |
+| Served by the launcher | 256 (1.27%) |
+| Declined | 19904 |
+| Distinct outcomes | 10 |
 
 ---
 
@@ -64,11 +64,12 @@ the enumeration produces no `UNCLASSIFIED` cell.
 | 2 | `DECLINE_MODE` | 2688 | `Facts(kind='map', source_kind='path', mode='python', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 | 3 | `DECLINE_RESUME` | 2016 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
 | 4 | `DECLINE_ORDER` | 1344 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 5 | `SERVED` | 288 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 6 | `DECLINE_STREAM_ORDER` | 168 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 7 | `DECLINE_SOURCE_MISSING` | 72 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 8 | `DECLINE_SOURCE_DIR` | 72 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 9 | `DECLINE_SOURCE_TYPE` | 72 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 5 | `SERVED` | 256 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 6 | `DECLINE_STREAM_ORDER` | 112 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 7 | `DECLINE_MODE_STREAM_SPAWN` | 112 | `Facts(kind='stream', source_kind='path', mode='spawn', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 8 | `DECLINE_SOURCE_MISSING` | 64 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 9 | `DECLINE_SOURCE_DIR` | 64 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
+| 10 | `DECLINE_SOURCE_TYPE` | 64 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
 
 ## The oracle's rules
 
@@ -82,6 +83,8 @@ Evaluated **first-match-wins**. Each is the contract's own words.
   docstring: 'order in (none, index)'. The launcher forks no C orderer, but does not need to: collect_records sorts by index for map, and stream reassembles parent-side from the batch_idx already in the framing
 - **R5 `resume/checkpoint`** &rarr; `DECLINE_RESUME`  
   CR-FIX1-K: the launcher neither transports nor implements checkpoint/resume. The check sits ABOVE the streaming block, so it applies to map() too -- it used to live under `if streaming:`, which made the refusal unreachable for map(), and the map() dispatch site did not pass the arguments, so a resume request was silently dropped on an accelerated path
+- **R2b `mode`** &rarr; `DECLINE_MODE_STREAM_SPAWN`  
+  stream(mode='spawn') is not served; the streaming path has no spawn dispatch
 - **R6 `stream+order`** &rarr; `DECLINE_STREAM_ORDER`  
   docstring + inline note: the stream path has no collect step to sort with, and its parent-side reassembly handles order='none' only. NOTE the asymmetry with R4: map SERVES order='index', stream does not. A single predicate holds both, deliberately
 - **R8 `source missing`** &rarr; `DECLINE_SOURCE_MISSING`  

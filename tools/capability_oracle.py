@@ -86,6 +86,8 @@ OUTCOMES = {
     "DECLINE_ORDER": "is not served; the launcher relies on downstream",
     "DECLINE_RESUME": "resume=/checkpoint_file= is not served",
     "DECLINE_STREAM_ORDER": "the stream path has no collect step",
+    "DECLINE_MODE_STREAM_SPAWN": "the streaming path has no spawn "
+                                  "dispatch",
     "DECLINE_SOURCE_MISSING": "source is not an existing file",
     "DECLINE_SOURCE_DIR": "source is a directory",
     "DECLINE_SOURCE_TYPE": "source must be a path, an open descriptor, or",
@@ -162,6 +164,21 @@ RULES = [
      "made the refusal unreachable for map(), and the map() dispatch site "
      "did not pass the arguments, so a resume request was silently dropped "
      "on an accelerated path"),
+
+    # R2b: stream() has no spawn dispatch. Ordered AFTER R5 on purpose:
+# the predicate checks resume/checkpoint ABOVE the streaming block
+# (CR-FIX1-K), so a stream+spawn cell carrying resume must decline as
+# DECLINE_RESUME, not as DECLINE_MODE_STREAM_SPAWN. Placing this
+# rule earlier disagreed with the predicate on 560 cells. It extracts a path:function
+    # spec and has no place to put an argv vector, so the predicate
+    # DECLINES spawn for streaming rather than admitting a route that
+    # does not exist. map() IS served for spawn. The two share the mode
+    # axis but not the route, so the rule is ordered after R2.
+    ("R2b", "mode",
+     lambda f: f.kind == "stream" and f.mode == "spawn",
+     "DECLINE_MODE_STREAM_SPAWN",
+     "stream(mode='spawn') is not served; the streaming path has no "
+     "spawn dispatch"),
 
     ("R6", "stream+order",
      lambda f: f.kind == "stream" and f.order != "none",

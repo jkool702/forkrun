@@ -166,6 +166,58 @@ class TestLauncherDescriptor(unittest.TestCase):
             "group signalling must not read a slot that can already be "
             "cleared -- that ordering made it a silent no-op")
 
+    def test_public_dispatch_actually_routes_spawn(self):
+        """The predicate admitting spawn is NOT sufficient.
+
+        The review found the real gap: map() and stream() both gated on
+        `raw_mode in ("plugin", "udf")`, so spawn fell through to the
+        in-process executor even though the predicate said otherwise --
+        and with FORKRUN_CLEANROOM=1 the decline warning then read an
+        unassigned _why. The predicate, the matrix and the reachable
+        public API were describing three different sets.
+
+        Asserted against the DISPATCH source, not the predicate.
+        """
+        src = open(os.path.join(_ROOT, "python", "forkrun", "run.py")).read()
+        # Scoped deliberately: map() must route spawn, stream() must NOT
+        # (it has no spawn dispatch and declines in the predicate). Both
+        # gates read identically, so asserting "no gate is plugin/udf
+        # only" would have demanded the WRONG thing for stream.
+        self.assertIn('if _cleanroom_enabled() and raw_mode in '
+                      '("plugin", "udf", "spawn"):', src,
+                      "map()'s cleanroom gate does not admit spawn")
+        # ...and the spawn route really carries argv into the launcher.
+        # Bounded substring checks rather than a regex: a DOTALL .*? over
+        # a 9000-line module matches across unrelated code and passes (or
+        # fails) for reasons unrelated to the dispatch.
+        self.assertIn('if raw_mode == "spawn":', src,
+                      "no spawn branch in the dispatch")
+        self.assertIn("spawn_argv=_sargv", src,
+                      "the spawn branch does not pass the argv vector")
+        self.assertIn("_validate_spawn_argv(_sargv)", src,
+                      "the argv is not validated before the launcher")
+
+    def test_stream_declines_spawn_explicitly(self):
+        """stream() has no spawn dispatch, so the predicate must decline
+        it rather than admit a route that does not exist."""
+        src = open(os.path.join(_ROOT, "python", "forkrun", "run.py")).read()
+        self.assertRegex(
+            src,
+            r"if raw_mode == \"spawn\":\s*\n\s*return False,",
+            "stream must decline spawn explicitly")
+
+    def test_decline_reason_is_initialised_before_use(self):
+        """The warning branch interpolates _why, and it can be reached
+        when the branch that ASSIGNS _why was never taken. An
+        UnboundLocalError there is a crash, not a clean decline."""
+        src = open(os.path.join(_ROOT, "python", "forkrun", "run.py")).read()
+        assign = src.index('_why = "mode=')
+        first_gate = src.index("if _cleanroom_enabled() and raw_mode in")
+        self.assertLess(assign, first_gate,
+                        "_why must be initialised before the gate that "
+                        "may assign it")
+        self.assertIn("% (_why,)", src, "the warning should report _why")
+
     def test_spawn_envelope_is_served_with_its_gates_named(self):
         """Activation is gated on the lifecycle tests, so the gate and its
         evidence are asserted together. A future removal of the envelope

@@ -37,6 +37,9 @@ _DISP_NO_RESULT = 1
 _DISP_SKIPPED = 2
 _DISP_POISONED = 3
 
+NAME_OF = {_DISP_DATA: "DATA", _DISP_NO_RESULT: "NO_RESULT",
+           _DISP_SKIPPED: "SKIPPED", _DISP_POISONED: "POISONED"}
+
 import os as _os
 
 #: Depth allowance inside the dynamic warn limit (see module notes).
@@ -69,6 +72,7 @@ class ReassemblyBuffer:
         # yielding, and so their dispositions stay distinguishable.
         self._terminal: set = set()
         self._terminal_seen: dict = {}
+        self._conflicts: dict = {}
         self._next_idx = start
         self._max_size = 0
         # W-REL6-3.2: byte accounting for the high-water warning.
@@ -160,18 +164,60 @@ class ReassemblyBuffer:
         a consumer needs to report, and DECISION-02 introduced them to
         remove a conflation, not to add another.
         """
+        # Contradictions are PROTOCOL VIOLATIONS, not cases to merge.
+        #
+        # A correct producer emits exactly one terminal outcome per
+        # batch. Silently accepting a second one would hide a future
+        # exactly-once regression: the reassembly layer is precisely the
+        # place that would absorb it and make the stream look healthy.
+        # So each contradiction is recorded and the FIRST outcome kept.
         if disposition == _DISP_DATA:
+            if batch_idx in self._terminal:
+                self._note_conflict(batch_idx, "DATA after terminal %s"
+                                    % NAME_OF.get(
+                                        self._terminal_seen.get(batch_idx),
+                                        "?"))
+                return
+            if batch_idx in self._buffer:
+                # Duplicate DATA for a batch already holding a payload:
+                # the engine never delivers one batch twice.
+                self._note_conflict(batch_idx, "duplicate DATA")
             self.add(batch_idx, payload)
             return
         if batch_idx in self._buffer:
-            # A DATA record already landed for this index. Two terminal
-            # outcomes for one batch is a protocol violation; keep the
-            # first-seen payload rather than silently overwriting it.
+            self._note_conflict(batch_idx, "%s after DATA"
+                                % NAME_OF.get(disposition, disposition))
+            return
+        if batch_idx in self._terminal:
+            self._note_conflict(batch_idx, "%s after %s"
+                                % (NAME_OF.get(disposition, disposition),
+                                   NAME_OF.get(
+                                       self._terminal_seen.get(batch_idx),
+                                       "?")))
             return
         self._terminal.add(batch_idx)
         self._terminal_seen[batch_idx] = disposition
         if len(self._terminal) > self._max_size:
             self._max_size = len(self._terminal)
+
+    def _note_conflict(self, batch_idx, what):
+        """Record a contradictory terminal outcome for this batch.
+
+        Reported rather than raised: the caller is a streaming loop that
+        has already consumed real input, so raising would convert a
+        protocol defect into a lost run. It is surfaced through
+        `conflicts()` so a caller can refuse the result.
+        """
+        self._conflicts.setdefault(batch_idx, []).append(what)
+
+    def conflicts(self) -> dict:
+        """batch_idx -> [contradictory outcome descriptions].
+
+        Empty for a correct producer. A non-empty result means the
+        stream is not trustworthy even if it looks well-formed, so the
+        caller should refuse it rather than return it.
+        """
+        return dict(self._conflicts)
 
     def drain(self):
         """Yield the consecutive run starting at _next_idx, in order.

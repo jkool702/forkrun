@@ -668,7 +668,7 @@ a few hundred seconds, and bisect per file when it wedges.
 
 ## 8c. Stage 4 — splice measurement: GO
 
-`tools/bench_splice.py`. Median of 5 trials, peak parent RSS
+`tools/bench_splice.py`. Median of 3 trials, peak parent RSS
 (`ru_maxrss`, not current RSS — current understates a peak, and the
 high-water mark never decreases, so every variant runs in a fresh
 process). Only representable, byte-moving paths are compared: the C
@@ -676,22 +676,27 @@ splice loop, and `spawn cat` / `spawn tr` through the launcher. A
 python-mode lambda is deliberately **not** a baseline — it is not
 exec-representable, so it poisons every batch and times a failure.
 
-| input | workers | splice | spawn cat | ratio |
-|---|---|---|---|---|
-| 2.6 MB | 1 | 0.0170s | 0.0807s | **4.9x faster** |
-| 2.6 MB | 4 | 0.0130s | 0.0337s | **2.6x faster** |
-| 26.5 MB | 1 | 0.0481s | 0.5622s | **11.7x faster** |
-| 26.5 MB | 4 | 0.0330s | 0.1753s | **5.3x faster** |
+**Every trial validates its own output** and the harness discards the
+whole configuration if any trial fails or returns nothing. A median over
+the trials that happened to succeed is exactly the shape of a benchmark
+that flatters the thing being measured.
 
-**Peak parent RSS is essentially flat across all four variants** — the
-26.5 MB run peaks around 50–70 MB whichever path moves the bytes, so the
+| input | workers | splice+c_drain | splice+py_drain | spawn cat | ratio |
+|---|---|---|---|---|---|
+| 2.6 MB | 1 | 0.0137s | 0.0119s | 0.0650s | **4.7x / 5.5x** |
+| 2.6 MB | 4 | 0.0289s | 0.0270s | 0.0650s | **2.2x / 2.4x** |
+| 26.5 MB | 1 | 0.0596s | 0.0564s | 0.5801s | **9.7x / 10.3x** |
+| 26.5 MB | 4 | 0.0558s | 0.0469s | 0.1841s | **3.3x / 3.9x** |
+
+**Peak parent RSS is essentially flat across all variants** — the
+26.5 MB run peaks around 94–95 MB whichever path moves the bytes, so the
 gain is throughput, not memory.
 
 Two findings worth stating plainly:
 
-* **The advantage is largest exactly where it matters least**: 11.7x on
+* **The advantage is largest exactly where it matters least**: ~10x on
   the biggest, single-worker case. But that case is also the slowest
-  absolute (0.56s for a plain byte copy), so the user-visible saving is
+  absolute (0.58s for a plain byte copy), so the user-visible saving is
   ~0.5s. Where a real call would actually wait — a command doing work,
   not `cat` — the margin is unknown.
 * **`spawn tr` is ~1.00x of `spawn cat`** at every size, i.e. the
@@ -706,13 +711,55 @@ the loop worth keeping — with a decisive yes. It does not answer whether
 launcher integration is worth the mode-specific dispatch and supervision
 work, because the win comes from bypassing the per-batch payload
 invocation, which splice already does in-process. Adding a third launcher
-mode to capture a path that is already 2.6–11.7x ahead of the boundary it
+mode to capture a path that is already 2–10x ahead of the boundary it
 would cross is not justified by these numbers.
 
 Caveat, stated because it bounds the result: this compares in-process
 splice against launcher-spawn. It does **not** compare against a
 launcher-splice integration, which does not exist. If that is built
 later, it must be measured against `spawn cat` before retention.
+
+### What the corrected measurement changed
+
+The first version of this benchmark was not measuring what its labels
+claimed, and the table above was rebuilt rather than adjusted:
+
+* **The spawn rows were not launcher-spawn at all.** `mode="spawn"` did
+  not route through the launcher, so the comparison was in-process splice
+  against ordinary in-process spawn. The harness now sets
+  `FORKRUN_CLEANROOM=1` explicitly, and the spawn rows are measured
+  against the real launcher. The ratios came down slightly because the
+  baseline got slower, which is the correct direction: the earlier
+  numbers flattered splice by understating the thing it beat.
+* **Timing runs that produced no output.** Output is now validated on
+  every trial as a **byte multiset**. Concatenated bytes are the wrong
+  invariant (with `order="none"` and >1 worker batches complete out of
+  order by design) and so is line splitting (splice moves bytes, and a
+  32768-byte batch does not align to line boundaries — it reported
+  500001 lines where the input has 500000). The multiset asks only what
+  this benchmark should care about: every byte arrived, none invented.
+  Ordering is a separate promise covered by the `order="index"` suites
+  and is **not** claimed here.
+
+### Second benchmarking mistake worth recording
+
+Finding the first one (below) led to a second, which is the more useful
+of the pair. Validating output exposed a **real product bug**: the public
+`map()` spawn path raised `AttributeError` inside the plugin-spec parse
+(`raw_payload.rpartition(":")`) because a spawn payload is an ARGV LIST.
+The plugin and udf modes carry a `"path:function"` spec; spawn does not.
+The parse now runs only for the modes that have one. That bug would have
+been invisible to a harness that only counted records — and it was
+present while the matrix and the spawn tests were already green, which
+is the clearest argument in this whole document for checking bytes
+rather than counts.
+
+The mutated-guard test makes the same argument in miniature. A first
+version tried to demonstrate the 2% matrix ceiling by monkeypatching
+`_cleanroom_eligible`; the patch silently did not take, so the test
+"passed" while measuring the UNMUTATED matrix. It is now a direct
+assertion of the arithmetic, with the failure mode recorded, because a
+test that cannot fail is worse than no test.
 
 ### A benchmarking mistake worth recording
 

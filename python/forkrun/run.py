@@ -802,6 +802,15 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
                        "checkpoint/resume semantics")
 
     if streaming:
+        # Stage 3: spawn is served for materialized map() only. The stream
+        # path has no spawn dispatch -- it extracts a path:function spec
+        # and has no place to put an argv vector -- so it DECLINES here
+        # rather than falling through to a route that does not exist.
+        # Admitting it would make the predicate disagree with the
+        # dispatch, which is exactly the gap the review found.
+        if raw_mode == "spawn":
+            return False, ("stream(mode='spawn') is not served; the "
+                           "streaming path has no spawn dispatch")
         if order != "none":
             return False, ("stream(order=%r) is not served; the stream "
                            "path has no collect step to sort with"
@@ -3337,7 +3346,14 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     raw_mode = mode
     raw_payload = payload
     order = kwargs.get("order", "none")
-    if _cleanroom_enabled() and raw_mode in ("plugin", "udf"):
+    # Initialised BEFORE any branch that may report a reason. The
+    # decline warning below interpolates it, and the condition that
+    # selects it (_cleanroom_enabled() and a launcher-served mode) can be
+    # False while the warning branch is still reached -- e.g. spawn with
+    # FORKRUN_CLEANROOM=1 -- which raised UnboundLocalError instead of
+    # declining cleanly.
+    _why = "mode=%r is not a launcher-served envelope" % (raw_mode,)
+    if _cleanroom_enabled() and raw_mode in ("plugin", "udf", "spawn"):
         _ok, _why = _cleanroom_eligible(
             source, raw_mode, num_nodes, order,
             kwargs.get("strict_poison", False), orchestrator,
@@ -3371,7 +3387,14 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             # A UDF needs its helper built for THIS minor; if it is not,
             # fall through to the in-process path rather than refusing --
             # slower and correct beats fast and missing.
-            _p, _sep, _f = raw_payload.rpartition(":")
+            # Only plugin and udf carry a "path:function" spec. A spawn
+            # payload is an ARGV LIST and has no rpartition, so parsing
+            # it unconditionally raised AttributeError before the spawn
+            # branch below could run.
+            if raw_mode == "spawn":
+                _p, _sep, _f = "", "", ""
+            else:
+                _p, _sep, _f = raw_payload.rpartition(":")
             _udf_args = {}
             if raw_mode == "udf" and _p and _f:
                 # Helper missing for this minor -> fall through to the
@@ -3386,7 +3409,42 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                         "udf_attr": _f,
                         "udf_roots": _udf_roots_spec(_p),
                     }
-            if _p and _f and (raw_mode != "udf" or _udf_args):
+            if raw_mode == "spawn":
+                # Stage 3: spawn carries an ARGV VECTOR, not a
+                # path:function plugin spec. It cannot share the branch
+                # below, which rpartitions a string and passes two
+                # strings to the launcher. The argv is extracted from the
+                # coerced payload's tagged wrapper and validated BEFORE
+                # the launcher starts and before the source is read, so a
+                # malformed command costs no input.
+                from ._worker import _c_spawn_spec as _spawn_argv_of
+                _coerced = _coerce_payload(raw_payload, "spawn")
+                _sargv = _spawn_argv_of(_coerced)
+                if _sargv:
+                    _sargv = _validate_spawn_argv(_sargv)
+                    with _signal_guard(
+                            kwargs.get("signal_policy",
+                                       "default")) as _sg:
+                        with _RUN_LOCK:
+                            out = _execute_cleanroom(
+                                source,
+                                lines=kwargs.get("lines"),
+                                bytes_=kwargs.get("bytes"),
+                                workers=base["workers"],
+                                plugin_path=None, plugin_func=None,
+                                on_error=kwargs.get("on_error", "retry"),
+                                views=base["views"],
+                                strict_poison=bool(
+                                    kwargs.get("strict_poison", False)),
+                                order=order,
+                                orchestrator=orchestrator,
+                                spawn_argv=_sargv,
+                                **_udf_args)
+                    _sg.check()
+                    if out is not None:
+                        return _map_return(out, return_stats)
+            if raw_mode != "spawn" and _p and _f and (
+                    raw_mode != "udf" or _udf_args):
                 with _signal_guard(
                         kwargs.get("signal_policy", "default")) as _sg:
                     with _RUN_LOCK:
@@ -4137,15 +4195,28 @@ def _make_results_pump(results_r, order="none", stats=None):
                          else None)}
 
     def _ingest(chunk):
-        records, tail = _split_records(st["tail"] + chunk)
-        st["tail"] = tail
+        # Stage 1: the results-PIPE consumer is a distinct production
+        # path from the worker-memfd drains, and it was still
+        # DATA-only. With the C drain active the records arrive here
+        # through this pipe rather than from the per-worker memfds, so
+        # SKIPPED / POISONED / NO_RESULT were being discarded before
+        # the reassembly buffer saw them and later DATA stayed blocked
+        # behind that hole until finalisation -- the exact behaviour
+        # Stage 1 exists to remove.
+        #
+        # The unordered branch keeps DATA-only semantics, which is what
+        # those callers require.
         if st["reassembly"] is None:
+            records, tail = _split_records(st["tail"] + chunk)
+            st["tail"] = tail
             st["pending"].extend(blob for _, blob in records)
-        else:
-            for bidx, blob in records:
-                st["reassembly"].add(bidx, blob)
-            for _, ordered in st["reassembly"].drain():
-                st["pending"].append(ordered)
+            return
+        records, tail = _split_records_terminal(st["tail"] + chunk)
+        st["tail"] = tail
+        for bidx, bdisp, bblob in records:
+            st["reassembly"].add_disposition(bidx, bdisp, bblob)
+        for _, ordered in st["reassembly"].drain():
+            st["pending"].append(ordered)
 
     def pump(alive):
         if not st["eof"]:

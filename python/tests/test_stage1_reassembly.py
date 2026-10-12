@@ -147,6 +147,55 @@ class TestReassemblyDispositions(unittest.TestCase):
         self.assertEqual([(2, b"c")], list(b.final_drain()))
 
 
+class TestContradictoryOutcomes(unittest.TestCase):
+    """A correct producer emits ONE terminal outcome per batch.
+
+    Contradictions are recorded rather than merged, because the
+    reassembly layer is exactly where a future exactly-once regression
+    would otherwise be absorbed and made to look like a healthy stream.
+    """
+
+    def test_data_after_terminal_is_recorded(self):
+        b = ReassemblyBuffer()
+        b.add_disposition(0, DISP_POISONED)
+        b.add_disposition(0, DISP_DATA, b"late")
+        self.assertIn(0, b.conflicts())
+        # The FIRST outcome is kept; the late DATA is not published.
+        self.assertEqual([], list(b.drain()),
+                         "late DATA was yielded after a terminal outcome")
+        self.assertEqual(0, b.pending)
+
+    def test_terminal_after_data_is_recorded(self):
+        b = ReassemblyBuffer()
+        b.add_disposition(0, DISP_DATA, b"a")
+        b.add_disposition(0, DISP_SKIPPED)
+        self.assertIn(0, b.conflicts())
+        self.assertEqual([(0, b"a")], list(b.drain()),
+                         "the original DATA should still be delivered")
+
+    def test_differing_terminal_outcomes_are_recorded(self):
+        b = ReassemblyBuffer()
+        b.add_disposition(0, DISP_SKIPPED)
+        b.add_disposition(0, DISP_POISONED)
+        self.assertIn(0, b.conflicts())
+
+    def test_duplicate_data_is_recorded(self):
+        b = ReassemblyBuffer()
+        b.add_disposition(0, DISP_DATA, b"a")
+        b.add_disposition(0, DISP_DATA, b"a")
+        self.assertIn(0, b.conflicts())
+
+    def test_a_correct_producer_records_no_conflicts(self):
+        b = ReassemblyBuffer()
+        for i, d in enumerate((DISP_DATA, DISP_NO_RESULT, DISP_SKIPPED,
+                               DISP_POISONED)):
+            b.add_disposition(i, d, b"p" if d == DISP_DATA else None)
+        list(b.drain())
+        self.assertEqual({}, b.conflicts(),
+                         "a single terminal outcome per batch must not be "
+                         "flagged as a conflict")
+
+
 # -- parser ------------------------------------------------------------
 
 class TestTerminalParser(unittest.TestCase):
@@ -259,6 +308,52 @@ def inspect_source_of(obj):
 
 # -- scope guard -------------------------------------------------------
 
+class TestResultsPipeConsumer(unittest.TestCase):
+    """The results-PIPE consumer is a separate production path.
+
+    With the C drain active, records reach the parent through a results
+    pipe and are consumed by _make_results_pump()._ingest(), not by the
+    per-worker memfd drains. Wiring the memfd sites alone left this one
+    DATA-only, so a SKIPPED/POISONED/NO_RESULT batch was discarded
+    before the buffer saw it and later DATA stayed blocked behind that
+    hole until finalisation.
+    """
+
+    def test_results_pipe_ingest_is_disposition_aware(self):
+        import importlib
+        run = importlib.import_module("forkrun.run")
+        src = __import__("inspect").getsource(run)
+        m = __import__("re").search(
+            r"def _ingest\(chunk\):.*?(?=\n    def )", src, __import__("re").S)
+        self.assertIsNotNone(m, "_ingest not found in _make_results_pump")
+        body = m.group(0)
+        self.assertIn("_split_records_terminal", body,
+                      "the results-pipe consumer must parse terminally "
+                      "when reassembling")
+        self.assertIn("add_disposition", body,
+                      "the results-pipe consumer must submit dispositions")
+        # ...and must keep DATA-only semantics for the unordered branch,
+        # whose callers must not see control records at all.
+        self.assertIn("_split_records(", body,
+                      "the unordered branch must keep the DATA-only parser")
+
+    def test_ordered_results_pipe_advances_past_a_terminal_before_eof(self):
+        """A terminal outcome for batch 0 followed by DATA for batch 1
+        must yield batch 1 WITHOUT waiting for EOF."""
+        import importlib
+        run = importlib.import_module("forkrun.run")
+        blob = (frame(0, DISP_NO_RESULT) + frame(1, DISP_DATA, b"one")
+                + frame(2, DISP_SKIPPED) + frame(3, DISP_DATA, b"three"))
+        recs, tail = run._split_records_terminal(blob)
+        self.assertEqual(b"", tail)
+        b = ReassemblyBuffer()
+        for idx, disp, payload in recs:
+            b.add_disposition(idx, disp, payload)
+        # A mid-stream drain, with no final_drain() anywhere.
+        self.assertEqual([(1, b"one"), (3, b"three")], list(b.drain()))
+        self.assertEqual([], b.unresolved_gaps(4))
+
+
 class TestStage1ChangedNoEligibility(unittest.TestCase):
 
     def test_ordered_streaming_is_still_declined(self):
@@ -272,13 +367,23 @@ class TestStage1ChangedNoEligibility(unittest.TestCase):
         # Assert the DECLINE, not just the presence of the word "stream".
         # A scope guard that only checked for a string could pass on a
         # comment while the gate had been removed.
+        # Stage 3 added a spawn decline above the ordering one, so this
+        # matches the streaming block structurally rather than assuming
+        # the ordering check is first.
+        stream_block = re.search(r"if streaming:\s*\n(.*?)\n(?=    #|"
+                                 r"\n    if |\n    return True)",
+                                 body, re.S)
+        self.assertIsNotNone(stream_block, "no streaming block found")
+        sb = stream_block.group(1)
         decline = re.search(
-            r"if streaming:\s*\n\s*if order != [\"']none[\"']:\s*\n"
-            r"\s*return False", body)
+            r"if order != [\"']none[\"']:\s*\n\s*return False", sb)
         self.assertIsNotNone(
             decline,
             "expected ordered STREAMING to still be declined in "
             "_cleanroom_eligible; Stage 1 must not have enabled it")
+        # Stage 3: spawn has no stream dispatch, so it declines too.
+        self.assertRegex(sb, r'if raw_mode == "spawn":\s*\n\s*return False',
+                         "stream(mode='spawn') must be declined")
         # ...and MAP order="index" must still be served (it always was).
         self.assertIn('if order not in ("none", "index"):', body,
                       "map ordering eligibility changed unexpectedly")

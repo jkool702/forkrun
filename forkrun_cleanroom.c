@@ -52,6 +52,48 @@
  * and every emit call is a single predictable branch against it. */
 int fr_trace_fd = -1;
 
+/* Stage 3: the live child tables, reachable from the termination
+ * handler below.
+ *
+ * The launcher had NO SIGTERM/SIGINT handler, so the default
+ * disposition killed it immediately: no teardown ran, no process group
+ * was signalled, and every command descendant of every worker was
+ * ABANDONED. That contradicts the documented Option A guarantee, which
+ * covers launcher teardown and parent abandonment. The handler restores
+ * it. */
+static pid_t *g_worker_pids;
+static int g_worker_count;
+static pid_t g_helper_pids[8];
+static int g_helper_count;
+static volatile sig_atomic_t g_terminating;
+
+static void fr_on_terminate(int sig) {
+    /* Only async-signal-safe calls here. kill() and _exit() qualify;
+     * fprintf and waitpid do not, so the warning is a raw write and the
+     * children are signalled rather than reaped -- they are killed, and
+     * the kernel reparents anything that outlives us.
+     *
+     * kill(-pgid) goes FIRST so descendants die even though this
+     * process is about to stop existing. */
+    static const char msg[] =
+        "forkrun-cleanroom: terminated -- killing worker process groups\n";
+    ssize_t ignored;
+    for (int i = 0; i < g_worker_count; i++) {
+        if (g_worker_pids[i] > 0) {
+            (void)kill(-g_worker_pids[i], SIGKILL);
+            (void)kill(g_worker_pids[i], SIGKILL);
+        }
+    }
+    for (int i = 0; i < g_helper_count; i++) {
+        if (g_helper_pids[i] > 0)
+            (void)kill(g_helper_pids[i], SIGKILL);
+    }
+    ignored = write(2, msg, sizeof(msg) - 1);
+    (void)ignored;
+    g_terminating = 1;
+    _exit(128 + sig);
+}
+
 typedef int (*fn_init)(int lines, int bytes);
 typedef int (*fn_worker_plugin_loop)(int wid, const char *path,
                                      const char *func_name,
@@ -1613,6 +1655,36 @@ int main(int argc, char **argv) {
      * once did) made every respawn inherit a CLOSED fd: the new worker
      * signalled to EBADF and the drain blocked on the signal pipe
      * forever. The spare is closed LAST, after the supervision loop. */
+    /* Stage 3: terminate cleanly enough to honour the process-group
+     * guarantee. Installed AFTER the worker table exists so the handler
+     * can see it. */
+    {
+        struct sigaction sa_term;
+        memset(&sa_term, 0, sizeof sa_term);
+        sa_term.sa_handler = fr_on_terminate;
+        sigemptyset(&sa_term.sa_mask);
+        (void)sigaction(SIGTERM, &sa_term, NULL);
+        (void)sigaction(SIGINT, &sa_term, NULL);
+        g_worker_pids = pids;
+        g_worker_count = o.workers;
+    }
+
+    /* Stage 3: terminate cleanly enough to honour the process-group
+     * guarantee. Installed after the worker table exists so the handler
+     * can see it. Without it SIGTERM killed the launcher on the default
+     * disposition: no teardown, no group signal, and every command
+     * descendant abandoned -- contradicting the documented guarantee. */
+    {
+        struct sigaction sa_term;
+        memset(&sa_term, 0, sizeof sa_term);
+        sa_term.sa_handler = fr_on_terminate;
+        sigemptyset(&sa_term.sa_mask);
+        (void)sigaction(SIGTERM, &sa_term, NULL);
+        (void)sigaction(SIGINT, &sa_term, NULL);
+        g_worker_pids = pids;
+        g_worker_count = o.workers;
+    }
+
     int spare_sig = dup(sigp[1]);
     int spare_fall = dup(fallp[1]);
     if (spare_sig < 0 || spare_fall < 0) die("dup(signal/fallow)");
