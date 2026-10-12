@@ -895,16 +895,24 @@ static void kill_slot(pid_t *slot) {
  * Orphan scenario this prevents: the worker's command forks a long-lived
  * child, then the worker is SIGKILLed. The child is reparented and keeps
  * running, and nothing in the run can ever observe it again. */
-static void kill_worker_group(pid_t *slot) {
-    if (slot && *slot > 0) {
+static void kill_worker_group(pid_t pid) {
+    if (pid > 0) {
         fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FATAL_KILL,
-                      FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)*slot);
+                      FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)pid);
         /* Group first: descendants must die even if the leader has
          * already exited and been reaped, since kill(-pgid) still works
-         * while the group has members. */
-        (void)kill(-(*slot), SIGKILL);
-        (void)kill(*slot, SIGKILL);
-        *slot = -1;
+         * while the group has members.
+         *
+         * Takes the pid BY VALUE on purpose. It previously took the slot
+         * pointer, and the supervision loop cleared pids[wid] = -1 as
+         * soon as it reaped the worker -- BEFORE calling this. The
+         * helper's own guard then refused to act, so the group signal was
+         * a silent no-op in both the fail-fast and recovery branches and
+         * the command's child survived a worker death the supervisor had
+         * already observed. Passing the value makes the ordering
+         * mistake impossible rather than merely unlikely. */
+        (void)kill(-pid, SIGKILL);
+        (void)kill(pid, SIGKILL);
     }
 }
 
@@ -1816,6 +1824,12 @@ int main(int argc, char **argv) {
          * Leaving a reaped pid in pids[wid] overstates the live set and
          * risks signalling a recycled number during fatal teardown. It
          * is refilled below only when a replacement is really forked. */
+        /* Keep the reaped generation's pid. The slot must stop being
+         * live (a reaped pid in pids[wid] overstates the live set and
+         * risks signalling a recycled number), but the process GROUP is
+         * still addressable as long as any descendant is alive -- and
+         * that surviving descendant is exactly what must be killed. */
+        pid_t dead_wid = pids[wid];
         pids[wid] = -1;
         /* DECISION-03 section 7.3 -- the worker-exit POLICY.
          *
@@ -1849,7 +1863,7 @@ int main(int argc, char **argv) {
              * descendants with it, even on the fail-fast path where no
              * recovery follows. Otherwise a long-lived grandchild would
              * outlive the run that started it. */
-            kill_worker_group(&pids[wid]);
+            kill_worker_group(dead_wid);
             fprintf(stderr, "forkrun-cleanroom: worker %d died (status %d) "
                     "under fail-fast supervision -- not recovering, "
                     "aborting\n", wid, death_cause(st));
@@ -1869,7 +1883,7 @@ int main(int argc, char **argv) {
          *
          * Ordering matters: this must precede the respawn, or the new
          * generation's pid could be mistaken for the old group. */
-        kill_worker_group(&pids[wid]);
+        kill_worker_group(dead_wid);
 
         int rc = p_recover ? p_recover(wid, incarn[wid], out_fds[wid],
                                        death_cause(st))
@@ -2025,7 +2039,10 @@ int main(int argc, char **argv) {
             /* Workers go by GROUP so a command's children die with the
              * worker; the helpers below are not group leaders and must
              * never be signalled by negative pid. */
-            for (int i = 0; i < o.workers; i++) kill_worker_group(&pids[i]);
+            for (int i = 0; i < o.workers; i++) {
+                pid_t _p = pids[i]; pids[i] = -1;
+                kill_worker_group(_p);
+            }
             kill_slot(&spill_pid);
             kill_slot(&scan_pid);
             kill_slot(&fallow_pid);

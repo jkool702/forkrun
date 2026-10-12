@@ -565,7 +565,53 @@ The documented boundary — descendants that `setsid()` away are **outside**
 the guarantee — is stated in the code but **not yet tested**, which is
 the main reason the envelope stays declined.
 
-### What the lifecycle tests actually found
+### Lifecycle: the first diagnosis was wrong
+
+The gate initially failed and I concluded the launcher "never notices the
+worker's death" — that no respawn occurred at all. **That was wrong**, and
+the reviewer is what corrected it.
+
+The supervisor's `waitpid(-1, &st, 0)` does observe the death. The group
+signal was a silent **no-op**: the supervision loop set `pids[wid] = -1`
+the moment it reaped the worker, *before* calling
+`kill_worker_group(&pids[wid])`, and the helper took the slot **pointer**
+and refused to act on a non-positive value. Both the fail-fast and
+recovery branches were affected.
+
+Fixed by taking the pid **by value**, which makes the ordering mistake
+impossible rather than merely unlikely, plus a regression test that
+asserts no call site passes a slot pointer. The lifecycle test then
+passed as an *unexpected success* of its `expectedFailure` marker.
+
+Worth keeping in the record because the wrong conclusion was the
+plausible one: "the child survived" reads like "the supervisor never
+noticed", and acting on it would have meant redesigning supervision that
+was working.
+
+### Stage 1 is now wired to production
+
+The first delivery was scaffolding: `add_disposition`,
+`_split_records_terminal` and `unresolved_gaps` had **no production
+callers**, so control records were still discarded before the buffer saw
+them and a `SKIPPED`/`POISONED`/`NO_RESULT` batch still read as a hole
+until `final_drain()`. The completion claim was not supported.
+
+All seven ordered drain sites now use `_drain_worker_memfd_terminal()` and
+`add_disposition()`. The DATA-only helpers remain for callers that must
+not see control records at all.
+
+`unresolved_gaps()` stays **diagnostic-only**, and the reason is a real
+producer asymmetry the reviewer surfaced: ordinary Python-mode payloads
+pass `data=NULL` to `fr_py_emit()`, which writes **no record at all** for
+a `None` result. So a `None` batch is a genuine hole, not a marker that
+can be skipped, and enforcing the gap check unconditionally would report
+false completeness failures. An earlier comment here claimed the C
+emitter supplies a `NO_RESULT` record for that case; it does not, and the
+comment is corrected.
+
+### What the lifecycle tests found (superseded)
+
+The original finding, retained for the record:
 
 Spawn now runs end-to-end through the launcher, and two of the three
 gates hold:

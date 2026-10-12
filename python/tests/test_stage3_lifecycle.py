@@ -149,7 +149,6 @@ class TestProcessGroupLifecycle(unittest.TestCase):
 
     # -- the positive case ---------------------------------------------
 
-    @unittest.expectedFailure
     def test_child_dies_with_its_worker_generation(self):
         """A descendant in the worker's process group must be gone once
         the launcher has torn that generation down.
@@ -157,21 +156,23 @@ class TestProcessGroupLifecycle(unittest.TestCase):
         The check happens while the LAUNCHER is still alive, so a passing
         result reflects the group signal rather than ordinary teardown.
 
-        KNOWN-UNMET GATE, not a flaky test. Marked expectedFailure so it
-        flips to unexpected success when fixed and cannot be forgotten.
+        HISTORY, because the first diagnosis was wrong. This test
+        originally failed and I concluded the launcher "never notices the
+        worker's death" -- that no respawn occurred at all.
 
-        What actually blocks it is bigger than the process group. Killing
-        a worker blocked mid-batch produces NO respawn at all over a
-        5s observation window, so the launcher never reaches the code
-        that would signal the group. Its supervision loop does not appear
-        to cover a worker that is still executing when it dies -- the
-        orphan is only reachable once something notices.
+        The reviewer showed that was not it. The supervisor's
+        waitpid(-1, &st, 0) does observe the death; the group signal was
+        a silent NO-OP because the loop cleared pids[wid] = -1 the moment
+        it reaped the worker, and kill_worker_group() took the slot
+        POINTER and refused to act on a non-positive value. The helper now
+        takes the pid by value, which makes that ordering mistake
+        impossible rather than merely unlikely.
 
-        So the honest status is: spawn runs through the launcher, the
-        escaping-descendant boundary holds, and in-group cleanup on
-        worker death is NOT yet demonstrated. That is precisely why the
-        spawn envelope stays declined. Claiming the group guarantee from
-        the code alone would be asserting something no test supports.
+        Worth keeping because the wrong conclusion was the plausible one:
+        "the child survived" reads like "the supervisor never noticed",
+        and acting on it would have meant redesigning supervision that was
+        working. The distinction between "cleanup failed" and "supervision
+        failed" needed the test to observe the right thing.
         """
         proc = self._launch(SPAWNER, extra=["--supervise", "recover"])
         pid = None
@@ -243,24 +244,48 @@ class TestProcessGroupLifecycle(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    # -- sanity: the spawn path itself works ---------------------------
+    # -- positive output -----------------------------------------------
 
     def test_spawn_through_the_launcher_produces_records(self):
-        """Not a lifecycle test: confirms the mode is actually served, so
-        the tests above cannot pass on a path that never ran."""
-        proc = subprocess.run(
-            [LAUNCHER, "--so", find_substrate(),
-             "--workers", "1", "--lines", "1", "--bytes", "0",
-             "--on-error", "0", "--retry", "2",
-             "--src", str(os.open(self.src, os.O_RDONLY)), "--result", "-1",
-             "--stats-fd", "-1",
-             "--spawn-argv", "tr", "--spawn-argv", "a-z",
-             "--spawn-argv", "A-Z"],
-            capture_output=True, timeout=60)
-        # --result -1 is invalid; use a real fd for the positive case.
-        self.assertNotEqual(64, proc.returncode,
-                            "spawn mode is still rejected by argv "
-                            "validation: %r" % proc.stderr[:200])
+        """Positive output, asserted properly.
+
+        Previously this passed --result -1 (its own comment called that
+        invalid) and asserted only `returncode != 64`, so it could pass
+        without proving successful execution or ANY output. It now uses a
+        real descriptor, requires exit 0, and checks every batch's
+        payload.
+        """
+        out = os.path.join(self.d, "positive.bin")
+        sfd = os.open(self.src, os.O_RDONLY)
+        ofd = os.open(out, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            proc = subprocess.run(
+                [LAUNCHER, "--so", find_substrate(),
+                 "--workers", "2", "--lines", "1", "--bytes", "0",
+                 "--on-error", "0", "--retry", "2",
+                 "--src", str(sfd), "--result", str(ofd),
+                 "--stats-fd", "-1",
+                 "--spawn-argv", "tr", "--spawn-argv", "a-z",
+                 "--spawn-argv", "A-Z"],
+                pass_fds=(sfd, ofd), capture_output=True, timeout=90)
+        finally:
+            os.close(sfd)
+            os.close(ofd)
+
+        self.assertEqual(0, proc.returncode,
+                         "spawn through the launcher failed: %r"
+                         % proc.stderr[-400:])
+        with open(out, "rb") as fh:
+            recs = _records(fh.read())
+        self.assertEqual(3, len(recs),
+                         "expected one record per batch, got %r"
+                         % ([(i, d) for i, d, _p in recs],))
+        by_batch = {i: p for i, _d, p in recs}
+        self.assertEqual(sorted(range(3)), sorted(by_batch),
+                         "batch-index set is incomplete")
+        for i, _d, payload in recs:
+            self.assertEqual(("LINE%06d\n" % i).encode(), payload,
+                             "batch %d payload wrong" % i)
 
 
 if __name__ == "__main__":

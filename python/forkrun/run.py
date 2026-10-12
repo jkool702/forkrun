@@ -3942,6 +3942,36 @@ def _drain_worker_memfd(fd, state) -> list:
     return records
 
 
+def _drain_worker_memfd_terminal(fd, state) -> list:
+    """Terminal-aware sibling of _drain_worker_memfd.
+
+    Same cursor and tail discipline, but parses with
+    _split_records_terminal so control records survive, returning
+    [(batch_idx, disposition, payload)].
+
+    This is what lets a SKIPPED / POISONED / NO_RESULT batch advance an
+    ordered consumer's prefix instead of masquerading as a hole until
+    final_drain(). The DATA-only helper stays for callers that must not
+    see control records at all.
+    """
+    try:
+        want = os.fstat(fd).st_size
+    except OSError:
+        return []
+    if want <= state[0]:
+        return []
+    try:
+        chunk = os.pread(fd, want - state[0], state[0])
+    except OSError:
+        return []
+    if not chunk:
+        return []
+    state[0] += len(chunk)
+    records, tail = _split_records_terminal(state[1] + chunk)
+    state[1] = tail
+    return records
+
+
 def _drain_records(lib, signal_r, out_fds, pids, statuses,
                    order="none", stats=None, pump=None):
     """Yield payload blobs (v1 drain loop).
@@ -4003,12 +4033,16 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
             if 0 <= wid:
                 while len(per_worker) <= wid:
                     per_worker.append([0, b""])
-                for _bidx, blob in _drain_worker_memfd(
+                for _bidx, _disp, _blob in _drain_worker_memfd_terminal(
                         out_fds[wid], per_worker[wid]):
                     if reassembly is None:
-                        yield blob
+                        # No ordering requested: only DATA is a result.
+                        # Control records are intentionally dropped, as
+                        # they always were for this shape.
+                        if _disp == _DISP_DATA:
+                            yield _blob
                     else:
-                        reassembly.add(_bidx, blob)
+                        reassembly.add_disposition(_bidx, _disp, _blob)
                         for _, ordered in reassembly.drain():
                             yield ordered
         if _sp:
@@ -4044,12 +4078,13 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
     # this should find nothing — but a short final write must never be
     # silently lost.
     for wid in range(len(per_worker)):
-        for bidx, blob in _drain_worker_memfd(out_fds[wid],
-                                              per_worker[wid]):
+        for bidx, bdisp, bblob in _drain_worker_memfd_terminal(
+                out_fds[wid], per_worker[wid]):
             if reassembly is None:
-                yield blob
+                if bdisp == _DISP_DATA:
+                    yield bblob
             else:
-                reassembly.add(bidx, blob)
+                reassembly.add_disposition(bidx, bdisp, bblob)
                 for _, ordered in reassembly.drain():
                     yield ordered
     if reassembly is not None:
@@ -6777,15 +6812,17 @@ def _parse_drain_quantum(drain, coll_fd, use_orderer, out_fds, per_worker,
             for wid in _seen:
                 while len(per_worker) <= wid:
                     per_worker.append([0, b""])
-                for _bidx, blob in _drain_worker_memfd(
+                for _bidx, _disp, _blob in _drain_worker_memfd_terminal(
                         out_fds[wid], per_worker[wid]):
                     if drain["reassembly"] is None:
-                        drain["pending"].append(blob)
+                        if _disp == _DISP_DATA:
+                            drain["pending"].append(_blob)
                     else:
-                        drain["reassembly"].add(_bidx, blob)
+                        drain["reassembly"].add_disposition(
+                            _bidx, _disp, _blob)
                         for _, ordered in drain["reassembly"].drain():
                             drain["pending"].append(ordered)
-                    got = True
+                got = True
     # Compact the consumed prefix once per quantum, not once per signal
     # (see _consume_sig_wakeups).
     if drain["sig_pos"]:
@@ -7139,12 +7176,15 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                         while len(per_worker) <= wid:
                             per_worker.append([0, b""])
                         if wid < len(out_fds):
-                            for _bidx, blob in _drain_worker_memfd(
-                                    out_fds[wid], per_worker[wid]):
+                            for _bidx, _disp, _blob in \
+                                    _drain_worker_memfd_terminal(
+                                        out_fds[wid], per_worker[wid]):
                                 if reassembly is None:
-                                    _pending.append(blob)
+                                    if _disp == _DISP_DATA:
+                                        _pending.append(_blob)
                                 else:
-                                    reassembly.add(_bidx, blob)
+                                    reassembly.add_disposition(
+                                        _bidx, _disp, _blob)
                                     for _, ordered in reassembly.drain():
                                         _pending.append(ordered)
                 if _sp:
@@ -7201,12 +7241,15 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     for _wid in range(len(per_worker)):
                         if _wid >= len(out_fds):
                             continue
-                        for _bidx, blob in _drain_worker_memfd(
-                                out_fds[_wid], per_worker[_wid]):
+                        for _bidx, _disp, _blob in \
+                                _drain_worker_memfd_terminal(
+                                    out_fds[_wid], per_worker[_wid]):
                             if reassembly is None:
-                                _pending.append(blob)
+                                if _disp == _DISP_DATA:
+                                    _pending.append(_blob)
                             else:
-                                reassembly.add(_bidx, blob)
+                                reassembly.add_disposition(
+                                    _bidx, _disp, _blob)
                                 for _, ordered in reassembly.drain():
                                     _pending.append(ordered)
                     if _pending:
@@ -8334,12 +8377,15 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     for _wid in range(len(per_worker)):
                         if _wid >= len(out_fds):
                             continue
-                        for _bidx, blob in _drain_worker_memfd(
-                                out_fds[_wid], per_worker[_wid]):
+                        for _bidx, _disp, _blob in \
+                                _drain_worker_memfd_terminal(
+                                    out_fds[_wid], per_worker[_wid]):
                             if drain["reassembly"] is None:
-                                drain["pending"].append(blob)
+                                if _disp == _DISP_DATA:
+                                    drain["pending"].append(_blob)
                             else:
-                                drain["reassembly"].add(_bidx, blob)
+                                drain["reassembly"].add_disposition(
+                                    _bidx, _disp, _blob)
                                 for _, ordered in drain[
                                         "reassembly"].drain():
                                     drain["pending"].append(ordered)
@@ -9724,12 +9770,14 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 for _wid in range(len(per_worker)):
                     if _wid >= len(out_fds):
                         continue
-                    for _bidx, blob in _drain_worker_memfd(
+                    for _bidx, _disp, _blob in _drain_worker_memfd_terminal(
                             out_fds[_wid], per_worker[_wid]):
                         if drain["reassembly"] is None:
-                            drain["pending"].append(blob)
+                            if _disp == _DISP_DATA:
+                                drain["pending"].append(_blob)
                         else:
-                            drain["reassembly"].add(_bidx, blob)
+                            drain["reassembly"].add_disposition(
+                                _bidx, _disp, _blob)
                             for _, ordered in drain[
                                     "reassembly"].drain():
                                 drain["pending"].append(ordered)

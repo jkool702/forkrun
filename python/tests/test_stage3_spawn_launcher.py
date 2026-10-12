@@ -149,10 +149,22 @@ class TestLauncherDescriptor(unittest.TestCase):
         src = self._c()
         m = re.search(r"static void kill_worker_group\(.*?\n\}\n", src, re.S)
         self.assertIsNotNone(m)
-        self.assertIn("kill(-(*slot), SIGKILL)", m.group(0))
-        self.assertNotIn("kill(-(*slot), SIGKILL)", src.split(
-            "static void kill_slot(")[0],
-            "group signalling must not leak into the generic kill path")
+        self.assertIn("kill(-pid, SIGKILL)", m.group(0))
+
+    def test_group_kill_cannot_be_disabled_by_a_cleared_slot(self):
+        """Regression for the bug that made the group signal a no-op.
+
+        The supervisor reaps a worker and sets pids[wid] = -1 BEFORE
+        calling kill_worker_group on it. With the helper taking the slot
+        POINTER, its own "positive pid only" guard then refused to act
+        and the group signal silently did nothing -- so a command's child
+        survived a worker death the supervisor had already observed.
+        Passing the pid BY VALUE makes that ordering impossible."""
+        src = self._c()
+        self.assertNotRegex(
+            src, r"kill_worker_group\(&pids\[",
+            "group signalling must not read a slot that can already be "
+            "cleared -- that ordering made it a silent no-op")
 
     def test_spawn_envelope_is_still_declined(self):
         """Stage 3 is plumbing. Activation waits on the lifecycle gates:

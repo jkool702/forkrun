@@ -205,11 +205,24 @@ class ReassemblyBuffer:
     def unresolved_gaps(self, upto: int) -> list:
         """Indices in [start, upto) that no terminal outcome has covered.
 
-        For a protocol that emits an authoritative disposition for EVERY
-        published batch, a gap after a successful run is a completeness
-        failure, not something to paper over with a sorted final_drain.
-        Legacy producers that emit no control records cannot be checked
-        this way, so callers must scope it to terminal-aware protocols.
+        DIAGNOSTIC ONLY. Deliberately not wired into the production
+        completion check, because no single call site can tell whether its
+        producer emits an authoritative disposition for EVERY published
+        batch:
+
+          * the C loops under the launcher do emit SKIPPED/POISONED;
+          * ordinary Python-mode payloads do NOT -- a payload returning
+            None passes data=NULL to fr_py_emit(), which writes no record
+            at all, so such a batch is a genuine hole rather than a
+            missing marker.
+
+        Enforcing this unconditionally would therefore report false
+        completeness failures on ordinary None results. It is offered for
+        callers that can scope it to a known terminal-aware producer, and
+        as a diagnostic for anyone investigating a short run. Turning it
+        into an enforced invariant needs a per-producer capability flag,
+        which is Stage 1 follow-up work rather than something to smuggle
+        in here.
         """
         return [i for i in range(self._next_idx, upto) if i not in self._seen()]
 

@@ -730,11 +730,20 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         try:
                             # DECISION-02: disposition is explicit.
                             # len(blob) == 0 with blob == b"" is a REAL
-                            # empty result (DATA); blob == None never
-                            # reaches here -- the guard above skips the
-                            # whole block for it, so the record for a
-                            # None result is written by the C emitter,
-                            # which supplies the NO_RESULT disposition.
+                            # empty result (DATA).
+                            #
+                            # blob == None never reaches here: the guard
+                            # above skips the whole block. Note that this
+                            # means the ordinary Python payload path
+                            # writes NO record at all for a None result --
+                            # fr_py_emit() is handed data=NULL and its
+                            # contract is to write nothing. An earlier
+                            # version of this comment claimed the C
+                            # emitter supplies a NO_RESULT record here;
+                            # that was wrong, and it matters for Stage 1,
+                            # because a None batch is a genuine hole for
+                            # an ordered consumer rather than a marker it
+                            # can skip over.
                             _write_all(out_fd, _HDR.pack(
                                 batch.batch_index, len(blob),
                                 0, 0))

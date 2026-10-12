@@ -246,7 +246,14 @@ class TestPostCommitNotifyFailure(unittest.TestCase):
         sfd = os.open(self.src, os.O_RDONLY)
         ofd = os.open(out, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
         env = dict(os.environ)
-        env["FORKRUN_TEST_DIE_BEFORE_ACK"] = "1"
+        # BEFORE_NOTIFY, not BEFORE_ACK. The scenario under test is a
+        # COMMITTED record whose ordinary notification was lost.
+        # BEFORE_ACK killed the worker with uncommitted output, which
+        # recovery rolled back -- so the abandoned record was gone and
+        # the test exercised the error branch without ever establishing
+        # the committed-but-unnotified case its name claims.
+        env["FORKRUN_TEST_DIE_BEFORE_NOTIFY"] = "1"
+        env["FORKRUN_TEST_DIE_AFTER_DRAIN_MS"] = "150"
         env["FORKRUN_TEST_BREAK_DRAIN_WAKEUP"] = "1"
         try:
             proc = subprocess.run(
@@ -255,7 +262,7 @@ class TestPostCommitNotifyFailure(unittest.TestCase):
                  "--on-error", "0", "--retry", "2",
                  "--src", str(sfd), "--result", str(ofd),
                  "--stats-fd", "-1", "--plugin", plugin,
-                 "--func", "die_once_v1"],
+                 "--func", "count_lines_v1"],
                 env=env, pass_fds=(sfd, ofd), capture_output=True, timeout=120)
         finally:
             os.close(sfd)
