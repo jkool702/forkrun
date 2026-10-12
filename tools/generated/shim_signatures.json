@@ -169,19 +169,24 @@
     "linkage": "extern",
     "return": "int"
   },
-  "fr_py_maybe_die_after_signal": {
-    "args": "uint64_t data_len",
+  "fr_py_maybe_die_before_ack": {
+    "args": "void",
     "linkage": "static",
     "return": "void"
   },
-  "fr_py_maybe_die_before_ack": {
-    "args": "void",
+  "fr_py_maybe_die_before_notify": {
+    "args": "int signal_fd",
     "linkage": "static",
     "return": "void"
   },
   "fr_py_nonblock": {
     "args": "int fd",
     "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_notify_committed": {
+    "args": "int signal_fd, int out_fd, uint64_t wid",
+    "linkage": "extern",
     "return": "int"
   },
   "fr_py_numa_ingest": {
@@ -280,7 +285,7 @@
     "return": "int"
   },
   "fr_py_signal_write": {
-    "args": "int signal_fd, uint64_t wid, uint64_t batch_idx",
+    "args": "int signal_fd, uint64_t wid, uint64_t frontier",
     "linkage": "static",
     "return": "int"
   },

@@ -214,7 +214,7 @@ class TestShimBindings(unittest.TestCase):
         # signalled before the before-ack hook fires. Extern count is
         # unchanged at 53: no dlsym-visible entry was added or changed,
         # so this is a fault-injection-only addition.
-        self.assertEqual((n_ext, n_st), (53, 16),
+        self.assertEqual((n_ext, n_st), (54, 16),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

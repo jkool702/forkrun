@@ -130,20 +130,31 @@ class TestLoopParity(unittest.TestCase):
 
     # -- the specific guarantees the parity protects -------------------
 
-    def test_poison_skip_is_acksilent_and_traps(self):
+    def test_poison_skip_traps_and_publishes_its_disposition(self):
         """A poisoned batch warns, notifies via the trap pipe, and
-        completes WITHOUT a signal -- nothing was emitted, so signalling
-        would tell the parent a record exists."""
+        publishes its POISONED disposition AFTER the commit.
+
+        STAGE0 changed this on purpose. A POISONED record is a real
+        committed record, so leaving the ack silent would commit it and
+        tell nobody -- and an ordered consumer waiting on that batch's
+        terminal outcome would wait forever. The disposition is emitted
+        first (so a death in between rolls it back), then the completion
+        commits and notifies with the real signal fd."""
         for mode in PARITY_MODES:
             body = self.canonical(mode)
             with self.subTest(mode=mode):
                 self.assertIn("Skipping poisoned batch", body)
                 self.assertIn("P:%llu:%u", body)
-                self.assertIn("fr_py_complete(-1,", body)
+                self.assertIn("FR_DISP_POISONED", body)
+                self.assertIn("fr_py_complete(signal_fd,", body)
 
     def test_zero_length_sentinel_never_emits(self):
         """The bash REPLY rule: a zero-length slot is acked, not
-        executed. Shared by every payload-failure mode."""
+        executed. Shared by every payload-failure mode.
+
+        Unlike a disposition, the sentinel writes NO record, so it stays
+        ack-silent after Stage 0: the committed frontier does not move
+        and a notification would be an empty wakeup."""
         for mode in PARITY_MODES:
             body = self.canonical(mode)
             with self.subTest(mode=mode):

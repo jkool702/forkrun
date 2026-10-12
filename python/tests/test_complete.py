@@ -138,7 +138,14 @@ class TestCompleteReturnCodes(unittest.TestCase):
         rc = lib.fr_py_complete(-1, 0, 0, -1, fd, b"xyz", 3)
         self.assertEqual(rc, -1)
 
-    def test_signal_failure_is_minus_two(self):
+    def test_ack_failure_precedes_notification(self):
+        """STAGE0: the notification moved AFTER the commit.
+
+        With a broken signal pipe, this now reports -3 (ack failure)
+        rather than -2, because the ack runs first and fails before any
+        notification is attempted. The old -2 came from a signal write
+        that happened before the ack -- exactly the ordering Stage 0
+        reversed."""
         lib = get()
         if not hasattr(lib, "fr_py_complete"):
             self.skipTest("fr_py_complete missing")
@@ -148,7 +155,30 @@ class TestCompleteReturnCodes(unittest.TestCase):
             rc = lib.fr_py_complete(w, 0, 0, -1, -1, None, 0)
         finally:
             os.close(w)
-        self.assertEqual(rc, -2)
+        self.assertEqual(rc, -3)
+
+    def test_post_commit_notification_failure_has_its_own_code(self):
+        """A notification failure is POST-commit and must be
+        distinguishable from every pre-commit failure, so a caller cannot
+        mistake it for "worker died, retry" and re-execute a batch the
+        engine already committed."""
+        lib = get()
+        if not hasattr(lib, "fr_py_notify_committed"):
+            self.skipTest("fr_py_notify_committed missing")
+        out = os.memfd_create("nc")
+        r, w = os.pipe()
+        os.close(r)                      # EPIPE on write
+        try:
+            rc = lib.fr_py_notify_committed(w, out, 0)
+        finally:
+            os.close(w)
+            os.close(out)
+        self.assertEqual(rc, -4,
+                         "post-commit notification failure must be its own "
+                         "code, distinct from pre-commit failures")
+        # ...and it must NOT be confusable with the pre-commit codes.
+        for pre_commit in (-1, -2, -3):
+            self.assertNotEqual(rc, pre_commit)
 
     def test_ack_without_state_is_minus_three(self):
         lib = get()

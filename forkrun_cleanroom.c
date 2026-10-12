@@ -800,6 +800,58 @@ static void kill_all(pid_t *slots, int nslots) {
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
 }
 
+        /* STAGE0: synthetic post-recovery drain notification.
+ *
+ * A worker can commit its batch and die before notifying the drain. That
+ * batch IS committed (TXN_IDLE is stored before the notification), but
+ * without a wakeup the drain never learns the record is there, so a
+ * committed result is stranded forever -- a completeness failure that
+ * looks exactly like a clean, short run.
+ *
+ * After recovery has resolved any rollback, the worker's memfd holds only
+ * committed bytes, so its size is a valid committed frontier and the
+ * drain can be told to forward up to it.
+ *
+ * Called ONLY for nonfatal, non-ambiguous outcomes:
+ *   rc 0 RECOVERED   rollback truncated the memfd to output_start
+ *   rc 1 NO_BATCH    transaction was IDLE; nothing in flight
+ *   rc 2 NORMAL_EXIT transaction was IDLE; drained to EOF
+ * rc 4 (CLAIMING/COMMITTING, ambiguous) and rc 5 (FATAL) do NOT truncate
+ * and are already fatal to the run, so they must never be treated as a
+ * committed frontier -- and rc 3 (ALREADY_DONE) does not truncate either,
+ * so the conservative choice is to skip it. Publishing a frontier above
+ * the committed boundary is precisely the defect Stage 0 removes, so a
+ * doubtful case must stay silent rather than guess. */
+static void fr_wake_drain_committed(int sig_w, int wid, int out_fd)
+{
+uint64_t sig[2];
+off_t frontier;
+size_t left;
+const char *p;
+
+if (sig_w < 0 || out_fd < 0 || wid < 0)
+    return;
+frontier = lseek(out_fd, 0, SEEK_END);
+if (frontier == (off_t)-1)
+    return;
+sig[0] = (uint64_t)wid;
+sig[1] = (uint64_t)frontier;
+p = (const char *)sig;
+left = sizeof(sig);
+while (left > 0) {
+    ssize_t n = write(sig_w, p, left);
+    if (n < 0) {
+        if (errno == EINTR)
+            continue;
+        return; /* drain gone: nothing left to notify */
+    }
+    if (n == 0)
+        return;
+    p += n;
+    left -= (size_t)n;
+}
+}
+
 int main(int argc, char **argv) {
     struct opts o;
     memset(&o, 0, sizeof o);
@@ -1578,6 +1630,16 @@ int main(int argc, char **argv) {
         int rc = p_recover ? p_recover(wid, incarn[wid], out_fds[wid],
                                        death_cause(st))
                            : 5;    /* no core -> cannot vouch for it */
+
+        /* STAGE0: notify the drain of anything committed that its
+         * notification may have lost. This must happen BEFORE the early
+         * continues below -- a NORMAL_EXIT classification in particular
+         * used to skip straight past, silently stranding a committed
+         * record. Only nonfatal, non-ambiguous rc values are woken for;
+         * see fr_wake_drain_committed. */
+        if (rc == 0 || rc == 1 || rc == 2)
+            fr_wake_drain_committed(spare_sig, wid, out_fds[wid]);
+
         if (rc == 2)
             continue;               /* NORMAL_EXIT: drained to EOF */
         if (rc == 4 || rc == 5) {

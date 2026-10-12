@@ -1,0 +1,212 @@
+"""Stage 0 publication protocol: safety and completeness.
+
+The Stage 0 protocol makes publication strictly post-commit. Two
+properties follow, and they are independent:
+
+  SAFETY      nothing from an uncommitted attempt is ever visible.
+              Inject a death AFTER the record is written but BEFORE the
+              commit. The drain must never publish it.
+
+  COMPLETENESS every committed record is delivered exactly once.
+              Inject a death AFTER the commit but BEFORE the drain is
+              notified. Recovery must wake the drain, or the committed
+              result is stranded forever.
+
+Both need the drain to have demonstrably acted before the worker dies,
+so both use FORKRUN_TEST_DIE_AFTER_DRAIN_MS to widen the window. That is
+a scheduling aid, not a handshake; the deterministic handshake remains
+required by the Stage 0 note.
+
+Before Stage 0 the signal was written at emit time and the drain
+forwarded to the memfd's current SIZE, so a single wakeup published any
+uncommitted bytes and a poisoned batch returned the abandoned attempt's
+DATA with rc=0. That was reproduced at 0341c9b4.
+
+Run: make -f Makefile.substrate python-substrate && cd python/tests
+     python3 -m unittest test_stage0_publication
+"""
+
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.normpath(os.path.join(_HERE, os.pardir, os.pardir))
+sys.path.insert(0, os.path.join(_ROOT, "python"))
+
+from forkrun._worker import _HDR  # noqa: E402
+
+DISP_DATA, DISP_NO_RESULT, DISP_SKIPPED, DISP_POISONED = 0, 1, 2, 3
+NAME = {0: "DATA", 1: "NO_RESULT", 2: "SKIPPED", 3: "POISONED"}
+
+UDF_SRC = "def up(b):\n    return b.upper()\n"
+BATCHES = 4
+
+
+def _helper():
+    from forkrun._udf import helper_path
+    return helper_path()
+
+
+def _launcher():
+    return os.path.join(_ROOT, "python", "forkrun", "_forkrun_cleanroom")
+
+
+def _substrate():
+    from forkrun._bindings import find_substrate
+    return find_substrate()
+
+
+def _roots(udf_dir):
+    import site
+    out = []
+    for p in site.getsitepackages():
+        if p not in out and os.path.isdir(p):
+            out.append(p)
+    try:
+        u = site.getusersitepackages()
+        if isinstance(u, str) and u not in out and os.path.isdir(u):
+            out.append(u)
+    except Exception:
+        pass
+    out.append(udf_dir)
+    return " ".join(out)
+
+
+def parse(blob):
+    recs, off = [], 0
+    while off + _HDR.size <= len(blob):
+        idx, ln, disp, _r = _HDR.unpack_from(blob, off)
+        off += _HDR.size
+        if off + ln > len(blob):
+            break
+        recs.append((idx, disp, blob[off:off + ln]))
+        off += ln
+    return recs
+
+
+@unittest.skipUnless(_helper() and os.path.exists(_launcher()),
+                     "udf helper / launcher not built")
+class TestStage0Publication(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        d = cls._tmp.name
+        with open(os.path.join(d, "px_udf.py"), "w") as fh:
+            fh.write(UDF_SRC)
+        cls.src = os.path.join(d, "in.txt")
+        with open(cls.src, "w") as fh:
+            fh.writelines("line%06d\n" % i for i in range(BATCHES))
+        cls.out = os.path.join(d, "out.bin")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def run_launcher(self, mode, delay_ms=150, retry="1"):
+        env = dict(os.environ)
+        for k in ("FORKRUN_TEST_DIE_BEFORE_ACK",
+                  "FORKRUN_TEST_DIE_BEFORE_NOTIFY",
+                  "FORKRUN_TEST_DIE_AFTER_DRAIN_MS"):
+            env.pop(k, None)
+        if mode == "before_ack":          # record written, not committed
+            env["FORKRUN_TEST_DIE_BEFORE_ACK"] = "1"
+            env["FORKRUN_TEST_DIE_AFTER_DRAIN_MS"] = str(delay_ms)
+        elif mode == "before_notify":     # committed, not notified
+            env["FORKRUN_TEST_DIE_BEFORE_NOTIFY"] = "1"
+            env["FORKRUN_TEST_DIE_AFTER_DRAIN_MS"] = str(delay_ms)
+        src_fd = os.open(self.src, os.O_RDONLY)
+        out_fd = os.open(self.out, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            argv = [_launcher(),
+                    "--so", _substrate(),
+                    "--workers", "1", "--lines", "1", "--bytes", "0",
+                    "--on-error", "0", "--retry", retry,
+                    "--src", str(src_fd), "--result", str(out_fd),
+                    "--stats-fd", "-1",
+                    "--udf-helper", _helper(),
+                    "--udf", "px_udf", "--udf-attr", "up",
+                    "--udf-roots", _roots(self._tmp.name)]
+            proc = subprocess.run(argv, env=env, pass_fds=(src_fd, out_fd),
+                                  capture_output=True, timeout=180)
+        finally:
+            os.close(src_fd)
+            os.close(out_fd)
+        with open(self.out, "rb") as fh:
+            return proc, fh.read()
+
+    # -- control ------------------------------------------------------
+
+    def test_control_unfaulted_run_delivers_data(self):
+        _p, blob = self.run_launcher("clean")
+        recs = parse(blob)
+        self.assertEqual(BATCHES, len(recs), "control broken: %r" % (recs,))
+        for _i, disp, _p in recs:
+            self.assertEqual(DISP_DATA, disp)
+
+    # -- SAFETY -------------------------------------------------------
+
+    def test_uncommitted_record_is_never_published(self):
+        """Death AFTER the record is written, BEFORE the commit.
+
+        Every generation writes DATA then dies uncommitted, so recovery
+        retries until the batch poisons. The batch's terminal outcome is
+        POISONED, and that is the only thing a consumer may see: no
+        DATA from any abandoned attempt may survive.
+        """
+        _p, blob = self.run_launcher("before_ack")
+        recs = parse(blob)
+        self.assertTrue(recs, "nothing reached the parent; harness is wrong")
+        leaked = [(i, NAME.get(d, d), p) for i, d, p in recs if d == DISP_DATA]
+        print("\n  before_ack stream: %r"
+              % ([(i, NAME.get(d, d)) for i, d, _p in recs],))
+        self.assertEqual(
+            [], leaked,
+            "SAFETY VIOLATION: %r -- DATA from an uncommitted attempt was "
+            "published. The record was written before the commit and must "
+            "not be reachable by the drain until TXN_IDLE." % (leaked,))
+
+    def test_each_batch_reaches_exactly_one_terminal_record(self):
+        _p, blob = self.run_launcher("before_ack")
+        recs = parse(blob)
+        by_batch = {}
+        for idx, disp, _pl in recs:
+            by_batch.setdefault(idx, []).append(disp)
+        dupes = {i: d for i, d in by_batch.items() if len(d) > 1}
+        self.assertEqual({}, dupes, "duplicate terminal records: %r" % (dupes,))
+        self.assertEqual(sorted(range(BATCHES)), sorted(by_batch),
+                         "batches missing a terminal record")
+
+    # -- COMPLETENESS -------------------------------------------------
+
+    def test_committed_record_survives_a_lost_notification(self):
+        """Death AFTER the commit, BEFORE the drain is notified.
+
+        These batches COMMITTED with DATA, so DATA is the correct outcome
+        -- but the notification that would have delivered it was lost. If
+        the supervisor does not synthesize a wakeup after recovery, the
+        committed result is stranded and the stream is short.
+
+        This is the S2 case; it is expected to FAIL until the recovery
+        wakeup lands, and is marked expectedFailure so it flips to
+        unexpected success when it does.
+        """
+        _p, blob = self.run_launcher("before_notify")
+        recs = parse(blob)
+        print("\n  before_notify stream: %r"
+              % ([(i, NAME.get(d, d)) for i, d, _p in recs],))
+        by_batch = {i for i, _d, _p in recs}
+        missing = sorted(set(range(BATCHES)) - by_batch)
+        self.assertEqual(
+            [], missing,
+            "COMPLETENESS VIOLATION: batches %r committed but were never "
+            "delivered. The commit succeeded and the notification was lost, "
+            "so recovery must issue a synthetic wakeup for this worker."
+            % (missing,))
+
+
+if __name__ == "__main__":
+    unittest.main()

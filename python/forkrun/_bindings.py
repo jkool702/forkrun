@@ -346,6 +346,11 @@ def _setup_signatures(lib) -> None:
             ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
             ctypes.c_uint64, ctypes.c_uint32]
         lib.fr_py_emit_disposition.restype = ctypes.c_int
+        # STAGE0: publication is a separate step from emit, and carries
+        # the committed frontier rather than a batch index.
+        lib.fr_py_notify_committed.argtypes = [ctypes.c_int, ctypes.c_int,
+                                               ctypes.c_uint64]
+        lib.fr_py_notify_committed.restype = ctypes.c_int
     except AttributeError:
         pass
     try:

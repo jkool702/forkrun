@@ -646,17 +646,19 @@ static void fr_py_maybe_die_before_ack(void)
  * exercises ONLY the disposition path and silently proves nothing about
  * DATA publication, however many POISONED records it forwards.
  *
- * Gated on data_len > 0 so it fires only where a real payload record was
- * actually emitted and signalled; the ack-silent disposition path passes
- * NULL/0 and is deliberately not reached here.
+ * Gated on signal_fd >= 0, i.e. wherever a completion WILL notify the
+ * drain. Gating on payload length was wrong: the UDF and plugin loops
+ * write their record themselves and then complete with data=NULL, so a
+ * length gate left the hook unreachable there and those runs passed
+ * without any fault being injected at all.
  *
  * Honours FORKRUN_TEST_DIE_AFTER_DRAIN_MS to let the drain forward the
  * record first, which is what makes the publication/commit window real
  * rather than theoretical. */
-static void fr_py_maybe_die_after_signal(uint64_t data_len)
+static void fr_py_maybe_die_before_notify(int signal_fd)
 {
-    const char *n = getenv("FORKRUN_TEST_DIE_AFTER_SIGNAL");
-    if (n != NULL && *n && data_len > 0) {
+    const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_NOTIFY");
+    if (n != NULL && *n && signal_fd >= 0) {
         static unsigned seq = 0;
         unsigned want = (unsigned)atoi(n);
         seq++;
@@ -801,28 +803,28 @@ static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
 int fr_py_emit_disposition(int out_fd, int signal_fd, uint64_t wid,
                            uint64_t batch_idx, uint32_t disposition)
 {
-    /* Record first, then signal -- in that order, so the drain can
-     * never be told about bytes that are not there yet.
+    /* STAGE0: WRITE ONLY -- no signal.
      *
-     * The signal is what makes the record REACHABLE. fr_py_drain_loop
-     * blocks on the signal pipe and only inspects the worker id it
-     * names, so an ack-silently written record sits in the worker's
-     * memfd forever: correct, and invisible to the parent.
+     * This used to write and then signal immediately, which is the
+     * publication/commit race: the drain could forward an uncommitted
+     * disposition, and recovery's rollback could not retract it. An
+     * ordered consumer that advanced its prefix on a forwarded SKIPPED
+     * could later see the retried attempt's DATA for a batch it had
+     * already closed.
      *
-     * That is not a cosmetic gap. DECISION-02's premise is that every
-     * published batch has an authoritative terminal disposition, and a
-     * disposition the parent cannot observe is not one -- it is the same
-     * failure as never emitting it, which is what POISONED/SKIPPED
-     * replaced.
+     * The caller MUST now follow up with a post-commit notification
+     * (fr_py_complete with the real signal descriptor, or
+     * fr_py_notify_committed) once the disposition's transaction has
+     * committed. A silent ack would commit POISONED/SKIPPED and tell
+     * nobody, and an ordered consumer would wait forever on a batch that
+     * has in fact finished.
      *
-     * The completion that FOLLOWS stays ack-silent (fr_py_complete(-1,
-     * ...)): that governs the fallow and order acknowledgements, whose
-     * v0 parity is "nothing was emitted for this batch" in the payload
-     * sense. The bytes now exist, so they are announced; the
-     * acknowledgement semantics are unchanged. */
+     * signal_fd is retained for ABI stability and deliberately unused. */
+    (void)signal_fd;
+    (void)wid;
     if (fr_py_emit_record_buf(out_fd, batch_idx, NULL, 0, disposition) != 0)
         return -1;
-    return fr_py_signal_write(signal_fd, wid, batch_idx);
+    return 0;
 }
 
 /* Set a fd nonblocking. Returns 0 ok, -1 on failure. */
@@ -1518,7 +1520,21 @@ uint64_t fr_py_data_ready(void) {
  * fr_py_drain_loop blocks on this and only ever inspects the worker id
  * it names -- so a record written WITHOUT a signal is never moved to the
  * results stream, however correct it is in the worker's memfd. */
-static int fr_py_signal_write(int signal_fd, uint64_t wid, uint64_t batch_idx)
+/* STAGE0: signal payload is (worker, COMMITTED FRONTIER), not
+ * (worker, batch_idx).
+ *
+ * The frontier is an ABSOLUTE byte offset into the worker's output
+ * memfd, taken only after the batch has committed (worker_txn_clear's
+ * TXN_IDLE release store). The drain forwards at most up to it, so no
+ * wakeup can ever publish bytes belonging to a transaction that is still
+ * CLAIMED or COMMITTING -- which is the publication/commit race this
+ * replaces.
+ *
+ * Offsets are absolute and monotonic for the lifetime of the memfd.
+ * out_fds[] is created once by the launcher and REUSED across worker
+ * generations, so the drain's per-worker cursor is persistent and must
+ * never be reset on respawn. */
+static int fr_py_signal_write(int signal_fd, uint64_t wid, uint64_t frontier)
 {
     uint64_t sig[2];
     const char *sp;
@@ -1527,7 +1543,7 @@ static int fr_py_signal_write(int signal_fd, uint64_t wid, uint64_t batch_idx)
     if (signal_fd < 0)
         return 0;
     sig[0] = wid;
-    sig[1] = batch_idx;
+    sig[1] = frontier;
     sp = (const char *)sig;
     sleft = sizeof(sig);
     while (sleft > 0) {
@@ -1542,6 +1558,50 @@ static int fr_py_signal_write(int signal_fd, uint64_t wid, uint64_t batch_idx)
         sp += n;
         sleft -= (size_t)n;
     }
+    return 0;
+}
+
+/* STAGE0: post-commit notification.
+ *
+ * Called ONLY after the acknowledgement has succeeded, i.e. after the
+ * transaction has committed (worker_txn_clear -> TXN_IDLE). Publishes
+ * the committed frontier so the drain can forward exactly that far.
+ *
+ * The frontier is read with SEEK_END: every byte below it belongs to a
+ * committed transaction, because uncommitted output is truncated back to
+ * output_start by recovery before this worker can reach here again.
+ *
+ * Returns a DISTINCT code (-4) for "committed but not notified",
+ * separate from every pre-commit failure code. A caller that treats all
+ * nonzero returns as "worker died, retry the batch" would otherwise
+ * re-execute work the engine has already committed -- introducing a
+ * duplicate execution bug inside the fix for the publication race.
+ *
+ * -4 means: TXN_IDLE was already stored, the batch IS committed, and the
+ * drain has not been told. Permitted responses are recovery notification
+ * or aborting the run without claiming success. NEVER a plain retry.
+ *
+ * EXPORTED, not static: publication is now a separate step from emit, so
+ * a test that hand-rolled "write then signal" would not be exercising the
+ * shipped boundary. fr_py_emit_disposition is exported for the same
+ * reason. */
+#define FR_PY_ERR_NOTIFY (-4)
+
+int fr_py_notify_committed(int signal_fd, int out_fd, uint64_t wid)
+{
+    off_t frontier;
+    int rc;
+
+    if (signal_fd < 0)
+        return 0;
+    if (out_fd < 0)
+        return -1;
+    frontier = lseek(out_fd, 0, SEEK_END);
+    if (frontier == (off_t)-1)
+        return -1;
+    rc = fr_py_signal_write(signal_fd, wid, (uint64_t)frontier);
+    if (rc != 0)
+        return FR_PY_ERR_NOTIFY;
     return 0;
 }
 
@@ -1640,9 +1700,22 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
         worker_txn_advance_output((int)wid, FR_PY_RECORD_FOOTPRINT(data_len));
     }
 
-    if (signal_fd < 0)
-        return 0;
-    return fr_py_signal_write(signal_fd, wid, batch_idx);
+    /* STAGE0: NO signal here.
+     *
+     * This used to signal the drain as soon as the bytes were written,
+     * which let an UNCOMMITTED record be forwarded: the drain acted on a
+     * wakeup alone and forwarded everything up to the memfd's current
+     * size, so a record written before its ack could be published and
+     * then could not be retracted when recovery rolled it back. A
+     * poisoned batch could therefore return the abandoned attempt's DATA
+     * while the run reported success.
+     *
+     * Publication is now strictly post-commit. The caller signals via
+     * fr_py_notify_committed() after the ack succeeds, carrying the
+     * committed frontier. signal_fd is retained for ABI stability and is
+     * deliberately unused here. */
+    (void)signal_fd;
+    return 0;
 }
 
 /* Flush C stdio before ack/deposit points in the splice loop (it has
@@ -1780,29 +1853,21 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
             worker_txn_advance_output(wid, FR_PY_RECORD_FOOTPRINT(claimed.length));
         }
 
-        if (signal_fd >= 0) {
-            uint64_t sig[2];
-            const char *sp;
-            size_t sleft;
-            sig[0] = (uint64_t)wid;
-            sig[1] = claimed.batch_idx;
-            sp = (const char *)sig;
-            sleft = sizeof(sig);
-            while (sleft > 0) {
-                ssize_t n = write(signal_fd, sp, sleft);
-                if (n < 0) {
-                    if (errno == EINTR)
-                        continue;
-                    return 2; /* EPIPE: parent gone — fatal */
-                }
-                if (n == 0)
-                    return 2;
-                sp += n;
-                sleft -= (size_t)n;
-            }
-        }
-
-        /* Splice's success path: record framed and signalled above.
+        /* STAGE0: no signal here.
+         *
+         * Splice used to hand-roll its own signal carrying the BATCH
+         * INDEX, written BEFORE the ack. Both parts are wrong now: it
+         * published uncommitted bytes (the race Stage 0 removes), and a
+         * batch index is meaningless to a drain that bounds forwarding by
+         * the committed FRONTIER -- it silently forwarded almost nothing,
+         * so the C drain returned an empty stream.
+         *
+         * Splice acknowledges below and publishes through
+         * fr_notify_committed afterwards, like every other emitter. This
+         * is a THIRD emitting path that a fr_py_emit /
+         * fr_py_emit_disposition audit would not have listed, because it
+         * calls neither. */
+        /* Splice's success path: record framed and committed above.
          * Hooked here because splice does not call fr_py_complete, and
          * the other two fr_py_ack sites in this loop are the
          * poison/sentinel branches. Splice is excluded from the loop
@@ -1812,7 +1877,10 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
 
         if (fr_py_ack(fallow_fd, -1) != 0)
             return 1;
+        if (fr_py_notify_committed(signal_fd, out_fd, (uint64_t)wid) != 0)
+            return 2; /* EPIPE: parent gone -- fatal */
         continue;
+
 
     payload_error:
         /* Output failure rides escrow like a payload error (bash -E):
@@ -2410,12 +2478,15 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
         uint64_t sig[2];
         ssize_t n;
         uint64_t wid;
+        uint64_t frontier;
         struct stat st;
         uint64_t size, offset;
         char buf[65536];
 
-        /* 1. Signal heartbeat (blocking): one keyed record's worth
-         * of new bytes is visible in out_fds[wid] when this returns. */
+        /* 1. Notification (blocking): (worker, committed frontier). The
+         * frontier is the exclusive upper bound this worker has committed
+         * output to; it is NOT a record count and makes no claim that the
+         * memfd holds nothing beyond it. */
         n = fr_py_read_full(signal_r, sig, sizeof(sig));
         if (n == 0)
             break; /* EOF: every write end closed — drained */
@@ -2427,17 +2498,41 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
             rc = 3; /* short signal: never from a 16B atomic write */
             break;
         }
-        wid = sig[0]; /* sig[1] (batch_idx) is transport-opaque here */
+        wid = sig[0];
         if (wid >= (uint64_t)num_workers)
             continue; /* defensive: our own workers never send this */
 
-        /* 2. New bytes in this worker's memfd (fstat size vs cursor). */
+        /* STAGE0: sig[1] is the COMMITTED FRONTIER -- an absolute offset
+         * into this worker's output memfd -- not a batch index. Forward
+         * at most that far.
+         *
+         * The old code ignored sig[1] and forwarded to the memfd's
+         * current SIZE. That is what let an uncommitted record be
+         * published: bytes written before a batch's ack were in the
+         * memfd, so any wakeup for that worker forwarded them, and the
+         * rollback could not retract what had already been copied out and
+         * punched.
+         *
+         * Offsets are monotonic for the life of the memfd, which is
+         * reused across worker generations, so the cursor is deliberately
+         * NOT reset on respawn. */
+        frontier = sig[1];
+
+        /* 2. Newly COMMITTED bytes in this worker's memfd. */
         if (fstat(out_fds[wid], &st) != 0)
             continue; /* memfd went away: nothing to move, keep going */
         size = (uint64_t)st.st_size;
         offset = offsets[wid];
-        if (size <= offset)
-            continue; /* duplicate/empty wakeup: next signal */
+        if (frontier <= offset)
+            continue; /* duplicate/stale wakeup, or nothing committed yet */
+        if (frontier > size)
+            frontier = size; /* clamp: never read past the memfd */
+        if (frontier <= offset)
+            continue;
+        /* The record loop below is bounded by `size`; retarget it at the
+         * committed frontier so every bound check downstream inherits the
+         * commit guarantee rather than the raw memfd size. */
+        size = frontier;
 
         /* 3. Move whole RECORDS, never a partial one.
          *
@@ -2792,10 +2887,23 @@ int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx,
     rc = fr_py_emit(out_fd, signal_fd, wid, batch_idx, data, data_len);
     if (rc != 0)
         return rc;
-    fr_py_maybe_die_after_signal(data_len);
     target = (g_fr_config.fd_order_pipe >= 0 && out_fd >= 0) ? out_fd : -1;
     if (fr_py_ack_direct(fallow_fd, target) != EXECUTION_SUCCESS)
         return -3;
+
+    /* STAGE0: notify AFTER the commit.
+     *
+     * fr_py_ack_direct returns only after worker_txn_clear() has stored
+     * TXN_IDLE, and every fallow/order packet is already on its pipe at
+     * that point. That store -- not this function's return -- is the
+     * commit linearization point: a worker can die between the store and
+     * the return, and that batch IS committed.
+     *
+     * Publication therefore happens strictly after commit, so a record
+     * the drain forwards always belongs to a transaction the engine
+     * kept. */
+    fr_py_maybe_die_before_notify(signal_fd);
+    return fr_py_notify_committed(signal_fd, out_fd, wid);
     return 0;
 }
 
@@ -3245,7 +3353,13 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
                                        claimed.batch_idx,
                                        FR_DISP_POISONED) != 0)
                 return 1;
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
@@ -3304,7 +3418,13 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
                                       FR_DISP_SKIPPED) != 0)
                 return 1;
             /* skip: ack-silent like poison (no signal — nothing emitted). */
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
@@ -3501,7 +3621,13 @@ int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
                                        claimed.batch_idx,
                                        FR_DISP_POISONED) != 0)
                 return 1;
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
@@ -3555,7 +3681,13 @@ int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
                                       claimed.batch_idx,
                                       FR_DISP_SKIPPED) != 0)
                 return 1;
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
@@ -3673,7 +3805,13 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
                                        claimed.batch_idx,
                                        FR_DISP_POISONED) != 0)
                 return 1;
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
@@ -3733,7 +3871,13 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
                                       FR_DISP_SKIPPED) != 0)
                 return 1;
             /* skip: ack (order target derived, no signal — v0 parity). */
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
