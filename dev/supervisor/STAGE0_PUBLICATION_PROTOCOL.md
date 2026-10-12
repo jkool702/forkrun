@@ -479,6 +479,54 @@ activated** on the current publication protocol.
   protocol.
 ---
 
+## 8a. Stage 1 — terminal-aware reassembly (as-built)
+
+Stage 1 makes ordered reassembly aware of every batch's TERMINAL outcome
+rather than only the ones that produced a payload. **It changes no
+eligibility decision**: `stream(order="index")` remains declined, and
+Stage 0's publication protocol is still its precondition. A test asserts
+the decline is still present so a future change cannot quietly enable it.
+
+What landed:
+
+* `ReassemblyBuffer.add_disposition(batch_idx, disposition, payload)` —
+  all four dispositions advance the contiguous prefix; only `DATA`
+  yields. `NO_RESULT` / `SKIPPED` / `POISONED` are retained distinctly,
+  not collapsed, because poison accounting and the skip distinction are
+  exactly what a consumer needs.
+* `drain()` now walks terminal markers as well as payloads, so a
+  terminal batch no longer strands everything behind it — and does so
+  **promptly**, not at finalisation.
+* `unresolved_gaps(upto)` — for protocols that emit an authoritative
+  terminal record per batch, an uncovered index is a completeness
+  failure rather than something `final_drain()` should sort over.
+* `run._split_records_terminal()` — a **separate** parser.
+  `_split_records()` is deliberately left filtering control records: its
+  callers must not receive a spurious `b""` for a batch that produced
+  nothing, and a test pins that so "unifying" the two breaks loudly.
+
+### Producer coverage is not uniform, and that is recorded
+
+The gap check is only meaningful where a producer actually emits terminal
+records:
+
+| producer | terminal dispositions |
+|---|---|
+| plugin / udf / spawn loops | `SKIPPED`, `POISONED` |
+| splice loop | `POISONED` (no `on_error=skip` arm) |
+
+`splice`'s DATA disposition is set explicitly inline, so it appears in
+the loop body too. The contract is asserted **against the source**, not
+against this table — two earlier audits were wrong precisely because a
+hand-written enumeration was trusted.
+
+`test_stage1_reassembly.py` (16 tests) pins buffer semantics, the
+`b""`-is-DATA distinction, never-yielding-out-of-order, prompt
+advancement, gap detection, parser separation, the producer contract,
+and that the ordered-streaming decline is intact.
+
+---
+
 ## 9. As-built
 
 Implementation: **`06235e11`** and the follow-up test commits on

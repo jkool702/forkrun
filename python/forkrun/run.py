@@ -2666,6 +2666,42 @@ def _split_records(blob: bytes) -> tuple:
     return records, blob[off:]
 
 
+def _split_records_terminal(blob: bytes) -> tuple:
+    """Split a record stream keeping EVERY record's disposition.
+
+    Stage 1. ``_split_records`` drops every non-DATA record, which is
+    correct for its callers (a map() caller must not receive a spurious
+    b"" for a batch that produced nothing) but fatal for ordered
+    reassembly: a NO_RESULT / SKIPPED / POISONED batch then looks
+    identical to a batch that never answered, and the consumer waits on
+    a hole that will never close.
+
+    So this is a SEPARATE parser rather than a change to ``_split_records``.
+    That function's filtering is load-bearing for several other callers,
+    and altering it to keep control records would hand them payloads they
+    are explicitly written not to see.
+
+    Returns (records, tail) where records is [(batch_idx, disposition,
+    payload)] and the tail is an incomplete header or short body, held
+    back for the next chunk exactly as elsewhere.
+    """
+    records = []
+    off = 0
+    n = len(blob)
+    while True:
+        rec_start = off
+        if off + _HDR.size > n:
+            break
+        idx, ln, disp, _res = _HDR.unpack_from(blob, off)
+        off += _HDR.size
+        if off + ln > n:
+            off = rec_start
+            break
+        records.append((idx, disp, blob[off:off + ln]))
+        off += ln
+    return records, blob[off:]
+
+
 def _parse_records_c(blob: bytes) -> list | None:
     """W-PY21-B: C descriptor parse + Python slicing from known bounds.
 

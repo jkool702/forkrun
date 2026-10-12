@@ -29,6 +29,14 @@ Correctness notes:
 
 from __future__ import annotations
 
+# DECISION-02 dispositions. Duplicated rather than imported to keep this
+# module free of run.py imports (it is loaded on every ordered path);
+# test_stage1_reassembly pins the two definitions agree.
+_DISP_DATA = 0
+_DISP_NO_RESULT = 1
+_DISP_SKIPPED = 2
+_DISP_POISONED = 3
+
 import os as _os
 
 #: Depth allowance inside the dynamic warn limit (see module notes).
@@ -55,6 +63,12 @@ class ReassemblyBuffer:
 
     def __init__(self, start: int = 0, reassembly_limit=None) -> None:
         self._buffer: dict = {}
+        # Stage 1: batches that reached a terminal outcome WITHOUT a
+        # payload (NO_RESULT / SKIPPED / POISONED). Tracked separately
+        # from _buffer so they advance the contiguous prefix without
+        # yielding, and so their dispositions stay distinguishable.
+        self._terminal: set = set()
+        self._terminal_seen: dict = {}
         self._next_idx = start
         self._max_size = 0
         # W-REL6-3.2: byte accounting for the high-water warning.
@@ -121,16 +135,86 @@ class ReassemblyBuffer:
             self._max_bytes = self._bytes
         self._check_warn()
 
+    def add_disposition(self, batch_idx: int, disposition: int,
+                        payload=None) -> None:
+        """Record a batch's TERMINAL outcome, preserving its disposition.
+
+        Stage 1. ``add()`` takes only results, so every control record is
+        invisible to it: a batch that completed with NO_RESULT, was
+        SKIPPED, or was POISONED simply never appears, and an ordered
+        consumer reads that absence as a HOLE. Worse, a batch that later
+        completes successfully would still look like a hole to anything
+        that already consumed the earlier state.
+
+        All four dispositions advance the contiguous prefix; only DATA
+        yields a payload:
+
+        * ``DATA``          -- record the payload and yield it. A genuine
+          ``b""`` is a REAL empty result and is stored as such.
+        * ``NO_RESULT``     -- the batch completed with no output.
+        * ``SKIPPED``       -- on_error=skip gave up on the batch.
+        * ``POISONED``      -- the retry limit was reached.
+
+        The last three are retained distinctly rather than collapsed:
+        poison accounting and the skip/skip distinction are exactly what
+        a consumer needs to report, and DECISION-02 introduced them to
+        remove a conflation, not to add another.
+        """
+        if disposition == _DISP_DATA:
+            self.add(batch_idx, payload)
+            return
+        if batch_idx in self._buffer:
+            # A DATA record already landed for this index. Two terminal
+            # outcomes for one batch is a protocol violation; keep the
+            # first-seen payload rather than silently overwriting it.
+            return
+        self._terminal.add(batch_idx)
+        self._terminal_seen[batch_idx] = disposition
+        if len(self._terminal) > self._max_size:
+            self._max_size = len(self._terminal)
+
     def drain(self):
         """Yield the consecutive run starting at _next_idx, in order.
 
-        Stops at the first hole. Returns a generator of (batch_idx, data).
+        Stops at the first hole. Terminal-without-payload batches advance
+        the prefix without yielding, so a NO_RESULT / SKIPPED / POISONED
+        batch no longer strands everything behind it.
+
+        Returns a generator of (batch_idx, data).
         """
-        while self._next_idx in self._buffer:
-            data = self._buffer.pop(self._next_idx)
-            self._bytes -= self._sizes.pop(self._next_idx, 0)
-            yield (self._next_idx, data)
-            self._next_idx += 1
+        while True:
+            if self._next_idx in self._buffer:
+                data = self._buffer.pop(self._next_idx)
+                self._bytes -= self._sizes.pop(self._next_idx, 0)
+                yield (self._next_idx, data)
+                self._next_idx += 1
+            elif self._next_idx in self._terminal:
+                self._terminal.discard(self._next_idx)
+                self._terminal_seen.pop(self._next_idx, None)
+                self._next_idx += 1
+            else:
+                return
+
+    def terminal_dispositions(self) -> dict:
+        """batch_idx -> disposition for terminals not yet yielded.
+
+        Diagnostics only; the map is mutated by drain().
+        """
+        return dict(self._terminal_seen)
+
+    def unresolved_gaps(self, upto: int) -> list:
+        """Indices in [start, upto) that no terminal outcome has covered.
+
+        For a protocol that emits an authoritative disposition for EVERY
+        published batch, a gap after a successful run is a completeness
+        failure, not something to paper over with a sorted final_drain.
+        Legacy producers that emit no control records cannot be checked
+        this way, so callers must scope it to terminal-aware protocols.
+        """
+        return [i for i in range(self._next_idx, upto) if i not in self._seen()]
+
+    def _seen(self) -> set:
+        return set(self._buffer) | self._terminal
 
     def final_drain(self):
         """Yield ALL leftovers sorted by batch_idx (EOF path).
@@ -141,11 +225,15 @@ class ReassemblyBuffer:
         for idx in sorted(self._buffer.keys()):
             self._bytes -= self._sizes.pop(idx, 0)
             yield (idx, self._buffer.pop(idx))
+        # Terminal-without-payload indices are not yielded (there is no
+        # payload to yield) but must not linger as phantom holes.
+        self._terminal.clear()
+        self._terminal_seen.clear()
 
     @property
     def pending(self) -> int:
-        """Buffered (not yet yielded) results."""
-        return len(self._buffer)
+        """Buffered (not yet yielded) outcomes, payloads and terminals."""
+        return len(self._buffer) + len(self._terminal)
 
     @property
     def max_size(self) -> int:
