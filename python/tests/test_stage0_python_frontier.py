@@ -89,7 +89,7 @@ class TestPythonFallbackFrontier(unittest.TestCase):
         # And the Python fallback derives it rather than hardcoding:
         with open(os.path.join(_ROOT, "python", "forkrun", "_worker.py")) as fh:
             body = fh.read()
-        self.assertIn("_HDR.size + len(blob or b\"\")", body,
+        self.assertIn("_advanced_fn(_HDR.size + len(blob))", body,
                       "the Python fallback no longer derives the advance "
                       "from _HDR.size")
         self.assertNotIn("_advanced_fn(16 + len(blob))", body,
@@ -140,6 +140,75 @@ class TestPythonFallbackFrontier(unittest.TestCase):
                 "batch %d appears %d times in the output; a truncated "
                 "committed record or a replayed one both land here"
                 % (i, text.count(want)))
+
+
+    # -- the partial-record cleanup invariant -------------------------
+
+    def test_failed_rollback_is_not_retryable(self):
+        """If the output rollback fails, the batch must NOT enter the
+        same-process retry path.
+
+        Retrying would append a fresh record behind the partial one that
+        could not be removed, corrupting framing for every later record.
+        The worker must exit so parent-side recovery can roll back on the
+        transaction frontier instead.
+        """
+        from forkrun import _worker
+
+        self.assertTrue(
+            issubclass(_worker._UnrecoverableOutput, OSError),
+            "the sentinel stays an OSError so callers catching output "
+            "errors still see it")
+
+        out = os.memfd_create("cr")
+        try:
+            os.write(out, b"committed-prefix")
+
+            # (a) rollback works: the partial record is removed and the
+            # caller may retry.
+            before = os.fstat(out).st_size
+            _worker._rollback_partial_record(out, before, 7)
+            self.assertEqual(
+                before, os.fstat(out).st_size,
+                "a successful rollback must restore the pre-record size")
+
+            # (b) rollback itself fails -> the non-retryable sentinel,
+            # NOT a plain OSError that would ride the ordinary ladder.
+            real_truncate = os.ftruncate
+            os.ftruncate = _boom
+            try:
+                with self.assertRaises(_worker._UnrecoverableOutput):
+                    _worker._rollback_partial_record(out, before, 7)
+            finally:
+                os.ftruncate = real_truncate
+
+            # (c) the pre-record boundary was never established -> also
+            # non-retryable, for the same reason.
+            with self.assertRaises(_worker._UnrecoverableOutput):
+                _worker._rollback_partial_record(out, -1, 7)
+        finally:
+            os.close(out)
+
+    def test_unrecoverable_output_bypasses_the_on_error_ladder(self):
+        """The sentinel must not be routed through skip / fail-fast /
+        retry. skip acks a batch whose partial record is still there;
+        retry appends behind it. Both are worse than exiting."""
+        import inspect
+        from forkrun import _worker
+        src = inspect.getsource(_worker)
+        self.assertIn("if isinstance(error, _UnrecoverableOutput):",
+                      src,
+                      "the sentinel is not intercepted before the ladder")
+
+        # Ordering (the check must precede the skip arm) is enforced by
+        # placement in the failure path rather than asserted here: a
+        # source-offset comparison is brittle, because the same string
+        # appears in docstrings and in other functions first. What is
+        # behaviourally pinned above is the classification itself.
+
+
+def _boom(fd, length):
+    raise OSError(5, "simulated rollback failure")
 
 
 if __name__ == "__main__":

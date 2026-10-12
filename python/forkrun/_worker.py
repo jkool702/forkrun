@@ -716,6 +716,13 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         # (append-once rule), so framing stays
                         # parseable under ENOSPC; the shared failure
                         # path below then retries the batch whole.
+                        #
+                        # If the rollback itself cannot be performed,
+                        # the batch is NOT retryable here: the partial
+                        # record survives and a same-process retry would
+                        # append behind it. That is a distinct,
+                        # non-retryable outcome -- see
+                        # _UnrecoverableOutput.
                         try:
                             _emit_end = os.lseek(out_fd, 0, os.SEEK_END)
                         except OSError:
@@ -723,35 +730,37 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         try:
                             # DECISION-02: disposition is explicit.
                             # len(blob) == 0 with blob == b"" is a REAL
-                            # empty result (DATA); blob is None/empty
-                            # because the UDF produced nothing
-                            # (NO_RESULT).
+                            # empty result (DATA); blob == None never
+                            # reaches here -- the guard above skips the
+                            # whole block for it, so the record for a
+                            # None result is written by the C emitter,
+                            # which supplies the NO_RESULT disposition.
                             _write_all(out_fd, _HDR.pack(
-                                batch.batch_index, len(blob or b""),
-                                1 if blob is None else 0, 0))
+                                batch.batch_index, len(blob),
+                                0, 0))
                             if blob:
                                 _write_all(out_fd, blob)
                         except OSError:
-                            if _emit_end >= 0:
-                                try:
-                                    os.ftruncate(out_fd, _emit_end)
-                                except OSError:
-                                    pass
+                            # Raises _UnrecoverableOutput if the rollback
+                            # cannot be done; on success the append-once
+                            # rule holds and the ordinary failure path may
+                            # retry the batch whole.
+                            _rollback_partial_record(
+                                out_fd, _emit_end, batch.batch_index)
                             raise
                         # W-PY29: complete record durable — advance the
-                        # rollback frontier (best-effort; emit/ordered
-                        # paths advance in C anyway).
+                        # rollback frontier.
                         #
-                        # The size MUST be the real framed size:
-                        # _HDR.size is 24 (batch_idx u64, len u64,
-                        # disposition u32, reserved u32), not 16. A hard
-                        # 16 undercounted the frontier by 8 bytes per
-                        # record, which accumulated across batches until
-                        # recovery truncated INTO already-committed
-                        # output. It was masked in order="index" runs
-                        # because ordered-ACK processing resynchronised the
-                        # cursor to the true file end; unordered runs have
-                        # no such correction and were vulnerable.
+                        # The size MUST be the real framed size: _HDR.size
+                        # is 24 (batch_idx u64, len u64, disposition u32,
+                        # reserved u32), not 16. A hard 16 undercounted
+                        # the frontier by 8 bytes per record, which
+                        # accumulated across batches until recovery
+                        # truncated INTO already-committed output. It was
+                        # masked in order="index" runs because ordered-ACK
+                        # processing resynchronised the cursor to the true
+                        # file end; unordered runs have no such
+                        # correction and were vulnerable.
                         #
                         # Deriving it from _HDR.size rather than repeating
                         # a literal is the whole point: the C emitters now
@@ -759,9 +768,18 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         # matching Python one.
                         if _advanced_fn is not None:
                             try:
-                                _advanced_fn(_HDR.size + len(blob or b""))
-                            except Exception:
-                                pass
+                                _advanced_fn(_HDR.size + len(blob))
+                            except Exception as adv_exc:
+                                # A stale frontier is indistinguishable
+                                # from a correct one until recovery
+                                # truncates through committed output, so
+                                # this must not be swallowed into a
+                                # successful-looking batch.
+                                raise _UnrecoverableOutput(
+                                    "forkrun: frontier advance failed for "
+                                    "batch %d (%s); the rollback frontier "
+                                    "is now untrustworthy"
+                                    % (batch.batch_index, adv_exc))
             except BaseException as exc:  # noqa: BLE001
                 error = exc
             finally:
@@ -811,6 +829,15 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     continue
 
             # --- failure path (bash -E analogue) ---
+            # STAGE0: an output state we cannot trust must not enter the
+            # ladder at all. skip would ack a batch whose partial record
+            # is still in the output; retry would append a fresh record
+            # behind it and corrupt framing for everything downstream.
+            # Exit and let parent-side recovery roll back on the
+            # transaction frontier instead.
+            if isinstance(error, _UnrecoverableOutput):
+                _flush()
+                return 1
             if on_error == "skip":
                 if _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
@@ -843,6 +870,57 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 pass
         # NOTE: the shared mmap stays open until _exit (pages must remain
         # valid for any in-flight exported views; Layer 3 UB otherwise).
+
+
+def _rollback_partial_record(out_fd, emit_end, batch_index):
+    """Remove a partially written record so framing stays parseable.
+
+    Mirrors _shim.c's payload_error. Raises _UnrecoverableOutput when the
+    rollback cannot be performed, which is the case that must not become
+    a same-process retry: the partial record survives, and the retry
+    would append behind it.
+
+    Extracted as a module-level function so the failure branch is
+    directly testable -- inline inside the worker loop it was reachable
+    only by forcing both a write failure and a rollback failure.
+    """
+    if emit_end < 0:
+        raise _UnrecoverableOutput(
+            "forkrun: cannot establish the pre-record boundary on output "
+            "fd for batch %d; a partial record may remain and the batch is "
+            "not retryable in-process" % batch_index)
+    try:
+        os.ftruncate(out_fd, emit_end)
+    except OSError as cleanup_exc:
+        raise _UnrecoverableOutput(
+            "forkrun: output rollback failed for batch %d (%s); a partial "
+            "record may remain, so the batch is not retryable in-process"
+            % (batch_index, cleanup_exc))
+
+
+class _UnrecoverableOutput(OSError):
+    """Output state can no longer be trusted; this worker must exit.
+
+    Raised when a write failure could NOT be rolled back -- the
+    pre-record boundary was never established, or ftruncate itself
+    failed. The partial record may still be present in the output memfd,
+    so retrying the batch in-process would append behind it and leave
+    malformed framing for every downstream record.
+
+    This deliberately does NOT ride the ordinary on_error ladder. That
+    ladder's three options are all wrong here:
+
+      skip       would ack a batch whose partial record is still there;
+      fail-fast  would abort rather than let recovery try, which is
+                 heavier than necessary when the transaction state is
+                 recoverable;
+      retry      is the dangerous one -- it deposits for a same-process
+                 retry, which appends behind the partial record.
+
+    Exiting instead hands the decision to parent-side recovery
+    (fr_py_recover_worker), which rolls back on the transaction frontier
+    and retries with a clean output.
+    """
 
 
 _ON_ERROR_CODES = {"retry": 0, "skip": 1, "fail-fast": 2}

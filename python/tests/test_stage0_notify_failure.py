@@ -219,8 +219,17 @@ class TestPostCommitNotifyFailure(unittest.TestCase):
         NOT produce a successful-looking run.
 
         spare_sig is normally held open for the whole supervision loop,
-        which is what makes the real fail-closed path safe. This closes it
-        so the wakeup genuinely cannot be delivered.
+        which is what makes the real fail-closed path safe. This closes
+        it so the wakeup genuinely cannot be delivered.
+
+        SCOPE, stated precisely: the hook sets spare_sig to -1, so this
+        exercises the helper's INVALID-DESCRIPTOR rejection, not a real
+        failed write()/EPIPE. That still validates the decision that
+        matters -- an undeliverable wakeup aborts rather than reporting
+        success with committed output missing -- but it is not syscall-
+        failure coverage. The genuine write-failure path is covered
+        separately by test_real_signal_write_failure_is_recovered_not_
+        retried, which closes the worker's own signal fd.
         """
         import subprocess
         import tempfile
