@@ -1,5 +1,12 @@
 # Review request — Stages 1–4 and the round-6 fixes
 
+> **SUPERSEDED IN PART — see `REVIEW_REQUEST_STAGES1-4_R7.md` for the
+> fixes made in response to the review below.** The review found that
+> `mode="spawn"` never reached the launcher, so the Stage 4 benchmark was
+> measuring the wrong baseline; the corrected numbers and the dispatch fix
+> are in round 7. Everything below is retained as the record of what was
+> claimed *at the time*, which is the useful part.
+
 Branch `NEW/REFACTOR4.2`, head **`b9a7c651`**. Frozen ring files
 (`forkrun_ring.c`, `forkrun_substrate.h`, `substratestubs.c`) untouched
 across `c72d27c6..HEAD`.
