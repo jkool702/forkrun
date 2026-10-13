@@ -71,6 +71,11 @@ def _cases():
     no batch-independent answer to compare against. Those still get
     determinism and parity, which is what they can support.
 
+    Every case that is meant to exercise the launcher must have SOME
+    positive success condition. A case with expected=None plus
+    on_error="skip" can satisfy every assertion while the command failed,
+    which is how the old `spawn-sh-argv` case passed.
+
     Both engine-distinguishing modes are represented. `mode="plugin"`
     takes a "path:function" spec and dlopens it; it is NOT a shell
     command -- the first version of this file passed "cat" and got
@@ -82,7 +87,15 @@ def _cases():
         ("spawn-tr-argv", "tr a-z A-Z", "spawn", "UPPER"),
         ("spawn-wc-c", "wc -c", "spawn", None),
         ("spawn-head-n", "head -n 5", "spawn", None),
-        ("spawn-sh-argv", "sh -c wc\\ -c", "spawn", None),
+        # LIST form for anything needing quoting: str.split() does no
+        # shell parsing (make_spawn_payload documents this). The previous
+        # case was "sh -c wc\ -c", a backslash-quoted string that
+        # str.split() renders as the literal argv
+        # ['sh','-c','wc\','-c'] -- a different command entirely -- and
+        # its expected output was None, so under on_error="skip" it
+        # passed by producing nothing at all. Now a list payload with a
+        # real, checkable answer.
+        ("spawn-sh-argv", ["sh", "-c", "tr a-z A-Z"], "spawn", "UPPER"),
     ]
     if _has_plugin():
         out.append(("plugin-upper", PLUGIN + ":process_v1", "plugin",
@@ -223,18 +236,39 @@ class TestParityIsNotVacuous(_ParityBase):
     """
 
     def _counted(self, cleanroom, payload, mode):
-        # `forkrun.run` on the package resolves to the re-exported run()
-        # FUNCTION, not the module -- `import forkrun.run as m` binds the
-        # function because the package __init__ shadows the submodule
-        # name. importlib is the only way to reach the module.
+        """Record whether _execute_cleanroom was CALLED and SUCCEEDED.
+
+        The round-8 review is right that counting calls is not enough.
+        The dispatch site is:
+
+            out = _execute_cleanroom(...)
+            if out is not None:
+                return _map_return(out, return_stats)
+
+        so a None return -- launcher unavailable, or a launcher failure
+        the policy allows falling back from -- silently continues to the
+        in-process executor. Every output-parity assertion downstream
+        would then pass while comparing two in-process runs. Recording
+        the call proved the wrapper was REACHED, not that the launcher
+        served the run. That is a narrower version of the round-7 false
+        positive: correct results from the wrong engine.
+
+        So each entry carries the return value, and the callers assert
+        `served is True`, which means the launcher actually produced
+        this result.
+        """
         import importlib
         run_mod = importlib.import_module("forkrun.run")
         real = run_mod._execute_cleanroom
         calls = []
 
         def counting(*a, **kw):
-            calls.append(kw.get("spawn_argv"))
-            return real(*a, **kw)
+            out = real(*a, **kw)
+            calls.append({
+                "argv": kw.get("spawn_argv") or kw.get("plugin_path"),
+                "served": out is not None,
+            })
+            return out
 
         run_mod._execute_cleanroom = counting
         self.addCleanup(setattr, run_mod, "_execute_cleanroom", real)
@@ -247,9 +281,15 @@ class TestParityIsNotVacuous(_ParityBase):
                 _got, calls = self._counted(True, payload, mode)
                 self.assertTrue(
                     calls, "%r: FORKRUN_CLEANROOM=1 did not reach the "
-                           "launcher -- every parity result for this case "
-                           "is an in-process run compared with itself"
-                    % label)
+                           "launcher at all -- every parity result for "
+                           "this case is an in-process run compared with "
+                           "itself" % label)
+                self.assertTrue(
+                    all(c["served"] for c in calls),
+                    "%r: the launcher was called but returned None for at "
+                    "least one batch, so the run fell back in-process and "
+                    "the parity comparison below proves nothing about "
+                    "the launcher: %r" % (label, calls))
 
     def test_in_process_run_really_avoids_the_launcher(self):
         for label, payload, mode, _e in CASES:
@@ -260,6 +300,46 @@ class TestParityIsNotVacuous(_ParityBase):
                     "%r: the launcher ran with FORKRUN_CLEANROOM=0; the "
                     "two arms of the comparison are not two engines"
                     % label)
+
+    def test_spawn_cases_carry_the_expected_argv(self):
+        """The launcher must receive the argv the caller asked for.
+
+        Output parity alone cannot distinguish `tr a-z A-Z` from a
+        command that uppercased by some other route. The argv is the
+        contract, and it is directly observable at the dispatch site.
+        """
+        expected = {
+            "spawn-cat": ["cat"],
+            "spawn-tr-argv": ["tr", "a-z", "A-Z"],
+            "spawn-wc-c": ["wc", "-c"],
+            "spawn-head-n": ["head", "-n", "5"],
+            "spawn-sh-argv": ["sh", "-c", "tr a-z A-Z"],
+        }
+        for label, payload, mode, _e in CASES:
+            if label not in expected:
+                continue
+            with self.subTest(case=label):
+                _got, calls = self._counted(True, payload, mode)
+                self.assertTrue(calls, "%r: launcher not reached" % label)
+                want = expected[label]
+                for c in calls:
+                    argv = c["argv"]
+                    # argv[0] is resolved to an ABSOLUTE path before the
+                    # launcher gets it, which is correct and necessary:
+                    # the child scrubs its environment, so a bare "cat"
+                    # would have no PATH to resolve against. Comparing
+                    # basename() keeps the assertion about what matters
+                    # -- the ARGUMENT VECTORS, which is where a re-split
+                    # or re-join would show up -- without freezing an
+                    # incidental path.
+                    self.assertEqual(
+                        want[1:], argv[1:],
+                        "%r: launcher received argv %r; arguments after "
+                        "argv[0] must match %r exactly" % (label, argv, want))
+                    self.assertEqual(
+                        os.path.basename(want[0]), os.path.basename(argv[0]),
+                        "%r: launcher received argv[0] %r, expected the "
+                        "command %r" % (label, argv[0], want[0]))
 
 
 class TestParityInCleanSubprocess(_ParityBase):
