@@ -1,5 +1,11 @@
 # Round 9 — response to the round-8 review
 
+> **RESPONDED TO — see `REVIEW_REQUEST_ROUND10.md`.** All four items the
+> round-9 review asked to be resolved are addressed. Retained as the
+> record; note that two claims in §1 here were themselves wrong — the
+> `map()` conflict check did not exist, and the round-9 NUMA wording
+> still implied distinct worker slots.
+
 Branch `NEW/REFACTOR4.2`. Review the **branch head**; `6284aa67` is the
 last commit the round-8 request pinned, and the response commits follow
 it. Frozen ring files (`forkrun_ring.c`, `forkrun_substrate.h`,
