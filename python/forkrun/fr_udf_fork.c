@@ -28,8 +28,92 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
+
+/* ---- C0.6 measurement support --------------------------------------
+ *
+ * The roadmap asks for more than a ratio: peak RSS AND PSS/USS, the
+ * THP state, and the parent's resident size at the moment of the fork
+ * (30/64/128/256/554/2127 MB). The parent-RSS axis is the one that
+ * decides the fleet-memory question, because a forked child inherits
+ * the parent's resident pages copy-on-write, so "one interpreter shared"
+ * is only as cheap as the pages nobody dirties.
+ *
+ * PSS matters more than RSS here and RSS is what most tools report.
+ * With N children over one parent, RSS double-counts every shared page
+ * N times, which is precisely the quantity the shared-interpreter claim
+ * rests on. PSS divides shared pages by the number of sharers, so it
+ * answers "what does one more worker actually cost".
+ */
+
+/* Inflate the parent's resident set to `mb` megabytes by touching real
+ * pages. Untouched pages would be reclaimed and never inherited, so the
+ * touch is the measurement rather than an optimisation. */
+static int inflate_parent_rss(long mb)
+{
+    long page = sysconf(_SC_PAGESIZE);
+    long want = mb * 1024L * 1024L;
+    if (want <= 0) return 0;
+    /* VOLATILE, and the result is consumed. A plain loop storing into a
+     * malloc'd buffer that is never read is dead code, and at -O2 GCC
+     * removes it: the first version of this reported parent_rss_kb 6004
+     * after asking for 256 MB, because the pages were never touched and
+     * therefore never resident and never inherited. The knob silently
+     * did nothing, which is the failure mode this whole exercise exists
+     * to avoid -- a measurement that measures nothing.
+     *
+     * The volatile store is load-bearing for the same reason. */
+    volatile char *p = (volatile char *)malloc((size_t)want);
+    if (!p) return -1;
+    volatile unsigned long sink = 0;
+    for (long off = 0; off < want; off += page) {
+        p[off] = 1;
+        sink += (unsigned long)p[off];
+    }
+    /* Keep the pages from being reclaimed: touch one byte per page
+     * again after the fork point would be too late, so hold the
+     * allocation and a reference to it for the process lifetime. */
+    static volatile char *keep = NULL;
+    static unsigned long keep_sink = 0;
+    keep = p;
+    keep_sink = sink;
+    (void)keep_sink;
+    return 0;
+}
+
+static void read_mem_self(long *rss_kb, long *pss_kb, long *uss_kb)
+{
+    *rss_kb = *pss_kb = *uss_kb = -1;
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) == 0) *rss_kb = (long)ru.ru_maxrss;
+    /* /proc/self/smaps_rollup gives PSS/USS directly. Absent on old
+     * kernels and inside some sandboxes; -1 means "not measured" and is
+     * never substituted with RSS, because RSS and PSS are different
+     * quantities and conflating them is the error being avoided. */
+    FILE *f = fopen("/proc/self/smaps_rollup", "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        long v;
+        if (sscanf(line, "Rss: %ld kB", &v) == 1) *rss_kb = v;
+        else if (sscanf(line, "Pss: %ld kB", &v) == 1) *pss_kb = v;
+        else if (sscanf(line, "Private_Clean: %ld kB", &v) == 1) ;
+        else if (sscanf(line, "Private_Dirty: %ld kB", &v) == 1) *uss_kb += v;
+        else if (sscanf(line, "Private_Hugetlb: %ld kB", &v) == 1) *uss_kb += v;
+    }
+    fclose(f);
+}
+
+static int set_thp(const char *mode)
+{
+    if (!mode) return 0;                     /* leave inherited state */
+    if (strcmp(mode, "on") == 0) return prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0);
+    if (strcmp(mode, "off") == 0) return prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    return -1;
+}
 
 /* The ONE fork site for this driver.
  *
@@ -348,10 +432,28 @@ int main(int argc, char **argv)
     int nchildren     = (argc > 3) ? atoi(argv[3]) : 4;
     int iters         = (argc > 4) ? atoi(argv[4]) : 50;
     const char *mode  = (argc > 5) ? argv[5] : NULL;
+    /* C0.6 axes, optional and trailing so the original argv shape still
+     * works: <root> <spec> <children> <iters> [mode] [parent_mb] [thp] */
+    const char *thp_mode = NULL;
+    long parent_mb = 0;
+    if (argc > 6) parent_mb = atol(argv[6]);
+    if (argc > 7) thp_mode = argv[7];
     int respawn_only  = mode && !strcmp(mode, "--respawn");
     int control_only  = mode && !strcmp(mode, "--control");
     int hooks_only    = mode && !strcmp(mode, "--hooks");
     const char *batch = "line000042\n";
+
+    /* Apply the C0.6 axes BEFORE any fork, so the inflated pages are
+     * resident and inherited by every child. Applying them after would
+     * measure a parent that never had them. */
+    if (set_thp(thp_mode) != 0) {
+        fprintf(stderr, "cannot set THP state to %s\n", thp_mode);
+        return 2;
+    }
+    if (parent_mb > 0 && inflate_parent_rss(parent_mb) != 0) {
+        fprintf(stderr, "cannot inflate parent RSS to %ld MB\n", parent_mb);
+        return 2;
+    }
 
     char mbuf[256];
     snprintf(mbuf, sizeof mbuf, "%s", spec);
@@ -417,11 +519,54 @@ int main(int argc, char **argv)
     if (t_post > 0)
         printf("  speedup   : %8.2fx\n", t_post / (t_pre > 0 ? t_pre : 1e-9));
 
-    /* A pre-fork candidate that cannot actually run the UDF in a child is
-     * not a candidate, whatever the timing says. */
-    if (fail_pre) {
-        printf("\n  VERDICT: pre-fork DOES NOT WORK -- the interpreter does "
-               "not survive fork. post-fork is the only option.\n");
+    /* C0.6 evidence block: the fleet-memory axis. */
+    {
+        long rss, pss, uss;
+        read_mem_self(&rss, &pss, &uss);
+        printf("\n  --- C0.6 evidence ---\n");
+        printf("  parent_rss_target : %ld MB\n", parent_mb);
+        printf("  thp               : %s\n", thp_mode ? thp_mode : "inherited");
+        printf("  parent_rss_kb     : %ld\n", rss);
+        printf("  parent_pss_kb     : %ld%s\n", pss,
+               pss < 0 ? "  (not exposed by this kernel)" : "");
+        printf("  parent_uss_kb     : %ld%s\n", uss,
+               uss < 0 ? "  (not exposed by this kernel)" : "");
+        printf("  children          : %d\n", nchildren);
+        printf("  ms_per_child_post : %.3f\n",
+               nchildren ? 1000.0 * t_post / nchildren : 0.0);
+        printf("  ms_per_child_pre  : %.3f\n",
+               nchildren ? 1000.0 * t_pre / nchildren : 0.0);
+    }
+
+    /* NO VERDICT unless BOTH arms actually ran the UDF.
+     *
+     * The child check caught a failing BASELINE, which is what it was
+     * written for. It did not catch the case where BOTH arms fail, and
+     * in that case it still emitted a confident architectural verdict:
+     *
+     *   $ fr_udf_fork                 # default spec is myudf:up
+     *   child 0..3 FAILED (status 3)  # x2
+     *   post-fork : 0.0135 s  (failures: 4)
+     *   pre-fork  : 0.0014 s  (failures: 4)
+     *   VERDICT: pre-fork DOES NOT WORK -- post-fork is the only option.
+     *
+     * Both arms had failed to import the module, so the 9.76x was two
+     * failing runs divided, and the verdict named the wrong winner on
+     * no evidence at all. With a real UDF supplied the same binary
+     * reports failures: 0 and pre-fork works at ~9x.
+     *
+     * A harness that prints a number when nothing ran will be believed.
+     * So: any failure in EITHER arm suppresses the comparison entirely.
+     * This is the same rule tools/bench_splice.py follows -- one failed
+     * trial discards the whole configuration. */
+    if (fail_pre || fail_post) {
+        printf("\n  NO VERDICT: %d of %d children failed "
+               "(post-fork %d, pre-fork %d).\n"
+               "  A candidate that cannot run the UDF is not a candidate, "
+               "and a\n  ratio between two failing runs is not a "
+               "measurement. Check that the module is importable from "
+               "root.\n  argv: <root> <module:attr> <children> <iters>\n",
+               fail_pre + fail_post, 2 * nchildren, fail_post, fail_pre);
         return 1;
     }
     printf("\n  VERDICT: pre-fork works and is %.2fx %s\n",

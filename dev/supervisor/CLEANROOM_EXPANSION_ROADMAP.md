@@ -963,7 +963,15 @@ on the frozen-engine decision.
   (**C0.3**), with the three categories separated and the decline observable
   for category 1.
 - Fork-lifecycle prototype passing for **the candidate to be evaluated**, or
-  reported as not passing (**C0.4**).
+  reported as not passing (**C0.4**). **[DONE]** `fr_udf_fork` — pre-fork
+  passes; see `DECISION-01` §9.3. A harness defect that emitted a confident
+  wrong verdict when BOTH candidates failed was found and fixed.
+- M1/M2 curves published; crossover stated as a range or "not yet observed".
+  **[PARTIAL]** See `C0.6_M2_MEASUREMENT.md`. Measured on 3.14.7 only, so
+  the C0.5 matrix remains incomplete. Crossover **not yet observed**: pre-fork
+  is faster on 56/56 configurations, but the margin decays monotonically
+  6.86x -> 1.82x as parent RSS goes 0 -> 2127 MB. Fleet memory (children's
+  PSS/USS) is still unmeasured, which C0.6 also requires.
 - Interpreter matrix decision recorded (add 3.14, or revise the policy).
 - M1/M2 curves published; crossover stated as a range or "not yet observed".
 - Ordered-output certificate designed, implementation tracked separately.
