@@ -32,8 +32,8 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-01 | Record protocol defined in three independent places | high | **verified** |
 | TD-02 | Payload import timing documented backwards | high | **verified** |
 | TD-03 | `_api.py` still describes a Stage 0 stub | med | **verified** |
-| TD-04 | Environment propagation: explicit in bash, implicit in Python | med | **verified divergence** |
-| TD-05 | Retry semantics: `-E` flag has no Python counterpart | med | **verified divergence** |
+| TD-04 | Environment propagation: explicit in bash, implicit in Python | med | **decided** — `DECISION-04` |
+| TD-05 | Retry semantics: `-E` flag has no Python counterpart | med | **partly decided** — one test open |
 | TD-06 | Executor consolidation audit not performed | med | **unverified claim** |
 | TD-07 | README collapses v0 history into current capability | low | **unverified claim** |
 | TD-08 | `Mode` type omitted a shipped, tested mode | med | **verified — FIXED** |
@@ -174,7 +174,15 @@ The frontend is implemented and shipping; the docstring is a fossil.
 
 ---
 
-### TD-04 — Environment propagation: explicit vs implicit (medium)
+### TD-04 — Environment propagation: explicit vs implicit (medium) — DECIDED
+
+> **Resolved** in `DECISION-04-environment-and-retry.md`. Python keeps
+> inheriting the full environment, deliberately: a library must not rewrite
+> its host's environment. The interpreter-level isolation
+> (`use_environment=0`, `site_import=0`, `safe_path=1`) is what closes the
+> Python-visible surface. The decision also bounds, and records, the part
+> isolation cannot reach — `LD_PRELOAD`/`LD_LIBRARY_PATH` are consumed by
+> `ld.so` before any `PyConfig` field applies.
 
 **Verified divergence.** Bash manages the cleanroom environment through an
 explicit allow-list: `frun.bash:189` builds `FORKRUN_EXTRA_VARS` from a
@@ -198,6 +206,13 @@ which is exactly where bash's explicit list exists.
 ---
 
 ### TD-05 — Retry semantics: `-E` has no Python counterpart (medium)
+
+> **Partly resolved** in `DECISION-04-environment-and-retry.md`. The
+> default difference is judged intentional (`on_error="retry"` as a
+> library default is defensible). But the *equivalence of the mechanisms*
+> is **assumed, not demonstrated**: exit 127, transient nonzero exits, and
+> the `FORKRUN_RETRY_LIMIT` 0/negative poison boundaries are untested.
+> Recorded as decided-but-not-settled rather than closed.
 
 **Verified divergence, and parity is better than it first appears.**
 `FORKRUN_RETRY_LIMIT` matches: bash documents default 3 (`frun.bash:448`),
