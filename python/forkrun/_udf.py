@@ -47,6 +47,20 @@ def helper_path():
     helper as "cleanroom unavailable for this call" and falls back to
     the in-process path, which is slower and correct.
     """
+    # KILL SWITCH (W-EXP-1 5.5 / roadmap 5.3): FORKRUN_NO_UDF masks ONLY
+    # this capability, and deliberately is NOT a mirror of
+    # FORKRUN_NO_V1 -- that one forces every v1 fast path off, because
+    # they are all substrate symbols read from one place. The UDF helper
+    # is a separate per-minor file whose existence is consulted from
+    # several routes, so masking it at the lookup keeps every caller in
+    # agreement instead of relying on each one to remember.
+    #
+    # Returning None (rather than raising) is what "forces in-process"
+    # means here: absence is already a reported, handled condition that
+    # falls back to the in-process path.
+    if os.environ.get("FORKRUN_NO_UDF"):
+        return None
+
     here = os.path.dirname(os.path.abspath(__file__))
     suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
     cand = os.path.join(here, "_fr_udf" + suffix)

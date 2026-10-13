@@ -39,6 +39,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-08 | `Mode` type omitted a shipped, tested mode | med | **verified — FIXED** |
 | TD-09 | `poisoned_batches` empty on `orchestrator=False` | high | **verified — documented, gap open** |
 | TD-10 | Class payload silently produced empty results | high | **verified — FIXED** |
+| TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
 
 ---
 
@@ -137,6 +138,48 @@ fix documents the condition rather than picking a side.
 **Does not establish:** that any user has been harmed by this.
 
 ---
+
+### TD-11 — `FORKRUN_NO_UDF` kill switch specified but unimplemented (high) — FIXED
+
+**Found by working §5.5 criterion by criterion.** Roadmap §5.3 specifies
+this switch in detail and §5.5 requires it, but `grep` for
+`FORKRUN_NO_UDF` across the whole tree matched **only the roadmap**. It was
+never implemented: not in Python, not in C, not in `frun.bash`. The only
+related variable in existence is `FORKRUN_NO_V1`.
+
+A kill switch is an operational escape hatch. Its absence means an
+operator who discovers a bad UDF-mode interaction in production has no way
+to turn the capability off except by removing the helper file or editing
+code.
+
+**Why it was missed for so long:** `test_v1_fast.py::test_no_v1_kill_switch`
+pinned the `FORKRUN_NO_V1` shape with an exact-dict equality that did not
+include `udf`. So the test actively asserted the spec-violating shape — the
+missing key was not merely unasserted, it was asserted absent.
+
+**Implemented** at `_udf.helper_path()` — the single point every route
+consults, so the capability report and the routing decision cannot
+disagree. `v1_available()` gained `udf` in **both** return shapes, with
+the value read from `helper_path()` so it cannot drift from routing.
+
+It returns `None` rather than raising, because absence is already a
+handled condition meaning "fall back to in-process" — which is precisely
+what "forces in-process" requires.
+
+Per the spec it masks **only** `udf` and is explicitly **not** a mirror of
+`FORKRUN_NO_V1`: verified that no other capability key changes, and that
+real capabilities stay *reported* rather than being lied away. Masking is a
+routing decision, not a claim that a symbol is absent.
+
+Five tests cover: masks only `udf`; not a mirror of `FORKRUN_NO_V1`; the
+key exists in **both** shapes with matching key sets; `helper_path()`
+returns `None` under the switch (the enforcement point itself); and a run
+still produces all 8 correct results under the switch — it must **degrade,
+never break**, since a kill switch is only safe to set in production if
+turning it on cannot lose results.
+
+The pre-existing exact-dict assertion was updated to include `udf`, with a
+comment recording that it had been asserting the spec-violating shape.
 
 ### TD-10 — A class payload produced silent empty results (high) — FIXED
 

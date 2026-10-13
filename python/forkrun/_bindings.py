@@ -496,15 +496,31 @@ def v1_available(lib=None) -> dict:
     if lib is None:
         lib = get()
     if os.environ.get("FORKRUN_NO_V1"):
+        # "udf" appears in EVERY return shape, including this one: a
+        # consumer reading caps["udf"] must not KeyError here. This branch
+        # is the documented two-shape contract (roadmap 5.3).
         return {"exec": False, "plugin": False, "emit": False,
                 "splice": False, "ack_direct": False, "complete": False,
                 "spill": False, "parse": False, "resume": False,
                 "plugin_loop": False, "spawn_loop": False,
                 "orderer": False, "order_pipe": False,
                 "scan_spawn": False, "numa": False,
-                "drain": False}
+                "drain": False, "udf": False}
     has = hasattr
-    return {"exec": has(lib, "fr_py_exec_spawn"),
+    # UDF is not a substrate symbol -- the helper is a separate per-minor
+    # file (DECISION-01 6.2.1), so its availability is a filesystem
+    # question. helper_path() already honours FORKRUN_NO_UDF, so reading
+    # it here means the capability report and the routing decision cannot
+    # disagree.
+    try:
+        from ._udf import helper_path as _udf_helper
+        udf_cap = _udf_helper() is not None
+    except Exception:
+        # An unimportable _udf module must not take down a capability
+        # report; the route degrades to in-process either way.
+        udf_cap = False
+    return {"udf": udf_cap,
+            "exec": has(lib, "fr_py_exec_spawn"),
             "plugin": has(lib, "fr_py_plugin_call"),
             "emit": has(lib, "fr_py_emit"),
             "splice": has(lib, "fr_py_worker_splice_loop"),

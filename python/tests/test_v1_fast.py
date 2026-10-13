@@ -70,6 +70,12 @@ class TestV1Detection(unittest.TestCase):
         os.environ["FORKRUN_NO_V1"] = "1"
         try:
             caps = v1_available()
+            # "udf" belongs in EVERY return shape, this one included --
+            # a consumer reading caps["udf"] must not KeyError because it
+            # happened to be switched off (roadmap 5.3, W-EXP-1). This
+            # assertion previously pinned a shape WITHOUT it, which is how
+            # the kill switch went specified-but-unimplemented: nothing
+            # here ever asserted the key existed.
             self.assertEqual(caps, {"exec": False, "plugin": False,
                                     "emit": False, "splice": False,
                                     "ack_direct": False, "complete": False,
@@ -81,7 +87,8 @@ class TestV1Detection(unittest.TestCase):
                                     "order_pipe": False,
                                     "scan_spawn": False,
                                     "numa": False,
-                                    "drain": False})
+                                    "drain": False,
+                                    "udf": False})
         finally:
             if old is None:
                 del os.environ["FORKRUN_NO_V1"]
