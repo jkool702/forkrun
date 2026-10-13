@@ -206,6 +206,37 @@ and running the whole suite under another minor needs the full
 per-minor substrate build, which I have not done. That is the honest
 state of this coverage.
 
+## 6b. Sanitizers — done for the targeted code, per §6 step 2
+
+Agreed with the ordering (tests first, then sanitizers, then W-EXP-1),
+and step 2 is now done for the code that actually changed.
+
+ASan + UBSan builds of `fr_udf_helper` and `fr_udf_fork`, run against:
+
+| path | result |
+|---|---|
+| probe from a hostile working directory | clean, module correctly unreachable |
+| path variants (`''`, cwd, trailing slash, stdlib, validated root) | clean |
+| driver, both candidates | clean, verdict stated |
+| control + respawn probes | clean |
+| **the whole `test_udf*.py` suite (59 tests) against the ASan binary** | **OK, zero reports** |
+
+Built with `-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1`,
+`ASAN_OPTIONS=detect_leaks=0` (the `MAINTAINERS.md` §5 idiom — CPython
+and bash produce false-positive leak reports at exit), `UBSAN_OPTIONS=
+print_stacktrace=1`. No ASan or UBSan report files were produced.
+
+**What this does and does not establish.** It is memory-safety and
+undefined-behaviour coverage for the new C code: the `PyList_SetSlice`
+deletion, the list iteration, the struct writes, the pipe protocol.
+It does **not** establish the security property — that the right paths
+were removed — which is what the functional tests are for. The review is
+right that both are needed, and this is the second half.
+
+**Not yet done: step 3 (TSan) and step 4 (the matrix under sanitizers).**
+TSan is the interesting one, because the driver forks and the barrier
+protocol is new concurrency code. Recorded as open rather than skipped.
+
 ## 7. Verification of this request
 
 | | |
