@@ -97,8 +97,23 @@ static int configure(PyConfig *cfg)
 
     /* safe_path: do not prepend the script's directory / cwd to sys.path.
      * Without it an interpreter can pick up modules from wherever it was
-     * launched, which is inherited state by another name. */
+     * launched, which is inherited state by another name.
+     *
+     * PyConfig.safe_path landed in 3.11 (PEP 587); the field does not
+     * exist in 3.10, and assigning to it there is a COMPILE ERROR. This
+     * file's header claimed the helper "builds across the 3.10-3.15
+     * target" and did not, for exactly this line -- found by the C0.5
+     * interpreter matrix, which is the gate that exists to find
+     * precisely this.
+     *
+     * Simply dropping the assignment on 3.10 would compile, but it
+     * would also silently drop the SECURITY property, since that field
+     * is what keeps a caller-influenced directory off sys.path. So 3.10
+     * enforces the same rule by hand in scrub_inherited_path(), called
+     * after initialisation and before any user code can run. */
+#if PY_VERSION_HEX >= 0x030B0000
     cfg->safe_path = 1;
+#endif
 
     /* An explicit program name avoids the "prefix derived from argv[0]"
      * behaviour of a plain Py_Initialize, which is caller-influenced.
@@ -107,6 +122,45 @@ static int configure(PyConfig *cfg)
      * LITERAL straight into cfg->program_name looks equivalent and is not:
      * PyConfig_Clear() frees that pointer, so the literal is free()d and the
      * process dies with "free(): invalid size". Cost one core dump to learn. */
+    /* Relocated-interpreter support, added by the C0.5 matrix.
+     *
+     * program_name is set to a path-LESS literal just below. That makes
+     * the interpreter search PATH for "forkrun-udf", fail, and fall back
+     * to its COMPILED-IN prefix. For the system interpreter that is
+     * /usr and everything works. For a relocated build it is wrong, and
+     * initialisation dies with "No module named 'encodings'" before any
+     * UDF runs -- which is exactly what the 3.10-3.15 matrix hit, since
+     * those interpreters had to be unpacked outside /usr.
+     *
+     * FR_UDF_HOME names the prefix explicitly for that case. It is opt-in
+     * and unset in normal operation, so the production path is unchanged.
+     * Note this is a MEASUREMENT ENABLER, not a fix: the underlying
+     * question -- whether the helper should support relocated
+     * interpreters at all -- is a deployment decision, not a testing
+     * one, and is recorded as open. */
+    {
+        const char *want_home = getenv("FR_UDF_HOME");
+        if (want_home && *want_home) {
+            /* PyConfig_SetString takes a wchar_t*, and getenv gives a
+             * char*. Py_DecodeLocale is the documented bridge and does
+             * the right thing for a non-ASCII prefix; handing it the
+             * char* directly is only a -Wincompatible-pointer-types
+             * warning that becomes memory corruption at run time. */
+            wchar_t *w_home = Py_DecodeLocale(want_home, NULL);
+            if (w_home == NULL) {
+                set_error("home is not decodable in the locale encoding");
+                take_exception(last_error, sizeof last_error, "home: ");
+                return FR_UDF_ERR;
+            }
+            PyStatus st = PyConfig_SetString(cfg, &cfg->home, w_home);
+            PyMem_RawFree(w_home);
+            if (PyStatus_Exception(st)) {
+                set_error("home rejected");
+                take_exception(last_error, sizeof last_error, "home: ");
+                return FR_UDF_ERR;
+            }
+        }
+    }
     {
         PyStatus st = PyConfig_SetString(cfg, &cfg->program_name,
                                          L"forkrun-udf");
@@ -139,6 +193,66 @@ static int configure(PyConfig *cfg)
     (void)append_root;   /* kept for the record; unused on this path */
     return 0;
 }
+
+/* Remove caller-influenced entries from sys.path.
+ *
+ * The 3.11+ equivalent is `cfg->safe_path = 1`, which tells the
+ * interpreter not to prepend the script's directory or the cwd. On 3.10
+ * that field does not exist, so the same rule is applied by hand here.
+ *
+ * Placement is load-bearing: this runs AFTER initialisation (so the
+ * interpreter has built its sys.path) and BEFORE install_roots() and any
+ * user payload, because the whole point is that no user code has run
+ * while the inherited entries are still reachable.
+ *
+ * Only entries that are NOT interpreter-owned are removed -- the empty
+ * string (which means "the current directory") and any entry equal to
+ * the current working directory. Stdlib, lib-dynload and the site
+ * directories are left alone: removing those would break imports, and
+ * they are not caller-influenced.
+ */
+static int scrub_inherited_path(void)
+{
+#if PY_VERSION_HEX >= 0x030B0000
+    /* safe_path was set in configure(); nothing to do. */
+    return 0;
+#else
+    PyObject *path = PySys_GetObject("path");   /* borrowed */
+    if (!path || !PyList_Check(path)) {
+        set_error("sys.path is not a list");
+        return -1;
+    }
+    char cwd[4096];
+    const char *have_cwd =
+        (getcwd(cwd, sizeof cwd) != NULL) ? cwd : NULL;
+
+    for (Py_ssize_t i = PyList_GET_SIZE(path) - 1; i >= 0; i--) {
+        PyObject *e = PyList_GET_ITEM(path, i);   /* borrowed */
+        if (!PyUnicode_Check(e)) continue;
+        /* PyUnicode_AsUTF8String is stable public API from 3.3, unlike
+         * PyUnicode_FSConverter, whose SIGNATURE changed in 3.11 (it
+         * took a char** out-param before). Guarding that would have been
+         * a second version fork for no benefit. */
+        PyObject *b = PyUnicode_AsUTF8String(e);
+        if (!b) { PyErr_Clear(); continue; }
+        const char *c = PyBytes_AS_STRING(b);
+        int drop = 0;
+        if (c == NULL || c[0] == '\0')
+            drop = 1;                                  /* '' == cwd */
+        else if (have_cwd && strcmp(c, have_cwd) == 0)
+            drop = 1;                                  /* literal cwd */
+        Py_DECREF(b);
+        if (drop) {
+            /* PyList_SetSlice(.., NULL) deletes the slice. PyList_DelSlice
+             * does not exist in 3.10. */
+            if (PyList_SetSlice(path, i, i + 1, NULL) != 0)
+                return -1;
+        }
+    }
+    return 0;
+#endif
+}
+
 
 /* Insert validated roots into sys.path AFTER initialisation.
  *
@@ -300,6 +414,14 @@ int fr_udf_init(const char *const *roots, int nroots)
             take_exception(last_error, sizeof last_error, "init: ");
         return FR_UDF_ERR;
     }
+    /* BEFORE install_roots: on 3.10 this is what stands in for
+     * cfg->safe_path, and it has to happen while no caller-supplied root
+     * is on the path yet. */
+    if (scrub_inherited_path() != 0) {
+        Py_FinalizeEx();
+        return FR_UDF_ERR;
+    }
+
     if (install_roots(roots, nroots) != 0) {
         Py_FinalizeEx();
         return FR_UDF_ERR;

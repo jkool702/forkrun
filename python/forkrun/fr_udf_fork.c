@@ -23,6 +23,10 @@
 
 #define _GNU_SOURCE
 #include "fr_udf.h"
+/* For the --version-probe: the driver is linked against a specific
+ * libpython and the harness needs to know WHICH. Including Python.h
+ * gives Py_GetVersion; the include path is already per-minor. */
+#include <Python.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -455,6 +459,39 @@ static int run_hooks_misuse(const char *module, const char *batch)
 
 int main(int argc, char **argv)
 {
+    /* A probe that prints the interpreter and exits, so a harness can
+     * report the version the DRIVER is linked against rather than the
+     * version of whatever Python is running the harness. Those differ
+     * whenever the C0.5 matrix is in play. */
+    (void)0;
+    if (argc > 1 && strcmp(argv[1], "--version-probe") == 0) {
+        /* The driver does not include Python.h, so the macros are not
+         * available here; the version comes from the interpreter the
+         * binary is linked against at run time. */
+        /* Deliberately fr_udf_init(), NOT a bare Py_Initialize().
+         *
+         * A bare Py_Initialize() ignores FR_UDF_HOME -- that variable is
+         * consumed by configure() inside fr_udf_init -- so the probe died
+         * with "No module named 'encodings'", the harness parsed nothing,
+         * and SILENTLY fell back to the host interpreter's version. Every
+         * sweep of the 3.10 driver therefore printed "3.14.7" and its
+         * numbers were mislabelled, which is the round-7 defect again:
+         * the label must describe what was measured.
+         *
+         * Going through the product's own init also means the probe
+         * fails loudly if the helper cannot initialise on this minor,
+         * rather than quietly reporting a plausible-looking version. */
+        if (fr_udf_init(NULL, 0) != 0) {
+            fprintf(stderr, "probe: init failed: %s\n",
+                    fr_udf_last_error());
+            return 1;
+        }
+        const char *v = Py_GetVersion();   /* borrowed static string */
+        printf("interpreter : %s\n", v ? v : "unknown");
+        fr_udf_finalize();
+        return 0;
+    }
+
     const char *root  = (argc > 1) ? argv[1] : NULL;
     const char *spec  = (argc > 2) ? argv[2] : "myudf:up";
     int nchildren     = (argc > 3) ? atoi(argv[3]) : 4;

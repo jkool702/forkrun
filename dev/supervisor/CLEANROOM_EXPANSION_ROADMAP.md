@@ -967,13 +967,22 @@ on the frozen-engine decision.
   passes; see `DECISION-01` §9.3. A harness defect that emitted a confident
   wrong verdict when BOTH candidates failed was found and fixed.
 - M1/M2 curves published; crossover stated as a range or "not yet observed".
-  **[PARTIAL]** See `C0.6_M2_MEASUREMENT.md`. Measured on 3.14.7 only, so
-  the C0.5 matrix remains incomplete. Crossover **not yet observed**: pre-fork
+  **[PARTIAL]** See `C0.6_M2_MEASUREMENT.md` and
+  `C0.5_INTERPRETER_MATRIX.md`. **Now measured on all six minors**, so
+  the lifecycle result is no longer a 3.14.7 extrapolation: pre-fork
+  wins on 48/48 (56/56 on 3.14) configurations of EVERY minor, with
+  medians in a 3.6x-4.7x band and no trend across versions. Crossover
   is faster on 56/56 configurations, but the margin decays ~3.5x across the
   axis as parent RSS goes 0 -> 2127 MB. Fleet memory (children's PSS/USS) is
   still unmeasured, which C0.6 also requires; the parent's own USS was
   found miscalculated and is now fixed.
 - Interpreter matrix decision recorded (add 3.14, or revise the policy).
+  **[DONE]** See `C0.5_INTERPRETER_MATRIX.md` and `tools/matrix_c05.sh`.
+  All six minors 3.10-3.15 exercised (3.15 is rc2). Pre-fork works on
+  every one, control probe non-vacuous on every one, respawn inherits no
+  interpreter state on every one. Three real defects found, none
+  reachable from a single-interpreter check -- including that the helper
+  did not COMPILE on 3.10, which is what this gate existed to find.
 - M1/M2 curves published; crossover stated as a range or "not yet observed".
 - Ordered-output certificate designed, implementation tracked separately.
 

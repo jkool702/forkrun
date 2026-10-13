@@ -1,0 +1,129 @@
+#!/bin/bash
+# C0.5 -- the interpreter matrix gate.
+#
+#   tools/matrix_c05.sh [--quick]
+#
+# Fetches the distro CPythons for 3.10-3.15 into a local prefix (no root
+# needed: dnf download + rpm2cpio), builds the UDF helper and the C0.4
+# fork-lifecycle driver against EACH one, and runs the three probes:
+#
+#   default   pre-fork vs post-fork timing, with a verdict REFUSED unless
+#             every requested trial succeeded and neither arm failed
+#   --control in-process state mutation must be detectable; a CLEAN
+#             result means the probe is vacuous and its verdict on a real
+#             respawn means nothing
+#   --respawn a respawned generation must NOT inherit interpreter state
+#
+# All three exist because "pre-fork works" is otherwise unfalsifiable in
+# the direction that matters. See dev/supervisor/C0.5_INTERPRETER_MATRIX.md.
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK=/tmp/pymin
+PREFIX="$WORK/root"
+MINORS="3.10 3.11 3.12 3.13 3.15"
+QUICK="--quick"
+
+if [ "${1:-}" = "--quick" ]; then QUICK="--quick"; fi
+
+mkdir -p "$PREFIX" "$WORK/rpms"
+
+fetch() {   # fetch <minor>
+    local v="$1"
+    if [ -x "$PREFIX/usr/bin/python$v" ]; then return 0; fi
+    echo "  fetching $v..."
+    ( cd "$WORK/rpms" && \
+      timeout 600 dnf download --destdir=. --resolve \
+        "python$v" "python$v-devel" >/dev/null 2>&1 )
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "  $v: download FAILED (rc=$rc)"
+        return 1
+    fi
+    local rpm
+    for rpm in "$WORK"/rpms/python$v-*.rpm "$WORK"/rpms/python$v-devel-*.rpm; do
+        [ -e "$rpm" ] || continue
+        rpm2cpio "$rpm" | ( cd "$PREFIX" && cpio -idmu --quiet 2>/dev/null )
+        rm -f "$rpm"
+    done
+    [ -x "$PREFIX/usr/bin/python$v" ] || { echo "  $v: no interpreter"; return 1; }
+}
+
+wrapper() {  # wrapper <minor>
+    local v="$1"
+    cat > "$WORK/bin/python$v" <<EOF
+#!/bin/bash
+export LD_LIBRARY_PATH=$PREFIX/usr/lib64\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}
+exec "$PREFIX/usr/bin/python$v" "\$@"
+EOF
+    chmod +x "$WORK/bin/python$v"
+}
+
+build() {    # build <minor>  -> /tmp/pymin/root/usr/bin/udf_fork_<minor>
+    local v="$1" inc lib
+    inc="$(LD_LIBRARY_PATH="$PREFIX/usr/lib64" "$PREFIX/usr/bin/python$v" -c \
+             'import sysconfig;print(sysconfig.get_paths()["include"])' 2>/dev/null)"
+    [ -f "$inc/Python.h" ] || { echo "  $v: no headers"; return 1; }
+    lib="$PREFIX/usr/lib64"
+    gcc -O2 -I"$inc" -I"$ROOT/python/forkrun" \
+        -o "$PREFIX/usr/bin/udf_fork_$v" \
+        "$ROOT/python/forkrun/fr_udf_fork.c" "$ROOT/python/forkrun/fr_udf.c" \
+        -L"$lib" "-lpython$v" -ldl -lm 2>"$WORK/build_$v.log" \
+        && return 0
+    echo "  $v: BUILD FAILED"; grep -m2 "error:" "$WORK/build_$v.log"
+    return 1
+}
+
+echo "C0.5 interpreter matrix gate"
+echo "  minors: 3.10-3.14 (system 3.14) + 3.15  |  probes: verdict, control, respawn"
+echo
+
+rc_all=0
+for v in $MINORS; do
+    echo "=== CPython $v ==="
+    fetch "$v"   || { rc_all=1; continue; }
+    wrapper "$v"
+    build  "$v"  || { rc_all=1; continue; }
+    export FR_UDF_HOME="$PREFIX/usr"
+    export LD_LIBRARY_PATH="$PREFIX/usr/lib64"
+    for probe in "" "--control" "--respawn"; do
+        line=$(timeout 180 "$PREFIX/usr/bin/udf_fork_$v" /tmp/udfroot \
+                 myudf:up 2 20 $probe 2>&1 \
+               | grep -E "interpreter :|VERDICT|NO VERDICT|control :|respawn :" \
+               | head -2 | tr '\n' '|')
+        printf "   %-9s %s\n" "${probe:-verdict}" "$line"
+    done
+    echo
+done
+
+# The system interpreter, for comparison.
+if [ -x "$ROOT/python/forkrun/fr_udf_fork" ]; then
+    # FR_UDF_HOME and LD_LIBRARY_PATH are exported in the loop above and
+    # point at the extracted prefix. Leaving them set makes the SYSTEM
+    # 3.14 driver initialise against a prefix that has no 3.14 stdlib, so
+    # it fails and the verdict line silently vanishes -- a row that looks
+    # like "no result" rather than "not run".
+    unset FR_UDF_HOME
+    export LD_LIBRARY_PATH=""
+    echo "=== CPython 3.14 (system build) ==="
+    for probe in "" "--control" "--respawn"; do
+        line=$(timeout 180 "$ROOT/python/forkrun/fr_udf_fork" /tmp/udfroot \
+                 myudf:up 2 20 $probe 2>&1 \
+               | grep -E "interpreter :|VERDICT|NO VERDICT|control :|respawn :" \
+               | head -2 | tr '\n' '|')
+        printf "   %-9s %s\n" "${probe:-verdict}" "$line"
+    done
+fi
+
+echo
+echo "Lifecyle curves per minor (needs /tmp/udfroot/myudf.py with up/touch/is_touched):"
+for v in $MINORS; do
+    [ -x "$PREFIX/usr/bin/udf_fork_$v" ] || continue
+    FR_UDF_HOME="$PREFIX/usr" LD_LIBRARY_PATH="$PREFIX/usr/lib64" \
+    FR_BENCH_DRIVER="$PREFIX/usr/bin/udf_fork_$v" \
+        timeout 1200 python3 "$ROOT/tools/bench_m2_lifecycle.py" $QUICK \
+        --trials 3 2>&1 | grep -E "driver cp|pre-fork faster|speedup  min" \
+        | sed 's/^/  /'
+done
+
+exit $rc_all

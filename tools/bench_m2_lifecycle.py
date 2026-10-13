@@ -45,7 +45,40 @@ import tempfile
 import time
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DRIVER = os.path.join(_ROOT, "python", "forkrun", "fr_udf_fork")
+# The driver may be built against a DIFFERENT interpreter than the one
+# running this harness -- that is the whole point of running the C0.5
+# matrix. FR_BENCH_DRIVER selects it.
+#
+# Without this the harness printed platform.python_version() while
+# measuring a driver linked against something else, so a 3.10 sweep
+# labelled itself "3.14.7" and its numbers were a 3.14.7 re-run. Same
+# class as round 7's launch-vs-in-process mislabelling: the label must
+# describe what was measured.
+DRIVER = os.environ.get(
+    "FR_BENCH_DRIVER",
+    os.path.join(_ROOT, "python", "forkrun", "fr_udf_fork"))
+
+
+def _driver_interpreter():
+    """Version the DRIVER reports, not the interpreter running us."""
+    import subprocess
+    try:
+        out = subprocess.run([DRIVER, "--version-probe"],
+                             capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        # Loudly, not silently: a probe that fails must not look like a
+        # probe that succeeded with an unexpected version.
+        raise RuntimeError("driver --version-probe failed (rc=%d): %s"
+                           % (out.returncode,
+                              (out.stderr.decode(errors="replace") or
+                               out.stdout.decode(errors="replace"))[-200:]))
+    txt = out.stdout.decode(errors="replace")
+    for line in txt.splitlines():
+        if "interpreter" in line and ":" in line:
+            return line.split(":", 1)[1].strip()
+    return None
 
 UDF_SRC = '''\
 def up(b):
@@ -168,7 +201,9 @@ def main():
 
     import platform
     print("C0.6 M2 -- pre-fork vs post-fork interpreter lifecycle")
-    print("  interpreter : %s" % platform.python_version())
+    print("  driver      : %s" % DRIVER)
+    print("  driver cp   : %s" % (_driver_interpreter()
+                                   or platform.python_version()))
     print("  driver      : %s" % os.path.relpath(DRIVER, _ROOT))
     print("  udf         : myudf:up  (pure-Python, 11 B batch)")
     print("  iters/child : %d   trials: %d" % (iters, args.trials))
@@ -234,7 +269,7 @@ def main():
           "3.10-3.15;\n  this run covers only what is installed here, so "
           "the matrix is INCOMPLETE and\n  the crossover above is a "
           "single-interpreter result, not a\n  cross-version claim."
-          % platform.python_version())
+          % (_driver_interpreter() or platform.python_version()))
     return 0
 
 
