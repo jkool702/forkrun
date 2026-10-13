@@ -31,7 +31,8 @@ import os
 import sys
 import sysconfig
 
-__all__ = ["UDFError", "helper_path", "roots_spec", "parse_spec",
+__all__ = ["UDFError", "helper_path", "candidate_helper_path",
+           "roots_spec", "parse_spec",
            "udf_payload", "caller_version_arg", "helper_fingerprint",
            "known_incompatible", "record_incompatible", "clear_incompatibles"]
 
@@ -110,6 +111,23 @@ def clear_incompatibles():
 
 class UDFError(Exception):
     """UDF mode is unavailable or misconfigured."""
+
+
+def candidate_helper_path():
+    """The helper that WOULD be used, ignoring the incompatibility cache.
+
+    Needed because helper_path() returns None once an artifact is known
+    bad -- so asking it "which artifact did we reject?" always answers
+    "none" and the per-invocation warning goes silent after the first
+    call. The cache must not be able to hide the reason it exists.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+    cand = os.path.join(here, "_fr_udf" + suffix)
+    if os.path.exists(cand):
+        return cand
+    plain = os.path.join(here, "_fr_udf.so")
+    return plain if os.path.exists(plain) else None
 
 
 def helper_path():

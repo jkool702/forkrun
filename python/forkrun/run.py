@@ -1016,18 +1016,24 @@ def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
                                    plugin, func, udf_args):
     """stream() over the cleanroom, with an explicit pre-ingest fallback.
 
-    The launcher refusal is raised from INSIDE the generator, so it can
-    only arrive before the first yield for a pre-ingestion code -- which
-    is the whole reason falling back is safe here. We catch it and return
-    the in-process stream instead.
+    LAZINESS IS THE POINT, and the first version of this broke it: it
+    primed the cleanroom generator with next() to surface a pre-ingest
+    refusal at the decision point, which made ``stream()`` block until the
+    first record arrived. Measured: with a writer that slept 3s before its
+    first record, stream() took 3.00s to RETURN instead of returning a
+    generator immediately -- turning a live-draining call into a blocking
+    one and defeating the contract the whole streaming surface is built
+    on. An existing test did not catch it.
 
-    Rewrapping (rather than yielding the cleanroom generator and
-    retrying) is what guarantees no partial output escapes: the in-process
-    generator is returned as a single value, so the caller never sees a
-    stream that started on one path and continued on another.
+    So the refusal is handled INSIDE the generator body: nothing happens
+    until the caller's first next(), and because a pre-ingestion code is
+    decided before any record is produced, the first next() is still the
+    earliest point at which the refusal can arrive. No record can have
+    escaped before it, so switching mid-iteration cannot split a stream
+    across two paths.
     """
-    def _run():
-        return _guarded_gen(
+    def _gen():
+        cleanroom = _guarded_gen(
             _signal_guard(kwargs.get("signal_policy", "default")),
             _execute_cleanroom_stream(
                 source,
@@ -1039,38 +1045,28 @@ def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
                 on_error=kwargs.get("on_error", "retry"),
                 strict_poison=bool(kwargs.get("strict_poison", False)),
                 **udf_args))
-
-    try:
-        gen = _run()
-        # Prime the generator so a pre-ingest refusal surfaces HERE, at
-        # the decision point, rather than on the caller's first next().
-        first = next(gen, _SENTINEL_NO_RECORD)
-    except _CleanroomPreIngestDecline as exc:
-        if isinstance(exc, _CleanroomCompatRefusal):
-            _warn_compat_refusal(exc)
-        new_payload, new_mode = _coerce_payload(
-            raw_payload, raw_mode, force_inprocess_udf=True)
-        # Only `mode` goes into kwargs: these generators take `payload`
-        # POSITIONALLY, so putting it in kwargs as well is a duplicate
-        # argument. (Which is exactly what happened the first time.)
-        kwargs = dict(kwargs, mode=new_mode)
-        return _guarded_gen(
-            _signal_guard(kwargs.get("signal_policy", "default")),
-            _ingest_stream_reactor_gen(new_payload, source, **kwargs))
-    return _prepend(first, gen)
-
-
-def _prepend(first, gen):
-    """Yield ``first`` (unless it is the sentinel) then the rest of gen."""
-    def _it():
-        if first is not _SENTINEL_NO_RECORD:
-            yield first
-        for item in gen:
-            yield item
-    return _it()
-
-
-_SENTINEL_NO_RECORD = object()
+        try:
+            first = next(cleanroom)
+        except StopIteration:
+            return
+        except _CleanroomPreIngestDecline as exc:
+            if isinstance(exc, _CleanroomCompatRefusal):
+                _warn_compat_refusal(exc)
+            new_payload, new_mode = _coerce_payload(
+                raw_payload, raw_mode, force_inprocess_udf=True)
+            # Only `mode` goes into kwargs: these generators take
+            # `payload` POSITIONALLY, so putting it in kwargs as well is
+            # a duplicate argument. (Which is exactly what happened the
+            # first time.)
+            inproc_kwargs = dict(kwargs, mode=new_mode)
+            yield from _guarded_gen(
+                _signal_guard(inproc_kwargs.get("signal_policy", "default")),
+                _ingest_stream_reactor_gen(new_payload, source,
+                                           **inproc_kwargs))
+            return
+        yield first
+        yield from cleanroom
+    return _gen()
 
 
 def _caller_version_argv():
@@ -1128,6 +1124,40 @@ def _warn_compat_refusal(exc):
         "         continuing on the in-process path for this call.\n"
         % (exc.label, (exc.detail or "").strip() or "no detail"))
     _sys.stderr.flush()
+
+
+def _warn_if_cached_incompatible():
+    """Warn once per affected invocation when the helper is already known bad.
+
+    A cached mismatch means we skip the probe, so the launcher never runs
+    and never reports anything -- but the call is still AFFECTED, and the
+    contract is one warning per affected invocation, not per probe. Without
+    this, the first call warns and every subsequent call in the process
+    goes quiet, which reads as "the cleanroom just stopped being
+    available".
+
+    Emitted at the public-call decision point rather than inside
+    helper_path(), which is called several times per call and would either
+    warn many times or need state to avoid it.
+    """
+    try:
+        from ._udf import candidate_helper_path, known_incompatible
+    except Exception:
+        return None
+    # candidate_helper_path, NOT helper_path: the cache makes helper_path
+    # return None, which would make the reason invisible and silence the
+    # warning after the very first call.
+    path = candidate_helper_path()
+    reason = known_incompatible(path) if path else None
+    if not reason:
+        return None
+    import sys as _sys
+    _sys.stderr.write(
+        "forkrun [WARN]: cleanroom UDF helper declined (%s): %s\n"
+        "         continuing on the in-process path for this call.\n"
+        % (_CR_EXIT_LABELS.get(80, "version mismatch"), reason.strip()))
+    _sys.stderr.flush()
+    return reason
 
 
 def _cleanroom_attempt(fn, payload, mode):
@@ -3657,6 +3687,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     # FORKRUN_CLEANROOM=1 -- which raised UnboundLocalError instead of
     # declining cleanly.
     _why = "mode=%r is not a launcher-served envelope" % (raw_mode,)
+    if raw_mode in ("plugin", "udf"):
+        _warn_if_cached_incompatible()
     if _cleanroom_enabled() and raw_mode in ("plugin", "udf", "spawn"):
         _ok, _why = _cleanroom_eligible(
             source, raw_mode, num_nodes, order,
@@ -4111,6 +4143,8 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
         # an unserved call is the overwhelmingly common case and
         # warning on each would be noise. An explicit request that cannot
         # be honoured still warns, as it does for map().
+        if raw_mode in ("plugin", "udf"):
+            _warn_if_cached_incompatible()
         if _cleanroom_enabled() and raw_mode in ("plugin", "udf"):
             _ok, _why = _cleanroom_eligible(
                 source, raw_mode, num_nodes,
