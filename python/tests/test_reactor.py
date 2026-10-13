@@ -18,6 +18,7 @@ Contract under test:
   - C orderer: ordered output identical to Python reassembly.
 """
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -42,6 +43,47 @@ except FileNotFoundError:
 
 def _up(batch):
     return bytes(batch.data).upper()
+
+
+#: stderr emitted by the most recent _capture_stderr() block.
+_LAST_STDERR = [""]
+
+
+@contextlib.contextmanager
+def _capture_stderr():
+    """Capture fd 2 for the duration of the block.
+
+    The poison pill reports on stderr, and asserting that report exists
+    is part of the guarantee -- a batch skipped WITHOUT telling the user
+    is silent partial data loss. Redirecting fd 2 rather than using
+    warnings catches the C-level write as well as any Python-level
+    message, so the assertion cannot be satisfied by a stray UserWarning.
+    """
+    saved = os.dup(2)
+    tmp = os.memfd_create("stderr")
+    try:
+        os.dup2(tmp, 2)
+        yield
+        # Flush the PYTHON-level stderr buffer too: sys.stderr wraps fd 2
+        # and may hold buffered text that has not reached the fd yet.
+        # (os has no flush() -- that was the first attempt's bug.)
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os.fsync(tmp)
+        os.lseek(tmp, 0, os.SEEK_SET)
+        chunks = []
+        while True:
+            b = os.read(tmp, 65536)
+            if not b:
+                break
+            chunks.append(b)
+        _LAST_STDERR[0] = b"".join(chunks).decode("utf-8", "replace")
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+        os.close(tmp)
 
 
 def _make_input(n=2000, prefix="line"):
@@ -192,10 +234,34 @@ class TestWorkerRespawn(unittest.TestCase):
                 sys.path.remove(plugin_dir)
             # The crashed batch is best-effort (no escrow possible
             # for a death that runs no code); everything else lands.
-            # Results are batch-granular blobs: batch 0 (lowest
-            # lines) is the lost one, the tail must be intact.
+            #
+            # Was: assertEqual(len(res), len(healthy) - 1) plus
+            # assertIn(b"LINE 1999\n", ...). The count says ONE blob is
+            # missing but not WHICH -- a run that dropped batch 500 and
+            # kept batch 0 satisfies it just as well as the opposite.
+            # The round-8 review is right that it does not establish that
+            # the correct batch was lost and the rest intact.
+            #
+            # Now asserts the CONTENT: exactly the first record of the
+            # healthy run is absent, and every other record is present
+            # byte-identical. That names the loss and proves the tail,
+            # which a count cannot.
             healthy = forkrun.map(_up, path, workers=2, nodes=1)
-            self.assertEqual(len(res), len(healthy) - 1)
+            healthy_recs = [bytes(x) for x in healthy if x is not None]
+            res_recs = [bytes(x) for x in res if x is not None]
+            self.assertEqual(
+                len(healthy_recs) - 1, len(res_recs),
+                "expected exactly one batch to be lost (%d healthy, %d "
+                "recovered)" % (len(healthy_recs), len(res_recs)))
+            self.assertNotIn(
+                healthy_recs[0], res_recs,
+                "batch 0 should be the LOST one -- a crash on the first "
+                "batch cannot escrow, so it is dropped")
+            self.assertEqual(
+                healthy_recs[1:], res_recs,
+                "every batch after the lost one must arrive byte-identical "
+                "and in order; got %d record(s) against %d"
+                % (len(res_recs), len(healthy_recs) - 1))
             self.assertIn(b"LINE 1999\n", b"".join(res))
         finally:
             os.unlink(path)
@@ -360,11 +426,40 @@ class TestTrapACK(unittest.TestCase):
         try:
             def _boom(batch):
                 raise ValueError("nope")
-            res = forkrun.map(_boom, path, workers=2,
-                              orchestrator=True, on_error="retry", nodes=1)
+            with _capture_stderr():
+                res = forkrun.map(_boom, path, workers=2,
+                                  orchestrator=True, on_error="retry",
+                                  nodes=1)
             healthy = forkrun.map(_up, path, workers=2, nodes=1)
             # Poisoned batches are skipped, never silently kept.
+            #
+            # Was: assertLess(len(res), len(healthy)). That proves
+            # something was dropped, which is also what any truncation,
+            # any lost batch and any early exit would satisfy -- and it
+            # never checks the user was TOLD. A poison pill that skipped
+            # batches silently would pass.
+            #
+            # Now: the poison warning must appear on stderr, and the
+            # surviving content must be the healthy content minus whole
+            # records -- dropped, never altered or duplicated.
             self.assertLess(len(res), len(healthy))
+            self.assertIn(
+                "poison", _LAST_STDERR[0].lower(),
+                "the poison pill skipped batches without telling anyone; a "
+                "silent skip is the failure this guards")
+            healthy_lines = sorted(
+                b"".join(bytes(x) for x in healthy if x is not None)
+                .splitlines())
+            got_lines = sorted(
+                b"".join(bytes(x) for x in res if x is not None)
+                .splitlines())
+            self.assertTrue(
+                set(got_lines) <= set(healthy_lines),
+                "the poisoned run produced lines the healthy run did not, "
+                "so records were altered rather than skipped")
+            self.assertLess(
+                len(got_lines), len(healthy_lines),
+                "nothing was actually skipped")
         finally:
             os.unlink(path)
 

@@ -473,6 +473,47 @@ class TestResultsPipeConsumer(unittest.TestCase):
         self.assertEqual([(1, b"one"), (3, b"three")], list(b.drain()))
         self.assertEqual([], b.unresolved_gaps(4))
 
+    def test_results_pipe_pump_advances_past_a_terminal_before_eof(self):
+        """The PRODUCTION path, not the primitives.
+
+        The test above drives _split_records_terminal() and
+        ReassemblyBuffer directly, which is what Stage 1 added, but the
+        liveness claim is about _make_results_pump() -- the actual
+        results-pipe consumer. Driving the primitives proves they work;
+        it does not prove the wiring that calls them does, and the
+        round-7 wiring change (_split_records -> _split_records_terminal
+        plus add_disposition in the pump) was never exercised here.
+
+        So this drives the pump over a real pipe and asserts the
+        property that matters: a terminal outcome for batch 0 lets batch
+        1 be emitted WITHOUT waiting for EOF, while the writer still
+        holds the pipe open.
+
+        If the pump still used DATA-only parsing, batch 0 would be an
+        unseen hole and batch 1 would never surface until finalisation --
+        the exact behaviour Stage 1 exists to remove.
+        """
+        import importlib
+        run = importlib.import_module("forkrun.run")
+        r, w = os.pipe()
+        self.addCleanup(lambda: os.close(w))
+        self.addCleanup(lambda: os.close(r))
+        try:
+            # batch 0 terminal-only, then data. Written and NOT closed:
+            # the pipe stays open, so anything the pump yields here was
+            # yielded before EOF.
+            os.write(w, frame(0, DISP_NO_RESULT))
+            os.write(w, frame(1, DISP_DATA, b"one"))
+            pump = run._make_results_pump(r, order="index")
+            first = pump(alive=True)
+            self.assertEqual(
+                b"one", bytes(first[0]) if isinstance(first, tuple)
+                else bytes(first),
+                "the pump did not emit batch 1 past the terminal outcome "
+                "for batch 0 while the pipe was still open")
+        finally:
+            pass
+
 
 class TestStage1ChangedNoEligibility(unittest.TestCase):
 

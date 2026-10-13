@@ -165,11 +165,15 @@ These are known. Please challenge them rather than rediscover them.
    verdict?** I argued no ordering evidence is needed because the harness
    does not claim ordering. A reviewer may reasonably say a throughput
    number on unvalidated ordering is not a decision.
-3. **Is the oracle independent?** `test_capability_matrix` now agrees on
-   20160/20160 cells. Is a generated oracle built from the documented
-   contract a genuine second opinion, or an elaborate restatement of the
-   same reading? Note this is the *fourth* defect class found by checking
-   an assumption rather than reading a spec.
+3. **Is the oracle independent?** `test_capability_matrix` agrees on
+   20160/20160 cells. Precisely: the oracle is **implementation-
+   independent, not specification-independent.** Its rules are a second
+   encoding of the same documented contract, authored in the same
+   project. A mistaken contract produces perfect agreement. So it is a
+   differential conformance test against the eligibility contract, not a
+   proof that the contract captures every user-facing requirement — and
+   the complementary safeguard is a separate review of the contract
+   itself, which cell-count agreement cannot provide.
 4. **Is the relaxed NUMA guard a loss of rigour?** I enabled 7 tests on
    UMA by relaxing a physical-hardware guard over forced-logical
    coverage. My reasoning is that `test_numa_bump.py` already establishes

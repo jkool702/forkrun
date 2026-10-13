@@ -4287,8 +4287,26 @@ def _make_results_pump(results_r, order="none", stats=None):
     None when nothing is complete YET (not EOF — keep polling), or
     raises StopIteration when producers are gone AND the pipe hit
     EOF AND no buffered records remain (same EOF-anchored rule as
-    _drain_records; a truncated tail drops like _parse_records —
-    a worker that died mid-record, never user data).
+    _drain_records; a truncated tail is dropped, like _parse_records).
+
+    On what a truncated tail means, the wording corrected (round-8
+    review). It previously read "a worker that died mid-record, never
+    user data", which is too strong. `RESILIENCE_PROTOCOL.md` 2.2 states
+    that output rollback is guarded by `S_ISREG` and that PIPES downgrade
+    to at-least-once -- a pipe cannot be truncated, so partial output
+    from a killed batch genuinely can appear on one.
+
+    In this specific path the risk is limited: the results pipe carries
+    already-framed records out of the per-worker memfds, and memfds are
+    S_ISREG, so the rollback that protects a killed batch's partial
+    output happens at the memfd rather than here. The truncation source
+    is therefore the DRAIN process losing a partial write, not a worker
+    emitting a partial batch.
+
+    So the honest statement is that the tail is dropped because it is an
+    incomplete FRAME, not because it is provably not user data. The
+    runtime behaviour is unchanged -- correcting the claim, not the
+    semantics -- but a caller reading this should know the difference.
 
     order="index" reassembles completion-order records into
     batch_idx sequence via ReassemblyBuffer (holes flush sorted at

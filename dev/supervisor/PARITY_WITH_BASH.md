@@ -256,6 +256,26 @@ Forced-logical covers the engine's per-node bookkeeping, not the
 kernel's placement. That gap is unchanged by this work and is named here
 rather than left for someone to assume away.
 
+## What the capability oracle is, precisely
+
+Agreed with the round-8 review and recorded here so the claim is not
+made loosely anywhere:
+
+The oracle is **implementation-independent, not specification-
+independent.** Its rules live in `tools/capability_oracle.py`, separate
+from the live predicate, with per-rule links to the normative
+documentation. That makes 20160/20160 agreement real evidence against
+accidental code drift, missing restrictions and precedence regressions —
+and it is more than a hand-written "everything should pass" test.
+
+It is not a second opinion on the *contract*. Both encodings were
+authored in the same project from the same reading, so a misread
+requirement satisfies both. The thing it cannot substitute for is
+someone checking the documented eligibility contract against what users
+actually need — which is why the behavioural tests for the public
+dispatcher (parity, `TestParityIsNotVacuous`) are a complement rather
+than a redundancy.
+
 ## The failure mode this is meant to prevent
 
 Four defects in four consecutive rounds shared a shape: **an assertion
