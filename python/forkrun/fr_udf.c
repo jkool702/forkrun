@@ -21,6 +21,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
 #include <unistd.h>
 
 static int initialized = 0;
@@ -109,7 +111,7 @@ static int configure(PyConfig *cfg)
      * Simply dropping the assignment on 3.10 would compile, but it
      * would also silently drop the SECURITY property, since that field
      * is what keeps a caller-influenced directory off sys.path. So 3.10
-     * enforces the same rule by hand in scrub_inherited_path(), called
+     * enforces the same rule by hand in enforce_path_policy(), called
      * after initialisation and before any user code can run. */
 #if PY_VERSION_HEX >= 0x030B0000
     cfg->safe_path = 1;
@@ -211,46 +213,196 @@ static int configure(PyConfig *cfg)
  * directories are left alone: removing those would break imports, and
  * they are not caller-influenced.
  */
-static int scrub_inherited_path(void)
+/* Resolve the current directory into a dynamically sized buffer.
+ *
+ * getcwd() with a fixed buffer fails with ERANGE when the path is longer
+ * than the buffer. The previous version treated that failure as "no cwd
+ * known", which silently disabled the comparison and left a literal-cwd
+ * entry on sys.path while still reporting success -- the exact
+ * fail-open behaviour a security boundary must not have.
+ *
+ * Returns 0 and sets *out to a malloc'd NUL-terminated string, or -1. */
+static int resolve_cwd(char **out)
 {
-#if PY_VERSION_HEX >= 0x030B0000
-    /* safe_path was set in configure(); nothing to do. */
+    size_t cap = 1024;
+    for (int attempt = 0; attempt < 8; attempt++, cap *= 4) {
+        char *buf = (char *)malloc(cap);
+        if (!buf) return -1;
+        if (getcwd(buf, cap) != NULL) {
+            *out = buf;
+            return 0;
+        }
+        free(buf);
+        if (errno != ERANGE) return -1;   /* a real failure, not growth */
+    }
+    return -1;   /* never grew enough */
+}
+
+/* Is this sys.path entry a caller-influenced location?
+ *
+ * Compares against the current directory in TWO spellings: the literal
+ * getcwd() result, and its realpath(). A symlinked or bind-mounted
+ * working directory yields a different byte string for the same place,
+ * and the review is right that byte-equality alone leaves that open.
+ *
+ * Returns 1 caller-influenced, 0 safe, -1 CANNOT DETERMINE.
+ * -1 is a distinct outcome because the caller must fail closed on it:
+ * a security boundary that answers "probably fine" when it cannot tell
+ * is not a boundary. */
+static int entry_is_caller_influenced(const char *c,
+                                      const char *cwd,
+                                      const char *cwd_real)
+{
+    if (c == NULL) return -1;                 /* not a string at all */
+    if (c[0] == '\0') return 1;               /* '' means cwd */
+    if (cwd && strcmp(c, cwd) == 0) return 1;
+    if (cwd_real && strcmp(c, cwd_real) == 0) return 1;
+    /* Trailing slashes: "/tmp/x" and "/tmp/x/" are the same directory. */
+    if (cwd) {
+        size_t n = strlen(cwd);
+        if (strncmp(c, cwd, n) == 0 && (c[n] == '/' || c[n] == '\0'))
+            return 1;
+    }
+    if (cwd_real) {
+        size_t n = strlen(cwd_real);
+        if (strncmp(c, cwd_real, n) == 0 && (c[n] == '/' || c[n] == '\0'))
+            return 1;
+    }
     return 0;
-#else
+}
+
+int fr_udf_classify_path_entry(const char *c)
+{
+    /* Test seam. The review's rule B ("path variants and adjacent
+     * entries") cannot be driven through real initialisation -- CPython
+     * decides what lands on sys.path -- so the CLASSIFIER is exposed
+     * and tested directly for spellings the interpreter would not
+     * produce on demand.
+     *
+     * This is deliberately NOT a way to establish the policy: only the
+     * real fr_udf_init() path can do that. It covers the decision table,
+     * and the policy tests cover the wiring. */
+    char *cwd = NULL, *cwd_real = NULL;
+    if (resolve_cwd(&cwd) != 0) return -1;
+    char resolved[PATH_MAX];
+    if (realpath(cwd, resolved) != NULL) cwd_real = strdup(resolved);
+    int v = entry_is_caller_influenced(c, cwd, cwd_real);
+    free(cwd); free(cwd_real);
+    return v;
+}
+
+/* Enforce the path policy: no caller-influenced entry on sys.path.
+ *
+ * 3.10  MUTATES, because PyConfig.safe_path does not exist there and
+ *       nothing else keeps the launch directory off sys.path.
+ * 3.11+ READ-ONLY. safe_path is the native control there; a second
+ *       mutating implementation would only be able to MASK a
+ *       configuration regression -- if safe_path stopped working, a
+ *       scrub would hide it. So the invariant is CHECKED and init fails
+ *       if it does not hold.
+ *
+ * Every uncertainty fails closed. Conversion failure, an unreadable
+ * cwd, an undecidable entry, a failed deletion: all return -1, and
+ * fr_udf_init refuses to initialise. The alternative -- skip and carry
+ * on -- is how a suspect path survives into an interpreter that reports
+ * a clean initialisation. */
+static int enforce_path_policy(void)
+{
     PyObject *path = PySys_GetObject("path");   /* borrowed */
     if (!path || !PyList_Check(path)) {
-        set_error("sys.path is not a list");
+        set_error("sys.path is not a list; cannot enforce the path policy");
         return -1;
     }
-    char cwd[4096];
-    const char *have_cwd =
-        (getcwd(cwd, sizeof cwd) != NULL) ? cwd : NULL;
 
-    for (Py_ssize_t i = PyList_GET_SIZE(path) - 1; i >= 0; i--) {
+    char *cwd = NULL, *cwd_real = NULL;
+    if (resolve_cwd(&cwd) != 0) {
+        set_error("cannot resolve the current directory; refusing to "
+                  "initialise rather than assume sys.path is clean");
+        return -1;
+    }
+    char resolved[PATH_MAX];
+    if (realpath(cwd, resolved) != NULL)
+        cwd_real = strdup(resolved);
+
+#if PY_VERSION_HEX >= 0x030B0000
+    /* Read-only verification of the native control. */
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(path); i++) {
         PyObject *e = PyList_GET_ITEM(path, i);   /* borrowed */
-        if (!PyUnicode_Check(e)) continue;
-        /* PyUnicode_AsUTF8String is stable public API from 3.3, unlike
-         * PyUnicode_FSConverter, whose SIGNATURE changed in 3.11 (it
-         * took a char** out-param before). Guarding that would have been
-         * a second version fork for no benefit. */
+        if (!PyUnicode_Check(e)) {
+            set_error("sys.path[%zd] is not a str; cannot verify the path "
+                      "policy", (Py_ssize_t)i);
+            goto fail;
+        }
         PyObject *b = PyUnicode_AsUTF8String(e);
-        if (!b) { PyErr_Clear(); continue; }
-        const char *c = PyBytes_AS_STRING(b);
-        int drop = 0;
-        if (c == NULL || c[0] == '\0')
-            drop = 1;                                  /* '' == cwd */
-        else if (have_cwd && strcmp(c, have_cwd) == 0)
-            drop = 1;                                  /* literal cwd */
+        if (!b) {
+            set_error("sys.path[%zd] is not encodable as UTF-8; refusing "
+                      "to initialise", (Py_ssize_t)i);
+            PyErr_Clear();
+            goto fail;
+        }
+        int verdict = entry_is_caller_influenced(PyBytes_AS_STRING(b),
+                                                 cwd, cwd_real);
+        const char *shown = PyBytes_AS_STRING(b);
+        char copy[512];
+        snprintf(copy, sizeof copy, "%s", shown ? shown : "(null)");
         Py_DECREF(b);
-        if (drop) {
-            /* PyList_SetSlice(.., NULL) deletes the slice. PyList_DelSlice
-             * does not exist in 3.10. */
-            if (PyList_SetSlice(path, i, i + 1, NULL) != 0)
-                return -1;
+        if (verdict != 0) {
+            set_error("sys.path[%zd] is a caller-influenced location "
+                      "(\"%s\") despite PyConfig.safe_path; refusing to "
+                      "initialise", (Py_ssize_t)i, copy);
+            goto fail;
         }
     }
+    free(cwd); free(cwd_real);
+    return 0;
+#else
+    /* Downward iteration, so a deletion at index i does not disturb the
+     * indices still to be visited (i-1 and below). An upward loop with
+     * an unconditional i++ is the classic way to delete every OTHER
+     * adjacent entry, so the direction is load-bearing and commented. */
+    for (Py_ssize_t i = PyList_GET_SIZE(path) - 1; i >= 0; i--) {
+        PyObject *e = PyList_GET_ITEM(path, i);   /* borrowed */
+        if (!PyUnicode_Check(e)) {
+            set_error("sys.path[%zd] is not a str; cannot verify the path "
+                      "policy", (Py_ssize_t)i);
+            goto fail;
+        }
+        /* UTF-8 is assumed here AND for cwd (both produced as UTF-8 by
+         * getcwd/AsUTF8String), so the comparison is consistent. A
+         * filesystem path with non-UTF-8 bytes would fail here, and
+         * that must fail closed rather than skip the entry. */
+        PyObject *b = PyUnicode_AsUTF8String(e);
+        if (!b) {
+            set_error("sys.path[%zd] is not encodable as UTF-8; refusing "
+                      "to initialise", (Py_ssize_t)i);
+            PyErr_Clear();
+            goto fail;
+        }
+        int verdict = entry_is_caller_influenced(PyBytes_AS_STRING(b),
+                                                 cwd, cwd_real);
+        Py_DECREF(b);
+        if (verdict < 0) {
+            set_error("sys.path[%zd] cannot be classified; refusing to "
+                      "initialise", (Py_ssize_t)i);
+            goto fail;
+        }
+        if (verdict == 1) {
+            /* PyList_SetSlice(.., NULL) deletes the slice.
+             * PyList_DelSlice does not exist on 3.10. */
+            if (PyList_SetSlice(path, i, i + 1, NULL) != 0) {
+                set_error("failed to remove a caller-influenced sys.path "
+                          "entry; refusing to initialise");
+                goto fail;
+            }
+        }
+    }
+    free(cwd); free(cwd_real);
     return 0;
 #endif
+
+fail:
+    free(cwd); free(cwd_real);
+    return -1;
 }
 
 
@@ -416,8 +568,9 @@ int fr_udf_init(const char *const *roots, int nroots)
     }
     /* BEFORE install_roots: on 3.10 this is what stands in for
      * cfg->safe_path, and it has to happen while no caller-supplied root
-     * is on the path yet. */
-    if (scrub_inherited_path() != 0) {
+     * is on the path yet. On 3.11+ it verifies rather than mutates, so
+     * that a safe_path regression cannot be masked. */
+    if (enforce_path_policy() != 0) {
         Py_FinalizeEx();
         return FR_UDF_ERR;
     }

@@ -67,6 +67,15 @@ enum {
  *
  * Returns FR_UDF_OK, or FR_UDF_ERR (message available from
  * fr_udf_last_error). */
+
+/* Test seam for the sys.path policy classifier (see fr_udf.c).
+ *
+ * Returns 1 caller-influenced, 0 safe, -1 undecidable. Exposed because
+ * the review's rule B -- path SPELLINGS and adjacent entries -- cannot be
+ * driven through real initialisation, since CPython decides what lands
+ * on sys.path. This classifies a string; it does NOT establish the
+ * policy, which only fr_udf_init() can do. */
+int fr_udf_classify_path_entry(const char *c);
 int fr_udf_init(const char *const *roots, int nroots);
 
 /* Non-zero once the interpreter is up. */

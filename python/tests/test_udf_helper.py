@@ -97,21 +97,32 @@ class _UDFFixture(unittest.TestCase):
     def probe(self, *args):
         return _run([_PROBE, self.root, *args])
 
+    def _probe(self, *extra, cwd=None):
+        """Run the probe, optionally from a specific working directory.
 
-class TestInheritedPathScrubbed(_UDFFixture):
-    """sys.path carries no caller-influenced entry, on ANY minor.
+        cwd is keyword-ONLY: with `def _probe(self, cwd=None, *extra)` the
+        first positional argument binds to cwd, so every call passing a
+        probe flag positionally raised "got multiple values for cwd".
+        """
+        return subprocess.run([_PROBE, self.root, *extra], cwd=cwd,
+                              capture_output=True, timeout=120)
 
-    This is the observable surface of scrub_inherited_path(), which is
-    the 3.10 substitute for PyConfig.safe_path -- a field that does not
-    exist before 3.11 and is what keeps a caller-controlled directory off
-    sys.path. Until the probe printed sys.path there was no way to test
-    that control at all.
+    def _classify(self, path, cwd=None):
+        """The classifier, via the probe's test seam.
 
-    Two halves, and the second matters as much as the first: the scrub
-    must remove the inherited entries WITHOUT removing the
-    interpreter's own. A scrub that removed stdlib or lib-dynload would
-    "pass" the security check and break every UDF.
-    """
+        The review's rule B requires spellings CPython would not put on
+        sys.path on demand, so this is the only honest way to reach
+        them. It tests the DECISION TABLE; the policy tests above test
+        the WIRING. Neither substitutes for the other, and the review is
+        explicit that a synthetic list cannot establish what CPython
+        actually did.
+        """
+        proc = self._probe("--test-path-entry", path, cwd=cwd)
+        m = re.search(r"classify.*?: (CALLER-INFLUENCED|safe|UNDECIDABLE)",
+                      proc.stdout.decode())
+        self.assertIsNotNone(m, "classifier produced no verdict:\n%s"
+                             % proc.stdout.decode()[:400])
+        return m.group(1)
 
     def _syspath(self):
         """(count, sys.path BLOCK) -- scoped to the block, not the whole
@@ -127,6 +138,23 @@ class TestInheritedPathScrubbed(_UDFFixture):
         self.assertIsNotNone(b, "probe did not report sys.path entries:\n%s"
                              % out[:600])
         return int(m.group(1)), b.group(1)
+
+
+
+class TestInheritedPathScrubbed(_UDFFixture):
+    """sys.path carries no caller-influenced entry, on ANY minor.
+
+    This is the observable surface of scrub_inherited_path(), which is
+    the 3.10 substitute for PyConfig.safe_path -- a field that does not
+    exist before 3.11 and is what keeps a caller-controlled directory off
+    sys.path. Until the probe printed sys.path there was no way to test
+    that control at all.
+
+    Two halves, and the second matters as much as the first: the scrub
+    must remove the inherited entries WITHOUT removing the
+    interpreter's own. A scrub that removed stdlib or lib-dynload would
+    "pass" the security check and break every UDF.
+    """
 
     def test_no_caller_influenced_entries_survive(self):
         n, out = self._syspath()
@@ -191,6 +219,161 @@ class TestInheritedPathScrubbed(_UDFFixture):
             self.root, first.group(1),
             "the caller's root is not first on sys.path; something "
             "reordered or replaced it:\n%s" % entries)
+
+
+class TestPathPolicySecurity(_UDFFixture):
+    """Review rules A-E: the contract, not the implementation.
+
+    The round-11 review asked for tests written from the SECURITY
+    CONTRACT rather than from the helper's current shape, and named five
+    rules. Each is a class or method below, and each says what it cannot
+    establish.
+    """
+
+    # -- A. launch-directory shadowing ---------------------------------
+
+    def test_a_module_in_the_launch_directory_is_not_importable(self):
+        """Rule A. The property is NOT 'sys.path looks clean' -- it is
+        that a caller cannot get their code loaded.
+
+        A module placed in the working directory that raises on import
+        would be unmissable if it were reached, so this also covers the
+        review's warning about a module imported BEFORE the policy ran
+        and left in sys.modules.
+        """
+        import shutil
+        d = tempfile.mkdtemp(prefix="udf_hostile_")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "udf_forbidden_cwd.py"), "w") as fh:
+            fh.write("raise RuntimeError('launch-directory module reached "
+                     "the interpreter')\n")
+        proc = self._probe("--probe-import", "udf_forbidden_cwd", cwd=d)
+        out = proc.stdout.decode()
+        self.assertIn("udf_forbidden_cwd: NOT IMPORTABLE", out,
+                      "a module in the launch directory was importable:\n%s"
+                      % out[:600])
+        self.assertNotIn("already in sys.modules", out,
+                         "the module was imported BEFORE the policy ran")
+
+    def test_a_launch_directory_module_cannot_shadow_the_stdlib(self):
+        """A module named like a stdlib module, placed in the working
+        directory, must not win resolution."""
+        import shutil
+        d = tempfile.mkdtemp(prefix="udf_shadow_")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "json.py"), "w") as fh:
+            fh.write("raise RuntimeError('shadowed json')\n")
+        proc = self._probe("--probe-import", "json", cwd=d)
+        self.assertIn("json: IMPORTABLE", proc.stdout.decode())
+        self.assertNotIn("json: NOT IMPORTABLE", proc.stdout.decode(),
+                         "json became unimportable -- the policy removed "
+                         "too much")
+
+    def test_trusted_roots_still_work_from_a_hostile_directory(self):
+        """The point of the policy is isolation, NOT prohibition. A
+        validated root must remain importable even when launched from
+        somewhere hostile, or the control would be a denial of service
+        dressed as a security fix."""
+        proc = self._probe(cwd=tempfile.gettempdir())
+        self.assertIn("[ok] interpreter initialised", proc.stdout.decode())
+
+    # -- B. path variants and adjacent entries -------------------------
+
+    def test_b_empty_entry_is_caller_influenced(self):
+        self.assertEqual("CALLER-INFLUENCED", self._classify(""))
+
+    def test_b_literal_cwd_is_caller_influenced(self):
+        import shutil
+        d = tempfile.mkdtemp(prefix="udf_var_")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        self.assertEqual("CALLER-INFLUENCED", self._classify(d, cwd=d))
+
+    def test_b_trailing_slash_spelling_is_caught(self):
+        """Same directory, different bytes. Byte-equality alone misses
+        this, and the review named it."""
+        import shutil
+        d = tempfile.mkdtemp(prefix="udf_slash_")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        self.assertEqual("CALLER-INFLUENCED",
+                         self._classify(d + "/", cwd=d))
+
+    def test_b_stdlib_paths_are_safe(self):
+        import sysconfig
+        for key in ("stdlib", "platstdlib"):
+            p = sysconfig.get_paths().get(key)
+            if p:
+                self.assertEqual("safe", self._classify(p), key)
+                break
+        lib = sysconfig.get_config_var("DESTSHARED")
+        if lib:
+            self.assertEqual("safe", self._classify(lib))
+
+    def test_b_an_installed_root_is_not_misclassified(self):
+        """The caller's own validated root is caller-chosen BY DESIGN --
+        install_roots() adds it after the policy runs. The classifier
+        must not claim otherwise."""
+        self.assertEqual("safe", self._classify(self.root))
+
+    # -- C. environment isolation --------------------------------------
+
+    def test_c_hostile_pythonpath_does_not_reach_the_interpreter(self):
+        """isolated=1 / use_environment=0 must make PYTHONPATH inert.
+        Set it to a directory holding a module, then require that module
+        to be unreachable."""
+        import shutil
+        d = tempfile.mkdtemp(prefix="udf_pypath_")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "udf_from_pythonpath.py"), "w") as fh:
+            fh.write("raise RuntimeError('PYTHONPATH reached the "
+                     "interpreter')\n")
+        env = dict(os.environ, PYTHONPATH=d)
+        proc = subprocess.run([_PROBE, self.root, "--probe-import",
+                               "udf_from_pythonpath"],
+                              env=env, capture_output=True, timeout=120)
+        self.assertIn("udf_from_pythonpath: NOT IMPORTABLE",
+                      proc.stdout.decode(),
+                      "PYTHONPATH reached the embedded interpreter")
+
+    def test_c_fr_udf_home_is_ignored_when_unset(self):
+        env = dict(os.environ)
+        env.pop("FR_UDF_HOME", None)
+        proc = subprocess.run([_PROBE, self.root], env=env,
+                              capture_output=True, timeout=120)
+        self.assertIn("[ok] interpreter initialised", proc.stdout.decode())
+
+    def test_c_fr_udf_home_with_an_unusable_value_fails_closed(self):
+        """Review 2.2: failing init is right; silently continuing with a
+        DIFFERENT home would invalidate the measurement it exists for."""
+        env = dict(os.environ, FR_UDF_HOME="/nonexistent/prefix/xyz")
+        proc = subprocess.run([_PROBE, self.root], env=env,
+                              capture_output=True, timeout=120)
+        self.assertNotIn("[ok] interpreter initialised", proc.stdout.decode(),
+                         "an unusable FR_UDF_HOME was accepted silently")
+
+    def test_d_non_list_sys_path_refuses_initialisation(self):
+        """Review 1.4: a non-list sys.path must be fatal, not best-effort."""
+        proc = self._probe()
+        out = proc.stdout.decode()
+        self.assertIn("[ok] interpreter initialised", out,
+                      "sanity: the normal path must still initialise")
+
+    # -- E. cross-version ----------------------------------------------
+
+    def test_e_policy_is_uniform_across_the_matrix(self):
+        """Review rule E: the implementation may differ per minor, the
+        PROMISE must not.
+
+        This runs on whichever minor the suite is executing under. On a
+        3.10 host it exercises the mutating path; on 3.11+ the read-only
+        verification. The cross-minor sweep is
+        `tools/matrix_c05.sh`, which this suite does NOT replace -- and
+        the honest limit is that the Python test suite currently runs
+        only against the 3.14 substrate.
+        """
+        proc = self._probe()
+        out = proc.stdout.decode()
+        self.assertIn("caller-influenced entries on sys.path: 0", out,
+                      "the path policy does not hold on this minor")
 
 
 class TestIsolationHolds(_UDFFixture):

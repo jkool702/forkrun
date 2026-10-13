@@ -94,12 +94,43 @@ int main(int argc, char **argv)
 {
     /* argv[1..] are validated import roots; then module:attr for the UDF. */
     const char *udf_spec = NULL;
-    int nroots = 0;
     const char *roots[16];
 
-    for (int i = 1; i < argc && nroots < 16; i++) {
-        if (strchr(argv[i], ':')) { udf_spec = argv[i]; break; }
-        roots[nroots++] = argv[i];
+    /* Extract "--probe-import <module>" from ANYWHERE in argv FIRST, then
+     * collect the remaining entries as roots. A single left-to-right
+     * pass cannot do this: the flag may follow a root, and the roots
+     * loop's break on the first ':' would stop before reaching it --
+     * which is what happened first time, and the flag was then treated
+     * as an unreadable root.
+     *
+     * Roots are compacted into `roots[]` in place; `argv[0]` (the
+     * program name) is skipped by starting the scan at 1. */
+    const char *probe_import = NULL;
+    const char *test_entry = NULL;
+    int nroots = 0;
+    (void)0;
+    {
+        int w = 1;
+        for (int r = 1; r < argc; r++) {
+            if (strcmp(argv[r], "--probe-import") == 0 && r + 1 < argc) {
+                probe_import = argv[r + 1];
+                r++;
+                continue;
+            }
+            if (strcmp(argv[r], "--test-path-entry") == 0 && r + 1 < argc) {
+                test_entry = argv[r + 1];
+                r++;
+                continue;
+            }
+            if (nroots < 16) {
+                if (strchr(argv[r], ':') && !udf_spec) {
+                    udf_spec = argv[r];   /* udf_spec declared above */
+                    continue;
+                }
+                roots[nroots++] = argv[r];
+            }
+        }
+        (void)w;
     }
     const char *udf_module = NULL, *udf_attr = NULL;
     if (udf_spec) {
@@ -154,6 +185,42 @@ int main(int argc, char **argv)
             }
             printf("  caller-influenced entries on sys.path: %d\n", bad);
         }
+    }
+
+    /* Can a named module be imported RIGHT NOW? The review is explicit
+     * that asserting sys.path "looks clean" can miss a module already
+     * imported before the scrub and sitting in sys.modules. This asks
+     * the interpreter directly, and distinguishes IMPORTABLE from
+     * ALREADY-IMPORTED-BEFORE-PROBE, which is the signature of exactly
+     * that failure.
+     *
+     * Usage: fr_udf_helper <root> --probe-import <module> */
+    printf("  -- import probe --\n");
+    if (probe_import && *probe_import) {
+        int already = PyImport_GetModuleDict() != NULL &&
+            PyDict_Contains(PyImport_GetModuleDict(),
+                            PyUnicode_FromString(probe_import));
+        PyObject *mod = PyImport_ImportModule(probe_import);
+        if (mod == NULL) {
+            PyErr_Clear();
+            printf("      %s: NOT IMPORTABLE%s\n", probe_import,
+                   already ? " (was already imported!)" : "");
+        } else {
+            Py_DECREF(mod);
+            printf("      %s: IMPORTABLE%s\n", probe_import,
+                   already ? " (already in sys.modules!)" : "");
+        }
+    }
+
+    /* --test-path-entry <path>: exercise the classifier directly. The
+     * review's rule B needs spellings CPython would not produce on
+     * demand, and this is the only honest way to reach them. It does NOT
+     * establish the policy -- only fr_udf_init() does that. */
+    if (test_entry) {
+        int v = fr_udf_classify_path_entry(test_entry);
+        printf("  classify %s: %s\n", test_entry,
+               v == 1 ? "CALLER-INFLUENCED" :
+               v == 0 ? "safe" : "UNDECIDABLE");
     }
 
     printf("  -- fork --\n");
