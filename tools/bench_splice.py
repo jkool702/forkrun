@@ -103,6 +103,16 @@ def _records_tile(want, records):
     bench input is zero-padded and unique, so a duplicate content match
     means a genuinely duplicated batch). The located spans must then
     cover every offset exactly once.
+
+    SCOPE (step 6 of dev/supervisor/EVIDENCE_CHAIN.md): empty records
+    are IGNORED. So this proves BYTE-STREAM INTEGRITY -- every input
+    byte was delivered exactly once, and none was invented or reordered
+    within a record. It does NOT prove an exact emitted-record count, and
+    it is NOT batch-level exactly-once evidence. A benchmark for a
+    deduplicating or overlapping workload needs a different oracle; this
+    one should not be weakened for that case, because the operations
+    measured here (splice, cat, tr) are one-to-one byte maps where the
+    guarantee is exactly right.
     """
     spans = []
     for rec in records:

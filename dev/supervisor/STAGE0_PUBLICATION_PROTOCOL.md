@@ -760,6 +760,15 @@ pipeline is not correct. So the strong claim lives in the ordered run
 and the order-appropriate weaker form is confined to the unordered timed
 runs.
 
+**What tiling does NOT prove, stated because it is easy to over-read:**
+empty records are ignored, so this is **byte-stream integrity** — every
+input byte delivered exactly once, none invented, none reordered within
+a record. It is **not** an exact emitted-record count and **not**
+batch-level exactly-once evidence. For the operations measured here
+(`splice`, `cat`, `tr` — all one-to-one byte maps) that is precisely the
+right invariant; a deduplicating or overlapping workload would need a
+different oracle rather than a weakened one.
+
 ### What the corrected measurement changed
 
 The first version of this benchmark was not measuring what its labels
