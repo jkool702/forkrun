@@ -18,6 +18,7 @@ Run: make -f Makefile.substrate udf && python3 -m unittest test_udf_helper
 """
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,101 @@ class _UDFFixture(unittest.TestCase):
 
     def probe(self, *args):
         return _run([_PROBE, self.root, *args])
+
+
+class TestInheritedPathScrubbed(_UDFFixture):
+    """sys.path carries no caller-influenced entry, on ANY minor.
+
+    This is the observable surface of scrub_inherited_path(), which is
+    the 3.10 substitute for PyConfig.safe_path -- a field that does not
+    exist before 3.11 and is what keeps a caller-controlled directory off
+    sys.path. Until the probe printed sys.path there was no way to test
+    that control at all.
+
+    Two halves, and the second matters as much as the first: the scrub
+    must remove the inherited entries WITHOUT removing the
+    interpreter's own. A scrub that removed stdlib or lib-dynload would
+    "pass" the security check and break every UDF.
+    """
+
+    def _syspath(self):
+        """(count, sys.path BLOCK) -- scoped to the block, not the whole
+        output. An unscoped regex matched an [ok] marker printed by an
+        earlier section and returned "interpreter" as the first entry."""
+        out = self.probe().stdout
+        m = re.search(r"caller-influenced entries on sys.path: (\d+)",
+                      out)
+        self.assertIsNotNone(m, "probe did not report the count:\n%s"
+                             % out[:600])
+        b = re.search(r"-- sys.path .*?--\n(.*?)\n  caller-influenced",
+                      out, re.S)
+        self.assertIsNotNone(b, "probe did not report sys.path entries:\n%s"
+                             % out[:600])
+        return int(m.group(1)), b.group(1)
+
+    def test_no_caller_influenced_entries_survive(self):
+        n, out = self._syspath()
+        self.assertEqual(
+            0, n,
+            "a caller-influenced entry (the empty string, meaning the "
+            "current directory) survived on sys.path:\n%s" % out[:600])
+
+    def test_the_working_directory_is_not_importable(self):
+        """The sharpest form of the same claim.
+
+        Run the probe FROM a directory, and require that directory not
+        to be reachable as an import root. A module placed there must
+        NOT be importable, which is what the control is for -- an
+        interpreter that can import cwd is an interpreter that will
+        import whatever the caller happened to leave lying around.
+        """
+        import shutil
+        elsewhere = tempfile.mkdtemp(prefix="udf_scrub_")
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        with open(os.path.join(elsewhere, "should_not_import.py"),
+                  "w") as fh:
+            fh.write("raise AssertionError('cwd was importable')\n")
+        proc = subprocess.run([_PROBE, self.root], cwd=elsewhere,
+                              capture_output=True, timeout=120)
+        out = proc.stdout.decode()
+        self.assertIn(
+            "caller-influenced entries on sys.path: 0", out,
+            "the cwd reached sys.path when the probe was launched from it:\n%s"
+            % out[:600])
+        self.assertNotIn(
+            elsewhere, out,
+            "the cwd appears verbatim in sys.path:\n%s" % out[:600])
+
+    def test_the_interpreter_still_functions_after_the_scrub(self):
+        """Over-scrubbing would pass the security test and break the
+        product. The probe calls a UDF, so a stripped sys.path surfaces
+        here as an init or call failure."""
+        proc = self.probe()
+        self.assertIn("[ok] interpreter initialised", proc.stdout,
+                      "the interpreter failed to initialise; the scrub may "
+                      "have removed too much:\n%s" % proc.stdout[:600])
+
+    def test_stdlib_entries_survive(self):
+        """stdlib and lib-dynload must remain: they are interpreter-owned
+        and not caller-influenced."""
+        _, entries = self._syspath()
+        self.assertRegex(entries, r"\[ok\] .*lib-dynload",
+                         "lib-dynload was removed from sys.path; the scrub "
+                         "is removing interpreter-owned entries:\n%s"
+                         % entries)
+        self.assertRegex(entries, r"\[ok\] .*python3\.\d+",
+                         "the stdlib entry was removed from sys.path:\n%s"
+                         % entries)
+
+    def test_the_callers_root_is_present_and_first(self):
+        """The scrub must not remove what install_roots() added."""
+        _, entries = self._syspath()
+        first = re.search(r"\[ok\] (\S+)", entries)
+        self.assertIsNotNone(first, "no sys.path entries reported")
+        self.assertEqual(
+            self.root, first.group(1),
+            "the caller's root is not first on sys.path; something "
+            "reordered or replaced it:\n%s" % entries)
 
 
 class TestIsolationHolds(_UDFFixture):

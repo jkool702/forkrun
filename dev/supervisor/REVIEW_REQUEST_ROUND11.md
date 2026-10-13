@@ -93,6 +93,42 @@ if (want_home && *want_home) { PyConfig_SetString(cfg, &cfg->home, w_home); }
 Are these right, and is there anything 3.15 changes that I have not
 accounted for?
 
+## 2d. `scrub_inherited_path()` may not be load-bearing — and I cannot show it is
+
+I added tests for the scrub (below) and then mutation-checked them, and
+the result is negative, so it belongs here rather than buried.
+
+**Disabling the scrub entirely changed nothing.** Tested on 3.14 (where
+the function is `#else`'d out and `cfg->safe_path` does the work) and on
+a 3.10 build (where the scrub is the live code path). Both report
+`caller-influenced entries on sys.path: 0` with and without it.
+
+`PyConfig_InitIsolatedConfig` appears to prevent the cwd prepend on 3.10
+by itself, so in these configurations **there is no inherited entry for
+the scrub to remove**.
+
+So the honest position: the scrub is defence-in-depth whose necessity I
+have not demonstrated. It may still be right — a future argv-processing
+path, or a different init sequence, could reintroduce the prepend — but
+right now I am shipping security-relevant code with no configuration in
+which it demonstrably does anything.
+
+Two things I would like you to weigh in on:
+
+1. **Keep or remove?** If there is a reachable configuration where
+   `sys.path[0]` becomes `''` on 3.10, the scrub is justified and I
+   should add a test that constructs it. If not, it is unjustified
+   complexity in a security control, which is its own kind of problem —
+   a reviewer cannot reason about a scrub with no reachable purpose.
+
+2. My tests assert the **observable property** (zero inherited entries,
+   stdlib and lib-dynload survive, caller's root first) rather than the
+   scrub's invocation. That is deliberate: on a 3.14 host the 3.10 code
+   does not exist, so a test of the scrub directly is **structural
+   vacuity** — it passes without ever entering the code under review.
+   The same mutation-miss happened in reverse twice this session, so I
+   am flagging it rather than claiming the coverage.
+
 ## 3. Measurement code — brief, but two bugs are worth your eye
 
 `fr_udf_fork.c` now has children self-report memory through a barrier.
@@ -155,6 +191,21 @@ guarded. I do not think that reasoning survives §2a: untested security
 code is a stronger argument for sanitizers than "keep the loop" was for
 a benchmark.
 
+## 6a. What I added since posting
+
+`test_udf_helper.py` gains `TestInheritedPathScrubbed` (5 tests) and the
+probe now prints `sys.path` with a per-entry caller-influenced marker
+and a count, so the property is observable at all. The sharpest is
+`test_the_working_directory_is_not_importable`, which launches the probe
+from a directory containing a module that raises on import and requires
+that module to be unreachable.
+
+On 3.14 these pass and are a genuine regression guard. On a 3.10 host
+the suite does **not** currently run — the substrate is 3.14-specific
+and running the whole suite under another minor needs the full
+per-minor substrate build, which I have not done. That is the honest
+state of this coverage.
+
 ## 7. Verification of this request
 
 | | |
@@ -165,3 +216,4 @@ a benchmark.
 | Frozen ring | untouched across `c72d27c6..HEAD` |
 | Matrix script | `tools/matrix_c05.sh --quick`, all six minors reporting |
 | Builds | helper + driver compile on all six minors |
+| New scrub tests | 5, passing on 3.14; **not** exercised on 3.10 (see §2d) |

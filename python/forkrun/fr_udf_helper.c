@@ -21,6 +21,8 @@
 
 #include "fr_udf.h"
 
+#include <Python.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +126,36 @@ int main(int argc, char **argv)
     /* Fork choreography availability. Reported rather than assumed: the
      * hooks are compiled only under CPython's HAVE_FORK, and a caller
      * that forks an initialised interpreter needs to know which it has. */
+    /* sys.path, so the 3.10 scrub is OBSERVABLE.
+     *
+     * scrub_inherited_path() exists because PyConfig.safe_path does not
+     * exist before 3.11, and until the probe printed sys.path there was
+     * no way to test it from Python at all -- a security control with no
+     * observable effect. Prints each entry on its own line so a test can
+     * assert membership, and marks whether the caller-influenced entries
+     * survived. */
+    {
+        PyObject *path = PySys_GetObject("path");
+        printf("  -- sys.path (%d entries) --\n",
+               (path && PyList_Check(path)) ? (int)PyList_GET_SIZE(path) : -1);
+        if (path && PyList_Check(path)) {
+            int bad = 0;
+            for (Py_ssize_t i = 0; i < PyList_GET_SIZE(path); i++) {
+                PyObject *e = PyList_GET_ITEM(path, i);
+                if (!PyUnicode_Check(e)) continue;
+                PyObject *b = PyUnicode_AsUTF8String(e);
+                if (!b) { PyErr_Clear(); continue; }
+                const char *c = PyBytes_AS_STRING(b);
+                int cwd_like = (c == NULL || c[0] == '\0');
+                printf("      [%s] %s\n", cwd_like ? "INHERITED?" : "ok",
+                       c ? c : "(null)");
+                if (cwd_like) bad++;
+                Py_DECREF(b);
+            }
+            printf("  caller-influenced entries on sys.path: %d\n", bad);
+        }
+    }
+
     printf("  -- fork --\n");
     printf("      CPython fork hooks    : %s\n",
            fr_udf_fork_hooks_available()
