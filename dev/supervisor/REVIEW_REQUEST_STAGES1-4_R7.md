@@ -1,5 +1,12 @@
 # Review request — round 7: response to the Stage 1–4 review
 
+> **SUPERSEDED — see `REVIEW_REQUEST_ROUND8.md`.** It carries the fixes
+> made in response to the review below, the three blockers closed since,
+> and the open-item list. This file is retained as the record of what was
+> claimed *at the time*, which is the useful part: the Stage 4 numbers
+> here were measured against the wrong baseline and were corrected in
+> round 7.
+
 Branch `NEW/REFACTOR4.2`, head **`a258defe`**. Frozen ring files
 (`forkrun_ring.c`, `forkrun_substrate.h`, `substratestubs.c`) untouched
 across `c72d27c6..HEAD`.
