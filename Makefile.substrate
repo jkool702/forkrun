@@ -210,8 +210,10 @@ UDF_LDFLAGS = $(shell $(PYCONFIG) --ldflags --embed 2>/dev/null || $(PYCONFIG) -
 
 .PHONY: udf-lib udf-probe udf-fork udf
 
-$(UDF_OBJ): $(UDF_SRC) $(UDF_HDR)
-	$(CC) -O2 -fPIC -Wall -Wextra $(UDF_CFLAGS) -c $< -o $@
+UDF_VER_HDR = forkrun_udf_version.h
+
+$(UDF_OBJ): $(UDF_SRC) $(UDF_HDR) $(UDF_VER_HDR)
+	$(CC) -O2 -fPIC -Wall -Wextra $(UDF_CFLAGS) -I. -c $< -o $@
 
 $(UDF_LIB): $(UDF_OBJ)
 	$(CC) -shared -o $@ $< $(UDF_LDFLAGS) -Wl,--build-id=none
@@ -224,6 +226,10 @@ udf-lib: $(UDF_LIB)
 # installed next to the package.
 fr_udf_helper_probe.o: python/forkrun/fr_udf_helper.c $(UDF_HDR)
 	$(CC) -O2 -Wall -Wextra $(UDF_CFLAGS) -c $< -o $@
+
+# The UDF helper and the cleanroom launcher must agree on the build-stamp
+# struct. Both compile against forkrun_udf_version.h, so the pairing is
+# structural rather than a convention two sides re-implement.
 
 $(UDF_PROBE): fr_udf_helper_probe.o $(UDF_OBJ)
 	$(CC) -o $@ fr_udf_helper_probe.o $(UDF_OBJ) $(UDF_LDFLAGS)

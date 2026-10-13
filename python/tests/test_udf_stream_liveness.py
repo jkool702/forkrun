@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.join(_ROOT, "python"))
 
 import forkrun  # noqa: E402
 from forkrun import _udf  # noqa: E402
+from forkrun._udf import _INCOMPATIBLE  # noqa: E402
 
 # mode="udf" hands the callable BYTES, not a Batch.
 _UDF = "def up(b):\n    return b.upper()\n"
@@ -188,6 +189,41 @@ class StreamFallbackLiveness(unittest.TestCase):
             b"".join(got), b"line0\nline1\nline2\nline3\n".upper(),
             "stream() must yield every record exactly once through the "
             "fallback; got %r" % (got,))
+
+    def test_replacing_the_helper_invalidates_the_negative_cache(self):
+        """A cached refusal must not outlive the artifact it described.
+
+        The cache exists so an unusable helper is not re-probed forever.
+        If the user UPGRADES the helper mid-process -- the obvious remedy
+        for a mismatch -- the replacement must be tried, not permanently
+        shadowed by the old refusal. That is what st_size/st_mtime_ns/
+        st_ctime_ns/st_ino in the fingerprint are for.
+        """
+        # A stand-in artifact we can replace, so the test does not touch
+        # the real installed helper.
+        real = os.path.join(self.tmp, "replaceable.so")
+        with open(real, "wb") as fh:
+            fh.write(b"\x7fELF placeholder one\n")
+        fp1 = _udf.fingerprint_now(real)
+        self.assertIsNotNone(fp1)
+        _udf.record_incompatible_for(fp1, "was incompatible")
+        self.assertIsNotNone(_udf.known_incompatible(real))
+
+        # Replace it: different content, and the touch bumps ctime.
+        time.sleep(0.01)
+        with open(real, "wb") as fh:
+            fh.write(b"\x7fELF placeholder two -- a different size\n")
+        fp2 = _udf.fingerprint_now(real)
+        self.assertNotEqual(fp1, fp2,
+                            "the fingerprint must change when the artifact "
+                            "is replaced, or the cache can never recover")
+        self.assertIsNone(
+            _udf.known_incompatible(real),
+            "the replacement must be treated as a candidate, not shadowed "
+            "by the old artifact's refusal")
+        # And the old fingerprint is still known, for in-flight callers.
+        self.assertIsNotNone(_udf.known_incompatible(real) if fp2 == fp1 else
+                             _INCOMPATIBLE.get(fp1))
 
     def src4(self):
         path = os.path.join(self.tmp, "four.txt")

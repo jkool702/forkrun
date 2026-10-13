@@ -16,6 +16,7 @@
 #include <Python.h>
 
 #include "fr_udf.h"
+#include "forkrun_udf_version.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -790,25 +791,31 @@ int fr_udf_fork_hooks_available(void) { return FR_UDF_FORK_HOOKS; }
 /* TEST BUILDS ONLY.
  *
  * The override exists so a test can exercise the mismatch branch with a
- * helper that is otherwise perfectly loadable -- without it the "mismatch"
- * test would refuse because the 3.12 libpython was absent, and would pass
- * for the wrong reason even with the comparison deleted.
+ * helper that is otherwise perfectly loadable -- without it the
+ * "mismatch" test refuses because the other minor's libpython is absent,
+ * and passes for the wrong reason even with the comparison deleted.
  *
- * It deliberately exports an EXTRA symbol, not just a different return
- * value. A bare #define leaves nothing to inspect, so release_check could
- * not prove the override cannot reach a release artifact; a named symbol
- * can be looked for in the ELF dynamic symbol table and its absence
- * asserted. See python/release_check.py. */
+ * It deliberately exports an EXTRA symbol so release_check can PROVE it
+ * cannot reach a release artifact by inspecting the ELF dynamic symbol
+ * table. A bare #define would leave nothing to inspect.
+ *
+ * The override sets the two fields INDEPENDENTLY, which is the property
+ * the shared header is meant to protect: there is no single packed value
+ * for the two sides to disagree about. */
 unsigned long fr_udf_TEST_VERSION_OVERRIDE_MARKER(void) { return 1UL; }
 
-unsigned long fr_udf_built_version(void)
+void fr_udf_built_version(struct fr_udf_version *out)
 {
-    return (unsigned long)(FR_UDF_REPORT_VERSION_OVERRIDE);
+    if (!out) return;
+    out->major = (int)(((FR_UDF_REPORT_VERSION_OVERRIDE) >> 16) & 0xFF);
+    out->minor = (int)(((FR_UDF_REPORT_VERSION_OVERRIDE) >> 24) & 0xFF);
 }
 #else
-unsigned long fr_udf_built_version(void)
+void fr_udf_built_version(struct fr_udf_version *out)
 {
-    return (unsigned long)PY_VERSION_HEX;
+    if (!out) return;
+    out->major = PY_MAJOR_VERSION;
+    out->minor = PY_MINOR_VERSION;
 }
 #endif
 

@@ -1002,11 +1002,12 @@ class _CleanroomCompatRefusal(_CleanroomPreIngestDecline):
     permanently disable the accelerator.
     """
 
-    def __init__(self, label, detail, conclusive):
+    def __init__(self, label, detail, conclusive, code=80):
         super().__init__(label)
         self.label = label
         self.detail = detail
         self.conclusive = conclusive
+        self.code = code
 
 
 # Launcher exits that are a compatibility refusal of the helper. 80 is
@@ -1016,7 +1017,7 @@ _CR_COMPAT_REFUSALS = {80: True, 81: False}
 
 def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
                                    num_nodes, orchestrator,
-                                   plugin, func, udf_args):
+                                   plugin, func, udf_args, helper_fp=None):
     """stream() over the cleanroom, with an explicit pre-ingest fallback.
 
     LAZINESS IS THE POINT, and the first version of this broke it: it
@@ -1054,6 +1055,7 @@ def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
             return
         except _CleanroomPreIngestDecline as exc:
             if isinstance(exc, _CleanroomCompatRefusal):
+                _record_compat_refusal(exc.code, exc.detail, helper_fp)
                 _warn_compat_refusal(exc)
             new_payload, new_mode = _coerce_payload(
                 raw_payload, raw_mode, force_inprocess_udf=True)
@@ -1072,12 +1074,22 @@ def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
     return _gen()
 
 
-# The helper artifact actually OFFERED for the invocation in progress.
-# Set when the UDF arguments are built, read by _record_compat_refusal so
-# the refusal is cached against the helper it was actually about. A
-# one-slot list rather than a module global so it is a single mutable
-# binding; every executor path is already serialised by _RUN_LOCK.
-_REFUSED_HELPER = [None]
+def _helper_fingerprint(path):
+    """Fingerprint a helper NOW, so a refusal can be keyed to this artifact.
+
+    Captured at dispatch time -- before the launcher is exec'd -- and
+    threaded into the refusal handler. A module-global slot was not
+    sufficient: it was written outside _RUN_LOCK, so concurrent calls
+    could overwrite each other and a refusal would be filed against
+    whichever helper happened to be recorded last.
+    """
+    if not path:
+        return None
+    try:
+        from ._udf import fingerprint_now
+        return fingerprint_now(path)
+    except Exception:
+        return None
 
 
 def _caller_version_argv():
@@ -1096,7 +1108,7 @@ def _caller_version_argv():
         return []
 
 
-def _record_compat_refusal(code, detail):
+def _record_compat_refusal(code, detail, helper_fp=None):
     """Remember a CONCLUSIVE incompatibility against the helper artifact.
 
     Only 80 is cached. An 81 timeout is inconclusive and deliberately
@@ -1105,22 +1117,22 @@ def _record_compat_refusal(code, detail):
     """
     if code != 80:
         return
+    if helper_fp is None:
+        return
     try:
-        from ._udf import candidate_helper_path, fingerprint_now, \
-            record_incompatible_for
+        from ._udf import record_incompatible_for
     except Exception:
         return
-    # Fingerprint the artifact THIS refusal was about, not whatever
-    # occupies the path afterwards. Re-querying the path after the
-    # launcher returned is a TOCTOU: if the file was replaced in between,
-    # the OLD helper's refusal would blacklist the NEW, valid one. That
-    # fails closed -- it never authorises an unverified load -- but it
-    # can silently disable a good replacement, which is a real cost.
-    path = _REFUSED_HELPER[0] or candidate_helper_path()
-    fp = fingerprint_now(path) if path else None
-    if fp:
-        record_incompatible_for(fp, detail or
-                                _CR_EXIT_LABELS.get(80, "mismatch"))
+    # The fingerprint is CAPTURED BEFORE the launcher starts and carried
+    # in as a parameter. Re-deriving it afterwards is a TOCTOU: replace
+    # the file while the launcher runs and the old helper's refusal lands
+    # on the new helper's fingerprint, disabling a valid replacement.
+    #
+    # An earlier revision captured the PATH before launching but still
+    # fingerprinted afterwards, so it fixed nothing on this path. That is
+    # the bug this parameter exists to remove.
+    record_incompatible_for(helper_fp, detail or
+                            _CR_EXIT_LABELS.get(80, "mismatch"))
 
 
 def _warn_compat_refusal(exc):
@@ -1187,7 +1199,7 @@ def _warn_if_cached_incompatible():
     return reason
 
 
-def _cleanroom_attempt(fn, payload, mode):
+def _cleanroom_attempt(fn, payload, mode, helper_fp=None):
     """Run the cleanroom attempt, handling a compatibility refusal.
 
     Returns ``(out, payload, mode)``. On a refusal the warning is emitted
@@ -1200,6 +1212,7 @@ def _cleanroom_attempt(fn, payload, mode):
     try:
         out = fn()
     except _CleanroomCompatRefusal as exc:
+        _record_compat_refusal(exc.code, exc.detail, helper_fp)
         _warn_compat_refusal(exc)
         new_payload, new_mode = _coerce_payload(
             payload, mode, force_inprocess_udf=True)
@@ -1549,9 +1562,9 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             # _UDFPayload for the ordinary Python worker to fail on --
             # since the file is still present, only the launcher knows it
             # is unusable.
-            _record_compat_refusal(code, _why_launcher)
             raise _CleanroomCompatRefusal(label, _why_launcher,
-                                          _CR_COMPAT_REFUSALS[code])
+                                          _CR_COMPAT_REFUSALS[code],
+                                          code=code)
         _warnings.warn(
             "forkrun: cleanroom launcher failed (%s)%s — %s"
             % (_describe_launcher_failure(status),
@@ -2169,9 +2182,8 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                 _lc, _ls, _ll, _lpre = _decode_launcher_status(lstatus)
                 if _lpre and not _fallback_forbidden(lstatus):
                     if _lc in _CR_COMPAT_REFUSALS:
-                        _record_compat_refusal(_lc, "")
                         raise _CleanroomCompatRefusal(
-                            _ll, "", _CR_COMPAT_REFUSALS[_lc])
+                            _ll, "", _CR_COMPAT_REFUSALS[_lc], code=_lc)
                     raise _CleanroomPreIngestDecline(
                         "cleanroom launcher declined before ingestion "
                         "(%s)" % (_describe_launcher_failure(lstatus),))
@@ -3767,8 +3779,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 _helper = _udf_helper_path()
                 if _helper:
                     _udf_args = {
-                        "udf_helper": _REFUSED_HELPER.__setitem__(0, _helper)
-                                       or _helper,
+                        "udf_helper": _helper,
                         "udf_module": _p,
                         "udf_attr": _f,
                         "udf_roots": _udf_roots_spec(_p),
@@ -3814,7 +3825,9 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                                     orchestrator=orchestrator,
                                     spawn_argv=_sargv,
                                     **_udf_args),
-                                payload, mode)
+                                payload, mode,
+                                helper_fp=_helper_fingerprint(
+                                    _udf_args.get("udf_helper")))
                     _sg.check()
                     if _ip_m is not None:
                         payload, mode = _ip_p, _ip_m
@@ -3839,7 +3852,9 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                                 order=order,
                                 orchestrator=orchestrator,
                                 **_udf_args),
-                            payload, mode)
+                            payload, mode,
+                            helper_fp=_helper_fingerprint(
+                                _udf_args.get("udf_helper")))
                     _sg.check()
                 if _ip_m is not None:
                     payload, mode = _ip_p, _ip_m
@@ -4192,8 +4207,7 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                     _helper = _udf_helper_path()
                     if _helper:
                         _udf_args = {
-                            "udf_helper": _REFUSED_HELPER.__setitem__(0, _helper)
-                                       or _helper,
+                            "udf_helper": _helper,
                             "udf_module": _p,
                             "udf_attr": _f,
                             "udf_roots": _udf_roots_spec(_p),
@@ -4201,7 +4215,9 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                 if _p and _f and (raw_mode != "udf" or _udf_args):
                     return _stream_with_preingest_fallback(
                         raw_payload, raw_mode, source, kwargs,
-                        num_nodes, orchestrator, _p, _f, _udf_args)
+                        num_nodes, orchestrator, _p, _f, _udf_args,
+                        helper_fp=_helper_fingerprint(
+                            _udf_args.get("udf_helper")))
             elif _cleanroom_explicit() and _why:
                 import warnings as _warnings
                 _warnings.warn(

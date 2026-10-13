@@ -28,6 +28,7 @@ exists to prevent (external review, confirmation pass, requirement 3).
 """
 
 import os
+import threading
 import sys
 import sysconfig
 
@@ -54,6 +55,15 @@ __all__ = ["UDFError", "helper_path", "candidate_helper_path",
 #      conclusive mismatch or a missing-version-symbol result is.
 _UDF_VERSION = sys.version_info[:2]
 _INCOMPATIBLE = {}          # fingerprint -> human-readable reason
+# Explicit lock. The dict is a NEGATIVE cache -- a race can at worst
+# duplicate a probe or lose an update, and it can never authorise
+# loading an unverified helper -- so a lock is not strictly required for
+# safety today. It is here because the previous "the cache is safe
+# because _RUN_LOCK serialises execution" argument was incomplete: the
+# slot recording WHICH helper a launch was about was written outside that
+# lock, and capability lookups can happen outside it entirely. The lock
+# makes the intended model explicit rather than inferred.
+_CACHE_LOCK = threading.RLock()
 
 
 def caller_version_arg():
@@ -97,7 +107,8 @@ def known_incompatible(path):
     fp = helper_fingerprint(path)
     if fp is None:
         return None
-    return _INCOMPATIBLE.get(fp)
+    with _CACHE_LOCK:
+        return _INCOMPATIBLE.get(fp)
 
 
 def fingerprint_now(path):
@@ -114,7 +125,8 @@ def record_incompatible_for(fp, reason):
     would blacklist the new, valid one.
     """
     if fp is not None:
-        _INCOMPATIBLE[fp] = reason
+        with _CACHE_LOCK:
+            _INCOMPATIBLE[fp] = reason
 
 
 def record_incompatible(path, reason):
@@ -125,12 +137,14 @@ def record_incompatible(path, reason):
     """
     fp = helper_fingerprint(path) if path else None
     if fp is not None:
-        _INCOMPATIBLE[fp] = reason
+        with _CACHE_LOCK:
+            _INCOMPATIBLE[fp] = reason
 
 
 def clear_incompatibles():
     """Test/operator hook: forget every recorded incompatibility."""
-    _INCOMPATIBLE.clear()
+    with _CACHE_LOCK:
+        _INCOMPATIBLE.clear()
 
 
 class UDFError(Exception):

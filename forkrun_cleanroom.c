@@ -24,6 +24,7 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include "forkrun_udf_version.h"
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
@@ -653,8 +654,42 @@ static int g_poison_stats_fd = -1;
 struct udf_probe_result {
     int32_t  status;     /* 0 ok, 1 dlopen failed, 2 version symbol absent */
     int32_t  pad;
-    unsigned long version;
+    struct fr_udf_version version;   /* typed fields: no packing to get wrong */
 };
+
+/* Monotonic milliseconds. The probe deadline is stated in wall-clock
+ * terms, so it must be measured with a clock that cannot jump.
+ *
+ * A counter incremented only on poll() timeout is NOT a deadline: an
+ * EINTR storm or a slow trickle of report bytes advances it too slowly,
+ * and elapsed time can exceed the configured bound without the counter
+ * reaching it. */
+static long long udf_monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000L);
+}
+
+/* Bounded reap, used after EVERY kill. An earlier version killed and
+ * returned without reaping again, so the claim that cleanup always
+ * reaps the child was broader than the code. */
+static int udf_reap_bounded(pid_t p)
+{
+    for (int i = 0; i < UDF_PROBE_REAP_SLICES; i++) {
+        int st = 0;
+        pid_t r = waitpid(p, &st, WNOHANG);
+        if (r > 0) return 1;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            if (errno == ECHILD) return 1;   /* already reaped elsewhere */
+            return 0;
+        }
+        struct timespec ts = {0, 1000000L};
+        nanosleep(&ts, NULL);
+    }
+    return 0;
+}
 
 /* Strict MAJOR.MINOR grammar.
  *
@@ -711,71 +746,59 @@ static int udf_probe_await(int fd, pid_t probe,
                            struct udf_probe_result *out)
 {
     size_t got = 0;
-    int waited_ms = 0;
     int complete = 0;
+    /* ABSOLUTE deadline, re-derived before every poll. Bounding the
+     * loop by elapsed wall-clock rather than by "how many times poll
+     * timed out" is what makes the guarantee independent of partial
+     * reads and signal interruptions. */
+    const long long deadline =
+        udf_monotonic_ms() + (long long)UDF_PROBE_TIMEOUT_MS;
 
     while (got < sizeof *out) {
+        long long now = udf_monotonic_ms();
+        if (now >= deadline) break;
+        int remain = (int)(deadline - now);
+        if (remain > UDF_PROBE_SLICE_MS) remain = UDF_PROBE_SLICE_MS;
+
         struct pollfd pf;
         pf.fd = fd; pf.events = POLLIN; pf.revents = 0;
-        int pr = poll(&pf, 1, UDF_PROBE_SLICE_MS);
+        int pr = poll(&pf, 1, remain);
         if (pr < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) continue;   /* deadline re-checked above */
             break;
         }
-        if (pr == 0) {
-            /* No data AND no hang indication: the deadline is what ends
-             * this loop, not the absence of bytes. */
-            waited_ms += UDF_PROBE_SLICE_MS;
-            if (waited_ms >= UDF_PROBE_TIMEOUT_MS) break;
-            continue;
-        }
+        if (pr == 0) continue;              /* slice expired, not the bound */
         if (pf.revents & (POLLIN | POLLHUP)) {
             ssize_t r = read(fd, (char *)out + got, sizeof *out - got);
             if (r > 0) { got += (size_t)r; continue; }
             if (r < 0 && errno == EINTR) continue;
-            break;                      /* EOF or error: truncated report */
+            break;                          /* EOF or error: truncated */
         }
         if (pf.revents & (POLLERR | POLLNVAL)) break;
     }
     if (got == sizeof *out) complete = 1;
 
-    /* ALWAYS reap. A complete report does not mean the child has exited
-     * yet -- it writes, then _exit -- and returning without reaping left a
-     * zombie for the supervision loop to stumble over. */
-    int reaped = 0;
-    for (int i = 0; i < UDF_PROBE_REAP_SLICES; i++) {
-        int st = 0;
-        pid_t r = waitpid(probe, &st, WNOHANG);
-        if (r > 0) { reaped = 1; break; }
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            if (errno == ECHILD) { reaped = 1; break; }  /* already gone */
-            break;
-        }
-        struct timespec ts = {0, 1000000L};
-        nanosleep(&ts, NULL);
+    /* A complete report does not mean the child has exited -- it writes,
+     * then _exit -- so reap before deciding anything. */
+    if (udf_reap_bounded(probe)) {
+        return complete ? 0 : -1;
     }
-    if (!complete) {
-        /* Timed out or truncated: the child is assumed wedged. */
-        (void)kill(probe, SIGKILL);
-        for (int i = 0; i < UDF_PROBE_REAP_SLICES; i++) {
-            int st = 0;
-            pid_t r = waitpid(probe, &st, WNOHANG);
-            if (r > 0) break;
-            if (r < 0 && errno == EINTR) continue;
-            struct timespec ts = {0, 1000000L};
-            nanosleep(&ts, NULL);
-        }
+
+    /* Not reaped within the budget. Kill, then reap again -- the same
+     * bounded helper, not a bare kill. If it is still not reapable we
+     * say so rather than claiming cleanup succeeded. */
+    (void)kill(probe, SIGKILL);
+    if (!udf_reap_bounded(probe)) {
+        fprintf(stderr, "forkrun-cleanroom: UDF probe child %ld did not "
+                        "reap after SIGKILL; continuing (cleanup NOT "
+                        "confirmed)\n", (long)probe);
+    }
+    if (complete) {
+        /* Report arrived but the child would not die. Refuse rather than
+         * proceed alongside a wedged helper. */
         return -1;
     }
-    if (!reaped) {
-        /* A complete report whose child will not die is not a hang we
-         * should paper over: refuse rather than proceed with a wedged
-         * helper. */
-        (void)kill(probe, SIGKILL);
-        return -1;
-    }
-    return 0;
+    return -1;
 }
 
 static int setup_udf_helper(const char *helper_path, const char *roots_spec,
@@ -829,7 +852,7 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
      * offset guarantee we make to callers is about OUR ingestion, and
      * this keeps a third-party constructor from silently breaking it.
      * stdin is closed too when it aliases the source. */
-    unsigned long helper_version = 0;
+    struct fr_udf_version helper_version = { 0, 0 };
     {
         int pp[2];
         if (pipe(pp) != 0)
@@ -846,13 +869,15 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
             }
             if (source_fd != 0) close(0);
             struct udf_probe_result r;
-            r.status = 1; r.pad = 0; r.version = 0;
+            r.status = 1; r.pad = 0;
+            r.version.major = 0; r.version.minor = 0;
             void *ph = dlopen(helper_path, RTLD_NOW | RTLD_LOCAL);
             if (ph) {
-                unsigned long (*vf)(void) =
-                    (unsigned long (*)(void))
-                    dlsym(ph, "fr_udf_built_version");
-                if (vf) { r.status = 0; r.version = vf(); }
+                fr_udf_built_version_fn vf =
+                    (fr_udf_built_version_fn)
+                    dlsym(ph, FR_UDF_BUILT_VERSION_SYMBOL);
+                if (vf) { r.status = 0; r.version.major = 0;
+                          r.version.minor = 0; vf(&r.version); }
                 else     { r.status = 2; }
             }
             ssize_t w = write(pp[1], &r, sizeof r);
@@ -902,14 +927,14 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
      * major<<8|minor, so a MATCHING 3.14/3.14 pair compared unequal and
      * refused every correct call. */
     {
-        int hmaj = (int)((helper_version >> 24) & 0xFFUL);
-        int hmin = (int)((helper_version >> 16) & 0xFFUL);
-        if (hmaj != caller_maj || hmin != caller_min) {
+        if (helper_version.major != caller_maj ||
+            helper_version.minor != caller_min) {
             fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) was built "
                             "against CPython %d.%d but the caller declared "
                             "%d.%d; refusing to initialise an interpreter "
                             "across the mismatch\n",
-                    helper_path, hmaj, hmin, caller_maj, caller_min);
+                    helper_path, helper_version.major, helper_version.minor,
+                    caller_maj, caller_min);
             return UDF_SETUP_VERIFY;
         }
     }
@@ -928,18 +953,23 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
      * one dlsym and closes the gap between "what we probed" and "what we
      * execute". */
     {
-        unsigned long (*vf)(void) =
-            (unsigned long (*)(void)) dlsym(hu, "fr_udf_built_version");
+        fr_udf_built_version_fn vf =
+            (fr_udf_built_version_fn)
+            dlsym(hu, FR_UDF_BUILT_VERSION_SYMBOL);
         if (!vf) {
             fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) lost its "
                             "version symbol between probe and load\n",
                     helper_path);
             return UDF_SETUP_VERIFY;
         }
-        if (vf() != helper_version) {
-            fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) reported two "
-                            "different versions (%lu then %lu); refusing\n",
-                    helper_path, helper_version, vf());
+        struct fr_udf_version live = { 0, 0 };
+        vf(&live);
+        if (live.major != helper_version.major ||
+            live.minor != helper_version.minor) {
+            fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) reported "
+                            "%d.%d on probe but %d.%d on load; refusing\n",
+                    helper_path, helper_version.major, helper_version.minor,
+                    live.major, live.minor);
             return UDF_SETUP_VERIFY;
         }
     }

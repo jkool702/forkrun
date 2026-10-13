@@ -169,12 +169,11 @@ class MinorMismatchBarrier(unittest.TestCase):
         mistyped.
         """
         proc = self._launch(["--caller-version", _caller_version()])
-        self.assertNotEqual(
-            proc.returncode, 80,
-            "a matching helper must not be refused as a mismatch; "
-            "stderr=%r" % proc.stderr[-400:])
-        self.assertNotIn(b"caller-version", proc.stderr,
-                         "the declaration must be accepted, not demanded")
+        self.assertEqual(
+            proc.returncode, 0,
+            "a matching helper must be SERVED. Asserting only '!= 80' "
+            "would pass on an unrelated 69 or 71, which is not a positive "
+            "control at all; stderr=%r" % proc.stderr[-400:])
 
     def test_missing_or_malformed_declaration_is_refused_as_82(self):
         """Fail closed, and with the CORRECT code.
@@ -202,14 +201,34 @@ class MinorMismatchBarrier(unittest.TestCase):
     def test_invalid_declaration_never_reaches_dlopen(self):
         """A bad declaration must not execute the helper's constructors.
 
-        If parsing ran after the probe, a malformed argument would run
-        third-party code before being rejected -- and a helper that then
-        failed to load would report 71 or 81 instead of 82.
+        The previous version asserted stderr contained neither "probe" nor
+        "dlopen" -- but a SUCCESSFUL dlopen emits neither, so the test
+        would still have passed if validation had moved back after the
+        load. Guessing from diagnostic text proves nothing.
+
+        This uses the hanging-constructor fixture and MEASURES the side
+        effect: if the constructor were reached, the launcher would sit in
+        the probe for ~5s and exit 81. It returns 82 in milliseconds.
         """
-        proc = self._launch(["--caller-version", "3.14garbage"])
-        self.assertEqual(proc.returncode, 82)
-        self.assertNotIn(b"probe", proc.stderr.lower())
-        self.assertNotIn(b"dlopen", proc.stderr.lower())
+        so = _build_hanging_helper(self.tmp)
+        started = time.time()
+        proc = subprocess.run(
+            [_LAUNCHER, "--so", _SUBSTRATE,
+             "--workers", "1", "--lines", "1", "--bytes", "0",
+             "--on-error", "0", "--retry", "1",
+             "--src", self.src, "--result",
+             os.path.join(self.tmp, "o2.bin"), "--stats-fd", "-1",
+             "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
+             "--caller-version", "3.14garbage"],
+            capture_output=True, timeout=60)
+        elapsed = time.time() - started
+        self.assertEqual(proc.returncode, 82,
+                         "malformed declaration must be 82, got %d"
+                         % proc.returncode)
+        self.assertLess(
+            elapsed, 2.0,
+            "took %.1fs, so the ELF constructor DID run before validation. "
+            "Parsing must precede the probe's dlopen." % elapsed)
 
     def test_source_offset_unchanged_on_refusal(self):
         """Pre-ingestion, proven by the descriptor's own offset.
@@ -305,13 +324,39 @@ class MinorMismatchBarrier(unittest.TestCase):
         This version goes through the real path: force a genuine 81 from
         the launcher, and assert the artifact is NOT recorded.
         """
-        rc = _run_launcher_with_hanging_helper(self.tmp)
-        self.assertEqual(rc, 81,
-                        "a hung constructor must be bounded into exit 81")
+        # The cache is a PYTHON-PROCESS structure; a directly-launched
+        # C launcher cannot mutate it. The previous version therefore
+        # checked the wrong dict: it launched a TEMPORARY hanging helper
+        # and then asserted the INSTALLED helper was absent from the
+        # cache -- which it trivially was, so the test passed no matter
+        # what _record_compat_refusal did.
+        #
+        # Exercise the Python policy directly, with the real code under
+        # test.
+        fp = _udf.fingerprint_now(_HELPER)
+        self.assertIsNotNone(fp, "the installed helper must be fingerprinted")
+        _udf.record_incompatible_for(fp, "synthetic 80")
+        self.assertIsNotNone(_udf.known_incompatible(_HELPER),
+                             "positive control: 80 IS cacheable")
+
+        _udf.clear_incompatibles()
+        from forkrun.run import _record_compat_refusal
+        _record_compat_refusal(81, "probe timed out", fp)
         self.assertIsNone(
             _udf.known_incompatible(_HELPER),
             "81 is inconclusive; caching it would let a transient stall "
             "permanently disable the accelerator for this artifact")
+        _record_compat_refusal(82, "invalid declaration", fp)
+        self.assertIsNone(
+            _udf.known_incompatible(_HELPER),
+            "82 is a caller bug, not evidence about the helper; it must "
+            "not blacklist a good artifact")
+
+    def test_timeout_fixture_really_exits_81(self):
+        """Kept separate: exit 81 itself is the launcher's contract."""
+        rc = _run_launcher_with_hanging_helper(self.tmp)
+        self.assertEqual(rc, 81,
+                        "a hung constructor must be bounded into exit 81")
 
     def test_hung_constructor_is_bounded_into_exit_81(self):
         """The timeout path must actually run.
@@ -339,9 +384,13 @@ class MinorMismatchBarrier(unittest.TestCase):
         self.assertEqual(proc.returncode, 81,
                          "a hung ELF constructor must be bounded into 81, "
                          "not waited on; stderr=%r" % proc.stderr[-300:])
-        self.assertLess(elapsed, 60.0,
-                        "the probe deadline is not being enforced (%.1fs)"
-                        % elapsed)
+        # The configured deadline is 5s. 60s was not a meaningful
+        # regression bound for that -- it only caught "hangs forever".
+        # This asserts the deadline is actually ENFORCED, with headroom
+        # for CI scheduling and reap cleanup.
+        self.assertLess(elapsed, 12.0,
+                        "the %ds probe deadline is not being enforced "
+                        "(took %.1fs)" % (5, elapsed))
 
     def test_kill_switch_suppresses_both_probe_and_warning(self):
         """FORKRUN_NO_UDF=1 prevents the probe, so there is no mismatch to

@@ -11,6 +11,10 @@ include forkrun_ring.c
 include forkrun_cleanroom.c
 include forkrun_substrate.h
 include forkrun_trace.h
+# Shared build-stamp struct for the UDF helper and the cleanroom launcher.
+# Both compile against it, so omitting it from the sdist breaks
+# `make python-substrate` for anyone installing from source.
+include forkrun_udf_version.h
 include substratestubs.c
 include Makefile.substrate
 include ring_loadables/forkrun_plugin.h
