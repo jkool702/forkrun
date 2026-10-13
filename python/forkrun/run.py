@@ -894,7 +894,7 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
 # :539 fork(drain)), so it cannot be classified either way.
 # 1 (supervision failure) is always post-ingestion. Any signal death is
 # indeterminate. Both are unsafe.
-_CR_EXIT_PRE_INGEST = frozenset((64, 69, 71, 78))
+_CR_EXIT_PRE_INGEST = frozenset((64, 69, 71, 78, 80, 81))
 
 # CR-FIX1-F: exits where falling back would REPRODUCE the hazard rather
 # than route around it. 79 means the launcher's capability probe of the
@@ -905,6 +905,15 @@ _CR_EXIT_PRE_INGEST = frozenset((64, 69, 71, 78))
 # completed and the plugin merely lacks the ctx protocol, which the
 # in-process path handles correctly.
 _CR_EXIT_NO_FALLBACK = frozenset((79,))
+
+# 80/81 are refusals of the CLEANROOM ACCELERATOR, decided before the
+# spill child is forked. They are eligible for in-process fallback and are
+# deliberately absent from _CR_EXIT_NO_FALLBACK, because we CAN establish
+# that declining them is safe -- which is exactly what separates them from
+# 79, where the C plugin probe failed such that loading the plugin in the
+# CALLER would itself be unsafe. The UDF fallback never loads the
+# CPython-linked helper into the caller, so a hung UDF probe is safe to
+# decline even though a hung plugin probe is not.
 
 _CR_EXIT_LABELS = {
     64: "invalid invocation (bad arguments)",
@@ -917,6 +926,12 @@ _CR_EXIT_LABELS = {
     79: "plugin capability probe did not complete (a constructor hung or "
          "crashed); loading this plugin is unsafe, so no fallback is "
          "attempted",
+    80: "UDF helper CPython version does not match the caller's declared "
+         "major.minor, or the helper's version could not be verified "
+         "(no fr_udf_built_version symbol); refusing to initialise an "
+         "interpreter across the mismatch",
+    81: "UDF helper probe timed out (an ELF constructor did not return); "
+         "the helper was not loaded and no input was consumed",
     1: "runtime worker/helper failure",
 }
 
@@ -952,6 +967,187 @@ def _fallback_forbidden(status):
     if os.WIFEXITED(status):
         return os.WEXITSTATUS(status) in _CR_EXIT_NO_FALLBACK
     return False
+
+
+class _CleanroomPreIngestDecline(Exception):
+    """The cleanroom was declined BEFORE ingestion began, so falling back
+    in-process cannot duplicate committed work and cannot truncate.
+
+    Base class for the two shapes of this. Both are raised, never
+    returned as ``None``, because "the run failed" and "the accelerator
+    was declined" lead to different next steps and collapsing them loses
+    the distinction -- which is what made the original bare ``return
+    None`` fall through into a route that could not run the payload.
+    """
+
+
+class _CleanroomCompatRefusal(_CleanroomPreIngestDecline):
+    """The cleanroom ACCELERATOR was declined BEFORE ingestion began.
+
+    Distinct from "the run failed". Carries:
+
+      label     -- the launcher's exit-code label, for the message
+      detail    -- the launcher's own diagnostic text
+      conclusive-- True when the launcher positively established that this
+                   artifact cannot serve this caller (a version mismatch or
+                   an unverifiable helper), False when the outcome was
+                   merely inconclusive (a probe timeout).
+
+    Only ``conclusive`` refusals are remembered in the negative cache. A
+    timeout says the helper did not answer in time, which is not evidence
+    that it is incompatible -- caching that would let a transient stall
+    permanently disable the accelerator.
+    """
+
+    def __init__(self, label, detail, conclusive):
+        super().__init__(label)
+        self.label = label
+        self.detail = detail
+        self.conclusive = conclusive
+
+
+# Launcher exits that are a compatibility refusal of the helper. 80 is
+# conclusive (the mismatch or unverifiability is established); 81 is not.
+_CR_COMPAT_REFUSALS = {80: True, 81: False}
+
+
+def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
+                                   num_nodes, orchestrator,
+                                   plugin, func, udf_args):
+    """stream() over the cleanroom, with an explicit pre-ingest fallback.
+
+    The launcher refusal is raised from INSIDE the generator, so it can
+    only arrive before the first yield for a pre-ingestion code -- which
+    is the whole reason falling back is safe here. We catch it and return
+    the in-process stream instead.
+
+    Rewrapping (rather than yielding the cleanroom generator and
+    retrying) is what guarantees no partial output escapes: the in-process
+    generator is returned as a single value, so the caller never sees a
+    stream that started on one path and continued on another.
+    """
+    def _run():
+        return _guarded_gen(
+            _signal_guard(kwargs.get("signal_policy", "default")),
+            _execute_cleanroom_stream(
+                source,
+                lines=kwargs.get("lines"),
+                bytes_=kwargs.get("bytes"),
+                workers=_resolve_workers_numa(
+                    kwargs.get("workers"), num_nodes),
+                plugin_path=plugin, plugin_func=func,
+                on_error=kwargs.get("on_error", "retry"),
+                strict_poison=bool(kwargs.get("strict_poison", False)),
+                **udf_args))
+
+    try:
+        gen = _run()
+        # Prime the generator so a pre-ingest refusal surfaces HERE, at
+        # the decision point, rather than on the caller's first next().
+        first = next(gen, _SENTINEL_NO_RECORD)
+    except _CleanroomPreIngestDecline as exc:
+        if isinstance(exc, _CleanroomCompatRefusal):
+            _warn_compat_refusal(exc)
+        new_payload, new_mode = _coerce_payload(
+            raw_payload, raw_mode, force_inprocess_udf=True)
+        # Only `mode` goes into kwargs: these generators take `payload`
+        # POSITIONALLY, so putting it in kwargs as well is a duplicate
+        # argument. (Which is exactly what happened the first time.)
+        kwargs = dict(kwargs, mode=new_mode)
+        return _guarded_gen(
+            _signal_guard(kwargs.get("signal_policy", "default")),
+            _ingest_stream_reactor_gen(new_payload, source, **kwargs))
+    return _prepend(first, gen)
+
+
+def _prepend(first, gen):
+    """Yield ``first`` (unless it is the sentinel) then the rest of gen."""
+    def _it():
+        if first is not _SENTINEL_NO_RECORD:
+            yield first
+        for item in gen:
+            yield item
+    return _it()
+
+
+_SENTINEL_NO_RECORD = object()
+
+
+def _caller_version_argv():
+    """``["--caller-version=M.m"]`` from THIS interpreter, or [].
+
+    A declaration, not an authenticated identity -- after exec the
+    launcher cannot know which interpreter started it, so it can only
+    check the helper against what we declare. Taken from
+    sys.version_info directly, never from the environment: a stray
+    FORKRUN_* must not be able to forge the claim.
+    """
+    try:
+        from ._udf import caller_version_arg
+        return [caller_version_arg()]
+    except Exception:
+        return []
+
+
+def _record_compat_refusal(code, detail):
+    """Remember a CONCLUSIVE incompatibility against the helper artifact.
+
+    Only 80 is cached. An 81 timeout is inconclusive and deliberately
+    left uncached, so a transient stall does not permanently disable the
+    accelerator.
+    """
+    if code != 80:
+        return
+    try:
+        from ._udf import helper_path, record_incompatible
+    except Exception:
+        return
+    path = helper_path()
+    if path:
+        record_incompatible(path, detail or _CR_EXIT_LABELS.get(80, "mismatch"))
+
+
+def _warn_compat_refusal(exc):
+    """ONE warning per affected public invocation, deliberately not coalesced.
+
+    ``warnings.warn`` applies the default filter ("default" == once per
+    location), which would emit this once per call SITE and then stay
+    silent -- the opposite of the required contract, since a permanently
+    degraded cleanroom that has stopped complaining looks like a feature
+    that simply chose not to run.
+
+    Going straight to stderr is per-emission by construction and mutates
+    no process-global filter, which is what the contract asks for. This
+    diagnostic is more like a log line than a library warning: the caller
+    is not being told about a type of problem they can catch, they are
+    being told what the runtime did on their behalf.
+    """
+    import sys as _sys
+    _sys.stderr.write(
+        "forkrun [WARN]: cleanroom UDF helper declined (%s): %s\n"
+        "         continuing on the in-process path for this call.\n"
+        % (exc.label, (exc.detail or "").strip() or "no detail"))
+    _sys.stderr.flush()
+
+
+def _cleanroom_attempt(fn, payload, mode):
+    """Run the cleanroom attempt, handling a compatibility refusal.
+
+    Returns ``(out, payload, mode)``. On a refusal the warning is emitted
+    (once, here -- the public-call decision point, NOT inside a helper
+    lookup that may run many times per call) and the payload is re-coerced
+    with ``force_inprocess_udf=True`` so the route genuinely becomes the
+    in-process UDF path rather than an ``_UDFPayload`` handed to workers
+    that cannot execute it.
+    """
+    try:
+        out = fn()
+    except _CleanroomCompatRefusal as exc:
+        _warn_compat_refusal(exc)
+        new_payload, new_mode = _coerce_payload(
+            payload, mode, force_inprocess_udf=True)
+        return None, new_payload, new_mode
+    return out, None, None
 
 
 def _cleanroom_may_fallback(status):
@@ -1206,6 +1402,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         argv += ["--udf-helper", udf_helper,
                  "--udf", udf_module,
                  "--udf-attr", udf_attr]
+        argv += _caller_version_argv()
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
     elif plugin_path is None and plugin_func is None:
@@ -1287,6 +1484,17 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         # function so it can be tested without re-implementing it.
         may_fallback = _cleanroom_may_fallback(status)
         _why_launcher = _read_launcher_stderr(errfd)
+        if code in _CR_COMPAT_REFUSALS:
+            # A compatibility refusal must NOT collapse into a bare
+            # "return None": the dispatcher has to know WHY, because the
+            # generic fall-through re-enters _coerce_payload(), which
+            # consults helper_path() again and would hand back an
+            # _UDFPayload for the ordinary Python worker to fail on --
+            # since the file is still present, only the launcher knows it
+            # is unusable.
+            _record_compat_refusal(code, _why_launcher)
+            raise _CleanroomCompatRefusal(label, _why_launcher,
+                                          _CR_COMPAT_REFUSALS[code])
         _warnings.warn(
             "forkrun: cleanroom launcher failed (%s)%s — %s"
             % (_describe_launcher_failure(status),
@@ -1778,6 +1986,7 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
         argv += ["--udf-helper", udf_helper,
                  "--udf", udf_module,
                  "--udf-attr", udf_attr]
+        argv += _caller_version_argv()
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
     else:
@@ -1887,6 +2096,28 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
             launch_pid = None
             if not (os.WIFEXITED(lstatus)
                     and os.WEXITSTATUS(lstatus) == 0):
+                # A PRE-INGESTION decline is categorically different from
+                # a failed run, and this function used to treat them the
+                # same. It raised on every nonzero exit because for the
+                # failures that class covers, records WERE yielded first
+                # and a partial stream must not look complete.
+                #
+                # But a refusal decided before the spill child is forked
+                # produced NO records, so "TRUNCATED" is false and raising
+                # loses a recoverable situation for no safety gain. The
+                # launcher's own classification answers which is which --
+                # the same one the map path has used since W-CR1, which
+                # is why this is a shared decision and not a second
+                # opinion formed at the stream call site.
+                _lc, _ls, _ll, _lpre = _decode_launcher_status(lstatus)
+                if _lpre and not _fallback_forbidden(lstatus):
+                    if _lc in _CR_COMPAT_REFUSALS:
+                        _record_compat_refusal(_lc, "")
+                        raise _CleanroomCompatRefusal(
+                            _ll, "", _CR_COMPAT_REFUSALS[_lc])
+                    raise _CleanroomPreIngestDecline(
+                        "cleanroom launcher declined before ingestion "
+                        "(%s)" % (_describe_launcher_failure(lstatus),))
                 raise RuntimeError(
                     "forkrun: cleanroom launcher failed (%s); the "
                     "stream is TRUNCATED and the records already yielded "
@@ -2982,7 +3213,7 @@ def _udf_as_inprocess(fn):
     return _wrapped
 
 
-def _coerce_payload(payload, mode):
+def _coerce_payload(payload, mode, force_inprocess_udf=False):
     """Normalize the payload + mode for the engine path (W-PY8, eager).
 
     Returns (payload_fn, engine_mode). mode="spawn" wraps the command and
@@ -2991,6 +3222,10 @@ def _coerce_payload(payload, mode):
     wrapper, so the claim/ack loop, emitter, and reassembly never branch
     on mode. Raises ValueError for shape mismatches eagerly, so stream()
     still validates on call.
+
+    ``force_inprocess_udf`` overrides the helper-present branch for a
+    single call whose helper the launcher has just declined. See the
+    comment at that branch.
     """
     if mode == "plugin":
         if callable(payload):
@@ -3030,7 +3265,13 @@ def _coerce_payload(payload, mode):
         # runs in the parent's interpreter instead of an isolated one.
         # Same "slower and correct beats fast and empty" doctrine the
         # cleanroom fallback already uses.
-        if _udf_helper_path() is not None:
+        # force_inprocess_udf is set when the launcher has positively
+        # declined the helper for THIS call. Without it the check below
+        # would consult helper_path() -- which still returns the file,
+        # because the file is present and only the launcher knows it is
+        # unusable -- and hand back an _UDFPayload for the ordinary
+        # Python worker, which cannot execute it as a plain callable.
+        if not force_inprocess_udf and _udf_helper_path() is not None:
             # Like mode="plugin", the spec is NOT resolved when the
             # cleanroom will serve it: importing the user's module in
             # this process would put their state into the parent that
@@ -3498,21 +3739,25 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                             kwargs.get("signal_policy",
                                        "default")) as _sg:
                         with _RUN_LOCK:
-                            out = _execute_cleanroom(
-                                source,
-                                lines=kwargs.get("lines"),
-                                bytes_=kwargs.get("bytes"),
-                                workers=base["workers"],
-                                plugin_path=None, plugin_func=None,
-                                on_error=kwargs.get("on_error", "retry"),
-                                views=base["views"],
-                                strict_poison=bool(
-                                    kwargs.get("strict_poison", False)),
-                                order=order,
-                                orchestrator=orchestrator,
-                                spawn_argv=_sargv,
-                                **_udf_args)
+                            out, _ip_p, _ip_m = _cleanroom_attempt(
+                                lambda: _execute_cleanroom(
+                                    source,
+                                    lines=kwargs.get("lines"),
+                                    bytes_=kwargs.get("bytes"),
+                                    workers=base["workers"],
+                                    plugin_path=None, plugin_func=None,
+                                    on_error=kwargs.get("on_error", "retry"),
+                                    views=base["views"],
+                                    strict_poison=bool(
+                                        kwargs.get("strict_poison", False)),
+                                    order=order,
+                                    orchestrator=orchestrator,
+                                    spawn_argv=_sargv,
+                                    **_udf_args),
+                                payload, mode)
                     _sg.check()
+                    if _ip_m is not None:
+                        payload, mode = _ip_p, _ip_m
                     if out is not None:
                         return _map_return(out, return_stats)
             if raw_mode != "spawn" and _p and _f and (
@@ -3520,20 +3765,24 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 with _signal_guard(
                         kwargs.get("signal_policy", "default")) as _sg:
                     with _RUN_LOCK:
-                        out = _execute_cleanroom(
-                            source,
-                            lines=kwargs.get("lines"),
-                            bytes_=kwargs.get("bytes"),
-                            workers=base["workers"],
-                            plugin_path=_p, plugin_func=_f,
-                            on_error=kwargs.get("on_error", "retry"),
-                            views=base["views"],
-                            strict_poison=bool(
-                                kwargs.get("strict_poison", False)),
-                            order=order,
-                            orchestrator=orchestrator,
-                            **_udf_args)
+                        out, _ip_p, _ip_m = _cleanroom_attempt(
+                            lambda: _execute_cleanroom(
+                                source,
+                                lines=kwargs.get("lines"),
+                                bytes_=kwargs.get("bytes"),
+                                workers=base["workers"],
+                                plugin_path=_p, plugin_func=_f,
+                                on_error=kwargs.get("on_error", "retry"),
+                                views=base["views"],
+                                strict_poison=bool(
+                                    kwargs.get("strict_poison", False)),
+                                order=order,
+                                orchestrator=orchestrator,
+                                **_udf_args),
+                            payload, mode)
                     _sg.check()
+                if _ip_m is not None:
+                    payload, mode = _ip_p, _ip_m
                 if out is not None:
                     return _map_return(out, return_stats)
         elif _cleanroom_explicit():
@@ -3887,20 +4136,9 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                             "udf_roots": _udf_roots_spec(_p),
                         }
                 if _p and _f and (raw_mode != "udf" or _udf_args):
-                    return _guarded_gen(
-                        _signal_guard(
-                            kwargs.get("signal_policy", "default")),
-                        _execute_cleanroom_stream(
-                            source,
-                            lines=kwargs.get("lines"),
-                            bytes_=kwargs.get("bytes"),
-                            workers=_resolve_workers_numa(
-                                kwargs.get("workers"), num_nodes),
-                            plugin_path=_p, plugin_func=_f,
-                            on_error=kwargs.get("on_error", "retry"),
-                            strict_poison=bool(
-                                kwargs.get("strict_poison", False)),
-                            **_udf_args))
+                    return _stream_with_preingest_fallback(
+                        raw_payload, raw_mode, source, kwargs,
+                        num_nodes, orchestrator, _p, _f, _udf_args)
             elif _cleanroom_explicit() and _why:
                 import warnings as _warnings
                 _warnings.warn(

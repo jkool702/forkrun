@@ -330,6 +330,48 @@ def check_canary():
     return True
 
 
+@check("UDF helper: no test-only version override in the shipped artifact")
+def check_no_udf_version_override():
+    """The mismatch barrier's negative control must be UNREACHABLE in a
+    release build.
+
+    `fr_udf_built_version()` can be compiled to report a deliberately
+    different version via -DFR_UDF_REPORT_VERSION_OVERRIDE, which is what
+    lets a test exercise the mismatch branch with a helper that is
+    otherwise perfectly loadable. Without that, the "mismatch" test
+    refuses because the other minor's libpython is absent -- it would pass
+    for the wrong reason even with the comparison deleted.
+
+    The override deliberately exports an EXTRA symbol,
+    `fr_udf_TEST_VERSION_OVERRIDE_MARKER`, because a bare #define leaves
+    nothing to inspect: the release check has to be able to PROVE the flag
+    cannot reach a shipped artifact, and that means looking in the ELF
+    dynamic symbol table rather than trusting the build command.
+    """
+    import glob
+    import subprocess as _sp
+    helpers = glob.glob("python/forkrun/_fr_udf*.so")
+    assert helpers, ("no UDF helper artifact found to inspect -- run "
+                     "`make -f Makefile.substrate udf-lib` first")
+    for path in helpers:
+        proc = _sp.run(["nm", "-D", "--defined-only", path],
+                       capture_output=True, text=True)
+        assert proc.returncode == 0, (
+            "nm failed on %s: %s" % (path, proc.stderr[-500:]))
+        offenders = [ln for ln in proc.stdout.splitlines()
+                     if "fr_udf_TEST_VERSION_OVERRIDE_MARKER" in ln]
+        assert not offenders, (
+            "TEST-ONLY version override marker is PRESENT in %s -- this "
+            "artifact was built with -DFR_UDF_REPORT_VERSION_OVERRIDE and "
+            "must not be shipped:\n%s" % (path, "\n".join(offenders)))
+        assert any("fr_udf_built_version" in ln
+                   for ln in proc.stdout.splitlines()), (
+            "%s does not export fr_udf_built_version, so the launcher's "
+            "version barrier cannot verify it and every UDF call would be "
+            "refused" % path)
+    return True
+
+
 @check("IDL: schema checks pass")
 def check_idl():
     proc = _run([sys.executable, "tools/test_idl.py"], timeout=300)

@@ -42,6 +42,7 @@ import os
 
 _CNT = os.path.join(os.path.dirname(__file__), "attempts.txt")
 
+
 def _n():
     try:
         with open(_CNT) as fh:
@@ -64,6 +65,19 @@ def diff_len(b):
 def plain(b):
     return b.upper()
 '''
+
+
+def _caller_version():
+    """This interpreter's major.minor, for the launcher's
+    --caller-version contract.
+
+    The launcher CANNOT infer it after exec, so it is a DECLARATION, not
+    an authenticated identity -- and it is therefore required on every
+    direct launcher invocation that asks for UDF mode. Direct invocations
+    bypass the Python wrapper that would normally supply it, so the test
+    has to state it explicitly.
+    """
+    return "%d.%d" % (sys.version_info[0], sys.version_info[1])
 
 BATCHES = 3
 
@@ -156,7 +170,7 @@ class TestStage0Matrix(unittest.TestCase):
                     "--src", str(src_fd), "--result", str(out_fd),
                     "--stats-fd", "-1",
                     "--udf-helper", _helper(),
-                    "--udf", "px_udf", "--udf-attr", func,
+                    "--udf", "px_udf", "--udf-attr", func, "--caller-version", _caller_version(),
                     "--udf-roots", _roots(self.d)]
             proc = subprocess.run(argv, env=env, pass_fds=(src_fd, out_fd),
                                   capture_output=True, timeout=180)

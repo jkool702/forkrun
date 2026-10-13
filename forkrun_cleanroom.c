@@ -171,6 +171,11 @@ struct opts {
     const char *udf_module;
     const char *udf_attr;
     const char *udf_roots;    /* space-separated, from the interpreter */
+    /* DECLARED caller major.minor, from the wrapper's sys.version_info.
+     * A declaration, not an authenticated identity: after exec the
+     * launcher cannot know which interpreter started it. Required for
+     * UDF mode; see setup_udf_helper's version gate. */
+    const char *caller_version;
     int workers;
     int lines;
     int bytes;
@@ -617,7 +622,74 @@ static int g_poison_stats_fd = -1;
  * isolation, which drops EVERY site root including the system one, so a
  * UDF whose dependency chain spans roots (adjustText -> numpy -> a third
  * root) needs all of them passed explicitly. Never hardcoded here. */
-static int setup_udf_helper(const char *helper_path, const char *roots_spec)
+/* UDF helper setup outcomes. These are REFUSALS, distinct from "the run
+ * failed": each is decided before the spill child is forked, so the
+ * caller may still fall back to in-process execution. 80 and 81 are
+ * classified pre-ingestion in run.py (_CR_EXIT_PRE_INGEST) and are
+ * deliberately NOT in _CR_EXIT_NO_FALLBACK -- we CAN establish that
+ * declining them is safe, which is what distinguishes them from 79
+ * ("the C plugin probe failed such that loading it in the CALLER would
+ * be unsafe"). */
+/* Bound on the UDF probe. Generous enough that a slow disk does not trip
+ * it, short enough that a wedged constructor is not a hang. */
+#ifndef UDF_PROBE_TIMEOUT_MS
+#define UDF_PROBE_TIMEOUT_MS 5000
+#endif
+
+#define UDF_SETUP_OK          0
+#define UDF_SETUP_GENERIC    -1   /* maps to the pre-existing 71 path */
+#define UDF_SETUP_VERIFY     80   /* mismatch, or version unverifiable */
+#define UDF_SETUP_PROBE_HANG 81   /* bounded probe expired */
+
+/* Probe -> parent report. Fixed size, written in one shot. */
+struct udf_probe_result {
+    int32_t  status;     /* 0 ok, 1 dlopen failed, 2 version symbol absent */
+    int32_t  pad;
+    unsigned long version;
+};
+
+/* Bounded wait for the probe's report, then SIGKILL and a bounded reap.
+ *
+ * Mirrors the plugin probe's shape (deadline loop, SIGKILL, WNOHANG reap)
+ * because the previous UDF probe used a BLOCKING read and an UNTIMED
+ * waitpid: a constructor that hung hung the launcher forever. Since the
+ * version check must query the library, that hang is now on the critical
+ * path of a safety decision and can no longer be tolerated.
+ *
+ * The deadline covers the report AND the reap. Bounding only one still
+ * leaves a hang. Returns 0 if the report arrived, -1 on timeout. */
+static int udf_probe_await(int fd, pid_t probe,
+                           struct udf_probe_result *out)
+{
+    int waited_ms = 0;
+    for (;;) {
+        ssize_t got = read(fd, out, sizeof *out);
+        if (got == (ssize_t)sizeof *out) return 0;
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) return -1;
+        if (got == 0) break;               /* child died without reporting */
+        if (waited_ms >= UDF_PROBE_TIMEOUT_MS) break;
+        struct timespec ts = {0, 1000000L};
+        nanosleep(&ts, NULL);
+        waited_ms += 1;
+    }
+    /* Timed out or truncated: the child is assumed wedged. */
+    (void)kill(probe, SIGKILL);
+    /* Bounded reap. A process stuck in uninterruptible sleep may outlive
+     * this loop -- we do not claim otherwise; we only refuse to hang. */
+    for (int i = 0; i < 200; i++) {
+        int st = 0;
+        pid_t r = waitpid(probe, &st, WNOHANG);
+        if (r > 0) break;
+        if (r < 0 && errno == EINTR) continue;
+        struct timespec ts = {0, 1000000L};
+        nanosleep(&ts, NULL);
+    }
+    return -1;
+}
+
+static int setup_udf_helper(const char *helper_path, const char *roots_spec,
+                            const char *caller_version, int source_fd)
 {
     void *hu;
     fn_udf_init init_fn;
@@ -630,32 +702,113 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec)
 
     /* (1) Disposable probe first, mirroring the plugin path: dlopen
      * runs ELF constructors, and a constructor that crashes or hangs
-     * must not take the launcher with it. */
+     * must not take the launcher with it.
+     *
+     * The probe now also REPORTS THE HELPER'S BUILD VERSION, because the
+     * version has to be read out of the loaded object and dlopen is how
+     * that happens -- so the version query is inside the probe, where a
+     * hang is already bounded.
+     *
+     * The probe child closes the source descriptor BEFORE dlopen. fork()
+     * shares the open-file-description offset, so a constructor that read
+     * the inherited descriptor would advance the caller's visible offset
+     * even though forkrun's spill child never started. The unchanged-
+     * offset guarantee we make to callers is about OUR ingestion, and
+     * this keeps a third-party constructor from silently breaking it.
+     * stdin is closed too when it aliases the source. */
+    unsigned long helper_version = 0;
     {
         int pp[2];
         if (pipe(pp) != 0)
-            return -1;
+            return UDF_SETUP_GENERIC;
         pid_t probe = fr_fork();
-        if (probe < 0) { close(pp[0]); close(pp[1]); return -1; }
+        if (probe < 0) { close(pp[0]); close(pp[1]); return UDF_SETUP_GENERIC; }
         if (probe == 0) {
             close(pp[0]);
+            /* Drop our reach to the caller's data BEFORE anything from the
+             * helper can run. */
+            if (source_fd >= 0 && source_fd != pp[1]) {
+                close(source_fd);
+                source_fd = -1;
+            }
+            if (source_fd != 0) close(0);
+            struct udf_probe_result r;
+            r.status = 1; r.pad = 0; r.version = 0;
             void *ph = dlopen(helper_path, RTLD_NOW | RTLD_LOCAL);
-            char ok = ph ? 1 : 0;
-            ssize_t w = write(pp[1], &ok, 1);
+            if (ph) {
+                unsigned long (*vf)(void) =
+                    (unsigned long (*)(void))
+                    dlsym(ph, "fr_udf_built_version");
+                if (vf) { r.status = 0; r.version = vf(); }
+                else     { r.status = 2; }
+            }
+            ssize_t w = write(pp[1], &r, sizeof r);
             (void)w;
             close(pp[1]);
             _exit(0);
         }
         close(pp[1]);
-        char ok = 0;
-        ssize_t got = read(pp[0], &ok, 1);
+        struct udf_probe_result r;
+        memset(&r, 0, sizeof r);
+        int rc = udf_probe_await(pp[0], probe, &r);
         close(pp[0]);
-        int wst = 0;
-        waitpid(probe, &wst, 0);
-        if (got != 1 || !ok) {
-            fprintf(stderr, "forkrun-cleanroom: UDF helper probe failed "
-                            "(%s)\n", helper_path);
-            return -1;
+        if (rc != 0) {
+            fprintf(stderr, "forkrun-cleanroom: UDF helper probe TIMED OUT "
+                            "after %d ms (%s); a helper ELF constructor is "
+                            "not returning\n",
+                    UDF_PROBE_TIMEOUT_MS, helper_path);
+            return UDF_SETUP_PROBE_HANG;
+        }
+        if (r.status == 1) {
+            fprintf(stderr, "forkrun-cleanroom: UDF helper probe failed to "
+                            "load (%s)\n", helper_path);
+            return UDF_SETUP_GENERIC;
+        }
+        if (r.status == 2) {
+            /* Fail closed. An older helper with no version symbol cannot
+             * be shown to match the caller, and "probably fine" is not a
+             * basis for initialising an interpreter. */
+            fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) exports no "
+                            "fr_udf_built_version(); its CPython "
+                            "compatibility CANNOT BE VERIFIED. Refusing.\n",
+                    helper_path);
+            return UDF_SETUP_VERIFY;
+        }
+        helper_version = r.version;
+    }
+
+    /* (1b) Version gate. DECLARED, not authenticated: after exec the
+     * launcher cannot identify the interpreter that started it, so this
+     * establishes only that the helper matches the version the caller
+     * declared. The Python wrapper fills that in from sys.version_info
+     * and nothing else. */
+    {
+        int maj = 0, min = 0;
+        if (!caller_version || sscanf(caller_version, "%d.%d", &maj, &min) != 2
+            || maj < 0 || min < 0 || maj > 99 || min > 99) {
+            fprintf(stderr, "forkrun-cleanroom: UDF mode requires "
+                            "--caller-version=MAJOR.MINOR (got %s); the "
+                            "launcher cannot infer the caller after exec.\n",
+                    caller_version ? caller_version : "(absent)");
+            return UDF_SETUP_VERIFY;
+        }
+        /* PY_VERSION_HEX packs major in bits 24-31 and minor in 16-23.
+         * Compare the two fields SEPARATELY rather than as one packed
+         * value -- packing them differently on the two sides is exactly
+         * the bug that made a MATCHING 3.14/3.14 pair compare unequal,
+         * which would have refused every correct call.
+         *
+         * Micro and release-level bits are deliberately ignored: a 3.14.7
+         * helper is correct for a 3.14.2 caller. */
+        int hmaj = (int)((helper_version >> 24) & 0xFFUL);
+        int hmin = (int)((helper_version >> 16) & 0xFFUL);
+        if (hmaj != maj || hmin != min) {
+            fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) was built "
+                            "against CPython %d.%d but the caller declared "
+                            "%d.%d; refusing to initialise an interpreter "
+                            "across the mismatch\n",
+                    helper_path, hmaj, hmin, maj, min);
+            return UDF_SETUP_VERIFY;
         }
     }
 
@@ -665,6 +818,28 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec)
         fprintf(stderr, "forkrun-cleanroom: dlopen UDF helper: %s\n",
                 dlerror());
         return -1;
+    }
+
+    /* (2b) Re-verify against the handle we will ACTUALLY initialise
+     * with, not just the probe handle. The probe already loaded the same
+     * path, so this is normally redundant -- which is the point: it costs
+     * one dlsym and closes the gap between "what we probed" and "what we
+     * execute". */
+    {
+        unsigned long (*vf)(void) =
+            (unsigned long (*)(void)) dlsym(hu, "fr_udf_built_version");
+        if (!vf) {
+            fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) lost its "
+                            "version symbol between probe and load\n",
+                    helper_path);
+            return UDF_SETUP_VERIFY;
+        }
+        if (vf() != helper_version) {
+            fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) reported two "
+                            "different versions (%lu then %lu); refusing\n",
+                    helper_path, helper_version, vf());
+            return UDF_SETUP_VERIFY;
+        }
     }
 
     /* (3) THE GUARD. dlopen just ran this library's ELF constructors,
@@ -1092,6 +1267,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--udf") && i + 1 < argc) o.udf_module = argv[++i];
         else if (!strcmp(argv[i], "--udf-attr") && i + 1 < argc) o.udf_attr = argv[++i];
         else if (!strcmp(argv[i], "--udf-roots") && i + 1 < argc) o.udf_roots = argv[++i];
+        else if (!strncmp(argv[i], "--caller-version=", 17))
+            o.caller_version = argv[i] + 17;
+        else if (!strcmp(argv[i], "--caller-version") && i + 1 < argc)
+            o.caller_version = argv[++i];
         else if (!strcmp(argv[i], "--workers") && i + 1 < argc) o.workers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lines") && i + 1 < argc)  o.lines = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bytes") && i + 1 < argc)  o.bytes = atoi(argv[++i]);
@@ -1366,8 +1545,13 @@ int main(int argc, char **argv) {
                             "fr_py_worker_udf_loop\n");
             return 69;
         }
-        if (setup_udf_helper(o.udf_helper, o.udf_roots) != 0)
-            return 71;
+        {
+            int urc = setup_udf_helper(o.udf_helper, o.udf_roots,
+                                       o.caller_version, o.source_fd);
+            if (urc == UDF_SETUP_VERIFY)      return 80;
+            if (urc == UDF_SETUP_PROBE_HANG)  return 81;
+            if (urc != UDF_SETUP_OK)           return 71;
+        }
         /* The loop reinterprets its two strings; nothing else changes. */
         p_wloop = u_wloop;
         o.plugin_path  = o.udf_module;

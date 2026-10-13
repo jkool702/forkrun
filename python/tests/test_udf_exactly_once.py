@@ -48,6 +48,19 @@ UDF_SRC = "def up(b):\n    return b.upper()\n"
 BATCHES = 5
 
 
+
+def _caller_version():
+    """This interpreter's major.minor, for the launcher's
+    --caller-version contract.
+
+    The launcher CANNOT infer it after exec, so it is a DECLARATION, not
+    an authenticated identity -- and it is therefore required on every
+    direct launcher invocation that asks for UDF mode. Direct invocations
+    bypass the Python wrapper that would normally supply it, so the test
+    has to state it explicitly.
+    """
+    return "%d.%d" % (sys.version_info[0], sys.version_info[1])
+
 def _helper():
     from forkrun._udf import helper_path
     return helper_path()
@@ -129,7 +142,7 @@ class TestLauncherExactlyOnce(unittest.TestCase):
                     "--src", str(src_fd), "--result", str(out_fd),
                     "--stats-fd", "-1",
                     "--udf-helper", _helper(),
-                    "--udf", "px_udf", "--udf-attr", "up",
+                    "--udf", "px_udf", "--udf-attr", "up", "--caller-version", _caller_version(),
                     "--udf-roots", _roots(self.udf_dir)]
             proc = subprocess.run(argv, env=env, pass_fds=(src_fd, out_fd),
                                   capture_output=True, timeout=180)

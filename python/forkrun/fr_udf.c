@@ -776,6 +776,42 @@ const char *fr_udf_version(void) { return PY_VERSION; }
 
 int fr_udf_fork_hooks_available(void) { return FR_UDF_FORK_HOOKS; }
 
+/* ------------------------------------------------------------------------ */
+/* Build-version stamp (W-EXP-1 5.5 minor-mismatch barrier)                  */
+/* ------------------------------------------------------------------------ */
+
+/* The launcher compares this against the calling interpreter's declared
+ * major.minor before it will initialise an interpreter. The guarantee is
+ * exactly "this helper was BUILT against this CPython" -- nothing more.
+ * It is not an assertion that the helper is otherwise sound, and the
+ * launcher treats a helper that cannot answer as incompatible. */
+#ifdef FR_UDF_REPORT_VERSION_OVERRIDE
+
+/* TEST BUILDS ONLY.
+ *
+ * The override exists so a test can exercise the mismatch branch with a
+ * helper that is otherwise perfectly loadable -- without it the "mismatch"
+ * test would refuse because the 3.12 libpython was absent, and would pass
+ * for the wrong reason even with the comparison deleted.
+ *
+ * It deliberately exports an EXTRA symbol, not just a different return
+ * value. A bare #define leaves nothing to inspect, so release_check could
+ * not prove the override cannot reach a release artifact; a named symbol
+ * can be looked for in the ELF dynamic symbol table and its absence
+ * asserted. See python/release_check.py. */
+unsigned long fr_udf_TEST_VERSION_OVERRIDE_MARKER(void) { return 1UL; }
+
+unsigned long fr_udf_built_version(void)
+{
+    return (unsigned long)(FR_UDF_REPORT_VERSION_OVERRIDE);
+}
+#else
+unsigned long fr_udf_built_version(void)
+{
+    return (unsigned long)PY_VERSION_HEX;
+}
+#endif
+
 int fr_udf_before_fork(void)
 {
     if (!initialized) {

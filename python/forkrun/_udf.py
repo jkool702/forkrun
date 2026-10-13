@@ -32,7 +32,80 @@ import sys
 import sysconfig
 
 __all__ = ["UDFError", "helper_path", "roots_spec", "parse_spec",
-           "udf_payload"]
+           "udf_payload", "caller_version_arg", "helper_fingerprint",
+           "known_incompatible", "record_incompatible", "clear_incompatibles"]
+
+
+# --- compatibility state -------------------------------------------------
+#
+# A confirmed mismatch is remembered so the same unusable artifact is not
+# re-probed (re-exec + dlopen) on every call. Three rules, each from
+# review:
+#
+#   1. This cache may only ever DISABLE the accelerator. It must never
+#      authorise running an unverified helper.
+#   2. The key is a METADATA FINGERPRINT, not a cryptographic identity.
+#      A collision can unnecessarily disable cleanroom execution; it can
+#      never enable an unverified one.
+#   3. A PROBE TIMEOUT is inconclusive and is therefore NOT cached. Only a
+#      conclusive mismatch or a missing-version-symbol result is.
+_UDF_VERSION = sys.version_info[:2]
+_INCOMPATIBLE = {}          # fingerprint -> human-readable reason
+
+
+def caller_version_arg():
+    """``--caller-version=MAJOR.MINOR`` from THIS interpreter.
+
+    A declaration, not an authenticated identity: after exec the launcher
+    cannot know which interpreter started it. It comes from
+    sys.version_info and nothing else -- not an environment variable, not
+    a separate probe -- so the declaration is not forgeable by a stray
+    FORKRUN_* in the environment.
+    """
+    return "--caller-version=%d.%d" % _UDF_VERSION
+
+
+def helper_fingerprint(path):
+    """Metadata fingerprint of a helper artifact, or None if unavailable.
+
+    ``st_ctime_ns`` is included alongside mtime so an in-place rewrite that
+    restores the modification time still changes the key.
+
+    Returns None when the identity cannot be obtained -- in which case
+    NOTHING is cached, because a missing fingerprint cannot safely stand
+    in for "same artifact".
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def known_incompatible(path):
+    """Reason this exact artifact was refused, or None."""
+    if not path:
+        return None
+    fp = helper_fingerprint(path)
+    if fp is None:
+        return None
+    return _INCOMPATIBLE.get(fp)
+
+
+def record_incompatible(path, reason):
+    """Remember a CONCLUSIVE refusal so it is not re-probed.
+
+    ``reason`` is the launcher diagnostic. Only conclusive outcomes are
+    recorded; a probe timeout must not be passed here.
+    """
+    fp = helper_fingerprint(path) if path else None
+    if fp is not None:
+        _INCOMPATIBLE[fp] = reason
+
+
+def clear_incompatibles():
+    """Test/operator hook: forget every recorded incompatibility."""
+    _INCOMPATIBLE.clear()
 
 
 class UDFError(Exception):
@@ -68,6 +141,9 @@ def helper_path():
         return cand
     # Fall back to a plain .so so a build that used a different suffix
     # still works, rather than silently disabling the feature.
+    #
+    # NOTE this fallback also defeats suffix-based IDENTIFICATION, which
+    # is why a filename match is not treated as a version check anywhere.
     plain = os.path.join(here, "_fr_udf.so")
     return plain if os.path.exists(plain) else None
 
