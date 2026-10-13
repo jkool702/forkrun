@@ -63,10 +63,42 @@ def _has_numa():
 
 
 def _multi_node():
+    """Can the per-node recovery path be exercised here?
+
+    Was `len(detect_numa_nodes()) >= 2` -- a check for PHYSICAL NUMA
+    hardware -- on a suite whose tests all use FORCED-LOGICAL nodes
+    (`nodes="@2"`) and which contains no mbind, no sched_setaffinity and
+    no other physical-placement call. `detect_numa_nodes` appeared
+    nowhere in the file except inside this guard.
+
+    The consequence was that all 7 Tier-3 recovery tests skipped on every
+    UMA machine, including CI, while the sibling `test_numa_bump.py` --
+    which states outright that forced-logical `@4` exercises "real
+    per-node machinery on any" host -- ran unconditionally. The suite
+    that verifies escrow routing by `txn->node`, per-node rings and
+    respawn pinning was therefore the one suite never executed.
+
+    Forced-logical `@2` was verified to work on this UMA host before
+    relaxing the guard: map/stream at `@2` and `@4` both reproduce the
+    input byte-exactly under orchestrator=True and False.
+
+    WHAT THIS DOES AND DOES NOT COVER. It covers the engine's per-node
+    bookkeeping: escrow routing by node, per-node rings, respawn node
+    stability, and cross-node recovery. It does NOT cover physical
+    memory locality, cross-socket placement, or real bandwidth
+    behaviour, which need actual NUMA hardware or a `numa=fake=N` boot.
+    `FORCED_LOGICAL_ONLY` below reports which kind of run this is so the
+    distinction is never silently lost.
+    """
+    return True
+
+
+def FORCED_LOGICAL_ONLY():
+    """True when running forced-logical nodes on non-NUMA hardware."""
     try:
-        return len(detect_numa_nodes()) >= 2
+        return len(detect_numa_nodes()) < 2
     except Exception:
-        return False
+        return True
 
 
 def _up(batch):
@@ -139,6 +171,24 @@ def _write_count_kill_module(plugin_dir, name, limit):
 @unittest.skipUnless(_multi_node(), "Requires multi-node NUMA")
 class TestNumaRecovery(unittest.TestCase):
     """NUMA Tier-3: WorkerTxn recovery across NUMA nodes."""
+
+    def test_report_topology_kind(self):
+        """State plainly which kind of NUMA this run exercised.
+
+        Without this a green run reads as physical-NUMA validation. It is
+        not, on a UMA host: the per-node machinery is real, the placement
+        is forced-logical.
+        """
+        forced = FORCED_LOGICAL_ONLY()
+        if forced:
+            print("\n  [NUMA] running FORCED-LOGICAL nodes on UMA hardware "
+                  "(%d node(s) online): per-node escrow/ring/respawn "
+                  "routing is exercised; physical locality and "
+                  "cross-socket placement are NOT."
+                  % len(detect_numa_nodes()))
+        else:
+            print("\n  [NUMA] %d physical node(s) online" %
+                  len(detect_numa_nodes()))
 
     def tearDown(self):
         assert_no_zombies(self)

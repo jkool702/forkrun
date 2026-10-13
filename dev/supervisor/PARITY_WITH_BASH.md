@@ -204,6 +204,42 @@ change accompanied it (`frun.bash` and `forkrun_ring.c` are untouched
 across this work), which is the documented exemption in §5's matrix
 policy rule.
 
+## NUMA validation status
+
+`MAINTAINERS.md` §4.1 requires the suite on both UMA and NUMA, and names
+`numa=fake=4` as the fallback. Two things about that, measured rather
+than assumed:
+
+**`numa=fake=4` was never actually needed, and never used.** This host
+is single-node UMA (28 CPUs, 1 online node) and rebooting it with a fake
+topology is not available here. But the project already has the right
+mechanism: forced-logical nodes (`nodes="@2"`). `test_numa_bump.py`
+states it outright — forced-logical `@4` exercises "real per-node
+machinery on any" host — and runs unconditionally. Verified before
+relying on it: `map`/`stream` at `@2` and `@4` both reproduce the input
+byte-exactly, under `orchestrator=True` and `False`.
+
+**The NUMA *recovery* suite was the one exception, and it never ran.**
+`test_numa_recovery.py` gated all 7 Tier-3 tests on
+`len(detect_numa_nodes()) >= 2` — a check for *physical* hardware — while
+the tests themselves use forced-logical `nodes="@2"` and contain no
+`mbind`, no `sched_setaffinity`, and no other placement call.
+`detect_numa_nodes` appeared nowhere in the file except inside that guard.
+
+So the suite verifying escrow routing by `txn->node`, per-node rings,
+respawn node stability and cross-node recovery was the one suite that
+skipped on every UMA machine, including CI: **7 tests of dead coverage**
+in the one area where silent loss is a documented property of the
+born-local topology. Guard relaxed; all 7 now run and pass. The suite
+prints which kind of NUMA it exercised, so a green forced-logical run is
+never mistaken for physical-NUMA validation.
+
+**Still outstanding:** physical locality, cross-socket placement and real
+bandwidth behaviour need actual NUMA hardware or a `numa=fake=N` boot.
+Forced-logical covers the engine's per-node bookkeeping, not the
+kernel's placement. That gap is unchanged by this work and is named here
+rather than left for someone to assume away.
+
 ## The failure mode this is meant to prevent
 
 Four defects in four consecutive rounds shared a shape: **an assertion
