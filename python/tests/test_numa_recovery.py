@@ -195,15 +195,24 @@ def _assert_deaths_occurred(testcase, plugin_dir, name, expect, where):
     twice would satisfy a bare count without ever exercising the
     escrow routing that a second WORKER's death does.
 
-    What this does NOT establish: which logical node each death was
-    on. The payload runs inside the worker and `Batch` exposes no
-    node or wid, and under forced-logical there is no physical
-    binding to observe. So this test claims "several distinct workers
-    died and all their work was recovered", not "deaths spanned both
-    nodes". The per-node routing claim rests on
+    Narrowed twice, because both earlier wordings overclaimed.
+
+    It does NOT establish which logical node each death was on: the
+    payload runs inside the worker, `Batch` exposes no node or wid, and
+    under forced-logical there is no physical binding to observe.
+
+    Nor, per the round-9 review, does it establish DISTINCT WORKER
+    SLOTS. A pid-named marker proves a distinct PROCESS died. One slot
+    can die, respawn under a new pid, and die again -- so two distinct
+    markers may be two generations of the SAME slot. Recording the wid
+    and generation would be needed for the stronger claim, and that
+    needs supervisor instrumentation this suite does not have.
+
+    So the claim is exactly: several distinct process generations died
+    during a forced-logical run, and the run still recovered its
+    expected output. Per-slot and per-node routing rest on
     test_escrow_routing_per_node's structural assertions plus the
-    completeness assertions here, which is why this docstring is
-    narrower than the test name suggests.
+    completeness checks here.
     """
     kdir = os.path.join(plugin_dir, "kills")
     if not os.path.isdir(kdir):
@@ -290,7 +299,7 @@ class TestNumaRecovery(unittest.TestCase):
            precondition all integration tests below rely on).
         3. The engine routes escrow by the WORKER's node (txn->node),
            not the parent's: covered end-to-end by
-           test_respawn_on_correct_node / test_numa_map_recovery —
+           test_multiple_process_deaths_all_recover / test_numa_map_recovery —
            any misrouting strands a batch and fails completeness.
         """
         from forkrun._numa import distribute_workers, wid_to_node
@@ -304,7 +313,8 @@ class TestNumaRecovery(unittest.TestCase):
         # Python can call a function twice.
         #
         # The property is real and is established at runtime instead, by
-        # test_respawn_on_correct_node: a worker dies, the replacement is
+        # test_multiple_process_deaths_all_recover: a worker dies, the
+        # replacement is
         # observed, and the test checks which logical node owns it. That
         # is the only version of this claim worth making, because it is
         # the one that can fail.
@@ -317,11 +327,25 @@ class TestNumaRecovery(unittest.TestCase):
                               (node, workers))
         self.assertEqual(distribute_workers(2, 4), [(0, 1), (1, 1)])
 
-    def test_respawn_on_correct_node(self):
-        """Kills across both nodes (count-gated) -> all recovered,
-        output complete. A respawn pinned to the wrong node (or an
-        escrow deposited to the wrong node's pipe) would strand a
-        batch and the completeness assertion would fail."""
+    def test_multiple_process_deaths_all_recover(self):
+        """RENAMED (round-9 review) from test_respawn_on_correct_node.
+
+        The old name claimed node placement the test cannot observe. A
+        payload inside a worker has no access to its logical node or wid:
+        `Batch` exposes neither, and forced-logual execution provides no
+        physical binding to inspect. The docstring claimed deaths "across
+        both nodes" and a respawn "pinned to the wrong node", neither of
+        which is established here.
+
+        What is established: several distinct process generations die
+        mid-run, and the run still recovers its complete expected output.
+        A misrouted escrow would strand a batch and the completeness
+        assertion would fail, so per-node ROUTING is exercised -- but the
+        node a given worker occupied is not verified, and the test no
+        longer claims it.
+
+        Node-level routing rests on test_escrow_routing_per_node's
+        structural assertions over wid_to_node()."""
         path = _make_input(3000)
         plugin_dir = tempfile.mkdtemp(prefix="w34nr_")
         try:
@@ -393,9 +417,13 @@ class TestNumaRecovery(unittest.TestCase):
                 res = list(forkrun.stream(spec, path, workers=4,
                                           nodes=NODES_2, order="none"))
             finally:
-                _assert_injection_fired(self, 
-                    plugin_dir, "w34ns_mod", "test_numa_stream_recovery")
                 sys.path.remove(plugin_dir)
+            # OUTSIDE the finally (round-9 review): an assertion inside
+            # it can mask the original failure. If the stream raises, the
+            # real error is what matters, and a "marker missing" failure
+            # on top of it hides why.
+            _assert_injection_fired(self, plugin_dir, "w34ns_mod",
+                                    "test_numa_stream_recovery")
             healthy = list(forkrun.stream(_up, path, workers=4,
                                           nodes=NODES_2, order="none"))
             self.assertEqual(

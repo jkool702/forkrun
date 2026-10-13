@@ -438,8 +438,18 @@ class TestTrapACK(unittest.TestCase):
         """Retry-always-fail poisons via escrow; run completes short."""
         path = _make_input(1000)
         try:
+            # Selective failure (round-9 review). The payload raised for
+            # EVERY batch, so the result was empty and
+            # `set(got_lines) <= set(healthy_lines)` was trivially true of
+            # the empty set -- it established nothing about surviving
+            # content, and an early abort after the warning would also
+            # have satisfied it. Failing only EVEN batches leaves real
+            # output behind, so the surviving set can be checked against
+            # what a correct skip should leave.
             def _boom(batch):
-                raise ValueError("nope")
+                if batch.batch_index % 2 == 0:
+                    raise ValueError("nope")
+                return bytes(batch.data).upper()
             with _capture_stderr():
                 res = forkrun.map(_boom, path, workers=2,
                                   orchestrator=True, on_error="retry",
@@ -457,23 +467,44 @@ class TestTrapACK(unittest.TestCase):
             # surviving content must be the healthy content minus whole
             # records -- dropped, never altered or duplicated.
             self.assertLess(len(res), len(healthy))
-            self.assertIn(
-                "poison", _LAST_STDERR[0].lower(),
-                "the poison pill skipped batches without telling anyone; a "
-                "silent skip is the failure this guards")
+            # PINNED to the per-batch warning, not merely the word.
+            #
+            # Mutation-checked: silencing every "Skipping poisoned batch"
+            # fprintf in _shim.c still passed a bare
+            # assertIn("poison", stderr), because the run ALSO prints
+            # "N poisoned batch(es) skipped" and a POISONED BATCH
+            # SUMMARY. So the assertion was satisfiable without the
+            # notification the test is about.
+            self.assertRegex(
+                _LAST_STDERR[0],
+                r"\[WARN\]: Skipping poisoned batch \d+",
+                "the per-batch poison warning is missing; stderr had:\n%s"
+                % _LAST_STDERR[0][:400])
             healthy_lines = sorted(
                 b"".join(bytes(x) for x in healthy if x is not None)
                 .splitlines())
             got_lines = sorted(
                 b"".join(bytes(x) for x in res if x is not None)
                 .splitlines())
+            # There IS surviving content now, so these are load-bearing.
+            self.assertTrue(
+                got_lines, "no output survived; the selective payload "
+                           "should have let the odd batches through")
             self.assertTrue(
                 set(got_lines) <= set(healthy_lines),
                 "the poisoned run produced lines the healthy run did not, "
                 "so records were altered rather than skipped")
             self.assertLess(
                 len(got_lines), len(healthy_lines),
-                "nothing was actually skipped")
+                "nothing was actually skipped -- every batch should have "
+                "been poisoned by the even-index rule")
+            # And the surviving content is a PROPER, substantial subset:
+            # roughly the odd half, not a token remnant.
+            self.assertGreater(
+                len(got_lines), 0.4 * len(healthy_lines),
+                "only %d of %d lines survived; that looks like an early "
+                "abort rather than selective skipping"
+                % (len(got_lines), len(healthy_lines)))
         finally:
             os.unlink(path)
 
