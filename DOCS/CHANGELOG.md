@@ -6,7 +6,29 @@ Scope: the UMA C-plugin cleanroom only. NUMA, Python UDF, a libpython
 helper and dynamic worker spawning are explicitly NOT implemented and
 remain future work.
 
-### Diagnostics
+### Python UDF: carrying vs reachability (CR-FIX1)
+
+`CLEANROOM_HANDOVER.md` recorded Python UDF as "Structurally impossible;
+do not attempt it". That ruling is **correct about carrying and incorrect
+about reachability**, and is superseded in part.
+
+A UDF callable is a live Python closure, and crossing `exec` destroys an
+object graph — so a *closure* still cannot cross, and coverage stays
+materialized + C plugin for that form. But `exec` does not prevent the far
+side from **re-creating** an interpreter and re-importing a **module
+reference**, which is exactly what `frun.bash` already does for the shell
+(`exec -c bash --norc --noprofile`, with `_FR_IN_CLEANROOM=1` as a
+recursion guard).
+
+A module function reference is therefore reachable, and is the
+`mode="python"` work item (Option A: an optional helper `.so` linking
+CPython, `dlopen`ed by the launcher only in that mode — substrate and
+launcher stay Python-free). "Reachable" is not "cheap": the seam set
+`CLEANROOM_DESIGN.md` prices is the real work.
+
+Updated `CLEANROOM_HANDOVER.md` to carry the distinction rather than the
+absolute, so the reason a closure cannot cross stays findable.
+
 
 **Opt-in structured trace of the launcher (C0.2 Phase A).** Set
 `FORKRUN_CLEANROOM_TRACE=1` and each run records a monotonic timestamp,

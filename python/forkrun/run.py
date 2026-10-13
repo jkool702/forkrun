@@ -1009,6 +1009,48 @@ def _describe_launcher_failure(status):
     return label
 
 
+def _read_launcher_stderr(fd, limit=400):
+    """Tail of what the launcher and its children wrote to stderr.
+
+    A launcher failure with no reason is close to undebuggable. The
+    launcher's own diagnostics are the only place the real cause appears
+    -- `sym()` exits 69 with "missing fr_py_worker_spawn_loop" when the
+    substrate predates a worker loop, and the `--plugin`/`--func` path
+    reports its own dlopen failure. Inheriting fd 2 put those bytes on
+    the caller's terminal, where a test or a captured exception never
+    sees them, so the Python-side error could only say
+    "exit 127 (unknown exit code 127)".
+
+    That is not hypothetical. A stale `libforkrun_python.so` is an
+    ORDINARY state, not an anomaly: both build artifacts are
+    gitignored, so a checkout that has not been rebuilt since a change
+    to the substrate has exactly this failure, and it presented as a
+    generic exec failure with no hint that a rebuild was the fix.
+
+    A memfd, not a pipe: every descendant writes to fd 2, and a pipe
+    would deadlock the launcher once 64KB accumulated with nobody
+    draining it. The size is final after waitpid, so this is read once.
+    """
+    if fd is None or fd < 0:
+        return ""
+    try:
+        size = os.fstat(fd).st_size
+        if size <= 0:
+            return ""
+        with open(fd, "rb", closefd=False) as fh:
+            fh.seek(max(0, size - limit))
+            tail = fh.read(limit)
+    except OSError:
+        return ""
+    text = tail.decode("utf-8", "replace").strip()
+    if not text:
+        return ""
+    # Keep the LAST line: the launcher interleaves children, and the
+    # final "fatal -- ..." summary is the one that names the cause.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
 def _source_is_reopenable(source):
     """True if a fallback can re-read the input from the beginning.
 
@@ -1097,6 +1139,12 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # it, _LAST_STATS["poisoned"] stayed 0 and a run with 10 poisoned
     # batches reported total=completed instead of completed+10.
     stats_fd = os.memfd_create("fr_cleanroom_stats")
+    # The launcher's own stderr, captured so a failure can say WHY. See
+    # _read_launcher_stderr: a stale substrate .so otherwise presents as
+    # "exit 127 (unknown exit code 127)" with the real cause --
+    # "missing fr_py_worker_spawn_loop" -- landing on the caller's
+    # terminal where no test or captured exception can see it.
+    errfd = os.memfd_create("fr_cleanroom_err")
     # Pre-size so every worker owns a real slot. A memfd starts
     # zero-filled, which the slot-count convention relies on.
     #
@@ -1201,6 +1249,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     pid = os.fork()
     if pid == 0:
         try:
+            os.dup2(errfd, 2)
             os.execv(launcher, argv)
         except BaseException:
             os._exit(127)
@@ -1237,9 +1286,11 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         # DECISION-03 section 7.2: the replay policy lives in a named
         # function so it can be tested without re-implementing it.
         may_fallback = _cleanroom_may_fallback(status)
+        _why_launcher = _read_launcher_stderr(errfd)
         _warnings.warn(
-            "forkrun: cleanroom launcher failed (%s) — %s"
+            "forkrun: cleanroom launcher failed (%s)%s — %s"
             % (_describe_launcher_failure(status),
+               ": " + _why_launcher if _why_launcher else "",
                "falling back to the in-process path" if may_fallback
                else "NOT falling back"),
             UserWarning, stacklevel=3)

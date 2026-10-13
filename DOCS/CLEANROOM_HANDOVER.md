@@ -196,8 +196,22 @@ yet handle:
   cannot do that — the whole point of exec is that you no longer share the
   parent's Python state).
 - **Python UDF callables.** A UDF is a live Python closure. Crossing `exec`
-  destroys it. Structurally impossible; do not attempt it. Coverage stays
-  materialized + C plugin.
+  destroys it, so a *closure* cannot be **carried**. Coverage stays
+  materialized + C plugin for the callable form.
+
+  **Superseded in part — see `CLEANROOM_DESIGN.md` "CR-FIX1 correction to
+  the ruling below".** The original text here read "Structurally
+  impossible; do not attempt it", which is correct about **carrying** and
+  wrong about **reachability**: `exec` prevents transporting an object
+  graph, but the far side can **re-create** an interpreter and re-import a
+  *module* reference — the same technique `frun.bash` already uses for the
+  shell. A callable closure remains out of reach; a module function
+  reference does not, and is the `mode="python"` work item.
+
+  Kept rather than deleted because the distinction is the whole point:
+  a reader who needs to know why a closure cannot cross should still find
+  the reason here, and should not have to infer that "possible" means
+  "easy".
 - **Fault injection / poison retry.** The test suite drives hooks through the
   Python path that the launcher does not yet implement.
 

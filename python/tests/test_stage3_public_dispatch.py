@@ -115,5 +115,46 @@ class TestSpawnPublicDispatch(unittest.TestCase):
         self.assertIn("spawn", why.lower())
 
 
+class TestLauncherFailureIsDiagnosable(unittest.TestCase):
+    """A launcher failure must say WHY, not just what.
+
+    Both build artifacts -- `libforkrun_python.so` and
+    `_forkrun_cleanroom` -- are gitignored, so a substrate that predates
+    a change is an ORDINARY state, not an anomaly. When it happens the
+    launcher exits 69 from `sym()` with "missing fr_py_worker_spawn_loop"
+    on its own stderr, but that used to be inherited straight to the
+    caller's terminal: invisible to any test, and invisible to a caller
+    reading a captured exception. The Python-side error could only say
+    "exit 127 (unknown exit code 127)", which points at the exec, not at
+    the rebuild that fixes it.
+    """
+
+    def test_launcher_stderr_tail_is_readable(self):
+        from forkrun.run import _read_launcher_stderr
+        fd = os.memfd_create("t")
+        os.write(fd, b"some chatter\n"
+                     b"forkrun-cleanroom: missing fr_py_worker_spawn_loop\n")
+        self.assertEqual("forkrun-cleanroom: missing fr_py_worker_spawn_loop",
+                         _read_launcher_stderr(fd))
+        os.close(fd)
+
+    def test_empty_and_absent_stderr_are_not_invented(self):
+        from forkrun.run import _read_launcher_stderr
+        self.assertEqual("", _read_launcher_stderr(None),
+                         "a None fd must not produce a fabricated reason")
+        fd = os.memfd_create("t")
+        self.assertEqual("", _read_launcher_stderr(fd))
+        os.close(fd)
+
+    def test_only_the_tail_is_returned(self):
+        """The last line names the cause; earlier lines are interleaved
+        child chatter and would bury it."""
+        from forkrun.run import _read_launcher_stderr
+        fd = os.memfd_create("t")
+        os.write(fd, b"x" * 5000 + b"\nTHE ACTUAL CAUSE\n")
+        self.assertEqual("THE ACTUAL CAUSE", _read_launcher_stderr(fd))
+        os.close(fd)
+
+
 if __name__ == "__main__":
     unittest.main()
