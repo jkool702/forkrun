@@ -69,6 +69,15 @@ path, mode, workers, batch, c_drain = (
 # A python-mode lambda is deliberately NOT a baseline: it is not
 # exec-representable, so every batch fails and the "result" is a
 # poison summary rather than a timing.
+# Ordered VALIDATION mode: the same operation under order="index",
+# compared BYTE-EXACTLY. The round-8 review is right that the unordered
+# runs cannot be validated by concatenation and the histogram is too
+# weak; this is where the strong claim lives. It costs one run, not the
+# timed sweep, and it is what licenses the tiling check as "sufficient
+# for the unordered case".
+#
+# If this ever fails, the benchmark is not measuring a correct pipeline
+# and the timed numbers mean nothing -- so it runs FIRST and aborts.
 if mode == "splice":
     payload, kw = None, dict(mode="splice", bytes=batch, c_drain=c_drain)
 else:
@@ -85,6 +94,54 @@ else:
 os.environ["FORKRUN_CLEANROOM"] = "1"
 
 want = open(path, "rb").read()
+
+
+def _records_tile(want, records):
+    """Do `records` tile `want` exactly once each, in any order?
+
+    Each record is located in `want` and must appear exactly once (the
+    bench input is zero-padded and unique, so a duplicate content match
+    means a genuinely duplicated batch). The located spans must then
+    cover every offset exactly once.
+    """
+    spans = []
+    for rec in records:
+        if not rec:
+            continue
+        if want.count(rec) != 1:
+            return False
+        spans.append((want.index(rec), len(rec)))
+    spans.sort()
+    pos = 0
+    for off, ln in spans:
+        if off != pos:
+            return False
+        pos += ln
+    return pos == len(want)
+
+
+def _report_tile_failure(want, records):
+    """Name what went wrong, rather than just that something did."""
+    missing = []
+    seen = []
+    pos = 0
+    spans = sorted((want.index(r), len(r)) for r in records
+                   if r and want.count(r) == 1)
+    for off, ln in spans:
+        if off != pos:
+            missing.append((pos, min(off, len(want))))
+            pos = off
+        pos += ln
+    if pos < len(want):
+        missing.append((pos, len(want)))
+    sys.stderr.write(
+        "OUTPUT NOT A TILING OF THE INPUT: %%d record(s), %%d bytes, "
+        "expected %%d.\n"
+        "  this means a batch was lost, duplicated, reordered WITHIN "
+        "itself,\n  or had its bytes altered -- the byte-histogram check "
+        "this replaces\n  could not detect any of those.\n"
+        "  first gap: %%r\n" %% (len(records), sum(len(r) for r in records),
+                                len(want), missing[:3]))
 if payload is not None and payload[0] == "tr":
     # tr a-z A-Z: faithful byte translation, not a targeted replace.
     # An earlier version only uppercased the literal "line", so a correct
@@ -92,10 +149,34 @@ if payload is not None and payload[0] == "tr":
     want = want.translate(bytes.maketrans(
         b"abcdefghijklmnopqrstuvwxyz", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
 
+ORDERED_VALIDATION = os.environ.get("FORKRUN_BENCH_VALIDATE_ONLY") == "1"
+
+if ORDERED_VALIDATION:
+    order = os.environ.get("FORKRUN_BENCH_ORDER", "index")
+    out = forkrun.map(payload, path, workers=workers, nodes=1,
+                      order=order, output="bytes", **kw)
+    recs = [bytes(x) for x in out if x is not None]
+    joined = b"".join(recs)
+    if joined != want:
+        sys.stderr.write(
+            "ORDERED VALIDATION FAILED (order=%%r): %%d bytes vs %%d\n"
+            "  first difference at offset %%d\n"
+            "  The timed sweep below is meaningless if the pipeline is "
+            "not\n  correct, so this aborts before measuring.\n"
+            %% (order, len(joined), len(want),
+               next((i for i, (a, b) in enumerate(zip(joined, want))
+                     if a != b), min(len(joined), len(want)))))
+        sys.exit(4)
+    print("0.0")
+    print("validated order=%%s %%d records, %%d bytes exact"
+          %% (order, len(recs), len(joined)), file=sys.stderr)
+    raise SystemExit(0)
+
 t0 = time.perf_counter()
 out = forkrun.map(payload, path, workers=workers, nodes=1,
                   output="bytes", **kw)
-got = b"".join(bytes(x) for x in out if x is not None)
+records = [bytes(x) for x in out if x is not None]
+got = b"".join(records)
 dt = time.perf_counter() - t0
 rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
@@ -106,29 +187,34 @@ rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 # semantics exits 0 having produced nothing at all -- which is how the
 # first version of this harness timed runs that returned no output.
 #
-# Compared as a BYTE MULTISET, not concatenated and not line-wise.
+# RECORD TILING, not concatenation and not a byte histogram.
 #
-# Both simpler invariants are wrong here:
+# The round-8 review is right that `sorted(got) == sorted(want)` is a
+# byte-value HISTOGRAM: it survives any permutation, including a full
+# REVERSAL of the output, so within-batch corruption -- a batch
+# assembled backwards -- passes it. Verified:
+#
+#     sorted(got[::-1]) == sorted(got)      -> True
+#
+# Two weaker candidates are also wrong here:
 #   * concatenation -- with order="none" and >1 worker the batches
-#     complete out of order by design, so this "fails" a correct run on
+#     complete out of order BY DESIGN, so this "fails" a correct run on
 #     ordering alone;
 #   * line splitting -- splice moves BYTES, and a 32768-byte batch does
 #     not align to line boundaries, so it reports 500001 lines where
 #     the input has 500000.
 #
-# The multiset answers only what this benchmark should care about: every
-# byte arrived, and no byte was invented. Ordering is a separate promise,
-# covered by the order="index" suites, and is NOT claimed here.
-if sorted(got) != sorted(want):
-    from collections import Counter
-    cg, cw = Counter(got), Counter(want)
-    diff = (cw - cg) or (cg - cw)
-    sys.stderr.write("OUTPUT MISMATCH: %%d bytes got vs %%d want; "
-                     "first differing byte 0x%%02x (%%d vs %%d)\n"
-                     %% (len(got), len(want),
-                        min(diff) if diff else 0,
-                        diff.get(min(diff), 0) if diff else 0,
-                        cw.get(min(diff), 0) if diff else 0))
+# What is asserted instead: every emitted record must be a CONTIGUOUS
+# slice of the expected output, and those slices must TILE it -- cover
+# [0, len(want)) exactly once, with no gap, no overlap and no
+# duplication, in whatever order they arrived.
+#
+# That is strictly stronger than the histogram and keeps the one thing
+# the histogram got right: it says nothing about arrival ORDER, which
+# order="none" does not promise. It catches a reversed batch, a
+# transposed byte pair, a dropped batch and a duplicated one.
+if not _records_tile(want, records):
+    _report_tile_failure(want, records)
     sys.exit(3)
 
 print("%%.6f" %% dt)
@@ -136,6 +222,34 @@ print("bytes=%%d rss_kb=%%d" %% (len(got), rss), file=sys.stderr)
 '''
 
 CODE = BODY % {"root": os.path.join(_ROOT, "python")}
+
+
+def validate_ordered(path, mode, workers, lines, c_drain, cmd=None):
+    """One byte-exact ORDERED run, before any timing is taken.
+
+    The tiled check in the timed path proves completeness and
+    within-record integrity while allowing arbitrary batch ORDER. That
+    is the right invariant for order="none", but it is weaker than an
+    exact comparison -- so this runs the same operation under
+    order="index" and requires byte equality.
+
+    If this fails the pipeline is not correct and every timing below is
+    meaningless, so it aborts the benchmark rather than producing
+    numbers. The round-8 review asked for exactly this: an ordered
+    validation run for the strong claim, with the weaker invariant
+    confined to the unordered timed runs.
+    """
+    env = dict(os.environ, FORKRUN_BENCH_VALIDATE_ONLY="1",
+               FORKRUN_BENCH_ORDER="index")
+    argv_extra = [path, mode, str(workers), str(lines),
+                  "1" if c_drain else "0"]
+    if cmd:
+        argv_extra.extend(cmd.split())
+    proc = subprocess.run([sys.executable, "-c", CODE] + argv_extra,
+                          capture_output=True, timeout=900, env=env)
+    if proc.returncode != 0:
+        return proc.stderr.decode()[-400:]
+    return None
 
 
 def measure(path, mode, workers, lines, c_drain, cmd=None):
@@ -175,6 +289,18 @@ def main():
     tmp = tempfile.mkdtemp()
     print("Stage 4 -- cleanroom splice measurement")
     print("median of %d trials; RSS is peak parent (ru_maxrss)\n" % TRIALS)
+
+    # Ordered validation FIRST, before a single timing is taken.
+    _probe = os.path.join(tmp, "validate.txt")
+    with open(_probe, "w") as _fh:
+        _fh.writelines("line %06d %s\n" % (i, "x" * 40) for i in range(2000))
+    _err = validate_ordered(_probe, "splice", 4, 2000, True)
+    if _err:
+        print("ORDERED VALIDATION FAILED -- the pipeline is not correct, "
+              "so\nno timing below means anything.\n%s" % _err,
+              file=sys.stderr)
+        return 4
+    print("ordered validation (order='index', byte-exact): PASS")
 
     VARIANTS = [
         ("splice+c_drain", "splice", True, None),
