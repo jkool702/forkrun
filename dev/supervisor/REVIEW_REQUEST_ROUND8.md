@@ -1,6 +1,11 @@
 # External review request — round 8
 
-Branch `NEW/REFACTOR4.2`, head **`9e4a599e`**. Frozen ring files
+Branch `NEW/REFACTOR4.2`. Review the **branch head** — this file is
+added by the commit immediately after `9e4a599e`, so pin the head rather
+than a SHA from this paragraph if you want the request itself in your
+checkout. `9e4a599e` is the last commit that changes tested code.
+
+Frozen ring files
 (`forkrun_ring.c`, `forkrun_substrate.h`, `substratestubs.c`) untouched
 across `c72d27c6..HEAD`.
 
