@@ -706,18 +706,59 @@ Two findings worth stating plainly:
   so large.
 
 **Recommendation: retain the C splice loop, and do NOT wire it into the
-launcher.** The measurement answers the question the design posed — is
-the loop worth keeping — with a decisive yes. It does not answer whether
-launcher integration is worth the mode-specific dispatch and supervision
-work, because the win comes from bypassing the per-batch payload
-invocation, which splice already does in-process. Adding a third launcher
-mode to capture a path that is already 2–10x ahead of the boundary it
-would cross is not justified by these numbers.
+launcher — as a scope and maintenance decision, not as a measured
+rejection.**
+
+**Framing corrected (round-8 review).** An earlier version of this
+section presented the recommendation as though the measurement had
+tested launcher-splice and found it wanting. It did not. What was
+measured is that a direct byte-moving path beats invoking a no-op
+command (`spawn cat`) by ~10x. That establishes the value of the
+in-process splice loop. It says nothing about a launcher-splice
+integration, because that integration does not exist and was never
+benchmarked.
+
+So the decision rests on two things the measurement does support:
+
+1. The loop is worth keeping — decisively, and it is already available.
+2. Building a third launcher mode would add mode-specific dispatch and
+   supervision work to capture a path with no identified user. That is a
+   complexity argument, and complexity arguments are what scope
+   decisions are made of.
+
+**If launcher-splice is ever wanted, it must be prototyped and measured
+against `spawn cat` under the workload that motivates it.** Recommending
+it against a number that measured something else is how the earlier
+version of this section overreached.
+
+The win is also specific: it is against a no-op command. For a command
+that does real work, the user-visible benefit is unknown and this
+measurement cannot bound it.
 
 Caveat, stated because it bounds the result: this compares in-process
 splice against launcher-spawn. It does **not** compare against a
 launcher-splice integration, which does not exist. If that is built
 later, it must be measured against `spawn cat` before retention.
+
+### What the integrity check changed (round 8)
+
+The first corrected version validated output as a byte-value HISTOGRAM,
+`sorted(got) == sorted(want)`. That is not an integrity check: it
+survives a full reversal of the output, so a batch assembled backwards
+passes it.
+
+The check is now **record tiling** — every emitted record must be a
+contiguous slice of the expected output, and those slices must cover
+`[0, len(want))` exactly once, in whatever order they arrived. That
+rejects a reversed batch, a dropped batch and a duplicated batch, while
+still asserting nothing about arrival order, which `order="none"` does
+not promise.
+
+Stronger still, a byte-exact **ordered validation run** (`order="index"`)
+executes before any timing is taken and aborts the benchmark if the
+pipeline is not correct. So the strong claim lives in the ordered run
+and the order-appropriate weaker form is confined to the unordered timed
+runs.
 
 ### What the corrected measurement changed
 

@@ -125,6 +125,22 @@ were missed:
   same words. That one was arrived at correctly, but by reasoning from
   first principles rather than by reading.
 
+  **Correction (round-8 review).** "Independently confirms" was too
+  strong and is withdrawn. §7.3.3 says to compare *line multisets or
+  joined bytes* across NUMA runs because batch granularity varies. It
+  says nothing about a global byte-value histogram — which is what the
+  harness actually used, and which is inadequate in a way §7.3.3 would
+  never have sanctioned:
+
+      sorted(got[::-1]) == sorted(want)   -> True
+
+  The Stage 4 check is now record TILING (every emitted record a
+  contiguous slice, the slices covering the output exactly once, arrival
+  order free), plus a byte-exact `order="index"` validation run before
+  any timing is taken. §7.3.3 is consistent with tiling but is not its
+  warrant; the warrant is that tiling rejects a reversed batch, a
+  dropped batch and a duplicated one, which a histogram cannot.
+
 ## SHAPES.md and EOF_PROTOCOL.md — the frame, and the checklist
 
 `SHAPES.md` is the architecture's mental model: one coordinate plane
