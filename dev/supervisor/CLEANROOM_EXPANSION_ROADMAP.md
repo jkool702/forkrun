@@ -969,9 +969,10 @@ on the frozen-engine decision.
 - M1/M2 curves published; crossover stated as a range or "not yet observed".
   **[PARTIAL]** See `C0.6_M2_MEASUREMENT.md`. Measured on 3.14.7 only, so
   the C0.5 matrix remains incomplete. Crossover **not yet observed**: pre-fork
-  is faster on 56/56 configurations, but the margin decays monotonically
-  6.86x -> 1.82x as parent RSS goes 0 -> 2127 MB. Fleet memory (children's
-  PSS/USS) is still unmeasured, which C0.6 also requires.
+  is faster on 56/56 configurations, but the margin decays ~3.5x across the
+  axis as parent RSS goes 0 -> 2127 MB. Fleet memory (children's PSS/USS) is
+  still unmeasured, which C0.6 also requires; the parent's own USS was
+  found miscalculated and is now fixed.
 - Interpreter matrix decision recorded (add 3.14, or revise the policy).
 - M1/M2 curves published; crossover stated as a range or "not yet observed".
 - Ordered-output certificate designed, implementation tracked separately.

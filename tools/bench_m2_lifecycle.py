@@ -81,7 +81,8 @@ def run_once(root, children, iters, parent_mb, thp):
     t_pre, fail_pre = float(f_pre.group(1)), int(f_pre.group(2))
 
     fields = {}
-    for key in ("parent_rss_kb", "parent_pss_kb", "parent_uss_kb"):
+    for key in ("parent_rss_cur_kb", "parent_rss_peak_kb",
+                "parent_pss_kb", "parent_uss_kb"):
         m = re.search(r"%s\s*:\s*(-?\d+)" % key, out)
         fields[key] = int(m.group(1)) if m else -1
 
@@ -112,15 +113,35 @@ def cell(root, children, parent_mb, thp, iters, trials):
             good.append(r)
         else:
             errs.append(e)
-    if not good:
-        return None, errs[0] if errs else "no data"
+    # A configuration is published ONLY if EVERY requested trial
+    # succeeded.
+    #
+    # The rule this harness documents -- and the rule
+    # tools/bench_splice.py follows -- is that a configuration with any
+    # child failure is DISCARDED, not averaged from the survivors. The
+    # code did not enforce it: `if not good` let a configuration
+    # requested with 3 trials publish on the strength of 1.
+    #
+    # That is not a hypothetical. The published table's minimum speedup
+    # is 1.05x, which is close enough to parity that the sample it rests
+    # on had better be the one that was asked for. A partial sample is
+    # also the shape that hides a flaky configuration: the trials that
+    # fail are the ones dropped, so the surviving ones are biased toward
+    # the favourable case by construction.
+    if len(good) != trials:
+        return None, ("only %d of %d trials succeeded -- %s"
+                      % (len(good), trials,
+                         errs[0] if errs else "no reason recorded"))
     speedups = sorted(g["speedup"] for g in good)
     return {
         "n": len(good),
         "speedup_median": statistics.median(speedups),
         "speedup_min": speedups[0],
         "speedup_max": speedups[-1],
-        "rss_kb": statistics.median(g["parent_rss_kb"] for g in good),
+        "rss_cur_kb": statistics.median(g["parent_rss_cur_kb"]
+                                        for g in good),
+        "rss_peak_kb": statistics.median(g["parent_rss_peak_kb"]
+                                         for g in good),
         "pss_kb": statistics.median(g["parent_pss_kb"] for g in good),
         "uss_kb": statistics.median(g["parent_uss_kb"] for g in good),
         "t_pre": statistics.median(g["t_pre"] for g in good),
@@ -154,8 +175,9 @@ def main():
     print("  thp knob    : prctl(PR_SET_THP_DISABLE); host default is "
           "'madvise'\n")
 
-    print("  %-9s %-6s %-9s %-9s %-9s %s"
-          % ("parent", "thp", "pre-fork", "post-fork", "speedup", "parent RSS/PSS/USS MB"))
+    print("  %-9s %-6s %-9s %-9s %-9s %-4s %s"
+          % ("parent", "thp", "pre-fork", "post-fork", "speedup", "n",
+             "parent RSScur/PSS/USS MB"))
     print("  " + "-" * 78)
 
     rows, skipped = [], []
@@ -172,11 +194,11 @@ def main():
                 rows.append((parent_mb, thp, children, c))
                 mb = lambda k: ("%.1f" % (c[k] / 1024.0)
                                 if c[k] >= 0 else "n/a")
-                print("  %-9s %-6s %-9.4f %-9.4f %5.2fx-%-5.2f %s/%s/%s"
+                print("  %-9s %-6s %-9.4f %-9.4f %5.2fx-%-5.2f %-4d %s/%s/%s"
                       % ("%d" % parent_mb if parent_mb else "0", thp,
                          c["t_pre"], c["t_post"],
-                         c["speedup_min"], c["speedup_max"],
-                         mb("rss_kb"), mb("pss_kb"), mb("uss_kb")))
+                         c["speedup_min"], c["speedup_max"], c["n"],
+                         mb("rss_cur_kb"), mb("pss_kb"), mb("uss_kb")))
 
     if skipped:
         print("\n  DISCARDED (not averaged, not compared):")

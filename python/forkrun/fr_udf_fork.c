@@ -84,27 +84,55 @@ static int inflate_parent_rss(long mb)
     return 0;
 }
 
-static void read_mem_self(long *rss_kb, long *pss_kb, long *uss_kb)
+/* Current and peak RSS are DIFFERENT quantities and both are wanted.
+ *
+ * ru_maxrss is the high-water mark and is what "peak RSS" means; the
+ * `Rss:` line in smaps_rollup is the CURRENT resident set. The first
+ * version reported only one `rss_kb`, seeded from ru_maxrss and then
+ * OVERWRITTEN by the smaps value -- so the field named as peak was in
+ * fact current whenever smaps_rollup was readable, which is on every
+ * modern kernel. Reporting both removes the ambiguity rather than
+ * picking a winner.
+ *
+ * -1 means "not measured" and is never substituted with another
+ * quantity. Conflating RSS, PSS and USS is the error being avoided, so
+ * a missing source leaves its own field at -1. */
+static void read_mem_self(long *rss_cur_kb, long *rss_peak_kb,
+                          long *pss_kb, long *uss_kb)
 {
-    *rss_kb = *pss_kb = *uss_kb = -1;
+    *rss_cur_kb = *pss_kb = *uss_kb = -1;
+    *rss_peak_kb = -1;
     struct rusage ru;
-    if (getrusage(RUSAGE_SELF, &ru) == 0) *rss_kb = (long)ru.ru_maxrss;
-    /* /proc/self/smaps_rollup gives PSS/USS directly. Absent on old
-     * kernels and inside some sandboxes; -1 means "not measured" and is
-     * never substituted with RSS, because RSS and PSS are different
-     * quantities and conflating them is the error being avoided. */
+    if (getrusage(RUSAGE_SELF, &ru) == 0) *rss_peak_kb = (long)ru.ru_maxrss;
+
     FILE *f = fopen("/proc/self/smaps_rollup", "r");
     if (!f) return;
+    /* USS = Private_Clean + Private_Dirty + Private_Hugetlb.
+     *
+     * The first version skipped Private_Clean and, worse, accumulated
+     * into a value initialised to -1 -- so the sum started one kilobyte
+     * below zero AND omitted the entire private-clean category. Both
+     * are wrong: USS counts all three private categories, and a
+     * partially-clean process (a file-backed library mapped MAP_PRIVATE)
+     * has a large private-clean component that was being dropped
+     * entirely. */
+    long uss = 0;
+    int have_uss = 0;
     char line[256];
     while (fgets(line, sizeof line, f)) {
         long v;
-        if (sscanf(line, "Rss: %ld kB", &v) == 1) *rss_kb = v;
+        if (sscanf(line, "Rss: %ld kB", &v) == 1) *rss_cur_kb = v;
         else if (sscanf(line, "Pss: %ld kB", &v) == 1) *pss_kb = v;
-        else if (sscanf(line, "Private_Clean: %ld kB", &v) == 1) ;
-        else if (sscanf(line, "Private_Dirty: %ld kB", &v) == 1) *uss_kb += v;
-        else if (sscanf(line, "Private_Hugetlb: %ld kB", &v) == 1) *uss_kb += v;
+        else if (sscanf(line, "Private_Clean: %ld kB", &v) == 1) {
+            uss += v; have_uss = 1;
+        } else if (sscanf(line, "Private_Dirty: %ld kB", &v) == 1) {
+            uss += v; have_uss = 1;
+        } else if (sscanf(line, "Private_Hugetlb: %ld kB", &v) == 1) {
+            uss += v; have_uss = 1;
+        }
     }
     fclose(f);
+    if (have_uss) *uss_kb = uss;
 }
 
 static int set_thp(const char *mode)
@@ -521,12 +549,14 @@ int main(int argc, char **argv)
 
     /* C0.6 evidence block: the fleet-memory axis. */
     {
-        long rss, pss, uss;
-        read_mem_self(&rss, &pss, &uss);
+        long rss_cur, rss_peak, pss, uss;
+        read_mem_self(&rss_cur, &rss_peak, &pss, &uss);
         printf("\n  --- C0.6 evidence ---\n");
         printf("  parent_rss_target : %ld MB\n", parent_mb);
         printf("  thp               : %s\n", thp_mode ? thp_mode : "inherited");
-        printf("  parent_rss_kb     : %ld\n", rss);
+        printf("  parent_rss_cur_kb : %ld%s\n", rss_cur,
+               rss_cur < 0 ? "  (not exposed by this kernel)" : "");
+        printf("  parent_rss_peak_kb: %ld\n", rss_peak);
         printf("  parent_pss_kb     : %ld%s\n", pss,
                pss < 0 ? "  (not exposed by this kernel)" : "");
         printf("  parent_uss_kb     : %ld%s\n", uss,
