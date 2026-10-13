@@ -98,6 +98,50 @@ bash counterpart, the specification has to live in the Python docs, and
 that is where a future reviewer should look for drift rather than at
 `frun.bash`.
 
+## Read `DOCS/` before asserting anything about the engine
+
+Added after a second round of avoidable work. The specifications live in
+`DOCS/`, and they are precise, current, and cited from the code. Each of
+these would have answered a question I had to guess at:
+
+| question I had | the document that answers it |
+|---|---|
+| Is a batch atomic? Can a caller see partial output? | `INVARIANTS.md` §3 Batch Atomicity — "A batch is claimed whole or not at all" |
+| What are the delivery guarantees per mode? | `RESILIENCE_PROTOCOL.md` §5.2 — ordered/buffered are EXACTLY-ONCE; realtime `-u` is AT-LEAST-ONCE and "NOT RECOMMENDED", because workers write straight to stdout and bytes cannot be recalled |
+| How is partial output actually rolled back? | `RESILIENCE_PROTOCOL.md` §2.2 — TLS `worker_output_end`, snapshotted as `output_start` at claim, advanced only after a COMPLETE emit; `ftruncate`+`lseek` guarded by `S_ISREG`, pipes downgrade to at-least-once |
+| Is the ingress memfd's file offset trustworthy? | `INVARIANTS.md` §20 — **it is undefined and must never be read.** There is a documented live offset-mover, and engine-side hardening is *halted per red lines for owner decision* |
+| When is comparing output across runs valid? | `RESILIENCE_PROTOCOL.md` §7.3.3 — NUMA batch granularity varies run to run, so compare line multisets or joined bytes, "never over blob identity" |
+| Which recovery paths are actually verified? | `RESILIENCE_PROTOCOL.md` §7.4 — explicitly NOT covered: recovery in `mode="spawn"`/`mode="plugin"` **streaming** |
+
+Two of these are worth calling out because they are load-bearing and
+were missed:
+
+* **§5.2 is the contract behind the B-01 false alarm.** The mode-dependent
+  delivery guarantees are written down. I asserted a single blanket
+  byte-exactness across failure policies without reading which guarantee
+  applied.
+* **§7.3.3 independently confirms the byte-multiset decision** made in
+  `tools/bench_splice.py` during Stage 4, for the same reason and in the
+  same words. That one was arrived at correctly, but by reasoning from
+  first principles rather than by reading.
+
+**Open coverage gap, now documented:** §7.4 lists recovery in
+`mode="spawn"` streaming as untested.
+`python/tests/test_stage3_recovery_integrity.py` covers `mode="spawn"`
+through `map()` with per-policy atomicity assertions, which closes the
+`map` half. The `stream()` half remains unverified.
+
+Also relevant and not yet acted on: `MAINTAINERS.md` §4–6 documents a
+release matrix much broader than `python/release_check.py` — unit tests,
+benchmarks, both UMA and NUMA topologies, plus TSan and ASan/UBSan
+repeats. Per §4.1, `numa=fake=4` is the documented way to cover NUMA
+without NUMA hardware, and this kernel has `CONFIG_NUMA_EMU=y`, so the
+"NUMA needs suitable hardware" blocker reported previously is not a
+blocker at all. The full matrix is not re-run here because no engine
+change accompanied it (`frun.bash` and `forkrun_ring.c` are untouched
+across this work), which is the documented exemption in §5's matrix
+policy rule.
+
 ## The failure mode this is meant to prevent
 
 Four defects in four consecutive rounds shared a shape: **an assertion
