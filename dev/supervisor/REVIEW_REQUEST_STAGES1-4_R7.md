@@ -202,6 +202,30 @@ cannot fill either: knowing *which contract* an expectation encodes.
 That is a question for the specification, not for the implementation,
 and in this case the specification was one message long.
 
+## 5b. Standing constraint going forward
+
+The maintainer has set a standing rule that changes what "done" means for
+Python work: **`frun.bash` is the approved reference, and the Python
+front end should stay as close to parity with it as possible rather than
+re-inventing mechanisms.** Written up, with the audit it prompted, in
+`dev/supervisor/PARITY_WITH_BASH.md`.
+
+The audit found the good pattern already in place — `_shim.c` reuses
+`do_lockfree_claim` / `ring_recover_worker_core` / `ring_order_main`
+instead of forking them, so the claim/ack/recover state machine has one
+implementation — and one real divergence: the splice path orders with a
+Python `ReassemblyBuffer` because splice emits no OrderPackets, so the C
+orderer cannot be used there.
+
+Worth flagging because it cuts against the obvious reading: that
+divergence costs **nothing measurable** (18.5 MB, median of 3: −0.4% at 8
+workers, −1.8% at 32). Splice moves bytes in sequence, so the Python
+sort has no work to do. The case for closing the gap is maintenance and
+semantics — two orderers means every ordering change is made twice, and
+the split has already produced an observable divergence, `map(order=
+"index")` serving while `stream(order="index")` declines. Not urgent, and
+I have not touched it.
+
 ## 6. Still open (unchanged, not regressed)
 
 * **Ordered streaming** declined — bounded-memory/liveness design absent.
