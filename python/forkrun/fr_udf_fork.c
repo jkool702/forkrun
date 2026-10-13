@@ -28,6 +28,7 @@
  * gives Py_GetVersion; the include path is already per-minor. */
 #include <Python.h>
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,14 +89,96 @@ static int inflate_parent_rss(long mb)
     return 0;
 }
 
-/* What a child reports back: outcome plus its OWN memory footprint. */
+static double now_s(void);
+
+/* Monotonic nanoseconds, for the report's sample timestamp.
+ *
+ * The review asks for timestamps alongside the raw per-PID numbers, so
+ * two children that "should" have sampled simultaneously can be checked
+ * rather than assumed to have. Defined here rather than borrowed from
+ * the launcher: the driver links only fr_udf.c, and now_ns lives in
+ * forkrun_cleanroom.c. */
+static long now_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
+    return (long)ts.tv_sec * 1000000000L + (long)ts.tv_nsec;
+}
+
+/* What a child reports back: outcome plus its OWN memory footprint.
+ *
+ * IDENTITY MATTERS. The review's point 2: every report carries a
+ * version and a pid, and the parent validates that each report
+ * corresponds to the child it is waiting for -- rather than parsing
+ * whatever bytes arrive next. Without that, a duplicated or reordered
+ * report is indistinguishable from a correct one, and the fleet sum is
+ * silently wrong.
+ *
+ * FIXED SIZE on purpose, and asserted with _Static_assert, because a
+ * struct whose layout differs between the writer and the reader is the
+ * class of bug this whole protocol has already produced twice (a
+ * one-byte report read as a struct; an ack byte consumed as report
+ * data). */
+#define FR_REPORT_VERSION 1
+#define MAX_CHILDREN 256
+
 struct child_report {
-    char status;
-    char _pad[3];
-    long rss_kb;
-    long pss_kb;
-    long uss_kb;
+    unsigned int version;      /* FR_REPORT_VERSION */
+    int          pid;          /* the child that measured itself */
+    char         status;
+    char         _pad[3];
+    long         rss_kb;
+    long         pss_kb;
+    long         uss_kb;
+    long long    t_ns;         /* monotonic at sample time */
 };
+
+/* 48, not the 40 the arithmetic suggested: the 12-byte header is
+ * followed by 8-byte-aligned longs, so 4 bytes of padding land at
+ * offset 12. Asserted rather than documented, and the assert is what
+ * caught it -- the first guess (40) and the second (44) both FAILED to
+ * compile. A layout that silently shifts every field is exactly the bug
+ * class this protocol has already produced twice.
+ *
+ * Measured: version@0 pid@4 status@8 rss@16 pss@24 uss@32 t_ns@40. */
+_Static_assert(sizeof(struct child_report) == 48,
+               "report layout changed; writer and reader must agree");
+
+/* Full-transfer helpers.
+ *
+ * A pipe is a BYTE STREAM. `read(fd, &struct, sizeof struct)` is not
+ * guaranteed to return the whole struct: it can return a short count,
+ * and read() is interruptible by a signal. The review lists this as the
+ * first failure mode to audit, and the earlier one-byte ack is a live
+ * demonstration that the byte-level framing here is unforgiving.
+ *
+ * These loop until the whole object is transferred, retrying EINTR,
+ * and treat EOF mid-object as an error rather than a short success. */
+static int write_all(int fd, const void *buf, size_t n)
+{
+    const char *p = (const char *)buf;
+    size_t done = 0;
+    while (done < n) {
+        ssize_t w = write(fd, p + done, n - done);
+        if (w > 0) { done += (size_t)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        return -1;              /* EPIPE, EAGAIN, anything else */
+    }
+    return 0;
+}
+
+static int read_all(int fd, void *buf, size_t n)
+{
+    char *p = (char *)buf;
+    size_t done = 0;
+    while (done < n) {
+        ssize_t r = read(fd, p + done, n - done);
+        if (r > 0) { done += (size_t)r; continue; }
+        if (r < 0 && errno == EINTR) continue;
+        return -1;              /* EOF or error, mid-object */
+    }
+    return 0;
+}
 
 /* Per-run accumulation, filled from the children's reports. */
 static long child_pss_kb = 0;
@@ -112,6 +195,15 @@ static int  child_sampled = 0;
 static long arm_child_pss[2] = {0, 0};
 static long arm_child_uss[2] = {0, 0};
 static long arm_child_rss[2] = {0, 0};
+
+/* Integrity counters. Every one of these INVALIDS a sample rather than
+ * degrading it: a fleet figure computed from an incomplete barrier or a
+ * report from the wrong process is not a smaller measurement, it is a
+ * wrong one, and it prints just as confidently. */
+static int ack_missing = 0;
+static int report_bad = 0;
+static int release_failed = 0;
+static int child_pids[MAX_CHILDREN];
 static long arm_parent_pss[2] = {0, 0};
 static long arm_parent_rss[2] = {0, 0};
 static int  arm_sampled[2]   = {0, 0};
@@ -250,14 +342,18 @@ static double run(int pre_fork, int nchildren, int iters,
                   const char *const *roots, int nroots,
                   int *failures)
 {
-    int *pipes = calloc((size_t)nchildren, sizeof(int));
-    if (!pipes) { perror("calloc"); exit(1); }
+    int (*data)[2] = calloc((size_t)nchildren, sizeof *data);
+    int (*gate)[2] = calloc((size_t)nchildren, sizeof *gate);
+    if (!data || !gate) { perror("calloc"); exit(1); }
 
     /* Per-ARM, not per-process: run() is called twice (post-fork, then
      * pre-fork), and a static accumulator carried the first arm's
      * children into the second -- "children_sampled: 8 of 4". */
     child_pss_kb = child_uss_kb = child_rss_kb = 0;
     child_sampled = 0;
+    ack_missing = 0;
+    report_bad = 0;
+    release_failed = 0;
 
     /* The parent's OWN footprint DURING this arm. Sampling it only at the
      * very end (after both runs, and after fr_udf_finalize) made the
@@ -270,6 +366,25 @@ static double run(int pre_fork, int nchildren, int iters,
         arm_parent_pss[pre_fork ? 1 : 0] = pss;
     }
 
+    /* ALL pipes are created BEFORE any fork.
+     *
+     * Creating each pipe inside the fork loop meant child N inherited
+     * every previously-created pipe's write end, held open via the
+     * parent's arrays. That is survivable for data, but it means the
+     * parent can never observe EOF on a pipe whose child has died,
+     * because the PARENT ITSELF holds the write end it is reading from.
+     * A child that died before writing then hung the parent forever --
+     * observed as two zombies and a parent blocked in anon_pipe_read.
+     *
+     * Two pipes per child, one per direction, so neither end has to be
+     * shared between a reader and a writer:
+     *     data[c]  child -> parent   (ack, then report)
+     *     gate[c]  parent -> child   (release) */
+    for (int c = 0; c < nchildren; c++) {
+        if (pipe(data[c]) != 0) { perror("pipe(data)"); exit(1); }
+        if (pipe(gate[c]) != 0) { perror("pipe(gate)"); exit(1); }
+    }
+
     double t0 = now_s();
     for (int c = 0; c < nchildren; c++) {
         /* Flush before every fork. A child that calls Py_FinalizeEx()
@@ -278,14 +393,20 @@ static double run(int pre_fork, int nchildren, int iters,
          * out. Cosmetic, but it makes the output look like the run
          * happened N times. */
         fflush(stdout);
-        int fds[2];
-        if (pipe(fds) != 0) { perror("pipe"); exit(1); }
+        int *fd_data = data[c];
+        int *fd_gate = gate[c];
         pid_t pid = udf_fork();
         if (pid < 0) { perror("fork"); exit(1); }
         if (pid == 0) {
             /* Child. Report one status byte; never write to stdout, which
              * is the parent's line-buffered table. */
-            close(fds[0]);
+            /* Close every pipe except this child's own two, so the
+             * parent gets EOF the moment this child dies. */
+            for (int j = 0; j < nchildren; j++) {
+                if (j == c) continue;
+                close(data[j][0]); close(data[j][1]);
+                close(gate[j][0]); close(gate[j][1]);
+            }
             char status = 0;
             if (pre_fork) {
                 /* Inherited interpreter: must NOT initialise again. */
@@ -328,8 +449,13 @@ static double run(int pre_fork, int nchildren, int iters,
              * reports "done", and none samples or exits until the parent
              * has released them all. Then every divisor is the full
              * mapper count and the sum IS the fleet footprint. */
-            { char sig = 1; ssize_t w = write(fds[1], &sig, 1); (void)w; }
-            { char go = 0; ssize_t r = read(fds[1], &go, 1); (void)r; }
+            /* ack on the write end, release read from the READ end --
+             * the opposite end to the one it writes on. Getting this
+             * backwards fails with EBADF and looks like a no-op. */
+            { char sig = 1;
+              if (write_all(fd_data[1], &sig, 1) != 0) { _exit(90); } }
+            { char go = 0;
+              if (read_all(fd_gate[0], &go, 1) != 0)   { _exit(90); } }
 
             /* Sample SELF at peak -- after the work, before teardown.
              *
@@ -346,17 +472,20 @@ static double run(int pre_fork, int nchildren, int iters,
              * physical footprint. RSS cannot be summed -- it would count
              * every shared page once per worker, which is precisely the
              * quantity the shared-interpreter claim rests on. */
-            struct child_report rep = {0};
+            struct child_report rep;
+            memset(&rep, 0, sizeof rep);
+            rep.version = FR_REPORT_VERSION;
+            rep.pid = (int)getpid();
             rep.status = status;
+            rep.t_ns = now_ns();
             read_self_mem(&rep.rss_kb, &rep.pss_kb, &rep.uss_kb);
             if (!pre_fork) fr_udf_finalize();
-            ssize_t ignored = write(fds[1], &rep, sizeof rep);
-            (void)ignored;
-            close(fds[1]);
+            if (write_all(fd_data[1], &rep, sizeof rep) != 0) _exit(91);
+            close(fd_data[1]);
+            close(fd_gate[0]);
             _exit(0);
         }
-        close(fds[1]);
-        pipes[c] = fds[0];
+        child_pids[c] = (int)pid;
     }
 
     /* Parent: collect every child's status before finalising, because a
@@ -381,38 +510,61 @@ static double run(int pre_fork, int nchildren, int iters,
      * samples see the same mapper count. */
     for (int c = 0; c < nchildren; c++) {
         char ack = 0;
-        ssize_t r = read(pipes[c], &ack, 1);
-        if (r != 1)
-            fprintf(stderr, "  child %d: no barrier ack (r=%zd)\n", c, r);
+        if (read_all(data[c][0], &ack, 1) != 0) {
+            /* Barrier INCOMPLETE. Recorded rather than tolerated: the
+             * whole point of the barrier is that every child samples
+             * with every child mapped, so a missing ack means the
+             * divisor for PSS is wrong for whoever is still alive. */
+            ack_missing++;
+            fprintf(stderr, "  child %d: no barrier ack\n", c);
+        }
     }
     for (int c = 0; c < nchildren; c++) {
         char go = 1;
-        ssize_t w = write(pipes[c], &go, 1);
-        (void)w;
+        if (write_all(gate[c][1], &go, 1) != 0) {
+            fprintf(stderr, "  child %d: RELEASE FAILED (errno=%d)\n",
+                    c, errno);
+            release_failed++;
+        }
     }
 
     for (int c = 0; c < nchildren; c++) {
         struct child_report rep;
         memset(&rep, 0, sizeof rep);
         rep.status = -1;
-        ssize_t got = read(pipes[c], &rep, sizeof rep);
+        int got = read_all(data[c][0], &rep, sizeof rep);
         char status = rep.status;
-        if (got == (ssize_t)sizeof rep) {
+        /* Validate BEFORE trusting anything in it. A report that is not
+         * from this run, or from the child we are waiting for, must not
+         * reach the aggregate: it would silently inflate or deflate the
+         * fleet figure while still printing a number. */
+        int rep_ok = (got == 0)
+                     && rep.version == FR_REPORT_VERSION
+                     && rep.pid == (int)child_pids[c];
+        if (!rep_ok) {
+            fprintf(stderr, "  child %d: BAD REPORT (got=%d ver=%u "
+                    "pid=%d expected=%d) -- excluded\n", c, got,
+                    rep.version, rep.pid, (int)child_pids[c]);
+            report_bad++;
+        }
+        if (rep_ok) {
             /* Fleet memory: the children's own PSS, summed. The parent's
              * is added at finalisation, after the interpreter is torn
              * down -- which is why this is a CHILD number and the parent
              * figure elsewhere is not a substitute. */
             if (getenv("FR_DEBUG_CHILD_MEM")) {
-                fprintf(stderr, "    child %d: status=%d rss=%ld pss=%ld "
-                        "uss=%ld\n", c, (int)status, rep.rss_kb,
-                        rep.pss_kb, rep.uss_kb);
+                fprintf(stderr, "    child %d: pid=%d status=%d rss=%ld "
+                        "pss=%ld uss=%ld t_ns=%lld\n", c, rep.pid,
+                        (int)status, rep.rss_kb, rep.pss_kb, rep.uss_kb,
+                        (long long)rep.t_ns);
             }
             child_pss_kb += rep.pss_kb;
             child_uss_kb += rep.uss_kb;
             child_rss_kb += rep.rss_kb;
             child_sampled++;
         }
-        close(pipes[c]);
+        close(data[c][0]);
+        close(gate[c][1]);
         int wstatus = 0;
         waitpid(-1, &wstatus, 0);
         /* sizeof rep, NOT 1. Extending the child's report from a status
@@ -425,7 +577,7 @@ static double run(int pre_fork, int nchildren, int iters,
          * validator produces a run that is *self-contradictory* rather
          * than obviously broken, and both symptoms were only visible
          * because the fleet block printed the sample count. */
-        if (got != (ssize_t)sizeof rep || status != 0) {
+        if (!rep_ok || status != 0) {
             /* Say WHICH signal. "exit -1" is what this printed for a
              * while and it distinguishes nothing between SIGABRT (a
              * fatal Python error), SIGSEGV, and a hang-kill -- which is
@@ -449,8 +601,15 @@ static double run(int pre_fork, int nchildren, int iters,
     arm_child_rss[pre_fork ? 1 : 0] = child_rss_kb;
     arm_sampled[pre_fork ? 1 : 0]   = child_sampled;
 
+    /* Close our copies of every child's data-write end. Without this the
+     * parent holds the write end of the pipe it reads, so a child that
+     * dies is invisible and the read blocks forever instead of seeing
+     * EOF. */
+    for (int c = 0; c < nchildren; c++) close(data[c][1]);
+
     double elapsed = now_s() - t0;
-    free(pipes);
+    free(data);
+    free(gate);
     return elapsed;
 }
 
@@ -759,15 +918,9 @@ int main(int argc, char **argv)
         printf("  children          : %d\n", nchildren);
         if (arm_sampled[0] > 0 || arm_sampled[1] > 0) {
             printf("  --- fleet memory, BOTH arms ---\n");
-            printf("  EXPERIMENTAL. Direction is consistent and matches\n"
-                   "  copy-on-write theory (pre-fork cheaper, and the gap\n"
-                   "  widens with worker count), but the MAGNITUDE is not\n"
-                   "  yet trustworthy: with the barrier held, every child\n"
-                   "  should report near-identical PSS for the shared\n"
-                   "  mapping, and observed values vary ~2.4x. The cause is\n"
-                   "  not established, so no fleet-memory conclusion is\n"
-                   "  drawn from this block. Per-child values print under\n"
-                   "  FR_DEBUG_CHILD_MEM=1 for diagnosis.\n");
+            printf("  integrity: %d missing ack(s), %d failed release(s), "
+                   "%d bad report(s) -- any of these invalidates the "
+                   "sample\n", ack_missing, release_failed, report_bad);
             printf("  %-9s %-11s %-11s %-11s %-11s %s\n",
                    "arm", "parent_pss", "child_pss", "parent_rss",
                    "child_rss", "n");

@@ -23,6 +23,11 @@ Honesty rules enforced here, all of them learned the hard way:
 
 * A run with any child failure is DISCARDED, not averaged in. The driver
   refuses to state a verdict when either arm fails, and so does this.
+  The driver also counts protocol integrity faults -- a missing barrier
+  ack, a failed release, a report whose version or pid does not match
+  the expected child -- and DISCARDS the configuration on any of them,
+  because a fleet figure computed from an incomplete barrier is not a
+  smaller measurement but a wrong one that prints just as confidently.
 * Nothing is compared across differing configurations. Each row is its
   own baseline.
 * The interpreter version, THP state and parent RSS are printed with
