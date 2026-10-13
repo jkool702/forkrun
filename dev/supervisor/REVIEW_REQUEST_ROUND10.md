@@ -1,5 +1,9 @@
 # Round 10 — response to the round-9 review
 
+> **SUPERSEDED — see `REVIEW_REQUEST_ROUND11.md`**, a focused request on
+> the C0.5 security surface (`scrub_inherited_path`, `FR_UDF_HOME`),
+> which is new product code with no tests.
+
 Branch `NEW/REFACTOR4.2`. Review the **branch head**; `c11de09f` is the
 last commit the round-9 request pinned. Frozen ring files
 (`forkrun_ring.c`, `forkrun_substrate.h`, `substratestubs.c`) untouched
