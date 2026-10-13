@@ -125,6 +125,76 @@ class StreamFallbackLiveness(unittest.TestCase):
             "%d. The cache exists to skip the PROBE, not to silence the "
             "consequence." % warnings_seen)
 
+    def test_map_mismatch_falls_back_with_COMPLETE_results(self):
+        """Both the ROUTE and the RESULT, not merely "did not raise".
+
+        The previous public-API test called map() and discarded the
+        output, so a fallback that returned zero records would have
+        passed. Correct output is the whole point of degrading: a
+        capability decline must not also become a data loss.
+        """
+        orig = _udf.caller_version_arg
+        _udf.caller_version_arg = lambda: "--caller-version=9.9"
+        self.addCleanup(setattr, _udf, "caller_version_arg", orig)
+
+        expected = [b"LINE0\n", b"LINE1\n", b"LINE2\n", b"LINE3\n"]
+        out = forkrun.map("sl:up", self.src4(), mode="udf", workers=1,
+                          on_error="retry", output="bytes")
+        self.assertEqual(out, expected,
+                         "map() under a forced mismatch must return every "
+                         "result via the in-process UDF route, got %r" % (out,))
+        # And the route really was the in-process one: the artifact is
+        # now cached as incompatible, so the cleanroom accelerator is
+        # disabled -- which is only correct if it was declined.
+        self.assertIsNotNone(_udf.known_incompatible(_udf.candidate_helper_path()))
+
+    def test_stream_mismatch_stays_lazy_then_yields_everything(self):
+        """Laziness AND completeness AND no duplication.
+
+        Three invariants in one test because the previous regression
+        broke laziness while a green suite watched, and a fallback that
+        spliced two routes would duplicate or truncate.
+        """
+        orig = _udf.caller_version_arg
+        _udf.caller_version_arg = lambda: "--caller-version=9.9"
+        self.addCleanup(setattr, _udf, "caller_version_arg", orig)
+
+        r, w = os.pipe()
+        def _feeder():
+            time.sleep(0.5)
+            try:
+                os.write(w, b"".join(b"line%d\n" % i for i in range(4)))
+            except OSError:
+                pass
+            os.close(w)
+        t = threading.Thread(target=_feeder, daemon=True)
+        t.start()
+        try:
+            t0 = time.time()
+            gen = forkrun.stream("sl:up", r, mode="udf", workers=1,
+                                 output="bytes")
+            self.assertLess(time.time() - t0, 0.3,
+                            "stream() must return before data exists")
+            got = list(gen)
+        finally:
+            t.join(timeout=10)
+        # Join before comparing. BATCHING is not the invariant: the
+        # cleanroom and in-process routes legitimately choose different
+        # batch boundaries, and asserting record-per-batch made this fail
+        # on correct behaviour ([LINE0, LINE1, LINE2+LINE3] vs four).
+        # What must hold is every byte exactly once -- which is what
+        # distinguishes a fallback from a truncation or a duplication.
+        self.assertEqual(
+            b"".join(got), b"line0\nline1\nline2\nline3\n".upper(),
+            "stream() must yield every record exactly once through the "
+            "fallback; got %r" % (got,))
+
+    def src4(self):
+        path = os.path.join(self.tmp, "four.txt")
+        with open(path, "wb") as fh:
+            fh.write(b"line0\nline1\nline2\nline3\n")
+        return path
+
     def src(self):
         path = os.path.join(self.tmp, "in.txt")
         with open(path, "wb") as fh:

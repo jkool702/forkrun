@@ -635,10 +635,18 @@ static int g_poison_stats_fd = -1;
 #ifndef UDF_PROBE_TIMEOUT_MS
 #define UDF_PROBE_TIMEOUT_MS 5000
 #endif
+/* poll() slice and reap budget, in milliseconds. */
+#ifndef UDF_PROBE_SLICE_MS
+#define UDF_PROBE_SLICE_MS 50
+#endif
+#ifndef UDF_PROBE_REAP_SLICES
+#define UDF_PROBE_REAP_SLICES 200   /* 200 x 1ms = 200ms */
+#endif
 
 #define UDF_SETUP_OK          0
 #define UDF_SETUP_GENERIC    -1   /* maps to the pre-existing 71 path */
 #define UDF_SETUP_VERIFY     80   /* mismatch, or version unverifiable */
+#define UDF_SETUP_INVALID    82   /* bad/missing --caller-version */
 #define UDF_SETUP_PROBE_HANG 81   /* bounded probe expired */
 
 /* Probe -> parent report. Fixed size, written in one shot. */
@@ -648,44 +656,126 @@ struct udf_probe_result {
     unsigned long version;
 };
 
+/* Strict MAJOR.MINOR grammar.
+ *
+ * sscanf("%d.%d") is NOT a strict parser: "3.14garbage" and "3.14.1" both
+ * yield two integers and leave trailing text unexamined, which is not the
+ * contract R2 specifies. This accepts digits, exactly one dot, digits,
+ * and requires the string to END there. It also bounds the accumulator,
+ * so a long digit run cannot overflow the int it is stored in. */
+static int parse_caller_version(const char *s, int *maj, int *min)
+{
+    const char *p = s;
+    long ma = 0, mi = 0;
+    if (!s || !*s) return -1;
+    while (*p >= '0' && *p <= '9') {
+        ma = ma * 10 + (*p - '0');
+        if (ma > 999) return -1;
+        p++;
+    }
+    if (ma == 0 || *p != '.') return -1;
+    p++;
+    if (!(*p >= '0' && *p <= '9')) return -1;   /* "3." is not 3.something */
+    while (*p >= '0' && *p <= '9') {
+        mi = mi * 10 + (*p - '0');
+        if (mi > 999) return -1;
+        p++;
+    }
+    if (*p != '\0') return -1;      /* strict: nothing may follow */
+    *maj = (int)ma; *min = (int)mi;
+    return 0;
+}
+
 /* Bounded wait for the probe's report, then SIGKILL and a bounded reap.
  *
- * Mirrors the plugin probe's shape (deadline loop, SIGKILL, WNOHANG reap)
+ * Mirrors the plugin probe's shape (deadline, SIGKILL, WNOHANG reap)
  * because the previous UDF probe used a BLOCKING read and an UNTIMED
  * waitpid: a constructor that hung hung the launcher forever. Since the
- * version check must query the library, that hang is now on the critical
- * path of a safety decision and can no longer be tolerated.
+ * version check must query the library, that hang is on the critical path
+ * of a safety decision and cannot be tolerated.
  *
- * The deadline covers the report AND the reap. Bounding only one still
- * leaves a hang. Returns 0 if the report arrived, -1 on timeout. */
+ * THE FIRST VERSION OF THIS FUNCTION HAD THE SAME BUG IT WAS WRITTEN TO
+ * FIX. It did a blocking read() and consulted waited_ms only AFTER, so a
+ * constructor that never wrote a byte left the parent parked inside
+ * read() with the deadline never reached -- the timer and the SIGKILL
+ * were unreachable code. Exit 81 was wired up and could not happen.
+ *
+ * So: poll() with a monotonic deadline and accumulate partial reports,
+ * which is the only way to bound a read that may never complete. The
+ * deadline covers BOTH the report and the reap; bounding one while
+ * leaving the other unbounded still leaves a hang.
+ *
+ * Returns 0 only when a complete report arrived AND the child was
+ * reaped. Returns -1 on timeout or a truncated report. */
 static int udf_probe_await(int fd, pid_t probe,
                            struct udf_probe_result *out)
 {
+    size_t got = 0;
     int waited_ms = 0;
-    for (;;) {
-        ssize_t got = read(fd, out, sizeof *out);
-        if (got == (ssize_t)sizeof *out) return 0;
-        if (got < 0 && errno == EINTR) continue;
-        if (got < 0) return -1;
-        if (got == 0) break;               /* child died without reporting */
-        if (waited_ms >= UDF_PROBE_TIMEOUT_MS) break;
-        struct timespec ts = {0, 1000000L};
-        nanosleep(&ts, NULL);
-        waited_ms += 1;
+    int complete = 0;
+
+    while (got < sizeof *out) {
+        struct pollfd pf;
+        pf.fd = fd; pf.events = POLLIN; pf.revents = 0;
+        int pr = poll(&pf, 1, UDF_PROBE_SLICE_MS);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) {
+            /* No data AND no hang indication: the deadline is what ends
+             * this loop, not the absence of bytes. */
+            waited_ms += UDF_PROBE_SLICE_MS;
+            if (waited_ms >= UDF_PROBE_TIMEOUT_MS) break;
+            continue;
+        }
+        if (pf.revents & (POLLIN | POLLHUP)) {
+            ssize_t r = read(fd, (char *)out + got, sizeof *out - got);
+            if (r > 0) { got += (size_t)r; continue; }
+            if (r < 0 && errno == EINTR) continue;
+            break;                      /* EOF or error: truncated report */
+        }
+        if (pf.revents & (POLLERR | POLLNVAL)) break;
     }
-    /* Timed out or truncated: the child is assumed wedged. */
-    (void)kill(probe, SIGKILL);
-    /* Bounded reap. A process stuck in uninterruptible sleep may outlive
-     * this loop -- we do not claim otherwise; we only refuse to hang. */
-    for (int i = 0; i < 200; i++) {
+    if (got == sizeof *out) complete = 1;
+
+    /* ALWAYS reap. A complete report does not mean the child has exited
+     * yet -- it writes, then _exit -- and returning without reaping left a
+     * zombie for the supervision loop to stumble over. */
+    int reaped = 0;
+    for (int i = 0; i < UDF_PROBE_REAP_SLICES; i++) {
         int st = 0;
         pid_t r = waitpid(probe, &st, WNOHANG);
-        if (r > 0) break;
-        if (r < 0 && errno == EINTR) continue;
+        if (r > 0) { reaped = 1; break; }
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            if (errno == ECHILD) { reaped = 1; break; }  /* already gone */
+            break;
+        }
         struct timespec ts = {0, 1000000L};
         nanosleep(&ts, NULL);
     }
-    return -1;
+    if (!complete) {
+        /* Timed out or truncated: the child is assumed wedged. */
+        (void)kill(probe, SIGKILL);
+        for (int i = 0; i < UDF_PROBE_REAP_SLICES; i++) {
+            int st = 0;
+            pid_t r = waitpid(probe, &st, WNOHANG);
+            if (r > 0) break;
+            if (r < 0 && errno == EINTR) continue;
+            struct timespec ts = {0, 1000000L};
+            nanosleep(&ts, NULL);
+        }
+        return -1;
+    }
+    if (!reaped) {
+        /* A complete report whose child will not die is not a hang we
+         * should paper over: refuse rather than proceed with a wedged
+         * helper. */
+        (void)kill(probe, SIGKILL);
+        return -1;
+    }
+    return 0;
 }
 
 static int setup_udf_helper(const char *helper_path, const char *roots_spec,
@@ -698,7 +788,30 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
     void *call_fn, *free_fn;
 
     if (!helper_path || !*helper_path)
-        return -1;
+        return UDF_SETUP_GENERIC;
+
+    /* Validate the declaration BEFORE the probe.
+     *
+     * The probe dlopen()s the helper, which runs its ELF constructors.
+     * Parsing after it means a malformed declaration executes
+     * third-party code before being rejected -- and a helper that then
+     * fails to load reports 71 or 81 instead of the promised 80. An
+     * argument the launcher can check in microseconds should never be
+     * gated behind loading untrusted code.
+     *
+     * 82 rather than 80: an invalid DECLARATION is a caller bug, not a
+     * property of the helper. Conflating them meant an internal
+     * programming error would permanently blacklist a perfectly good
+     * artifact in the Python-side negative cache. */
+    int caller_maj = 0, caller_min = 0;
+    if (parse_caller_version(caller_version, &caller_maj, &caller_min) != 0) {
+        fprintf(stderr, "forkrun-cleanroom: UDF mode requires "
+                        "--caller-version=MAJOR.MINOR with nothing after it "
+                        "(got %s); the launcher cannot infer the caller "
+                        "after exec.\n",
+                caller_version ? caller_version : "(absent)");
+        return UDF_SETUP_INVALID;
+    }
 
     /* (1) Disposable probe first, mirroring the plugin path: dlopen
      * runs ELF constructors, and a constructor that crashes or hangs
@@ -781,33 +894,22 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
      * launcher cannot identify the interpreter that started it, so this
      * establishes only that the helper matches the version the caller
      * declared. The Python wrapper fills that in from sys.version_info
-     * and nothing else. */
+     * and nothing else.
+     *
+     * major and minor are compared SEPARATELY as integers. No bit
+     * packing: an earlier version packed the caller as major<<16|minor
+     * and extracted the helper as (hex>>16)&0xffff, which is
+     * major<<8|minor, so a MATCHING 3.14/3.14 pair compared unequal and
+     * refused every correct call. */
     {
-        int maj = 0, min = 0;
-        if (!caller_version || sscanf(caller_version, "%d.%d", &maj, &min) != 2
-            || maj < 0 || min < 0 || maj > 99 || min > 99) {
-            fprintf(stderr, "forkrun-cleanroom: UDF mode requires "
-                            "--caller-version=MAJOR.MINOR (got %s); the "
-                            "launcher cannot infer the caller after exec.\n",
-                    caller_version ? caller_version : "(absent)");
-            return UDF_SETUP_VERIFY;
-        }
-        /* PY_VERSION_HEX packs major in bits 24-31 and minor in 16-23.
-         * Compare the two fields SEPARATELY rather than as one packed
-         * value -- packing them differently on the two sides is exactly
-         * the bug that made a MATCHING 3.14/3.14 pair compare unequal,
-         * which would have refused every correct call.
-         *
-         * Micro and release-level bits are deliberately ignored: a 3.14.7
-         * helper is correct for a 3.14.2 caller. */
         int hmaj = (int)((helper_version >> 24) & 0xFFUL);
         int hmin = (int)((helper_version >> 16) & 0xFFUL);
-        if (hmaj != maj || hmin != min) {
+        if (hmaj != caller_maj || hmin != caller_min) {
             fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) was built "
                             "against CPython %d.%d but the caller declared "
                             "%d.%d; refusing to initialise an interpreter "
                             "across the mismatch\n",
-                    helper_path, hmaj, hmin, maj, min);
+                    helper_path, hmaj, hmin, caller_maj, caller_min);
             return UDF_SETUP_VERIFY;
         }
     }
@@ -817,7 +919,7 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
     if (!hu) {
         fprintf(stderr, "forkrun-cleanroom: dlopen UDF helper: %s\n",
                 dlerror());
-        return -1;
+        return UDF_SETUP_GENERIC;
     }
 
     /* (2b) Re-verify against the handle we will ACTUALLY initialise
@@ -855,7 +957,7 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
                         "exactly 1.\n",
                 nthreads < 0 ? "an unknown number of " : "", 
                 nthreads < 0 ? 0 : nthreads);
-        return -1;
+        return UDF_SETUP_GENERIC;
     }
 
     init_fn     = (fn_udf_init)      sym(hu, "fr_udf_init");
@@ -868,12 +970,12 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
     if (!init_fn || !call_fn || !free_fn || !hooks_avail) {
         fprintf(stderr, "forkrun-cleanroom: UDF helper is missing required "
                         "symbols\n");
-        return -1;
+        return UDF_SETUP_GENERIC;
     }
     if (!hooks_avail()) {
         fprintf(stderr, "forkrun-cleanroom: this CPython has no fork hooks "
                         "(HAVE_FORK); refusing pre-fork interpreter init\n");
-        return -1;
+        return UDF_SETUP_GENERIC;
     }
 
     /* (4) Initialise, in the launcher, before any fork. Roots come from
@@ -891,7 +993,7 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
         const char *msg = (const char *)sym(hu, "fr_udf_last_error");
         fprintf(stderr, "forkrun-cleanroom: fr_udf_init failed: %s\n",
                 msg ? msg : "(no detail)");
-        return -1;
+        return UDF_SETUP_GENERIC;
     }
 
     /* (5) Hand the loop its two entry points. The shim must not link
@@ -901,7 +1003,7 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
     bind_fn = (fn_udf_bind) sym(g_so_handle, "fr_py_udf_bind");
     if (!bind_fn || bind_fn(call_fn, free_fn) != 0) {
         fprintf(stderr, "forkrun-cleanroom: fr_py_udf_bind failed\n");
-        return -1;
+        return UDF_SETUP_GENERIC;
     }
 
     g_udf_handle = hu;
@@ -928,15 +1030,15 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
  * unusable command cannot consume input and then fail. */
 static int fr_validate_worker_desc(const worker_desc *d) {
     if (d == NULL)
-        return -1;
+        return UDF_SETUP_GENERIC;
     if (d->kind == WK_SPAWN) {
         if (d->argv == NULL || d->argc <= 0)
-            return -1;
+            return UDF_SETUP_GENERIC;
         if (d->argv[d->argc] != NULL)
-            return -1;               /* must be NULL-terminated */
+            return UDF_SETUP_GENERIC;               /* must be NULL-terminated */
         for (int i = 0; i < d->argc; i++) {
             if (d->argv[i] == NULL)
-                return -1;
+                return UDF_SETUP_GENERIC;
         }
         /* NUL needs no check HERE and cannot be: a C string is
          * NUL-terminated by definition, so an embedded NUL is not
@@ -947,7 +1049,7 @@ static int fr_validate_worker_desc(const worker_desc *d) {
          * it again at this layer would be theatre. */
     } else {
         if (d->a == NULL || d->b == NULL)
-            return -1;
+            return UDF_SETUP_GENERIC;
     }
     return 0;
 }
@@ -961,20 +1063,20 @@ static int fr_run_worker(const worker_desc *d,
     switch (d->kind) {
     case WK_SPAWN:
         if (!s_wloop)
-            return -1;
+            return UDF_SETUP_GENERIC;
         return s_wloop(wid, d->argv, d->argc, ingress_fd, out_fd,
                        signal_fd, fallow_fd, -1, trap_ack_fd,
                        wincarn, retry_limit, on_error);
     case WK_UDF:
         if (!p_wloop)
-            return -1;
+            return UDF_SETUP_GENERIC;
         return p_wloop(wid, d->a, d->b, ingress_fd, out_fd, signal_fd,
                        fallow_fd, -1, trap_ack_fd, wincarn, retry_limit,
                        on_error);
     case WK_PLUGIN:
     default:
         if (!p_wloop)
-            return -1;
+            return UDF_SETUP_GENERIC;
         return p_wloop(wid, d->a, d->b, ingress_fd, out_fd, signal_fd,
                        fallow_fd, -1, trap_ack_fd, wincarn, retry_limit,
                        on_error);
@@ -992,7 +1094,7 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
                   (int32_t)wid, (int32_t)wincarn, 0, 0);
     pid_t p = fr_fork();
     if (p < 0)
-        return -1;
+        return UDF_SETUP_GENERIC;
     if (p == 0) {
         /* Stage 3: the worker becomes a PROCESS GROUP LEADER, so the
          * launcher can signal the whole group on worker death. A SIGKILLed
@@ -1212,10 +1314,10 @@ static int fr_wake_drain_committed(int sig_w, int wid, int out_fd)
     const char *p;
 
     if (sig_w < 0 || out_fd < 0 || wid < 0)
-        return -1;
+        return UDF_SETUP_GENERIC;
     frontier = lseek(out_fd, 0, SEEK_END);
     if (frontier == (off_t)-1)
-        return -1;
+        return UDF_SETUP_GENERIC;
     sig[0] = (uint64_t)wid;
     sig[1] = (uint64_t)frontier;
     p = (const char *)sig;
@@ -1225,10 +1327,10 @@ static int fr_wake_drain_committed(int sig_w, int wid, int out_fd)
         if (n < 0) {
             if (errno == EINTR)
                 continue;
-            return -1;
+            return UDF_SETUP_GENERIC;
         }
         if (n == 0)
-            return -1;
+            return UDF_SETUP_GENERIC;
         p += n;
         left -= (size_t)n;
     }
@@ -1549,6 +1651,7 @@ int main(int argc, char **argv) {
             int urc = setup_udf_helper(o.udf_helper, o.udf_roots,
                                        o.caller_version, o.source_fd);
             if (urc == UDF_SETUP_VERIFY)      return 80;
+            if (urc == UDF_SETUP_INVALID)     return 82;
             if (urc == UDF_SETUP_PROBE_HANG)  return 81;
             if (urc != UDF_SETUP_OK)           return 71;
         }

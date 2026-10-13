@@ -488,10 +488,17 @@ __all__ = ["FrPyBatch", "RecordDescriptor", "FrPyInterval",
 def v1_available(lib=None) -> dict:
     """W-PY13: which C-level fast paths the loaded substrate offers.
 
-    Returns {"exec": bool, "plugin": bool}. Missing symbols (pre-v1
-    .so) read as False — the worker then uses the v0 subprocess/ctypes
-    dispatch. Respects the FORKRUN_NO_V1 kill switch (test escape hatch
-    + operator override: forces v0 even when the symbols exist).
+    Respects the FORKRUN_NO_V1 kill switch (test escape hatch + operator
+    override: forces v0 even when the symbols exist).
+
+    On the "udf" key specifically: True means **a candidate helper file
+    is present**, NOT that the launcher has validated it. The two differ
+    in the way that matters: a helper can be present and still be
+    incompatible with the running interpreter (wrong CPython minor), in
+    which case the launcher refuses it before initialising anything and
+    the call degrades to the in-process path. `udf` is False in that case
+    too, but False is not proof of either "no file" or "validated" — it
+    means the cleanroom UDF accelerator is not available to this caller.
     """
     if lib is None:
         lib = get()

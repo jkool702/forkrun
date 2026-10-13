@@ -34,7 +34,9 @@ import sysconfig
 __all__ = ["UDFError", "helper_path", "candidate_helper_path",
            "roots_spec", "parse_spec",
            "udf_payload", "caller_version_arg", "helper_fingerprint",
-           "known_incompatible", "record_incompatible", "clear_incompatibles"]
+           "fingerprint_now", "known_incompatible", "record_incompatible",
+           "record_incompatible_for", "clear_incompatibles",
+           "candidate_helper_path"]
 
 
 # --- compatibility state -------------------------------------------------
@@ -80,17 +82,39 @@ def helper_fingerprint(path):
         st = os.stat(path)
     except OSError:
         return None
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    # Caller major/minor is part of the key because compatibility is a
+    # function of BOTH sides: the same artifact is "incompatible" only
+    # with respect to one declared version. Including it makes the key
+    # match the stated design rather than a subset of it.
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+            st.st_ctime_ns, _UDF_VERSION)
 
 
 def known_incompatible(path):
-    """Reason this exact artifact was refused, or None."""
+    """Reason this exact artifact was refused for THIS caller, or None."""
     if not path:
         return None
     fp = helper_fingerprint(path)
     if fp is None:
         return None
     return _INCOMPATIBLE.get(fp)
+
+
+def fingerprint_now(path):
+    """Fingerprint of ``path`` right now, or None."""
+    return helper_fingerprint(path) if path else None
+
+
+def record_incompatible_for(fp, reason):
+    """Remember a refusal against an ALREADY-CAPTURED fingerprint.
+
+    Taking the fingerprint from the caller matters: the launcher may have
+    exited some time ago, and re-deriving the path afterwards is a TOCTOU
+    -- if the artifact was replaced in between, the old helper's refusal
+    would blacklist the new, valid one.
+    """
+    if fp is not None:
+        _INCOMPATIBLE[fp] = reason
 
 
 def record_incompatible(path, reason):

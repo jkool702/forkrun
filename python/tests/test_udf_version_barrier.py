@@ -29,6 +29,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 # This file lives at <repo>/python/tests/, so the repo root is THREE
@@ -59,6 +60,44 @@ def _caller_version():
     return "%d.%d" % (sys.version_info[0], sys.version_info[1])
 
 
+_HANG_C = """\
+/* Test-only helper whose ELF constructor blocks forever.
+ *
+ * It does NOT embed CPython. The property under test is that the launcher
+ * can bound a dlopen() that never returns -- embedding CPython would only
+ * make the fixture slower to build.
+ */
+#include <unistd.h>
+__attribute__((constructor))
+static void hang_forever(void) { for (;;) sleep(3600); }
+unsigned long fr_udf_built_version(void) { return 0x030E0000UL; }
+"""
+
+
+def _build_hanging_helper(directory):
+    src = os.path.join(directory, "hang.c")
+    so = os.path.join(directory, "libhang.so")
+    with open(src, "w") as fh:
+        fh.write(_HANG_C)
+    subprocess.run(["gcc", "-shared", "-fPIC", "-o", so, src],
+                   check=True, capture_output=True, timeout=180)
+    return so
+
+
+def _run_launcher_with_hanging_helper(directory):
+    so = _build_hanging_helper(directory)
+    proc = subprocess.run(
+        [_LAUNCHER, "--so", _SUBSTRATE,
+         "--workers", "1", "--lines", "1", "--bytes", "0",
+         "--on-error", "0", "--retry", "1",
+         "--src", os.path.join(directory, "in.txt"), "--result",
+         os.path.join(directory, "hh.bin"), "--stats-fd", "-1",
+         "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
+         "--caller-version", _caller_version()],
+        capture_output=True, timeout=120)
+    return proc.returncode
+
+
 @unittest.skipUnless(_HELPER and os.path.exists(_LAUNCHER),
                      "cleanroom UDF helper not built")
 class MinorMismatchBarrier(unittest.TestCase):
@@ -75,8 +114,18 @@ class MinorMismatchBarrier(unittest.TestCase):
     # ------------------------------------------------------------------
     # route-level, launcher invoked DIRECTLY
     # ------------------------------------------------------------------
-    def _launch(self, extra):
-        src_fd = os.open(self.src, os.O_RDONLY)
+    def _launch(self, extra, src_fd=None):
+        """Run the launcher directly.
+
+        ``src_fd`` must be passed via ``pass_fds``. POSIX closes fds
+        across exec by default, so without it the launcher inherits
+        NOTHING and the test measures a resource that was never
+        connected to the production route -- the exact evidence-chain
+        failure that makes a correct-looking assertion meaningless.
+        """
+        owned = src_fd is None
+        if owned:
+            src_fd = os.open(self.src, os.O_RDONLY)
         out_fd = os.open(os.path.join(self.tmp, "out.bin"),
                          os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
@@ -87,10 +136,12 @@ class MinorMismatchBarrier(unittest.TestCase):
                     "--stats-fd", "-1",
                     "--udf-helper", _HELPER, "--udf", "bm",
                     "--udf-attr", "up", "--udf-roots", self.tmp] + extra
-            proc = subprocess.run(argv, capture_output=True, timeout=120)
+            proc = subprocess.run(argv, capture_output=True, timeout=120,
+                                  pass_fds=(src_fd, out_fd))
         finally:
-            os.close(src_fd)
             os.close(out_fd)
+            if owned:
+                os.close(src_fd)
         return proc
 
     def test_mismatched_declaration_is_refused_with_code_80(self):
@@ -125,16 +176,40 @@ class MinorMismatchBarrier(unittest.TestCase):
         self.assertNotIn(b"caller-version", proc.stderr,
                          "the declaration must be accepted, not demanded")
 
-    def test_missing_or_malformed_declaration_is_refused(self):
-        """Fail closed. The launcher cannot infer the caller after exec."""
-        for extra, why in (([], "absent"),
-                           (["--caller-version", "3.x"], "malformed"),
-                           (["--caller-version", ""], "empty"),
-                           (["--caller-version", "314"], "no dot")):
+    def test_missing_or_malformed_declaration_is_refused_as_82(self):
+        """Fail closed, and with the CORRECT code.
+
+        82, not 80: an invalid declaration is a CALLER bug, not a property
+        of the helper. Sharing 80 meant an internal programming error would
+        enter the negative cache and permanently blacklist a perfectly
+        good artifact. The launcher also rejects it BEFORE the probe, so
+        no ELF constructor runs -- asserted below.
+        """
+        cases = (([], "absent"),
+                 (["--caller-version", "3.x"], "malformed"),
+                 (["--caller-version", ""], "empty"),
+                 (["--caller-version", "314"], "no dot"),
+                 (["--caller-version", "3.14garbage"], "trailing text"),
+                 (["--caller-version", "3.14.1"], "three components"),
+                 (["--caller-version", "3."], "empty minor"),
+                 (["--caller-version", "3.14 "], "trailing space"))
+        for extra, why in cases:
             proc = self._launch(extra)
-            self.assertEqual(proc.returncode, 80,
-                             "%s declaration should be refused, got %d"
+            self.assertEqual(proc.returncode, 82,
+                             "%s declaration should be refused as 82, got %d"
                              % (why, proc.returncode))
+
+    def test_invalid_declaration_never_reaches_dlopen(self):
+        """A bad declaration must not execute the helper's constructors.
+
+        If parsing ran after the probe, a malformed argument would run
+        third-party code before being rejected -- and a helper that then
+        failed to load would report 71 or 81 instead of 82.
+        """
+        proc = self._launch(["--caller-version", "3.14garbage"])
+        self.assertEqual(proc.returncode, 82)
+        self.assertNotIn(b"probe", proc.stderr.lower())
+        self.assertNotIn(b"dlopen", proc.stderr.lower())
 
     def test_source_offset_unchanged_on_refusal(self):
         """Pre-ingestion, proven by the descriptor's own offset.
@@ -145,7 +220,13 @@ class MinorMismatchBarrier(unittest.TestCase):
         fd = os.open(self.src, os.O_RDONLY)
         try:
             self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), 0)
-            proc = self._launch(["--caller-version", "9.9"])
+            # Same descriptor, preserved with pass_fds. The previous
+            # version opened its own fd here AND another inside _launch,
+            # so for a regular file these were independent open-file
+            # descriptions: the measured offset belonged to a file the
+            # launcher never touched, and the test would have passed even
+            # if the launcher consumed the input.
+            proc = self._launch(["--caller-version", "9.9"], src_fd=fd)
             self.assertEqual(proc.returncode, 80)
             self.assertEqual(
                 os.lseek(fd, 0, os.SEEK_CUR), 0,
@@ -215,12 +296,52 @@ class MinorMismatchBarrier(unittest.TestCase):
         self.assertFalse(v1_available()["udf"])
 
     def test_probe_timeout_is_not_cached_as_incompatibility(self):
-        """A timeout is INCONCLUSIVE and must never disable the accelerator."""
-        reason = "probe timed out"
-        _udf.record_incompatible(_HELPER, reason)
-        _udf._INCOMPATIBLE.clear()
-        # Nothing was recorded by the caller, so nothing is known.
-        self.assertIsNone(_udf.known_incompatible(_HELPER))
+        """A timeout is INCONCLUSIVE and must never disable the accelerator.
+
+        The previous version of this test wrote an entry, cleared the WHOLE
+        cache, then asserted the entry was gone. It exercised nothing --
+        it would have passed no matter what _record_compat_refusal did.
+
+        This version goes through the real path: force a genuine 81 from
+        the launcher, and assert the artifact is NOT recorded.
+        """
+        rc = _run_launcher_with_hanging_helper(self.tmp)
+        self.assertEqual(rc, 81,
+                        "a hung constructor must be bounded into exit 81")
+        self.assertIsNone(
+            _udf.known_incompatible(_HELPER),
+            "81 is inconclusive; caching it would let a transient stall "
+            "permanently disable the accelerator for this artifact")
+
+    def test_hung_constructor_is_bounded_into_exit_81(self):
+        """The timeout path must actually run.
+
+        A shared object whose ELF constructor blocks forever. It does not
+        embed CPython: the property under test is that the launcher can
+        bound a dlopen() that never returns.
+
+        The test's own subprocess timeout is the backstop -- without it a
+        regression here would FREEZE the suite rather than fail it.
+        """
+        so = _build_hanging_helper(self.tmp)
+        self.assertTrue(os.path.exists(so))
+        started = time.time()
+        proc = subprocess.run(
+            [_LAUNCHER, "--so", _SUBSTRATE,
+             "--workers", "1", "--lines", "1", "--bytes", "0",
+             "--on-error", "0", "--retry", "1",
+             "--src", self.src, "--result",
+             os.path.join(self.tmp, "o.bin"), "--stats-fd", "-1",
+             "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
+             "--caller-version", _caller_version()],
+            capture_output=True, timeout=120)
+        elapsed = time.time() - started
+        self.assertEqual(proc.returncode, 81,
+                         "a hung ELF constructor must be bounded into 81, "
+                         "not waited on; stderr=%r" % proc.stderr[-300:])
+        self.assertLess(elapsed, 60.0,
+                        "the probe deadline is not being enforced (%.1fs)"
+                        % elapsed)
 
     def test_kill_switch_suppresses_both_probe_and_warning(self):
         """FORKRUN_NO_UDF=1 prevents the probe, so there is no mismatch to

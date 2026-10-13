@@ -894,7 +894,7 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
 # :539 fork(drain)), so it cannot be classified either way.
 # 1 (supervision failure) is always post-ingestion. Any signal death is
 # indeterminate. Both are unsafe.
-_CR_EXIT_PRE_INGEST = frozenset((64, 69, 71, 78, 80, 81))
+_CR_EXIT_PRE_INGEST = frozenset((64, 69, 71, 78, 80, 81, 82))
 
 # CR-FIX1-F: exits where falling back would REPRODUCE the hazard rather
 # than route around it. 79 means the launcher's capability probe of the
@@ -932,6 +932,9 @@ _CR_EXIT_LABELS = {
          "interpreter across the mismatch",
     81: "UDF helper probe timed out (an ELF constructor did not return); "
          "the helper was not loaded and no input was consumed",
+    82: "invalid --caller-version declaration (must be MAJOR.MINOR with "
+         "nothing after it). A CALLER bug, not a property of the helper -- "
+         "rejected before the helper is loaded, so no ELF constructor runs",
     1: "runtime worker/helper failure",
 }
 
@@ -1069,6 +1072,14 @@ def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
     return _gen()
 
 
+# The helper artifact actually OFFERED for the invocation in progress.
+# Set when the UDF arguments are built, read by _record_compat_refusal so
+# the refusal is cached against the helper it was actually about. A
+# one-slot list rather than a module global so it is a single mutable
+# binding; every executor path is already serialised by _RUN_LOCK.
+_REFUSED_HELPER = [None]
+
+
 def _caller_version_argv():
     """``["--caller-version=M.m"]`` from THIS interpreter, or [].
 
@@ -1095,12 +1106,21 @@ def _record_compat_refusal(code, detail):
     if code != 80:
         return
     try:
-        from ._udf import helper_path, record_incompatible
+        from ._udf import candidate_helper_path, fingerprint_now, \
+            record_incompatible_for
     except Exception:
         return
-    path = helper_path()
-    if path:
-        record_incompatible(path, detail or _CR_EXIT_LABELS.get(80, "mismatch"))
+    # Fingerprint the artifact THIS refusal was about, not whatever
+    # occupies the path afterwards. Re-querying the path after the
+    # launcher returned is a TOCTOU: if the file was replaced in between,
+    # the OLD helper's refusal would blacklist the NEW, valid one. That
+    # fails closed -- it never authorises an unverified load -- but it
+    # can silently disable a good replacement, which is a real cost.
+    path = _REFUSED_HELPER[0] or candidate_helper_path()
+    fp = fingerprint_now(path) if path else None
+    if fp:
+        record_incompatible_for(fp, detail or
+                                _CR_EXIT_LABELS.get(80, "mismatch"))
 
 
 def _warn_compat_refusal(exc):
@@ -1147,6 +1167,13 @@ def _warn_if_cached_incompatible():
     # candidate_helper_path, NOT helper_path: the cache makes helper_path
     # return None, which would make the reason invisible and silence the
     # warning after the very first call.
+    # The kill switch means the UDF path was never considered, so there is
+    # no refusal to report. candidate_helper_path() deliberately ignores
+    # both the cache and the switch to recover identity for diagnostics;
+    # the WARNING DECISION has to honour the switch separately, or a
+    # deliberately-disabled UDF would still nag.
+    if os.environ.get("FORKRUN_NO_UDF"):
+        return None
     path = candidate_helper_path()
     reason = known_incompatible(path) if path else None
     if not reason:
@@ -3687,7 +3714,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     # FORKRUN_CLEANROOM=1 -- which raised UnboundLocalError instead of
     # declining cleanly.
     _why = "mode=%r is not a launcher-served envelope" % (raw_mode,)
-    if raw_mode in ("plugin", "udf"):
+    if raw_mode == "udf":
         _warn_if_cached_incompatible()
     if _cleanroom_enabled() and raw_mode in ("plugin", "udf", "spawn"):
         _ok, _why = _cleanroom_eligible(
@@ -3740,7 +3767,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 _helper = _udf_helper_path()
                 if _helper:
                     _udf_args = {
-                        "udf_helper": _helper,
+                        "udf_helper": _REFUSED_HELPER.__setitem__(0, _helper)
+                                       or _helper,
                         "udf_module": _p,
                         "udf_attr": _f,
                         "udf_roots": _udf_roots_spec(_p),
@@ -4143,7 +4171,7 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
         # an unserved call is the overwhelmingly common case and
         # warning on each would be noise. An explicit request that cannot
         # be honoured still warns, as it does for map().
-        if raw_mode in ("plugin", "udf"):
+        if raw_mode == "udf":
             _warn_if_cached_incompatible()
         if _cleanroom_enabled() and raw_mode in ("plugin", "udf"):
             _ok, _why = _cleanroom_eligible(
@@ -4164,7 +4192,8 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                     _helper = _udf_helper_path()
                     if _helper:
                         _udf_args = {
-                            "udf_helper": _helper,
+                            "udf_helper": _REFUSED_HELPER.__setitem__(0, _helper)
+                                       or _helper,
                             "udf_module": _p,
                             "udf_attr": _f,
                             "udf_roots": _udf_roots_spec(_p),
