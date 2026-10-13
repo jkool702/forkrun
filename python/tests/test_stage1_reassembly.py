@@ -197,6 +197,70 @@ class TestContradictoryOutcomes(unittest.TestCase):
             "first-wins is both the documented policy and the "
             "conservative direction for exactly-once")
 
+    def test_duplicate_after_drain_is_caught_and_not_emitted(self):
+        """The gap the round-8 review found.
+
+        Once drain() delivers index 0, the payload leaves _buffer and the
+        terminal marker is gone, so the original duplicate checks found
+        nothing: add() re-buffered the stale index and final_drain()
+        emitted it. That published a DUPLICATE through a buffer whose
+        documented policy is first-wins.
+        """
+        b = ReassemblyBuffer()
+        b.add_disposition(0, DISP_DATA, b"FIRST")
+        self.assertEqual([(0, b"FIRST")], list(b.drain()),
+                         "precondition: index 0 delivered")
+
+        b.add_disposition(1, DISP_DATA, b"b1")
+        b.add_disposition(0, DISP_DATA, b"SECOND")
+        self.assertIn(0, b.conflicts(),
+                      "a second outcome for a DELIVERED index must be a "
+                      "conflict, not silently re-buffered")
+        list(b.drain())
+        self.assertEqual([], list(b.final_drain()),
+                         "final_drain emitted a duplicate of an already "
+                         "delivered batch -- the failure this guards")
+
+    def test_terminal_after_drain_is_caught(self):
+        """Same hole via the terminal path, not just DATA."""
+        b = ReassemblyBuffer()
+        b.add_disposition(0, DISP_NO_RESULT)
+        list(b.drain())
+        b.add_disposition(0, DISP_DATA, b"LATE")
+        self.assertIn(0, b.conflicts())
+        self.assertEqual([], list(b.final_drain()))
+
+    def test_stale_payload_past_the_guard_is_still_caught_by_final_drain(self):
+        """final_drain is the LAST gate before a payload reaches a caller.
+
+        Bypasses add_disposition entirely to prove the guard is repeated
+        there rather than assumed -- this is the path the duplicate
+        escaped through before.
+        """
+        b = ReassemblyBuffer()
+        b._buffer[0] = b"STALE"
+        b._sizes[0] = 5
+        b._consumed_upto = 1
+        self.assertEqual([], list(b.final_drain()))
+        self.assertIn(0, b.conflicts())
+
+    def test_forward_progress_is_unaffected(self):
+        """The consumed-index guard must not reject legitimate late work.
+
+        Out-of-order delivery is normal: index 5 arriving before 2 is not
+        a duplicate, and must still buffer and drain in order.
+        """
+        b = ReassemblyBuffer()
+        b.add_disposition(0, DISP_DATA, b"a")
+        b.add_disposition(1, DISP_DATA, b"b")
+        b.add_disposition(3, DISP_DATA, b"d")
+        b.add_disposition(2, DISP_DATA, b"c")
+        self.assertEqual({}, b.conflicts(),
+                         "normal out-of-order arrival was flagged as a "
+                         "conflict")
+        self.assertEqual([(0, b"a"), (1, b"b"), (2, b"c"), (3, b"d")],
+                         list(b.drain()))
+
     def test_a_correct_producer_records_no_conflicts(self):
         b = ReassemblyBuffer()
         for i, d in enumerate((DISP_DATA, DISP_NO_RESULT, DISP_SKIPPED,
@@ -206,6 +270,50 @@ class TestContradictoryOutcomes(unittest.TestCase):
         self.assertEqual({}, b.conflicts(),
                          "a single terminal outcome per batch must not be "
                          "flagged as a conflict")
+
+
+class TestConsumersRefuseConflicts(unittest.TestCase):
+    """The review's second half: `conflicts()` had no production caller.
+
+    `ReassemblyBuffer.conflicts()` documented "a caller can refuse the
+    result", and no caller existed -- the policy was record-and-ignore.
+    These drive the real consumers rather than the buffer.
+    """
+
+    def _buffer_with_conflict(self):
+        # The module keeps its disposition constants private (_DISP_*),
+        # so import them by their real names.
+        from forkrun._reassembly import (ReassemblyBuffer,
+                                         _DISP_DATA, _DISP_NO_RESULT)
+        b = ReassemblyBuffer()
+        b.add_disposition(0, _DISP_DATA, b"a")
+        list(b.drain())
+        b.add_disposition(0, _DISP_DATA, b"a")     # post-drain duplicate
+        return b
+
+    def test_the_helper_raises_on_a_recorded_conflict(self):
+        from forkrun.run import _raise_on_disposition_conflicts
+        from forkrun.exceptions import ForkrunProtocolError
+        b = self._buffer_with_conflict()
+        with self.assertRaises(ForkrunProtocolError) as cm:
+            _raise_on_disposition_conflicts(b, "map()")
+        self.assertIn(0, cm.exception.conflicts,
+                      "the exception must carry WHICH batches were "
+                      "affected, not only that something was")
+
+    def test_the_helper_is_silent_when_there_is_no_conflict(self):
+        from forkrun.run import _raise_on_disposition_conflicts
+        from forkrun._reassembly import (ReassemblyBuffer,
+                                         _DISP_DATA, _DISP_NO_RESULT)
+        b = ReassemblyBuffer()
+        b.add_disposition(0, _DISP_DATA, b"a")
+        b.add_disposition(1, _DISP_NO_RESULT)
+        _raise_on_disposition_conflicts(b, "map()")   # must not raise
+
+    def test_protocol_error_is_a_runtimeerror(self):
+        """Callers written as `except RuntimeError` must keep working."""
+        from forkrun.exceptions import ForkrunProtocolError
+        self.assertTrue(issubclass(ForkrunProtocolError, RuntimeError))
 
 
 # -- parser ------------------------------------------------------------

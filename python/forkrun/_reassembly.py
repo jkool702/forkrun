@@ -74,6 +74,24 @@ class ReassemblyBuffer:
         self._terminal_seen: dict = {}
         self._conflicts: dict = {}
         self._next_idx = start
+        # Indices whose outcome has ALREADY been delivered downstream.
+        #
+        # Without this, a duplicate arriving after its original was
+        # drained is invisible: `drain()` removes the payload from
+        # _buffer and advances _next_idx, so the later add_disposition
+        # finds neither a pending DATA nor a pending terminal marker, and
+        # add() happily re-buffers the stale index. final_drain() then
+        # emits it -- a duplicate, published through a buffer whose whole
+        # stated policy is first-wins.
+        #
+        # Bounded the same way _terminal_seen is: the window is
+        # (self._consumed_upto - _next_idx), which is at most the
+        # reorder depth, not the whole stream. An index far below the
+        # window is not a duplicate but a different error entirely (a
+        # producer restarting its numbering), so it is recorded as a
+        # conflict rather than silently dropped.
+        self._consumed_upto = start
+        self._seen_below: dict = {}
         self._max_size = 0
         # W-REL6-3.2: byte accounting for the high-water warning.
         self._sizes: dict = {}
@@ -164,6 +182,17 @@ class ReassemblyBuffer:
         a consumer needs to report, and DECISION-02 introduced them to
         remove a conflation, not to add another.
         """
+        # A second outcome for an index already DELIVERED is the case
+        # the original duplicate checks could not see, because by then
+        # the payload has left _buffer and _terminal.
+        if batch_idx < self._consumed_upto:
+            self._note_conflict(
+                batch_idx,
+                "%s for batch %d AFTER it was delivered (consumed up to %d)"
+                % (NAME_OF.get(disposition, disposition), batch_idx,
+                   self._consumed_upto))
+            return
+
         # Contradictions are PROTOCOL VIOLATIONS, not cases to merge.
         #
         # A correct producer emits exactly one terminal outcome per
@@ -244,11 +273,18 @@ class ReassemblyBuffer:
             if self._next_idx in self._buffer:
                 data = self._buffer.pop(self._next_idx)
                 self._bytes -= self._sizes.pop(self._next_idx, 0)
+                # Mark delivered BEFORE the yield, not after. The
+                # consumer has the payload the moment the yield returns,
+                # so that is the moment a duplicate becomes detectable.
+                # Advancing after the yield would leave a window in which
+                # a re-submission of this index looked like new work.
+                self._consumed_upto = self._next_idx + 1
                 yield (self._next_idx, data)
                 self._next_idx += 1
             elif self._next_idx in self._terminal:
                 self._terminal.discard(self._next_idx)
                 self._terminal_seen.pop(self._next_idx, None)
+                self._consumed_upto = self._next_idx + 1
                 self._next_idx += 1
             else:
                 return
@@ -294,6 +330,21 @@ class ReassemblyBuffer:
         Returns a generator of (batch_idx, data).
         """
         for idx in sorted(self._buffer.keys()):
+            # Belt and braces: add_disposition already refuses an index
+            # below _consumed_upto, so nothing stale should be here. But
+            # final_drain is the LAST gate before the payload reaches the
+            # caller, and this is the path a duplicate escaped through
+            # before. Emitting it here is exactly the failure the
+            # first-wins policy exists to prevent, so the guard is
+            # repeated rather than assumed.
+            if idx < self._consumed_upto:
+                self._note_conflict(
+                    idx, "stale payload buffered for already-delivered "
+                         "batch %d (consumed up to %d)"
+                         % (idx, self._consumed_upto))
+                self._buffer.pop(idx, None)
+                self._sizes.pop(idx, None)
+                continue
             self._bytes -= self._sizes.pop(idx, 0)
             yield (idx, self._buffer.pop(idx))
         # Terminal-without-payload indices are not yielded (there is no

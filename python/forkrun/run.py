@@ -69,7 +69,7 @@ from ._worker import _HDR, _c_plugin_spec, _c_spawn_spec, \
     _fork_c_plugin_worker, _fork_c_spawn_worker, resolve_payload_parent, \
     worker_main
 from .exceptions import (ForkrunInterrupted, ForkrunPoisonSkip,
-                           ForkrunWorkerFailure)
+                           ForkrunProtocolError, ForkrunWorkerFailure)
 
 import fcntl as _fcntl
 import time as _time
@@ -4240,6 +4240,41 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
             yield ordered
         if stats is not None:
             stats["reassembly_max"] = reassembly.max_size
+        _raise_on_disposition_conflicts(reassembly, "map()")
+
+
+def _raise_on_disposition_conflicts(reassembly, where):
+    """Refuse a result the reassembly buffer says is untrustworthy.
+
+    `ReassemblyBuffer.conflicts()` is documented as "a caller can refuse
+    the result". Until now no caller existed, so the policy was
+    record-and-ignore -- the conflicts were recorded faithfully and then
+    never read by anything in production.
+
+    This is that caller. Two rules, and the difference matters:
+
+    * `map()` collects everything before returning, so a conflict is
+      raised BEFORE the caller has any of it. The result is simply not
+      returned, which is the whole point of refusing.
+    * `stream()` has already yielded earlier records to the caller and
+      cannot retract them. So the error is raised at the point of
+      detection, and the message says plainly that data already yielded
+      is not withdrawn. Silently completing successfully after emitting a
+      contradictory stream is the failure this prevents.
+    """
+    conflicts = reassembly.conflicts()
+    if not conflicts:
+        return
+    detail = "; ".join("batch %d: %s" % (idx, "; ".join(what))
+                       for idx, what in sorted(conflicts.items()))
+    raise ForkrunProtocolError(
+        "forkrun: %s produced contradictory terminal outcomes for %d "
+        "batch(es) -- the result is NOT trustworthy and is refused.\n"
+        "  %s\n"
+        "  A correct producer emits exactly ONE terminal outcome per batch.\n"
+        "  This is an engine-protocol defect, not a caller error."
+        % (where, len(conflicts), detail),
+        conflicts=conflicts)
 
 
 def _make_results_pump(results_r, order="none", stats=None):
@@ -7374,6 +7409,16 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 if reassembly is not None:
                     for _, ordered in reassembly.final_drain():
                         _pending.append(ordered)
+                    # Streaming boundary: records yielded BEFORE this
+                    # point cannot be retracted, so the error is raised
+                    # at detection rather than at the end, and says so.
+                    # A contradictory stream must not complete
+                    # successfully just because the contradiction
+                    # happened to arrive before EOF.
+                    _raise_on_disposition_conflicts(
+                        reassembly,
+                        "stream() [records already yielded before this "
+                        "point are NOT withdrawn]")
                     if _pending:
                         return _pending.popleft()
                 # Safety sweep before giving up (short final writes).
