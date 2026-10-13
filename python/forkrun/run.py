@@ -4240,7 +4240,12 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
             yield ordered
         if stats is not None:
             stats["reassembly_max"] = reassembly.max_size
-        _raise_on_disposition_conflicts(reassembly, "map()")
+        # LABEL CORRECTED (round-9 review). This said "map()", but
+        # _drain_records() is called only from _execute_streaming() and
+        # _execute_ingest_stream() -- both generator/stream paths.
+        # map() never constructs a ReassemblyBuffer at all: it uses the C
+        # orderer (`use_orderer`), so there is no buffer here to refuse.
+        _raise_on_disposition_conflicts(reassembly, "stream()")
 
 
 def _raise_on_disposition_conflicts(reassembly, where):
@@ -4251,16 +4256,34 @@ def _raise_on_disposition_conflicts(reassembly, where):
     record-and-ignore -- the conflicts were recorded faithfully and then
     never read by anything in production.
 
-    This is that caller. Two rules, and the difference matters:
+    This is that caller, and it is wired into EVERY path that
+    constructs a ReassemblyBuffer:
 
-    * `map()` collects everything before returning, so a conflict is
-      raised BEFORE the caller has any of it. The result is simply not
-      returned, which is the whole point of refusing.
-    * `stream()` has already yielded earlier records to the caller and
-      cannot retract them. So the error is raised at the point of
-      detection, and the message says plainly that data already yielded
-      is not withdrawn. Silently completing successfully after emitting a
-      contradictory stream is the failure this prevents.
+        _drain_records                  (streaming, ingest-stream)
+        _make_results_pump             (C-drain: materialized stream,
+                                         ingest-stream, reactor-stream,
+                                         NUMA-stream)
+        _execute_streaming_reactor
+        _execute_ingest_stream_reactor
+        _execute_numa_stream
+
+    Streams raise at the point of detection rather than at EOF, because
+    a stream cannot retract records already yielded and because
+    delaying permits further output to escape after integrity has
+    already been invalidated. The message says plainly that
+    already-yielded data is not withdrawn.
+
+    ABOUT `map()` -- there is deliberately no hook here, and claiming
+    one would be wrong. map() never constructs a ReassemblyBuffer: its
+    order="index" path uses the C orderer (`use_orderer`), which merges
+    by (major, minor) and emits only records that exist. A skipped or
+    poisoned batch produces no record there at all, so the orderer
+    simply never sees it and no contradiction can arise.
+
+    An earlier version of this helper's comment claimed map() was the
+    collected-result consumer checked here. It was not -- the single
+    call site was inside _drain_records(), which is a STREAM path, and
+    it was mislabelled "map()". Corrected in round 9.
     """
     conflicts = reassembly.conflicts()
     if not conflicts:
@@ -4319,6 +4342,21 @@ def _make_results_pump(results_r, order="none", stats=None):
           "reassembly": (ReassemblyBuffer() if order == "index"
                          else None)}
 
+    def _check_conflicts():
+        # Checked IMMEDIATELY on ingestion, before any further pending
+        # output is handed back.
+        #
+        # Waiting until EOF permits more records to escape after the
+        # producer has already violated the protocol, which is the
+        # window the check exists to close. Already-yielded records
+        # cannot be withdrawn, so the error says so -- but no further
+        # ones are released after the contradiction is known.
+        if st["reassembly"] is not None:
+            _raise_on_disposition_conflicts(
+                st["reassembly"],
+                "stream() [records already yielded before this point "
+                "are NOT withdrawn]")
+
     def _ingest(chunk):
         # Stage 1: the results-PIPE consumer is a distinct production
         # path from the worker-memfd drains, and it was still
@@ -4340,6 +4378,10 @@ def _make_results_pump(results_r, order="none", stats=None):
         st["tail"] = tail
         for bidx, bdisp, bblob in records:
             st["reassembly"].add_disposition(bidx, bdisp, bblob)
+        # BEFORE draining: a contradiction detected here must not release
+        # further output. Checked after drain() it would already have
+        # queued records that the caller can no longer be told about.
+        _check_conflicts()
         for _, ordered in st["reassembly"].drain():
             st["pending"].append(ordered)
 
@@ -4367,6 +4409,10 @@ def _make_results_pump(results_r, order="none", stats=None):
                 if stats is not None:
                     stats["reassembly_max"] = (
                         st["reassembly"].max_size)
+                # And again at EOF, for a contradiction whose second
+                # outcome arrived with the final chunk and was not seen
+                # on a later ingestion pass.
+                _check_conflicts()
                 if st["pending"]:
                     return st["pending"].popleft()
             raise StopIteration
@@ -8574,6 +8620,10 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 if drain["reassembly"] is not None:
                     for _, ordered in drain["reassembly"].final_drain():
                         drain["pending"].append(ordered)
+                    _raise_on_disposition_conflicts(
+                        drain["reassembly"],
+                        "stream() [records already yielded before this "
+                        "point are NOT withdrawn]")
                     if drain["pending"]:
                         return drain["pending"].popleft()
                 if use_orderer:
@@ -10008,6 +10058,13 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             if drain["reassembly"] is not None:
                 for _, ordered in drain["reassembly"].final_drain():
                     drain["pending"].append(ordered)
+                # Added (round-9 review): this route finalised without
+                # consulting conflicts(), so a contradiction recorded on
+                # the NUMA-stream path was silently ignored.
+                _raise_on_disposition_conflicts(
+                    drain["reassembly"],
+                    "stream() [records already yielded before this point "
+                    "are NOT withdrawn]")
 
         def _pump_drain():
             nonlocal spare_signal_w, signal_w

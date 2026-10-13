@@ -272,6 +272,23 @@ class TestContradictoryOutcomes(unittest.TestCase):
                          "flagged as a conflict")
 
 
+def _pump_reassembly(pump):
+    """Reach the pump's ReassemblyBuffer through its closure cells.
+
+    Deliberately reaching in rather than exposing internals: the point
+    is to construct a state the pump can only detect at final_drain,
+    which the public ingestion path cannot produce.
+    """
+    for cell in pump.__closure__ or ():
+        try:
+            val = cell.cell_contents
+        except ValueError:
+            continue
+        if isinstance(val, dict) and val.get("reassembly") is not None:
+            return val["reassembly"]
+    raise AssertionError("pump closure has no reassembly state")
+
+
 class TestConsumersRefuseConflicts(unittest.TestCase):
     """The review's second half: `conflicts()` had no production caller.
 
@@ -309,6 +326,104 @@ class TestConsumersRefuseConflicts(unittest.TestCase):
         b.add_disposition(0, _DISP_DATA, b"a")
         b.add_disposition(1, _DISP_NO_RESULT)
         _raise_on_disposition_conflicts(b, "map()")   # must not raise
+
+    def test_results_pump_refuses_a_contradiction_midstream(self):
+        """PRODUCTION path, not the helper.
+
+        The round-9 review is right that invoking
+        _raise_on_disposition_conflicts() directly proves nothing about
+        the pump. This drives _make_results_pump() -- the C-drain
+        consumer used by the materialized-stream, ingest-stream,
+        reactor-stream and NUMA-stream paths -- over a real pipe, and
+        injects a duplicate for an index it has ALREADY emitted while
+        the writer still holds the pipe open.
+
+        Asserts three things the helper-only test could not:
+          * the conflict is caught at INGEST time, not at EOF;
+          * no further output is released after the contradiction;
+          * the error names the offending index.
+
+        The writer staying open is what makes the first point testable:
+        an EOF-time check would never fire here.
+        """
+        import importlib
+        from forkrun.exceptions import ForkrunProtocolError
+        run = importlib.import_module("forkrun.run")
+        r, w = os.pipe()
+        self.addCleanup(lambda: os.close(w))
+        self.addCleanup(lambda: os.close(r))
+        try:
+            os.write(w, frame(0, DISP_DATA, b"zero"))
+            os.write(w, frame(1, DISP_DATA, b"one"))
+            pump = run._make_results_pump(r, order="index")
+            self.assertEqual(b"zero", bytes(pump(alive=True)))
+            self.assertEqual(b"one", bytes(pump(alive=True)))
+            # Batch 0 was DELIVERED; a second outcome for it is a
+            # contradiction the buffer must refuse.
+            os.write(w, frame(0, DISP_DATA, b"ZERO AGAIN"))
+            with self.assertRaises(ForkrunProtocolError) as cm:
+                pump(alive=True)
+            self.assertIn(0, cm.exception.conflicts,
+                          "the error must name the offending batch")
+        finally:
+            pass
+
+    def test_results_pump_refuses_a_contradiction_at_eof(self):
+        """The same contradiction, delivered with the final chunk.
+
+        An ingest-time-only check would miss this if the duplicate
+        arrived in the same read as EOF, so the EOF path is checked
+        separately rather than assumed covered.
+        """
+        import importlib
+        from forkrun.exceptions import ForkrunProtocolError
+        run = importlib.import_module("forkrun.run")
+        r, w = os.pipe()
+        self.addCleanup(lambda: os.close(r))
+        try:
+            os.write(w, frame(0, DISP_DATA, b"zero"))
+            os.write(w, frame(0, DISP_DATA, b"ZERO AGAIN"))
+            os.close(w)          # EOF in the same burst
+            pump = run._make_results_pump(r, order="index")
+            with self.assertRaises(ForkrunProtocolError):
+                while True:
+                    pump(alive=False)
+        finally:
+            pass
+
+    def test_results_pump_refuses_a_stale_payload_at_final_drain(self):
+        """The case the EOF check exists for, and which the ingest check
+        cannot cover.
+
+        The first EOF test is caught by the ingest-time check, so
+        removing the EOF check left it passing -- it was not testing what
+        it claimed. This one injects a stale payload directly into the
+        pump's buffer, bypassing add_disposition (which would refuse it
+        at ingest). It surfaces only at final_drain(), so only the EOF
+        check sees it.
+
+        Mutation-checked: removing the EOF check makes THIS test fail
+        while the other two still pass.
+        """
+        import importlib
+        from forkrun.exceptions import ForkrunProtocolError
+        run = importlib.import_module("forkrun.run")
+        r, w = os.pipe()
+        # w is closed explicitly below to signal EOF; only r is
+        # cleaned up here, or the cleanup double-closes it.
+        self.addCleanup(lambda: os.close(r))
+        os.write(w, frame(0, DISP_DATA, b"zero"))
+        pump = run._make_results_pump(r, order="index")
+        self.assertEqual(b"zero", bytes(pump(alive=True)))
+        # Bypass add_disposition: place a stale payload for an index
+        # that has already been delivered.
+        reassembly = _pump_reassembly(pump)
+        reassembly._buffer[0] = b"STALE"
+        reassembly._sizes[0] = 5
+        os.close(w)
+        with self.assertRaises(ForkrunProtocolError):
+            while True:
+                pump(alive=False)
 
     def test_protocol_error_is_a_runtimeerror(self):
         """Callers written as `except RuntimeError` must keep working."""
