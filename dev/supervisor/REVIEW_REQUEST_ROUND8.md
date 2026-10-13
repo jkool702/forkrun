@@ -1,5 +1,10 @@
 # External review request — round 8
 
+> **RESPONDED TO — see `REVIEW_REQUEST_ROUND9.md`.** All three blocking
+> grounds were reproduced and fixed, along with the follow-ups.
+> Retained as the record of the request; the open-item table in §5 is
+> superseded by round 9's §8.
+
 Branch `NEW/REFACTOR4.2`. Review the **branch head** — this file is
 added by the commit immediately after `9e4a599e`, so pin the head rather
 than a SHA from this paragraph if you want the request itself in your
