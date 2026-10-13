@@ -34,7 +34,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-03 | `_api.py` still describes a Stage 0 stub | med | **verified** |
 | TD-04 | Environment propagation: explicit in bash, implicit in Python | med | **decided** — `DECISION-04` |
 | TD-05 | Retry semantics: `-E` flag has no Python counterpart | med | **partly decided** — one test open |
-| TD-06 | Executor consolidation audit not performed | med | **unverified claim** |
+| TD-06 | Executor consolidation | med | **audited** — `EXECUTOR_CONSOLIDATION_AUDIT.md` |
 | TD-07 | README collapses v0 history into current capability | low | **unverified claim** |
 | TD-08 | `Mode` type omitted a shipped, tested mode | med | **verified — FIXED** |
 
@@ -239,9 +239,17 @@ unrecorded semantic choice.
 
 ---
 
-### TD-06 — Executor consolidation audit not performed (medium)
+### TD-06 — Executor consolidation (medium) — AUDITED
 
-**Unverified claim. Do not act on this yet.**
+> **Mapping complete** in `EXECUTOR_CONSOLIDATION_AUDIT.md`. Headline:
+> `12/16` executors adopt the shared core, which is **better** than
+> "substantial duplication" implies — but `fork_workers` (4/16) and
+> `report_poison` (4/16) are the real gaps, and consolidation tracks
+> **age**: the two cleanroom executors are 38% of executor code and adopt
+> the least. Still **no refactoring recommended on this evidence**, because
+> behavioural equivalence was never tested.
+
+**Originally an unverified claim. Do not act on it yet.**
 
 The audit reports substantial remaining duplication in `run.py` across
 materialised input, streaming ingest, blocking collection, generator
