@@ -261,6 +261,52 @@ The current wheel is `manylinux`; whether `libpython3.X` is excluded (system
 library) or vendored is a policy question that must be *observed*, not
 predicted.
 
+#### 6.2.1 Two of the three checks, run (third blocked)
+
+Run against the helper this tree builds, with `readelf` only —
+`auditwheel` and `patchelf` are **not installed** on the measurement host,
+so the third bullet remains unverified and is **not** claimed.
+
+| check | result |
+|---|---|
+| `DT_NEEDED` requests the intended minor | **verified** |
+| no accidental `RPATH`/`RUNPATH` | **verified — none present at all** |
+| `auditwheel` verdict | **NOT RUN — tool unavailable** |
+
+Local build (`make -f Makefile.substrate udf-lib`, CPython 3.14.7):
+
+```
+NEEDED  libpython3.14.so.1.0
+NEEDED  libm.so.6
+NEEDED  libc.so.6
+(no RPATH, no RUNPATH)
+```
+
+**The first check needed a negative control to mean anything.** A helper
+built against the build host's own headers will *trivially* request that
+host's minor, so "DT_NEEDED is right" proves nothing on its own — it is
+consistent both with an honest build and with one that ignores its inputs
+entirely. So the same source was rebuilt against the cached 3.12 headers:
+
+```
+gcc -I/tmp/pymin/root/usr/include/python3.12 ... -lpython3.12
+NEEDED  libpython3.12.so.1.0        <- follows the headers, not the host
+```
+
+The build genuinely tracks the minor. **That is also exactly why the
+roadmap's packaging warning is real rather than theoretical:** the minor
+in `DT_NEEDED` is decided by which headers were on the command line, so a
+wheel built from an sdist on one machine and tagged `py3-none` would carry
+a different minor than its tag claims, with nothing in the artifact to
+contradict the tag.
+
+Not yet established: what `auditwheel repair` would actually do to this
+binary — vendoring a private `libpython3.X.so` behind an RPATH, or
+excluding it as a system library. Those are different shipping outcomes
+with different security and portability consequences, and only one of
+them can be inferred from the docs. This cannot be settled without
+installing `auditwheel`.
+
 ### 6.3 Implementation sequence
 
 Prototype the helper against the **local** interpreter's headers and the full
