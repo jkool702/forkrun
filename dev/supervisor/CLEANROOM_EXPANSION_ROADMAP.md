@@ -973,9 +973,23 @@ on the frozen-engine decision.
   wins on 48/48 (56/56 on 3.14) configurations of EVERY minor, with
   medians in a 3.6x-4.7x band and no trend across versions. Crossover
   is faster on 56/56 configurations, but the margin decays ~3.5x across the
-  axis as parent RSS goes 0 -> 2127 MB. Fleet memory (children's PSS/USS) is
-  still unmeasured, which C0.6 also requires; the parent's own USS was
+  axis as parent RSS goes 0 -> 2127 MB. The parent's own USS was
   found miscalculated and is now fixed.
+  **Fleet memory (children's PSS/USS) is now MEASURED**, closing the last
+  C0.6 item — see `C0.6_M2_MEASUREMENT.md`. Two cautions travel with the
+  number. (a) The barrier that made it measurable was **broken until this
+  session**: both ends of the barrier pipe were used backwards, both calls
+  failed with `EBADF`, and both errors were discarded with `(void)`, so
+  the barrier was a no-op that looked like it worked. The variance it was
+  built to remove was in fact the symptom, and the first result it
+  produced was **wrong in direction**. (b) With the barrier repaired the
+  result **reverses** the earlier claim: pre-fork is *worse* on memory at
+  1-2 workers (+39%, +7.5% at parent 0 MB), crosses over near 3 workers,
+  and is better from there (-46% at 16 workers); parent size swamps the
+  difference (within 0.5% at 2127 MB). Replicated on all six minors with
+  integrity counters clean. **[MEASURED]** — scope remains one host, one
+  sample point, and the inflation buffer as the only large shared mapping;
+  a workload that dirties most shared pages is untested.
 - Interpreter matrix decision recorded (add 3.14, or revise the policy).
   **[DONE]** See `C0.5_INTERPRETER_MATRIX.md` and `tools/matrix_c05.sh`.
   All six minors 3.10-3.15 exercised (3.15 is rc2). Pre-fork works on
