@@ -228,8 +228,21 @@ class TestWorkerRespawn(unittest.TestCase):
                     "    return bytes(batch.data).upper()\n")
             sys.path.insert(0, plugin_dir)
             try:
+                # order="index" EXPLICITLY (round-9 review). Both runs
+                # previously used the default order="none", where output
+                # is COMPLETION order -- so `healthy_recs[0]` was the
+                # first record to COMPLETE, not necessarily batch 0, and
+                # `healthy_recs[1:] == res_recs` treated list position as
+                # batch identity. That is not a contract order="none"
+                # makes, and it would reject a correct run whose later
+                # batches happened to complete in a different order.
+                #
+                # Indexed order is a promise, so under it "the first
+                # record IS batch 0" is supported rather than assumed,
+                # and the rest of the assertion becomes meaningful.
                 res = forkrun.map("w19segv_mod:payload", path,
-                                  workers=2, orchestrator=True, nodes=1)
+                                  workers=2, orchestrator=True, nodes=1,
+                                  order="index")
             finally:
                 sys.path.remove(plugin_dir)
             # The crashed batch is best-effort (no escrow possible
@@ -246,7 +259,8 @@ class TestWorkerRespawn(unittest.TestCase):
             # healthy run is absent, and every other record is present
             # byte-identical. That names the loss and proves the tail,
             # which a count cannot.
-            healthy = forkrun.map(_up, path, workers=2, nodes=1)
+            healthy = forkrun.map(_up, path, workers=2, nodes=1,
+                                  order="index")
             healthy_recs = [bytes(x) for x in healthy if x is not None]
             res_recs = [bytes(x) for x in res if x is not None]
             self.assertEqual(
