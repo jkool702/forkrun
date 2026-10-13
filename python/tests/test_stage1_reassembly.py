@@ -179,11 +179,23 @@ class TestContradictoryOutcomes(unittest.TestCase):
         b.add_disposition(0, DISP_POISONED)
         self.assertIn(0, b.conflicts())
 
-    def test_duplicate_data_is_recorded(self):
+    def test_duplicate_data_keeps_the_FIRST_payload(self):
+        """First-wins, like every other contradiction branch.
+
+        The original version noted the conflict and then called `add()`,
+        which overwrites -- so duplicate DATA was last-wins while every
+        other contradiction was first-wins. The docstring claimed one
+        policy and the code implemented another.
+        """
         b = ReassemblyBuffer()
-        b.add_disposition(0, DISP_DATA, b"a")
-        b.add_disposition(0, DISP_DATA, b"a")
+        b.add_disposition(0, DISP_DATA, b"first")
+        b.add_disposition(0, DISP_DATA, b"SECOND")
         self.assertIn(0, b.conflicts())
+        self.assertEqual(
+            [(0, b"first")], list(b.drain()),
+            "a second delivery replaced an already-delivered payload; "
+            "first-wins is both the documented policy and the "
+            "conservative direction for exactly-once")
 
     def test_a_correct_producer_records_no_conflicts(self):
         b = ReassemblyBuffer()

@@ -170,7 +170,16 @@ class ReassemblyBuffer:
         # batch. Silently accepting a second one would hide a future
         # exactly-once regression: the reassembly layer is precisely the
         # place that would absorb it and make the stream look healthy.
-        # So each contradiction is recorded and the FIRST outcome kept.
+        # So each contradiction is recorded and the FIRST outcome kept --
+        # in EVERY direction, including duplicate DATA. That last one was
+        # inconsistent at first: the conflict was noted and then `add()`
+        # was still called, and `add()` overwrites, so duplicate DATA was
+        # last-wins while every other contradiction was first-wins. The
+        # docstring claimed one policy and the code did another, which is
+        # SHAPES.md Shape 6's failure mode exactly: ownership that is not
+        # written down as a truth table at the site. First-wins is also
+        # the conservative direction -- a second delivery must not
+        # replace a payload that has already been delivered.
         if disposition == _DISP_DATA:
             if batch_idx in self._terminal:
                 self._note_conflict(batch_idx, "DATA after terminal %s"
@@ -179,9 +188,12 @@ class ReassemblyBuffer:
                                         "?"))
                 return
             if batch_idx in self._buffer:
-                # Duplicate DATA for a batch already holding a payload:
-                # the engine never delivers one batch twice.
+                # Duplicate DATA: keep the FIRST payload. `add()` would
+                # overwrite, and the first-wins policy is the one the
+                # docstring states and the one the terminal branches
+                # already follow.
                 self._note_conflict(batch_idx, "duplicate DATA")
+                return
             self.add(batch_idx, payload)
             return
         if batch_idx in self._buffer:

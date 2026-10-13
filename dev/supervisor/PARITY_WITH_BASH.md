@@ -125,6 +125,68 @@ were missed:
   same words. That one was arrived at correctly, but by reasoning from
   first principles rather than by reading.
 
+## SHAPES.md and EOF_PROTOCOL.md — the frame, and the checklist
+
+`SHAPES.md` is the architecture's mental model: one coordinate plane
+(absolute byte offsets), one lattice `(major, minor)`, six control-flow
+shapes, six derivation laws. `EOF_PROTOCOL.md` is Shapes 3 and 5 in
+purest form and ends with an explicit audit checklist.
+
+Applied to this work's own changes, three laws are load-bearing:
+
+* **Law 3, every exit path publishes** (Shape 6). Ownership of a value
+  downstream waiters consume must be written down as a truth table *at
+  the site*. This is the law Stage 0's publication-after-commit work
+  exists to satisfy.
+* **Law 6, progress is irreversible.** No rollback of claims, no
+  decrements of monotonic indices. The `conflicts()` design complies: it
+  records a contradiction and keeps the first outcome rather than
+  retracting state.
+* **EOF §6, the co-polling checklist.** Every blocking poll that waits
+  for data must also watch the EOF eventfd; the EOF eventfd is never
+  `sys_read()`; escrow drain must terminate on EAGAIN with the re-arm
+  flag cleared only after EAGAIN and `escrow_pending` TATAS-consumed.
+
+### This found a real inconsistency in my own code
+
+Applying Shape 6's truth-table discipline to `ReassemblyBuffer`
+immediately produced a finding, and it was in code I had written this
+session:
+
+`add_disposition`'s docstring stated **"the FIRST outcome is kept"**,
+and three of the four contradiction branches did exactly that. The
+fourth — duplicate DATA — noted the conflict and then called `add()`,
+which **overwrites**. So duplicate DATA was last-wins while every other
+contradiction was first-wins: the docstring claimed one policy and the
+code implemented another.
+
+That is precisely Shape 6's failure mode — ownership that is not written
+down as a truth table at the site is the gap where this bug class lives
+— and it was a docstring/code divergence, which is the cheapest possible
+bug to catch and the easiest to ship without noticing. Fixed to
+first-wins, with a regression test that asserts the *first* payload
+survives. First-wins is also the conservative direction for exactly-once:
+a second delivery must not replace a payload that has already been
+delivered.
+
+### Flagged, not fixed: the truncated-tail claim
+
+`_make_results_pump`'s docstring says a truncated tail is "a worker that
+died mid-record, **never user data**". That is too strong for the pipe
+case. `RESILIENCE_PROTOCOL.md` §2.2 states rollback is guarded by
+`S_ISREG` and that **pipes downgrade to at-least-once** — a pipe cannot
+be truncated, so partial output from a killed batch genuinely can appear
+on one.
+
+In practice the internal results pipe carries already-framed complete
+records out of the worker memfds (memfds are `S_ISREG`, so rollback
+works there), so the truncation source is the drain process rather than a
+worker's mid-batch emit. The claim is probably right in spirit and
+wrong in wording. It is pre-existing behaviour, not introduced here, and
+changing truncation handling needs its own care, so it is recorded
+rather than touched. Worth a maintainer decision on whether a truncated
+tail should be surfaced rather than silently dropped.
+
 **Open coverage gap, now documented:** §7.4 lists recovery in
 `mode="spawn"` streaming as untested.
 `python/tests/test_stage3_recovery_integrity.py` covers `mode="spawn"`
