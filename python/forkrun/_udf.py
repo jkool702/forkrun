@@ -138,6 +138,16 @@ def helper_path():
     suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
     cand = os.path.join(here, "_fr_udf" + suffix)
     if os.path.exists(cand):
+        # A helper this launcher has conclusively REFUSED is not a
+        # candidate. Reporting it as present would be a capability lie
+        # about an artifact we already know cannot serve this caller --
+        # and the boolean's contract is "a candidate helper exists", not
+        # "a usable one does".
+        #
+        # This may only ever DISABLE the accelerator. It is consulted on
+        # the way to a refusal, never on the way to authorising a load.
+        if known_incompatible(cand):
+            return None
         return cand
     # Fall back to a plain .so so a build that used a different suffix
     # still works, rather than silently disabling the feature.
