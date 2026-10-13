@@ -6231,6 +6231,16 @@ def last_run_stats():
     relay slot filled up, so poisoned_batches is a prefix of the poisoned
     set rather than all of it. Check it before treating len() as a count;
     `poisoned` itself is always exact.
+
+    ``poisoned_batches`` is populated on the reactor path (the default,
+    ``orchestrator=None``/``True``) and on both cleanroom paths. It is
+    **EMPTY on the non-reactor path** (``orchestrator=False``), where it
+    comes back ``[]`` even when ``poisoned`` is non-zero -- the engine
+    exposes only a poisoned COUNT there (``fr_py_poisoned_count()``), not
+    the indices, so there is nothing to list. Verified divergence; see
+    TD-09 in dev/supervisor/TECH_DEBT_REGISTER.md. Treat ``poisoned`` as
+    the portable field and ``poisoned_batches`` as available only on the
+    paths above.
     """
     return dict(_LAST_STATS)
 

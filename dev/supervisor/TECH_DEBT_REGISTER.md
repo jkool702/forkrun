@@ -37,6 +37,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-06 | Executor consolidation | med | **audited** — `EXECUTOR_CONSOLIDATION_AUDIT.md` |
 | TD-07 | README collapses v0 history into current capability | low | **unverified claim** |
 | TD-08 | `Mode` type omitted a shipped, tested mode | med | **verified — FIXED** |
+| TD-09 | `poisoned_batches` empty on `orchestrator=False` | high | **verified — documented, gap open** |
 
 ---
 
@@ -135,6 +136,58 @@ fix documents the condition rather than picking a side.
 **Does not establish:** that any user has been harmed by this.
 
 ---
+
+### TD-09 — `poisoned_batches` is empty on `orchestrator=False` (high)
+
+**Verified by reproduction, not by reading.** The audit asked whether plain,
+reactor and cleanroom execution share poison accounting rules. They do
+not. One scenario — 8 batches, one raising, `FORKRUN_RETRY_LIMIT=0` —
+run through both supported `orchestrator` settings:
+
+```
+orchestrator=False  poisoned=8  total=8  poisoned_batches=[]
+orchestrator=True   poisoned=8  total=8  poisoned_batches=[0,1,2,3,4,5,6,7]
+```
+
+The **count agrees**; the **indices do not**. `orchestrator` is public
+(`_validate_orchestrator`, None/True/False) and defaults to `True`, so two
+supported configurations of the same function disagree on a documented
+stats key.
+
+**Root cause is structural, not an oversight in the stats code.**
+`last_run_stats()` documents `poisoned_batches` as "batch indices". The
+plain path sets it nowhere: `_raise_for_poisoned` (`run.py:6288`) writes
+only `poisoned`. It cannot do otherwise — that path learns the poisoned
+total from `lib.fr_py_poisoned_count()` (`run.py:4908`), a **count**; the
+indices are not available to it. The cleanroom paths relay real indices
+through a bounded per-worker stats side channel (`run.py:1357`,
+`1909`), and the reactor path has its own reporter.
+
+`test_cleanroom.py:980` already asserts that cleanroom indices agree with
+the in-process path — but "in-process" there means the **reactor**, the
+default. The `orchestrator=False` path was never in that comparison, which
+is why this survived.
+
+**Done now:** the `last_run_stats()` docstring states the asymmetry
+explicitly instead of promising indices unconditionally, and
+`python/tests/test_poison_accounting.py` pins all three behaviours —
+count agreement across paths (the portable guarantee), indices populated
+on the reactor path, and the known gap on the plain path written as a
+*gap* assertion naming TD-09 rather than as correct behaviour.
+
+Mutation-checked: clearing `poisoned_batches` in `_finish_map_stats` fails
+2 of the 3. The third still passes under that mutation **by design** — it
+pins current state, so it guards against a docstring re-promising
+something untrue, not against a regression.
+
+**The gap itself is open.** Closing it needs a C accessor returning
+poisoned indices on the non-reactor path (the cleanroom solved the same
+problem with a bounded side channel). That is engine work, not a stats
+patch, so it is flagged rather than attempted here.
+
+**Does not establish:** anything about the cleanroom paths' correctness —
+only that they already agree with the reactor on this scenario. Other
+poison modes (`skip`, `strict_poison`, truncated relays) were not compared.
 
 ### TD-08 — `Mode` type omitted a shipped, tested mode (medium) — FIXED
 
