@@ -1,166 +1,239 @@
-# Round 12 — review request: the W-EXP-1 minor-mismatch refusal (proposed)
+# Round 12 (R1) — revised proposal: the W-EXP-1 minor-mismatch refusal
 
 Branch `NEW/REFACTOR4.2`. Review the **branch head**; `2a5f4068` is the
-last commit this request pins. Frozen ring files (`forkrun_ring.c`,
-`forkrun_ring.h`, `forkrun_substrate.h`, `substratestubs.c`) untouched
-across the whole branch history.
+last commit this pins. Frozen ring untouched.
 
 **1038 tests, 0 unexpected failures, 2 skipped.** Release gate green.
 
-This is a **narrow** request with **no code written yet**. I want the
-design reviewed *before* implementation, because the change touches the
-engine's loading path and the obvious implementation has a security
-dimension that is easy to get wrong.
+**Status: REVISED. Still not implemented.** Round 12's original §3 was
+wrong on its load-bearing claim and §4 proposed a mechanism that violates
+the helper's isolation model. Both corrections are below, with the
+evidence that produced them. Nothing in this proposal exists in code.
 
 ---
 
-## 1. What I am proposing, in one paragraph
+## 1. Corrections — accepted, with evidence
 
-Add an explicit **pre-flight** check that the per-minor UDF helper matches
-the calling interpreter's minor, and refuse before input is consumed, with
-an observable message. Today there is **no application-level check at
-all** — the mismatch is caught by the dynamic linker at `dlopen` time,
-which happens *after* the input has already been materialised.
+### 1.1 The ordering diagnosis was wrong. The reviewer is right.
 
-## 2. The requirement being met
+I claimed input is materialised before the launcher starts, making the
+preflight requirement load-bearing. I re-checked both halves:
 
-Roadmap §5.5, currently unchecked:
+* `_cleanroom_source_fd()` (`run.py:1659-1698`) only calls `os.dup()` or
+  `os.open(O_RDONLY)`. **No `read()`, no `mmap`.** It yields a descriptor,
+  not bytes.
+* In `forkrun_cleanroom.c`, `setup_udf_helper()` runs at **line 1369**;
+  the spill child is forked at **line 1461**. The spill child is what
+  reads the caller's source.
 
-> A caller/helper CPython-minor mismatch is refused safely **before input
-> consumption**, with the refusal observable. A helper built for 3.12 must
-> not be driven by a 3.14 caller.
+So a helper load failure **already happens before any source byte is
+consumed**. The "before input consumption" clause is *already satisfied*,
+for a reason I had not looked for. My §3 described opening a descriptor as
+if it were reading data.
 
-And §5.3:
+**Consequence:** the justification for a preflight changes. It is no
+longer "we must get in before input". It is that **a successful `dlopen`
+does not establish the helper matches the caller** — see §2.
 
-> **Absent helper.** A distinct exit code — **not 79**, which means "the
-> probe failed and fallback is unsafe" — so Python warns and takes the
-> in-process path, mirroring the exit-78 refusal precedent.
+### 1.2 `ctypes` was the wrong mechanism. Fully conceded.
 
-## 3. What happens today — verified, not assumed
+`_udf.py:1-20` states the helper **must not** be loaded into a process
+that already runs Python; it calls `Py_InitializeFromConfig`. My proposal
+would have done `ctypes.CDLL(helper_path)` to read a symbol — loading the
+`.so` into the caller, running its ELF constructors and pulling its
+`libpython` into the process the design exists to keep free of it. A
+`try/except` around `CDLL` does not undo those side effects.
 
-**There is no runtime minor comparison anywhere in the tree.**
-`PY_VERSION_HEX` appears in `fr_udf.c` only as *compile-time* `#if`
-conditionals. Helper discovery is purely filename convention: `_udf.py:51`
-builds `_fr_udf` + `EXT_SUFFIX`, and returns `None` if that file is
-absent.
+I had read that paragraph and proposed against it. The reviewer's
+correction stands.
 
-Discovery-by-filename does catch the **common** case: on 3.14 you look for
-`_fr_udf.cpython-314-*.so`, and a 3.12-only tree yields `None` → in-process
-fallback. That part works.
+### 1.3 `PY_MINOR_HEX` does not exist. Conceded.
 
-**What it does not catch is the case the criterion names.** If a caller
-passes a helper path explicitly, or the suffix happens to match, the
-mismatch surfaces at `dlopen` as a `DT_NEEDED` failure — and §6.2.1
-established the helper carries **no `RPATH`/`RUNPATH`**, so nothing pins it
-to a particular `libpython`.
+The macros are `PY_MAJOR_VERSION`, `PY_MINOR_VERSION`, `PY_MICRO_VERSION`
+and `PY_VERSION_HEX`. I would have written a compile error. Comparing
+**major and minor** rather than minor alone is also the right call, and is
+adopted.
 
-**The ordering problem is the actual defect.** In `_execute_cleanroom`:
+### 1.4 The exit code. Question 1 answered; I adopt the answer.
 
-```
-1132:  src_fd = _cleanroom_source_fd(source)     <- input materialised
-1253:      os.execv(launcher, argv)              <- launcher starts here
-                 ... inside: setup_udf_helper() -> dlopen()  <- mismatch found HERE
-```
+I could not resolve what 78 means and did not want to guess. The table in
+`run.py:897-925` is unambiguous:
 
-So the input is read and `mmap`ed **before** the mismatch is discoverable.
-The criterion's "before input consumption" is therefore not met today: the
-refusal happens, but after the work the refusal is supposed to avoid.
+| code | meaning | fallback |
+|---|---|---|
+| 71 | `fr_py_init` failed | permitted (`_CR_EXIT_PRE_INGEST`) |
+| 78 | plugin lacks `forkrun_use_ctx` v1/v2 | permitted (`_CR_EXIT_PRE_INGEST`) |
+| 79 | plugin capability probe did not complete | **forbidden** (`_CR_EXIT_NO_FALLBACK`) |
 
-This ordering claim is the load-bearing one in this proposal. It is why I
-am asking for review before writing code — if it is wrong, the change is
-unnecessary.
+So 78 means "unsupported plugin dialect", not "probe failed". The
+roadmap's "mirroring the exit-78 refusal precedent" means matching its
+*behaviour*, not its number. **Adopted: a new code (80), added to
+`_CR_EXIT_PRE_INGEST`, given an accurate `_CR_EXIT_LABELS` entry, and
+deliberately NOT added to `_CR_EXIT_NO_FALLBACK`** — because we *can*
+establish that the mismatch is safe to decline.
 
-## 4. Proposed design
+### 1.5 The plain `.so` fallback is a hole in my "common case" claim. Conceded.
 
-**Helper side (C):** export `int fr_udf_built_minor(void)` returning
-`PY_MINOR_HEX` at compile time.
+`_udf.py` falls back to a bare `_fr_udf.so` when the `EXT_SUFFIX` candidate
+is absent ("so a build that used a different suffix still works"). So a
+3.12 helper named `_fr_udf.so` **is** picked up by a 3.14 caller. My
+statement that "discovery-by-filename catches the common case" was too
+generous: the fallback exists precisely to bypass that identification.
 
-**Caller side (Python, `_udf.py`):** after locating a helper, read the
-built minor via `ctypes` and compare to `sys.version_info.minor`.
+### 1.6 The in-process fall-through trap. Accepted; it invalidates part of my §4.
 
-**Refusal behaviour:** treat a mismatch exactly like an absent helper —
-`helper_path()` returns `None`, so the route degrades to in-process with a
-warning. This keeps the existing single-choke-point design (established in
-TD-11, where `FORKRUN_NO_UDF` was implemented the same way) rather than
-adding a second decision point.
+My proposal had the launcher refuse and "treat it like an absent helper",
+i.e. return `None`. That is insufficient. Verified: after a `None` from
+`_execute_cleanroom`, dispatch reaches `_coerce_payload()` (`run.py:3552`),
+which consults `_udf_helper_path()` again — and if the file is still there,
+returns `_make_udf_payload(...)` / mode `"udf"`. The ordinary Python worker
+cannot execute that wrapper as a plain callable. See §3.2.
 
-**Exit code:** per §5.3 this must be a **distinct** code, not 79. My
-proposal is **exit 78**, matching the existing refusal precedent — but
-§5.3 says "mirroring the exit-78 refusal precedent" as if 78 is *not* the
-right one, and I cannot find a statement of what 78 means. **This is
-question 1 below; I do not want to guess an exit-code contract.**
+## 2. What the defect actually is, stated precisely
 
-## 5. Alternatives I considered and rejected
+Since §1.1 removed the ordering justification, the reason to do this is
+narrower, and I want it stated accurately rather than inflated:
 
-| option | why not |
-|---|---|
-| Add an `RPATH`/`RUNPATH` pinning `libpython3.X` | Closes the substitution path at the loader, but §6.2.1 could not verify what `auditwheel repair` does to it, and it is packaging work, not a refusal |
-| Rely on `DT_NEEDED` alone | Already the status quo, and it fails the "before input consumption" requirement |
-| Validate only in `v1_available()` | Reports capability but does not prevent the route; two decisions to keep in sync |
-| Refuse the whole run rather than degrade | Contradicts §5.3, which says warn and take the in-process path |
+**A successful `dlopen` does not prove the helper matches the caller.**
 
-## 6. What this proposal does NOT fix
+The launcher is a fresh process with no interpreter of its own. A helper
+built for 3.12 requests `libpython3.12.so.1.0` via `DT_NEEDED`, and §6.2.1
+established the artifact carries **no `RPATH`/`RUNPATH`** — so if
+`libpython3.12` is installed, the loader satisfies it and the helper
+loads cleanly, in a launcher that was launched by a 3.14 caller.
 
-Stated up front, because this area has a habit of overclaiming:
+**The harm is a correctness barrier, not memory safety.** Nothing here
+corrupts memory: the launcher has no interpreter, so a 3.12 helper plus
+`libpython3.12` is internally self-consistent. What breaks is the user's
+expectation — a UDF written against 3.14 semantics executing under 3.12,
+failing confusingly or behaving differently. §5.5 asks for a barrier; this
+is what the barrier is worth. I would rather say that plainly than let
+"version mismatch" imply a vulnerability it is not.
 
-- **It does not make `auditwheel` verifiable.** §6.2.1 ran two of three
-  checks; the tool is still not installed. That gap is untouched.
-- **It does not close `LD_LIBRARY_PATH` influence.** DECISION-04 §4 records
-  that with no `RPATH`/`RUNPATH`, `LD_LIBRARY_PATH` is the only
-  environment-controlled input to which `libpython` loads. Python inherits
-  the environment unfiltered. This proposal is a **refusal**, not a
-  containment measure, and a determined caller can still influence
-  resolution *within a matching minor*.
-- **It does not detect a same-minor, differently-built `libpython`.** The
-  check compares minors only.
-- **It does not address TD-01** (record protocol defined in three places)
-  or **TD-06** (executor consolidation) — both deliberately deferred.
+## 3. Revised design
 
-## 7. Test plan
+### 3.1 Authoritative check stays in the launcher
 
-Non-vacuity is the point; this branch has shipped two protocol bugs that a
-green suite did not catch.
+1. Helper exports `fr_udf_built_version()` → `PY_VERSION_HEX` at compile
+   time (major + minor together).
+2. **The caller passes its own minor explicitly on the command line**, as
+   roadmap §5.3 already requires. The launcher must not guess.
+3. The launcher compares **inside the existing disposable probe
+   subprocess**, before interpreter initialisation and before the spill
+   fork (line 1461) — so the decision precedes any source consumption.
+4. Mismatch → specific message, **exit 80**.
+5. Re-verify against the handle actually loaded for execution, after
+   `dlopen`, not only on the probe handle.
 
-1. **Positive control:** matching helper → route proceeds, `udf` capability
-   reported `True`, identical results to the in-process path.
-2. **The criterion itself:** 3.12-built helper offered to a 3.14 caller →
-   refusal, observable message, **and the input is not consumed**. The
-   last part needs a source that would fail if read (e.g. a FIFO with no
-   writer, or a path that would error), so a post-read check cannot pass.
-3. **Negative control:** remove the comparison → test 2 must fail.
-4. **Degradation:** with the switch forced, results are still **complete and
-   correct**, not fewer. Same property as TD-11's kill-switch test.
-5. **Interaction:** `FORKRUN_NO_UDF=1` and a mismatched helper together →
-   in-process, single warning, no double-warn.
+Direct `launcher --udf-helper ...` invocations are covered by this, since
+the check does not depend on the Python side.
 
-## 8. Questions for the reviewer
+### 3.2 The in-process degradation must be explicit, not incidental
 
-1. **The exit code.** §5.3 says "a distinct exit code — not 79" and "not
-   [78] which means the probe failed", then says "mirroring the exit-78
-   refusal precedent". I cannot resolve what 78 denotes. **What is the
-   correct code, and what does 78 already mean?**
-2. **Is "degrade to in-process" right for a *mismatch*, as opposed to an
-   absent helper?** A mismatch means someone shipped a broken build;
-   silently using a different path may be worse than refusing loudly.
-   §5.3's wording is about an *absent* helper.
-3. **Is the `ctypes` read of a C symbol the right mechanism**, or should
-   the helper expose the minor through the existing probe/`v1_available()`
-   channel instead? A `ctypes` call on a `.so` that may not be loadable is
-   exactly the kind of thing that produces an unhandled exception at an
-   awkward moment.
-4. **Does the §5.5 criterion apply to `mode="udf"` only, or to every route
-   that can reach `dlopen`?** `mode="plugin"` uses the same launcher.
-5. **Is this worth doing at all**, given §3 — discovery-by-filename already
-   catches the common case? If the honest answer is "the criterion is
-   stricter than the real risk", I would rather record that in §5.5 and
-   close the item than add a check that never fires.
+Per §1.6, a bare "return `None`" is not enough. Adopted: **the Python-side
+availability decision identifies the refusal and the call is routed
+explicitly to the in-process UDF path**, bypassing the helper-present
+branch in `_coerce_payload()`.
 
-## 9. Status vocabulary
+This is why `helper_path()` alone is insufficient: it reflects *file
+presence*, and after a mismatch the file is still present. Any design here
+must close that desync explicitly rather than hope the two agree.
 
-This branch has been conflating these, so, explicitly:
+### 3.3 On the sidecar — accepted with a sharpened failure mode
 
-- The three criteria fixed this session (TD-10 class refusal, TD-11 kill
-  switch, and the unbounded-retry warning) are **implemented and tested**.
-- This proposal is **not implemented**. Nothing in it exists in code.
-- The `fork_workers` / `report_poison` consolidation is **mapped only**.
-- Packaging under `auditwheel` is **unverified**, not passing.
+I agree the launcher check is authoritative and the Python side needs a
+**non-loading** hint. A build-generated metadata sidecar is reasonable,
+with one requirement the review did not spell out:
+
+**The sidecar must never be the thing that *refuses*.** If it is missing
+or stale, `helper_path()` should stay permissive and let the launcher
+decide. Rationale: a sidecar and its `.so` can legitimately desynchronise
+— copying the `.so` without the sidecar, or rebuilding one without the
+other — and a routing *hint* failing open is benign while failing closed
+silently disables UDF mode. The sidecar's only safe use is to avoid a
+pointless `exec`+`dlopen`, never to substitute for the guard.
+
+### 3.4 Scope
+
+UDF-helper routes only, per the reviewer's Q4. **Agreed** — the C plugin
+is a different artifact with a different ABI contract (`forkrun_use_ctx`
+v1/v2), and giving it a CPython-minor check would be meaningless. A C
+plugin that independently links CPython is a separate concern, not
+something this criterion governs.
+
+## 4. Revised test plan
+
+Adopting the reviewer's sharpening, plus one requirement the sharpened
+plan implies:
+
+1. **Positive control** — a matching helper must demonstrably serve the
+   request *through the cleanroom UDF route*, not merely produce identical
+   bytes. Assert the route was served and the capability reported.
+2. **Non-consumption, route level** — supply the source as an **already-open
+   descriptor**, not an unconnected FIFO path (opening a FIFO blocks, which
+   would hang *before* the preflight and prove nothing). Assert all three:
+   mismatch code and message observed; no UDF init or worker execution; and
+   **the descriptor's offset is unchanged when the cleanroom attempt
+   returns**.
+3. **Degradation, public API** — separately, the full public call must fall
+   back in-process and return **every** result. The reviewer's point is
+   decisive here: this test must prove the *fallback route actually ran*,
+   not merely that output appeared. Given §1.6 that is exactly the trap.
+4. **Negative control that cannot false-pass** — if the mismatched helper
+   fails to *load* (missing `libpython`), removing the comparison would
+   still refuse before consumption, and the test would "pass" for the wrong
+   reason. The helper must be built against the **same runtime as the
+   caller** while **advertising a different version**.
+   *This requires a build-time override for the reported version
+   (e.g. `-DFR_UDF_REPORT_VERSION_OVERRIDE=0x030C0000`) used solely by
+   tests — otherwise the branch cannot be exercised as described.*
+5. **Kill-switch interaction** — with `FORKRUN_NO_UDF=1` the helper must not
+   be probed or loaded at all. Per the reviewer I will **not** assert "one
+   warning": the ordinary missing-helper path can fall through quietly, so
+   warning policy is a separate contract decision (see §5).
+6. **Matrix case** — the real 3.12-helper-vs-3.14-caller case where the
+   matrix can build both.
+
+## 5. New finding, elevated by this work
+
+The reviewer noted it; I verified it and think it must be raised in
+priority because §3.1 places the version check **inside** that probe.
+
+`setup_udf_helper()`'s probe uses a **blocking `read()` and an untimed
+`waitpid()`** (`forkrun_cleanroom.c:638-655`), whereas the plugin probe
+around `:1225` is bounded. A constructor that hangs therefore hangs the UDF
+probe indefinitely.
+
+That is pre-existing. But once the version check relies on that probe, it
+stops being a robustness gap and becomes part of a **security-relevant
+boundary** — and we must not describe constructor hangs as safely bounded
+until it is fixed. Either bound the probe in this change, or state
+explicitly that the version check does not depend on probe completion.
+I would rather bound it than caveat it.
+
+## 6. Questions still open
+
+1. **Warning policy.** The reviewer's point stands: the ordinary
+   missing-helper path can fall through quietly, so §5.5's "the decline is
+   observable" may not hold for a *refusal* today. Is a refusal required
+   to warn even when the cleanroom was not explicitly requested?
+2. **Mislabel, separable.** `setup_udf_helper()` failure returns **71**,
+   labelled "engine initialization failed (fr_py_init)". That is actively
+   misleading in triage — a helper load failure is not an engine init
+   failure. I would give it its own code, but that changes a shipping
+   path's observable exit status, so I am **flagging rather than bundling**.
+3. **Scope of "observable".** Should `v1_available()["udf"]` become
+   `False` for the rest of the process once a mismatch is seen, or stay
+   `True` (file present) with the route re-routing instead? The first is a
+   capability lie after a transient condition; the second is a desync the
+   route must own. I lean to the second plus an explicit refusal record,
+   but this is a design choice worth a second opinion.
+
+## 7. Status vocabulary
+
+- TD-10 (class payloads), TD-11 (kill switch), the unbounded-retry warning
+  — **implemented and tested**.
+- This proposal — **not implemented**. Nothing here exists in code.
+- `fork_workers` / `report_poison` consolidation — **mapped only**.
+- Packaging under `auditwheel` — **unverified**, not passing.
+- The UDF probe's missing timeout — **open**, newly elevated by §5.
