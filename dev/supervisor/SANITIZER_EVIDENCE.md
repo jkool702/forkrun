@@ -82,6 +82,13 @@ and neither is obvious:
   the output. UBSan is the instrument carrying real signal here, and runs
   with `halt_on_error=1` and a stack trace.
 
+  This is not hypothetical: with leak detection on, the memory
+  measurement driver reports `SUMMARY: AddressSanitizer: 268435456
+  byte(s) leaked in 1 allocation(s)` — the deliberate 256 MB parent
+  inflation buffer. A reviewer meeting that on the first sanitized run
+  would reasonably conclude the driver leaks its whole workload, and be
+  wrong.
+
 **Result: zero sanitizer hits on all three probes, on all six
 interpreters.**
 
