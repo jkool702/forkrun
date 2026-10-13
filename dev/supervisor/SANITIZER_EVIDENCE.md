@@ -124,6 +124,64 @@ caught it immediately:
 so the instrument is live and the matrix above is a real result rather
 than a build that silently compiled the flags away.
 
+## Round 14 — re-run over the W-EXP-1 version-barrier code
+
+The version barrier added new C to the launcher and the helper after the
+matrix above was green. Re-run over the new code.
+
+**ASan + UBSan** (`-fsanitize=address,undefined`, `PYTHONMALLOC=malloc`,
+`detect_leaks=0`) — zero findings across all four paths:
+
+| path | exit | sanitizer findings |
+|---|---|---|
+| matching declaration | 0 | 0 |
+| genuine mismatch | 80 | 0 |
+| invalid declaration | 82 | 0 |
+| **hung ELF constructor** (the new poll-deadline + reap path) | 81 | 0 |
+
+**Non-vacuity checked.** An injected heap overflow in `setup_udf_helper`
+was caught immediately (`ERROR: AddressSanitizer: heap-buffer-overflow`,
+exit 1), so the clean result above is a real result and not a build that
+dropped the flags.
+
+An earlier attempt at this check was itself vacuous — the injected line
+never landed (the anchor had been edited away), so the "mutant" was an
+unmutated launcher that of course reported nothing. Worth recording,
+because a non-vacuity check that cannot fail is the same failure mode as
+the tests round 13 and 14 kept finding.
+
+**TSan** — zero warnings. As set out above, this remains close to
+uninformative: the launcher is *fork*-based and the processes never share
+memory, so there is no intra-process race to find.
+
+## Cross-minor: a real 3.12 helper, driven by the 3.14 launcher
+
+The synthetic version override validates the comparison logic. This
+validates the actual loader behaviour the whole feature exists for.
+
+Built a genuine helper against the cached 3.12 headers
+(`DT_NEEDED: libpython3.12`):
+
+| declared | `LD_LIBRARY_PATH` has libpython3.12? | exit | what happened |
+|---|---|---|---|
+| **3.14** (truthful) | yes | **80** | `was built against CPython 3.12` |
+| 3.12 (matches the helper) | yes | 71 | **helper LOADED**, then the embedded 3.12 interpreter failed on path configuration |
+| 3.14 | no | 71 | probe failed to load |
+
+Row 1 is the §5.5 requirement met on a real cross-minor artifact rather
+than a synthetic one.
+
+**Row 2 is the one that justifies the feature.** The launcher dlopened a
+3.12 helper successfully, because the loader satisfied `libpython3.12`
+from `LD_LIBRARY_PATH`. **The loader did not consider it a mismatch** —
+so without the explicit comparison, a 3.14 process would have gone on to
+initialise a 3.12 interpreter and run the UDF under it. The barrier is
+what turns that silent divergence into a refusal.
+
+Row 3 is why the common case looked safe before: without the other
+minor's library on the path, `dlopen` fails on its own. Which is exactly
+the reasoning that made the original §5.5 criterion look unnecessary.
+
 ## Still open
 
 - The **frozen ring** is compiled by these builds but was not rewritten
