@@ -335,6 +335,43 @@ int fr_py_claim(fr_py_batch_t *out) {
         uint32_t poisoned = 0;
         if (batch.num_kills > 0) {
             int limit = g_fr_config.retry_limit;
+            if (limit < 0) {
+                /* UNBOUNDED RETRY. A negative limit means "never declared
+                 * poisoned" (bash -E parity, frun.bash:448), so the poison
+                 * branch below is skipped entirely and the batch is
+                 * retried forever.
+                 *
+                 * That is the intended semantics -- but it was SILENT:
+                 * measured, a permanently failing batch under
+                 * FORKRUN_RETRY_LIMIT=-1 ran past a 45s timeout with no
+                 * stdout, no stderr and no diagnostic. A user who set -1
+                 * meaning "absorb transient failures" instead got an
+                 * indistinguishable hang, with no hint that the retry
+                 * budget was unbounded rather than merely large.
+                 *
+                 * Warn at each power of ten: escalating rather than
+                 * periodic. A fixed interval is wrong here because retry
+                 * cost varies by orders of magnitude between workloads --
+                 * at 1ms a "every 100" warning emits tens of thousands of
+                 * lines over an overnight hang, which is its own
+                 * undebuggable condition. Powers of ten cap the output at
+                 * O(log n) per batch however long it runs, while still
+                 * showing the growth rate. */
+                uint32_t k = batch.num_kills;
+                if (k == 10u || k == 100u || k == 1000u || k == 10000u ||
+                    k == 100000u || k == 1000000u) {
+                    fprintf(stderr,
+                            "forkrun [WARN]: batch %llu has been retried "
+                            "%lu times and retry_limit is negative "
+                            "(--unbounded); it will never be poisoned.\n"
+                            "         If this is unexpected, set "
+                            "FORKRUN_RETRY_LIMIT to a non-negative value "
+                            "to bound retries.\n",
+                            (unsigned long long)batch.batch_idx,
+                            (unsigned long)k);
+                    fflush(stderr);
+                }
+            }
             if (limit >= 0 && batch.num_kills >= (uint32_t)limit) {
                 uint32_t poison_threshold =
                     (limit > 0) ? (uint32_t)limit : 1;

@@ -188,8 +188,29 @@ missing is any **warning**. A test would have to time out, making it slow
 and flaky rather than informative, so the boundary is pinned by
 documentation instead and the test file says so explicitly.
 
-Whether to warn on a negative limit is an open maintainer choice, not a
-parity defect: bash is silent here too.
+**Now implemented** (`_shim.c`, in the claim path where the poison branch
+is skipped): the unbounded case warns at each power of ten — 10, 100,
+1000, … — naming the batch, the kill count, and the fact that
+`FORKRUN_RETRY_LIMIT=-1` means the batch will never be poisoned.
+
+Maintainer ruling: the infinite retry is **intended** ("-1 means retry
+infinitely"; the hang on a permanently failing batch is the correct
+consequence). The silence was not.
+
+*Why powers of ten rather than a fixed interval:* a periodic warning is
+the wrong shape here because retry cost spans orders of magnitude between
+workloads. At ~1 ms per attempt, "every 100" emits tens of thousands of
+lines over an overnight hang — itself an undebuggable condition, and one
+that would bury the first warning. Powers of ten cap output at O(log n) per
+batch however long it runs, while still showing the growth rate. Measured:
+6 warnings over a 40 s hang (10 … 1,000,000).
+
+Verified not to affect bounded behaviour: at `FORKRUN_RETRY_LIMIT` 0, 1
+and 3, zero unbounded warnings and 8 poison warnings, with poisoning and
+counts identical to before.
+
+`_shim.c` is used rather than `forkrun_ring.c` because the retry decision
+lives in the shim's claim path and **the ring is frozen**.
 
 ### Also unexamined
 
