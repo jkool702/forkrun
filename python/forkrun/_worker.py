@@ -26,6 +26,7 @@ the caller's UB, same as Layer 3 numpy UB).
 from __future__ import annotations
 
 import mmap
+import inspect
 import os
 import struct
 import sys
@@ -142,6 +143,25 @@ def _resolve_payload(spec):
         if not callable(fn):
             raise TypeError(
                 "payload %r is not callable" % (spec,))
+        # A CLASS is callable, so the check above admits it. W-EXP-1
+        # eligibility is module-level functions (roadmap C0.3); a class
+        # reference must be DECLINED before input is consumed, not
+        # discovered at call time.
+        #
+        # What happened without this: workers called MyUDF(batch), which
+        # CONSTRUCTED an instance and returned it instead of bytes. The
+        # instance was not a valid result, so it was dropped, and
+        # map() returned [] -- indistinguishable from "input had no
+        # matching records". A wiring mistake reported as an empty
+        # result is worse than an error, because the user has no reason
+        # to doubt the data.
+        if inspect.isclass(fn):
+            raise TypeError(
+                "payload %r resolves to a class (%s.%s), not a function. "
+                "Cleanroom UDF mode takes module-level functions; pass "
+                "the function itself, e.g. %r, or an instance/callable "
+                "directly." % (spec, mod_name, func_name,
+                               "%s:%s.__call__" % (mod_name, func_name)))
         return fn
     if not callable(spec):
         raise TypeError("payload must be 'pkg.mod:func' or callable")

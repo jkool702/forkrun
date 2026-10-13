@@ -38,6 +38,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-07 | README collapses v0 history into current capability | low | **unverified claim** |
 | TD-08 | `Mode` type omitted a shipped, tested mode | med | **verified — FIXED** |
 | TD-09 | `poisoned_batches` empty on `orchestrator=False` | high | **verified — documented, gap open** |
+| TD-10 | Class payload silently produced empty results | high | **verified — FIXED** |
 
 ---
 
@@ -136,6 +137,46 @@ fix documents the condition rather than picking a side.
 **Does not establish:** that any user has been harmed by this.
 
 ---
+
+### TD-10 — A class payload produced silent empty results (high) — FIXED
+
+**Found by working W-EXP-1, not by the audit.** Roadmap §5.5 carries this
+as an explicitly unmet acceptance criterion, marked [V]:
+
+> A class reference and other unsupported callable attributes are declined
+> pre-consumption by an explicit kind check, not merely undocumented — the
+> resolver's `callable()` check at `_worker.py:138` admits classes.
+
+**Confirmed by reproduction.** Both resolution sites admitted classes:
+`_worker.py` used `callable(fn)` and `fr_udf.c:643` used
+`PyCallable_Check(fn)`. Both are true of a class.
+
+The failure mode was worse than an error: calling a class with a batch
+**constructs an instance** and returns it; the instance is not bytes, so
+the result was dropped and `map()` returned `[]` — indistinguishable from
+"the input matched no records". A wiring mistake reported as an empty
+result leaves the user no reason to doubt the data.
+
+**Fixed at both sites** — `inspect.isclass()` in the parent-side resolver,
+`PyType_Check()` in the launcher's `fr_udf.c`. Both name the module, the
+attribute and the fix. `PyType_Check` was chosen over
+`PyType_IsSubtype(fn, &PyType_Type)` so that a metaclass-derived class is
+caught too.
+
+**Scope, stated honestly:** the check rejects *classes*. Other
+"unsupported callable attributes" from the criterion — a callable
+instance with unusual semantics, say — are still accepted, because the
+documented payload contract explicitly allows callables and narrowing
+further would break working code. The criterion's broader wording is
+therefore only partly met, and the narrow reading is deliberate.
+
+`test_class_payload_refusal.py` covers: plain class declined, class with
+callable instances declined, non-callable declined, **module-level function
+still resolves (negative control)**, **callable instance still accepted
+when passed directly** (so the fix does not leak into the callable
+payload form), and refusal **before input is consumed** (asserted with a
+nonexistent source, so a post-resolution check would fail with a file
+error instead).
 
 ### TD-09 — `poisoned_batches` is empty on `orchestrator=False` (high)
 

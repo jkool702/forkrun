@@ -647,6 +647,20 @@ int fr_udf_call(const char *module, const char *attr,
             Py_DECREF(m);
             return FR_UDF_ERR;
         }
+        /* A CLASS passes PyCallable_Check -- calling it CONSTRUCTS an
+         * instance. W-EXP-1 eligibility is module-level functions
+         * (roadmap C0.3), so a class reference must be declined here,
+         * while the module and attribute are still named, rather than
+         * downstream where the constructed instance is not bytes and
+         * the batch silently yields no result. PyType_Check is true
+         * exactly when the object is a class/type. */
+        if (PyType_Check(fn)) {
+            set_error("%s.%s is a class, not a function; cleanroom UDF "
+                      "mode takes module-level functions", module, attr);
+            Py_DECREF(fn);
+            Py_DECREF(m);
+            return FR_UDF_ERR;
+        }
         clear_cache();
         cached_module = m;      /* strong: keeps the module alive */
         cached_fn = fn;
