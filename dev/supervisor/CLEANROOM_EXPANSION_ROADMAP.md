@@ -1175,7 +1175,16 @@ Python UDFs; refusal is about capability, not safety.
 > from the sdist does not make the resulting wheel honest, because the binary
 > still carries the builder's minor while the tag claims otherwise.
 
-Three options, to be chosen:
+> **[DECIDED]** This choice was made in `DECISION-01-helper-packaging.md`:
+> **Option A (per-minor wheels) for release, Option C (source-only) as the
+> documented development path**, with the implementation sequence in
+> DECISION-01 §6.3 — prototype against the local interpreter's headers to
+> establish the runtime contract, then complete the per-minor wheel matrix
+> for release. The requirement below is therefore **met**, and what remains
+> is verification, not selection.
+
+Three options (see `DECISION-01-helper-packaging.md`, where A and C are
+the chosen pair):
 
 1. **Source-only prototype.** Helper source in the sdist; built locally as an
    explicitly optional capability; **not advertised as present in the generic
@@ -1193,6 +1202,15 @@ Three options, to be chosen:
 > the measurement machine, so this is **unverified**. Inspect real
 > `auditwheel show` and `repair` output before shipping any binary. The docs
 > establish what `repair` may do, not what this artifact will contain.
+
+> **[PARTIALLY VERIFIED]** DECISION-01 §6.2.1 ran the two checks that do not
+> need `auditwheel`: the helper's `DT_NEEDED` requests the intended
+> `libpython3.X`, and the artifact carries **no `RPATH`/`RUNPATH` at all**.
+> The `DT_NEEDED` check was given a negative control — the same source
+> rebuilt against 3.12 headers requests `libpython3.12.so.1.0` — because a
+> build against the host's own headers trivially agrees with the host, so
+> the check only means something if the minor is shown to *follow the
+> headers*. The `auditwheel` question above is untouched and remains open.
 
 ### 5.5 Acceptance criteria
 
