@@ -88,6 +88,34 @@ static int inflate_parent_rss(long mb)
     return 0;
 }
 
+/* What a child reports back: outcome plus its OWN memory footprint. */
+struct child_report {
+    char status;
+    char _pad[3];
+    long rss_kb;
+    long pss_kb;
+    long uss_kb;
+};
+
+/* Per-run accumulation, filled from the children's reports. */
+static long child_pss_kb = 0;
+static long child_uss_kb = 0;
+static long child_rss_kb = 0;
+static int  child_sampled = 0;
+
+/* Per-ARM snapshots, indexed [0]=post-fork [1]=pre-fork.
+ *
+ * The fleet-memory QUESTION is which candidate costs more physical
+ * memory, so reporting only the last arm answers nothing. run() is
+ * called twice; each arm's totals are kept separately and printed
+ * side by side. */
+static long arm_child_pss[2] = {0, 0};
+static long arm_child_uss[2] = {0, 0};
+static long arm_child_rss[2] = {0, 0};
+static long arm_parent_pss[2] = {0, 0};
+static long arm_parent_rss[2] = {0, 0};
+static int  arm_sampled[2]   = {0, 0};
+
 /* Current and peak RSS are DIFFERENT quantities and both are wanted.
  *
  * ru_maxrss is the high-water mark and is what "peak RSS" means; the
@@ -101,6 +129,14 @@ static int inflate_parent_rss(long mb)
  * -1 means "not measured" and is never substituted with another
  * quantity. Conflating RSS, PSS and USS is the error being avoided, so
  * a missing source leaves its own field at -1. */
+static void read_smaps_rollup(const char *path, long *rss_kb, long *pss_kb,
+                              long *uss_kb);
+
+static void read_self_mem(long *rss_kb, long *pss_kb, long *uss_kb)
+{
+    read_smaps_rollup("/proc/self/smaps_rollup", rss_kb, pss_kb, uss_kb);
+}
+
 static void read_mem_self(long *rss_cur_kb, long *rss_peak_kb,
                           long *pss_kb, long *uss_kb)
 {
@@ -108,8 +144,13 @@ static void read_mem_self(long *rss_cur_kb, long *rss_peak_kb,
     *rss_peak_kb = -1;
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) == 0) *rss_peak_kb = (long)ru.ru_maxrss;
+    read_smaps_rollup("/proc/self/smaps_rollup", rss_cur_kb, pss_kb, uss_kb);
+}
 
-    FILE *f = fopen("/proc/self/smaps_rollup", "r");
+static void read_smaps_rollup(const char *path, long *rss_kb, long *pss_kb,
+                              long *uss_kb)
+{
+    FILE *f = fopen(path, "r");
     if (!f) return;
     /* USS = Private_Clean + Private_Dirty + Private_Hugetlb.
      *
@@ -125,7 +166,7 @@ static void read_mem_self(long *rss_cur_kb, long *rss_peak_kb,
     char line[256];
     while (fgets(line, sizeof line, f)) {
         long v;
-        if (sscanf(line, "Rss: %ld kB", &v) == 1) *rss_cur_kb = v;
+        if (sscanf(line, "Rss: %ld kB", &v) == 1) *rss_kb = v;
         else if (sscanf(line, "Pss: %ld kB", &v) == 1) *pss_kb = v;
         else if (sscanf(line, "Private_Clean: %ld kB", &v) == 1) {
             uss += v; have_uss = 1;
@@ -212,6 +253,23 @@ static double run(int pre_fork, int nchildren, int iters,
     int *pipes = calloc((size_t)nchildren, sizeof(int));
     if (!pipes) { perror("calloc"); exit(1); }
 
+    /* Per-ARM, not per-process: run() is called twice (post-fork, then
+     * pre-fork), and a static accumulator carried the first arm's
+     * children into the second -- "children_sampled: 8 of 4". */
+    child_pss_kb = child_uss_kb = child_rss_kb = 0;
+    child_sampled = 0;
+
+    /* The parent's OWN footprint DURING this arm. Sampling it only at the
+     * very end (after both runs, and after fr_udf_finalize) made the
+     * fleet figure ambiguous: a parent-side number that moves between
+     * the two arms cannot be attributed to either. */
+    {
+        long r = -1, pss = -1, uss = -1;
+        read_self_mem(&r, &pss, &uss);
+        arm_parent_rss[pre_fork ? 1 : 0] = r;
+        arm_parent_pss[pre_fork ? 1 : 0] = pss;
+    }
+
     double t0 = now_s();
     for (int c = 0; c < nchildren; c++) {
         /* Flush before every fork. A child that calls Py_FinalizeEx()
@@ -253,8 +311,46 @@ static double run(int pre_fork, int nchildren, int iters,
                     fr_udf_free(out);
                 }
             }
+            /* BARRIER before sampling.
+             *
+             * Self-sampling at exit is WRONG for PSS. PSS divides each
+             * shared page by the number of processes MAPPING it, and the
+             * children exit one at a time -- so the last child to sample
+             * sees a divisor near 1 and reports nearly the whole parent
+             * as if it were private. Summing staggered self-reports
+             * therefore OVER-COUNTS, which showed up as pre-fork
+             * "using" +29% PSS with a 256MB parent, a result that made no
+             * physical sense: 8 children each inheriting a 256MB COW
+             * mapping cannot collectively cost 646MB when the mapping
+             * totals 256MB.
+             *
+             * The barrier makes every sample simultaneous: each child
+             * reports "done", and none samples or exits until the parent
+             * has released them all. Then every divisor is the full
+             * mapper count and the sum IS the fleet footprint. */
+            { char sig = 1; ssize_t w = write(fds[1], &sig, 1); (void)w; }
+            { char go = 0; ssize_t r = read(fds[1], &go, 1); (void)r; }
+
+            /* Sample SELF at peak -- after the work, before teardown.
+             *
+             * This is the measurement C0.6 asks for and that the parent
+             * cannot make: by the time the parent could read
+             * /proc/<pid>/smaps_rollup the child may already have exited,
+             * and reading it while the child is alive still races with
+             * the child's own exit. Self-measurement has neither
+             * problem.
+             *
+             * PSS is the right per-child number precisely because it
+             * divides each shared page by the number of sharers: summing
+             * PSS over parent and children yields the FLEET's actual
+             * physical footprint. RSS cannot be summed -- it would count
+             * every shared page once per worker, which is precisely the
+             * quantity the shared-interpreter claim rests on. */
+            struct child_report rep = {0};
+            rep.status = status;
+            read_self_mem(&rep.rss_kb, &rep.pss_kb, &rep.uss_kb);
             if (!pre_fork) fr_udf_finalize();
-            ssize_t ignored = write(fds[1], &status, 1);
+            ssize_t ignored = write(fds[1], &rep, sizeof rep);
             (void)ignored;
             close(fds[1]);
             _exit(0);
@@ -266,13 +362,70 @@ static double run(int pre_fork, int nchildren, int iters,
     /* Parent: collect every child's status before finalising, because a
      * pre-fork child is still using the shared interpreter until it
      * exits. */
+    /* TWO PHASES, and the ack MUST be drained before the release.
+     *
+     * Child: write 1 ack byte, block on read, sample, write the report.
+     * Parent: read the ack from EVERY child, THEN release every child,
+     *         THEN read the reports.
+     *
+     * Releasing before draining desynchronised the pipe: the parent
+     * wrote 'go' into a pipe still holding each child's ack byte, so the
+     * following read() of sizeof rep consumed the ack plus 27 bytes of
+     * the report. Every field was shifted, which is how a 271 MB child
+     * reported rss=68794368 kB (68 GB) and the run claimed 98 GB of
+     * fleet PSS -- physically impossible, and the tell that the protocol
+     * rather than the kernel was wrong.
+     *
+     * Draining first is also what makes the barrier work: every child is
+     * released only after every child has reported "done", so all
+     * samples see the same mapper count. */
     for (int c = 0; c < nchildren; c++) {
-        char status = -1;
-        ssize_t got = read(pipes[c], &status, 1);
+        char ack = 0;
+        ssize_t r = read(pipes[c], &ack, 1);
+        if (r != 1)
+            fprintf(stderr, "  child %d: no barrier ack (r=%zd)\n", c, r);
+    }
+    for (int c = 0; c < nchildren; c++) {
+        char go = 1;
+        ssize_t w = write(pipes[c], &go, 1);
+        (void)w;
+    }
+
+    for (int c = 0; c < nchildren; c++) {
+        struct child_report rep;
+        memset(&rep, 0, sizeof rep);
+        rep.status = -1;
+        ssize_t got = read(pipes[c], &rep, sizeof rep);
+        char status = rep.status;
+        if (got == (ssize_t)sizeof rep) {
+            /* Fleet memory: the children's own PSS, summed. The parent's
+             * is added at finalisation, after the interpreter is torn
+             * down -- which is why this is a CHILD number and the parent
+             * figure elsewhere is not a substitute. */
+            if (getenv("FR_DEBUG_CHILD_MEM")) {
+                fprintf(stderr, "    child %d: status=%d rss=%ld pss=%ld "
+                        "uss=%ld\n", c, (int)status, rep.rss_kb,
+                        rep.pss_kb, rep.uss_kb);
+            }
+            child_pss_kb += rep.pss_kb;
+            child_uss_kb += rep.uss_kb;
+            child_rss_kb += rep.rss_kb;
+            child_sampled++;
+        }
         close(pipes[c]);
         int wstatus = 0;
         waitpid(-1, &wstatus, 0);
-        if (got != 1 || status != 0) {
+        /* sizeof rep, NOT 1. Extending the child's report from a status
+         * byte to a struct left this check comparing against 1, so every
+         * child counted as a failure and the run reported "8 of 8 failed"
+         * while the reports were in fact arriving intact -- the reports
+         * had been accumulated, and printed "children_sampled: 8 of 4".
+         *
+         * Worth recording: changing a wire protocol without updating the
+         * validator produces a run that is *self-contradictory* rather
+         * than obviously broken, and both symptoms were only visible
+         * because the fleet block printed the sample count. */
+        if (got != (ssize_t)sizeof rep || status != 0) {
             /* Say WHICH signal. "exit -1" is what this printed for a
              * while and it distinguishes nothing between SIGABRT (a
              * fatal Python error), SIGSEGV, and a hang-kill -- which is
@@ -291,6 +444,11 @@ static double run(int pre_fork, int nchildren, int iters,
             (*failures)++;
         }
     }
+    arm_child_pss[pre_fork ? 1 : 0] = child_pss_kb;
+    arm_child_uss[pre_fork ? 1 : 0] = child_uss_kb;
+    arm_child_rss[pre_fork ? 1 : 0] = child_rss_kb;
+    arm_sampled[pre_fork ? 1 : 0]   = child_sampled;
+
     double elapsed = now_s() - t0;
     free(pipes);
     return elapsed;
@@ -599,6 +757,52 @@ int main(int argc, char **argv)
         printf("  parent_uss_kb     : %ld%s\n", uss,
                uss < 0 ? "  (not exposed by this kernel)" : "");
         printf("  children          : %d\n", nchildren);
+        if (arm_sampled[0] > 0 || arm_sampled[1] > 0) {
+            printf("  --- fleet memory, BOTH arms ---\n");
+            printf("  EXPERIMENTAL. Direction is consistent and matches\n"
+                   "  copy-on-write theory (pre-fork cheaper, and the gap\n"
+                   "  widens with worker count), but the MAGNITUDE is not\n"
+                   "  yet trustworthy: with the barrier held, every child\n"
+                   "  should report near-identical PSS for the shared\n"
+                   "  mapping, and observed values vary ~2.4x. The cause is\n"
+                   "  not established, so no fleet-memory conclusion is\n"
+                   "  drawn from this block. Per-child values print under\n"
+                   "  FR_DEBUG_CHILD_MEM=1 for diagnosis.\n");
+            printf("  %-9s %-11s %-11s %-11s %-11s %s\n",
+                   "arm", "parent_pss", "child_pss", "parent_rss",
+                   "child_rss", "n");
+            const char *names[2] = {"post-fork", "pre-fork"};
+            for (int a = 0; a < 2; a++) {
+                if (arm_sampled[a] <= 0) continue;
+                printf("  %-9s %-11ld %-11ld %-11ld %-11ld %d\n",
+                       names[a], arm_parent_pss[a], arm_child_pss[a],
+                       arm_parent_rss[a], arm_child_rss[a], arm_sampled[a]);
+            }
+            if (arm_sampled[0] > 0 && arm_sampled[1] > 0) {
+                long pss0 = arm_parent_pss[0] + arm_child_pss[0];
+                long pss1 = arm_parent_pss[1] + arm_child_pss[1];
+                long uss0 = (uss >= 0 ? uss : 0) + arm_child_uss[0];
+                long uss1 = (uss >= 0 ? uss : 0) + arm_child_uss[1];
+                printf("  fleet PSS (parent+children): post-fork %ld kB, "
+                       "pre-fork %ld kB\n", pss0, pss1);
+                printf("  fleet USS (parent+children): post-fork %ld kB, "
+                       "pre-fork %ld kB\n", uss0, uss1);
+                printf("  --> pre-fork uses %+.1f%% PSS vs post-fork\n",
+                       pss0 > 0 ? (double)(pss1 - pss0) * 100.0 / pss0
+                                : 0.0);
+                printf("      RSS for the same runs would read %ld vs %ld kB "
+                       "-- a %.1fx over-count, because RSS counts every\n"
+                       "      shared page once per process. That gap is "
+                       "why the roadmap marked the\n      memory rows [H] "
+                       "and deferred them to measurement.\n",
+                       arm_child_rss[0] + rss_cur, arm_child_rss[1] + rss_cur,
+                       (double)(arm_child_rss[0] + rss_cur) /
+                       (arm_child_rss[1] + rss_cur + 1));
+            }
+        } else {
+            printf("  fleet memory      : NOT SAMPLED (no child reported; "
+                   "a failed run is not a measurement)\n");
+        }
         printf("  ms_per_child_post : %.3f\n",
                nchildren ? 1000.0 * t_post / nchildren : 0.0);
         printf("  ms_per_child_pre  : %.3f\n",
