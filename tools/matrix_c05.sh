@@ -23,8 +23,33 @@ WORK=/tmp/pymin
 PREFIX="$WORK/root"
 MINORS="3.10 3.11 3.12 3.13 3.15"
 QUICK="--quick"
+SAN=""
 
-if [ "${1:-}" = "--quick" ]; then QUICK="--quick"; fi
+# --asan builds every minor with ASan+UBSan and runs each probe with the
+# allocator settings that make that meaningful for an EMBEDDED CPython.
+#
+# Two settings matter and neither is obvious:
+#
+#   PYTHONMALLOC=malloc routes CPython's object allocations through the
+#   system allocator so ASan can actually see them. Without it CPython
+#   uses its own pymalloc arenas and an overflow inside an object is
+#   invisible to the sanitizer -- the single most common reason people
+#   report "ASan is clean on Python".
+#
+#   detect_leaks=0, because an embedded interpreter initialised and torn
+#   down in a short-lived process reports CPython's own module-cache
+#   allocations as leaks. Leaving it on produces noise that trains
+#   reviewers to ignore the output; UBSan is the one that carries real
+#   signal here, so it runs with halt_on_error and a stack trace.
+SAN_ENV="ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 PYTHONMALLOC=malloc"
+
+for arg in "$@"; do
+    case "$arg" in
+        --quick) QUICK="--quick" ;;
+        --asan)  SAN="-fsanitize=address,undefined -fno-omit-frame-pointer -g" ;;
+        *) echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
 
 mkdir -p "$PREFIX" "$WORK/rpms"
 
@@ -65,7 +90,7 @@ build() {    # build <minor>  -> /tmp/pymin/root/usr/bin/udf_fork_<minor>
              'import sysconfig;print(sysconfig.get_paths()["include"])' 2>/dev/null)"
     [ -f "$inc/Python.h" ] || { echo "  $v: no headers"; return 1; }
     lib="$PREFIX/usr/lib64"
-    gcc -O2 -I"$inc" -I"$ROOT/python/forkrun" \
+    gcc -O2 $SAN -I"$inc" -I"$ROOT/python/forkrun" \
         -o "$PREFIX/usr/bin/udf_fork_$v" \
         "$ROOT/python/forkrun/fr_udf_fork.c" "$ROOT/python/forkrun/fr_udf.c" \
         -L"$lib" "-lpython$v" -ldl -lm 2>"$WORK/build_$v.log" \
@@ -87,11 +112,19 @@ for v in $MINORS; do
     export FR_UDF_HOME="$PREFIX/usr"
     export LD_LIBRARY_PATH="$PREFIX/usr/lib64"
     for probe in "" "--control" "--respawn"; do
-        line=$(timeout 180 "$PREFIX/usr/bin/udf_fork_$v" /tmp/udfroot \
-                 myudf:up 2 20 $probe 2>&1 \
+        raw=$(timeout 180 env $SAN_ENV "$PREFIX/usr/bin/udf_fork_$v" \
+                 /tmp/udfroot myudf:up 2 20 $probe 2>&1)
+        echo "$raw" > "$WORK/probe_${v}_${probe:-verdict}.log"
+        line=$(echo "$raw" \
                | grep -E "interpreter :|VERDICT|NO VERDICT|control :|respawn :" \
                | head -2 | tr '\n' '|')
         printf "   %-9s %s\n" "${probe:-verdict}" "$line"
+        san=$(echo "$raw" | grep -cE "AddressSanitizer|runtime error:|SUMMARY: .*Sanitizer")
+        if [ "$san" -gt 0 ]; then
+            printf "   %-9s SANITIZER HITS: %s\n" "" "$san"
+            echo "$raw" | grep -m2 -E "AddressSanitizer|runtime error:" | sed 's/^/       /'
+            rc_all=1
+        fi
     done
     echo
 done
@@ -107,11 +140,19 @@ if [ -x "$ROOT/python/forkrun/fr_udf_fork" ]; then
     export LD_LIBRARY_PATH=""
     echo "=== CPython 3.14 (system build) ==="
     for probe in "" "--control" "--respawn"; do
-        line=$(timeout 180 "$ROOT/python/forkrun/fr_udf_fork" /tmp/udfroot \
-                 myudf:up 2 20 $probe 2>&1 \
+        raw=$(timeout 180 env $SAN_ENV "$ROOT/python/forkrun/fr_udf_fork" \
+                 /tmp/udfroot myudf:up 2 20 $probe 2>&1)
+        echo "$raw" > "$WORK/probe_sys_${probe:-verdict}.log"
+        line=$(echo "$raw" \
                | grep -E "interpreter :|VERDICT|NO VERDICT|control :|respawn :" \
                | head -2 | tr '\n' '|')
         printf "   %-9s %s\n" "${probe:-verdict}" "$line"
+        san=$(echo "$raw" | grep -cE "AddressSanitizer|runtime error:|SUMMARY: .*Sanitizer")
+        if [ "$san" -gt 0 ]; then
+            printf "   %-9s SANITIZER HITS: %s\n" "" "$san"
+            echo "$raw" | grep -m2 -E "AddressSanitizer|runtime error:" | sed 's/^/       /'
+            rc_all=1
+        fi
     done
 fi
 
@@ -119,6 +160,10 @@ echo
 echo "Lifecyle curves per minor (needs /tmp/udfroot/myudf.py with up/touch/is_touched):"
 for v in $MINORS; do
     [ -x "$PREFIX/usr/bin/udf_fork_$v" ] || continue
+    if [ -n "$SAN" ]; then
+        echo "  $v: lifecycle sweep skipped under sanitizers (3 trials x 2 arms x 6 minors does not fit a gate)"
+        continue
+    fi
     FR_UDF_HOME="$PREFIX/usr" LD_LIBRARY_PATH="$PREFIX/usr/lib64" \
     FR_BENCH_DRIVER="$PREFIX/usr/bin/udf_fork_$v" \
         timeout 1200 python3 "$ROOT/tools/bench_m2_lifecycle.py" $QUICK \

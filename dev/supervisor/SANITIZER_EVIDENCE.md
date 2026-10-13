@@ -63,16 +63,67 @@ rather than redundant:
 This is worth stating plainly because "TSan clean" could easily be
 mistaken for "the concurrency is verified". It is not.
 
+## ASan + UBSan — interpreter matrix, clean
+
+`tools/matrix_c05.sh --asan` builds each minor with
+`-fsanitize=address,undefined -fno-omit-frame-pointer -g` and runs all
+three probes against it.
+
+Two allocator settings make that meaningful for an **embedded** CPython,
+and neither is obvious:
+
+- `PYTHONMALLOC=malloc` routes CPython's object allocations through the
+  system allocator so ASan can see them. Without it CPython uses its own
+  pymalloc arenas and an overflow inside an object is invisible — the
+  most common reason people report "ASan is clean on Python".
+- `detect_leaks=0`, because an interpreter initialised and torn down in a
+  short-lived process reports CPython's own module-cache allocations as
+  leaks. Leaving it on produces noise that trains reviewers to ignore
+  the output. UBSan is the instrument carrying real signal here, and runs
+  with `halt_on_error=1` and a stack trace.
+
+**Result: zero sanitizer hits on all three probes, on all six
+interpreters.**
+
+| interpreter | verdict | control | respawn |
+|---|---|---|---|
+| 3.10.22 | 3.59x faster | DIRTY (non-vacuous) | CLEAN |
+| 3.11.17 | 2.76x faster | DIRTY (non-vacuous) | CLEAN |
+| 3.12.15 | 4.53x faster | DIRTY (non-vacuous) | CLEAN |
+| 3.13.16 | 3.85x faster | DIRTY (non-vacuous) | CLEAN |
+| 3.15.0rc2 | 4.24x faster | DIRTY (non-vacuous) | CLEAN |
+| 3.14.7 (system) | 5.53x faster | DIRTY (non-vacuous) | CLEAN |
+
+This is the coverage that mattered: `safe_path` exists only on 3.11+, and
+`PyConfig` field layout and initialisation changed across these minors, so
+a fault that appears on exactly one interpreter would be invisible to a
+single-version run.
+
+The lifecycle *timing* sweep is deliberately skipped under sanitizers
+(3 trials × 2 arms × 6 minors does not fit a gate); timing under ASan is
+meaningless anyway, since instrumentation changes what is being timed.
+
+### Non-vacuity of the sanitizer build
+
+A matrix that finds nothing is only evidence if the build detects
+something when there is something to find. An out-of-bounds write was
+injected into a throwaway copy of the driver and the sanitized build
+caught it immediately:
+
+```
+==3464739==ERROR: AddressSanitizer: stack-buffer-overflow
+```
+
+so the instrument is live and the matrix above is a real result rather
+than a build that silently compiled the flags away.
+
 ## Still open
 
-- The **interpreter matrix under sanitizers** is not yet run: the
-  targeted builds above use one interpreter (3.14.7). C0.5's cross-minor
-  matrix passes unsanitized, but ASan/TSan coverage of 3.10 → 3.15rc2 is
-  outstanding, and `safe_path` plus `PyConfig` differences across minors
-  are exactly where a sanitizer-only fault would live.
 - The **frozen ring** is compiled by these builds but was not rewritten
   to force faults; a coverage build (`-fsanitize-coverage=trace-pc-guard`)
   over the fork driver's own branches is not done.
-
-Until the sanitizer matrix is run, the honest status is: **targeted
-sanitizers clean on one interpreter; matrix coverage outstanding.**
+- **Leak detection is off by design**, so a genuine leak in the driver is
+  not covered here. It would need a suppression file for CPython's own
+  allocations to produce usable output.
+- TSan remains a single-interpreter result, and as set out above it does
+  not cover the fork/pipe protocol in any case.
