@@ -2,107 +2,76 @@
 
 Confirmed, reproducible defects. Each has a reproducer, evidence, and an
 explicit statement of what is NOT yet known — because a confident guess
-at a cause is worse than an admitted gap when someone is about to go
-fix it in concurrency code.
-
-Status vocabulary:
-
-| status | meaning |
-|---|---|
-| `CONFIRMED` | reproduced, cause understood |
-| `CONFIRMED / cause open` | reproduced, cause not established |
-| `MITIGATED` | worked around, underlying defect remains |
+at a cause is worse than an admitted gap when someone is about to go fix
+it in concurrency code.
 
 ---
 
-## B-01 — worker killed mid-batch loses the consumed prefix of that batch
+## RETRACTED — "B-01: worker killed mid-batch loses the consumed prefix"
 
-**Status:** `CONFIRMED / cause open`
-**Severity:** high — silent data loss
-**Found:** 2026-10-12, while adding the recovery output-integrity gate the
-Stage 1–4 review asked for (round 7 follow-up)
-**Frozen code:** fix is expected to land in `forkrun_ring.c`, which is frozen
+**Retracted 2026-10-12, same day it was filed. There was no bug.**
 
-### Symptom
-
-A worker SIGKILLed while holding a batch causes that batch's
-**consumed prefix to be discarded**. The batch is reclaimed and
-redelivered, but the redelivered batch's input begins partway through,
-so only the unconsumed tail is ever processed.
-
-At 20 lines of 21 bytes with 128-byte batches, a run returns **14 of 20
-lines** and exits normally — no error, no poison record, no non-zero
-status. The first delivered record is the 4-byte fragment `LOAD`, which
-is the tail of `LINE000006 PAYLOAD`: the batch's start was lost and only
-`end - 4` survived.
+I filed this after adding the recovery output-integrity gate the Stage
+1–4 review asked for. The evidence at filing time looked compelling and
+was reported to the maintainer as silent data loss:
 
 ```
-cleanroom=0 orchestrator=True   14/20 lines  first=b'LOAD'   LOST 7 lines
-cleanroom=0 orchestrator=False  14/20 lines  first=b'LOAD'   LOST 7 lines
-cleanroom=1 orchestrator=True   14/20 lines  first=b'LOAD'   LOST 7 lines
-cleanroom=1 orchestrator=False  14/20 lines  first=b'LOAD'   LOST 7 lines
+run returns 14 of 20 lines, exits cleanly, no error, no poison record
+first delivered record is the 4-byte fragment "LOAD"
+identical under both cleanroom settings and both supervision policies
 ```
 
-### Scope
+It was wrong. The test asserted byte-exactness while running with
+`on_error="skip"`, and **skip mode drops the failed batch by contract**.
+The output was in fact exactly `input[batch_bytes:]` — a clean,
+contiguous remainder with the failed batch removed. Nothing was
+corrupted, nothing was torn, and nothing was silently lost.
 
-**Engine-core, not cleanroom.** Identical loss with `FORKRUN_CLEANROOM=0`
-and `=1`, and under `orchestrator=True` and `False`. The cleanroom
-discipline is not implicated; this is reachable on the ordinary path.
+What the maintainer said at the time is the whole answer:
 
-Recovery itself works — a replacement worker appears, later batches
-arrive intact and in order — so the defect is confined to the *input
-extent* of the one redelivered batch. This is what makes it dangerous:
-the run looks healthy, the counts look plausible, and the loss is silent.
+> on the bash side batches are treated as atomic — there is no "partial
+> batch output". the batch is re-run in full, and the partial output
+> from the batch is rolled back by fallocate (since the partial output is
+> still in the output memfd)
 
-### Reproducer
+That is the contract `frun.bash` implements, and the engine implements it
+correctly. The measured behaviour:
 
-```
-python3 dev/supervisor/repro_B01_worker_death_truncation.py
-```
+| policy | records | partial output leaked | correct? |
+|---|---|---|---|
+| `on_error="retry"` | `[128, 128, 124]` | no | yes — batch re-run in full, byte-exact |
+| `on_error="skip"` | `[128, 124]` | no | yes — exactly one batch absent, remainder contiguous |
 
-Exits 0 while the bug is present. Once fixed it exits 1 and prints
-`NOT REPRODUCED`, at which point the two `@unittest.expectedFailure`
-markers in `python/tests/test_stage3_recovery_integrity.py` must be
-removed or the suite will report **unexpected success**.
+The probe emitted `PARTIALJUNKTHATWASROLLBACK` *before* dying; none of
+it survived, in either policy. The rollback works.
 
-### Cause: not established
+### Why it is recorded rather than deleted
 
-What is known about the code path:
+The failure was not the engine's, but it was mine, and it was expensive
+enough to be worth keeping. Three specific things went wrong:
 
-* `ring_recover_worker_core` Case 2b ("THE ORPHAN") escrows
-  `batch_idx` and a slot **count** (`ep.cnt`), but carries no byte
-  extent — it has no way to say which bytes the dead worker had already
-  consumed.
-* The claimant derives the batch start from
-  `local_state->offset_ring[my_read_idx & RING_MASK]`, which *should*
-  name the batch start regardless of how far the dead worker read.
+1. **I asserted a contract without stating it.** The test demanded
+   byte-exactness without recording which failure policy was in force,
+   so "exactly one batch dropped" read as "six lines vanished".
+2. **I treated a plausible-looking number as a diagnosis.** "14 of 20"
+   looks like loss. It is exactly what skip means. I then constructed
+   three candidate mechanisms in the ring code to explain a behaviour
+   that had no unexplained component.
+3. **I reported it as high severity before checking the reference
+   implementation**, with `frun.bash` sitting in the repository root the
+   entire time.
 
-Those two facts are in tension with the observed 4-byte delivery, and
-the resolution is not yet pinned down. Candidate mechanisms, none
-confirmed:
+The corrected suite is
+`python/tests/test_stage3_recovery_integrity.py`, which asserts the
+expected output *per policy* rather than one blanket expectation, and
+`dev/supervisor/check_batch_atomicity.py`, which prints the table above.
 
-1. `offset_ring[slot]` is overwritten or stale by the time the escrow is
-   serviced, so the redelivery reads a later start.
-2. The batch's input extent is established somewhere other than
-   `offset_ring` on the spawn/exec path, and *that* is what is resumed.
-3. Partial-output rollback (`ftruncate` to `txn->output_start`) interacts
-   with the reclaim such that the already-consumed prefix is suppressed
-   rather than the input being truncated.
+### The transferable lesson
 
-**Do not act on this list without instrumentation.** The next step is to
-log, for the claimed batch, `offset_ring[slot]`, `end_ring[slot]`,
-`txn->offset`, and the bytes actually fed to the command, for both the
-original claim and the escrow redelivery. That distinguishes (1) from
-(2) directly.
-
-### Why this was not caught
-
-The Stage 3 lifecycle suite proved a replacement worker *appears* after a
-death, and that is genuinely useful. It never checked the output. The
-review's request for a "recovery output-integrity test" is what surfaced
-this — and it is the third time in this project that a test asserting
-*observable structure* passed while asserting nothing about *results*
-(`map(mode="spawn")` never reaching the launcher; the teardown test
-signalling a process with no handler; the ceiling test whose mutation
-silently did not apply). Structural assertions are necessary and not
-sufficient.
+Structural assertions are necessary and not sufficient — that was the
+lesson from round 7, and it was not enough. The additional step here is
+**assert the contract, not your assumption about it**: before calling a
+result anomalous, find the specification that makes it expected. In this
+case the specification was the maintainer's own summary of the bash
+implementation, which took one message to state and would have taken one
+command to find.

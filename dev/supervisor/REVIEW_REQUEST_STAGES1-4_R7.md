@@ -117,26 +117,51 @@ from a stale `libforkrun_python.so`, so the launcher could not resolve
 its spawn worker at all. Artifacts are gitignored, so a stale build is an
 ordinary state, not an anomaly.
 
-### B-01: silent data loss on worker death — `dev/supervisor/BUGS.md`
+### B-01 — RETRACTED. There was no bug.
 
-The recovery integrity test found a bug worth more than the test.
+An earlier version of this section reported B-01 as silent data loss on
+worker death, at high severity. **It was wrong, and it was retracted the
+same day.** `dev/supervisor/BUGS.md` holds the full retraction.
 
-A worker SIGKILLed mid-batch causes that batch's **consumed prefix to be
-lost**. The batch is reclaimed and redelivered, but the redelivery
-begins partway through, so only the unconsumed tail is processed. At 20
-lines / 128-byte batches the run returns **14 of 20 lines and exits
-cleanly** — no error, no poison record. The first record delivered is
-the 4-byte fragment `LOAD`.
+The short version: the test asserted byte-exactness while running with
+`on_error="skip"`, and skip mode drops the failed batch **by contract**.
+The output was exactly `input[batch_bytes:]` — a clean, contiguous
+remainder. Nothing was torn, nothing was corrupted, nothing was lost.
 
-It is **engine-core**, not cleanroom: identical under both
-`FORKRUN_CLEANROOM` settings and both supervision policies.
+The maintainer's description of the bash side is the specification, and
+the engine conforms to it:
 
-The two integrity tests are landed as `@unittest.expectedFailure` — green,
-self-documenting, and they flip to **unexpected success** the moment the
-bug is fixed. The cause is **not established** and `BUGS.md` says so
-explicitly, with the candidate mechanisms listed as hypotheses. The fix
-is expected in frozen `forkrun_ring.c`, so it is a maintainer decision,
-not something to patch opportunistically.
+> batches are treated as atomic — there is no "partial batch output".
+> the batch is re-run in full, and the partial output from the batch is
+> rolled back by fallocate (since the partial output is still in the
+> output memfd)
+
+Measured, with a probe that emits 26 bytes of partial output before
+`kill -9 $$`:
+
+| policy | workers | records | partial leaked | verdict |
+|---|---|---|---|---|
+| `retry` | 1, 2 | `[128, 128, 124]` | no | byte-exact — re-run in full |
+| `skip` | 1, 2 | `[128, 124]` | no | exactly one batch absent, remainder contiguous |
+
+Reproduce in one command: `python3 dev/supervisor/check_batch_atomicity.py`.
+
+**What I got wrong, since the process failure is the reviewable part.**
+I asserted a contract without stating which failure policy was in force;
+treated a plausible number ("14 of 20 lines") as a diagnosis when it was
+exactly what skip means; constructed three candidate mechanisms in the
+ring code to explain a behaviour with no unexplained component; and
+reported it before reading the reference implementation — `frun.bash`
+was in the repository root the whole time.
+
+The corrected suite asserts the expected output *per policy* rather than
+one blanket expectation, and separately asserts that a death actually
+occurred, so a wrong-contract assertion cannot read as an engine bug.
+
+### What the exercise did find that is real
+
+The spawn dispatch bugs fixed earlier in this round. Nothing here
+contradicts them.
 
 ## 4. Invariant chosen for benchmark output, and why
 
@@ -156,7 +181,7 @@ the `order="index"` suites, and is not claimed by this harness.
 
 ## 5. A note on the meta-finding
 
-Two of the fixes this round were tests that could not fail:
+Three of the fixes in this project were tests that could not fail:
 
 * the mutation test intended to justify the 2% ceiling patched
   `_cleanroom_eligible` and the patch **silently did not take** — it
@@ -165,11 +190,17 @@ Two of the fixes this round were tests that could not fail:
 * the original teardown test sent SIGTERM to a launcher with **no signal
   handler**, so it exercised nothing.
 
-Both were green before this round. The general rule this suggests, and
-the reason the byte-level validation matters more than its own bugfix: a
-suite that agrees with an oracle built from the same assumption is one
-assumption from being wrong. The oracle-agreement test is still worth
-having, but it cannot be the only thing watching.
+All were green before being examined. The pattern across them: a suite
+that agrees with an oracle built from the same assumption is one
+assumption from being wrong, and a structural assertion proves the shape
+of the run rather than its result. Neither is fixed by adding more
+assertions of the same kind — which is exactly what B-01 was, one
+round later.
+
+The remaining gap in that list is the one the oracle-agreement test
+cannot fill either: knowing *which contract* an expectation encodes.
+That is a question for the specification, not for the implementation,
+and in this case the specification was one message long.
 
 ## 6. Still open (unchanged, not regressed)
 
