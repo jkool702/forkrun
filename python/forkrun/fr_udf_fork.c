@@ -29,6 +29,8 @@
 #include <Python.h>
 
 #include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,11 +156,41 @@ _Static_assert(sizeof(struct child_report) == 48,
  *
  * These loop until the whole object is transferred, retrying EINTR,
  * and treat EOF mid-object as an error rather than a short success. */
+/* A blocking wait here would be a hang, not a slow run. The ack phase in
+ * particular CANNOT rely on EOF: a child that fails before acknowledging
+ * is still alive and still holding its write end, waiting for a release
+ * that the parent will not send until it has seen the ack. That is a
+ * deadlock by construction, so every wait is bounded and a timeout is
+ * an error, not a partial success. */
+static int io_timeout_ms(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FR_UDF_IO_TIMEOUT_MS");
+        cached = (e && atoi(e) > 0) ? atoi(e) : 10000;
+    }
+    return cached;
+}
+
+static int wait_fd(int fd, short events)
+{
+    for (;;) {
+        struct pollfd pf;
+        pf.fd = fd; pf.events = events; pf.revents = 0;
+        int r = poll(&pf, 1, io_timeout_ms());
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) return -1;
+        if (r == 0) { errno = ETIMEDOUT; return 0; }
+        return 1;               /* POLLHUP/POLLERR still land on the I/O */
+    }
+}
+
 static int write_all(int fd, const void *buf, size_t n)
 {
     const char *p = (const char *)buf;
     size_t done = 0;
     while (done < n) {
+        if (wait_fd(fd, POLLOUT) <= 0) return -1;
         ssize_t w = write(fd, p + done, n - done);
         if (w > 0) { done += (size_t)w; continue; }
         if (w < 0 && errno == EINTR) continue;
@@ -172,12 +204,27 @@ static int read_all(int fd, void *buf, size_t n)
     char *p = (char *)buf;
     size_t done = 0;
     while (done < n) {
+        if (wait_fd(fd, POLLIN) <= 0) return -1;
         ssize_t r = read(fd, p + done, n - done);
         if (r > 0) { done += (size_t)r; continue; }
         if (r < 0 && errno == EINTR) continue;
         return -1;              /* EOF or error, mid-object */
     }
     return 0;
+}
+
+/* Fault injection, driven by tools/protocol_faults.py. Each hook fires for
+ * exactly ONE child, so the run keeps N-1 good reports: that is what
+ * proves a single defect invalidates the whole sample instead of
+ * quietly shrinking it. */
+static int fault(const char *name)
+{
+    const char *v = getenv(name);
+    return v && *v && strcmp(v, "0") != 0;
+}
+static int fault_child(const char *name, int c)
+{
+    return c == 0 && fault(name);
 }
 
 /* Per-run accumulation, filled from the children's reports. */
@@ -452,8 +499,11 @@ static double run(int pre_fork, int nchildren, int iters,
             /* ack on the write end, release read from the READ end --
              * the opposite end to the one it writes on. Getting this
              * backwards fails with EBADF and looks like a no-op. */
-            { char sig = 1;
-              if (write_all(fd_data[1], &sig, 1) != 0) { _exit(90); } }
+            if (fault_child("FR_FAULT_EXIT_BEFORE_BARRIER", c)) _exit(92);
+            if (!fault_child("FR_FAULT_NO_ACK", c)) {
+                char sig = 1;
+                if (write_all(fd_data[1], &sig, 1) != 0) { _exit(90); }
+            }
             { char go = 0;
               if (read_all(fd_gate[0], &go, 1) != 0)   { _exit(90); } }
 
@@ -480,12 +530,40 @@ static double run(int pre_fork, int nchildren, int iters,
             rep.t_ns = now_ns();
             read_self_mem(&rep.rss_kb, &rep.pss_kb, &rep.uss_kb);
             if (!pre_fork) fr_udf_finalize();
+            if (fault_child("FR_FAULT_DIE_BEFORE_REPORT", c)) _exit(93);
+            if (fault_child("FR_FAULT_BAD_VERSION", c))
+                rep.version = 0xDEADBEEFu;
+            if (fault_child("FR_FAULT_BAD_PID", c))
+                rep.pid = 0x7FFFFFFFu;
+            if (fault_child("FR_FAULT_TRUNCATED", c)) {
+                /* Half a record: read_all must treat the short tail as an
+                 * error rather than as a report with zeroed fields. */
+                if (write_all(fd_data[1], &rep, sizeof rep / 2) != 0)
+                    _exit(91);
+                close(fd_data[1]);
+                close(fd_gate[0]);
+                _exit(0);
+            }
             if (write_all(fd_data[1], &rep, sizeof rep) != 0) _exit(91);
+            if (fault_child("FR_FAULT_DUPLICATE", c)) {
+                /* The extra bytes must not be mistaken for another
+                 * child's record. */
+                if (write_all(fd_data[1], &rep, sizeof rep) != 0) _exit(91);
+            }
             close(fd_data[1]);
             close(fd_gate[0]);
             _exit(0);
         }
         child_pids[c] = (int)pid;
+    }
+
+    /* The parent must not hold the WRITE end of any pipe it reads. If it
+     * does, EOF is unreachable and a child that dies is invisible: the
+     * read blocks until the timeout instead of failing fast. This close
+     * has to happen BEFORE collection, not after. */
+    for (int c = 0; c < nchildren; c++) {
+        close(data[c][1]);
+        close(gate[c][0]);
     }
 
     /* Parent: collect every child's status before finalising, because a
@@ -521,6 +599,13 @@ static double run(int pre_fork, int nchildren, int iters,
     }
     for (int c = 0; c < nchildren; c++) {
         char go = 1;
+        if (fault_child("FR_FAULT_RELEASE_FAIL", c)) {
+            /* Make the release genuinely impossible, rather than
+             * skipping it silently: the child's read must then see EOF
+             * and the parent must notice. */
+            close(gate[c][1]);
+            gate[c][1] = -1;
+        }
         if (write_all(gate[c][1], &go, 1) != 0) {
             fprintf(stderr, "  child %d: RELEASE FAILED (errno=%d)\n",
                     c, errno);
@@ -547,6 +632,38 @@ static double run(int pre_fork, int nchildren, int iters,
                     rep.version, rep.pid, (int)child_pids[c]);
             report_bad++;
         }
+
+        /* Reap FIRST, then look for anything left on the pipe. Once the
+         * child is reaped it can never write again, so leftover bytes are
+         * definitive: a duplicate or a stray second record. Reading
+         * exactly sizeof rep and never checking what follows is how a
+         * doubled report would sit unnoticed in the buffer forever --
+         * the arithmetic still looks reasonable, so nothing else would
+         * reveal it. */
+        int wstatus = 0;
+        waitpid(-1, &wstatus, 0);
+        {
+            struct pollfd tp;
+            tp.fd = data[c][0]; tp.events = POLLIN; tp.revents = 0;
+            /* Poll first so the check cannot block, but decide on the
+             * byte COUNT, not on the poll flags: a closed pipe reports
+             * POLLHUP (and POLLIN on Linux) with nothing to read, and
+             * keying on the flags would flag every healthy child. */
+            if (poll(&tp, 1, 0) > 0) {
+                char extra[64];
+                ssize_t nleft = read(data[c][0], extra, sizeof extra);
+                if (nleft <= 0) {
+                    /* clean EOF: the child wrote exactly one record */
+                } else {
+                fprintf(stderr, "  child %d: %ld trailing byte(s) after the "
+                        "report -- duplicate or stray record, child "
+                        "excluded\n", c, (long)nleft);
+                report_bad++;
+                rep_ok = 0;
+                }
+            }
+        }
+
         if (rep_ok) {
             /* Fleet memory: the children's own PSS, summed. The parent's
              * is added at finalisation, after the interpreter is torn
@@ -565,8 +682,6 @@ static double run(int pre_fork, int nchildren, int iters,
         }
         close(data[c][0]);
         close(gate[c][1]);
-        int wstatus = 0;
-        waitpid(-1, &wstatus, 0);
         /* sizeof rep, NOT 1. Extending the child's report from a status
          * byte to a struct left this check comparing against 1, so every
          * child counted as a failure and the run reported "8 of 8 failed"
@@ -605,8 +720,6 @@ static double run(int pre_fork, int nchildren, int iters,
      * parent holds the write end of the pipe it reads, so a child that
      * dies is invisible and the read blocks forever instead of seeing
      * EOF. */
-    for (int c = 0; c < nchildren; c++) close(data[c][1]);
-
     double elapsed = now_s() - t0;
     free(data);
     free(gate);
@@ -776,6 +889,10 @@ static int run_hooks_misuse(const char *module, const char *batch)
 
 int main(int argc, char **argv)
 {
+    /* A write to a dead child's pipe must fail with EPIPE, not kill the
+     * parent. Under fault injection a child dies by design. */
+    signal(SIGPIPE, SIG_IGN);
+
     /* A probe that prints the interpreter and exits, so a harness can
      * report the version the DRIVER is linked against rather than the
      * version of whatever Python is running the harness. Those differ
