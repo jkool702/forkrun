@@ -33,7 +33,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-02 | Payload import timing documented backwards | high | **verified** |
 | TD-03 | `_api.py` still describes a Stage 0 stub | med | **verified** |
 | TD-04 | Environment propagation: explicit in bash, implicit in Python | med | **decided** — `DECISION-04` |
-| TD-05 | Retry semantics: `-E` flag has no Python counterpart | med | **partly decided** — one test open |
+| TD-05 | Retry semantics: `-E` flag has no Python counterpart | med | **decided + boundaries measured** |
 | TD-06 | Executor consolidation | med | **audited** — `EXECUTOR_CONSOLIDATION_AUDIT.md` |
 | TD-07 | README collapses v0 history into current capability | low | **unverified claim** |
 | TD-08 | `Mode` type omitted a shipped, tested mode | med | **verified — FIXED** |
@@ -260,12 +260,17 @@ which is exactly where bash's explicit list exists.
 
 ### TD-05 — Retry semantics: `-E` has no Python counterpart (medium)
 
-> **Partly resolved** in `DECISION-04-environment-and-retry.md`. The
-> default difference is judged intentional (`on_error="retry"` as a
-> library default is defensible). But the *equivalence of the mechanisms*
-> is **assumed, not demonstrated**: exit 127, transient nonzero exits, and
-> the `FORKRUN_RETRY_LIMIT` 0/negative poison boundaries are untested.
-> Recorded as decided-but-not-settled rather than closed.
+> **Resolved** in `DECISION-04-environment-and-retry.md` §4.1. The three
+> named boundaries are now measured, not asserted: a missing payload
+> module fails fast without consuming the retry budget; an unexecutable
+> spawn command retries then poisons, matching `-E`; limit 0 poisons on
+> first failure. A negative limit is a silent infinite loop — parity with
+> bash, but with no warning, left as an open maintainer choice.
+>
+> One correction recorded there: a first probe appeared to show
+> `mode="spawn"` returning `[]` with no error for a nonexistent command.
+> That was the **probe's** error — it omitted `return_stats=True`, which
+> is where `poisoned=8` and the indices live. Not a defect.
 
 **Verified divergence, and parity is better than it first appears.**
 `FORKRUN_RETRY_LIMIT` matches: bash documents default 3 (`frun.bash:448`),

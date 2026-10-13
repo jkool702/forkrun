@@ -1,8 +1,9 @@
 # DECISION-04 — Environment propagation and retry semantics in Python
 
-**Status: DECIDED (TD-04, TD-05) — both were unrecorded choices that are
-now recorded. TD-04 keeps current behaviour deliberately. TD-05 needs one
-test before it can be called settled.**
+**Status: DECIDED (TD-04, TD-05). TD-04 keeps current behaviour
+deliberately; TD-05's boundaries are now measured (§4.1) rather than
+asserted. One open maintainer choice remains: whether a negative
+`FORKRUN_RETRY_LIMIT` should warn.**
 
 Origin: the external parity audit, recorded as TD-04/TD-05 in
 `TECH_DEBT_REGISTER.md`. Both were flagged there as "records an unrecorded
@@ -151,10 +152,44 @@ posture actually matches bash's `-E` behaviour at the same
 * behaviour at `FORKRUN_RETRY_LIMIT=0` (poison on first failure) and at a
   negative value (never poison).
 
-Until that test exists, the honest statement is: *the defaults differ by
-design, and the equivalence of the mechanisms under those defaults is
-assumed rather than demonstrated.* The audit raised the 127 case
-specifically and it has not been exercised.
+### 4.1 The three boundaries, measured
+
+Now tested in `python/tests/test_retry_boundaries.py`:
+
+| case | measured behaviour |
+|---|---|
+| payload module does not exist | **fails fast**, `ModuleNotFoundError`, ~0.00s, **no retry**, nothing poisoned |
+| spawn command cannot be executed | retries to the limit (3), then **poisons**; counts in `last_run_stats()`; each skip warned on stderr |
+| `FORKRUN_RETRY_LIMIT=0` | poisons on the **first** failure, as documented at `frun.bash:448` |
+
+**On the audit's exit-127 question, the answer differs by payload kind,
+and Python's half is better than bash's.**
+
+* An **unexecutable spawn command** is the literal 127 analogue, and
+  Python matches `-E` precisely: retry to the limit, poison, report. A
+  first probe of this looked like a defect — `map()` returned `[]` with no
+  exception — but that was the probe's error, not the code's: the counts
+  are in the stats surface (`poisoned=8`, `poisoned_batches=[0..7]`) and
+  each skip is warned on stderr. Corrected here rather than recorded as a
+  finding.
+* A **missing payload module** does *not* retry, because the spec resolves
+  parent-side (W-REL6-3.1) and the import error surfaces before any input
+  is read. Bash under `-E` *would* burn the retry budget on a typo, since
+  `|| exit $?` cannot tell "not found" from "transient". Python's
+  fail-fast here is a consequence of the fork-safety rule rather than a
+  retry decision, and it is worth keeping.
+
+**The negative limit remains untested, deliberately.** `FORKRUN_RETRY_LIMIT=-1`
+on a permanently failing payload is an infinite silent loop — measured: it
+ran past a 45 s timeout with no stdout, no stderr and no diagnostic. That
+matches bash's documented "never declared poisoned (and could retry
+indefinitely)" at `frun.bash:448`, so the *semantics* are parity. What is
+missing is any **warning**. A test would have to time out, making it slow
+and flaky rather than informative, so the boundary is pinned by
+documentation instead and the test file says so explicitly.
+
+Whether to warn on a negative limit is an open maintainer choice, not a
+parity defect: bash is silent here too.
 
 ### Also unexamined
 
@@ -170,7 +205,12 @@ implied-covered.
   defensible library choice and that its limit is understood and bounded.
 - That `LD_PRELOAD` sanitisation is unnecessary — that is a threat-model
   judgement reserved for the maintainer.
-- That Python's retry mechanism is behaviourally equivalent to bash's
-  `-E`. Asserted as an API judgement, **not** tested; the 127 and
-  poison-threshold cases remain open.
+- That Python's retry mechanism is equivalent to bash's `-E` in every
+  respect. §4.1 tests the three named boundaries and finds parity for the
+  unexecutable-command case and a deliberate *improvement* for the
+  missing-module case. **Transient nonzero exits that eventually succeed
+  were not tested** — only permanent failures — so "retry then succeed"
+  remains unverified.
+- That a negative `FORKRUN_RETRY_LIMIT` is safe. It is parity with bash,
+  and it is a silent infinite loop.
 - Nothing about worker exit-status propagation, which was not examined.
