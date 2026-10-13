@@ -1007,6 +1007,17 @@ on the frozen-engine decision.
   is frozen in Phase 0, or one branch is designated for integration and rebased
   before the other. Starting either workstream without this recorded is how two
   branches end up rewriting the same supervisor.
+  **[DONE]** `SUPERVISION_INTERFACE.md` specifies it and records the
+  integration strategy: **this branch owns the supervisor**, and W-EXP-2 and
+  W-EXP-3 land here in that order and rebase onto it. Two findings from writing
+  it are worth carrying: the launcher has **no NUMA concept at all**
+  (`grep -c numa forkrun_cleanroom.c` is 0), so W-EXP-2 is not an extension of
+  an existing per-node supervisor but the first one; and DECISION-03 §7.3's
+  central requirement is **already implemented** in the launcher (fail-fast
+  classifies death from the raw wait status at `forkrun_cleanroom.c:2232` and
+  never reaches `p_recover`), so the gate's substance is satisfied even though
+  the signatures did not exist. **Not implemented and not externally
+  reviewed** — the specification closes the recorded gate, nothing more.
 - **The packaging path (§5.4) must be chosen before W-EXP-1 implementation
   begins**: source-only optional prototype, interpreter-specific release
   wheels, or abandoning the CPython-linked helper for the bootstrap design.
