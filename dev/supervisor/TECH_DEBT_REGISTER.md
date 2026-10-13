@@ -36,6 +36,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-05 | Retry semantics: `-E` flag has no Python counterpart | med | **verified divergence** |
 | TD-06 | Executor consolidation audit not performed | med | **unverified claim** |
 | TD-07 | README collapses v0 history into current capability | low | **unverified claim** |
+| TD-08 | `Mode` type omitted a shipped, tested mode | med | **verified — FIXED** |
 
 ---
 
@@ -89,7 +90,12 @@ not a live defect.
 
 ---
 
-### TD-02 — Payload import timing documented backwards (high)
+### TD-02 — Payload import timing documented backwards (high) — FIXED
+
+> **Resolved.** Rewritten in `README.md` and `MODES.md`. Investigating it
+> produced a sharper finding than the audit reported: the rule is
+> **conditional**, and the docs flattened that to a single unconditional
+> claim. See below.
 
 **Verified, and more serious than "stale".**
 
@@ -108,14 +114,58 @@ fallback at `_worker.py:138-140`.
 
 So the public docs describe the **unsafe** variant. Anyone trusting them
 could construct a workload that deadlocks a child on a frozen import
-lock. This is a two-line documentation fix with real blast radius, and it
-is the cheapest high-value item in the register.
+lock.
+
+**What the audit did not catch: the rule is conditional.** Tracing the
+resolver (`run.py:3025-3057`) shows three distinct outcomes for the *same*
+string spec:
+
+| path | where `"pkg.mod:func"` is imported |
+|---|---|
+| `mode="plugin"`, and `mode="python"` when the helper is absent | **parent**, before fork (W-REL6-3.1) |
+| `mode="udf"` / `mode="python"` **with the helper built** | **inside the launcher**, after `exec` |
+| `mode="python"`, helper absent (plain wheel install) | falls back to the parent-side rule |
+
+The last row matters more than it looks: **`setup.py` does not ship the
+UDF helper**, so the parent-side path is what a plain `pip install`
+actually takes — the exact opposite of what the docs promised. Both
+branches are deliberate and both are correct for their reason, so the
+fix documents the condition rather than picking a side.
 
 **Does not establish:** that any user has been harmed by this.
 
 ---
 
-### TD-03 — `_api.py` describes a Stage 0 stub (medium)
+### TD-08 — `Mode` type omitted a shipped, tested mode (medium) — FIXED
+
+**Found while fixing TD-02, not reported by the audit.**
+`_api.py:21` declared `Mode = Literal["python", "spawn", "plugin",
+"splice"]` while `_api.py:28` validated against `_VALID_MODES`, which also
+contains `"udf"`.
+
+`mode="udf"` is not vestigial: it is dispatched at `run.py:746` ("served
+wherever `mode="plugin"` is: same launcher"), adapted at `run.py:2952`,
+and exercised through the public API by `test_stage0_public_api.py` and
+`test_stage0_notify_failure.py`.
+
+This had user-visible teeth because **`py.typed` ships**
+(`setup.py:225`): the package advertises typing, so a user running mypy or
+pyright against `forkrun.map(..., mode="udf")` got a false type error on a
+supported mode — while `pip install` + runtime accepted it. The type and
+the runtime disagreed, and only the runtime was tested.
+
+Fixed by adding `"udf"` to the `Literal`. No runtime behaviour changed.
+
+**Does not establish:** that any user hit this, or that the other public
+annotations agree with runtime validation. A systematic
+annotation-vs-`_VALID_*` comparison across the API was **not** performed.
+
+### TD-03 — `_api.py` describes a Stage 0 stub (medium) — FIXED
+
+> **Resolved.** Replaced with a description of the module's actual
+> responsibilities, including the division of labour (this module
+> validates public arguments; `run.py` selects strategy;
+> `_executor_core.py` implements mechanics) so the boundary stops eroding.
 
 **Verified.** `python/forkrun/_api.py:1` opens *"forkrun Python frontend
 — Stage 0 API surface stub (v1.3 §3.0)"* and line 6 says the surface

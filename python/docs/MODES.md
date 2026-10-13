@@ -30,8 +30,12 @@ forkrun.map(clean, "events.jsonl", workers=8, order="index")
 ```
 
 - Payload forms: a callable (fork-inherited, never pickled)
-  or `"pkg.mod:func"` (imported post-fork in the worker,
-  keeping the parent free of native imports).
+  or `"pkg.mod:func"`. A string spec is resolved in the **parent** on this
+  path, before any fork: a child forked from a threaded host must not
+  import, because frozen import locks in the child deadlock. The cleanroom
+  UDF path (`mode="udf"`, or `mode="python"` with the helper built) is the
+  exception — there the spec is resolved inside the launcher after `exec`.
+  See `_worker.py` and `_udf.py`.
 - Throughput (28 workers, 5M records): ~1.6M/s light,
   ~700k/s medium. An earlier version of this file called that "at parity
   with `ProcessPoolExecutor`", which is now wrong in the other

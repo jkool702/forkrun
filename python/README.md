@@ -75,9 +75,20 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
   `bytes` (it drains live, with no finished file to map). Full contract:
   [docs/API.md](docs/API.md#result-representation).
 
-- `payload`: `"pkg.mod:func"` (imported post-fork in the worker — keeps the
-  parent virgin of native imports) or a callable (fork-inherited, never
+- `payload`: `"pkg.mod:func"` or a callable (fork-inherited, never
   pickled). Receives a `Batch`, returns `bytes`/`memoryview`/`str`/`None`.
+  Where a **string** spec is imported depends on the path, and it is not
+  the same everywhere:
+  - `mode="plugin"` (and `mode="python"` when the cleanroom UDF helper is
+    not built, as in a plain wheel install) resolves it in the **parent**,
+    before any fork. A child forked from a threaded host must never import:
+    frozen import locks in the child deadlock. Import errors therefore
+    surface early, in the caller.
+  - `mode="udf"` / `mode="python"` with the helper built resolve it
+    **inside the launcher**, after `exec`, so the user's module state never
+    enters the process that forks the workers.
+  Both are deliberate; see `_worker.py` (`resolve_payload_parent`) and
+  `_udf.py`.
 - `source`: path | fd | pipe/socket object. v0.5 **materializes** the input
   into an ingress memfd and mmaps it whole: bounded inputs only.
 - `Batch.data`: borrowed `memoryview` (zero-copy MAP_SHARED window). Valid
