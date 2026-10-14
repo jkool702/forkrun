@@ -3038,6 +3038,41 @@ def _iter_records(lib, fd, _chunk=_CHUNK, views=False):
             _chunk = len(tail) + _CHUNK
 
 
+# C0.7 frame accounting.
+#
+# The framer ALREADY walks every complete frame; it simply does not count
+# the ones it then filters (non-DATA dispositions, which include the
+# EOF sentinel and any NO_RESULT/SKIPPED/POISONED control record).
+# Counting here -- after a complete frame has been read and validated,
+# BEFORE the disposition filter -- measures exactly the quantity the
+# certificate needs, with no engine change.
+#
+# Named frames, not records: "records" is what the collector YIELDS, and
+# that is the quantity that differs from the ring's published slots.
+_FRAME_STATS = {"complete": 0, "filtered": 0}
+
+# C0.7 expected-side. fr_py_diag_node answers only while the ring state is
+# live, so the published-slot total has to be captured DURING the run --
+# a probe after map() returns reads zeros. Recorded here purely as
+# telemetry so the correspondence sweep can compare the two sides.
+_PUBLISHED_SLOTS = {"total": None, "nodes": 0}
+
+
+def reset_frame_stats():
+    _FRAME_STATS["complete"] = 0
+    _FRAME_STATS["filtered"] = 0
+    _PUBLISHED_SLOTS["total"] = None
+    _PUBLISHED_SLOTS["nodes"] = 0
+
+
+def frame_stats():
+    return dict(_FRAME_STATS)
+
+
+def published_slots():
+    return dict(_PUBLISHED_SLOTS)
+
+
 def _split_records_views(blob):
     """_split_records, yielding memoryview slices instead of bytes.
 
@@ -3064,8 +3099,14 @@ def _split_records_views(blob):
         # would hand map()'s caller a spurious b"" -- a new class of wrong
         # answer in exactly the place that decides what a call returns.
         if disp != _DISP_DATA:
+            # A COMPLETE frame that carries a control disposition rather
+            # than payload. Counted, because it occupied a published slot
+            # and must be accounted for at the certificate boundary.
+            _FRAME_STATS["complete"] += 1
+            _FRAME_STATS["filtered"] += 1
             off += ln
             continue
+        _FRAME_STATS["complete"] += 1
         records.append((idx, view[off:off + ln]))
         off += ln
     tail = view[off:]
@@ -3096,8 +3137,11 @@ def _split_records(blob: bytes) -> tuple:
         # a UDF that returned None -- a new class of wrong answer in exactly
         # the place that decides what a call returns.
         if disp != _DISP_DATA:
+            _FRAME_STATS["complete"] += 1
+            _FRAME_STATS["filtered"] += 1
             off += ln
             continue
+        _FRAME_STATS["complete"] += 1
         records.append((idx, blob[off:off + ln]))
         off += ln
     return records, blob[off:]
@@ -9608,6 +9652,8 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
     if any(w >= 0 for (_n, w, _r, _f, _c, _t, _te) in rows):
         expected_total = sum(w for (_n, w, _r, _f, _c, _t, _te) in rows
                              if w >= 0)
+    _PUBLISHED_SLOTS["total"] = expected_total
+    _PUBLISHED_SLOTS["nodes"] = num_nodes
 
     bad = [(node, w, r) for (node, w, r, _f, _c, _t, te) in rows
            if w >= 0 and r >= 0 and w > r and te != 1]
