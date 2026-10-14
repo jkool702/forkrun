@@ -809,10 +809,16 @@ static int udf_probe_await(int fd, pid_t probe,
     if (timed_out) (void)kill(probe, SIGKILL);
     if (!udf_reap_bounded(probe)) {
         (void)kill(probe, SIGKILL);
-        (void)udf_reap_bounded(probe);
-        fprintf(stderr, "forkrun-cleanroom: UDF probe child %ld did not "
-                        "reap after SIGKILL; continuing (cleanup NOT "
-                        "confirmed)\n", (long)probe);
+        /* RETAIN the second result. It used to be discarded and the
+         * "cleanup NOT confirmed" line printed unconditionally, so a
+         * child that DID reap after the kill was still reported as
+         * unreaped -- a diagnostic contradicting the code that produced
+         * it, in the very path this was meant to make accurate. */
+        if (!udf_reap_bounded(probe)) {
+            fprintf(stderr, "forkrun-cleanroom: UDF probe child %ld did not "
+                            "reap after SIGKILL; continuing (cleanup NOT "
+                            "confirmed)\n", (long)probe);
+        }
     }
     return complete ? UDF_PROBE_STUCK
                     : (timed_out ? UDF_PROBE_TIMEOUT : UDF_PROBE_FAILED);
@@ -938,9 +944,11 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
              * be shown to match the caller, and "probably fine" is not a
              * basis for initialising an interpreter. */
             fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) exports no "
-                            "fr_udf_built_version(); its CPython "
-                            "compatibility CANNOT BE VERIFIED. Refusing.\n",
-                    helper_path);
+                            "%s; its CPython compatibility CANNOT BE "
+                            "VERIFIED. Refusing. (A helper built against "
+                            "the older, differently-typed symbol is also "
+                            "refused here, by name.)\n",
+                    helper_path, FR_UDF_BUILT_VERSION_SYMBOL);
             return UDF_SETUP_VERIFY;
         }
         helper_version = r.version;
@@ -988,9 +996,9 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
             (fr_udf_built_version_fn)
             dlsym(hu, FR_UDF_BUILT_VERSION_SYMBOL);
         if (!vf) {
-            fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) lost its "
-                            "version symbol between probe and load\n",
-                    helper_path);
+            fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) lost %s "
+                            "between probe and load\n",
+                    helper_path, FR_UDF_BUILT_VERSION_SYMBOL);
             return UDF_SETUP_VERIFY;
         }
         struct fr_udf_version live = { 0, 0 };

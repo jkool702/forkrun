@@ -69,9 +69,13 @@ _MARKER_C = """\
 #include <stdio.h>
 #include <stdlib.h>
 struct fr_udf_version { int major; int minor; };
+/* major/minor come from the BUILD, not hard-coded. The fixture used to
+ * report 3.14, so on any interpreter whose major.minor differs this is
+ * not a matching-version control -- the helper is refused before init
+ * and the negative control fails for an unrelated reason. */
 void fr_udf_built_version_v2(struct fr_udf_version *out)
 {
-    if (out) { out->major = 3; out->minor = 14; }
+    if (out) { out->major = FR_TEST_MAJOR; out->minor = FR_TEST_MINOR; }
 }
 /* Returns 1 so the accepted path REACHES fr_udf_init. Returning 0 makes
  * the launcher refuse earlier ("no fork hooks"), so the marker would
@@ -79,11 +83,15 @@ void fr_udf_built_version_v2(struct fr_udf_version *out)
  * fixture exists to observe -- and the negative control would fail while
  * the property under test was untested. */
 int fr_udf_fork_hooks_available(void) { return 1; }
-void fr_udf_init(const char *const *roots, int nroots)
+/* MUST return int. The launcher resolves this as
+ * int (*)(const char *const *, int) and checks the result; a void-return
+ * fixture is an incompatible function type and undefined behaviour. */
+int fr_udf_init(const char *const *roots, int nroots)
 {
     (void)roots; (void)nroots;
     const char *m = getenv("FR_TEST_INIT_MARKER");
     if (m) { FILE *f = fopen(m, "w"); if (f) { fputs("INITIALISED", f); fclose(f); } }
+    return 0;
 }
 int fr_udf_call(const char *a, int b) { (void)a; (void)b; return 0; }
 void fr_udf_free(void) {}
@@ -93,11 +101,35 @@ int fr_udf_after_fork_child(void) { return 0; }
 """
 
 
-def _build_marker_helper(directory, compile_ok=True):
+def _build_marker_helper(directory):
     src = os.path.join(directory, "marker.c")
     so = os.path.join(directory, "libmarker.so")
     with open(src, "w") as fh:
         fh.write(_MARKER_C)
+    subprocess.run(
+        ["gcc", "-shared", "-fPIC", "-o", so, src,
+         "-DFR_TEST_MAJOR=%d" % sys.version_info[0],
+         "-DFR_TEST_MINOR=%d" % sys.version_info[1]],
+        check=True, capture_output=True, timeout=180)
+    return so
+
+
+# A constructor that CRASHES rather than hangs. Distinct from the hanging
+# fixture and from the distinction it exists to pin: a crash used to
+# report itself as "TIMED OUT", which made exit 81 meaningless.
+_CRASH_C = """\
+#include <unistd.h>
+void fr_udf_built_version_v2(void *out) { (void)out; }
+__attribute__((constructor))
+static void die_now(void) { _exit(7); }
+"""
+
+
+def _build_crashing_helper(directory):
+    src = os.path.join(directory, "crash.c")
+    so = os.path.join(directory, "libcrash.so")
+    with open(src, "w") as fh:
+        fh.write(_CRASH_C)
     subprocess.run(["gcc", "-shared", "-fPIC", "-o", so, src],
                    check=True, capture_output=True, timeout=180)
     return so
@@ -338,7 +370,7 @@ class MinorMismatchBarrier(unittest.TestCase):
         marker = os.path.join(self.tmp, "init-marker-ok")
         env = dict(os.environ)
         env["FR_TEST_INIT_MARKER"] = marker
-        subprocess.run(
+        proc = subprocess.run(
             [_LAUNCHER, "--so", _SUBSTRATE,
              "--workers", "1", "--lines", "1", "--bytes", "0",
              "--on-error", "0", "--retry", "1",
@@ -347,38 +379,72 @@ class MinorMismatchBarrier(unittest.TestCase):
              "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
              "--caller-version", _caller_version()],
             capture_output=True, timeout=25, env=env)
+        # Assert the exit status, not just the marker: if the helper were
+        # refused early the marker would be absent and the test would
+        # "pass" for a reason that proves nothing.
+        self.assertEqual(proc.returncode, 0,
+                         "the marker helper must be ACCEPTED when the "
+                         "declaration matches; stderr=%r"
+                         % proc.stderr[-300:])
         self.assertTrue(
             os.path.exists(marker),
             "the marker must be writable when the helper IS accepted, or "
             "the mismatch test above proves nothing")
 
-    def test_no_interpreter_was_initialised_on_refusal(self):
-        """fr_udf_init must not have run.
-
-        Note what is NOT asserted: that the helper was never loaded. The
-        probe dlopens it deliberately -- that is how the version is read.
-        Claiming "never loaded" would be false, and a test asserting it
-        would fail for a correct implementation.
-        """
-        proc = self._launch(["--caller-version", "9.9"])
-        blob = (proc.stdout + proc.stderr)
-        # The refusal diagnostic legitimately contains the word
-        # "interpreter" ("refusing to initialise an interpreter across the
-        # mismatch"), so asserting on it would fail a correct
-        # implementation. Assert the properties that actually matter: the
-        # refusal was reported, no engine initialisation was attempted,
-        # and no worker produced output.
-        self.assertIn(b"mismatch", blob.lower())
-        self.assertNotIn(b"fr_py_init", blob)
-        self.assertEqual(
-            os.path.getsize(os.path.join(self.tmp, "out.bin")), 0,
-            "a refused call must not have produced result records")
-        self.assertNotIn(b"POISONED BATCH", blob)
-
     # ------------------------------------------------------------------
     # status contract
     # ------------------------------------------------------------------
+    def test_crashing_constructor_is_not_reported_as_a_timeout(self):
+        """A CRASH is not a TIMEOUT.
+
+        Pinning the distinction the diagnostic fix made: a child that dies
+        or closes the pipe without reporting is a probe FAILURE (71), not
+        an expired deadline (81). Before the fix both returned 81 with a
+        "TIMED OUT" message, so a constructor that crashed in
+        microseconds was reported as having hung for five seconds.
+        """
+        so = _build_crashing_helper(self.tmp)
+        started = time.monotonic()
+        proc = subprocess.run(
+            [_LAUNCHER, "--so", _SUBSTRATE,
+             "--workers", "1", "--lines", "1", "--bytes", "0",
+             "--on-error", "0", "--retry", "1",
+             "--src", self.src, "--result",
+             os.path.join(self.tmp, "c.bin"), "--stats-fd", "-1",
+             "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
+             "--caller-version", _caller_version()],
+            capture_output=True, timeout=25)
+        elapsed = time.monotonic() - started
+        self.assertEqual(proc.returncode, 71,
+                         "a crashed constructor must be 71 (probe failure), "
+                         "got %d; stderr=%r"
+                         % (proc.returncode, proc.stderr[-300:]))
+        self.assertNotIn(b"TIMED OUT", proc.stderr,
+                         "a crash must not be reported as a timeout")
+        self.assertLess(elapsed, 2.0,
+                        "a crash must be detected immediately, not after "
+                        "the 5s deadline (took %.1fs)" % elapsed)
+
     def test_status_contract(self):
+        """Pin the classification of EVERY UDF refusal code, not just two."""
+        for code in (80, 81, 82, 71):
+            self.assertIn(code, _CR_EXIT_PRE_INGEST,
+                          "%d is a pre-ingestion refusal" % code)
+            self.assertNotIn(code, _CR_EXIT_NO_FALLBACK,
+                             "%d is safely declineable, unlike 79" % code)
+            self.assertIn(code, _CR_EXIT_LABELS,
+                          "%d must carry a human-readable label" % code)
+        # Every label must name the CURRENT symbol, not the superseded one.
+        self.assertIn("fr_udf_built_version_v2", _CR_EXIT_LABELS[80])
+        self.assertNotIn("(no fr_udf_built_version symbol)",
+                         _CR_EXIT_LABELS[80])
+        # 71 is no longer only fr_py_init: a UDF probe failure returns it.
+        self.assertIn("UDF", _CR_EXIT_LABELS[71])
+        # 81 must not claim the helper was never loaded: the disposable
+        # probe child DID dlopen it and ran its constructors.
+        self.assertNotIn("the helper was not loaded", _CR_EXIT_LABELS[81])
+
+    def test_status_contract_legacy_subset(self):
         for code in (80, 81):
             self.assertIn(code, _CR_EXIT_PRE_INGEST,
                           "%d is a pre-ingestion refusal" % code)
@@ -579,19 +645,84 @@ class MinorMismatchBarrier(unittest.TestCase):
                         "the %ds probe deadline is not being enforced "
                         "(took %.1fs)" % (5, elapsed))
 
-    def test_kill_switch_suppresses_both_probe_and_warning(self):
-        """FORKRUN_NO_UDF=1 must prevent the probe AND emit no warning.
+    def _capture_stdout_stderr(self, fn):
+        import io
+        import contextlib
+        out_b, err_b = io.StringIO(), io.StringIO()
+        real_out, real_err = sys.stdout, sys.stderr
+        try:
+            sys.stdout, sys.stderr = out_b, err_b
+            result = fn()
+        finally:
+            sys.stdout, sys.stderr = real_out, real_err
+        return result, out_b.getvalue(), err_b.getvalue()
 
-        The previous version only asserted helper_path() returns None,
-        which is narrower than the name by two claims: it never ran the
-        PUBLIC route, and it never checked that no warning was emitted.
+    def test_kill_switch_suppresses_the_probe_ALONE(self):
+        """No cache entry at all: the kill switch must prevent the probe.
+
+        The previous version POISONED the cache first, which makes the
+        helper unavailable anyway -- so the launcher could be skipped
+        even if FORKRUN_NO_UDF failed to suppress probing. The claim in
+        the test's name was never established.
+
+        Here the cache is CLEAN, and the observation is the launcher
+        binary being invoked at all: with the switch set, the cleanroom
+        route must not be taken, so it must never be exec'd.
+        """
+        _udf.clear_incompatibles()
+        self.assertIsNone(
+            _udf.known_incompatible(_HELPER),
+            "precondition: no cached refusal, so nothing else could be "
+            "suppressing the probe")
+
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        self.addCleanup(os.environ.pop, "FORKRUN_CLEANROOM", None)
+        sys.path.insert(0, self.tmp)
+        self.addCleanup(sys.path.remove, self.tmp)
+        os.environ["FORKRUN_NO_UDF"] = "1"
+        self.addCleanup(os.environ.pop, "FORKRUN_NO_UDF", None)
+
+        _runmod = sys.modules["forkrun.run"]
+        launched = []
+        real_cleanroom_enabled = _runmod._cleanroom_enabled
+        _runmod._cleanroom_enabled = lambda: True   # would otherwise engage
+        self.addCleanup(setattr, _runmod, "_cleanroom_enabled",
+                        real_cleanroom_enabled)
+        # helper_path() is what every route consults; with the switch on it
+        # must be None, which is what makes the cleanroom branch
+        # ineligible even though _cleanroom_enabled() is True.
+        self.assertIsNone(_udf.helper_path())
+
+        out, sout, serr = self._capture_stdout_stderr(
+            lambda: forkrun.map("bm:up", self.src, mode="udf",
+                                workers=1, on_error="retry",
+                                output="bytes"))
+        self.assertNotIn("declined", serr,
+                         "no probe happened, so there is no refusal to "
+                         "report. Got: %r" % serr[:200])
+
+        # COMPLETE results, not merely nonempty: assertTrue(out) only
+        # proves something came back.
+        self.assertEqual(
+            sorted(out),
+            [b"LINE%d\n" % i for i in range(8)],
+            "the kill switch must DEGRADE to a COMPLETE in-process run. "
+            "src.txt has 8 lines and the fixture uppercases them, so this "
+            "is every record, not merely a nonempty result; got %r"
+            % (out,))
+
+    def test_kill_switch_suppresses_the_WARNING_for_a_poisoned_cache(self):
+        """Separate claim: a cached refusal must not warn under the switch.
+
+        Kept apart from the probe test above on purpose. Poisoning the
+        cache is the right way to make a warning DUE; it is the wrong way
+        to test probe suppression, because it suppresses the helper by
+        itself.
         """
         os.environ["FORKRUN_CLEANROOM"] = "1"
         self.addCleanup(os.environ.pop, "FORKRUN_CLEANROOM", None)
         sys.path.insert(0, self.tmp)
         self.addCleanup(sys.path.remove, self.tmp)
-
-        # First, poison the cache so a warning WOULD be due.
         fp = _udf.fingerprint_now(_HELPER)
         self.assertIsNotNone(fp)
         _udf.record_incompatible_for(fp, "pre-existing refusal")
@@ -600,23 +731,15 @@ class MinorMismatchBarrier(unittest.TestCase):
         self.addCleanup(os.environ.pop, "FORKRUN_NO_UDF", None)
         self.assertIsNone(_udf.helper_path())
 
-        import io
-        import contextlib
-        buf = io.StringIO()
-        real_stderr = sys.stderr
-        try:
-            sys.stderr = buf
-            out = forkrun.map("bm:up", self.src, mode="udf", workers=1,
-                              on_error="retry", output="bytes")
-        finally:
-            sys.stderr = real_stderr
-        blob = buf.getvalue()
-        self.assertNotIn("declined", blob,
+        out, sout, serr = self._capture_stdout_stderr(
+            lambda: forkrun.map("bm:up", self.src, mode="udf",
+                                workers=1, on_error="retry",
+                                output="bytes"))
+        self.assertNotIn("declined", serr,
                          "FORKRUN_NO_UDF means the UDF path was never "
                          "considered; warning here would describe something "
-                         "that did not happen. Got: %r" % blob[:200])
-        # And the run still produced correct results in-process.
-        self.assertTrue(out, "the kill switch must degrade, not break")
+                         "that did not happen. Got: %r" % serr[:200])
+        self.assertTrue(out, "and the run must still produce results")
 
 
 if __name__ == "__main__":

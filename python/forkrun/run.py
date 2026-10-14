@@ -921,17 +921,22 @@ _CR_EXIT_LABELS = {
          "(is the substrate built and compatible with this launcher?)",
     70: "launcher internal error -- may have occurred before or after "
          "the input was consumed; treated as unsafe",
-    71: "engine initialization failed (fr_py_init)",
+    71: "engine initialization failed (fr_py_init), OR a UDF helper could "
+         "not be probed or loaded. Covers more than engine init since the "
+         "UDF helper's disposable probe was added",
     78: "unsupported plugin capability (no forkrun_use_ctx dialect v1/v2)",
     79: "plugin capability probe did not complete (a constructor hung or "
          "crashed); loading this plugin is unsafe, so no fallback is "
          "attempted",
     80: "UDF helper CPython version does not match the caller's declared "
          "major.minor, or the helper's version could not be verified "
-         "(no fr_udf_built_version symbol); refusing to initialise an "
+         "(no fr_udf_built_version_v2 symbol); refusing to initialise an "
          "interpreter across the mismatch",
-    81: "UDF helper probe timed out (an ELF constructor did not return); "
-         "the helper was not loaded and no input was consumed",
+    81: "UDF helper probe timed out (an ELF constructor did not return). "
+         "The helper was NOT ACCEPTED into the launcher's execution path "
+         "and was not initialised there, and no input was consumed. Note "
+         "the disposable probe child did dlopen() it, so its constructors "
+         "did run in that child -- this is not a sandbox",
     82: "invalid --caller-version declaration (must be MAJOR.MINOR with "
          "nothing after it). A CALLER bug, not a property of the helper -- "
          "rejected before the helper is loaded, so no ELF constructor runs",
