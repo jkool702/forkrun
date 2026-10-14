@@ -1871,6 +1871,27 @@ struct SharedState {
   uint8_t steal_threshold[1024] ALIGNED(CACHE_LINE);
   uint8_t base_steal_threshold[1024]; // Stores baseline invariants
   uint32_t chunk_buffer_limit; // Dynamic limit (Ingest -> Scanner)
+  // C0.7: per-node count of COMMITTED DATA frames. Appended at the END
+  // of the struct so no existing field offset shifts (the mmap layout is
+  // sized from sizeof(SharedState) * node_count, so growing the struct
+  // is a pure extension).
+  //
+  // It counts COMMITTED, not WRITTEN, frames. A worker accumulates a
+  // thread-local pending count and transfers it here ONLY after every
+  // acknowledgement side effect has succeeded and immediately before
+  // worker_txn_clear() publishes TXN_IDLE. A batch whose worker dies
+  // first has its output truncated (ring_revert_output) and its pending
+  // count discarded, so a rolled-back attempt never reaches this field.
+  // Counting at write time instead would overcount every recovered run:
+  // measured 2 writes : 1 committed record at one death, and 4 : 1 at
+  // three.
+  //
+  // Written with __atomic_fetch_add(RELAXED): several workers share a
+  // node, so a plain store would lose updates. Readers must snapshot
+  // only once producers are quiescent -- RELEASE/ACQUIRE alone cannot
+  // establish that, because quiescence is a lifecycle fact, not an
+  // ordering property.
+  _Atomic uint64_t committed_data_frames ALIGNED(CACHE_LINE);
 };
 
 static struct GlobalState *g_state = NULL;

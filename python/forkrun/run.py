@@ -3049,7 +3049,13 @@ def _iter_records(lib, fd, _chunk=_CHUNK, views=False):
 #
 # Named frames, not records: "records" is what the collector YIELDS, and
 # that is the quantity that differs from the ring's published slots.
-_FRAME_STATS = {"complete": 0, "filtered": 0}
+# "complete" counts EVERY complete frame, including the non-DATA
+# dispositions the collector filters, so it is NOT the observed side of
+# the certificate. "data_frames" is the DATA-only count: complete, valid
+# FR_DISP_DATA frames actually accepted. A zero-length DATA result still
+# counts as one frame -- it IS a frame, and counting it as zero would
+# make a legitimate b"" look like a lost frame.
+_FRAME_STATS = {"complete": 0, "filtered": 0, "data_frames": 0}
 
 # C0.7 expected-side. fr_py_diag_node answers only while the ring state is
 # live, so the published-slot total has to be captured DURING the run --
@@ -3061,6 +3067,7 @@ _PUBLISHED_SLOTS = {"total": None, "nodes": 0}
 def reset_frame_stats():
     _FRAME_STATS["complete"] = 0
     _FRAME_STATS["filtered"] = 0
+    _FRAME_STATS["data_frames"] = 0
     _PUBLISHED_SLOTS["total"] = None
     _PUBLISHED_SLOTS["nodes"] = 0
 
@@ -3107,6 +3114,7 @@ def _split_records_views(blob):
             off += ln
             continue
         _FRAME_STATS["complete"] += 1
+        _FRAME_STATS["data_frames"] += 1
         records.append((idx, view[off:off + ln]))
         off += ln
     tail = view[off:]
@@ -3142,6 +3150,7 @@ def _split_records(blob: bytes) -> tuple:
             off += ln
             continue
         _FRAME_STATS["complete"] += 1
+        _FRAME_STATS["data_frames"] += 1
         records.append((idx, blob[off:off + ln]))
         off += ln
     return records, blob[off:]
@@ -9687,6 +9696,44 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
         "hold unclaimed published batches (%s) — refusing silent "
         "partial completion" % (label, len(bad), num_nodes,
                                 detail))
+
+
+def _c07_envelope(lib, mode, *, use_complete, has_emit,
+                  has_ack_direct):
+    """C0.7: decide whether this execution is INSIDE the counted envelope.
+
+    Fail-closed by construction. Every branch here corresponds to a path
+    that writes DATA frames without incrementing the pending counter, or
+    commits without running the shim-side flush. A comment would not
+    help: the risk is a supported fallback silently bypassing the
+    expected side and the certificate still reporting clean.
+
+    Returns (covered: bool, reason: str).
+
+      * mode == "splice" -- fr_py_worker_splice_loop frames DATA inline
+        and streams it with sendfile, bypassing fr_py_emit,
+        fr_py_emit_record_buf AND fr_py_emit_record. Only its
+        sendfile-UNAVAILABLE fallback is counted, so the fast path and
+        the fallback would disagree about accounting.
+      * no C emitter -- the Python `_write_all` fallback in _worker.py
+        writes the frame from Python with no C involvement at all, so a
+        C counter cannot see it (reached under FORKRUN_NO_V1=1).
+      * no fr_py_ack_direct -- _ack() falls back to fr_py_ack, which
+        routes to ring_ack_main and skips the shim-side commit flush.
+        The absence of the symbol DETERMINES that the fallback happens,
+        so this is decidable up front rather than needing to observe a
+        child process.
+    """
+    if mode == "splice":
+        return False, ("splice mode frames DATA inline via sendfile and "
+                       "bypasses all counted emitters")
+    if not (use_complete or has_emit):
+        return False, ("python _write_all fallback emits frames outside "
+                       "the C counter (no fr_py_complete/fr_py_emit)")
+    if not has_ack_direct:
+        return False, ("no fr_py_ack_direct: _ack() falls back to "
+                       "fr_py_ack/ring_ack_main, skipping the commit flush")
+    return True, ""
 
 
 def _ordered_completeness_certificate(expected, actual, *, label,

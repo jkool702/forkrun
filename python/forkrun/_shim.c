@@ -109,6 +109,25 @@ const char *fr_py_version(void) {
  * demands it. */
 static __thread int fr_py_txn_out_fd = -1;
 
+/* C0.7: worker-local count of DATA frames written for the CURRENT
+ * transaction but not yet committed.
+ *
+ * This is deliberately NOT the shared counter. Writing a frame does not
+ * commit it: if the worker dies before acknowledgement, recovery
+ * truncates the output (ring_revert_output) and the retry writes again.
+ * Counting at write time therefore overcounts every recovered run --
+ * measured 2 writes : 1 committed record at one death, 4 : 1 at three.
+ *
+ * So emitters bump THIS, and the value is transferred to the shared
+ * per-node field only in fr_py_ack_core, after every acknowledgement
+ * side effect has succeeded and immediately before worker_txn_clear()
+ * publishes TXN_IDLE. fr_py_recover_worker discards it on the RECOVERED
+ * branch, so a rolled-back attempt contributes nothing.
+ *
+ * Thread-local, like fr_py_txn_out_fd, so concurrent workers on one node
+ * never contend here; the only shared write is the commit flush. */
+static __thread uint64_t fr_py_txn_pending_data = 0;
+
 /* Set the worker-local output fd for W-PY28 transaction records.
  * Call once post-fork, post-init (idempotent; -1 disarms). */
 int fr_py_set_output_fd(int fd) {
@@ -907,14 +926,13 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
      * infer from. Empty DATA is reachable only through
      * fr_py_emit_record_buf (explicit disposition) or fr_py_emit.
      *
-     * That inference is deliberate and correct for both of this
-     * function's only callers, which are the stdout-CAPTURE paths (see
-     * the two call sites: cap_fd, fstat on the capture file). For a
-     * spawned child, "wrote nothing to stdout" and "produced no result"
-     * genuinely coincide -- there is no separate Python return value to
-     * distinguish them -- and emitting a NO_RESULT terminal record is
-     * REQUIRED, because without one an ordered consumer waits forever on
-     * a batch that has already finished.
+     * That inference is deliberate and correct for this function's
+     * callers. Two are the stdout-CAPTURE paths (cap_fd,
+     * fstat on the capture file); a third is the sendfile-unavailable
+     * fallback inside fr_py_worker_splice_loop. (An earlier draft of
+     * this comment said "exactly two callers" and was wrong -- the
+     * splice fallback is a third. See also the splice fast path, which
+     * frames DATA inline and therefore bypasses this function entirely.)
      *
      * UDF results must NOT come through here: a UDF returning None and a
      * UDF returning b"" would produce identical records. They go through
@@ -961,6 +979,13 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
      * Making the framer responsible removes the whole class: a caller
      * cannot forget an advance it no longer performs. */
     worker_txn_advance_output(-1, FR_PY_RECORD_FOOTPRINT(src_len));
+    /* C0.7: count only the DATA case. src_len == 0 is a NO_RESULT
+     * terminal record, which the parent framer filters and which must
+     * never appear on either side of the completeness comparison --
+     * those records exist so an ordered consumer does not wait forever
+     * on a batch that finished with no output. */
+    if (src_len > 0)
+        fr_py_txn_pending_data++;
     return 0;
 }
 
@@ -995,6 +1020,12 @@ static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
             return -1;
     }
     worker_txn_advance_output(0, FR_PY_RECORD_FOOTPRINT(len));
+    /* C0.7: the disposition is EXPLICIT here, unlike fr_py_emit_record
+     * which infers it from length. Count only DATA; SKIPPED/POISONED/
+     * NO_RESULT are control records the parent filters. A zero-length
+     * DATA (a UDF returning b"") is a real frame and IS counted. */
+    if (disposition == FR_DISP_DATA)
+        fr_py_txn_pending_data++;
     return 0;
 }
 
@@ -1985,6 +2016,14 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
          * durable — advance the rollback frontier. Partial writes
          * return -1 above before reaching here. */
         worker_txn_advance_output((int)wid, FR_PY_RECORD_FOOTPRINT(data_len));
+        /* C0.7: one DATA frame is now durable, but NOT committed. Count
+         * it against the pending total only; fr_py_ack_core transfers it
+         * to the shared field after the ack side effects succeed and
+         * just before worker_txn_clear publishes TXN_IDLE. Reached only
+         * for data != NULL, so a null emission -- which writes no record
+         * at all -- contributes nothing. A zero-length b"" DOES reach
+         * here and IS a real DATA frame. */
+        fr_py_txn_pending_data++;
     }
 
     /* STAGE0: NO signal here.
@@ -2655,6 +2694,33 @@ int fr_py_ingest_eof_posted(void) {
  * teardown destroys the engine; indices are monotonic and finished
  * is sticky, so the window is stable. Never on a hot path (once per
  * node per run, behind FORKRUN_DIAG_NUMA1=1 or the drain guard). */
+/* C0.7: committed-DATA-frame snapshot, for the ordered completeness
+ * certificate.
+ *
+ * Deliberately a SEPARATE entry point rather than a 7th element of
+ * fr_py_diag_node: existing callers allocate exactly six, so enlarging
+ * that array would overrun their buffers.
+ *
+ * *out = committed DATA frames for `node`; returns 0 ok, -1 bad node or
+ * no engine state.
+ *
+ * CALLER MUST HAVE PRODUCER QUIESCENCE. This returns a relaxed load,
+ * which is the right pairing for the writers' relaxed fetch_add, but no
+ * memory ordering can substitute for the lifecycle guarantee: a worker
+ * that has not yet reached its commit point will contribute nothing, and
+ * that is indistinguishable from a worker that committed nothing. Read
+ * it after the reactor has joined workers, before teardown.
+ *
+ * This is not the generic "complete frame" statistic, which includes
+ * non-DATA dispositions the parent framer filters. */
+int fr_py_committed_data_frames(int node, uint64_t *out) {
+    if (!out || !state || node < 0 || node >= (int)global_num_nodes)
+        return -1;
+    *out = __atomic_load_n(&state[node].committed_data_frames,
+                           __ATOMIC_RELAXED);
+    return 0;
+}
+
 int fr_py_diag_node(int node, uint64_t *out) {
     if (!out || !state || !g_state || node < 0 ||
         node >= (int)global_num_nodes)
@@ -3149,6 +3215,39 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
 
     worker_last_cnt = 0;
 
+    /* C0.7: COMMIT-SCOPED FLUSH. Transfer the pending DATA count into the
+     * shared per-node total HERE, and the placement is load-bearing.
+     *
+     * Every acknowledgement side effect above has already succeeded
+     * (the fallow packet and any order packet are on their pipes), so a
+     * failure before this point returns without the batch being
+     * committed and without the count moving.
+     *
+     * It must be BEFORE worker_txn_clear(), which is the store that
+     * publishes TXN_IDLE. A worker that dies in the gap leaves an
+     * ambiguous commit -- output written, count moved, TXN_IDLE not
+     * published. The engine fails such a run rather than recovering it,
+     * which is the correct outcome: a run accepted as successful must
+     * never hold committed output whose count is missing.
+     *
+     * Flushing AFTER the TXN_IDLE store would invert that: a death in
+     * the gap would leave committed output that is never counted, and
+     * the certificate would report a clean run having lost a frame --
+     * precisely the silent false success this counter exists to prevent.
+     *
+     * __atomic_fetch_add, not a store: several workers share a node's
+     * cache line, so a plain store would lose updates. */
+    if (fr_py_txn_pending_data) {
+        uint32_t _sn = g_fr_config.ring_node_id < 0
+                           ? UINT32_MAX
+                           : (uint32_t)g_fr_config.ring_node_id;
+        if (_sn < global_num_nodes) {
+            __atomic_fetch_add(&state[_sn].committed_data_frames,
+                               fr_py_txn_pending_data, __ATOMIC_RELAXED);
+        }
+        fr_py_txn_pending_data = 0;
+    }
+
     /* W-PY29: COMMITTING → IDLE (pairs with the begin_commit above).
      * Runs after every ack side effect is on its pipe, so TXN_IDLE
      * means fully committed. */
@@ -3560,8 +3659,24 @@ int fr_py_recover_worker(int wid, int incarnation, int output_fd,
      * Only on RECOVERED (rc 0): that is the branch that truncated. Any
      * other return means the engine declined to roll back, and moving
      * the cursor would then be a lie about where output ends. */
-    if (rc == 0 && output_fd >= 0)
+    if (rc == 0 && output_fd >= 0) {
         (void)worker_txn_init_output_cursor(output_fd);
+        /* C0.7: the truncated frames are uncommitted, so their pending
+         * count is discarded and never reaches the shared field. The
+         * retry accumulates afresh and is added once at ITS commit.
+         *
+         * Scope, stated honestly: this runs in the SUPERVISING process,
+         * so it clears this process's thread-local value -- it does not
+         * and cannot reach into the dead worker's TLS, which is gone.
+         * That is sufficient because the supervisor's pending count is
+         * required to be zero: nothing emits here, so a value observed
+         * now would be inherited by a future fork. The in-process
+         * harness (same process emits, then recovers) therefore
+         * exercises a different situation than a real worker death, and
+         * the process-level test is the one that establishes the real
+         * behaviour. */
+        fr_py_txn_pending_data = 0;
+    }
     return rc;
 }
 

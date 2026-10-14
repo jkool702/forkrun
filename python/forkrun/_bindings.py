@@ -293,6 +293,20 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # C0.7: committed DATA frames for one node, read after producers
+        # are quiescent. Separate from fr_py_diag_node (whose callers
+        # allocate exactly six values, so widening it would overrun
+        # them) and deliberately NOT the generic complete-frame count,
+        # which includes non-DATA dispositions the parent filters.
+        # Absent on older substrates -- callers treat a missing symbol as
+        # "certificate unavailable", never as a pass.
+        lib.fr_py_committed_data_frames.argtypes = [ctypes.c_int,
+                                                    ctypes.POINTER(
+                                                        ctypes.c_uint64)]
+        lib.fr_py_committed_data_frames.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
         # W-PY21-A: C drain process (data/control path separation).
         lib.fr_py_drain_loop.argtypes = [ctypes.c_int,
                                          ctypes.POINTER(ctypes.c_int),

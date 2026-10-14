@@ -44,6 +44,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_committed_data_frames": {
+    "args": "int node, uint64_t *out",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_complete": {
     "args": "int signal_fd, uint64_t wid, uint64_t batch_idx, int fallow_fd, int out_fd, const char *data, uint64_t data_len",
     "linkage": "extern",

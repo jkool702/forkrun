@@ -84,6 +84,15 @@ def _cloexec_all() -> None:
         pass
 
 
+# C0.7: records WHICH ack route was actually taken, as opposed to the
+# one requested. Set by _ack() on every call. The completeness
+# certificate refuses when this is "fallback", because the legacy route
+# reaches ring_ack_main and skips the shim-side commit flush -- so frames
+# would be committed with no count. Process-local and advisory; it exists
+# so a silent fallback cannot pass for a covered run.
+_ACK_ROUTE = {"route": "none"}
+
+
 def _ack(lib, fallow_fd=-1, target_fd=-1) -> int:
     """Flush + ack. The single ack funnel for the pre-W-PY21-B paths.
 
@@ -101,14 +110,25 @@ def _ack(lib, fallow_fd=-1, target_fd=-1) -> int:
     -1 is the materialized-path disarm (no reaper exists).
     target_fd: W-PY19 C-orderer target (>= 0 emits an OrderPacket for
     the bytes appended since the last ack; -1 disarms, the v0 default).
+
+    C0.7: the fallback to fr_py_ack routes to ring_ack_main, which does
+    NOT run the shim-side commit flush, so a DATA frame could be
+    committed with no count reaching the shared counter. That fallback is
+    therefore recorded in _ACK_ROUTE, and the completeness certificate
+    REFUSES to claim coverage when it is anything but "direct". This is
+    enforced rather than documented: a silent ack fallback would
+    otherwise produce a certificate that looks clean and is not.
     """
     _flush()
     ack_direct = getattr(lib, "fr_py_ack_direct", None)
     if ack_direct is not None:
         try:
-            return ack_direct(fallow_fd, target_fd)
+            rc = ack_direct(fallow_fd, target_fd)
+            _ACK_ROUTE["route"] = "direct"
+            return rc
         except Exception:
-            pass
+            _ACK_ROUTE["route"] = "fallback"
+    _ACK_ROUTE["route"] = "fallback"
     return lib.fr_py_ack(fallow_fd, target_fd)
 
 

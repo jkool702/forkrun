@@ -214,7 +214,33 @@ class TestShimBindings(unittest.TestCase):
         # signalled before the before-ack hook fires. Extern count is
         # unchanged at 53: no dlsym-visible entry was added or changed,
         # so this is a fault-injection-only addition.
-        self.assertEqual((n_ext, n_st), (54, 16),
+        #
+        # C0.7 extern (54 -> 55): fr_py_committed_data_frames(node, *out).
+        # Read-only snapshot of COMMITTED DATA frames per node, for the
+        # ordered completeness certificate. Purely additive: a NEW entry
+        # point, no existing symbol changed arity or signature.
+        #
+        #   extern  fr_py_committed_data_frames C0.7 committed-DATA
+        #                                 snapshot. Deliberately its own
+        #                                 entry point rather than a 7th
+        #                                 value on fr_py_diag_node:
+        #                                 existing callers allocate
+        #                                 exactly six, so widening that
+        #                                 array would overrun their
+        #                                 buffers. Returns the DATA-only
+        #                                 count, NOT the generic
+        #                                 complete-frame statistic, which
+        #                                 includes non-DATA dispositions
+        #                                 the parent filters -- the two
+        #                                 are not interchangeable.
+        #
+        # Behavior delta: read-only and inert until a caller opts in.
+        # A missing symbol on an older substrate is treated by callers as
+        # "certificate unavailable", never as a pass, so the new entry
+        # point cannot make an uncovered run look certified. Nothing is
+        # written by this symbol; the counter it reads is maintained by
+        # the commit flush in fr_py_ack_core.
+        self.assertEqual((n_ext, n_st), (55, 16),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))
