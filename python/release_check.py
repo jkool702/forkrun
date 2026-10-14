@@ -349,10 +349,35 @@ def check_no_udf_version_override():
     dynamic symbol table rather than trusting the build command.
     """
     import glob
+    import re
     import subprocess as _sp
     helpers = glob.glob("python/forkrun/_fr_udf*.so")
     assert helpers, ("no UDF helper artifact found to inspect -- run "
                      "`make -f Makefile.substrate udf-lib` first")
+
+    # Read the symbol name from the shared header rather than hardcoding a
+    # literal. Round 15 moved the launcher to the typed ABI
+    # (fr_udf_built_version_v2), but this check kept asserting the literal
+    # "fr_udf_built_version" and STILL PASSED, because the test was a
+    # prefix SUBSTRING match: "fr_udf_built_version" is a prefix of
+    # "fr_udf_built_version_v2". The artifact exports zero bare
+    # fr_udf_built_version and the gate was green regardless.
+    #
+    # That is the same failure this check's own docstring warns against
+    # ("it would pass for the wrong reason even with the comparison
+    # deleted") -- a check that cannot tell the typed symbol from the old
+    # one verifies nothing. Matching the header's name exactly, plus the
+    # stale-symbol assertion below, makes the two impossible to confuse
+    # again -- the same single-source discipline as TD-01.
+    header = "forkrun_udf_version.h"
+    with open(header) as fh:
+        m = re.search(r'#define\s+FR_UDF_BUILT_VERSION_SYMBOL\s+"([^"]+)"',
+                      fh.read())
+    assert m, ("could not read FR_UDF_BUILT_VERSION_SYMBOL from %s -- if it "
+               "moved, this gate must be taught where it lives rather than "
+               "carrying a stale copy" % header)
+    expected = m.group(1)
+
     for path in helpers:
         proc = _sp.run(["nm", "-D", "--defined-only", path],
                        capture_output=True, text=True)
@@ -364,11 +389,20 @@ def check_no_udf_version_override():
             "TEST-ONLY version override marker is PRESENT in %s -- this "
             "artifact was built with -DFR_UDF_REPORT_VERSION_OVERRIDE and "
             "must not be shipped:\n%s" % (path, "\n".join(offenders)))
-        assert any("fr_udf_built_version" in ln
+        assert any(expected in ln
                    for ln in proc.stdout.splitlines()), (
-            "%s does not export fr_udf_built_version, so the launcher's "
-            "version barrier cannot verify it and every UDF call would be "
-            "refused" % path)
+            "%s does not export %s, so the launcher's version barrier "
+            "cannot verify it and every UDF call would be refused"
+            % (path, expected))
+        # And the pre-ABI-renaming symbol must be ABSENT, so a helper built
+        # from pre-Round-15 source can never satisfy this gate again.
+        stale = [ln for ln in proc.stdout.splitlines()
+                 if re.search(r"\bfr_udf_built_version\b", ln)]
+        assert not stale, (
+            "%s still exports the pre-Round-15 fr_udf_built_version -- it "
+            "was built from source older than %s, which declares %s. "
+            "Rebuild the helper:\n%s"
+            % (path, header, expected, "\n".join(stale)))
     return True
 
 
