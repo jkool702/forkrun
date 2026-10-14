@@ -9599,10 +9599,20 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
             os.write(2, ("\n".join(parts) + "\n").encode())
         except OSError:
             pass
+    # C0.7: the published-slot total, read HERE because fr_py_diag_node
+    # only answers while the ring state is live -- a probe issued after
+    # map() returns reads zeros. Returning it lets the caller compare it
+    # against the records it subsequently collects, which it cannot do
+    # itself because collection happens after this function returns.
+    expected_total = None
+    if any(w >= 0 for (_n, w, _r, _f, _c, _t, _te) in rows):
+        expected_total = sum(w for (_n, w, _r, _f, _c, _t, _te) in rows
+                             if w >= 0)
+
     bad = [(node, w, r) for (node, w, r, _f, _c, _t, te) in rows
            if w >= 0 and r >= 0 and w > r and te != 1]
     if not bad:
-        return
+        return expected_total
     detail = ", ".join(
         "node %d (write_idx=%d != read_idx=%d)" % (n, w, r)
         for (n, w, r) in bad)
@@ -9625,12 +9635,66 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
                          ).encode())
         except OSError:
             pass
-        return
+        return expected_total
     raise RuntimeError(
         "forkrun: NUMA drain incomplete (%s): %d/%d node(s) "
         "hold unclaimed published batches (%s) — refusing silent "
         "partial completion" % (label, len(bad), num_nodes,
                                 detail))
+
+
+def _ordered_completeness_certificate(expected, actual, *, label,
+                                      covered=True, unordered=False,
+                                      emit_failed=False):
+    """C0.7: prove every PUBLISHED record reached the ordered output.
+
+    The claim/drain audit can only prove "every published slot was
+    CLAIMED". It cannot prove every claimed record reached the orderer's
+    output: a record can be claimed, framed, written into the order pipe
+    and lost there. Collection deliberately does not sort when the C
+    orderer ran, so there is no second line of defence — `map(...,
+    nodes="@2", order="index")` had no completeness gate at all.
+
+    expected_records = sum over nodes of write_idx   (slots published)
+    actual_records   = framed records the parent collected
+    certificate      = (actual_records == expected_records)
+
+    Counting rather than inspecting the orderer's heap is what makes this
+    work without changing the frozen engine, and it catches the case a
+    heap inspection CANNOT: a missing FINAL packet leaves an empty heap,
+    so "drained cleanly and heap empty" is not a certificate. Every
+    required fault injection drops at least one emitted record while
+    leaving the published count untouched, so each appears as
+    actual < expected.
+
+    Scope, from the design: unordered mode has no per-slot
+    correspondence, and an emit failure legitimately produces fewer
+    records but already pulls the fire alarm, so it must not be
+    double-reported here.
+    """
+    if expected is None:
+        return                      # diag unavailable: disarmed, not failing
+    if unordered or emit_failed:
+        return
+    if int(actual) == int(expected):
+        return
+    where = "ordered output lost published records"
+    detail = ("collected %d record(s) but the engine published %d "
+              "(short by %d)" % (actual, expected, expected - actual))
+    if not covered:
+        # Same disposition as the drain audit: an under-covered pool
+        # cannot claim nodes it never worked, and benchmark sweeps probe
+        # this shape deliberately. Observable, not fatal.
+        try:
+            os.write(2, ("forkrun [WARN]: %s (%s): %s — pool under-covers "
+                         "the topology; partial output is expected here\n"
+                         % (where, label, detail)).encode())
+        except OSError:
+            pass
+        return
+    raise RuntimeError(
+        "forkrun: %s (%s): %s — refusing silent partial completion"
+        % (where, label, detail))
 
 
 def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
@@ -9964,8 +10028,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
 
         _reactor_failure_check(state, workers, on_error)
 
-        _numa_drain_audit(lib, num_nodes, forked, wid_node,
-                          workers, label="map/run")
+        _expected_published = _numa_drain_audit(
+            lib, num_nodes, forked, wid_node, workers, label="map/run")
 
         if fallow_w is not None:
             try:
@@ -10079,7 +10143,32 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         if use_orderer:
-            return [blob for _, blob in _iter_records(lib, coll_fd, views=_zc)]
+            _ordered = [blob for _, blob in _iter_records(lib, coll_fd,
+                                                          views=_zc)]
+            # C0.7 IS NOT WIRED HERE. The correspondence the design
+            # specifies -- actual_records == sum(write_idx) -- is FALSE
+            # for multi-node NUMA, and wiring it fails healthy runs.
+            # Measured, 27-line input, 4 workers, nodes="@2":
+            #   node0 write=14 read=14 tail_empty=1
+            #   node1 write=1  read=1  tail_empty=1
+            #   orderer recv=15 emitted=15 heap_left=0 stdout_broken=0
+            #   parent collected 14 records, totalling 179 bytes, which
+            #   is EXACTLY the input size -- so nothing was lost.
+            #
+            # The extra published slot is the EOF sentinel / empty tail:
+            # it occupies a slot but yields no record. write_idx counts
+            # SLOTS, not DATA slots, and fr_py_diag_node exposes no
+            # data-slot count. Same concept the drain audit already
+            # handles via tail_empty.
+            #
+            # The design's premise was "measured across five sizes and two
+            # batch granularities" -- but on single-worker in-process
+            # cases, where no sentinel is published. Deriving the correct
+            # correspondence needs either an engine-side data-slot count
+            # or a publisher-side data marker. Until then, asserting the
+            # designed equality would make a completeness certificate fire
+            # on correct runs, which is worse than not having one.
+            return _ordered
         # Collection is _executor_core.collect_records: drain-vs-direct
         # and order-index-vs-none are mechanics, not lifecycle shape.
         return collect_records(use_drain=use_drain,

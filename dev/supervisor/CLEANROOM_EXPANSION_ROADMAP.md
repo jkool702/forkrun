@@ -948,6 +948,40 @@ fire. The premise (`emitted == published`) is measured across five sizes
 and two batch granularities; the detection behaviour is design, not
 evidence.
 
+**[V] CORRECTION — the premise is FALSIFIED for multi-node NUMA.**
+Implementing the certificate immediately shows `actual_records ==
+sum(write_idx)` is FALSE there, and wiring it fails healthy runs.
+
+Measured, 27-line input, 4 workers, `nodes="@2"`:
+
+| signal | value |
+|---|---|
+| node0 | `write=14 read=14 finished=1 tail_empty=1` |
+| node1 | `write=1 read=1 finished=1 tail_empty=1` |
+| orderer | `recv=15 emitted=15 heap_left=0 stdout_broken=0` |
+| parent collected | **14** records, **179 bytes** |
+
+179 bytes is exactly the input size, so **nothing is lost**. The extra
+published slot is the **EOF sentinel / empty tail**: it occupies a slot
+but yields no record. `write_idx` counts **SLOTS**, not DATA slots, and
+`fr_py_diag_node` exposes no data-slot count — the same concept the drain
+audit already handles via `tail_empty`.
+
+The premise survived earlier measurement because those cases were
+**single-worker in-process**, where no sentinel is published: UMA
+`order="index"` does satisfy the equality exactly (verified 14 published,
+14 collected).
+
+**Consequence for the work item:** the certificate cannot be wired as
+specified. Deriving the correct correspondence needs either an engine-side
+data-slot count or a publisher-side data marker — both of which touch the
+frozen ring or add per-record state. Until then, the implemented
+`_ordered_completeness_certificate()` exists but is **deliberately not
+wired**, and `test_c07_correspondence.py` pins the measurement so the
+false positive is not rediscovered as an engine correctness bug. It is
+also why the earlier claim "the check has not been observed to fire"
+mattered: the first implementation attempt fired on a *correct* run.
+
 
 **Status: DESIGN DONE** (this subsection). Implementation, fault-injection
 tests and review remain a separate work item per the section's opening
