@@ -601,7 +601,7 @@ class TestCleanroomExecutes(unittest.TestCase):
         os.environ["FORKRUN_TEST_SIDE_EFFECT_FILE"] = marker
         try:
             with self.assertRaises(RuntimeError):
-                forkrun.map("python/tests/plugins/test_plugin_v1.so:"
+                forkrun.map(PLUGIN + ":"
                             "die_always_v1", self.path, workers=2,
                             nodes=1, mode="plugin", order="index",
                             output="bytes", orchestrator=False)
@@ -2578,7 +2578,7 @@ class TestCleanroomStreamStrictPoison(unittest.TestCase):
     def test_poisoned_stream_raises_under_strict_poison(self):
         from forkrun.exceptions import ForkrunPoisonSkip
         with self.assertRaises((ForkrunPoisonSkip, RuntimeError)):
-            self._drain("python/tests/plugins/test_plugin_v1.so:"
+            self._drain(PLUGIN + ":"
                         "always_fail_v1", strict_poison=True)
 
     def test_clean_stream_does_not_raise_under_strict_poison(self):

@@ -830,16 +830,18 @@ static int udf_probe_await(int fd, pid_t probe,
  * loaded dependencies, not just the object. So a helper missing the
  * stamp could in principle be accepted if one of its dependencies
  * happened to export a same-named symbol -- and, more generally, any of
- * the six other fr_udf_* symbols resolved by cast below would be called
+ * the other fr_udf_* symbols resolved by cast below would be called
  * through whatever signature the found definition actually has.
+ *
+ * Every one of them now goes through here, not just the version stamp.
  *
  * dladdr() reports the ELF object that DEFINES a function, which lets
  * the launcher check that the definition came from the file it chose.
  * A transitive match is treated as absent: fail closed.
  *
  * This is a robustness measure, not a fix for a demonstrated defect --
- * the six other symbols have unchanged signatures, so a helper built
- * from the same tree is unaffected. It is here because the helper is
+ * the other symbols have unchanged signatures, so a helper built from
+ * the same tree is unaffected. It is here because the helper is
  * buildable by hand (`make -f Makefile.substrate udf-lib`), so a
  * hand-built third-party helper is a real scenario rather than a
  * hypothetical one. */
@@ -1075,13 +1077,20 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
         return UDF_SETUP_GENERIC;
     }
 
-    init_fn     = (fn_udf_init)      sym(hu, "fr_udf_init");
-    hooks_avail = (fn_udf_hooks_avail) sym(hu, "fr_udf_fork_hooks_available");
-    call_fn     = sym(hu, "fr_udf_call");
-    free_fn     = sym(hu, "fr_udf_free");
-    g_before_fork = (fn_udf_before_fork) sym(hu, "fr_udf_before_fork");
-    g_after_parent = (fn_udf_after_fork_parent) sym(hu, "fr_udf_after_fork_parent");
-    g_after_child  = (fn_udf_after_fork_child)  sym(hu, "fr_udf_after_fork_child");
+    /* Every helper symbol is ownership-checked, not merely looked up.
+     * A bare dlsym() returns a match from the helper OR from anything it
+     * pulled in, so a dependency exporting a same-named symbol would be
+     * called in place of ours -- with our caller's arguments and no
+     * diagnostic. FR_UDF_BUILT_VERSION_SYMBOL below already worked this
+     * way; the same reasoning covers the rest, and the helper is
+     * hand-buildable, so a third-party helper is a real scenario. */
+    init_fn     = (fn_udf_init)      sym_owned_by(hu, "fr_udf_init", helper_path);
+    hooks_avail = (fn_udf_hooks_avail) sym_owned_by(hu, "fr_udf_fork_hooks_available", helper_path);
+    call_fn     = sym_owned_by(hu, "fr_udf_call", helper_path);
+    free_fn     = sym_owned_by(hu, "fr_udf_free", helper_path);
+    g_before_fork = (fn_udf_before_fork) sym_owned_by(hu, "fr_udf_before_fork", helper_path);
+    g_after_parent = (fn_udf_after_fork_parent) sym_owned_by(hu, "fr_udf_after_fork_parent", helper_path);
+    g_after_child  = (fn_udf_after_fork_child)  sym_owned_by(hu, "fr_udf_after_fork_child", helper_path);
     if (!init_fn || !call_fn || !free_fn || !hooks_avail) {
         fprintf(stderr, "forkrun-cleanroom: UDF helper is missing required "
                         "symbols\n");
@@ -1105,7 +1114,7 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
             if (*tok) roots[nroots++] = tok;
     }
     if (init_fn(roots, nroots) != 0) {
-        const char *msg = (const char *)sym(hu, "fr_udf_last_error");
+        const char *msg = (const char *)sym_owned_by(hu, "fr_udf_last_error", helper_path);
         fprintf(stderr, "forkrun-cleanroom: fr_udf_init failed: %s\n",
                 msg ? msg : "(no detail)");
         return UDF_SETUP_GENERIC;

@@ -898,7 +898,29 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
      *
      * Now the disposition distinguishes them explicitly: src_len == 0 is
      * NO_RESULT, and a real empty DATA result is carried as DATA with
-     * len == 0. */
+     * len == 0.
+     *
+     * NOTE (comment-only clarification, no behaviour change): the
+     * sentence above describes what the DISPOSITION FIELD can express,
+     * NOT what this function emits. THIS FUNCTION INFERS, and therefore
+     * can never produce an empty DATA frame -- it has no other input to
+     * infer from. Empty DATA is reachable only through
+     * fr_py_emit_record_buf (explicit disposition) or fr_py_emit.
+     *
+     * That inference is deliberate and correct for both of this
+     * function's only callers, which are the stdout-CAPTURE paths (see
+     * the two call sites: cap_fd, fstat on the capture file). For a
+     * spawned child, "wrote nothing to stdout" and "produced no result"
+     * genuinely coincide -- there is no separate Python return value to
+     * distinguish them -- and emitting a NO_RESULT terminal record is
+     * REQUIRED, because without one an ordered consumer waits forever on
+     * a batch that has already finished.
+     *
+     * UDF results must NOT come through here: a UDF returning None and a
+     * UDF returning b"" would produce identical records. They go through
+     * fr_py_emit_record_buf, which takes the disposition from the actual
+     * Python return value. See also fr_py_emit_record_buf's own header
+     * comment, which states the same rule. */
     woff = lseek(out_fd, 0, SEEK_END);
     if (woff == (off_t)-1)
         return -1;
