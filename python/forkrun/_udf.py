@@ -36,7 +36,8 @@ __all__ = ["UDFError", "helper_path", "candidate_helper_path",
            "roots_spec", "parse_spec",
            "udf_payload", "caller_version_arg", "helper_fingerprint",
            "fingerprint_now", "known_incompatible", "record_incompatible",
-           "record_incompatible_for", "clear_incompatibles",
+           "record_incompatible_for", "known_incompatible_by_fp",
+           "clear_incompatibles",
            "candidate_helper_path"]
 
 
@@ -114,6 +115,12 @@ def known_incompatible(path):
 def fingerprint_now(path):
     """Fingerprint of ``path`` right now, or None."""
     return helper_fingerprint(path) if path else None
+
+
+def known_incompatible_by_fp(fp):
+    """Look up by an already-captured fingerprint."""
+    with _CACHE_LOCK:
+        return _INCOMPATIBLE.get(fp)
 
 
 def record_incompatible_for(fp, reason):

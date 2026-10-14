@@ -799,19 +799,24 @@ int fr_udf_fork_hooks_available(void) { return FR_UDF_FORK_HOOKS; }
  * cannot reach a release artifact by inspecting the ELF dynamic symbol
  * table. A bare #define would leave nothing to inspect.
  *
- * The override sets the two fields INDEPENDENTLY, which is the property
- * the shared header is meant to protect: there is no single packed value
- * for the two sides to disagree about. */
+ * The override sets the two fields INDEPENDENTLY -- two macros, one per
+ * field -- which is the property the shared header exists to protect: no
+ * single packed value for the two sides to disagree about.
+ *
+ * An earlier revision took ONE packed macro and shifted it into the two
+ * fields, with major and minor swapped relative to PY_VERSION_HEX, so an
+ * override of 0x030E0000 reported 14.3 instead of 3.14. It would have
+ * "worked" only because no test compared it against a real 3.x. */
 unsigned long fr_udf_TEST_VERSION_OVERRIDE_MARKER(void) { return 1UL; }
 
-void fr_udf_built_version(struct fr_udf_version *out)
+void fr_udf_built_version_v2(struct fr_udf_version *out)
 {
     if (!out) return;
-    out->major = (int)(((FR_UDF_REPORT_VERSION_OVERRIDE) >> 16) & 0xFF);
-    out->minor = (int)(((FR_UDF_REPORT_VERSION_OVERRIDE) >> 24) & 0xFF);
+    out->major = FR_UDF_REPORT_MAJOR;
+    out->minor = FR_UDF_REPORT_MINOR;
 }
 #else
-void fr_udf_built_version(struct fr_udf_version *out)
+void fr_udf_built_version_v2(struct fr_udf_version *out)
 {
     if (!out) return;
     out->major = PY_MAJOR_VERSION;

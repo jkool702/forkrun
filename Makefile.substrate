@@ -60,6 +60,12 @@ PY_SHIM_OBJ = forkrun_python_shim.o
 # link the engine -- building it needs no engine objects, only -ldl.
 # Shipped next to the .so; forkrun.run locates it relative to that.
 CR_OUT ?= python/forkrun/_forkrun_cleanroom
+
+# Declared HERE, above the launcher rule, because the launcher includes
+# it. It used to be defined near the UDF helper rule further down, so a
+# reference added to $(CR_OUT) would have expanded to EMPTY -- make reads
+# prerequisites lazily and the variable was not yet set.
+UDF_VER_HDR = forkrun_udf_version.h
 CR_SRC = forkrun_cleanroom.c
 
 all: canary
@@ -107,7 +113,9 @@ python-substrate: $(PY_OUT) $(CR_OUT)
 # W-CR1: launcher build. -O2 -D_GNU_SOURCE for memfd_create/
 # copy_file_range; -ldl for dlopen. No engine linkage on purpose --
 # it resolves every fr_py_* symbol from the .so at runtime.
-$(CR_OUT): $(CR_SRC) $(PY_OUT)
+# The header is a real prerequisite: a header-only change must rebuild the
+# launcher, or it keeps running compiled against the previous API shape.
+$(CR_OUT): $(CR_SRC) $(PY_OUT) $(UDF_VER_HDR)
 	$(CC) -O2 -D_GNU_SOURCE -o $@ $(CR_SRC) -ldl -lrt
 	@echo "cleanroom launcher OK: $@"
 
@@ -209,8 +217,6 @@ UDF_CFLAGS  = $(shell $(PYCONFIG) --includes)
 UDF_LDFLAGS = $(shell $(PYCONFIG) --ldflags --embed 2>/dev/null || $(PYCONFIG) --ldflags)
 
 .PHONY: udf-lib udf-probe udf-fork udf
-
-UDF_VER_HDR = forkrun_udf_version.h
 
 $(UDF_OBJ): $(UDF_SRC) $(UDF_HDR) $(UDF_VER_HDR)
 	$(CC) -O2 -fPIC -Wall -Wextra $(UDF_CFLAGS) -I. -c $< -o $@

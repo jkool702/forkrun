@@ -60,6 +60,49 @@ def _caller_version():
     return "%d.%d" % (sys.version_info[0], sys.version_info[1])
 
 
+# A helper whose fr_udf_init() LEAVES A MARKER. The previous
+# no-interpreter-initialised test grepped stderr for "fr_py_init" -- a
+# different function than the one its name claimed, and one that succeeds
+# SILENTLY. Initialising an interpreter before refusing would not have
+# changed any string in the output, so the test could not fail.
+_MARKER_C = """\
+#include <stdio.h>
+#include <stdlib.h>
+struct fr_udf_version { int major; int minor; };
+void fr_udf_built_version_v2(struct fr_udf_version *out)
+{
+    if (out) { out->major = 3; out->minor = 14; }
+}
+/* Returns 1 so the accepted path REACHES fr_udf_init. Returning 0 makes
+ * the launcher refuse earlier ("no fork hooks"), so the marker would
+ * never be written for a reason that has nothing to do with what this
+ * fixture exists to observe -- and the negative control would fail while
+ * the property under test was untested. */
+int fr_udf_fork_hooks_available(void) { return 1; }
+void fr_udf_init(const char *const *roots, int nroots)
+{
+    (void)roots; (void)nroots;
+    const char *m = getenv("FR_TEST_INIT_MARKER");
+    if (m) { FILE *f = fopen(m, "w"); if (f) { fputs("INITIALISED", f); fclose(f); } }
+}
+int fr_udf_call(const char *a, int b) { (void)a; (void)b; return 0; }
+void fr_udf_free(void) {}
+int fr_udf_before_fork(void) { return 0; }
+int fr_udf_after_fork_parent(void) { return 0; }
+int fr_udf_after_fork_child(void) { return 0; }
+"""
+
+
+def _build_marker_helper(directory, compile_ok=True):
+    src = os.path.join(directory, "marker.c")
+    so = os.path.join(directory, "libmarker.so")
+    with open(src, "w") as fh:
+        fh.write(_MARKER_C)
+    subprocess.run(["gcc", "-shared", "-fPIC", "-o", so, src],
+                   check=True, capture_output=True, timeout=180)
+    return so
+
+
 _HANG_C = """\
 /* Test-only helper whose ELF constructor blocks forever.
  *
@@ -94,7 +137,7 @@ def _run_launcher_with_hanging_helper(directory):
          os.path.join(directory, "hh.bin"), "--stats-fd", "-1",
          "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
          "--caller-version", _caller_version()],
-        capture_output=True, timeout=120)
+        capture_output=True, timeout=30)
     return proc.returncode
 
 
@@ -136,7 +179,7 @@ class MinorMismatchBarrier(unittest.TestCase):
                     "--stats-fd", "-1",
                     "--udf-helper", _HELPER, "--udf", "bm",
                     "--udf-attr", "up", "--udf-roots", self.tmp] + extra
-            proc = subprocess.run(argv, capture_output=True, timeout=120,
+            proc = subprocess.run(argv, capture_output=True, timeout=30,
                                   pass_fds=(src_fd, out_fd))
         finally:
             os.close(out_fd)
@@ -211,7 +254,7 @@ class MinorMismatchBarrier(unittest.TestCase):
         the probe for ~5s and exit 81. It returns 82 in milliseconds.
         """
         so = _build_hanging_helper(self.tmp)
-        started = time.time()
+        started = time.monotonic()
         proc = subprocess.run(
             [_LAUNCHER, "--so", _SUBSTRATE,
              "--workers", "1", "--lines", "1", "--bytes", "0",
@@ -220,8 +263,8 @@ class MinorMismatchBarrier(unittest.TestCase):
              os.path.join(self.tmp, "o2.bin"), "--stats-fd", "-1",
              "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
              "--caller-version", "3.14garbage"],
-            capture_output=True, timeout=60)
-        elapsed = time.time() - started
+            capture_output=True, timeout=20)
+        elapsed = time.monotonic() - started
         self.assertEqual(proc.returncode, 82,
                          "malformed declaration must be 82, got %d"
                          % proc.returncode)
@@ -253,6 +296,61 @@ class MinorMismatchBarrier(unittest.TestCase):
                 "the caller's descriptor offset")
         finally:
             os.close(fd)
+
+    def test_interpreter_is_never_initialised_on_refusal(self):
+        """Observe the side effect directly, via a marker file.
+
+        fr_udf_init() writes a marker when it runs. On a version mismatch
+        the marker must not exist. This is the property the test has been
+        NAMING all along; the previous version could not detect its own
+        violation because a successful initialisation prints nothing.
+        """
+        so = _build_marker_helper(self.tmp)
+        marker = os.path.join(self.tmp, "init-marker")
+        env = dict(os.environ)
+        env["FR_TEST_INIT_MARKER"] = marker
+        proc = subprocess.run(
+            [_LAUNCHER, "--so", _SUBSTRATE,
+             "--workers", "1", "--lines", "1", "--bytes", "0",
+             "--on-error", "0", "--retry", "1",
+             "--src", self.src, "--result",
+             os.path.join(self.tmp, "m.bin"), "--stats-fd", "-1",
+             "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
+             "--caller-version", "9.9"],
+            capture_output=True, timeout=25, env=env)
+        self.assertEqual(proc.returncode, 80,
+                         "a mismatched marker helper must be refused")
+        self.assertFalse(
+            os.path.exists(marker),
+            "fr_udf_init() RAN despite the mismatch -- the version gate is "
+            "after interpreter initialisation")
+
+    def test_marker_helper_WOULD_be_observed_if_it_ran(self):
+        """Negative control for the test above.
+
+        Same fixture, MATCHING declaration: the helper is accepted, so
+        fr_udf_init() runs and the marker appears. Without this, a marker
+        that could never be written would make the previous test pass
+        vacuously -- which is exactly the failure mode these tests keep
+        having.
+        """
+        so = _build_marker_helper(self.tmp)
+        marker = os.path.join(self.tmp, "init-marker-ok")
+        env = dict(os.environ)
+        env["FR_TEST_INIT_MARKER"] = marker
+        subprocess.run(
+            [_LAUNCHER, "--so", _SUBSTRATE,
+             "--workers", "1", "--lines", "1", "--bytes", "0",
+             "--on-error", "0", "--retry", "1",
+             "--src", self.src, "--result",
+             os.path.join(self.tmp, "m2.bin"), "--stats-fd", "-1",
+             "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
+             "--caller-version", _caller_version()],
+            capture_output=True, timeout=25, env=env)
+        self.assertTrue(
+            os.path.exists(marker),
+            "the marker must be writable when the helper IS accepted, or "
+            "the mismatch test above proves nothing")
 
     def test_no_interpreter_was_initialised_on_refusal(self):
         """fr_udf_init must not have run.
@@ -317,12 +415,18 @@ class MinorMismatchBarrier(unittest.TestCase):
     def test_probe_timeout_is_not_cached_as_incompatibility(self):
         """A timeout is INCONCLUSIVE and must never disable the accelerator.
 
-        The previous version of this test wrote an entry, cleared the WHOLE
-        cache, then asserted the entry was gone. It exercised nothing --
-        it would have passed no matter what _record_compat_refusal did.
+        SCOPE, stated accurately: this is a UNIT test of the Python
+        caching policy. It is not an integration test, and an earlier
+        docstring here claimed it "force[d] a genuine 81 from the
+        launcher", which the body did not do -- a directly-launched C
+        launcher cannot mutate this process's cache. The launcher's own
+        exit-81 behaviour is covered by
+        test_timeout_fixture_really_exits_81, and together the two are
+        useful. Neither alone is what this paragraph used to imply.
 
-        This version goes through the real path: force a genuine 81 from
-        the launcher, and assert the artifact is NOT recorded.
+        History worth keeping: the version before that wrote an entry,
+        cleared the whole cache, then asserted the entry was gone. It
+        exercised nothing and passed no matter what the code did.
         """
         # The cache is a PYTHON-PROCESS structure; a directly-launched
         # C launcher cannot mutate it. The previous version therefore
@@ -352,6 +456,89 @@ class MinorMismatchBarrier(unittest.TestCase):
             "82 is a caller bug, not evidence about the helper; it must "
             "not blacklist a good artifact")
 
+    def test_refusal_is_keyed_to_the_fingerprint_it_was_given(self):
+        """What this DOES prove, and what it does not.
+
+        PROVES: a refusal recorded against fingerprint fp1 does not make
+        fp2 -- the same path, replaced -- ineligible. That is the failure
+        mode that silently disables a valid helper.
+
+        DOES NOT PROVE: that the dispatch threads the pre-launch
+        fingerprint in. Distinguishing that needs the artifact to change
+        WHILE the launcher runs; without a mid-flight replacement the
+        pre- and post-launch fingerprints are the same value, so a revert
+        to re-deriving the path afterwards is invisible here. Verified by
+        mutation: reverting the threading left this test green.
+
+        What IS pinned separately, below, is that a real public refusal
+        supplies a fingerprint at all.
+        """
+        real = os.path.join(self.tmp, "inflight.so")
+        with open(real, "wb") as fh:
+            fh.write(b"\x7fELF original\n")
+        fp1 = _udf.fingerprint_now(real)
+        self.assertIsNotNone(fp1)
+
+        time.sleep(0.01)
+        with open(real, "wb") as fh:
+            fh.write(b"\x7fELF replacement, longer\n")
+        fp2 = _udf.fingerprint_now(real)
+        self.assertNotEqual(fp1, fp2, "the replacement must differ")
+
+        from forkrun.run import _record_compat_refusal
+        _record_compat_refusal(80, "refusal for the original artifact", fp1)
+
+        self.assertIsNotNone(
+            _udf.known_incompatible_by_fp(fp1),
+            "the refusal must land on the fingerprint it was given")
+        self.assertIsNone(
+            _udf.known_incompatible_by_fp(fp2),
+            "the REPLACEMENT must stay eligible; recording against it "
+            "silently disables a valid helper")
+
+    def test_public_refusal_supplies_a_fingerprint_at_all(self):
+        """The dispatch must HAND the handler a fingerprint.
+
+        Pinned separately because the test above cannot see the threading:
+        without a mid-flight replacement the values are identical either
+        way. What this catches is the coarse regression -- the handler
+        being called with None, which would silently disable caching
+        entirely rather than mis-key it.
+        """
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        self.addCleanup(os.environ.pop, "FORKRUN_CLEANROOM", None)
+        sys.path.insert(0, self.tmp)
+        self.addCleanup(sys.path.remove, self.tmp)
+        self._force_mismatch()
+
+        # sys.modules, NOT `import forkrun.run`: the package exports a
+        # FUNCTION named run, which shadows the submodule, so the import
+        # binds the function and has no attributes to spy on.
+        import sys as _sys
+        _runmod = _sys.modules["forkrun.run"]
+        seen = []
+        original = _runmod._record_compat_refusal
+        def _spy(code, detail, helper_fp=None):
+            seen.append(helper_fp)
+            return original(code, detail, helper_fp)
+        _runmod._record_compat_refusal = _spy
+        self.addCleanup(setattr, _runmod, "_record_compat_refusal",
+                        original)
+
+        before = _udf.fingerprint_now(_HELPER)
+        forkrun.map("bm:up", self.src, mode="udf", workers=1,
+                    on_error="retry", output="bytes")
+
+        compat_calls = [fp for fp in seen if fp is not None]
+        self.assertTrue(
+            compat_calls,
+            "a conclusive public refusal must reach the cache handler with "
+            "a fingerprint; it arrived with None, so a mismatch would never "
+            "be remembered and every call would re-probe the launcher")
+        self.assertEqual(compat_calls[0], before,
+                         "the fingerprint must be the one captured for THIS "
+                         "invocation")
+
     def test_timeout_fixture_really_exits_81(self):
         """Kept separate: exit 81 itself is the launcher's contract."""
         rc = _run_launcher_with_hanging_helper(self.tmp)
@@ -370,7 +557,7 @@ class MinorMismatchBarrier(unittest.TestCase):
         """
         so = _build_hanging_helper(self.tmp)
         self.assertTrue(os.path.exists(so))
-        started = time.time()
+        started = time.monotonic()
         proc = subprocess.run(
             [_LAUNCHER, "--so", _SUBSTRATE,
              "--workers", "1", "--lines", "1", "--bytes", "0",
@@ -379,8 +566,8 @@ class MinorMismatchBarrier(unittest.TestCase):
              os.path.join(self.tmp, "o.bin"), "--stats-fd", "-1",
              "--udf-helper", so, "--udf", "bm", "--udf-attr", "up",
              "--caller-version", _caller_version()],
-            capture_output=True, timeout=120)
-        elapsed = time.time() - started
+            capture_output=True, timeout=30)
+        elapsed = time.monotonic() - started
         self.assertEqual(proc.returncode, 81,
                          "a hung ELF constructor must be bounded into 81, "
                          "not waited on; stderr=%r" % proc.stderr[-300:])
@@ -393,12 +580,43 @@ class MinorMismatchBarrier(unittest.TestCase):
                         "(took %.1fs)" % (5, elapsed))
 
     def test_kill_switch_suppresses_both_probe_and_warning(self):
-        """FORKRUN_NO_UDF=1 prevents the probe, so there is no mismatch to
-        warn about -- a warning here would be describing something that
-        did not happen."""
+        """FORKRUN_NO_UDF=1 must prevent the probe AND emit no warning.
+
+        The previous version only asserted helper_path() returns None,
+        which is narrower than the name by two claims: it never ran the
+        PUBLIC route, and it never checked that no warning was emitted.
+        """
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        self.addCleanup(os.environ.pop, "FORKRUN_CLEANROOM", None)
+        sys.path.insert(0, self.tmp)
+        self.addCleanup(sys.path.remove, self.tmp)
+
+        # First, poison the cache so a warning WOULD be due.
+        fp = _udf.fingerprint_now(_HELPER)
+        self.assertIsNotNone(fp)
+        _udf.record_incompatible_for(fp, "pre-existing refusal")
+
         os.environ["FORKRUN_NO_UDF"] = "1"
         self.addCleanup(os.environ.pop, "FORKRUN_NO_UDF", None)
         self.assertIsNone(_udf.helper_path())
+
+        import io
+        import contextlib
+        buf = io.StringIO()
+        real_stderr = sys.stderr
+        try:
+            sys.stderr = buf
+            out = forkrun.map("bm:up", self.src, mode="udf", workers=1,
+                              on_error="retry", output="bytes")
+        finally:
+            sys.stderr = real_stderr
+        blob = buf.getvalue()
+        self.assertNotIn("declined", blob,
+                         "FORKRUN_NO_UDF means the UDF path was never "
+                         "considered; warning here would describe something "
+                         "that did not happen. Got: %r" % blob[:200])
+        # And the run still produced correct results in-process.
+        self.assertTrue(out, "the kill switch must degrade, not break")
 
 
 if __name__ == "__main__":

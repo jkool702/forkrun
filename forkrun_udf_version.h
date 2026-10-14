@@ -29,8 +29,17 @@ struct fr_udf_version {
 };
 
 /* Symbol exported by the UDF helper. Fills *out and returns.
- * A helper that does not export it is REFUSED, not assumed compatible. */
-#define FR_UDF_BUILT_VERSION_SYMBOL "fr_udf_built_version"
+ * A helper that does not export it is REFUSED, not assumed compatible.
+ *
+ * v2, AND THE SUFFIX IS LOAD-BEARING. The v1 symbol had the same name
+ * with a different signature (unsigned long fr_udf_built_version(void)).
+ * Resolving by bare name meant a STALE v1 helper still appeared to
+ * provide the symbol, and dlsym's result would then be called through an
+ * incompatible function-pointer type -- undefined behaviour that on
+ * common ABIs happens to leave the zero-initialised output struct
+ * unchanged and so refuses by accident rather than by design. A distinct
+ * name turns that into an ordinary "symbol absent" refusal. */
+#define FR_UDF_BUILT_VERSION_SYMBOL "fr_udf_built_version_v2"
 typedef void (*fr_udf_built_version_fn)(struct fr_udf_version *out);
 
 #endif /* FORKRUN_UDF_VERSION_H */

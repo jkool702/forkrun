@@ -737,16 +737,35 @@ static int parse_caller_version(const char *s, int *maj, int *min)
  *
  * So: poll() with a monotonic deadline and accumulate partial reports,
  * which is the only way to bound a read that may never complete. The
- * deadline covers BOTH the report and the reap; bounding one while
- * leaving the other unbounded still leaves a hang.
+ * The reap has its OWN bounded budget (UDF_PROBE_REAP_SLICES), not the
+ * same deadline: a completed report's child may need a moment to finish
+ * _exit, and folding that into the deadline would fail healthy probes.
+ * So the total is bounded -- deadline PLUS at most two reap budgets --
+ * and the 5s figure is the report deadline alone.
  *
  * Returns 0 only when a complete report arrived AND the child was
  * reaped. Returns -1 on timeout or a truncated report. */
+/* Probe outcomes. DISTINGUISHED on purpose: a single "failed" collapsed
+ * deadline expiry and an early child death into the same exit 81 with a
+ * "TIMED OUT" message, so a constructor that CRASHED reported as a
+ * timeout. Still fail-closed, but it misstated what happened and made
+ * 81 meaningless as a timeout signal.
+ *
+ *   UDF_PROBE_OK      complete report, child reaped
+ *   UDF_PROBE_TIMEOUT the deadline expired with the report incomplete
+ *   UDF_PROBE_FAILED  the child died or closed early without reporting
+ *   UDF_PROBE_STUCK   a complete report whose child would not reap */
+#define UDF_PROBE_OK      0
+#define UDF_PROBE_TIMEOUT (-1)
+#define UDF_PROBE_FAILED  (-2)
+#define UDF_PROBE_STUCK   (-3)
+
 static int udf_probe_await(int fd, pid_t probe,
                            struct udf_probe_result *out)
 {
     size_t got = 0;
     int complete = 0;
+    int timed_out = 0;
     /* ABSOLUTE deadline, re-derived before every poll. Bounding the
      * loop by elapsed wall-clock rather than by "how many times poll
      * timed out" is what makes the guarantee independent of partial
@@ -756,7 +775,7 @@ static int udf_probe_await(int fd, pid_t probe,
 
     while (got < sizeof *out) {
         long long now = udf_monotonic_ms();
-        if (now >= deadline) break;
+        if (now >= deadline) { timed_out = 1; break; }
         int remain = (int)(deadline - now);
         if (remain > UDF_PROBE_SLICE_MS) remain = UDF_PROBE_SLICE_MS;
 
@@ -780,25 +799,23 @@ static int udf_probe_await(int fd, pid_t probe,
 
     /* A complete report does not mean the child has exited -- it writes,
      * then _exit -- so reap before deciding anything. */
-    if (udf_reap_bounded(probe)) {
-        return complete ? 0 : -1;
-    }
+    if (complete && udf_reap_bounded(probe))
+        return UDF_PROBE_OK;
 
-    /* Not reaped within the budget. Kill, then reap again -- the same
-     * bounded helper, not a bare kill. If it is still not reapable we
-     * say so rather than claiming cleanup succeeded. */
-    (void)kill(probe, SIGKILL);
+    /* Incomplete report: the child is either wedged (deadline expired) or
+     * already gone. Kill FIRST on a confirmed timeout rather than spending
+     * a reap interval waiting for a child that is known not to have
+     * finished -- the previous order waited, then killed. */
+    if (timed_out) (void)kill(probe, SIGKILL);
     if (!udf_reap_bounded(probe)) {
+        (void)kill(probe, SIGKILL);
+        (void)udf_reap_bounded(probe);
         fprintf(stderr, "forkrun-cleanroom: UDF probe child %ld did not "
                         "reap after SIGKILL; continuing (cleanup NOT "
                         "confirmed)\n", (long)probe);
     }
-    if (complete) {
-        /* Report arrived but the child would not die. Refuse rather than
-         * proceed alongside a wedged helper. */
-        return -1;
-    }
-    return -1;
+    return complete ? UDF_PROBE_STUCK
+                    : (timed_out ? UDF_PROBE_TIMEOUT : UDF_PROBE_FAILED);
 }
 
 static int setup_udf_helper(const char *helper_path, const char *roots_spec,
@@ -890,12 +907,26 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
         memset(&r, 0, sizeof r);
         int rc = udf_probe_await(pp[0], probe, &r);
         close(pp[0]);
-        if (rc != 0) {
+        if (rc == UDF_PROBE_TIMEOUT) {
             fprintf(stderr, "forkrun-cleanroom: UDF helper probe TIMED OUT "
                             "after %d ms (%s); a helper ELF constructor is "
                             "not returning\n",
                     UDF_PROBE_TIMEOUT_MS, helper_path);
             return UDF_SETUP_PROBE_HANG;
+        }
+        if (rc != UDF_PROBE_OK) {
+            /* NOT a timeout: the probe child died, closed the pipe, or
+             * reported incompletely. Saying "TIMED OUT" here would make
+             * exit 81 meaningless -- a constructor that CRASHES reports
+             * here, immediately, and would otherwise be indistinguishable
+             * from one that hangs. */
+            fprintf(stderr, "forkrun-cleanroom: UDF helper probe did not "
+                            "complete (%s): %s\n", helper_path,
+                    rc == UDF_PROBE_STUCK
+                        ? "report arrived but the probe child would not reap"
+                        : "probe child exited or closed the pipe before "
+                          "reporting");
+            return UDF_SETUP_GENERIC;
         }
         if (r.status == 1) {
             fprintf(stderr, "forkrun-cleanroom: UDF helper probe failed to "
