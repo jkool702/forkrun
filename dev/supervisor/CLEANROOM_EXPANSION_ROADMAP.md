@@ -972,6 +972,37 @@ The premise survived earlier measurement because those cases were
 `order="index"` does satisfy the equality exactly (verified 14 published,
 14 collected).
 
+**[V] A SECOND plan-level finding: the submission site cannot count
+frames.** Round 17's review located the packet-write site
+(`fr_py_ack_core`, `_shim.c:3108`, mirroring `ring_ack_main`,
+`forkrun_ring.c:6934`) and it is the right site for "successfully
+SUBMITTED". It is **not** the right site for the frame count, for two
+reasons found by reading the emit path rather than assuming:
+
+1. **Granularity.** One packet covers every record appended since the
+   last ack (`op.len = curr - last_ack_offset`), so one packet may carry
+   several frames.
+2. **Disposition is not visible at submission.** `fr_py_emit`
+   (`_shim.c:907`) sets
+   `hdr.disposition = (src_len == 0) ? FR_DISP_NO_RESULT : FR_DISP_DATA`,
+   and the framer **filters** non-`DATA` frames. So a packet with
+   `op.len > 0` can carry a NO_RESULT record the parent never observes —
+   and counting it produces a mismatch on a perfectly healthy run that
+   emitted `None` or `b""`.
+
+Note the surrounding comment claims "a real empty DATA result is carried
+as DATA with len == 0", which the line below it contradicts. That
+doc/code contradiction is pre-existing and is **not** fixed here; it is
+recorded because the counter design depends on which one is true, and the
+CODE is what runs.
+
+**Revised counting site:** `fr_py_emit`, once per **`FR_DISP_DATA`
+record, after `fr_py_write_all` succeeds**. That is per-frame, has the
+disposition available, and is post-write. `fr_py_emit` is in the **shim**,
+so only the `SharedState` field itself is a ring change — the increment
+is not. `ring_ack_main`'s parallel path is out of envelope for the Python
+certificate and must be documented as excluded, not silently ignored.
+
 **Consequence for the work item:** the certificate cannot be wired as
 specified. Deriving the correct correspondence needs either an engine-side
 data-slot count or a publisher-side data marker — both of which touch the

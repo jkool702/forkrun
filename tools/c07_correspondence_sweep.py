@@ -25,7 +25,11 @@ on does not hold. Per that stated condition, the fallback is the engine-side
 DATA-slot count (Option 1).
 """
 import sys, os, tempfile, itertools
-sys.path.insert(0, '/mnt/ramdisk/forkrun/python')
+
+# Derived from this file's location, not hard-coded: the sweep is a gate
+# and must run wherever the repository is checked out.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "python"))
 import forkrun
 Rm = sys.modules['forkrun.run']
 
