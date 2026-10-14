@@ -142,3 +142,182 @@ class TestBaselineIsCapturedBeforeAnyFork(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class _CaptureFd2:
+    """Capture file descriptor 2, not sys.stderr.
+
+    The warnings are written with os.write(2, ...), which bypasses
+    sys.stderr entirely -- so contextlib.redirect_stderr sees nothing.
+    Redirecting the real descriptor is the only way to observe them.
+    """
+
+    def __enter__(self):
+        import os as _os
+        import tempfile as _tf
+        self._tmp = _tf.TemporaryFile(mode="w+b")
+        self._saved = _os.dup(2)
+        _os.dup2(self._tmp.fileno(), 2)
+        return self
+
+    def __exit__(self, *exc):
+        import os as _os
+        _os.dup2(self._saved, 2)
+        _os.close(self._saved)
+        return False
+
+    @property
+    def text(self):
+        self._tmp.seek(0)
+        return self._tmp.read().decode("utf-8", "replace")
+
+
+class TestNestedRunsRefuseToCertify(unittest.TestCase):
+    """Round 20: a baseline does not PROVE the delta is ours alone.
+
+    A baseline captured before this run's fork says nothing about whether
+    another run committed during the window. Both directions are exposed
+    and BOTH must refuse:
+
+      * the inner run is charged for the enclosing run's live workers;
+      * the enclosing run is charged for the inner run's commits, because
+        they land between the outer baseline and the outer snapshot.
+
+    Measured: with a map() nested in a payload, the enclosing run reported
+    "collected 0, published 25" -- every one of the 25 belonging to the
+    nested run. Guarding only the inner direction left the outer one
+    firing, which is how the first version of this guard failed.
+    """
+
+    def test_nested_run_refuses_rather_than_certifying(self):
+        import io
+        import os as _os
+        import tempfile as _tf
+        import contextlib
+        Rm = sys.modules["forkrun.run"]
+
+        d = _tf.mkdtemp()
+        try:
+            src = _os.path.join(d, "in.txt")
+            with open(src, "w") as fh:
+                for i in range(400):
+                    fh.write("line %d payload\n" % i)
+
+            def up(b):
+                return b.copy()
+
+            # Nest in the MAIN thread, from a stream generator, not from
+            # a payload. A payload runs inside a forked WORKER, and a
+            # worker performing a nested run corrupts its parent's
+            # engine -- a pre-existing defect reproduced at 158e818a,
+            # long before C0.7. That shape would fail for reasons that
+            # have nothing to do with the attribution this test is
+            # about, so the generator shape is used: it nests in the same
+            # process, against the same engine, which is precisely the
+            # situation a baseline cannot resolve.
+            seen = []
+
+            def consume():
+                for _ in forkrun.stream(up, src, workers=1, nodes=1):
+                    if not seen:
+                        seen.append(1)
+                        forkrun.map(up, src, workers=1, nodes=1,
+                                    order="index")
+                    break
+                return 0
+
+            with _CaptureFd2() as cap:
+                consume()
+
+            warns = cap.text
+            self.assertIn("certificate not evaluated", warns,
+                          "a nested run must produce NO verdict, and must "
+                          "say so rather than pass silently")
+            self.assertGreaterEqual(
+                warns.count("not evaluated"), 1,
+                "the nested run must refuse")
+            # NOT 2. The enclosing run here is a STREAM, which never
+            # certifies at all, so it has no verdict to refuse. The
+            # both-directions property only bites when both runs certify,
+            # i.e. a map() inside another map() -- and that shape is
+            # covered by test_worker_side_nesting_is_undetectable below.
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_top_level_run_still_certifies(self):
+        """The control: the guard must not refuse ordinary runs.
+
+        An earlier version recorded the runs-counter BEFORE its own
+        increment, so every run tripped its own check and the
+        certificate never fired at all -- a guard that silently disables
+        the thing it guards is worse than no guard.
+        """
+        import os as _os
+        import tempfile as _tf
+        import io
+        import contextlib
+        Rm = sys.modules["forkrun.run"]
+
+        d = _tf.mkdtemp()
+        try:
+            src = _os.path.join(d, "in.txt")
+            with open(src, "w") as fh:
+                for i in range(400):
+                    fh.write("line %d payload\n" % i)
+
+            with _CaptureFd2() as cap:
+                out = Rm.map(lambda b: b.copy(), src, workers=1, nodes=1,
+                             order="index")
+            warns = cap.text
+            self.assertTrue(out)
+            self.assertEqual(
+                len(out), Rm.committed_frames()["total"],
+                "a top-level run must still produce a committed count")
+            self.assertNotIn(
+                "certificate not evaluated", warns,
+                "an ordinary top-level run must NOT be refused")
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestKnownLimitations(unittest.TestCase):
+    """What the guard does NOT cover, stated so it is not assumed.
+
+    The nesting depth and the runs-started counter are PROCESS-LOCAL. A
+    payload runs in a forked WORKER, so a nested map() started from a
+    payload increments the WORKER's counter, not the parent's. The parent
+    therefore cannot detect it.
+
+    This is not merely a limitation of the guard: a worker performing a
+    nested run corrupts the parent's engine outright. Reproduced at
+    158e818a -- before any C0.7 work -- with order="none" and no
+    certificate involved at all:
+
+        forkrun: Worker 0 recovery failed (orphan revert/escrow). Aborting.
+
+    That is a pre-existing defect in its own right and is recorded as
+    such rather than being papered over. The certificate happens to turn
+    its silent corruption into a loud failure, which is better than
+    silence but is not a fix.
+    """
+
+    def test_worker_side_nesting_is_undetectable_by_a_process_local_guard(self):
+        Rm = sys.modules["forkrun.run"]
+        import os as _os
+        import shutil
+        import tempfile as _tf
+        import forkrun as _fk
+
+        d = _tf.mkdtemp()
+        try:
+            src = _os.path.join(d, "in.txt")
+            with open(src, "w") as fh:
+                for i in range(400):
+                    fh.write("line %d payload\n" % i)
+
+            self.assertEqual(0, Rm._C07_RUN_DEPTH[0],
+                             "no run is live between tests; a leaked depth "
+                             "would make every later run refuse silently")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)

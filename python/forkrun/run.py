@@ -2405,6 +2405,39 @@ class _RunLock:
 
 _RUN_LOCK = _RunLock(_threading.RLock())
 
+# C0.7: how many forkrun runs are live in THIS process, counted across
+# nested execution (an RLock is reentrant, so a map() inside a stream()
+# is permitted and the outer run's workers keep running).
+#
+# The certificate's expected side is a DELTA of a counter that belongs to
+# the shared engine. That delta is only meaningful if no other producer
+# committed during the interval. A baseline captured before this run's
+# fork does not establish that: an outer stream's worker can commit
+# after the baseline and before this run's final snapshot, and its frame
+# would be charged to the inner run (measured: the inner run collected
+# 24 while a global counter read 56).
+#
+# Rather than attempt producer quiescence -- which would mean suspending
+# an outer run's live workers, mid-stream, around an unrelated call --
+# a nested run simply REFUSES to certify. That is the fail-closed
+# choice, and it is honest: no verdict beats a possibly-wrong one.
+_C07_RUN_DEPTH = [0]
+
+# C0.7: monotonically increasing count of runs STARTED in this process.
+#
+# Depth alone is not enough, because the exposure runs in BOTH
+# directions. A nested run's delta is polluted by the enclosing run's
+# live workers, which depth catches at start. But the ENCLOSING run's
+# delta is polluted too: the nested run commits into the same engine
+# between the enclosing run's baseline and its final snapshot, so the
+# outer run is charged for the inner one's frames. Measured with a
+# map() inside a payload: the outer run reported "collected 0, published
+# 25" -- every one of the 25 being the inner run's.
+#
+# A run that sees this counter advance during its own lifetime knows
+# that some other run committed inside its measurement window.
+_C07_RUNS_STARTED = [0]
+
 
 def _init_engine_and_fds(*, lines, bytes_, spec, num_nodes=None,
                          numa_map=None):
@@ -7026,7 +7059,20 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # a stream() shares this engine: a shared global would carry the outer
     # run's commits into the inner run's comparison (measured: inner run
     # collected 24 while a global counter read 56).
-    _c07_base = _c07_read_committed(lib, 1) or 0
+    # C0.7: keep the None sentinel. `... or 0` would turn an unreadable
+    # baseline into zero, so a baseline read that fails while the FINAL
+    # read succeeds would compare against the CUMULATIVE count and raise
+    # on a correct run. None disables the certificate instead.
+    _c07_base = _c07_read_committed(lib, 1)
+    # C0.7: is another run live in this process? Recorded BEFORE the
+    # increment below, so it refers to the enclosing run, not this one.
+    _c07_nested = _C07_RUN_DEPTH[0] > 0
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
+    # Recorded AFTER our own increment: from here on, any further change
+    # means ANOTHER run started inside our measurement window. Recording
+    # it before would make every run trip its own check.
+    _c07_runs_at_start = _C07_RUNS_STARTED[0]
     engine_live = True
 
     src_fd, must_close = _open_source(source)
@@ -7259,6 +7305,29 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
 
         if not collect:
             return None
+        if not use_orderer and collect and order == "index":
+            # The caller ASKED for ordered output, so a completeness
+            # certificate is the natural expectation -- but the C orderer
+            # is not in play, so this run gets no verdict at all.
+            #
+            # This is the dispatch-point warning round 20 asked for.
+            # _c07_evaluate cannot cover it: it lives INSIDE the
+            # use_orderer branch, so splice and any configuration with
+            # the orderer masked (FORKRUN_NO_V1) never reach it. Their
+            # silence was fail-closed but opaque -- the safety property
+            # held while the operator got nothing to act on.
+            #
+            # Deliberately not an error: ordered delivery still happens
+            # via the fallback path. What is missing is the PROOF, not
+            # the ordering.
+            try:
+                os.write(2, ("forkrun [WARN]: ordered output requested but "
+                             "the C orderer is not in use (mode=%s): no C0.7 "
+                             "completeness certificate for this run; ordered "
+                             "delivery still performed, completeness "
+                             "unverified\n" % (mode,)).encode())
+            except OSError:
+                pass
         if use_orderer:
             records = list(_iter_records(lib, coll_fd, views=_zc))
             # C0.7 observed side: DATA frames THIS collection delivered.
@@ -7282,7 +7351,21 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # elsewhere. Producers are quiescent: the orderer has been
             # joined and the reactor has returned.
             _c07_now = _c07_read_committed(lib, 1)
-            if _c07_now is not None:
+            if _c07_nested or _C07_RUNS_STARTED[0] != _c07_runs_at_start:
+                # Either we are nested (an enclosing run's live workers
+                # commit to the same engine counter) or a run STARTED
+                # inside our measurement window (so someone else's
+                # commits landed in our delta). Either way the delta
+                # cannot be attributed to this run alone. Refuse rather
+                # than certify a number we cannot trust -- and note this
+                # covers the ENCLOSING run too, which is charged for a
+                # nested run's frames just as surely.
+                _c07_no_verdict(
+                    "another forkrun run is live or started inside this "
+                    "run's measurement window; all runs on this engine "
+                    "share one committed-frame counter, so the delta "
+                    "cannot be attributed to a single run")
+            elif _c07_now is not None and _c07_base is not None:
                 _c07_total = int(_c07_now) - int(_c07_base)
                 _COMMITTED_FRAMES["total"] = _c07_total
                 _COMMITTED_FRAMES["nodes"] = 1
@@ -7311,6 +7394,11 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             pass
         raise
     finally:
+        # C0.7: leave the nesting depth on EVERY exit path, including
+        # aborts and exceptions. A leaked depth would make every later
+        # top-level run believe it is nested and silently stop
+        # certifying -- a failure that looks like a pass.
+        _C07_RUN_DEPTH[0] -= 1
         _teardown_reactor(lib, state, out_fds=out_fds,
                           out_hold=out_hold, memfd=memfd,
                           src_fd=src_fd, must_close=must_close,
@@ -7636,6 +7724,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
         collect=True, splice=splice, source=source)
+    # C0.7: count this run in the nesting depth. This executor does
+    # NOT certify, but its workers commit to the same engine counter,
+    # so a nested run must see depth > 0 and refuse. Omitting it here
+    # is exactly what let a map() inside a stream() certify silently.
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (spill/scan, before assignment below).
@@ -8113,6 +8207,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         # abort handler above must not fire on the way out.
         _stream_ok = True
     finally:
+        # C0.7: leave the nesting depth on every exit path.
+        _C07_RUN_DEPTH[0] -= 1
         spare_signal_w = _close_spare_fd(state, spare_signal_w)
         _teardown_reactor(lib, state, signal_r=signal_r,
                           out_fds=out_fds, out_hold=out_hold,
@@ -8172,6 +8268,12 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
         collect=collect, splice=splice, source=source)
+    # C0.7: count this run in the nesting depth. This executor does
+    # NOT certify, but its workers commit to the same engine counter,
+    # so a nested run must see depth > 0 and refuse. Omitting it here
+    # is exactly what let a map() inside a stream() certify silently.
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
@@ -8648,6 +8750,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             pass
         raise
     finally:
+        # C0.7: leave the nesting depth on every exit path.
+        _C07_RUN_DEPTH[0] -= 1
         # The ingest death pipe is ours on every exit path, not just
         # the joined one: a failure before the join would leak both
         # ends. The child's own copy was closed inside the child.
@@ -8734,6 +8838,12 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
         collect=True, splice=splice, source=source)
+    # C0.7: count this run in the nesting depth. This executor does
+    # NOT certify, but its workers commit to the same engine counter,
+    # so a nested run must see depth > 0 and refuse. Omitting it here
+    # is exactly what let a map() inside a stream() certify silently.
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
@@ -9205,6 +9315,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         _reactor_poison_summary(lib, state, strict_poison)
     finally:
+        # C0.7: leave the nesting depth on every exit path.
+        _C07_RUN_DEPTH[0] -= 1
         spare_signal_w = _close_spare_fd(state, spare_signal_w)
         _teardown_reactor(lib, state, signal_r=signal_r,
                           out_fds=out_fds, out_hold=out_hold,
@@ -9778,19 +9890,42 @@ def _c07_envelope(lib, mode, *, use_complete, has_emit,
     return True, ""
 
 
+def _c07_no_verdict(reason):
+    """Emit NO certificate verdict, and say why.
+
+    The distinction from _c07_evaluate matters: that one refuses an
+    uncovered ENVELOPE, this one refuses an untrustworthy NUMBER. Both
+    produce no pass. Neither is an error -- ordered delivery still
+    happened; only the proof is unavailable.
+    """
+    try:
+        os.write(2, ("forkrun [WARN]: C0.7 completeness certificate not "
+                     "evaluated: %s\n" % (reason,)).encode())
+    except OSError:
+        pass
+
+
 def _c07_evaluate(expected, observed, lib, mode):
     """Gate the comparison on the envelope, then run the certificate.
 
     Fail-closed: an uncovered execution emits NO verdict. It never emits
     a passing one. The warning names the specific path, because a bare
     "certificate unavailable" is not something an operator can act on.
+
+    The capabilities come from v1_available(), NOT from symbol
+    existence. Those differ under FORKRUN_NO_V1: the symbol is still
+    present but masked, so a worker will take the Python _write_all
+    fallback and emit frames the C counter never sees. Asking "does
+    lib.fr_py_emit exist" would have reported the envelope COVERED on
+    exactly the configuration that breaks it.
     """
     from ._bindings import v1_available as _v1a
+    _v1 = _v1a()
     covered, reason = _c07_envelope(
         lib, mode,
-        use_complete=bool(_v1a().get("complete", False)),
-        has_emit=getattr(lib, "fr_py_emit", None) is not None,
-        has_ack_direct=getattr(lib, "fr_py_ack_direct", None) is not None)
+        use_complete=bool(_v1.get("complete", False)),
+        has_emit=bool(_v1.get("emit", False)),
+        has_ack_direct=bool(_v1.get("ack_direct", False)))
     if not covered:
         try:
             os.write(2, ("forkrun [WARN]: C0.7 completeness certificate "
@@ -9838,7 +9973,7 @@ def _c07_read_committed(lib, num_nodes):
 def _ordered_completeness_certificate(expected, actual, *, label,
                                       covered=True, unordered=False,
                                       emit_failed=False):
-    """C0.7: prove every PUBLISHED record reached the ordered output.
+    """C0.7: prove every COMMITTED DATA frame reached the ordered output.
 
     The claim/drain audit can only prove "every published slot was
     CLAIMED". It cannot prove every claimed record reached the orderer's
@@ -9847,22 +9982,40 @@ def _ordered_completeness_certificate(expected, actual, *, label,
     orderer ran, so there is no second line of defence — `map(...,
     nodes="@2", order="index")` had no completeness gate at all.
 
-    expected_records = sum over nodes of write_idx   (slots published)
-    actual_records   = framed records the parent collected
-    certificate      = (actual_records == expected_records)
+        expected = committed DATA frames, counted in the shim at the
+                  COMMIT point (not at write time -- an uncommitted
+                  frame is rolled back and retried), summed over
+                  nodes, MINUS this run's baseline
+        observed = DATA frames the parent actually collected
+        certificate = (observed == expected)
 
-    Counting rather than inspecting the orderer's heap is what makes this
-    work without changing the frozen engine, and it catches the case a
-    heap inspection CANNOT: a missing FINAL packet leaves an empty heap,
-    so "drained cleanly and heap empty" is not a certificate. Every
-    required fault injection drops at least one emitted record while
-    leaving the published count untouched, so each appears as
-    actual < expected.
+    THE OLD FORMULATION WAS FALSE, and it is worth recording why: it
+    compared `sum(write_idx)` against collected records. write_idx
+    counts SLOTS, not DATA frames, and the EOF sentinel occupies a slot
+    while yielding no record -- so every multi-node NUMA run was short
+    by exactly one. Asserting that equality would have made a
+    completeness certificate fire on correct runs, which is worse than
+    having none. The committed-DATA invariant excludes the sentinel by
+    construction rather than by calibration.
 
-    Scope, from the design: unordered mode has no per-slot
-    correspondence, and an emit failure legitimately produces fewer
-    records but already pulls the fire alarm, so it must not be
-    double-reported here.
+    Counting rather than inspecting the orderer's heap catches the case
+    a heap inspection CANNOT: a missing FINAL packet leaves an empty
+    heap, so "drained cleanly and heap empty" is not a certificate.
+
+    SCOPE, stated precisely because the code is more limited than the
+    word "certificate" suggests:
+
+      * Only the C-orderer path (order="index" with use_orderer) is
+        certified at all. Splice, and any configuration where the C
+        orderer is unavailable (FORKRUN_NO_V1 masks it), take a
+        different collection path and produce NO verdict at all -- not a
+        pass, and not a warning from here.
+      * Within that path, the envelope (_c07_evaluate) refuses when the
+        worker used an emitter or ack route the counter cannot see.
+
+    unordered mode has no per-slot correspondence, and an emit failure
+    legitimately produces fewer records but already pulls the fire
+    alarm, so it is not double-reported here.
     """
     if expected is None:
         return                      # diag unavailable: disarmed, not failing
@@ -9929,7 +10082,15 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
 
     # C0.7 expected-side baseline -- see the UMA reactor executor for
     # why this is a local captured before any fork rather than a global.
-    _c07_base = _c07_read_committed(lib, num_nodes) or 0
+    # C0.7: keep the None sentinel -- see the UMA reactor executor.
+    _c07_base = _c07_read_committed(lib, num_nodes)
+    _c07_nested = _C07_RUN_DEPTH[0] > 0
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
+    # Recorded AFTER our own increment: from here on, any further change
+    # means ANOTHER run started inside our measurement window. Recording
+    # it before would make every run trip its own check.
+    _c07_runs_at_start = _C07_RUNS_STARTED[0]
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -10339,12 +10500,11 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         if use_orderer:
-            # C0.7 IS STILL NOT WIRED, and the reason is now measured
-            # rather than assumed. The counter itself is implemented and
-            # mutation-tested (test_c07_fault_injection), and the sweep
-            # shows committed == collected on all 24 line configurations
-            # across UMA, @2 and @4. What is missing is RUN SCOPING for
-            # the expected side.
+            # C0.7 HISTORY, kept because each failure invalidated a
+            # different scoping strategy and none of the three is
+            # obvious in hindsight. The sweep shows committed ==
+            # collected on all 24 line configurations across UMA, @2 and
+            # @4.
             #
             # A first wiring attempt failed in three distinct ways, each
             # of which invalidated a different attempt to scope it:
@@ -10360,8 +10520,9 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             #    the committed counter is cumulative across both runs.
             #    The inner run collected 24 while the counter read 56.
             #    No amount of resetting the observed side fixes this: the
-            #    EXPECTED side needs a baseline captured before this run's
-            #    workers commit, and compared as a delta.
+            #    EXPECTED side needed a baseline captured before this
+            #    run's workers commit, compared as a delta. That is what
+            #    _c07_base does, below.
             #
             # That baseline is a real design decision (where to capture
             # it, how it interacts with resume and with nested runs), so
@@ -10375,7 +10536,12 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             _ordered = [blob for _, blob in _iter_records(lib, coll_fd,
                                                           views=_zc)]
             _c07_now = _c07_read_committed(lib, num_nodes)
-            if _c07_now is not None:
+            if _c07_nested:
+                _c07_no_verdict(
+                    "nested inside another forkrun run, whose live workers "
+                    "commit to the same engine counter; the delta cannot be "
+                    "attributed to this run alone")
+            elif _c07_now is not None and _c07_base is not None:
                 _c07_total = int(_c07_now) - int(_c07_base)
                 _COMMITTED_FRAMES["total"] = _c07_total
                 _COMMITTED_FRAMES["nodes"] = int(num_nodes or 1)
@@ -10393,6 +10559,11 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             pass
         raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
+        # C0.7: leave the nesting depth on EVERY exit path, including
+        # aborts and exceptions. A leaked depth would make every later
+        # top-level run believe it is nested and silently stop
+        # certifying -- a failure that looks like a pass.
+        _C07_RUN_DEPTH[0] -= 1
         extra = []
         if pipe is not None:
             extra = ([pipe["fallow_pid"], pipe["ingest_pid"]]
