@@ -70,15 +70,25 @@ for nodes, workers, lines, bytesb in itertools.product(
         bad += 1
         continue
     fs = Rm.frame_stats()
-    ps = Rm.published_slots()
-    exp = ps['total']
+    committed = Rm.committed_frames()['total']
     outbytes = sum(len(r) for r in out)
     ok_bytes = (outbytes == inbytes)
-    ok_frame = (exp is not None and exp == fs['complete'])
+    # The NEW correspondence: COMMITTED DATA frames (counted in the shim
+    # at the commit point) vs DATA frames actually collected.
+    #
+    # The retired one compared published SLOTS to frames and was short by
+    # exactly 1 on every NUMA configuration, because write_idx counts the
+    # EOF sentinel slot that yields no record. Comparing a DATA-frame
+    # count against a DATA-frame count excludes the sentinel by
+    # construction rather than by calibration.
+    #
+    # data_frames, not complete: complete includes filtered control
+    # records, which are written routinely and are not loss.
+    ok_frame = (committed is not None and committed == fs['data_frames'])
     rows.append((nodes, workers, lines, bytesb,
-                 fs['complete'], fs['filtered'],
-                 (exp if exp is not None else '-'),
-                 (len(out) if exp == fs['complete'] else 'MISMATCH')))
+                 fs['data_frames'], fs['filtered'],
+                 (committed if committed is not None else '-'),
+                 (len(out) if ok_frame else 'MISMATCH')))
     if not ok_bytes or not ok_frame:
         bad += 1
 

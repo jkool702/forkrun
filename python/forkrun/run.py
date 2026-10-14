@@ -3063,6 +3063,14 @@ _FRAME_STATS = {"complete": 0, "filtered": 0, "data_frames": 0}
 # telemetry so the correspondence sweep can compare the two sides.
 _PUBLISHED_SLOTS = {"total": None, "nodes": 0}
 
+# C0.7 expected-side, captured DURING the run for the same reason as the
+# published-slot total above: fr_py_committed_data_frames answers only
+# while the ring state is live, so a probe after map() returns reads
+# nothing. The certificate itself reads it inline, where the engine is
+# still up; this copy exists so tools and tests can compare the two
+# sides after the fact, the way c07_correspondence_sweep does.
+_COMMITTED_FRAMES = {"total": None, "nodes": 0}
+
 
 def reset_frame_stats():
     _FRAME_STATS["complete"] = 0
@@ -3070,6 +3078,8 @@ def reset_frame_stats():
     _FRAME_STATS["data_frames"] = 0
     _PUBLISHED_SLOTS["total"] = None
     _PUBLISHED_SLOTS["nodes"] = 0
+    _COMMITTED_FRAMES["total"] = None
+    _COMMITTED_FRAMES["nodes"] = 0
 
 
 def frame_stats():
@@ -3078,6 +3088,11 @@ def frame_stats():
 
 def published_slots():
     return dict(_PUBLISHED_SLOTS)
+
+
+def committed_frames():
+    """Committed DATA frames for the most recent run (C0.7 telemetry)."""
+    return dict(_COMMITTED_FRAMES)
 
 
 def _split_records_views(blob):
@@ -9736,6 +9751,39 @@ def _c07_envelope(lib, mode, *, use_complete, has_emit,
     return True, ""
 
 
+def _c07_read_committed(lib, num_nodes):
+    """Sum the committed DATA frames across nodes, or None.
+
+    None means "not readable" -- an older substrate without the symbol.
+    That must NEVER be read as zero: a zero would look like "the engine
+    committed nothing", which is the one value that would make the
+    certificate fire on every run. Callers treat None as "no verdict".
+
+    The load itself is RELAXED and that is correct here, because the
+    caller has already joined the workers: quiescence is a lifecycle
+    fact, not something a stronger memory order can express. Reading
+    while a worker were mid-batch would undercount, not double-count.
+    """
+    import ctypes as _ct
+    fn = getattr(lib, "fr_py_committed_data_frames", None)
+    if fn is None:
+        return None
+    total = 0
+    nodes = max(int(num_nodes or 1), 1)
+    for node in range(nodes):
+        out = _ct.c_uint64(0)
+        try:
+            rc = fn(node, _ct.byref(out))
+        except Exception:
+            return None
+        if rc != 0:
+            # A node the engine does not have is not a shortfall; it
+            # means the snapshot is unavailable, so decline the verdict.
+            return None
+        total += int(out.value)
+    return total
+
+
 def _ordered_completeness_certificate(expected, actual, *, label,
                                       covered=True, unordered=False,
                                       emit_failed=False):
@@ -10236,32 +10284,37 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         if use_orderer:
-            _ordered = [blob for _, blob in _iter_records(lib, coll_fd,
-                                                          views=_zc)]
-            # C0.7 IS NOT WIRED HERE. The correspondence the design
-            # specifies -- actual_records == sum(write_idx) -- is FALSE
-            # for multi-node NUMA, and wiring it fails healthy runs.
-            # Measured, 27-line input, 4 workers, nodes="@2":
-            #   node0 write=14 read=14 tail_empty=1
-            #   node1 write=1  read=1  tail_empty=1
-            #   orderer recv=15 emitted=15 heap_left=0 stdout_broken=0
-            #   parent collected 14 records, totalling 179 bytes, which
-            #   is EXACTLY the input size -- so nothing was lost.
+            # C0.7 IS STILL NOT WIRED, and the reason is now measured
+            # rather than assumed. The counter itself is implemented and
+            # mutation-tested (test_c07_fault_injection), and the sweep
+            # shows committed == collected on all 24 line configurations
+            # across UMA, @2 and @4. What is missing is RUN SCOPING for
+            # the expected side.
             #
-            # The extra published slot is the EOF sentinel / empty tail:
-            # it occupies a slot but yields no record. write_idx counts
-            # SLOTS, not DATA slots, and fr_py_diag_node exposes no
-            # data-slot count. Same concept the drain audit already
-            # handles via tail_empty.
+            # A first wiring attempt failed in three distinct ways, each
+            # of which invalidated a different attempt to scope it:
             #
-            # The design's premise was "measured across five sizes and two
-            # batch granularities" -- but on single-worker in-process
-            # cases, where no sentinel is published. Deriving the correct
-            # correspondence needs either an engine-side data-slot count
-            # or a publisher-side data marker. Until then, asserting the
-            # designed equality would make a completeness certificate fire
-            # on correct runs, which is worse than not having one.
-            return _ordered
+            #  - _FRAME_STATS is a module global, so it accumulated across
+            #    map() calls in one process ("collected 282, published
+            #    26"). Fixed by resetting per collection.
+            #  - a RESUME merges sidecar records committed by EARLIER
+            #    runs, which were counted then, so including them gave
+            #    "collected 40, published 33" on a correct resume. Fixed
+            #    by snapshotting the observed count before the merge.
+            #  - a NESTED map() inside a stream() SHARES the engine, so
+            #    the committed counter is cumulative across both runs.
+            #    The inner run collected 24 while the counter read 56.
+            #    No amount of resetting the observed side fixes this: the
+            #    EXPECTED side needs a baseline captured before this run's
+            #    workers commit, and compared as a delta.
+            #
+            # That baseline is a real design decision (where to capture
+            # it, how it interacts with resume and with nested runs), so
+            # it is not being guessed at here. The count, the accessor,
+            # the envelope and both proof tests stand; only this wiring
+            # waits.
+            return [blob for _, blob in _iter_records(lib, coll_fd,
+                                                      views=_zc)]
         # Collection is _executor_core.collect_records: drain-vs-direct
         # and order-index-vs-none are mechanics, not lifecycle shape.
         return collect_records(use_drain=use_drain,
