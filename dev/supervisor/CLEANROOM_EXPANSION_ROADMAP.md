@@ -1003,6 +1003,44 @@ so only the `SharedState` field itself is a ring change — the increment
 is not. `ring_ack_main`'s parallel path is out of envelope for the Python
 certificate and must be documented as excluded, not silently ignored.
 
+**[V] THIRD finding — and a BLOCKER: emission is not commit.**
+Incrementing at `fr_py_emit` counts *written* DATA frames, but a written
+frame can be **rolled back before the batch commits**.
+
+Verified in source:
+
+* `fr_py_complete` = emit + signal; the **acknowledgement** is the commit
+  linearization point (`_shim.c:1767-1770`: "Called ONLY after the
+  acknowledgement has succeeded, i.e. after the transaction has committed
+  (worker_txn_clear -> TXN_IDLE)").
+* Recovery truncates uncommitted output: *"uncommitted output is truncated
+  back to output_start by recovery"* (`_shim.c:1772-1773`).
+
+So this sequence is a valid execution:
+
+1. worker writes a DATA frame; counter increments;
+2. worker dies **before** the ack, transaction still recoverable;
+3. recovery rolls the output back;
+4. the batch is retried, writes again, counter increments again.
+
+Final collected output holds **one** frame; the counter says **two**. A
+healthy, successfully-recovered run would fail the certificate. Producer
+quiescence does **not** fix this — quiescence stabilises the counter, it
+cannot undo an increment from a rolled-back attempt.
+
+**[V] A fourth finding: `fr_py_emit` is not the only Python emitter.**
+`_worker.py` has three branches — `fr_py_complete` (which calls
+`fr_py_emit`), `fr_py_emit` directly, and a **Python `_write_all`
+fallback** (`:767`) that bypasses `fr_py_emit` entirely and is exercised
+by `test_v1_emit.py` under `FORKRUN_NO_V1=1`. A counter placed only in
+`fr_py_emit` would therefore be **invisible** to a supported fallback
+path. Either every supported emitter is instrumented, or the certificate
+must REFUSE to claim completeness when the selected path is uncovered.
+
+**Consequence:** the expected-side count must be defined against
+**committed** DATA records, not written ones, and its execution envelope
+must be explicit. The ring field is **not** added until both are settled.
+
 **Consequence for the work item:** the certificate cannot be wired as
 specified. Deriving the correct correspondence needs either an engine-side
 data-slot count or a publisher-side data marker — both of which touch the
