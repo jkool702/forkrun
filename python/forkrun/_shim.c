@@ -281,7 +281,15 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
     /* W-PY28: fresh generation — drop any inherited output-fd naming
      * (fork inherits the value; the worker re-arms it explicitly via
      * fr_py_set_output_fd or the C loops below). */
-    fr_py_txn_out_fd = -1;
+fr_py_txn_out_fd = -1;
+    /* C0.7: same reasoning for the pending DATA count. It is thread-local
+     * and survives fork, so a value inherited by a fresh generation
+     * would be flushed into the NEW run's shared counter and report
+     * frames nobody committed in it. This is the W-PY28 hazard applied
+     * to the counter: it surfaced as a test that failed only when run
+     * after another that left a pending value behind, and passed alone.
+     * A fresh generation must carry neither name nor count. */
+    fr_py_txn_pending_data = 0;
     /* W-PY30: per-worker coredump defaults (dumps off; generous hard
      * preserved for final-attempt arming; small-dump filter). */
     worker_coredump_startup();

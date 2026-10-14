@@ -83,26 +83,35 @@ class _Engine(unittest.TestCase):
     LINES = 40
 
     def setUp(self):
+        self.emitted = 0
+        self._start_generation()
+
+    def _start_generation(self):
+        """Bring up a complete engine generation: init, ingress, worker,
+        output. Split out of setUp so a test that tears the engine down
+        can build a genuine fresh generation rather than leaving the
+        worker un-armed (which makes claim() block forever)."""
         lib = self.lib
         self.assertEqual(lib.fr_py_init(0, 0), 0)
         self.addCleanup(lib.fr_py_destroy)
 
         memfd = os.memfd_create("fr_c07_faults_in")
-        self.addCleanup(lambda: os.close(memfd))
+        # Bind the descriptor at registration: a lambda closing
+        # self.out_fd would, after a second generation replaced it, close
+        # the NEW fd and leave the old one leaked.
+        self.addCleanup(lambda fd=memfd: os.close(fd))
         os.write(memfd, "".join("line %d\n" % i
                                 for i in range(self.LINES)).encode())
         os.lseek(memfd, 0, os.SEEK_SET)
         self.assertEqual(lib.fr_py_ingest_done(), 0)
         self.assertEqual(lib.fr_py_scan(memfd), 0)
 
-        self.out_fd = os.memfd_create("fr_c07_faults_out")
-        self.addCleanup(lambda: os.close(self.out_fd))
+        out_fd = os.memfd_create("fr_c07_faults_out")
+        self.addCleanup(lambda fd=out_fd: os.close(fd))
+        self.out_fd = out_fd
         self.assertEqual(lib.fr_py_worker_init(0, 0, 0, 3, 0), 0)
         lib.fr_py_set_output_fd(self.out_fd)
         lib.fr_py_ack_init(self.out_fd)
-
-        # "emitted" is what an fr_py_emit-based counter would have tallied.
-        self.emitted = 0
 
     def claim(self):
         b = FrPyBatch()
@@ -279,3 +288,147 @@ class TestLossRemainsDetectable(_Engine):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestPendingDoesNotSurviveAFreshGeneration(_Engine):
+    """A real defect this work item surfaced, pinned so it cannot return.
+
+    fr_py_txn_pending_data is thread-local and survives fork. It was NOT
+    reset by fr_py_init, so a value left over from a previous generation
+    -- or inherited across a fork -- would be flushed into the NEW run's
+    shared counter, reporting frames nobody committed in it.
+
+    This is the same hazard as the documented W-PY28 fix for
+    fr_py_txn_out_fd ("fresh generation -- drop any inherited
+    output-fd naming"), applied to the counter.
+
+    It was found only because a test failed when run AFTER another that
+    left a pending value behind, and passed when run alone. That is
+    exactly the shape a single-test invocation hides, so the fix needs a
+    test that fails without it rather than one that merely describes it.
+    """
+
+    def test_pending_count_does_not_leak_into_the_next_generation(self):
+        import ctypes as _c
+        b = self.claim()
+        # Write a DATA frame and leave it UNCOMMITTED: pending is now 1
+        # in this thread, and nothing will flush it.
+        self.assertEqual(0, self.emit(b.batch_idx, b"never-committed"))
+
+        # Tear the engine down and bring up a COMPLETE fresh generation,
+        # exactly as a re-entrant run in one process would.
+        self.lib.fr_py_destroy()
+        self._start_generation()
+
+        out = _c.c_uint64(0)
+        self.assertEqual(
+            0, self.lib.fr_py_committed_data_frames(0, _c.byref(out)))
+        self.assertEqual(
+            0, out.value,
+            "REGRESSION GUARD: a pending count from a previous generation "
+            "must not be inherited into the new run's committed total")
+
+        # And it must not resurface later: a commit in the new
+        # generation must flush 0, not the stale 1.
+        b2 = self.claim()
+        self.assertEqual(0, self.emit(b2.batch_idx, b"first-of-new-run"))
+        self.assertEqual(0, self.lib.fr_py_ack_direct(-1, -1))
+        self.assertEqual(
+            0, self.lib.fr_py_committed_data_frames(0, _c.byref(out)))
+        self.assertEqual(
+            1, out.value,
+            "the new generation commits exactly its own one frame -- a "
+            "stale pending would have reported 2")
+
+
+class TestCommittedCounter(_Engine):
+    """The counter itself, and the two-sided gate round 19 requires.
+
+    Everything below exercises the SHARED committed total, read through
+    fr_py_committed_data_frames. The two properties that matter:
+
+      1. a recovered run counts EXACTLY the records ultimately committed
+         (so the certificate cannot false-positive on a healthy run);
+      2. a deliberately dropped committed DATA frame makes the
+         certificate FAIL (so it is not vacuously satisfiable).
+
+    Round 19 requires BOTH before the certificate may be wired. A test
+    that only proves (1) would pass against a counter that never moves;
+    a test that only proves (2) would pass against one that always
+    reports a huge number. Both are required because they are the two
+    ways the certificate could be wrong in opposite directions.
+    """
+
+    def committed_count(self):
+        import ctypes as _c
+        out = _c.c_uint64(0)
+        rc = self.lib.fr_py_committed_data_frames(0, _c.byref(out))
+        self.assertEqual(0, rc, "counter snapshot must succeed on node 0")
+        return out.value
+
+    def test_clean_run_counts_every_committed_frame(self):
+        # One claim per committed record: a batch is acked once. Claiming
+        # once and acking three times is invalid (the second ack fails),
+        # which is the engine correctly refusing to double-commit.
+        for payload in (b"a", b"", b"c"):
+            b = self.claim()
+            self.assertEqual(0, self.emit(b.batch_idx, payload))
+            self.assertEqual(0, self.lib.fr_py_ack_direct(-1, -1))
+        # a, b"", c -- the empty DATA frame is a REAL frame and must count
+        self.assertEqual(3, self.committed_count(),
+                         "three committed DATA frames, including a "
+                         "zero-length one")
+        self.assertEqual(3, self.emitted,
+                         "no rollback happened, so writes == commits")
+
+    def test_rollback_leaves_the_counter_at_one_not_two(self):
+        """THE regression this whole work item exists to prevent."""
+        b = self.claim()
+        idx = b.batch_idx
+        self.assertEqual(0, self.emit(idx, b"orphan"))
+        # Before the ack the frame is written but NOT committed.
+        self.assertEqual(0, self.committed_count(),
+                         "an uncommitted write must not be counted yet")
+        self.kill_and_recover(b)
+
+        again = self.claim()
+        self.assertEqual(idx, again.batch_idx)
+        self.assertEqual(0, self.emit(idx, b"survivor"))
+        self.assertEqual(0, self.lib.fr_py_ack_direct(-1, -1))
+
+        self.assertEqual(2, self.emitted, "two successful writes")
+        self.assertEqual(1, len(self.committed()), "one committed record")
+        self.assertEqual(
+            1, self.committed_count(),
+            "REGRESSION GUARD: counting at WRITE time would report 2 here "
+            "and fail a healthy, fully-recovered run")
+
+    def test_repeated_rollbacks_do_not_accumulate(self):
+        b = self.claim()
+        idx = b.batch_idx
+        for _ in range(3):
+            self.assertEqual(0, self.emit(idx, b"orphan"))
+            self.kill_and_recover(b)
+            b = self.claim()
+            self.assertEqual(idx, b.batch_idx)
+        self.assertEqual(0, self.emit(idx, b"survivor"))
+        self.assertEqual(0, self.lib.fr_py_ack_direct(-1, -1))
+
+        self.assertEqual(4, self.emitted, "four writes")
+        self.assertEqual(1, len(self.committed()), "one committed record")
+        self.assertEqual(
+            1, self.committed_count(),
+            "the divergence must not accumulate: write-counting would "
+            "report 4 against a single collected frame")
+
+    def test_no_result_records_never_count(self):
+        """A NO_RESULT terminal record is written but filtered."""
+        b = self.claim()
+        idx = b.batch_idx
+        raw = _HDR.pack(idx, 0, DISP_NO_RESULT, 0)
+        os.pwrite(self.out_fd, raw, os.lseek(self.out_fd, 0, os.SEEK_END))
+        self.assertEqual(0, self.lib.fr_py_ack_direct(-1, -1))
+        self.assertEqual(
+            0, self.committed_count(),
+            "a filtered control record must not count as a DATA frame")
+        self.assertEqual([], self.committed(),
+                         "and the parent collects nothing for it")
