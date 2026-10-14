@@ -432,3 +432,89 @@ class TestCommittedCounter(_Engine):
             "a filtered control record must not count as a DATA frame")
         self.assertEqual([], self.committed(),
                          "and the parent collects nothing for it")
+
+
+class TestRealProcessDeath(_Engine):
+    """Process-level, as round 19 requires.
+
+    The in-process tests above call fr_py_recover_worker from the SAME
+    thread that emitted the frame, so the pending count is cleared from
+    the supervisor's own TLS. A real worker death is different: the
+    process is gone, so its thread-local state is GONE -- there is
+    nothing for recovery to clear.
+
+    That distinction is the whole point. If the shared counter were
+    moved by anything other than a commit, a dead worker's pending value
+    would either persist (counting an uncommitted frame) or be reachable
+    by a future fork. Forking a real child and letting it die before the
+    ack exercises the situation the in-process harness cannot.
+
+    Lifecycle:
+      1. parent inits the engine and forks a worker child;
+      2. the child claims a batch, writes a DATA frame, and dies BEFORE
+         the ack -- so the frame is on disk but never committed;
+      3. the parent recovers, truncating the orphan;
+      4. the parent re-claims the same batch and commits it;
+      5. the committed count must be exactly 1, and the parent must
+         collect exactly 1 DATA frame.
+    """
+
+    def _run_child_dying_before_ack(self, payload):
+        """Fork a child that emits `payload` then exits before acking."""
+        b = self.claim()
+        idx = b.batch_index if hasattr(b, "batch_index") else b.batch_idx
+        pid = os.fork()
+        if pid == 0:
+            # -- child --
+            try:
+                rc = self.lib.fr_py_emit(self.out_fd, -1, 0, idx,
+                                         payload, len(payload))
+                _exitcode = 0 if rc == RC_OK else 3
+            except BaseException:
+                _exitcode = 4
+            # Die BEFORE fr_py_ack_direct: the frame is written, the
+            # batch is not committed, and this process's TLS dies with
+            # us -- which is the point.
+            os._exit(_exitcode)
+        _, status = os.waitpid(pid, 0)
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            self.fail("worker child did not exit cleanly (status=%d)"
+                      % status)
+        return b
+
+    def test_dead_worker_pending_is_destroyed_with_the_process(self):
+        import ctypes as _c
+
+        b = self._run_child_dying_before_ack(b"orphan")
+
+        # The frame is really on disk, written by a process that is now
+        # gone -- so nothing can have flushed a count for it.
+        self.assertEqual(1, len(self.committed()),
+                         "precondition: the orphan is in the stream")
+        out = _c.c_uint64(0)
+        self.assertEqual(0, self.lib.fr_py_committed_data_frames(
+            0, _c.byref(out)))
+        self.assertEqual(
+            0, out.value,
+            "a worker that died before its ack committed nothing, so the "
+            "shared count must still be 0")
+
+        # Parent recovers: truncation happens in the parent, and the
+        # dead child's TLS is not merely cleared -- it is unreachable.
+        self.kill_and_recover(b)
+        self.assertEqual([], self.committed(), "the orphan was truncated")
+
+        again = self.claim()
+        self.assertEqual(b.batch_idx, again.batch_idx)
+        self.assertEqual(0, self.emit(again.batch_idx, b"survivor"))
+        self.assertEqual(0, self.lib.fr_py_ack_direct(-1, -1))
+
+        self.assertEqual(1, len(self.committed()),
+                         "exactly one DATA frame survives")
+        self.assertEqual(0, self.lib.fr_py_committed_data_frames(
+            0, _c.byref(out)))
+        self.assertEqual(
+            1, out.value,
+            "REGRESSION GUARD: the committed count must be 1 after a real "
+            "worker death and retry -- not 0 (the commit never flushed) "
+            "and not 2 (the dead worker's pending leaked)")
