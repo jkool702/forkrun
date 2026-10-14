@@ -7018,6 +7018,15 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
         collect=collect, splice=splice, source=source)
+    # C0.7 expected-side baseline. Captured HERE: after the engine exists,
+    # after resume-begin has folded in any sidecar, and BEFORE any fork --
+    # so no worker of THIS run has committed anything yet.
+    #
+    # A per-run LOCAL, not a module global, because a nested map() inside
+    # a stream() shares this engine: a shared global would carry the outer
+    # run's commits into the inner run's comparison (measured: inner run
+    # collected 24 while a global counter read 56).
+    _c07_base = _c07_read_committed(lib, 1) or 0
     engine_live = True
 
     src_fd, must_close = _open_source(source)
@@ -7252,6 +7261,13 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             return None
         if use_orderer:
             records = list(_iter_records(lib, coll_fd, views=_zc))
+            # C0.7 observed side: DATA frames THIS collection delivered.
+            # len(records) is exactly that -- _iter_records delegates to
+            # _split_records_views, which filters non-DATA dispositions,
+            # so everything it yields is a DATA frame. Deliberately NOT
+            # _FRAME_STATS, which is a module global and would charge a
+            # nested run with its parent's frames.
+            _c07_observed = len(records)
             # Already batch_idx-ordered by the C orderer; prepend any
             # sidecar output from previously aborted run(s), then sort
             # (committed ranges are jagged — the union of two ordered
@@ -7260,6 +7276,17 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # publish — W-REL5-C4).
             if resume is not None:
                 records = consume_sidecar(resume, records)
+            # C0.7 expected side: committed DATA frames MINUS this run's
+            # baseline, so a shared engine (a nested map inside a stream)
+            # or a resumed run is not charged for frames committed
+            # elsewhere. Producers are quiescent: the orderer has been
+            # joined and the reactor has returned.
+            _c07_now = _c07_read_committed(lib, 1)
+            if _c07_now is not None:
+                _c07_total = int(_c07_now) - int(_c07_base)
+                _COMMITTED_FRAMES["total"] = _c07_total
+                _COMMITTED_FRAMES["nodes"] = 1
+                _c07_evaluate(_c07_total, _c07_observed, lib, mode)
             # Already batch_idx-ordered by the C orderer; no sort.
             return [blob for _, blob in records]
         # Collection is _executor_core.collect_records: drain-vs-direct
@@ -9751,6 +9778,30 @@ def _c07_envelope(lib, mode, *, use_complete, has_emit,
     return True, ""
 
 
+def _c07_evaluate(expected, observed, lib, mode):
+    """Gate the comparison on the envelope, then run the certificate.
+
+    Fail-closed: an uncovered execution emits NO verdict. It never emits
+    a passing one. The warning names the specific path, because a bare
+    "certificate unavailable" is not something an operator can act on.
+    """
+    from ._bindings import v1_available as _v1a
+    covered, reason = _c07_envelope(
+        lib, mode,
+        use_complete=bool(_v1a().get("complete", False)),
+        has_emit=getattr(lib, "fr_py_emit", None) is not None,
+        has_ack_direct=getattr(lib, "fr_py_ack_direct", None) is not None)
+    if not covered:
+        try:
+            os.write(2, ("forkrun [WARN]: C0.7 completeness certificate "
+                         "not evaluated: execution envelope not covered "
+                         "(mode=%s): %s\n" % (mode, reason)).encode())
+        except OSError:
+            pass
+        return
+    _ordered_completeness_certificate(expected, observed, label="map/run")
+
+
 def _c07_read_committed(lib, num_nodes):
     """Sum the committed DATA frames across nodes, or None.
 
@@ -9875,6 +9926,10 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
     lib, engine_fds = _init_engine_and_fds(
         lines=lines, bytes_=bytes_, spec=_spec,
         num_nodes=num_nodes, numa_map=numa_map)
+
+    # C0.7 expected-side baseline -- see the UMA reactor executor for
+    # why this is a local captured before any fork rather than a global.
+    _c07_base = _c07_read_committed(lib, num_nodes) or 0
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -10311,10 +10366,21 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             # That baseline is a real design decision (where to capture
             # it, how it interacts with resume and with nested runs), so
             # it is not being guessed at here. The count, the accessor,
-            # the envelope and both proof tests stand; only this wiring
-            # waits.
-            return [blob for _, blob in _iter_records(lib, coll_fd,
-                                                      views=_zc)]
+            # the envelope and both proof tests stand.
+            #
+            # SOLVED by scoping the EXPECTED side: _c07_base was captured
+            # at engine init, before any fork, so the comparison is this
+            # run's commits minus this run's baseline. See the UMA reactor
+            # executor for why the baseline is a per-run local.
+            _ordered = [blob for _, blob in _iter_records(lib, coll_fd,
+                                                          views=_zc)]
+            _c07_now = _c07_read_committed(lib, num_nodes)
+            if _c07_now is not None:
+                _c07_total = int(_c07_now) - int(_c07_base)
+                _COMMITTED_FRAMES["total"] = _c07_total
+                _COMMITTED_FRAMES["nodes"] = int(num_nodes or 1)
+                _c07_evaluate(_c07_total, len(_ordered), lib, mode)
+            return _ordered
         # Collection is _executor_core.collect_records: drain-vs-direct
         # and order-index-vs-none are mechanics, not lifecycle shape.
         return collect_records(use_drain=use_drain,
