@@ -394,6 +394,62 @@ class MinorMismatchBarrier(unittest.TestCase):
     # ------------------------------------------------------------------
     # status contract
     # ------------------------------------------------------------------
+    def test_stamp_must_come_from_the_helper_itself(self):
+        """A dependency exporting the stamp must not satisfy the lookup.
+
+        dlsym(handle, ...) searches the opened object AND its
+        automatically loaded dependencies. A helper lacking
+        fr_udf_built_version_v2 must therefore be refused even when a
+        dependency happens to export that name -- otherwise the launcher
+        would read a version from a library it did not choose and call
+        through a signature it never validated.
+        """
+        # A "helper" that has no stamp of its own, but pulls in one.
+        libdir = os.path.join(self.tmp, "dep")
+        os.makedirs(libdir, exist_ok=True)
+        with open(os.path.join(libdir, "stamp_provider.c"), "w") as fh:
+            fh.write(
+                "#include <stdlib.h>\n"
+                "struct fr_udf_version { int major; int minor; };\n"
+                "void fr_udf_built_version_v2(struct fr_udf_version *o)\n"
+                "{ if (o) { o->major = 3; o->minor = 14; } }\n")
+        dep = os.path.join(libdir, "libstampdep.so")
+        subprocess.run(["gcc", "-shared", "-fPIC", "-o", dep,
+                        os.path.join(libdir, "stamp_provider.c")],
+                       check=True, capture_output=True, timeout=180)
+
+        # The helper itself exports NOTHING named like the stamp.
+        helper_c = os.path.join(libdir, "helper.c")
+        with open(helper_c, "w") as fh:
+            fh.write("int unrelated_symbol(void) { return 1; }\n")
+        helper = os.path.join(libdir, "libnohelper.so")
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", "-o", helper, helper_c,
+             "-L" + libdir, "-lstampdep",
+             "-Wl,-rpath," + libdir],
+            check=True, capture_output=True, timeout=180)
+
+        env = dict(os.environ)
+        env["LD_LIBRARY_PATH"] = libdir + ":" + env.get("LD_LIBRARY_PATH", "")
+        proc = subprocess.run(
+            [_LAUNCHER, "--so", _SUBSTRATE,
+             "--workers", "1", "--lines", "1", "--bytes", "0",
+             "--on-error", "0", "--retry", "1",
+             "--src", self.src, "--result",
+             os.path.join(self.tmp, "dep.bin"), "--stats-fd", "-1",
+             "--udf-helper", helper, "--udf", "bm", "--udf-attr", "up",
+             "--caller-version", _caller_version()],
+            capture_output=True, timeout=25, env=env)
+        # The dependency IS on the loader path, so a bare dlsym would have
+        # found the stamp there and accepted it.
+        self.assertEqual(
+            proc.returncode, 80,
+            "a stamp resolved out of a DEPENDENCY must be refused as "
+            "unverifiable; got %d with stderr=%r"
+            % (proc.returncode, proc.stderr[-300:]))
+        self.assertIn(b"resolves into", proc.stderr,
+                      "the refusal must say the symbol came from elsewhere")
+
     def test_crashing_constructor_is_not_reported_as_a_timeout(self):
         """A CRASH is not a TIMEOUT.
 

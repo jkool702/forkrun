@@ -824,6 +824,51 @@ static int udf_probe_await(int fd, pid_t probe,
                     : (timed_out ? UDF_PROBE_TIMEOUT : UDF_PROBE_FAILED);
 }
 
+/* Resolve a symbol and confirm the HELPER ITSELF owns it.
+ *
+ * dlsym(handle, name) searches the opened object AND its automatically
+ * loaded dependencies, not just the object. So a helper missing the
+ * stamp could in principle be accepted if one of its dependencies
+ * happened to export a same-named symbol -- and, more generally, any of
+ * the six other fr_udf_* symbols resolved by cast below would be called
+ * through whatever signature the found definition actually has.
+ *
+ * dladdr() reports the ELF object that DEFINES a function, which lets
+ * the launcher check that the definition came from the file it chose.
+ * A transitive match is treated as absent: fail closed.
+ *
+ * This is a robustness measure, not a fix for a demonstrated defect --
+ * the six other symbols have unchanged signatures, so a helper built
+ * from the same tree is unaffected. It is here because the helper is
+ * buildable by hand (`make -f Makefile.substrate udf-lib`), so a
+ * hand-built third-party helper is a real scenario rather than a
+ * hypothetical one. */
+static void *sym_owned_by(void *handle, const char *name,
+                          const char *helper_path)
+{
+    void *p = dlsym(handle, name);
+    if (!p) return NULL;
+    Dl_info info;
+    if (dladdr(p, &info) == 0 || !info.dli_fname) {
+        fprintf(stderr, "forkrun-cleanroom: cannot attribute %s to an ELF "
+                        "object; refusing to use it\n", name);
+        return NULL;
+    }
+    /* Compare the basename: the dependency path is recorded by the loader
+     * and may be an absolute path we do not have. */
+    const char *got = strrchr(info.dli_fname, '/');
+    got = got ? got + 1 : info.dli_fname;
+    const char *want = strrchr(helper_path, '/');
+    want = want ? want + 1 : helper_path;
+    if (strcmp(got, want) != 0) {
+        fprintf(stderr, "forkrun-cleanroom: %s resolves into %s, not into "
+                        "the helper %s; refusing to call through a foreign "
+                        "definition\n", name, got, want);
+        return NULL;
+    }
+    return p;
+}
+
 static int setup_udf_helper(const char *helper_path, const char *roots_spec,
                             const char *caller_version, int source_fd)
 {
@@ -898,7 +943,8 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
             if (ph) {
                 fr_udf_built_version_fn vf =
                     (fr_udf_built_version_fn)
-                    dlsym(ph, FR_UDF_BUILT_VERSION_SYMBOL);
+                    sym_owned_by(ph, FR_UDF_BUILT_VERSION_SYMBOL,
+                                 helper_path);
                 if (vf) { r.status = 0; r.version.major = 0;
                           r.version.minor = 0; vf(&r.version); }
                 else     { r.status = 2; }
@@ -994,7 +1040,7 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
     {
         fr_udf_built_version_fn vf =
             (fr_udf_built_version_fn)
-            dlsym(hu, FR_UDF_BUILT_VERSION_SYMBOL);
+            sym_owned_by(hu, FR_UDF_BUILT_VERSION_SYMBOL, helper_path);
         if (!vf) {
             fprintf(stderr, "forkrun-cleanroom: UDF helper (%s) lost %s "
                             "between probe and load\n",

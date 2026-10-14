@@ -139,6 +139,30 @@ with no interface to constrain them, which is the exact hazard §3 names.
 * **NUMA topology discovery.** Belongs to W-EXP-2's own design.
 * **Anything in `forkrun_ring.c`.** Frozen, and this spec does not reach it.
 
+## 6a. Post-review note
+
+Round 16's review accepted the version barrier with one residual noted:
+on Linux `dlsym(handle, ...)` searches the opened object **and its
+automatically loaded dependencies**. That is now closed for the stamp —
+`sym_owned_by()` attributes the resolved symbol with `dladdr()` and
+refuses if it did not come from the helper file itself. Verified with a
+fixture whose helper exports no stamp but pulls in a dependency that
+does: the launcher reports
+
+```
+fr_udf_built_version_v2 resolves into libstampdep.so, not into the
+helper libnohelper.so; refusing to call through a foreign definition
+```
+
+and refuses with 80.
+
+This is a robustness measure, not a fix for a demonstrated defect. The
+other six `fr_udf_*` symbols are still resolved by cast without the
+ownership check; their signatures have not changed, so a helper built
+from the same tree is unaffected, and the launcher only ever dlopens a
+path the caller supplied. Recorded rather than presented as more than it
+is.
+
 ## 7. What this does not establish
 
 * **Not implemented.** No signature above has been written; the code has
