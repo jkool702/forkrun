@@ -79,16 +79,45 @@ class C07Correspondence(unittest.TestCase):
         self.assertEqual(sum(len(r) for r in out), expected_bytes,
                          "every input byte must appear in the output")
 
-        # And 14 records is correct -- the designed equality would
-        # demand 15 and raise here. That is the false positive the
-        # certificate must not be wired against until the correspondence
-        # accounts for sentinel slots.
-        self.assertEqual(len(out), 14)
+        # WO-ROI-1-R1: the record COUNT is not an invariant and must not
+        # be asserted as one.
+        #
+        # This used to assert exactly 14, measured once at round 18. It is
+        # flaky -- 2 failures in 10 runs at 7b363270, before any of that
+        # round's work -- because with 4 workers over 2 NUMA nodes the
+        # batch interleaving changes how many frames the parent receives.
+        # The count is an artefact of scheduling; only the BYTES are
+        # promised.
+        #
+        # What IS invariant, and is the property this file exists to
+        # protect, is the correspondence with COMMITTED DATA frames --
+        # which holds exactly on every configuration the sweep covers.
+        from forkrun.run import committed_frames
+        committed = committed_frames()["total"]
+        self.assertIsNotNone(
+            committed,
+            "the committed-frame count must be available; a None here "
+            "means the counter was never read, not that it was zero")
+        self.assertEqual(
+            len(out), committed,
+            "collected records must equal COMMITTED DATA frames. The "
+            "retired design compared against published SLOTS, which "
+            "includes the EOF sentinel and is therefore short by one.")
 
     def test_certificate_would_fire_on_this_correct_run(self):
-        """Demonstrates WHY it is not wired, rather than only asserting so."""
-        # 14 records vs the 15 published slots measured above. A wired
-        # certificate raises here -- and that raise would be WRONG.
+        """The RETIRED design, kept as arithmetic.
+
+        Pure arithmetic on literal values -- no forkrun call -- so it is
+        deterministic. It documents the false invariant that C0.7 was
+        built to replace: comparing collected records against published
+        SLOTS raises on a perfectly correct run, because the EOF
+        sentinel occupies a slot and yields no record.
+
+        Retained deliberately. The certificate now compares committed
+        DATA frames and is wired, so nothing else in the suite would
+        notice if someone re-derived the slot-based comparison and
+        reintroduced this false positive.
+        """
         with self.assertRaises(RuntimeError) as cm:
             _ordered_completeness_certificate(15, 14, label="map/run")
         self.assertIn("lost published records", str(cm.exception))
