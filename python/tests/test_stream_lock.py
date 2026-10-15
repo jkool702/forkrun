@@ -272,3 +272,113 @@ class TestNestedStreamMap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEveryExecutionPathIsGuarded(unittest.TestCase):
+    """WO-ROI-1-R1: is _RUN_LOCK really the universal choke point?
+
+    WO-ROI-1 claimed it was, based on the lock being the single wrapper
+    every entry point passes through. A review raised the concrete
+    objection that map()'s orchestrator=False branches call _execute()
+    directly, apparently without the lock -- which, if true, would leave
+    the original corruption reachable through a supported option.
+
+    It is NOT true, and this is the test that establishes it rather than
+    asserting it. The arrangement is:
+
+        _execute(...)            takes _RUN_LOCK itself, then calls
+        _execute_locked(...)     which does not
+        _execute_ingest(...)     likewise
+
+    So the two families are complementary: the *_locked executors require
+    a wrapping call site, and the non-locked wrappers supply it. The
+    orchestrator=False branches call the SELF-GUARDING wrapper, so they
+    are covered -- a point that is easy to get backwards from reading
+    call sites alone.
+
+    Each configuration below is exercised for real, from a live stream,
+    because the property under test is a runtime refusal and not a
+    property of the source text.
+    """
+
+    CONFIGS = [
+        ("reactor=True", dict(orchestrator=True)),
+        ("reactor=False", dict(orchestrator=False)),
+        ("order=none", dict(orchestrator=False, order="none")),
+        ("lines batching", dict(orchestrator=False, lines=8)),
+    ]
+
+    def _nested_refused(self, **kw):
+        """Return True if the nested call was refused by the guard."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            pb = fh.name
+        try:
+            write_lines(pb, 400, fmt="other %d\n")
+            kw = dict(kw)
+            kw.setdefault("order", "index")
+            forkrun.map(_up, pb, workers=2, nodes=1, **kw)
+            return False
+        except RuntimeError as exc:
+            self.assertIn(
+                "nested run", str(exc),
+                "the refusal must come from the engine-session guard, not "
+                "from an incidental failure: %r" % str(exc)[:120])
+            return True
+        finally:
+            os.unlink(pb)
+
+    def test_all_execution_paths_refuse_a_nested_session(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            pa = fh.name
+        try:
+            write_lines(pa, 2000)
+            refused = []
+            for label, kw in self.CONFIGS:
+                gen = forkrun.stream(_up, pa, workers=2, order="index",
+                                     nodes=1)
+                try:
+                    next(gen)
+                    refused.append((label, self._nested_refused(**kw)))
+                finally:
+                    try:
+                        gen.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            for label, was_refused in refused:
+                self.assertTrue(
+                    was_refused,
+                    "%s bypassed the engine-session guard. A nested run on "
+                    "that path would reinitialise the process-global engine "
+                    "underneath the live stream." % label)
+        finally:
+            os.unlink(pa)
+
+    def test_outer_stream_survives_every_refused_path(self):
+        """Refusal must be inert: the live session is untouched."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            pa = fh.name
+        try:
+            write_lines(pa, 2000)
+            gen = forkrun.stream(_up, pa, workers=2, order="index", nodes=1)
+            first = next(gen)
+            for _label, kw in self.CONFIGS:
+                self.assertTrue(self._nested_refused(**kw))
+            rest = list(gen)
+            gen.close()
+            self.assertIsNotNone(first)
+            self.assertTrue(rest, "the outer stream must still deliver")
+            joined = b"".join([bytes(first)] + [bytes(r) for r in rest])
+            # Computed, not guessed: "line %d" is NOT a fixed width, so a
+            # hard-coded expectation would pass for the wrong reason.
+            # An earlier version used 2000 * len("line %d\n") and was wrong
+            # by 890 bytes -- which is exactly why it is not repeated.
+            expected = sum(len("line %d\n" % i) for i in range(2000))
+            self.assertEqual(
+                len(joined), expected,
+                "the outer stream must remain byte-exact after every "
+                "refusal")
+        finally:
+            os.unlink(pa)

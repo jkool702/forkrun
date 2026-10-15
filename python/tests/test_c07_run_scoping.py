@@ -71,56 +71,97 @@ class TestRunScoping(_Src):
             "would be compared against the CUMULATIVE counter (%d) and "
             "fail a correct run" % (first + second))
 
-    def test_payload_nesting_never_yields_a_misattributed_verdict(self):
-        """Payload-side nesting, whose outcome depends on the executor.
+    def test_payload_nesting_is_refused_and_observed_by_the_parent(self):
+        """Worker-side nesting, observed through a channel the parent owns.
 
-        A payload calling map() may run on the guarded thread (refused by
-        the WO-ROI-1 session guard) or in a forked worker (a fresh
-        process, where the per-thread guard cannot see it). Which one
-        happens depends on the executor path, so this test does not assert
-        a specific outcome -- it asserts the INVARIANT, which holds either
-        way: a run that overlapped another never reports a completed
-        correspondence it cannot stand behind.
+        WO-ROI-1-R1 corrected this test twice.
 
-        Getting this wrong is exactly the C0.7 failure mode -- charging
-        one run for another's frames.
+        First: it recorded the payload's outcome in a plain dict. When the
+        payload runs in a FORKED WORKER the dict mutation is private to
+        the child, so the parent read its own unchanged values and the
+        conditional assertion below it was vacuous -- it "passed" without
+        ever seeing what the worker did.
+
+        Second, and more important: it asserted the run produced no
+        verdict. That was wrong about the mechanism. A forked worker
+        INHERITS the engine session (a forked child sees active=True),
+        so the session guard refuses the worker's nested call before the
+        certificate is ever consulted. The morning report claimed the
+        certificate handled this path; it does not.
+
+        The outcome is now reported over file descriptor 2, which IS
+        shared across fork, and asserted from the captured bytes.
         """
-        attempts = {"n": 0, "raised": 0, "completed": 0}
-
+        # NOTE: an earlier version also appended to a list here and
+        # asserted it was non-empty in the parent. That assertion FAILED,
+        # and its failure is the point: when the payload runs in a forked
+        # worker the mutation is private to the child, so the parent sees
+        # an empty list. The only evidence the parent can trust is what
+        # the worker wrote to a shared file descriptor.
         def payload(b):
-            if not attempts["n"]:
-                attempts["n"] = 1
-                try:
-                    inner = forkrun.map(lambda x: x, self.src, workers=1,
-                                        nodes=1, order="index")
-                    attempts["completed"] = len(inner)
-                except RuntimeError as exc:
-                    if "nested run" not in str(exc):
-                        raise
-                    attempts["raised"] = 1
+            try:
+                inner = forkrun.map(lambda x: x.copy(), self.src,
+                                    workers=1, nodes=1, order="index")
+                os.write(2, b"C07_NESTED_COMPLETED:%d\n" % len(inner))
+            except RuntimeError as exc:
+                msg = str(exc)
+                tag = (b"C07_NESTED_REFUSED_WORKER"
+                       if "worker process" in msg
+                       else b"C07_NESTED_REFUSED_THREAD")
+                # Emit the REAL message too, so the assertion below
+                # checks the diagnostic a user would actually see rather
+                # than the tag the test chose.
+                os.write(2, tag + b"\n")
+                os.write(2, b"C07_NESTED_MSG:" + msg.encode() + b"\n")
             return b.copy()
 
-        try:
+        # MARK goes INSIDE the capture: written before it, it would go to
+        # the real stderr and the presence check below would be a lie
+        # about interception.
+        with _CaptureFd2() as cap:
+            os.write(2, b"C07_MARK_BEGIN\n")
             out = forkrun.map(payload, self.src, workers=1, nodes=1,
                               order="index")
-        except RuntimeError as exc:
-            self.assertIn("nested run", str(exc),
-                          "only the session guard may refuse a top-level "
-                          "call, and only for a nested one")
-            self.assertEqual(1, attempts["raised"])
-            return
 
-        self.assertTrue(out, "a run that completes must return output")
-        # Either it was refused, or the overlapping run did not report a
-        # certificate: committed_frames stays None when the C0.7 guard
-        # declined to attribute frames to this run.
-        if attempts["completed"] and attempts["raised"] == 0:
-            total = Rm.committed_frames()["total"]
-            self.assertTrue(
-                total is None or total == len(out),
-                "a completed overlapping run must not report a committed "
-                "count it cannot attribute: %r vs %d"
-                % (total, len(out)))
+        seen = cap.text
+        self.assertIn("C07_MARK_BEGIN", seen,
+                      "capture must actually intercept the payload's "
+                      "writes; if it does not, every assertion below is "
+                      "vacuous")
+        # The payload runs once per batch, so more than one report is
+        # expected -- each a separate forked worker. What must hold is
+        # that EVERY attempt was refused and NONE completed. Counting to
+        # exactly one was wrong: the payload cannot deduplicate itself,
+        # because the flag guarding it would be parent-private in each
+        # child.
+        attempted = (seen.count("C07_NESTED_COMPLETED")
+                     + seen.count("C07_NESTED_REFUSED_WORKER")
+                     + seen.count("C07_NESTED_REFUSED_THREAD"))
+        self.assertGreaterEqual(attempted, 1,
+                                "the payload must attempt a nested run; "
+                                "its execution is evidenced by the fd-2 "
+                                "report above, not by parent-side state")
+        self.assertEqual(
+            0, seen.count("C07_NESTED_COMPLETED"),
+            "a nested run from inside a worker must NEVER complete; if it "
+            "did, the inherited session marker was cleared and the worker "
+            "could clobber the engine state its own ack path needs")
+        self.assertGreaterEqual(
+            seen.count("C07_NESTED_REFUSED_WORKER"), 1,
+            "a nested run from inside a worker must be refused")
+        self.assertIn("worker process", seen,
+                      "the refusal must name the WORKER as the cause -- a "
+                      "worker is not 'another run live in this thread', "
+                      "and the old message sent operators looking in the "
+                      "wrong place")
+
+        # And the outer run is intact: the refusal did not disturb it.
+        self.assertTrue(out, "the outer run must still return output")
+        after = forkrun.map(lambda b: b.copy(), self.src, workers=1,
+                            nodes=1, order="index")
+        self.assertTrue(after,
+                        "a later run must still work; a guard left marked "
+                        "would make every subsequent call raise")
 
 
 class TestBaselineIsCapturedBeforeAnyFork(unittest.TestCase):

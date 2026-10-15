@@ -2422,6 +2422,32 @@ class _RunLock:
         # wrong: it must record whether THIS thread is inside a session,
         # not how many threads are waiting.
         self._local = _threading.local()
+        # WO-ROI-1-R1: a forked child inherits the parent's thread-local
+        # state, so it inherits `active` too -- VERIFIED: a forked child
+        # sees active=True. A worker that starts a nested run from its
+        # payload therefore inherits the refusal.
+        #
+        # That refusal is the correct outcome, but it arrives by accident
+        # and with a misleading message (it claims another run is live
+        # "in this thread", when what actually happened is that this
+        # PROCESS is a forked worker). So the inheritance is recorded
+        # explicitly and the diagnostic is made accurate.
+        #
+        # The marker is deliberately NOT cleared in the child. Clearing it
+        # would ADMIT worker-side nesting, and that is unsafe: the worker
+        # is mid-batch on the inherited engine state, so a nested
+        # _init_engine_and_fds would mmap over the mapping its own
+        # ack path still depends on. Refusal is the safe contract, and the
+        # smallest defensible one.
+        try:
+            os.register_at_fork(after_in_child=self._after_fork_child)
+        except AttributeError:      # pragma: no cover - non-POSIX
+            pass
+
+    def _after_fork_child(self):
+        # Runs in the child immediately after fork(). `active` is left
+        # True deliberately -- see __init__.
+        self._local.inherited_from_parent = True
 
     def _session_live(self):
         return getattr(self._local, "active", False)
@@ -2431,6 +2457,15 @@ class _RunLock:
             # Refuse BEFORE acquiring. Acquiring first would succeed
             # (RLock) and the nested session would then reinitialise the
             # engine we are trying to protect.
+            if getattr(self._local, "inherited_from_parent", False):
+                raise RuntimeError(
+                    "forkrun: refusing to start a nested run inside a "
+                    "forkrun worker process. A worker inherits the "
+                    "engine session of the run that created it, and is "
+                    "mid-batch on that state, so a nested session would "
+                    "replace the mapping its own completion path depends "
+                    "on. Start the nested run from the parent instead -- "
+                    "pass it as data, or use a separate process.")
             raise RuntimeError(
                 "forkrun: refusing to start a nested run while another "
                 "forkrun execution is live in this thread. The engine's "
@@ -2455,6 +2490,7 @@ class _RunLock:
         # make every later top-level run raise, which looks like the
         # library being broken rather than a leaked guard.
         self._local.active = False
+        self._local.inherited_from_parent = False
         self._lock.release()
         return False
 
