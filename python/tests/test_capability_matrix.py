@@ -69,7 +69,7 @@ class TestAgreement(_MatrixBase):
     def test_predicate_agrees_with_oracle_on_every_cell(self):
         """Every cell resolves identically in the predicate and the oracle."""
         mismatches = []
-        for f, _ok, _reason, actual in cells():
+        for f, _ok, _reason, actual, _v, _r, _route in cells():
             want, _rule = oracle.expected(f)
             if actual != want:
                 mismatches.append((f, want, actual))
@@ -87,7 +87,7 @@ class TestAgreement(_MatrixBase):
         pass while the served/declined split itself was wrong.
         """
         bad = []
-        for f, ok, _reason, outcome in cells():
+        for f, ok, _reason, outcome, _v, _r, _route in cells():
             want, _rule = oracle.expected(f)
             if (outcome == oracle.SERVED) != bool(ok):
                 bad.append((f, ok, outcome))
@@ -105,7 +105,7 @@ class TestCoverage(_MatrixBase):
         A rule that never fires is indistinguishable from a rule that is
         wrong, so every outcome must be reachable from the matrix.
         """
-        reached = {outcome for _f, _ok, _r, outcome in cells()}
+        reached = {outcome for _f, _ok, _r, outcome, _v, _rr, _rt in cells()}
         missing = set(oracle.OUTCOMES) - reached
         self.assertEqual(set(), missing,
                          "outcomes never exercised: %s" % sorted(missing))
@@ -117,7 +117,7 @@ class TestCoverage(_MatrixBase):
 
         Two rules could share an outcome while one of them was dead code.
         """
-        fired = {oracle.expected(f)[1] for f, _ok, _r, _o in cells()}
+        fired = {oracle.expected(f)[1] for f, _ok, _r, _o, _v, _rr, _rt in cells()}
         unfired = {r[0] for r in oracle.RULES} - fired
         self.assertEqual(set(), unfired,
                          "oracle rules that never fire: %s" % sorted(unfired))
@@ -187,7 +187,23 @@ class TestCoverage(_MatrixBase):
         missing here while the oracle already admitted it, so the matrix
         was undercounting what the launcher actually serves.
         """
-        self.assertEqual(20160, len(cells()))
+        # WO-CM1: the grid grew because two axes were added (entry with
+        # "run", and the effective streaming flag) and because the old
+        # `kind` axis was replaced by `entry`. The pin's PURPOSE is "an
+        # axis cannot be dropped unnoticed", so it asserts the exact
+        # count AND that it decomposes as the axes predict -- a single
+        # opaque integer would let a compensating error through.
+        all_cells = cells()
+        self.assertEqual(60480, len(all_cells))
+        n_axes = len(capability_matrix.AXES)
+        product = 1
+        for _name, values in capability_matrix.AXES:
+            product *= len(values)
+        self.assertEqual(product, len(all_cells),
+                         "cell count must equal the Cartesian product of "
+                         "the declared axes (%d); a mismatch means an axis "
+                         "was added without its values being enumerated"
+                         % product)
 
 
 class TestRegressions(_MatrixBase):
@@ -304,8 +320,22 @@ class TestDeliverable(unittest.TestCase):
         """The findings are part of the deliverable, not just this test."""
         with open(capability_matrix.MATRIX) as fh:
             text = fh.read()
-        self.assertIn("Replayability is not an eligibility axis", text)
-        self.assertIn("return_stats", text)
+        # WO-CM1 replaced this test's assertions. It used to require the
+        # phrase "Replayability is not an eligibility axis", which was
+        # removed because the document it was guarding has been rebuilt
+        # around a different claim. Asserting the new findings instead is
+        # what keeps the deliverable honest; a test that pins wording the
+        # audit invalidated would block the correction.
+        for required in (
+            "never cleanroom-served",
+            "The predicate was unreachable",
+            "only when streaming",
+            "bypass the predicate for NUMA",
+            "Public-VALID",
+            "Launcher selected",
+        ):
+            self.assertIn(required, text,
+                          "the matrix must document %r" % required)
 
 
 if __name__ == "__main__":

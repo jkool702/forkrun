@@ -3,127 +3,165 @@
 **Generated. Do not edit by hand.** Regenerate with
 `python3 tools/capability_matrix.py`; verify with `--check`.
 
-Produced by `tools/capability_matrix.py` from the live
-`_cleanroom_eligible` predicate. The expected behaviour is *not* taken
-from the predicate: it comes from `tools/capability_oracle.py`, a module
-that imports nothing from `forkrun`. The two agreeing is the evidence;
-neither alone would be.
+WO-CM1 rebuilt this. The previous version was a truth table over
+`_cleanroom_eligible()`, which answers only *"is this envelope
+acceptable?"* -- never *"does a public call ever ask?"* Those
+diverge at the current head in three independent ways, so this
+document now reports the predicate's answer **and** the route the
+public entry point actually takes.
 
 | | |
 |---|---|
-| Cells enumerated | 20160 |
-| Served by the launcher | 256 (1.27%) |
-| Declined | 19904 |
-| Distinct outcomes | 10 |
+| Cells enumerated | 60480 |
+| Public-VALID cells | 17280 (28.6% of grid) |
+| Cells rejected by public validation | 43200 |
+| Predicate accepts (of valid) | 768 |
+| **Launcher selected (of valid)** | **336 (1.94%)** |
+| Distinct routes | 5 |
+
+Percentages are against the **public-valid** denominator. The full
+grid includes configurations no public call can make (iterable
+sources, a missing path, a directory, `order="sorted"`); those keep
+their conformance tests and are counted as *validation rejection*,
+never as cleanroom refusals.
 
 ---
 
 ## Axes
 
-The axes are the facts a call carries to the envelope:
+- **entry**: `'map'`, `'stream'`, `'run'`
+- **streaming**: `False`, `True`
+- **source_kind**: `'path'`, `'fd'`, `'fileobj'`, `'iterable'`, `'missing'`, `'dir'`, `'bogus'`
+- **mode**: `'plugin'`, `'udf'`, `'python'`, `'spawn'`, `'splice'`
+- **nodes**: `1`, `2`, `4`
+- **order**: `'none'`, `'index'`, `'sorted'`
+- **orchestrator**: `True`, `False`
+- **strict_poison**: `True`, `False`
+- **return_stats**: `True`, `False`
+- **resume**: `None`, `'state.json'`
+- **checkpoint_file**: `None`, `'ckpt.json'`
 
-| axis | values |
-|---|---|
-| `kind` | 'map', 'stream' |
-| `source_kind` | 'path', 'fd', 'fileobj', 'iterable', 'missing', 'dir', 'bogus' |
-| `mode` | 'plugin', 'udf', 'python', 'spawn', 'splice' |
-| `nodes` | 1, 2, 4 |
-| `order` | 'none', 'index', 'sorted' |
-| `orchestrator` | True, False |
-| `strict_poison` | True, False |
-| `return_stats` | True, False |
-| `resume` | None, 'state.json' |
-| `checkpoint_file` | None, 'ckpt.json' |
-
-### Two corrections to the roadmap's axis list
-
-**1. Replayability is not an eligibility axis.** Roadmap section 4.1
-lists `{replayable, non-replayable}` among the envelope axes. It is not
-an input to `_cleanroom_eligible` at all. Replayability is computed in
-the *outcome* contract, after the launcher has run:
-`replayable = pre_ingest or _source_is_reopenable(source)` (run.py:1025)
-and gates `may_fallback`. It answers "may we fall back?", not "may the
-launcher serve this call?". Conflating the two would make the matrix
-claim to predict something it cannot observe.
-
-**2. `return_stats` is a real axis, and the roadmap omits it.** It is a
-parameter of the predicate and of the dispatch sites. It is a
-**constant axis**: the predicate never consults it, so it always
-serves. It is kept in the matrix anyway, because an axis that is
-currently constant is exactly what a future change would silently
-start varying.
-
-## Outcomes
-
-Every cell resolves to exactly one of these. There are no others:
-the enumeration produces no `UNCLASSIFIED` cell.
-
-| # | outcome | cells | example |
-|---|---|---|---|
-| 1 | `DECLINE_NODES` | 13440 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=2, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 2 | `DECLINE_MODE` | 2688 | `Facts(kind='map', source_kind='path', mode='python', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 3 | `DECLINE_RESUME` | 2016 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file='ckpt.json')` |
-| 4 | `DECLINE_ORDER` | 1344 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='sorted', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 5 | `SERVED` | 256 | `Facts(kind='map', source_kind='path', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 6 | `DECLINE_STREAM_ORDER` | 112 | `Facts(kind='stream', source_kind='path', mode='plugin', nodes=1, order='index', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 7 | `DECLINE_MODE_STREAM_SPAWN` | 112 | `Facts(kind='stream', source_kind='path', mode='spawn', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 8 | `DECLINE_SOURCE_MISSING` | 64 | `Facts(kind='map', source_kind='missing', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 9 | `DECLINE_SOURCE_DIR` | 64 | `Facts(kind='map', source_kind='dir', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-| 10 | `DECLINE_SOURCE_TYPE` | 64 | `Facts(kind='map', source_kind='bogus', mode='plugin', nodes=1, order='none', orchestrator=True, strict_poison=True, return_stats=True, resume=None, checkpoint_file=None)` |
-
-## The oracle's rules
-
-Evaluated **first-match-wins**. Each is the contract's own words.
-
-- **R1 `nodes`** &rarr; `DECLINE_NODES`  
-  docstring: 'UMA single node -- no multi-node rings'
-- **R2 `mode`** &rarr; `DECLINE_MODE`  
-  docstring: 'mode=plugin -- it dlopens an object and calls an entry point'; and the plugin must export forkrun_use_ctx, since a plugin without it is driven by the legacy ARGV/stdout route whose output lands on the worker's stdout, not the memfd -- exit 78, not silent success with an empty result set. P1-3 adds mode='udf', served wherever plugin is: the launcher dlopens a per-minor helper, initialises the interpreter before forking, and selects fr_py_worker_udf_loop, which has the same signature and the same lifecycle. The refusal reason does not transfer -- a UDF has no ctx dialect to be mismatched on -- but the envelope is identical, so the outcome is too. Stage 3 adds mode='spawn', whose worker loop takes an argv VECTOR rather than the plugin's two strings. Same arity, incompatible types, so the launcher routes it through a mode-specific worker descriptor instead of casting. It is served only once the process-lifecycle gates held: in-group descendant cleanup on worker death, a tested setsid-escape boundary, observed respawn, teardown cleanup, and command failure handled by on_error with an explicit SKIPPED record rather than an infrastructure abort. All six are in test_stage3_lifecycle.py.
-- **R4 `order`** &rarr; `DECLINE_ORDER`  
-  docstring: 'order in (none, index)'. The launcher forks no C orderer, but does not need to: collect_records sorts by index for map, and stream reassembles parent-side from the batch_idx already in the framing
-- **R5 `resume/checkpoint`** &rarr; `DECLINE_RESUME`  
-  CR-FIX1-K: the launcher neither transports nor implements checkpoint/resume. The check sits ABOVE the streaming block, so it applies to map() too -- it used to live under `if streaming:`, which made the refusal unreachable for map(), and the map() dispatch site did not pass the arguments, so a resume request was silently dropped on an accelerated path
-- **R2b `mode`** &rarr; `DECLINE_MODE_STREAM_SPAWN`  
-  stream(mode='spawn') is not served; the streaming path has no spawn dispatch
-- **R6 `stream+order`** &rarr; `DECLINE_STREAM_ORDER`  
-  docstring + inline note: the stream path has no collect step to sort with, and its parent-side reassembly handles order='none' only. NOTE the asymmetry with R4: map SERVES order='index', stream does not. A single predicate holds both, deliberately
-- **R8 `source missing`** &rarr; `DECLINE_SOURCE_MISSING`  
-  inline: a path that does not exist is not servable
-- **R9 `source directory`** &rarr; `DECLINE_SOURCE_DIR`  
-  inline: a directory is not servable
-- **R10 `source type`** &rarr; `DECLINE_SOURCE_TYPE`  
-  inline: source must be a path, an open descriptor, or an iterable
-
-## Precedence
-
-The order of declines is part of the contract: when several conditions
-hold at once, the winner is the message the caller actually sees.
-
-- **R1-R7 precedence is load-bearing.** Several can hold simultaneously
-  (nodes=2 *and* mode="python" *and* orchestrator=False), so reordering
-  these silently changes observable behaviour.
-- **R8-R10 precedence is immaterial.** They classify mutually exclusive
-  source kinds; at most one can hold. Their relative order carries no
-  contract weight.
-
-## Contract points that were historically wrong
-
-These are the assertions carrying the most weight, because each
-corresponds to a defect that actually reached this codebase. A generic
-rule check would not catch a regression in any of them.
-
-| assertion | expected | why it matters |
-|---|---|---|
-| `resume_is_refused_for_map_not_just_stream` | `DECLINE_RESUME` | CR-FIX1-K: the refusal was unreachable for map() because the check lived under `if streaming:`, and map()'s dispatch site never passed resume at all -- so the envelope could not see it |
-| `both_supervision_models_are_served` | `SERVED` | orchestrator=False used to be DECLINED (DECLINE_ORCH), because the launcher supervised unconditionally and a caller asking for fail-fast would silently get recovery. DECISION-03 gave the launcher a fail-fast policy whose branch returns before the recovery call, so the refusal reason no longer holds |
-| `map_serves_order_index` | `SERVED` | ordering is applied downstream by shared code, so the launcher needs no C orderer to honour it |
-| `map_serves_strict_poison` | `SERVED` | served via the counter channel; both were previously declined and return_stats was a live P0 bug reporting poisoned=0 for a run that had poisoned batches |
-| `stream_declines_order_index_that_map_serves` | `DECLINE_STREAM_ORDER` | asymmetry is intentional; a second hand-written predicate at the stream() dispatch site had already drifted from the map() one once, requiring not-orchestrator while this one required orchestrator |
-| `stream_serves_order_none` | `SERVED` | the stream path's actual envelope |
-| `descending_precedence_puts_orchestrator_before_order` | `DECLINE_NODES` | five decline conditions hold simultaneously. R1 wins, so the caller is told about nodes first rather than about the last thing checked |
-| `resume_outranks_stream_order` | `DECLINE_RESUME` | R5 sits above the streaming block precisely so that resume is refused before the stream/order distinction is consulted |
+`entry` and `streaming` are new in WO-CM1. See "Corrections" below
+for what they made visible that the old axis set could not.
 
 ---
 
-Next: the independent oracle is `tools/capability_oracle.py`; the
-agreement test is `python/tests/test_capability_matrix.py`.
+## Actual dispatch route
+
+### Public-VALID cells
+
+| Actual route | Cells | Share |
+|---|---:|---:|
+| `numa-pipeline` | 9216 | 53.3% |
+| `splice-pipeline` | 3456 | 20.0% |
+| `cleanroom-not-reached` | 2736 | 15.8% |
+| `in-process/reactor` | 1536 | 8.9% |
+| `cleanroom-selected` | 336 | 1.9% |
+
+### All cells, including invalid ones
+
+| Actual route | Cells | Share |
+|---|---:|---:|
+| `numa-pipeline` | 32256 | 53.3% |
+| `splice-pipeline` | 12096 | 20.0% |
+| `cleanroom-not-reached` | 10304 | 17.0% |
+| `in-process/reactor` | 5376 | 8.9% |
+| `cleanroom-selected` | 448 | 0.7% |
+
+---
+
+## Corrections this audit made
+
+Each was verified against the live source and, where possible,
+observed directly rather than inferred.
+
+### 1. `run()` is never cleanroom-served
+
+`run()` contains no cleanroom branch at all: 0 calls to
+`_cleanroom_eligible`, 0 evaluations of `_cleanroom_enabled()`. It
+dispatches straight to the NUMA, reactor, or in-process executor.
+The previous matrix never mentioned `run`.
+
+### 2. The predicate was unreachable for most of the grid
+
+`map()` consults it only when the gate is on **and** `raw_mode` is
+in `(plugin, udf, spawn)`. `stream()` only for `(plugin, udf)`. Every
+other mode returns before the predicate is reached, so a cell could
+satisfy the envelope and never be asked about it.
+
+### 3. `stream()` reaches the predicate only when streaming
+
+The call sits inside stream()'s streaming branch, so a materialised
+source never consults it. Observed with a real plugin:
+`stream(..., streaming=True)` selects the launcher; the same call
+with `streaming=None` over a regular file does not.
+
+### 4. Both `map()` and `stream()` bypass the predicate for NUMA
+
+`num_nodes > 1` takes the NUMA path and returns before the
+predicate (run.py:3834 for map, :4254 for stream).
+
+### 5. The old denominator was inflated by 71.4%
+
+Invalid configurations were counted against the capability
+denominator. **256 cells were reported as served that no public call
+could ever make** -- every one of them an iterable source, which
+`_api._reject_iterable_source` rejects before any envelope check.
+
+---
+
+## Predicate outcomes (valid cells only)
+
+| Outcome | Cells | Reason fragment |
+|---|---:|---|
+| `DECLINE_NODES` | 11520 | UMA single-node only (got nodes=2) |
+| `DECLINE_RESUME` | 2592 | resume=/checkpoint_file= is not served; the launcher neith |
+| `DECLINE_MODE` | 2304 | mode='plugin', 'udf' or 'spawn' only (got 'python') |
+| `SERVED` | 768 |  |
+| `DECLINE_STREAM_ORDER` | 48 | stream(order='index') is not served; the stream path has n |
+| `DECLINE_MODE_STREAM_SPAWN` | 48 | stream(mode='spawn') is not served; the streaming path has |
+
+---
+
+## Oracle rules
+
+| Rule | Fires on | Citation |
+|---|---|---|
+| `R1` | 0 | docstring: 'UMA single node -- no multi-node rings' |
+| `R2` | 0 | docstring: 'mode=plugin -- it dlopens an object and calls an |
+| `R4` | 0 | docstring: 'order in (none, index)'. The launcher forks no C |
+| `R5` | 0 | CR-FIX1-K: the launcher neither transports nor implements ch |
+| `R2b` | 0 | stream(mode='spawn') is not served; the streaming path has n |
+| `R6` | 0 | docstring + inline note: the stream path has no collect step |
+| `R8` | 0 | inline: a path that does not exist is not servable |
+| `R9` | 0 | inline: a directory is not servable |
+| `R10` | 0 | inline: source must be a path, an open descriptor, or an ite |
+
+---
+
+## Reproducing
+
+```
+python3 tools/capability_matrix.py            # write
+python3 tools/capability_matrix.py --check    # fail if stale
+python3 -m unittest discover -s python/tests -p test_capability_matrix.py
+```
+
+The expected behaviour is not taken from the predicate: it comes
+from `tools/capability_oracle.py`, which imports nothing from
+`forkrun`. The two agreeing is the evidence; neither alone is.
+
+## Limitations not expressible as cell counts
+
+- **Default is OFF.** `FORKRUN_CLEANROOM` is opt-in, so on a default
+  configuration the launcher-selected row above is reachable but
+  not *selected*. Capability and default behaviour are different
+  questions; this table answers the first.
+- **Artifacts are a separate axis.** A missing launcher or an
+  incompatible UDF helper changes the route without changing any
+  cell in this grid; they are tested as boundary conditions, not
+  enumerated.
+- **Fake NUMA is not physical NUMA.** `nodes="@N"` models the
+  multi-node code path only.
+- **Counts are synthetic.** They enumerate a configuration space;
+  they are not an estimate of real-world usage.

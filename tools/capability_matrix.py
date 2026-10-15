@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 import capability_oracle as oracle                              # noqa: E402
 from forkrun.run import _cleanroom_eligible                     # noqa: E402
+import capability_dispatch as dispatch                          # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, os.pardir))
@@ -32,7 +33,14 @@ MATRIX = os.path.join(ROOT, "dev", "supervisor",
                       "CLEANROOM_CAPABILITY_MATRIX.md")
 
 AXES = [
-    ("kind", ("map", "stream")),
+    # WO-CM1: "run" is a first-class entry point here. It was absent, and
+    # `run()` turns out to have NO cleanroom branch at all, so the matrix
+    # was structurally unable to report that.
+    ("entry", ("map", "stream", "run")),
+    # The EFFECTIVE ingestion decision for stream(). Not a synonym for
+    # the entry point: `stream()` only consults the predicate inside its
+    # streaming branch, so a materialised source never reaches it.
+    ("streaming", (False, True)),
     ("source_kind", oracle.SOURCE_KINDS),
     # P1-3 added mode="udf" (embedded-CPython worker loop, DECISION-01
     # Option A). Without it here the axis undercounts what is actually
@@ -81,27 +89,76 @@ def cleanup_source(kind, src):
 
 
 def call_predicate(f, src):
-    """Invoke the predicate exactly as the dispatch sites do."""
+    """Invoke the predicate exactly as the dispatch sites do.
+
+    `streaming` here is the EFFECTIVE ingestion decision, which is what
+    the live sites pass. It is not the same thing as "the caller used
+    stream()": stream() over a materialised source passes False, and a
+    materialised map() passes False too.
+    """
     return _cleanroom_eligible(
         src, f.mode, f.nodes, f.order, f.strict_poison,
         f.orchestrator, f.return_stats,
-        streaming=(f.kind == "stream"),
+        streaming=f.streaming,
         resume=f.resume, checkpoint_file=f.checkpoint_file)
 
 
+def cell_route(f, reached, ok):
+    """The route a public call for this cell ACTUALLY takes.
+
+    Derived from the dispatch contract in the oracle, which is why it can
+    disagree with `ok`: a cell can satisfy the envelope and never be
+    asked about it. tools/capability_dispatch.py observes the live
+    branches independently, and the tests assert the two agree.
+    """
+    if not reached:
+        if f.mode == "splice":
+            return dispatch.SPLICE_PIPELINE
+        if f.nodes != 1:
+            return dispatch.NUMA_PIPELINE
+        if f.entry == "run":
+            # run() has no cleanroom branch; whatever it does, it is not
+            # this. Recorded as its own category rather than folded into
+            # "in-process", because "run() cannot be cleanroom-served" is
+            # the single most important fact this audit produced.
+            return dispatch.CLEANROOM_NOT_REACHED
+        return dispatch.IN_PROCESS
+    return (dispatch.CLEANROOM_SELECTED if ok
+            else dispatch.CLEANROOM_NOT_REACHED)
+
+
 def collect():
-    """Every (facts, ok, reason, outcome) cell of the cross product."""
+    """Every cell of the cross product, with its public validity and its
+    ACTUAL dispatch route alongside the predicate's answer.
+
+    A cell tuple is (facts, ok, reason, outcome, valid, reached, route).
+    The last three are what make this an inventory of implementation
+    facts rather than a predicate truth table.
+    """
     cells = []
     names = [a for a, _ in AXES]
     with tempfile.TemporaryDirectory() as tmpdir:
         for combo in itertools.product(*[v for _, v in AXES]):
-            f = oracle.Facts(**dict(zip(names, combo)))
+            values = dict(zip(names, combo))
+            # `streaming` is INAPPLICABLE for map/run and must not be
+            # enumerated for them. Generating map(streaming=True) creates
+            # a cell no public call can make -- map() has no streaming
+            # notion and always passes streaming=False to the predicate --
+            # which is precisely the misleading Cartesian product this
+            # work order warns about. It also made the oracle's stream
+            # rules fire against map cells.
+            if values["entry"] != "stream":
+                values["streaming"] = False
+            f = oracle.Facts(kind="map", **values)
             src = make_source(f.source_kind, tmpdir)
             try:
                 ok, reason = call_predicate(f, src)
             finally:
                 cleanup_source(f.source_kind, src)
-            cells.append((f, ok, reason, oracle.classify(ok, reason)))
+            valid = oracle.public_valid(f)
+            reached = oracle.dispatch_reaches_predicate(f)
+            cells.append((f, ok, reason, oracle.classify(ok, reason),
+                          valid, reached, cell_route(f, reached, ok)))
     return cells
 
 
@@ -113,14 +170,34 @@ LONG_CITATIONS = {r[0]: r[4] for r in oracle.RULES}
 
 
 def render(cells):
-    total = len(cells)
-    served = sum(1 for c in cells if c[1])
+    """Render the matrix.
 
-    # outcome -> count, and a representative cell for each
-    outcomes = {}
-    for f, ok, reason, oid in cells:
-        rec = outcomes.setdefault(oid, {"n": 0, "example": f, "reason": reason})
-        rec["n"] += 1
+    Reports TWO denominators and refuses to collapse them: the full grid
+    (every generated cell) and the public-VALID subset (configurations a
+    caller could actually make). The previous document reported only the
+    first, which inflated the denominator with configurations that public
+    validation rejects before any envelope is consulted.
+    """
+    total = len(cells)
+    valid = [c for c in cells if c[4]]
+    nvalid = len(valid)
+
+    def _route_table(rows, title):
+        counts = {}
+        for c in rows:
+            counts.setdefault(c[6], {"n": 0, "example": c[0]})
+            counts[c[6]]["n"] += 1
+        w2 = []
+        w2.append("### %s" % title)
+        w2.append("")
+        w2.append("| Actual route | Cells | Share |")
+        w2.append("|---|---:|---:|")
+        for rid, d in sorted(counts.items(), key=lambda kv: -kv[1]["n"]):
+            f = d["example"]
+            share = 100.0 * d["n"] / len(rows) if rows else 0.0
+            w2.append("| `%s` | %d | %.1f%% |" % (rid, d["n"], share))
+        w2.append("")
+        return w2
 
     L = []
     w = L.append
@@ -129,108 +206,148 @@ def render(cells):
     w("**Generated. Do not edit by hand.** Regenerate with")
     w("`python3 tools/capability_matrix.py`; verify with `--check`.")
     w("")
-    w("Produced by `tools/capability_matrix.py` from the live")
-    w("`_cleanroom_eligible` predicate. The expected behaviour is *not* taken")
-    w("from the predicate: it comes from `tools/capability_oracle.py`, a module")
-    w("that imports nothing from `forkrun`. The two agreeing is the evidence;")
-    w("neither alone would be.")
+    w("WO-CM1 rebuilt this. The previous version was a truth table over")
+    w("`_cleanroom_eligible()`, which answers only *\"is this envelope")
+    w("acceptable?\"* -- never *\"does a public call ever ask?\"* Those")
+    w("diverge at the current head in three independent ways, so this")
+    w("document now reports the predicate's answer **and** the route the")
+    w("public entry point actually takes.")
     w("")
     w("| | |")
     w("|---|---|")
     w("| Cells enumerated | %d |" % total)
-    w("| Served by the launcher | %d (%.2f%%) |"
-      % (served, 100.0 * served / total))
-    w("| Declined | %d |" % (total - served))
-    w("| Distinct outcomes | %d |" % len(outcomes))
+    w("| Public-VALID cells | %d (%.1f%% of grid) |"
+      % (nvalid, 100.0 * nvalid / total if total else 0.0))
+    w("| Cells rejected by public validation | %d |" % (total - nvalid))
+    w("| Predicate accepts (of valid) | %d |"
+      % sum(1 for c in valid if c[1]))
+    w("| **Launcher selected (of valid)** | **%d (%.2f%%)** |"
+      % (sum(1 for c in valid if c[6] == dispatch.CLEANROOM_SELECTED),
+         100.0 * sum(1 for c in valid
+                     if c[6] == dispatch.CLEANROOM_SELECTED) / nvalid
+         if nvalid else 0.0))
+    w("| Distinct routes | %d |" % len({c[6] for c in cells}))
+    w("")
+    w("Percentages are against the **public-valid** denominator. The full")
+    w("grid includes configurations no public call can make (iterable")
+    w("sources, a missing path, a directory, `order=\"sorted\"`); those keep")
+    w("their conformance tests and are counted as *validation rejection*,")
+    w("never as cleanroom refusals.")
     w("")
     w("---")
     w("")
-
-    # ---- axes
     w("## Axes")
     w("")
-    w("The axes are the facts a call carries to the envelope:")
+    for name, values in AXES:
+        w("- **%s**: %s" % (name, ", ".join("`%r`" % v for v in values)))
     w("")
-    w("| axis | values |")
-    w("|---|---|")
-    for name, vals in AXES:
-        w("| `%s` | %s |" % (name, ", ".join(repr(v) for v in vals)))
-    w("")
-    w("### Two corrections to the roadmap's axis list")
-    w("")
-    w("**1. Replayability is not an eligibility axis.** Roadmap section 4.1")
-    w("lists `{replayable, non-replayable}` among the envelope axes. It is not")
-    w("an input to `_cleanroom_eligible` at all. Replayability is computed in")
-    w("the *outcome* contract, after the launcher has run:")
-    w("`replayable = pre_ingest or _source_is_reopenable(source)` (run.py:1025)")
-    w("and gates `may_fallback`. It answers \"may we fall back?\", not \"may the")
-    w("launcher serve this call?\". Conflating the two would make the matrix")
-    w("claim to predict something it cannot observe.")
-    w("")
-    w("**2. `return_stats` is a real axis, and the roadmap omits it.** It is a")
-    w("parameter of the predicate and of the dispatch sites. It is a")
-    w("**constant axis**: the predicate never consults it, so it always")
-    w("serves. It is kept in the matrix anyway, because an axis that is")
-    w("currently constant is exactly what a future change would silently")
-    w("start varying.")
-    w("")
-
-    # ---- outcomes
-    w("## Outcomes")
-    w("")
-    w("Every cell resolves to exactly one of these. There are no others:")
-    w("the enumeration produces no `UNCLASSIFIED` cell.")
-    w("")
-    w("| # | outcome | cells | example |")
-    w("|---|---|---|---|")
-    for i, (oid, rec) in enumerate(
-            sorted(outcomes.items(), key=lambda kv: -kv[1]["n"]), 1):
-        f = rec["example"]
-        w("| %d | `%s` | %d | `%s` |" % (i, oid, rec["n"], f))
-    w("")
-
-    # ---- rules
-    w("## The oracle's rules")
-    w("")
-    w("Evaluated **first-match-wins**. Each is the contract's own words.")
-    w("")
-    for rid, name, _cond, outcome, cite in oracle.RULES:
-        w("- **%s `%s`** &rarr; `%s`  " % (rid, name, outcome))
-        w("  %s" % cite)
-    w("")
-
-    # ---- precedence
-    w("## Precedence")
-    w("")
-    w("The order of declines is part of the contract: when several conditions")
-    w("hold at once, the winner is the message the caller actually sees.")
-    w("")
-    w("- **R1-R7 precedence is load-bearing.** Several can hold simultaneously")
-    w("  (nodes=2 *and* mode=\"python\" *and* orchestrator=False), so reordering")
-    w("  these silently changes observable behaviour.")
-    w("- **R8-R10 precedence is immaterial.** They classify mutually exclusive")
-    w("  source kinds; at most one can hold. Their relative order carries no")
-    w("  contract weight.")
-    w("")
-
-    # ---- regressions
-    w("## Contract points that were historically wrong")
-    w("")
-    w("These are the assertions carrying the most weight, because each")
-    w("corresponds to a defect that actually reached this codebase. A generic")
-    w("rule check would not catch a regression in any of them.")
-    w("")
-    w("| assertion | expected | why it matters |")
-    w("|---|---|---|")
-    for name, _f, outcome, _rid, why in oracle.REGRESSIONS:
-        w("| `%s` | `%s` | %s |" % (name, outcome, why))
+    w("`entry` and `streaming` are new in WO-CM1. See \"Corrections\" below")
+    w("for what they made visible that the old axis set could not.")
     w("")
     w("---")
     w("")
-    w("Next: the independent oracle is `tools/capability_oracle.py`; the")
-    w("agreement test is `python/tests/test_capability_matrix.py`.")
+    w("## Actual dispatch route")
     w("")
-    return "\n".join(L)
+    L.extend(_route_table(valid, "Public-VALID cells"))
+    L.extend(_route_table(cells, "All cells, including invalid ones"))
+    w("---")
+    w("")
+    w("## Corrections this audit made")
+    w("")
+    w("Each was verified against the live source and, where possible,")
+    w("observed directly rather than inferred.")
+    w("")
+    w("### 1. `run()` is never cleanroom-served")
+    w("")
+    w("`run()` contains no cleanroom branch at all: 0 calls to")
+    w("`_cleanroom_eligible`, 0 evaluations of `_cleanroom_enabled()`. It")
+    w("dispatches straight to the NUMA, reactor, or in-process executor.")
+    w("The previous matrix never mentioned `run`.")
+    w("")
+    w("### 2. The predicate was unreachable for most of the grid")
+    w("")
+    w("`map()` consults it only when the gate is on **and** `raw_mode` is")
+    w("in `(plugin, udf, spawn)`. `stream()` only for `(plugin, udf)`. Every")
+    w("other mode returns before the predicate is reached, so a cell could")
+    w("satisfy the envelope and never be asked about it.")
+    w("")
+    w("### 3. `stream()` reaches the predicate only when streaming")
+    w("")
+    w("The call sits inside stream()'s streaming branch, so a materialised")
+    w("source never consults it. Observed with a real plugin:")
+    w("`stream(..., streaming=True)` selects the launcher; the same call")
+    w("with `streaming=None` over a regular file does not.")
+    w("")
+    w("### 4. Both `map()` and `stream()` bypass the predicate for NUMA")
+    w("")
+    w("`num_nodes > 1` takes the NUMA path and returns before the")
+    w("predicate (run.py:3834 for map, :4254 for stream).")
+    w("")
+    w("### 5. The old denominator was inflated by %.1f%%"
+      % (100.0 * (total - nvalid) / total if total else 0.0))
+    w("")
+    w("Invalid configurations were counted against the capability")
+    w("denominator. **%d cells were reported as served that no public call"
+      % sum(1 for c in cells if c[1] and not c[4]))
+    w("could ever make** -- every one of them an iterable source, which")
+    w("`_api._reject_iterable_source` rejects before any envelope check.")
+    w("")
+    w("---")
+    w("")
+    w("## Predicate outcomes (valid cells only)")
+    w("")
+    counts = {}
+    for c in valid:
+        counts.setdefault(c[3], {"n": 0, "reason": c[2]})
+        counts[c[3]]["n"] += 1
+    w("| Outcome | Cells | Reason fragment |")
+    w("|---|---:|---|")
+    for oid, d in sorted(counts.items(), key=lambda kv: -kv[1]["n"]):
+        w("| `%s` | %d | %s |"
+          % (oid, d["n"], (d["reason"] or "")[:58].replace("|", "\\|")))
+    w("")
+    w("---")
+    w("")
+    w("## Oracle rules")
+    w("")
+    w("| Rule | Fires on | Citation |")
+    w("|---|---|---|")
+    for rule in oracle.RULES:
+        name, desc, _test, anchor, cite = rule[0], rule[1], rule[2], rule[3], rule[4]
+        fired = sum(1 for c in valid
+                    if anchor and c[3] != "SERVED" and anchor in (c[2] or ""))
+        w("| `%s` | %s | %s |" % (name, fired, (cite or "")[:60]))
+    w("")
+    w("---")
+    w("")
+    w("## Reproducing")
+    w("")
+    w("```")
+    w("python3 tools/capability_matrix.py            # write")
+    w("python3 tools/capability_matrix.py --check    # fail if stale")
+    w("python3 -m unittest discover -s python/tests -p test_capability_matrix.py")
+    w("```")
+    w("")
+    w("The expected behaviour is not taken from the predicate: it comes")
+    w("from `tools/capability_oracle.py`, which imports nothing from")
+    w("`forkrun`. The two agreeing is the evidence; neither alone is.")
+    w("")
+    w("## Limitations not expressible as cell counts")
+    w("")
+    w("- **Default is OFF.** `FORKRUN_CLEANROOM` is opt-in, so on a default")
+    w("  configuration the launcher-selected row above is reachable but")
+    w("  not *selected*. Capability and default behaviour are different")
+    w("  questions; this table answers the first.")
+    w("- **Artifacts are a separate axis.** A missing launcher or an")
+    w("  incompatible UDF helper changes the route without changing any")
+    w("  cell in this grid; they are tested as boundary conditions, not")
+    w("  enumerated.")
+    w("- **Fake NUMA is not physical NUMA.** `nodes=\"@N\"` models the")
+    w("  multi-node code path only.")
+    w("- **Counts are synthetic.** They enumerate a configuration space;")
+    w("  they are not an estimate of real-world usage.")
+    return "\n".join(L) + "\n"
+
 
 
 def main(argv=None):

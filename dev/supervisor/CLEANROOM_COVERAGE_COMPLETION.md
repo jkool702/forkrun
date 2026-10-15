@@ -46,9 +46,27 @@ one unproven axis never holds back another.
 
 ## 1. Measured baseline — valid workload configurations
 
-The C0.1 capability matrix enumerates 16,128 cells, but its axes carry values
+The C0.1 capability matrix enumerates 60,480 cells, but its axes carry values
 that do not correspond to valid workloads. Two different corrections apply,
 and conflating them was the previous draft's error:
+
+> **WO-CM1 supersedes the counts below.** The matrix was rebuilt from the
+> public entry points rather than from the predicate alone, and the headline
+> numbers in this section predate that work. Three facts changed:
+>
+> 1. `run()` is now a first-class entry point, and it has **no cleanroom
+>    branch at all** -- it is never launcher-served, for any mode.
+> 2. The predicate is **unreachable** for most of the grid: `map()` consults
+>    it only for modes `(plugin, udf, spawn)`, `stream()` only for
+>    `(plugin, udf)` and only when the call is actually streaming, and both
+>    bypass it entirely for `num_nodes > 1`.
+> 3. The denominator is now stated over **public-VALID** cells
+>    (17,280 of 60,480). The old figure divided by a grid that was 62%
+>    configurations no public call could make.
+>
+> Current figures are in `dev/supervisor/CLEANROOM_CAPABILITY_MATRIX.md`,
+> which is generated and verified with `--check`. The historical counts
+> below are retained only to show what changed.
 
 | case | status | why |
 |---|---|---|
@@ -70,7 +88,8 @@ fail-fast, skip}`) plus four valid source kinds:
 | `DECLINE_STREAM_POISON` | 8 | 0.2% |
 | **SERVED** | **40** | **0.98%** |
 
-**4,096 valid configurations; 40 served.**
+**4,096 valid configurations; 40 served.** *(historical — WO-CM1
+replaced this denominator; see the note above.)*
 
 **These percentages are refusal-category shares, not usage frequencies.**
 There is no production telemetry here. "P1 first" is a **prioritisation

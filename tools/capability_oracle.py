@@ -47,9 +47,23 @@ from typing import NamedTuple
 
 
 class Facts(NamedTuple):
-    """One cell of the matrix: everything a call tells the envelope."""
+    """One cell of the matrix: everything a call tells the envelope.
 
-    kind: str            # "map" | "stream"
+    WO-CM1 added `entry` and `streaming`, because a predicate truth table
+    over (map, stream) x mode could not distinguish three facts that are
+    independently true at the current head:
+
+      * `run` has NO cleanroom branch at all;
+      * `stream` reaches the predicate only inside its streaming branch,
+        so a materialised source never consults it;
+      * `stream` omits "spawn" from the modes it offers the launcher,
+        while `map` includes it.
+
+    `kind` is retained for backwards compatibility with the existing
+    rule set; `entry` supersedes it where they differ.
+    """
+
+    kind: str            # "map" | "stream"  (legacy alias of `entry`)
     source_kind: str     # see SOURCE_KINDS
     mode: str            # "plugin" | "python" | "spawn" | "splice"
     nodes: int           # 1 | 2 | 4
@@ -59,10 +73,84 @@ class Facts(NamedTuple):
     return_stats: bool
     resume: str | None
     checkpoint_file: str | None
+    # WO-CM1. Defaults keep every existing positional construction valid.
+    entry: str = "map"           # "run" | "map" | "stream"
+    streaming: bool = False      # effective ingestion for stream()
 
 
 SOURCE_KINDS = ("path", "fd", "fileobj", "iterable",
                 "missing", "dir", "bogus")
+
+# ---------------------------------------------------------------------------
+# WO-CM1 -- the public DISPATCH contract, stated independently of the
+# predicate.
+#
+# `_cleanroom_eligible` answers "would this configuration be acceptable to
+# the launcher ENVELOPE?". It cannot answer "does a public call ever ASK?",
+# because reaching it is a property of the branch structure of run/map/
+# stream, not of the envelope. The audit at 460c77da found three cells
+# where those two answers diverge, so the matrix now carries both.
+#
+# These tables are transcribed from the public contract and the reviewed
+# dispatch rules, NOT by reading the predicate -- same discipline as the
+# rest of this module. `tools/capability_dispatch.py` independently
+# OBSERVES the live branches and the tests assert the two agree.
+
+# run() has no cleanroom branch at all: it dispatches straight to
+# _execute_numa_locked / _execute_reactor_locked / _execute.
+LAUNCHER_SERVED_MODES = {
+    "run":    (),                      # no cleanroom branch exists
+    "map":    ("plugin", "udf", "spawn"),
+    "stream": ("plugin", "udf"),       # spawn has no streaming dispatch
+}
+
+# Both map() and stream() take the NUMA path when num_nodes > 1, which
+# RETURNS before the predicate is consulted (run.py:3834 and :4254).
+NUMA_BYPASSES_PREDICATE = True
+
+# stream() consults the predicate only inside its streaming branch, so a
+# materialised source (a regular path with streaming=None/False) never
+# reaches it at all.
+PREDICATE_REQUIRES_STREAMING = ("stream",)
+
+
+def dispatch_reaches_predicate(facts) -> bool:
+    """Does a public call for these facts ever CONSULT the predicate?
+
+    True does not mean served -- the predicate may still decline, and the
+    launcher may still be absent. It means the envelope was asked.
+    """
+    entry = getattr(facts, "entry", None) or facts.kind
+    if not LAUNCHER_SERVED_MODES.get(entry):
+        return False
+    if facts.mode not in LAUNCHER_SERVED_MODES[entry]:
+        return False
+    if NUMA_BYPASSES_PREDICATE and facts.nodes != 1:
+        return False
+    if entry in PREDICATE_REQUIRES_STREAMING and not facts.streaming:
+        return False
+    return True
+
+
+def public_valid(facts) -> bool:
+    """Does this cell satisfy the PUBLIC API contract?
+
+    Invalid configurations must not enter the capability denominator.
+    They keep their conformance tests; they are simply not configurations
+    a caller could ever make.
+
+    Derived from the live validators, re-stated here so the oracle stays
+    independent of forkrun:
+      * _api._VALID_ORDERS == ("none", "index") -- "sorted" is rejected
+        by public validation before any envelope is consulted;
+      * _api._reject_iterable_source rejects iterables and generators;
+      * a missing path or a directory is not a readable workload source.
+    """
+    if facts.order not in ("none", "index"):
+        return False
+    if facts.source_kind in ("iterable", "missing", "dir", "bogus"):
+        return False
+    return True
 
 # ---------------------------------------------------------------------------
 # Outcomes. `anchor` is the stable substring that classifies a predicate
@@ -175,13 +263,13 @@ RULES = [
     # does not exist. map() IS served for spawn. The two share the mode
     # axis but not the route, so the rule is ordered after R2.
     ("R2b", "mode",
-     lambda f: f.kind == "stream" and f.mode == "spawn",
+     lambda f: f.streaming and f.mode == "spawn",
      "DECLINE_MODE_STREAM_SPAWN",
      "stream(mode='spawn') is not served; the streaming path has no "
      "spawn dispatch"),
 
     ("R6", "stream+order",
-     lambda f: f.kind == "stream" and f.order != "none",
+     lambda f: f.streaming and f.order != "none",
      "DECLINE_STREAM_ORDER",
      "docstring + inline note: the stream path has no collect step to sort "
      "with, and its parent-side reassembly handles order='none' only. "
@@ -267,14 +355,16 @@ REGRESSIONS = [
      "had poisoned batches"),
 
     ("stream_declines_order_index_that_map_serves",
-     Facts("stream", "path", "plugin", 1, "index", True, False, False, None, None),
+     Facts("stream", "path", "plugin", 1, "index", True, False, False, None, None,
+           streaming=True),
      "DECLINE_STREAM_ORDER", "R6",
      "asymmetry is intentional; a second hand-written predicate at the "
      "stream() dispatch site had already drifted from the map() one once, "
      "requiring not-orchestrator while this one required orchestrator"),
 
     ("stream_serves_order_none",
-     Facts("stream", "path", "plugin", 1, "none", True, False, False, None, None),
+     Facts("stream", "path", "plugin", 1, "none", True, False, False, None, None,
+           streaming=True),
      SERVED, "R0",
      "the stream path's actual envelope"),
 
