@@ -976,7 +976,8 @@ So the interim restriction set is unchanged from the proposal and does
 
 * `Auto` stays off.
 * `stream(order="index")` stays declined.
-* Cleanroom stays opt-in behind `FORKRUN_CLEANROOM`.
+* Cleanroom: `map(plugin)` is default-on; `udf`, `spawn` and both stream
+  routes stay opt-in behind `FORKRUN_CLEANROOM` (`04485e52`).
 
 If external review rejects the protocol, the containment to fall back on
 is to **disable the affected envelope**, not to narrow the detector.

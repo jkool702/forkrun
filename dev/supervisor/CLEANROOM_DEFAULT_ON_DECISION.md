@@ -3,7 +3,31 @@
 WO-ROI-1 §2. Evaluated at `0f942b42` (P0 nested-session fix) plus the
 WO-CM1-R1 inventory.
 
-## Decision: **B — the gate does not pass. The default is unchanged.**
+## SUPERSEDED by WO-CR-ROI-2 (`d8d23025`, `9670d6b4`, `6109dd93`, `04485e52`)
+
+**Decision now: A, for `map(plugin)` ONLY.** The default moved. Everything
+else is unchanged and remains opt-in.
+
+The original decision was **B — the gate does not pass — for a stated
+structural reason**: the gate was a single boolean over
+`FORKRUN_CLEANROOM`, so default-on would have enabled five envelopes at
+once, four of which asserted output rather than route and would therefore
+have passed under a fallback.
+
+That structural blocker no longer exists. WO-CR-ROI-2 closed it:
+
+| Original blocker | Status |
+|---|---|
+| 1. No missing-launcher fallback test | closed (earlier pass) |
+| 2. No route-level proof for udf/spawn/stream | closed — `test_cleanroom_routes.py` execs the REAL launcher for all five, mutation-proven (`9670d6b4`) |
+| 3. "No performance evidence" | the claim was WRONG; evidence exists, and Phase D **re-measured** the smallest question on this host (`04485e52`) |
+| 4. No per-envelope gate (**the structural blocker**) | closed — per-ROUTE selector (`6109dd93`) |
+
+Read the rest of this document as the reasoning that was correct *at the
+time*; each of the four blockers above now carries a current verdict.
+
+## Decision as of WO-ROI-1: **B — the gate does not pass. The default is
+## unchanged.**
 
 The plugin envelope is close to ready and is the strongest of the three.
 The reason the *default* cannot move is structural, not a missing test.
@@ -107,3 +131,74 @@ until they have route-level tests. That is a gate change, not an
 envelope change: it enables no new capability, it only stops the gate
 from coupling three envelopes together. With (1) and (2) closed, the
 plugin envelope is defensible on its own evidence.
+
+
+---
+
+## 6. The decision WO-CR-ROI-2 actually made
+
+### 6.1 What is now true
+
+`map(plugin)` is **default-on**. `udf`, `spawn`, `stream(plugin)` and
+`stream(udf)` are unchanged: still opt-in, still gated on
+`FORKRUN_CLEANROOM` naming them.
+
+The selector (`6109dd93`):
+
+    FORKRUN_CLEANROOM unset            -> map-plugin only  (Phase D default)
+    FORKRUN_CLEANROOM=1 / yes / all    -> every eligible route (legacy)
+    FORKRUN_CLEANROOM=map-plugin      -> one route
+    FORKRUN_CLEANROOM=a,b              -> a subset
+    unknown value                      -> ValueError
+
+Two properties make this narrow default safe rather than a disguised
+whole-feature default:
+
+* the default is expressed as a **route set**, not a boolean, so it
+  cannot spill into the other four routes;
+* unset is `explicit=False`, and both decline-warning sites are gated on
+  `_cleanroom_explicit()`. A user who never asked for the cleanroom is
+  not nagged when a call cannot use it. **Unset-on is not asked-on.**
+
+### 6.2 Performance, re-measured
+
+`python/benchmarks/bench_cleanroom_default_on.py` — same in-repo plugin
+the route tests build, so it is reproducible on a clean checkout. Paired
+interleaved A/B, warmup discarded, medians, exactness guard.
+
+| Regime | in-process / cleanroom |
+|---|---|
+| startup, no ballast | **1.77x** (stable 1.60–1.80x) |
+| startup, 512 MB ballast | **2.34x** (stable 2.34–3.45x) |
+| throughput, 400k records | **1.16x** |
+
+Throughput is reported on purpose: `bench_cleanroom.py`'s own docstring
+names it the regime "where a regression would hide". The advantage is
+smallest there and still positive. **No measured regime regresses.**
+
+This also falsifies the last reason `test_disabled_by_default` gave for
+keeping the default off — "it is SLOWER in the shape callers actually
+use".
+
+### 6.3 Why this is safe if wrong
+
+The launcher **ships**: `forkrun/_forkrun_cleanroom` (41,280 bytes) is
+inside `dist/forkrun-0.17.0-py3-none-manylinux_2_39_x86_64.whl` and named
+by `setup.py`. Without it the default would have been a no-op for
+installed users, which is worth having checked.
+
+If the launcher is missing or cannot be exec'd, the caller falls back
+in-process. A broken install therefore degrades to the **old** behaviour,
+not to a failure.
+
+### 6.4 What is deliberately still NOT done
+
+* `mode="python"` — has no launcher dispatch at all. Unchanged.
+* multi-node — bypasses the envelope entirely; W-EXP-2 remains blocked on
+  real hardware, and this host has one NUMA node online.
+* `stream(spawn)` — has no dispatch, and so has no route identifier
+  (`6109dd93`); a selectable-but-dead route would be indistinguishable,
+  from a user's side, from being ignored.
+* `stream(udf, order="index")` — still declines, then falls through to an
+  in-process UDF path and raises `NotImplementedError`. Known robustness
+  gap; narrowing it is separate work.

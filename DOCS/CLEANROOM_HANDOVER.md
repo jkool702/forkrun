@@ -251,6 +251,9 @@ job here is to confirm it, not to write it.
 path, which the launcher already fully covers.
 
 - Add `FORKRUN_CLEANROOM` env flag, default **off** for now.
+  **[STALE as of WO-CR-ROI-2 / `04485e52`]** The gate is now per-ROUTE and
+  `map(plugin)` is default-on; the other four routes are still opt-in.
+  See `dev/supervisor/CLEANROOM_DEFAULT_ON_DECISION.md` §6.
 - Build the launcher as part of the normal build (`Makefile.substrate`), or
   ship it as a prebuilt in the wheel. Decide, and write down why.
 - Route the chosen path through the launcher; leave the other 9 alone.

@@ -69,15 +69,15 @@ The common shape: a claim about one code path generalised to a sibling path.
 | Property | State |
 |---|---|
 | Serves | `mode="plugin"` (C `.so`, ctx dialect v1/v2), UMA, `orchestrator=True` |
-| Declines | `mode="python"` (**the default mode**), spawn, splice, multi-node, `resume=`, `checkpoint_file=`, `orchestrator=False` |
-| Gate | `FORKRUN_CLEANROOM`, **default OFF** |
-| Tests | 70/70 cleanroom, 0 skips; 738 full suite **[V]** (measured) |
-| Measured | startup 1.57×–10.25×, throughput 1.56×–3.78× vs in-process, across 30 MB–2127 MB parent RSS, both THP regimes **[V]** (measured; recorded in `DOCS/CHANGELOG.md`) |
+| Declines | `mode="python"` (**the default mode**), splice, multi-node, `resume=`, `checkpoint_file=`, `orchestrator=False`; `stream(spawn)` |
+| Gate | `FORKRUN_CLEANROOM`, per-ROUTE. **map(plugin) is default-ON** (WO-CR-ROI-2 Phase D, `04485e52`); every other route opt-in |
+| Tests | 1169 full suite, 0 failures, 2 skips **[V]** (measured, committed tree) |
+| Measured | **current**, re-measured Phase D: startup 1.77×, startup+512 MB ballast 2.34×, throughput (400k records) 1.16× vs in-process **[V]** (`benchmarks/bench_cleanroom_default_on.py`). Historical 1.57×–10.25× startup / 1.56×–3.78× throughput across 30 MB–2127 MB parent RSS remains provenance-sound; its plugin fixture no longer exists on this machine, so it is not reproducible as written |
 
 ### 1.1 "Default on" is three decisions, not one
 
-**[V]** Enabling the `FORKRUN_CLEANROOM` gate today would change nothing for
-any non-plugin caller: they reach `_cleanroom_eligible`, decline, and take the
+**[V]** Enabling the `FORKRUN_CLEANROOM` gate changes nothing for any
+non-plugin caller: they reach `_cleanroom_eligible`, decline, and take the
 in-process path unchanged. Verified by predicate inspection — `mode="python"`
 declines with *"mode='plugin' only"*, `orchestrator=False` declines, and
 `resume=` declines.
@@ -89,6 +89,15 @@ So "make it the default" decomposes into three independently-gated decisions:
 3. enable for multi-node — thinnest validation.
 
 **Each gets its own evidence gate, its own commit, and its own revert.**
+
+**Status: Decision 1 is DONE** (`04485e52`). The other two are not.
+
+Decision 1 could only be expressed once a per-ROUTE selector existed
+(`6109dd93`): with the old boolean gate, "default on" would have meant
+"default on for five envelopes at once", which is precisely the coupling
+that made the question unanswerable. Decisions 2 and 3 remain blocked —
+`mode="python"` has no launcher dispatch at all, and multi-node bypasses the
+envelope entirely.
 
 ---
 

@@ -191,10 +191,11 @@ from `tools/capability_oracle.py`, which imports nothing from
 
 ## Limitations not expressible as cell counts
 
-- **Default is OFF.** `FORKRUN_CLEANROOM` is opt-in, so on a default
-  configuration the launcher-selected row above is reachable but
-  not *selected*. Capability and default behaviour are different
-  questions; this table answers the first.
+- **Default was OFF; map(plugin) is now ON** (WO-CR-ROI-2 Phase D,
+  `04485e52`). The other four served routes remain opt-in. Capability
+  and default behaviour are different questions; this table answers the
+  first, and the count above is unchanged by the default — it counts
+  what is *reachable*, not what is *selected*.
 - **Artifacts are a separate axis.** A missing launcher or an
   incompatible UDF helper changes the route without changing any
   cell in this grid; they are tested as boundary conditions, not

@@ -137,10 +137,13 @@ what the engine sets itself, and every unrelated descriptor (the parent
 
 ## Rollback and rollout
 
-- Default **off**, opt in with `FORKRUN_CLEANROOM=1`. It was briefly on
-  and reversed. It stays off while the envelope is narrower than the
-  API and while NUMA validation is fake-only — not because it is slow,
-  which was true until CR-FIX1 and is not true now.
+- Default is now **on for `map(plugin)` only** (WO-CR-ROI-2 Phase D,
+  `04485e52`); every other route stays opt-in behind
+  `FORKRUN_CLEANROOM`. History: it was briefly on in full, reversed, and
+  stayed off while the gate was a single boolean coupling five
+  envelopes. A per-**route** selector (`6109dd93`) made the narrow
+  default expressible, and all four of the original readiness blockers
+  are closed. It was never "slow" — that was true until CR-FIX1.
 - **No RSS threshold.** An earlier draft proposed gating on ~350 MB
   parent RSS; that number was wrong. It came from a PoC whose fixed
   cost was inflated by a synchronous whole-corpus ingest. With the
