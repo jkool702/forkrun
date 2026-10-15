@@ -435,86 +435,104 @@ def _require_plugin_loop_symbol():
 
 
 def _cleanroom_enabled():
-    """W-CR1: is the exec-based cleanroom launcher requested?
+    """See the definition below, after the Phase C selector.
+
+    Kept as a forward declaration so any name resolved
+    before the selector is defined still binds; the body
+    below is the single implementation.
+    """
+
+
+
+def _cleanroom_route_for(entry, raw_mode):
+    """The route identifier a public call would select, or None.
+
+    `entry` is "map" or "stream"; `raw_mode` is the mode as the CALLER
+    wrote it, before _coerce_payload rewrites plugin->python.
+    """
+    if raw_mode not in ("plugin", "udf", "spawn"):
+        return None
+    route = "%s-%s" % (entry, raw_mode)
+    # Only SERVED routes get an identifier. stream(spawn) has no dispatch,
+    # so "stream-spawn" must not be a name a user could select -- it
+    # would be a selector that appears valid and can never fire, which is
+    # worse than no selector at all. Deriving the check from the served
+    # set also means the two cannot drift apart.
+    return route if route in _CLEANROOM_ROUTES else None
+
+
+# WO-CR-ROI-2 Phase C: per-route activation.
+#
+# FORKRUN_CLEANROOM was effectively boolean -- any non-false value
+# enabled EVERY eligible route at once, coupling five envelopes whose
+# dispatch and streaming behaviour differ and whose levels of proof
+# differ. A mode-based selector would not fix it: "plugin" would still
+# enable both map(plugin) and stream(plugin). So the identifier is the
+# DISPATCH ROUTE, resolved from the raw public mode plus the entry point
+# BEFORE payload coercion hides either.
+#
+# An unknown value is an ERROR, not a silent "enable everything" --
+# that failure mode is the one a strict parser exists to prevent.
+_CLEANROOM_FALSE_VALUES = ("", "0", "no", "off", "false")
+
+_CLEANROOM_ROUTES = ("map-plugin", "map-udf", "map-spawn",
+                     "stream-plugin", "stream-udf")
+
+
+def _cleanroom_selected_routes():
+    """Parse FORKRUN_CLEANROOM into (enabled, routes, explicit).
+
+    Returns (enabled, routes_or_None, explicit):
+      enabled  -- may this run use the cleanroom at all?
+      routes   -- None means "every eligible route" (legacy behaviour);
+                  a frozenset means "only these";
+      explicit -- did the user set the variable at all?
+
+    Raises ValueError on an unknown selector, so a typo cannot silently
+    widen what is enabled.
+    """
+    v = os.environ.get("FORKRUN_CLEANROOM")
+    if v is None:
+        return False, None, False
+    val = v.strip().lower()
+    if val in _CLEANROOM_FALSE_VALUES:
+        return False, None, True
+    if val in ("1", "yes", "on", "true", "all", "*"):
+        # Legacy: every route the envelope accepts. Preserved exactly.
+        return True, None, True
+    parts = [p.strip() for p in val.split(",") if p.strip()]
+    if not parts:
+        raise ValueError(
+            "FORKRUN_CLEANROOM=%r selects no route. Use one of %s, a "
+            "comma-separated subset, or 1 for every eligible route."
+            % (v, ", ".join(_CLEANROOM_ROUTES)))
+    unknown = [p for p in parts if p not in _CLEANROOM_ROUTES]
+    if unknown:
+        raise ValueError(
+            "FORKRUN_CLEANROOM=%r contains unknown route(s) %s. Valid "
+            "routes: %s. (Use 1 for the legacy all-routes behaviour.)"
+            % (v, ", ".join(repr(u) for u in unknown),
+               ", ".join(_CLEANROOM_ROUTES)))
+    return True, frozenset(parts), True
+
+
+def _cleanroom_enabled():
+    """Is the exec-based cleanroom launcher requested at all?
 
     BETA. Opt-IN via FORKRUN_CLEANROOM; the default is deliberately OFF.
 
-    ---- CR-FIX1: status after the hardening pass ----
+    This is the WHOLE-ENVIRONMENT gate. Whether a given call may use it
+    additionally depends on _cleanroom_route_enabled below, so enabling
+    the environment does not enable every envelope.
 
-    The "~100 ms fixed overhead" that used to dominate this path is
-    GONE. Root cause: the spill, fallow and scanner children did not
-    inherit the engine descriptors that fr_py_init opens, and their
-    keep-lists scrubbed them away.
+    ---- performance evidence (historical; provenance sound, currency
+    unverified -- see dev/supervisor/CLEANROOM_ROUTE_INVENTORY.md) ----
+    Produced by python/benchmarks/bench_cleanroom.py: paired interleaved
+    A/B, warmup discarded, medians with means, and an exactness guard
+    that refuses to report a number for wrong output. UMA, 28 workers,
+    i9-7940X 14c/28t.
 
-        scanner : writes evfd_data_arr on every publish and blasts
-                  evfd_eof_arr at finalization. With those closed,
-                  sys_write returns EBADF and every caller ignores it,
-                  so the notifications vanish and workers are released
-                  only by the 100 ms timeout in do_lockfree_claim.
-                  Worse, the pre-flight poll over evfd_ingest_data does
-                  not check POLLNVAL, so a closed descriptor returns
-                  immediately and the pre-flight SPINS instead of
-                  sleeping. So the symptom was BOTH a fixed latency AND
-                  a hot core -- which is why the original triage
-                  concluded "nobody is spinning" and reached the wrong
-                  answer.
-        spill   : calls fr_py_ingest_data_post() per chunk so the
-                  scanner's pre-flight blocks rather than spin-sleeps.
-                  The descriptor was scrubbed four lines later, making
-                  the documented mechanism a silent no-op.
-
-    Measured, paired interleaved A/B, medians, 28 workers, UMA, byte-exact
-    output asserted identical on both sides (5020240 bytes every run):
-
-        variant              startup (2000 recs)      light_5M throughput
-        pre-fix (HEAD)       107.06 ms  (44 ms cpu)   232.2 ms  (858 ms cpu)
-        scanner-fd only        3.30 ms  (21 ms cpu)   227.9 ms (1652 ms cpu)
-        full fix               3.41 ms  (21 ms cpu)   192.9 ms (1840 ms cpu)
-
-        startup      32.5x faster   (the scanner omission was the whole
-                                   of it)
-        throughput    1.20x faster   (the spill omission is what gave the
-                                   scanner ingest backpressure)
-        cpu          858 -> 1840 ms  (NOT a regression: effective cores
-                                     rose from 3.7 to 9.5 while finishing
-                                     20% sooner. That is the whole thesis
-                                     -- all cores doing work instead of
-                                     sleeping on a poll timeout.)
-
-    The earlier diagnosis -- a "circular wait" on the spare signal/fallow
-    pipe write ends -- is REFUTED. Those spares are closed only after the
-    supervision loop exits, and the loop exits when live == 0, i.e. after
-    every worker has already terminated. A write end held open cannot
-    delay workers that have already died. The 1.91x-2.06x figures in
-    MEMORY.md were measured with orchestrator=False, which the envelope
-    now rejects, and describe a path the public API cannot reach.
-
-    Correctness fixes in the same pass (see the module history and
-    DOCS/CLEANROOM_HANDOVER.md for the full disposition):
-      * Fatal teardown is bounded. It used to kill workers and then block
-        on a waitpid for the spill child, which is never signalled and
-        sits in read() on the caller's descriptor -- so a detected worker
-        failure became a HANG whenever the producer stayed open.
-      * Fallback is replay-safe. os.dup() shares the open file
-        description, so after ingestion a caller-supplied descriptor is
-        advanced and the in-process retry returned a TRUNCATED result
-        with exit 0. Now refused, with an explicit error.
-      * The capability probe runs in a disposable subprocess with a
-        bounded wait. dlopen runs the plugin's ELF constructors in
-        whatever process calls it; a constructor that starts a thread
-        left a thread in the launcher and every subsequent fork died
-        (measured: SIGSEGV). Exit 79 now means "loading this plugin is
-        unsafe" and SUPPRESSES fallback, because the fallback would
-        dlopen it in the caller and reproduce the failure there.
-      * resume=/checkpoint_file= are refused unconditionally in the
-        shared envelope. map() never passed them and the refusal was
-        nested under `if streaming:`, so a resume request was silently
-        ignored.
-      * Descriptor scrubbing covers the whole descriptor space
-        (close_range, /proc/self/fd fallback) and a truncated or failed
-        snapshot fails the run rather than degrading it silently.
-
-    PARENT-RSS SCALING, re-measured after these fixes in both THP
+PARENT-RSS SCALING, re-measured after these fixes in both THP
     regimes (bench_cleanroom.py, paired interleaved, medians, 28
     workers, UMA, exact record counts asserted; i9-7940X 14c/28t):
 
@@ -574,10 +592,24 @@ def _cleanroom_enabled():
     BLOBS as records, so do not repeat that: compare JOINED BYTES, which
     is what test_matches_in_process_content does and why it is stable.
     """
-    v = os.environ.get("FORKRUN_CLEANROOM")
-    if v is None:
-        return False         # default OFF; opt in with =1
-    return v.strip().lower() not in ("", "0", "no", "off", "false")
+    enabled, _routes, _explicit = _cleanroom_selected_routes()
+    return enabled
+
+
+def _cleanroom_route_enabled(entry, raw_mode):
+    """May THIS dispatch route use the launcher?
+
+    A route selector narrows; it never widens. If the environment named
+    specific routes, this route must be one of them. With the legacy
+    unset-route selector every eligible route remains eligible.
+    """
+    _enabled, routes, _explicit = _cleanroom_selected_routes()
+    if not _enabled:
+        return False
+    if routes is None:
+        return True
+    route = _cleanroom_route_for(entry, raw_mode)
+    return route is not None and route in routes
 
 
 def _cleanroom_explicit():
@@ -3986,7 +4018,12 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     _why = "mode=%r is not a launcher-served envelope" % (raw_mode,)
     if raw_mode == "udf":
         _warn_if_cached_incompatible()
-    if _cleanroom_enabled() and raw_mode in ("plugin", "udf", "spawn"):
+    # WO-CR-ROI-2 Phase C: the route gate narrows which envelopes the
+    # environment enables. It is consulted with the RAW mode and the
+    # entry point, before _coerce_payload rewrites plugin->python, so the
+    # identifier reflects what the caller asked for.
+    if (_cleanroom_enabled()
+            and _cleanroom_route_enabled("map", raw_mode)):
         _ok, _why = _cleanroom_eligible(
             source, raw_mode, num_nodes, order,
             kwargs.get("strict_poison", False), orchestrator,
@@ -4446,7 +4483,10 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
         # be honoured still warns, as it does for map().
         if raw_mode == "udf":
             _warn_if_cached_incompatible()
-        if _cleanroom_enabled() and raw_mode in ("plugin", "udf"):
+        # WO-CR-ROI-2 Phase C: same route gate as map(), keyed on the
+        # STREAM routes. stream(spawn) has no dispatch regardless.
+        if (_cleanroom_enabled()
+                and _cleanroom_route_enabled("stream", raw_mode)):
             _ok, _why = _cleanroom_eligible(
                 source, raw_mode, num_nodes,
                 kwargs.get("order", "none"),

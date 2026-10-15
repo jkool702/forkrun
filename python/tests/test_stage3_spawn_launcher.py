@@ -191,9 +191,18 @@ class TestLauncherDescriptor(unittest.TestCase):
         # (it has no spawn dispatch and declines in the predicate). Both
         # gates read identically, so asserting "no gate is plugin/udf
         # only" would have demanded the WRONG thing for stream.
-        self.assertIn('if _cleanroom_enabled() and raw_mode in '
-                      '("plugin", "udf", "spawn"):', src,
-                      "map()'s cleanroom gate does not admit spawn")
+        # WO-CR-ROI-2 Phase C: admission moved out of a literal mode
+        # tuple and into the per-ROUTE gate. The property this test
+        # protects is unchanged -- map() must be able to route spawn --
+        # so it is now asserted as: the gate consults the route helper
+        # AND map(spawn) is a served route. Asserting the old literal text
+        # would have frozen the implementation, not the behaviour.
+        self.assertIn('_cleanroom_route_enabled("map", raw_mode)', src,
+                      "map()'s cleanroom gate does not consult the route "
+                      "helper")
+        self.assertIn('"map-spawn"', src,
+                      "map(spawn) is no longer a named route, so it cannot "
+                      "be selected")
         # ...and the spawn route really carries argv into the launcher.
         # Bounded substring checks rather than a regex: a DOTALL .*? over
         # a 9000-line module matches across unrelated code and passes (or
@@ -220,7 +229,11 @@ class TestLauncherDescriptor(unittest.TestCase):
         UnboundLocalError there is a crash, not a clean decline."""
         src = open(os.path.join(_ROOT, "python", "forkrun", "run.py")).read()
         assign = src.index('_why = "mode=')
-        first_gate = src.index("if _cleanroom_enabled() and raw_mode in")
+        # Phase C reformatted the gate across two lines; match the gate
+        # by its first distinguishing token instead of its full text.
+        first_gate = min(
+            src.index("if (_cleanroom_enabled()"),
+            src.index("and _cleanroom_route_enabled("))
         self.assertLess(assign, first_gate,
                         "_why must be initialised before the gate that "
                         "may assign it")

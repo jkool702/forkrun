@@ -367,3 +367,58 @@ class TestUnservedRoutesStayUnserved(_Fixtures):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestSelectorControlsRealDispatch(_Fixtures):
+    """Phase C: the selector must change what actually RUNS.
+
+    TestCleanroomSelector pins the parser. That is not enough on its own:
+    a selector that parses correctly but is never consulted would pass
+    every grammar test while enabling everything. These tests exercise
+    the public API with the exec probe.
+    """
+
+    def _map_plugin(self):
+        return forkrun.map(self.spec, self.src, mode="plugin", nodes=1,
+                           workers=2, order="index", output="bytes")
+
+    def _set_gate(self, value):
+        os.environ["FORKRUN_CLEANROOM"] = value
+
+    def test_map_plugin_selector_enables_map_plugin(self):
+        self._set_gate("map-plugin")
+        with LauncherExecProbe() as probe:
+            out = self._map_plugin()
+        self.assertGreaterEqual(probe.read(), 1,
+                                "map-plugin must select the launcher")
+
+    def test_stream_plugin_selector_does_not_enable_map_plugin(self):
+        """The independence property, end to end."""
+        self._set_gate("stream-plugin")
+        with LauncherExecProbe() as probe:
+            out = self._map_plugin()
+        self.assertEqual(0, probe.read(),
+                         "stream-plugin must NOT launch for a map() call")
+        self.assertTrue(out, "and the run must still produce output")
+
+    def test_legacy_one_still_enables_everything_eligible(self):
+        self._set_gate("1")
+        with LauncherExecProbe() as probe:
+            self._map_plugin()
+        self.assertGreaterEqual(probe.read(), 1,
+                                "legacy =1 must keep enabling map(plugin)")
+
+    def test_unknown_selector_fails_clearly_at_the_public_api(self):
+        """A typo must surface, not silently widen the blast radius."""
+        self._set_gate("map-plguin")
+        with LauncherExecProbe() as probe:
+            with self.assertRaises(ValueError):
+                self._map_plugin()
+        self.assertEqual(0, probe.read(),
+                         "a rejected selector must not launch anything")
+
+    def test_explicit_off_never_launches_end_to_end(self):
+        self._set_gate("off")
+        with LauncherExecProbe() as probe:
+            out = self._map_plugin()
+        self.assertEqual(0, probe.read())
+        self.assertTrue(out)

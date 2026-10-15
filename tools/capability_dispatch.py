@@ -141,8 +141,28 @@ class _Probe:
             self._saved.append((name, real))
             setattr(Rm, name, probe)
 
+        real_route_for = Rm._cleanroom_route_for
+
+        def probe_route_enabled(entry, mode):
+            """Honour the prober's gate, but keep the REAL route test.
+
+            Returning probe_self.gate outright was too permissive: it let
+            modes that have no launcher route at all -- 'python',
+            'splice' -- through the gate, so the prober counted an
+            envelope consultation for a route that cannot exist. The
+            prober measures DISPATCH, so the route must genuinely exist.
+            """
+            if not probe_self.gate:
+                return False
+            return real_route_for(entry, mode) is not None
+
         self._patch(Rm, "_cleanroom_eligible", probe_eligible)
         self._patch(Rm, "_cleanroom_enabled", probe_enabled)
+        # WO-CR-ROI-2 Phase C: dispatch no longer consults
+        # _cleanroom_enabled directly -- it consults the PER-ROUTE gate.
+        # Patching only the boolean left the gate reading the real
+        # environment, so every probe run silently stopped launching.
+        self._patch(Rm, "_cleanroom_route_enabled", probe_route_enabled)
         self._patch(Rm, "_cleanroom_launcher_path", probe_launcher_path)
 
         # Record the ordinary executors. Raising _StopRoute ends the call
