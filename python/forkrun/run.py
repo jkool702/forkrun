@@ -2373,26 +2373,88 @@ def _warn_threaded_fork():
 
 
 class _RunLock:
-    """_RUN_LOCK, plus the threaded-fork warning on entry.
+    """_RUN_LOCK: one live engine session per process, enforced.
 
-    Wrapping the lock rather than adding a check at each `with
-    _RUN_LOCK:` site means all ~20 entry points are covered by
-    construction -- a new executor cannot forget it.
+    THE INVARIANT
+    -------------
+    At most ONE engine session may be live at a time. The C engine's
+    state is process-global (`g_state` / `state` in forkrun_ring.c), so a
+    second session does not merely interleave work -- it REPLACES the
+    first session's state. Specifically:
+
+      * ring_init_main mmaps unconditionally and overwrites `g_state`,
+        leaking the previous mapping;
+      * ring_destroy_main munmaps it and sets both pointers to NULL.
+
+    A nested run therefore returns its own correct results while
+    DESTROYING its parent's ability to supervise or recover its workers.
+    Measured: the enclosing run's fr_py_diag_node goes from rc=0 (live)
+    to rc=-1 (no engine state) across a nested map(). The parent cannot
+    then revert an orphan, so the run aborts with "Worker N recovery
+    failed (orphan revert/escrow)".
+
+    ENFORCEMENT
+    -----------
+    The lock is reentrant, which prevents a same-thread deadlock but is
+    NOT a safety property -- a reentrant lock happily lets the second
+    session in. So re-entry is REFUSED.
+
+    This class is the single choke point: every stream() path returns
+    through _guarded_gen, and every run()/map() branch takes the lock
+    before dispatching, so checking here covers all entry points by
+    construction rather than by remembering to check at each one.
+
+      * different threads -> serialize (the RLock blocks), because
+        engine globals are process-wide;
+      * same thread, no live session -> acquire normally;
+      * same thread, live session -> RuntimeError BEFORE acquiring, so
+        the nested call cannot initialise or destroy anything.
+
+    Every `with _RUN_LOCK:` site in this module is a sibling branch that
+    returns immediately, so no internal path relies on re-entry. That was
+    verified rather than assumed; see
+    python/tests/test_stream_lock.py.
     """
 
     def __init__(self, lock):
         self._lock = lock
+        # Per-thread session marker. A plain counter on self would be
+        # wrong: it must record whether THIS thread is inside a session,
+        # not how many threads are waiting.
+        self._local = _threading.local()
+
+    def _session_live(self):
+        return getattr(self._local, "active", False)
 
     def __enter__(self):
+        if self._session_live():
+            # Refuse BEFORE acquiring. Acquiring first would succeed
+            # (RLock) and the nested session would then reinitialise the
+            # engine we are trying to protect.
+            raise RuntimeError(
+                "forkrun: refusing to start a nested run while another "
+                "forkrun execution is live in this thread. The engine's "
+                "state is process-global, so a nested session would "
+                "replace the live one's state and leave the parent "
+                "unable to supervise or recover its workers. Finish or "
+                "close the active stream() before starting another run; "
+                "runs in SEPARATE threads are still supported and are "
+                "serialised.")
         self._lock.acquire()
         try:
             _warn_threaded_fork()
         except BaseException:
             self._lock.release()
             raise
+        self._local.active = True
         return self._lock
 
     def __exit__(self, *exc):
+        # Cleared BEFORE release so a session is never left marked live
+        # by an exception unwinding through here -- a stuck marker would
+        # make every later top-level run raise, which looks like the
+        # library being broken rather than a leaked guard.
+        self._local.active = False
         self._lock.release()
         return False
 

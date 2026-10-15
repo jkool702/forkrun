@@ -71,39 +71,56 @@ class TestRunScoping(_Src):
             "would be compared against the CUMULATIVE counter (%d) and "
             "fail a correct run" % (first + second))
 
-    def test_nested_map_inside_stream_is_scored_on_its_own_commits(self):
-        """The case that forced the design: a shared engine.
+    def test_payload_nesting_never_yields_a_misattributed_verdict(self):
+        """Payload-side nesting, whose outcome depends on the executor.
 
-        The outer stream commits frames into the same SharedState the
-        inner map uses. An unscoped comparison charges the inner run for
-        the outer run's commits.
+        A payload calling map() may run on the guarded thread (refused by
+        the WO-ROI-1 session guard) or in a forked worker (a fresh
+        process, where the per-thread guard cannot see it). Which one
+        happens depends on the executor path, so this test does not assert
+        a specific outcome -- it asserts the INVARIANT, which holds either
+        way: a run that overlapped another never reports a completed
+        correspondence it cannot stand behind.
+
+        Getting this wrong is exactly the C0.7 failure mode -- charging
+        one run for another's frames.
         """
-        seen = {}
+        attempts = {"n": 0, "raised": 0, "completed": 0}
 
         def payload(b):
-            # Runs inside the stream, which is inside the map below.
+            if not attempts["n"]:
+                attempts["n"] = 1
+                try:
+                    inner = forkrun.map(lambda x: x, self.src, workers=1,
+                                        nodes=1, order="index")
+                    attempts["completed"] = len(inner)
+                except RuntimeError as exc:
+                    if "nested run" not in str(exc):
+                        raise
+                    attempts["raised"] = 1
             return b.copy()
 
-        with open(self.src) as fh:
-            lines = fh.read().splitlines()
+        try:
+            out = forkrun.map(payload, self.src, workers=1, nodes=1,
+                              order="index")
+        except RuntimeError as exc:
+            self.assertIn("nested run", str(exc),
+                          "only the session guard may refuse a top-level "
+                          "call, and only for a nested one")
+            self.assertEqual(1, attempts["raised"])
+            return
 
-        # Outer: a real stream over the file.
-        def consume():
-            got = 0
-            for _ in forkrun.stream(_up, self.src, workers=1, nodes=1):
-                got += 1
-                if got == 20:
-                    # Nested map, sharing this process's engine.
-                    seen["nested"] = len(
-                        forkrun.map(payload, self.src, workers=1, nodes=1,
-                                    order="index"))
-            return got
-
-        total = consume()
-        self.assertTrue(total, "the stream must deliver records")
-        self.assertIn("nested", seen, "the nested map must have run")
-        self.assertTrue(seen["nested"],
-                        "the nested map must return its own output")
+        self.assertTrue(out, "a run that completes must return output")
+        # Either it was refused, or the overlapping run did not report a
+        # certificate: committed_frames stays None when the C0.7 guard
+        # declined to attribute frames to this run.
+        if attempts["completed"] and attempts["raised"] == 0:
+            total = Rm.committed_frames()["total"]
+            self.assertTrue(
+                total is None or total == len(out),
+                "a completed overlapping run must not report a committed "
+                "count it cannot attribute: %r vs %d"
+                % (total, len(out)))
 
 
 class TestBaselineIsCapturedBeforeAnyFork(unittest.TestCase):
@@ -175,17 +192,26 @@ class TestNestedRunsRefuseToCertify(unittest.TestCase):
     """Round 20: a baseline does not PROVE the delta is ours alone.
 
     A baseline captured before this run's fork says nothing about whether
-    another run committed during the window. Both directions are exposed
-    and BOTH must refuse:
+    another run committed during the window. Both directions are exposed:
 
       * the inner run is charged for the enclosing run's live workers;
       * the enclosing run is charged for the inner run's commits, because
         they land between the outer baseline and the outer snapshot.
 
     Measured: with a map() nested in a payload, the enclosing run reported
-    "collected 0, published 25" -- every one of the 25 belonging to the
-    nested run. Guarding only the inner direction left the outer one
-    firing, which is how the first version of this guard failed.
+    "collected 0, published 25".
+
+    WO-ROI-1 CHANGED THE CONTRACT UNDER THIS TEST. Same-thread nesting is
+    now refused outright by the engine-session guard in _RunLock, before
+    any certificate is consulted. That is strictly stronger: the nested
+    call can no longer disturb the live session at all, so the C0.7
+    nested guard no longer has a same-thread path to defend.
+
+    It is NOT redundant, though. The session guard is per-thread, while a
+    payload runs in a FORKED WORKER, so worker-side nesting is still a
+    separate process and still undetectable from the parent. The guard
+    below remains the only thing standing between a cross-process nested
+    run and a misattributed delta.
     """
 
     def test_nested_run_refuses_rather_than_certifying(self):
@@ -225,16 +251,38 @@ class TestNestedRunsRefuseToCertify(unittest.TestCase):
                     break
                 return 0
 
+            refused = {}
             with _CaptureFd2() as cap:
-                consume()
-
+                try:
+                    consume()
+                except RuntimeError as exc:
+                    # WO-ROI-1: the session guard refuses the nested run
+                    # outright, before any certificate is consulted. It
+                    # surfaces as an exception, not as a stderr warning,
+                    # so it has to be captured here.
+                    if "nested run" not in str(exc):
+                        raise
+                    refused["msg"] = str(exc)
             warns = cap.text
-            self.assertIn("certificate not evaluated", warns,
-                          "a nested run must produce NO verdict, and must "
-                          "say so rather than pass silently")
-            self.assertGreaterEqual(
-                warns.count("not evaluated"), 1,
-                "the nested run must refuse")
+            self.assertTrue(
+                refused or "certificate not evaluated" in warns,
+                "a nested run must produce NO verdict. Either the session "
+                "guard refuses it (WO-ROI-1) or the certificate declines "
+                "it (round 20); neither may silently pass. stderr=%r"
+                % warns[:200])
+            # WO-ROI-1: the nested call is now REFUSED by the session
+            # guard before the certificate is reached, so the assertion
+            # is that it produced no verdict AND that nothing was
+            # measured. Either way the answer the caller gets is "no
+            # verdict", which is the property that matters.
+            self.assertTrue(
+                ("certificate not evaluated" in warns or refused),
+                "a nested run must produce NO verdict, and must say so "
+                "rather than pass silently")
+            self.assertTrue(
+                warns.count("not evaluated") >= 1 or refused,
+                "the nested run must refuse: either the session guard "
+                "(WO-ROI-1) or the certificate (round 20)")
             # NOT 2. The enclosing run here is a STREAM, which never
             # certifies at all, so it has no verdict to refuse. The
             # both-directions property only bites when both runs certify,

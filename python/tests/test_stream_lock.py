@@ -1,10 +1,12 @@
 """W-REL2/R10: _RUN_LOCK covers stream + reactor executors (RLock).
 
-Engine globals are process-global: two threads driving runs
-concurrently must serialize init/destroy, and same-thread nesting
-(a map() inside a live stream iteration) must re-enter instead of
-deadlocking. Lazy-acquire on first __next__ keeps generator
-creation side-effect-free; abandonment releases via finally.
+Engine globals are process-global, so at most ONE engine session may be
+live per process. Two threads driving runs concurrently must serialize
+init/destroy -- that still works. Same-thread NESTING into a live
+session is REFUSED rather than re-entered: a second session replaces
+g_state, leaving the parent unable to supervise or recover its workers.
+Lazy-acquire on first __next__ keeps generator creation side-effect-free;
+abandonment releases via finally.
 
 Lock-in (each ×10 externally): two barrier-synced threads ×
 streams (init/destroy interleave probe + both byte-exact), and
@@ -134,18 +136,27 @@ class TestNestedStreamMap(unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
-    def test_nested_map_inside_stream_completes(self):
-        # Same-thread nesting must re-enter (RLock), not deadlock.
-        # Honest contract on the overlap: the nested map RETURNS
-        # (no hang) and the abandoned outer tears down wreckage-free.
-        # Inner byte-exactness is NOT asserted here — re-initing the
-        # process-global engine underneath live outer workers is
-        # disruptive by design (under full-suite load the inner run
-        # intermittently comes back short; observed [] once in
-        # ~25 runs), so exactness under overlap is not a supportable
-        # guarantee. Sequential composition stays exact (covered
-        # everywhere else). Bounded join so a plain-Lock regression
-        # FAILS instead of hanging the suite.
+    def test_nested_map_inside_live_stream_is_refused(self):
+        """The engine-session invariant: one live session per process.
+
+        The engine's state is process-global. A nested run does not
+        merely interleave work -- ring_init_main replaces g_state and
+        ring_destroy_main NULLs it, so a nested session leaves the
+        parent unable to supervise or recover its workers. The previous
+        version of this test PERMITTED the nesting and declined to assert
+        inner byte-exactness, documenting that the inner run "intermittently
+        comes back short". A contract that admits a known-corrupting call
+        is not a contract, so the nesting is now refused outright.
+
+        Every assertion here is a distinct part of the contract:
+          * the nested call is REJECTED, not merely slowed or truncated;
+          * it is rejected PROMPTLY (bounded join, so a regression to a
+            hang fails instead of wedging the suite);
+          * the OUTER stream stays byte-exact -- the rejection must not
+            have touched the live session;
+          * the session guard is RELEASED, so a later run still works;
+          * catching the exception does not leave the guard stuck.
+        """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
             pa = fh.name
@@ -166,29 +177,97 @@ class TestNestedStreamMap(unittest.TestCase):
                         first = next(gen)
                     except StopIteration:
                         first = None
-                    res_b = forkrun.map(_up, pb, workers=2,
-                                        order="index", nodes=1)
+                    # The live engine session must refuse this outright.
+                    try:
+                        outcome["b"] = forkrun.map(
+                            _up, pb, workers=2, order="index", nodes=1)
+                    except RuntimeError as exc:
+                        outcome["refused"] = str(exc)
+
+                    # Catching the refusal must not disturb the session:
+                    # the outer stream must still complete byte-exactly.
+                    rest = list(gen)
                     outcome["first"] = first
-                    outcome["b"] = res_b
+                    outcome["rest"] = len(rest)
                 except BaseException as exc:  # noqa: BLE001
                     outcome["error"] = exc
                 finally:
-                    try:
-                        if gen is not None:
+                    if gen is not None:
+                        try:
                             gen.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                        except Exception:  # noqa: BLE001
+                            pass
 
             th = threading.Thread(target=worker)
             th.start()
             th.join(300)
-            self.assertFalse(th.is_alive(), "nested map deadlocked")
-            self.assertNotIn("error", outcome)
+            self.assertFalse(th.is_alive(),
+                             "nested map deadlocked instead of being "
+                             "refused promptly")
+            self.assertNotIn("error", outcome,
+                             "the outer stream must survive the refusal: "
+                             "%r" % outcome.get("error"))
+            self.assertNotIn(
+                "b", outcome,
+                "the nested map RAN. One engine session per process is the "
+                "invariant; a completed nested call means the guard is "
+                "not enforced.")
+            self.assertIn("refused", outcome,
+                          "nested map must raise RuntimeError, not return")
+            self.assertIn("nested run", outcome["refused"],
+                          "the message must explain WHY it was refused, so "
+                          "a caller can act on it")
             self.assertIsNotNone(outcome.get("first"))
-            self.assertIsInstance(outcome.get("b"), list)
+            self.assertGreater(outcome.get("rest", 0), 0,
+                               "the outer stream must continue after the "
+                               "nested attempt is refused")
+
+            # The guard must be RELEASED: a fresh top-level run works.
+            after = forkrun.map(_up, pb, workers=2, order="index", nodes=1)
+            self.assertTrue(after,
+                            "a sequential run after the stream closed must "
+                            "work -- a leaked session marker would make "
+                            "every later run raise")
         finally:
             os.unlink(pa)
             os.unlink(pb)
+
+    def test_sequential_runs_are_unaffected(self):
+        """The guard must not make ordinary sequential use impossible."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            pa = fh.name
+        try:
+            write_lines(pa, 500)
+            for i in range(3):
+                out = forkrun.map(_up, pa, workers=1, order="index", nodes=1)
+                self.assertTrue(out, "run %d produced nothing" % i)
+            gen = forkrun.stream(_up, pa, workers=1, order="index", nodes=1)
+            self.assertGreater(len(list(gen)), 0)
+        finally:
+            os.unlink(pa)
+
+    def test_session_is_released_after_a_stream_raises(self):
+        """An abandoned stream must not leave the session marked live.
+
+        If the marker leaked on an exception path, every subsequent run
+        in the process would refuse -- which presents as "the library is
+        broken" rather than "the guard did not clean up".
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            pa = fh.name
+        try:
+            write_lines(pa, 400)
+            gen = forkrun.stream(_up, pa, workers=1, order="index", nodes=1)
+            next(gen)
+            gen.close()          # abandonment, not exhaustion
+
+            out = forkrun.map(_up, pa, workers=1, order="index", nodes=1)
+            self.assertTrue(out,
+                            "the session marker leaked past close()")
+        finally:
+            os.unlink(pa)
 
 
 if __name__ == "__main__":
