@@ -231,6 +231,66 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## Unreleased — WO-CR-ROI-2: `map(plugin)` is default-on
+
+**Behaviour change.** When `FORKRUN_CLEANROOM` is unset, `map(plugin)` now
+runs through the exec-based cleanroom launcher. `udf`, `spawn`,
+`stream(plugin)` and `stream(udf)` are **unchanged** and still opt-in.
+
+To return to the previous behaviour: `FORKRUN_CLEANROOM=0`.
+
+### Per-route gate
+
+`FORKRUN_CLEANROOM` was a single boolean, so "turn it on" enabled five
+envelopes at once. It is now a **route** selector:
+
+    unset                     map-plugin only (the new default)
+    1 / yes / on / all        every eligible route (legacy, unchanged)
+    map-plugin                one route
+    map-plugin,map-udf        a subset
+    anything else             ValueError
+
+Route names: `map-plugin`, `map-udf`, `map-spawn`, `stream-plugin`,
+`stream-udf`. An unknown value raises rather than being treated as "on" —
+a typo must not silently widen the blast radius. The legacy boolean
+values (`0`, `off`, `false`, `no`, `""`) keep working exactly as before.
+
+Note the selector is **per route, not per mode**: `plugin` would still
+have enabled both `map(plugin)` and `stream(plugin)`.
+
+Unset-on is **not** asked-on: `FORKRUN_CLEANROOM` unset reports
+`explicit=False`, so a user who never requested the cleanroom is not
+warned when a call cannot use it.
+
+### Why
+
+All four blockers in `CLEANROOM_DEFAULT_ON_DECISION.md` are closed:
+
+* **Route proof for all five routes.** `python/tests/test_cleanroom_routes.py`
+  replaces the launcher path with a wrapper that records its own `exec`
+  and then `exec`s the real binary. Output-only assertions are not
+  sufficient: they pass identically when the launcher is missing and the
+  call falls back in-process. Mutation-verified — forcing the launcher
+  to "missing" turns these red.
+* **Per-route gate** (the original structural blocker).
+* **Performance re-measured.** `benchmarks/bench_cleanroom_default_on.py`,
+  paired interleaved A/B, exactness guard, same in-repo plugin the route
+  tests build: startup **1.77x**, startup + 512 MB parent ballast
+  **2.34x**, throughput (400k records) **1.16x**, in-process/cleanroom.
+  No measured regime regresses. This falsifies the old "it is slower"
+  rationale for keeping the default off.
+* **Packaging.** `forkrun/_forkrun_cleanroom` ships inside the manylinux
+  wheel, so the default is not a no-op for installed users.
+
+### Compatibility and failure mode
+
+* Missing or unexec'able launcher → falls back in-process, i.e. the old
+  behaviour. A broken install degrades, it does not fail.
+* `mode="python"`, multi-node, `stream(spawn)`, `resume=` and
+  `checkpoint_file=` are untouched and still decline.
+* `stream(spawn)` has no route identifier, because it has no dispatch; a
+  selectable-but-dead route is indistinguishable from being ignored.
+
 ## Unreleased — CR-FIX1: the Python cleanroom launcher, hardened
 
 Scope: the UMA C-plugin cleanroom only. NUMA, Python UDF, a libpython
