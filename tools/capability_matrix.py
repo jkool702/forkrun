@@ -66,6 +66,16 @@ def make_source(kind, tmpdir):
     if not os.path.exists(good):
         with open(good, "w") as fh:
             fh.write("0:A\n1:B\n")
+    # `resume`/`checkpoint_file` cells reference these by name. Public
+    # validation requires the path to EXIST (FileNotFoundError otherwise),
+    # so the fixture must be real -- otherwise every resume cell would be
+    # invalid for a reason that has nothing to do with the capability
+    # under test, and the resume axis would silently measure nothing.
+    for _name in ("state.json", "ckpt.json"):
+        _p = os.path.join(tmpdir, _name)
+        if not os.path.exists(_p):
+            with open(_p, "w") as fh:
+                fh.write("{}")
     if kind == "path":
         return good
     if kind == "fd":
@@ -103,28 +113,45 @@ def call_predicate(f, src):
         resume=f.resume, checkpoint_file=f.checkpoint_file)
 
 
-def cell_route(f, reached, ok):
+def cell_route(f, reached, valid, ok):
     """The route a public call for this cell ACTUALLY takes.
 
     Derived from the dispatch contract in the oracle, which is why it can
     disagree with `ok`: a cell can satisfy the envelope and never be
     asked about it. tools/capability_dispatch.py observes the live
     branches independently, and the tests assert the two agree.
+
+    Argument order is (facts, reached, valid, ok) and the last two are
+    both booleans of different meaning. Swapping them does not raise --
+    it silently relabels thousands of valid cells as validation
+    rejections, which is exactly what happened once during WO-CM1-R1.
     """
+    # An invalid configuration never reaches an executor at all, so it
+    # must not be given an execution route. The previous version assigned
+    # one anyway, which is why the "all cells" table showed normal
+    # execution categories for calls that public validation refuses.
+    if not valid:
+        return dispatch.VALIDATION_REJECTED
+    # Precedence mirrors the live branch order. NUMA is tested BEFORE
+    # splice: both map() and stream() take the num_nodes > 1 branch first,
+    # so a multi-node splice call is a NUMA route, not a splice one. The
+    # old order checked mode == "splice" first and mislabelled it.
+    if f.nodes != 1:
+        return dispatch.NUMA_PIPELINE
+    if f.mode == "splice":
+        return dispatch.SPLICE_PIPELINE
     if not reached:
-        if f.mode == "splice":
-            return dispatch.SPLICE_PIPELINE
-        if f.nodes != 1:
-            return dispatch.NUMA_PIPELINE
         if f.entry == "run":
-            # run() has no cleanroom branch; whatever it does, it is not
-            # this. Recorded as its own category rather than folded into
-            # "in-process", because "run() cannot be cleanroom-served" is
-            # the single most important fact this audit produced.
-            return dispatch.CLEANROOM_NOT_REACHED
-        return dispatch.IN_PROCESS
+            # run() has no cleanroom branch. Recorded as its own category
+            # rather than folded into "in-process", because "run() cannot
+            # be cleanroom-served" is the single most important fact this
+            # audit produced.
+            return dispatch.CLEANROOM_UNREACHABLE
+        return dispatch.PREDICATE_NOT_CONSULTED
+    # The predicate WAS consulted. Serving and declining are different
+    # facts and must not share a label.
     return (dispatch.CLEANROOM_SELECTED if ok
-            else dispatch.CLEANROOM_NOT_REACHED)
+            else dispatch.PREDICATE_DECLINED)
 
 
 def collect():
@@ -140,15 +167,20 @@ def collect():
     with tempfile.TemporaryDirectory() as tmpdir:
         for combo in itertools.product(*[v for _, v in AXES]):
             values = dict(zip(names, combo))
-            # `streaming` is INAPPLICABLE for map/run and must not be
-            # enumerated for them. Generating map(streaming=True) creates
-            # a cell no public call can make -- map() has no streaming
-            # notion and always passes streaming=False to the predicate --
-            # which is precisely the misleading Cartesian product this
-            # work order warns about. It also made the oracle's stream
-            # rules fire against map cells.
-            if values["entry"] != "stream":
-                values["streaming"] = False
+            # `streaming` is INAPPLICABLE to map/run: those entry points
+            # have no streaming notion and always pass streaming=False to
+            # the predicate, so map(streaming=True) is a configuration no
+            # public call can make.
+            #
+            # SKIP the combination. The previous fix overwrote the value
+            # after generating the full cross product, which silently
+            # turned map(streaming=True) into a SECOND COPY of
+            # map(streaming=False) and counted every map/run cell twice:
+            # 60,480 rows containing only 40,320 distinct configurations.
+            # Rewriting a generated value is not the same as not
+            # generating it.
+            if values["entry"] != "stream" and values["streaming"]:
+                continue
             f = oracle.Facts(kind="map", **values)
             src = make_source(f.source_kind, tmpdir)
             try:
@@ -158,7 +190,19 @@ def collect():
             valid = oracle.public_valid(f)
             reached = oracle.dispatch_reaches_predicate(f)
             cells.append((f, ok, reason, oracle.classify(ok, reason),
-                          valid, reached, cell_route(f, reached, ok)))
+                          valid, reached, cell_route(f, reached, valid, ok)))
+    # Uniqueness is a property of the GENERATOR, so it is asserted here
+    # rather than only in a test: a future axis could reintroduce
+    # duplicates and the error would otherwise show up as a plausible
+    # count change.
+    unique = {c[0] for c in cells}
+    if len(unique) != len(cells):
+        dupes = len(cells) - len(unique)
+        raise AssertionError(
+            "capability_matrix generated %d rows for %d distinct "
+            "configurations: %d duplicate(s). An axis is being enumerated "
+            "where it is inapplicable."
+            % (len(cells), len(unique), dupes))
     return cells
 
 
@@ -283,8 +327,42 @@ def render(cells):
     w("`num_nodes > 1` takes the NUMA path and returns before the")
     w("predicate (run.py:3834 for map, :4254 for stream).")
     w("")
-    w("### 5. The old denominator was inflated by %.1f%%"
-      % (100.0 * (total - nvalid) / total if total else 0.0))
+    w("### 5. Duplicate configurations were being counted")
+    w("")
+    w("The first WO-CM1 pass normalised the inapplicable `streaming`")
+    w("value for map/run *after* expanding the Cartesian product, which")
+    w("turned `map(streaming=True)` into a second copy of")
+    w("`map(streaming=False)`. The grid reported %d rows for %d distinct" % (60480, 40320))
+    w("configurations -- every map/run cell counted twice, and every")
+    w("headline figure inflated with it. The generator now SKIPS")
+    w("inapplicable combinations and asserts uniqueness itself, so the")
+    w("error cannot recur silently.")
+    w("")
+    w("### 6. Public validity is entry-point aware")
+    w("")
+    w("The first pass called every surviving cell \"public-valid\", which")
+    w("overstated the denominator. Verified by calling each entry point:")
+    w("")
+    w("| Configuration | Observed |")
+    w("|---|---|")
+    w("| `run(return_stats=True)` | TypeError -- unexpected keyword |")
+    w("| `stream(return_stats=True)` | TypeError -- unexpected keyword |")
+    w("| `run(mode=\"udf\")` | NotImplementedError: unknown mode |")
+    w("| `run(mode=\"splice\")` | ValueError for BOTH payload shapes |")
+    w("| `resume=` with a missing path | FileNotFoundError |")
+    w("")
+    w("`resume`/`checkpoint_file` cells are therefore backed by a real")
+    w("fixture file, so the axis measures the capability rather than a")
+    w("missing-file error.")
+    w("")
+    w("### 7. `map()` and `stream()` differ on a missing launcher")
+    w("")
+    w("`map()` gates only on the predicate and calls the cleanroom")
+    w("executor, which resolves the launcher itself and, if absent, warns")
+    w("and falls back internally. `stream()` tests launcher availability")
+    w("*before* selecting (run.py:4345). So the two are not")
+    w("interchangeable on that boundary, and the earlier assumption that")
+    w("a missing artifact stops selection was wrong for `map()`.")
     w("")
     w("Invalid configurations were counted against the capability")
     w("denominator. **%d cells were reported as served that no public call"

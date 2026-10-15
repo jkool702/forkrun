@@ -132,6 +132,27 @@ def dispatch_reaches_predicate(facts) -> bool:
     return True
 
 
+# Entry-point argument applicability, established by CALLING each entry
+# point and recording what it raises. Re-stated here so the oracle stays
+# independent of forkrun.
+#
+#   run(return_stats=True)    -> TypeError: got an unexpected keyword
+#   stream(return_stats=True) -> TypeError: unexpected keyword argument(s)
+#   run(mode="udf")           -> NotImplementedError: unknown mode 'udf'
+#   run(mode="splice")        -> ValueError either way: with a payload
+#                                "takes no payload (passthrough)"; with
+#                                payload=None "produces output records --
+#                                use map() or stream()". So it is rejected
+#                                unconditionally, not merely payload-shaped.
+#   resume / checkpoint_file  -> accepted by all three, but the path must
+#                                EXIST (FileNotFoundError otherwise). The
+#                                generator now creates the fixture so the
+#                                precondition holds rather than silently
+#                                failing every resume cell.
+MAP_ONLY_KWARGS = ("return_stats",)
+RUN_UNSUPPORTED_MODES = ("udf", "splice")
+
+
 def public_valid(facts) -> bool:
     """Does this cell satisfy the PUBLIC API contract?
 
@@ -139,16 +160,26 @@ def public_valid(facts) -> bool:
     They keep their conformance tests; they are simply not configurations
     a caller could ever make.
 
-    Derived from the live validators, re-stated here so the oracle stays
-    independent of forkrun:
-      * _api._VALID_ORDERS == ("none", "index") -- "sorted" is rejected
-        by public validation before any envelope is consulted;
-      * _api._reject_iterable_source rejects iterables and generators;
-      * a missing path or a directory is not a readable workload source.
+    Three layers, all re-derived from the live implementation:
+      1. values the public validators reject regardless of entry point
+         (_VALID_ORDERS, _reject_iterable_source, unreadable sources);
+      2. arguments that are not applicable to the entry point at all;
+      3. (entry, mode) pairs the entry point refuses outright.
     """
+    entry = getattr(facts, "entry", None) or facts.kind
+
+    # (1) universally invalid values
     if facts.order not in ("none", "index"):
         return False
     if facts.source_kind in ("iterable", "missing", "dir", "bogus"):
+        return False
+
+    # (2) argument applicability
+    if entry != "map" and facts.return_stats:
+        return False
+
+    # (3) entry-point contract refusals
+    if entry == "run" and facts.mode in RUN_UNSUPPORTED_MODES:
         return False
     return True
 

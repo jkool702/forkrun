@@ -57,7 +57,13 @@ if os.path.join(_ROOT, "python") not in sys.path:
 # --------------------------------------------------------------------------
 
 CLEANROOM_SELECTED = "cleanroom-selected"
-CLEANROOM_NOT_REACHED = "cleanroom-not-reached"
+CLEANROOM_NOT_REACHED = "cleanroom-not-reached"   # legacy alias
+# WO-CM1-R1 split the old catch-all in two. "The envelope was never asked"
+# and "the envelope was asked and said no" are different facts, and a
+# matrix whose whole point is dispatch cannot collapse them.
+PREDICATE_NOT_CONSULTED = "predicate-not-consulted"
+PREDICATE_DECLINED = "predicate-declined"
+CLEANROOM_UNREACHABLE = "cleanroom-unreachable"
 VALIDATION_REJECTED = "validation-rejected"
 NUMA_PIPELINE = "numa-pipeline"
 SPLICE_PIPELINE = "splice-pipeline"
@@ -67,7 +73,9 @@ UNCLASSIFIED = "unclassified"
 
 ROUTES = (
     CLEANROOM_SELECTED,
-    CLEANROOM_NOT_REACHED,
+    PREDICATE_NOT_CONSULTED,
+    PREDICATE_DECLINED,
+    CLEANROOM_UNREACHABLE,
     VALIDATION_REJECTED,
     NUMA_PIPELINE,
     SPLICE_PIPELINE,
@@ -180,7 +188,7 @@ class _Probe:
         if self.predicate_called:
             # Reached the predicate but did not select the launcher: the
             # predicate declined, or the launcher was missing.
-            return CLEANROOM_NOT_REACHED
+            return PREDICATE_DECLINED
         if isinstance(self.error, (TypeError, ValueError, FileNotFoundError,
                                    NotADirectoryError, IsADirectoryError,
                                    PermissionError)):

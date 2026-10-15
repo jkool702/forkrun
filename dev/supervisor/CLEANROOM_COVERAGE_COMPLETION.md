@@ -64,9 +64,24 @@ and conflating them was the previous draft's error:
 >    (17,280 of 60,480). The old figure divided by a grid that was 62%
 >    configurations no public call could make.
 >
-> Current figures are in `dev/supervisor/CLEANROOM_CAPABILITY_MATRIX.md`,
-> which is generated and verified with `--check`. The historical counts
-> below are retained only to show what changed.
+> **WO-CM1-R1 corrected the inventory again.** The first WO-CM1 pass
+> generated 60,480 rows for only 40,320 distinct configurations: it
+> normalised the inapplicable `streaming` value for map/run *after*
+> expanding the Cartesian product, counting every map/run cell twice.
+> Public validity was also too weak — it did not model argument
+> applicability or entry-point refusals — so the "public-valid"
+> denominator was overstated even then.
+>
+> Current figures, all from the generated matrix (`--check` verified):
+>
+> | Measure | Value |
+> |---|---:|
+> | Rows enumerated (all distinct) | 40,320 |
+> | Public-VALID | 6,624 |
+> | Predicate accepts (of valid) | 288 |
+> | **Launcher selected (of valid)** | **168 (2.54%)** |
+>
+> The historical counts below are retained only to show what changed.
 
 | case | status | why |
 |---|---|---|

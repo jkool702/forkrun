@@ -12,12 +12,12 @@ public entry point actually takes.
 
 | | |
 |---|---|
-| Cells enumerated | 60480 |
-| Public-VALID cells | 17280 (28.6% of grid) |
-| Cells rejected by public validation | 43200 |
-| Predicate accepts (of valid) | 768 |
-| **Launcher selected (of valid)** | **336 (1.94%)** |
-| Distinct routes | 5 |
+| Cells enumerated | 40320 |
+| Public-VALID cells | 6624 (16.4% of grid) |
+| Cells rejected by public validation | 33696 |
+| Predicate accepts (of valid) | 288 |
+| **Launcher selected (of valid)** | **168 (2.54%)** |
+| Distinct routes | 7 |
 
 Percentages are against the **public-valid** denominator. The full
 grid includes configurations no public call can make (iterable
@@ -52,21 +52,24 @@ for what they made visible that the old axis set could not.
 
 | Actual route | Cells | Share |
 |---|---:|---:|
-| `numa-pipeline` | 9216 | 53.3% |
-| `splice-pipeline` | 3456 | 20.0% |
-| `cleanroom-not-reached` | 2736 | 15.8% |
-| `in-process/reactor` | 1536 | 8.9% |
-| `cleanroom-selected` | 336 | 1.9% |
+| `numa-pipeline` | 4416 | 66.7% |
+| `predicate-not-consulted` | 768 | 11.6% |
+| `predicate-declined` | 600 | 9.1% |
+| `splice-pipeline` | 384 | 5.8% |
+| `cleanroom-unreachable` | 288 | 4.3% |
+| `cleanroom-selected` | 168 | 2.5% |
 
 ### All cells, including invalid ones
 
 | Actual route | Cells | Share |
 |---|---:|---:|
-| `numa-pipeline` | 32256 | 53.3% |
-| `splice-pipeline` | 12096 | 20.0% |
-| `cleanroom-not-reached` | 10304 | 17.0% |
-| `in-process/reactor` | 5376 | 8.9% |
-| `cleanroom-selected` | 448 | 0.7% |
+| `validation-rejected` | 33696 | 83.6% |
+| `numa-pipeline` | 4416 | 11.0% |
+| `predicate-not-consulted` | 768 | 1.9% |
+| `predicate-declined` | 600 | 1.5% |
+| `splice-pipeline` | 384 | 1.0% |
+| `cleanroom-unreachable` | 288 | 0.7% |
+| `cleanroom-selected` | 168 | 0.4% |
 
 ---
 
@@ -101,10 +104,45 @@ with `streaming=None` over a regular file does not.
 `num_nodes > 1` takes the NUMA path and returns before the
 predicate (run.py:3834 for map, :4254 for stream).
 
-### 5. The old denominator was inflated by 71.4%
+### 5. Duplicate configurations were being counted
+
+The first WO-CM1 pass normalised the inapplicable `streaming`
+value for map/run *after* expanding the Cartesian product, which
+turned `map(streaming=True)` into a second copy of
+`map(streaming=False)`. The grid reported 60480 rows for 40320 distinct
+configurations -- every map/run cell counted twice, and every
+headline figure inflated with it. The generator now SKIPS
+inapplicable combinations and asserts uniqueness itself, so the
+error cannot recur silently.
+
+### 6. Public validity is entry-point aware
+
+The first pass called every surviving cell "public-valid", which
+overstated the denominator. Verified by calling each entry point:
+
+| Configuration | Observed |
+|---|---|
+| `run(return_stats=True)` | TypeError -- unexpected keyword |
+| `stream(return_stats=True)` | TypeError -- unexpected keyword |
+| `run(mode="udf")` | NotImplementedError: unknown mode |
+| `run(mode="splice")` | ValueError for BOTH payload shapes |
+| `resume=` with a missing path | FileNotFoundError |
+
+`resume`/`checkpoint_file` cells are therefore backed by a real
+fixture file, so the axis measures the capability rather than a
+missing-file error.
+
+### 7. `map()` and `stream()` differ on a missing launcher
+
+`map()` gates only on the predicate and calls the cleanroom
+executor, which resolves the launcher itself and, if absent, warns
+and falls back internally. `stream()` tests launcher availability
+*before* selecting (run.py:4345). So the two are not
+interchangeable on that boundary, and the earlier assumption that
+a missing artifact stops selection was wrong for `map()`.
 
 Invalid configurations were counted against the capability
-denominator. **256 cells were reported as served that no public call
+denominator. **352 cells were reported as served that no public call
 could ever make** -- every one of them an iterable source, which
 `_api._reject_iterable_source` rejects before any envelope check.
 
@@ -114,12 +152,12 @@ could ever make** -- every one of them an iterable source, which
 
 | Outcome | Cells | Reason fragment |
 |---|---:|---|
-| `DECLINE_NODES` | 11520 | UMA single-node only (got nodes=2) |
-| `DECLINE_RESUME` | 2592 | resume=/checkpoint_file= is not served; the launcher neith |
-| `DECLINE_MODE` | 2304 | mode='plugin', 'udf' or 'spawn' only (got 'python') |
-| `SERVED` | 768 |  |
-| `DECLINE_STREAM_ORDER` | 48 | stream(order='index') is not served; the stream path has n |
-| `DECLINE_MODE_STREAM_SPAWN` | 48 | stream(mode='spawn') is not served; the streaming path has |
+| `DECLINE_NODES` | 4416 | UMA single-node only (got nodes=2) |
+| `DECLINE_RESUME` | 1008 | resume=/checkpoint_file= is not served; the launcher neith |
+| `DECLINE_MODE` | 864 | mode='plugin', 'udf' or 'spawn' only (got 'python') |
+| `SERVED` | 288 |  |
+| `DECLINE_STREAM_ORDER` | 24 | stream(order='index') is not served; the stream path has n |
+| `DECLINE_MODE_STREAM_SPAWN` | 24 | stream(mode='spawn') is not served; the streaming path has |
 
 ---
 

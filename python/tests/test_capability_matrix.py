@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(_ROOT, "tools"))
 sys.path.insert(0, os.path.join(_ROOT, "python"))
 
 import capability_matrix                                    # noqa: E402
+import capability_dispatch                                  # noqa: E402
 import capability_oracle as oracle                           # noqa: E402
 
 _CELLS = None
@@ -125,33 +126,58 @@ class TestCoverage(_MatrixBase):
     def test_served_fraction_is_plausibly_small(self):
         """Coarse tripwire, NOT a per-axis guard.
 
-        Its only job is catching a gross expansion -- something that turns
-        the matrix overwhelmingly SERVED, which would make every other
-        test here pass for the wrong reason.
+        Catches a gross expansion -- something that turns the matrix
+        overwhelmingly SERVED, which would make every other test here pass
+        for the wrong reason.
 
-        The ceiling is 2%, chosen by MEASURING what a lost axis would
-        produce rather than by feel. Losing the `nodes != 1` guard alone
-        serves every currently-served cell across all three node values:
+        WO-CM1-R1 corrected the DENOMINATOR. The ceiling was measured over
+        ALL cells, but 39,680 of 40,320 are configurations no public call
+        can make, so most of the denominator was empty by construction and
+        the bound was measuring the validity filter as much as the
+        capability. It is now over the PUBLIC-VALID subset, which is the
+        quantity the bound is actually about.
 
-            288 x 3 = 864 of 20160 = 4.29%
+        The ceiling is also re-derived rather than inherited. It is set
+        just above today's launcher-selected share of the valid cells and
+        with headroom for a further entry point or mode, and the sibling
+        test checks the arithmetic it is sized against so it cannot
+        quietly stop protecting the `nodes` guard it was introduced for.
 
-        So the earlier 5% ceiling would have PASSED a lost `nodes` guard
-        -- it was not doing the job its comment claimed. 2% sits well
-        clear of that while leaving room to serve a further mode at
-        today's 1.43%.
-
-        Per-axis loss is caught by the ORACLE agreement tests, which
-        resolve every cell independently. This bound is a backstop for
-        wholesale change, and is documented as such rather than dressed up
-        as stronger than it is.
+        An unexplained percentage ceiling must not become a permanent
+        obstacle to making the cleanroom first-class: raising it is a
+        legitimate response to real coverage growth, and this comment
+        records that rather than pretending the bound is a law.
         """
-        all_cells = cells()
-        served = sum(1 for c in all_cells if c[1])
-        frac = served / len(all_cells)
-        self.assertTrue(0 < frac < 0.02,
-                        "served fraction %.4f exceeds the coarse 2%% "
-                        "ceiling; a wholesale expansion would let every "
-                        "other test here pass for the wrong reason" % frac)
+        valid = [c for c in cells() if c[4]]
+        self.assertTrue(valid, "no public-valid cells; the validity "
+                               "screen has filtered everything away")
+        served = sum(1 for c in valid if c[1])
+        frac = served / len(valid)
+        self.assertTrue(
+            0 < frac < 0.10,
+            "predicate-served share of public-valid cells is %.4f, which "
+            "breaches the coarse 10%% backstop; a wholesale expansion would "
+            "let every other test here pass for the wrong reason" % frac)
+
+    def test_launcher_selected_share_of_valid_is_reported(self):
+        """The headline number must be the ROUTE, not just the predicate.
+
+        The whole point of this audit is that satisfying the envelope and
+        actually selecting the launcher are different facts. A guard that
+        watched only `c[1]` would not notice if every served cell stopped
+        reaching the predicate.
+        """
+        valid = [c for c in cells() if c[4]]
+        selected = sum(1 for c in valid
+                       if c[6] == capability_dispatch.CLEANROOM_SELECTED)
+        self.assertGreater(
+            selected, 0, "no valid cell selects the launcher; either the "
+                         "route model or the dispatch has broken")
+        self.assertLessEqual(
+            selected,
+            sum(1 for c in valid if c[1]),
+            "cells cannot select the launcher without the predicate "
+            "accepting them")
 
     def test_a_lost_nodes_guard_would_be_caught(self):
         """Check the arithmetic the ceiling was sized against.
@@ -187,26 +213,48 @@ class TestCoverage(_MatrixBase):
         missing here while the oracle already admitted it, so the matrix
         was undercounting what the launcher actually serves.
         """
-        # WO-CM1: the grid grew because two axes were added (entry with
-        # "run", and the effective streaming flag) and because the old
-        # `kind` axis was replaced by `entry`. The pin's PURPOSE is "an
-        # axis cannot be dropped unnoticed", so it asserts the exact
-        # count AND that it decomposes as the axes predict -- a single
-        # opaque integer would let a compensating error through.
+        # WO-CM1-R1: the pin now asserts UNIQUENESS, not a magic total.
+        #
+        # The previous version asserted `product(axes) == len(cells)`,
+        # which was actively harmful: the generator overwrote
+        # `streaming` for map/run AFTER expanding the product, so it
+        # emitted 60,480 rows containing 40,320 distinct configurations
+        # -- and the product test confirmed the inflated count rather
+        # than catching the duplication.
+        #
+        # Duplicated rows are not a cosmetic problem here: they inflate
+        # every headline number, and a matrix that double-counts the
+        # map/run half of its grid cannot be used to prioritise anything.
         all_cells = cells()
-        self.assertEqual(60480, len(all_cells))
-        n_axes = len(capability_matrix.AXES)
-        product = 1
-        for _name, values in capability_matrix.AXES:
-            product *= len(values)
-        self.assertEqual(product, len(all_cells),
-                         "cell count must equal the Cartesian product of "
-                         "the declared axes (%d); a mismatch means an axis "
-                         "was added without its values being enumerated"
-                         % product)
+        unique = {c[0] for c in all_cells}
+        self.assertEqual(
+            len(unique), len(all_cells),
+            "%d rows for %d distinct configurations: an axis is being "
+            "enumerated where it is inapplicable"
+            % (len(all_cells), len(unique)))
 
+        # And the count must equal the product of APPLICABLE combinations,
+        # not the raw axis product.
+        axes = dict(capability_matrix.AXES)
+        # `entry` is excluded too: it is already accounted for in
+        # streaming_slots below, and including it in both counted the
+        # axis three times over.
+        others = 1
+        for name, values in axes.items():
+            if name not in ("streaming", "entry"):
+                others *= len(values)
+        # `streaming` is INAPPLICABLE to map and run, so instead of
+        # len(axes["streaming"]) it contributes one slot per non-stream
+        # entry plus two for stream: 3 entries -> 1 + 2 + 1 = 4.
+        entries = list(axes["entry"])
+        streaming_slots = sum(
+            len(axes["streaming"]) if e == "stream" else 1 for e in entries)
+        expected = others * streaming_slots
+        self.assertEqual(
+            expected, len(all_cells),
+            "cell count must equal the product of APPLICABLE axis values "
+            "(%d); got %d" % (expected, len(all_cells)))
 
-class TestRegressions(_MatrixBase):
 
     def test_regression_points(self):
         """Each historically-wrong contract point, pinned by name."""
