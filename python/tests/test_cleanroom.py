@@ -2613,3 +2613,127 @@ class TestCleanroomStreamStrictPoison(unittest.TestCase):
             status_at, stats_at,
             "the poison count must be read only AFTER the launcher exit has "
             "been confirmed clean, or a failed run reports as zero poison")
+
+
+@unittest.skipUnless(HAVE_PLUGIN, "plugin fixture not built")
+class TestLauncherUnavailableFallsBackObservably(unittest.TestCase):
+    """WO-ROI-1 §3: a silent in-process fallback must not look clean.
+
+    This is the highest-value uncovered case in the route set. When the
+    launcher binary is missing, _execute_cleanroom warns and returns
+    None and the caller continues on the in-process path -- so the OUTPUT
+    is correct either way, and a test that only checks totals cannot tell
+    the two apart. That is exactly the shape of test this class exists to
+    replace.
+
+    Three things are asserted, and the third is the one that matters:
+      * the fallback is ANNOUNCED, so nobody believes they got the
+        cleanroom when they did not;
+      * the run still produces correct output (the fallback is safe);
+      * and the same configuration with the launcher present is a
+        DIFFERENT observable state, so the two are distinguishable.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="crmiss-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.path = os.path.join(self.tmp, "input.txt")
+        with open(self.path, "w") as fh:
+            for i in range(400):
+                fh.write("line %d payload text\n" % i)
+        self._old = os.environ.get("FORKRUN_CLEANROOM")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._old is None:
+            os.environ.pop("FORKRUN_CLEANROOM", None)
+        else:
+            os.environ["FORKRUN_CLEANROOM"] = self._old
+
+    # Uses the module-level _spec()/PLUGIN fixture this file already
+    # builds. A private fixture module was invented first and does not
+    # exist; the existing one is the single source of truth for what the
+    # launcher actually loads.
+
+    def test_missing_launcher_warns_and_still_produces_correct_output(self):
+        R = sys.modules["forkrun.run"]
+        real_path = R._cleanroom_launcher_path
+        R._cleanroom_launcher_path = lambda: None
+        self.addCleanup(setattr, R, "_cleanroom_launcher_path", real_path)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                              mode="plugin", output="bytes")
+        self.assertTrue(out, "the fallback must still produce output")
+        msgs = " ".join(str(w.message) for w in caught)
+        self.assertIn("launcher", msgs.lower(),
+                      "a missing launcher must be announced; a silent "
+                      "fallback lets a caller believe the cleanroom ran")
+        self.assertIn("in-process", msgs.lower(),
+                      "the warning must say which path was actually used")
+
+    def test_present_and_absent_launcher_are_distinguishable(self):
+        """The property the previous shape of test could not express.
+
+        Same configuration, same output -- but the observable state
+        differs. If these two were indistinguishable, every existing
+        output-only cleanroom test would pass with the launcher route
+        entirely dead.
+        """
+        R = sys.modules["forkrun.run"]
+        # Capture the REAL callable FIRST. An earlier version of this
+        # test assigned the lambda and only then read the value back to
+        # restore, so cleanup reinstalled the lambda and every LATER test
+        # in the process ran with no launcher -- surfacing as
+        # "v0 supports mode='python' only" in an unrelated suite.
+        real_path = R._cleanroom_launcher_path
+        self.addCleanup(setattr, R, "_cleanroom_launcher_path", real_path)
+        with_path = real_path()
+        self.assertIsNotNone(with_path,
+                             "precondition: the launcher binary must exist "
+                             "for this comparison to mean anything")
+
+        # Route entered, launcher present.
+        entered_present = []
+        real = R._execute_cleanroom
+
+        def spy_present(*a, **k):
+            entered_present.append(1)
+            return real(*a, **k)
+        R._execute_cleanroom = spy_present
+        self.addCleanup(setattr, R, "_execute_cleanroom", real)
+        out_a = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                            mode="plugin", output="bytes")
+
+        # Same call, launcher absent. real_path was captured above, so
+        # cleanup restores the genuine function.
+        entered_absent = []
+        R._cleanroom_launcher_path = lambda: None
+
+        def spy_absent(*a, **k):
+            entered_absent.append(1)
+            return real(*a, **k)
+        R._execute_cleanroom = spy_absent
+        out_b = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                            mode="plugin", output="bytes")
+
+        self.assertTrue(entered_present,
+                        "with the launcher present the route must be taken")
+        self.assertTrue(entered_absent,
+                        "with it absent the route is still entered, then "
+                        "falls back internally -- which is why a "
+                        "route-only assertion is not enough on its own")
+        # JOINED BYTES, not the record list. This file's own header
+        # records the rule and the reason: the two routes produce
+        # DIFFERENT record boundaries for the same content -- the
+        # launcher path returns 16-byte chunks where the in-process path
+        # returns batch-sized ones -- so comparing lists fails on
+        # chunking rather than on content. An earlier version of this
+        # test compared lists and was flaky in 6 runs out of 8.
+        self.assertEqual(
+            b"".join(out_a), b"".join(out_b),
+            "the fallback must preserve the output BYTES exactly; if it "
+            "does not, the fallback is a correctness bug, not a "
+            "convenience")

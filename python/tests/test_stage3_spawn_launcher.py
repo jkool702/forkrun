@@ -19,8 +19,16 @@ element. It cannot be rejected in C: a C string is NUL-terminated by
 definition, so an embedded NUL would have been truncated before the
 launcher ever saw it. Asserted here as the single place it happens.
 
-The launcher's spawn ENVELOPE is still declined. This module pins the
-plumbing, not activation.
+WO-ROI-1 CORRECTED THIS. The claim above ("the launcher's spawn
+ENVELOPE is still declined... not activation") was STALE. Verified at
+`0f942b42`: with FORKRUN_CLEANROOM=1, map(mode="spawn") DOES enter the
+launcher route -- a parent-side spy on `_execute_cleanroom` records the
+call -- and returns correct output. Spawn is activated.
+
+The stale claim was not harmless: it was the reason one might have
+believed enabling the global gate was safe, since two of its three
+envelopes appeared to be dormant. See
+dev/supervisor/CLEANROOM_DEFAULT_ON_DECISION.md.
 """
 
 import inspect
