@@ -191,11 +191,12 @@ from `tools/capability_oracle.py`, which imports nothing from
 
 ## Limitations not expressible as cell counts
 
-- **Default was OFF; map(plugin) is now ON** (WO-CR-ROI-2 Phase D,
-  `04485e52`). The other four served routes remain opt-in. Capability
-  and default behaviour are different questions; this table answers the
-  first, and the count above is unchanged by the default — it counts
-  what is *reachable*, not what is *selected*.
+- **The default does not change these counts.** `map(plugin)` is
+  default-on (WO-CR-ROI-2 Phase D, `04485e52`); `udf`, `spawn` and
+  both stream routes stay opt-in behind `FORKRUN_CLEANROOM`.
+  Capability and default behaviour are different questions: the
+  cells above count what is *reachable*, not what is *selected*,
+  so moving the default moved no count here.
 - **Artifacts are a separate axis.** A missing launcher or an
   incompatible UDF helper changes the route without changing any
   cell in this grid; they are tested as boundary conditions, not
