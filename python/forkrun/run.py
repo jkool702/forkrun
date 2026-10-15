@@ -7103,7 +7103,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # baseline into zero, so a baseline read that fails while the FINAL
     # read succeeds would compare against the CUMULATIVE count and raise
     # on a correct run. None disables the certificate instead.
-    _c07_base = _c07_read_committed(lib, 1)
+    _c07_base = _c07_read_committed(lib, 1) if _c07_enabled() else None
     # C0.7: is another run live in this process? Recorded BEFORE the
     # increment below, so it refers to the enclosing run, not this one.
     _c07_nested = _C07_RUN_DEPTH[0] > 0
@@ -7390,7 +7390,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # or a resumed run is not charged for frames committed
             # elsewhere. Producers are quiescent: the orderer has been
             # joined and the reactor has returned.
-            _c07_now = _c07_read_committed(lib, 1)
+            _c07_now = (_c07_read_committed(lib, 1)
+                        if _c07_enabled() else None)
             if _c07_nested or _C07_RUNS_STARTED[0] != _c07_runs_at_start:
                 # Either we are nested (an enclosing run's live workers
                 # commit to the same engine counter) or a run STARTED
@@ -9930,6 +9931,23 @@ def _c07_envelope(lib, mode, *, use_complete, has_emit,
     return True, ""
 
 
+def _c07_enabled():
+    """Read the SAME switch the shim reads.
+
+    Both halves must agree or the feature becomes a false-pass factory:
+    accounting off with the certificate still live compares a counter
+    that reads 0 against real collected frames, so every correct run
+    fails; accounting on with the certificate silently skipped measures
+    nothing while reporting success.
+
+    The shim caches this per process on first use. So must this, or a
+    run would compare against a counter whose accounting state was
+    decided at a different moment.
+    """
+    v = os.environ.get("FORKRUN_C07_COUNT")
+    return not (v and v[0] and v == "0")
+
+
 def _c07_no_verdict(reason):
     """Emit NO certificate verdict, and say why.
 
@@ -10123,7 +10141,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
     # C0.7 expected-side baseline -- see the UMA reactor executor for
     # why this is a local captured before any fork rather than a global.
     # C0.7: keep the None sentinel -- see the UMA reactor executor.
-    _c07_base = _c07_read_committed(lib, num_nodes)
+    _c07_base = _c07_read_committed(lib, num_nodes) if _c07_enabled() else None
     _c07_nested = _C07_RUN_DEPTH[0] > 0
     _C07_RUN_DEPTH[0] += 1
     _C07_RUNS_STARTED[0] += 1
@@ -10575,7 +10593,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             # executor for why the baseline is a per-run local.
             _ordered = [blob for _, blob in _iter_records(lib, coll_fd,
                                                           views=_zc)]
-            _c07_now = _c07_read_committed(lib, num_nodes)
+            _c07_now = (_c07_read_committed(lib, num_nodes)
+                        if _c07_enabled() else None)
             if _c07_nested:
                 _c07_no_verdict(
                     "nested inside another forkrun run, whose live workers "

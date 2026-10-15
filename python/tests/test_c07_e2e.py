@@ -173,3 +173,66 @@ class TestHookIsInertByDefault(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestAccountingSwitchIsCoupled(unittest.TestCase):
+    """Round 20 §6: one switch, both halves, or neither.
+
+    Separating them is a false-pass factory. With accounting off and the
+    certificate still live, the counter reads 0 while the parent collects
+    real frames -- verified, every correct run then raises "collected 25,
+    published 0". The inverse silently measures nothing while reporting
+    success.
+
+    So FORKRUN_C07_COUNT=0 must disable BOTH, and the only reachable
+    states are "measured and checked" or "not attempted".
+    """
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.src = _src(self.d)
+        self._saved = os.environ.get("FORKRUN_C07_COUNT")
+
+        def restore():
+            if self._saved is None:
+                os.environ.pop("FORKRUN_C07_COUNT", None)
+            else:
+                os.environ["FORKRUN_C07_COUNT"] = self._saved
+        self.addCleanup(restore)
+
+    def test_default_is_enabled(self):
+        os.environ.pop("FORKRUN_C07_COUNT", None)
+        self.assertTrue(Rm._c07_enabled(),
+                        "the certificate is live by default; opting out "
+                        "must be explicit")
+
+    def test_zero_disables_both_halves(self):
+        os.environ["FORKRUN_C07_COUNT"] = "0"
+        self.assertFalse(Rm._c07_enabled())
+
+    def test_disabled_run_neither_measures_nor_fails(self):
+        """The decisive case: off must not become a false failure.
+
+        If the accounting is off but the certificate still runs, the
+        counter reads 0 against real collected frames and every correct
+        run raises. This is what the coupling prevents.
+        """
+        os.environ["FORKRUN_C07_COUNT"] = "0"
+        # Reset first: when disabled the run never WRITES the telemetry,
+        # so an earlier test's value would otherwise still be sitting
+        # there and this would assert against another test's leftovers.
+        Rm._COMMITTED_FRAMES["total"] = None
+        Rm._COMMITTED_FRAMES["nodes"] = 0
+        out = forkrun.map(_up, self.src, workers=1, nodes=1,
+                          order="index")
+        self.assertTrue(out, "a disabled run must still return its output")
+        self.assertIsNone(Rm.committed_frames()["total"],
+                          "and must record no committed count, since none "
+                          "was accumulated")
+
+    def test_enabled_run_measures_and_checks(self):
+        os.environ["FORKRUN_C07_COUNT"] = "1"
+        out = forkrun.map(_up, self.src, workers=1, nodes=1,
+                          order="index")
+        self.assertEqual(len(out), Rm.committed_frames()["total"],
+                         "an enabled run must measure and correspond")

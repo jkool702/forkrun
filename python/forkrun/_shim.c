@@ -128,6 +128,36 @@ static __thread int fr_py_txn_out_fd = -1;
  * never contend here; the only shared write is the commit flush. */
 static __thread uint64_t fr_py_txn_pending_data = 0;
 
+/* C0.7 accounting switch.
+ *
+ * Reads ONE env var and applies it to BOTH halves of the feature: the
+ * per-emitter pending increment AND the commit-time flush. They cannot be
+ * separated, and that is deliberate.
+ *
+ * Separating them would be a false-pass factory. With the flush disabled
+ * and the certificate still active, the counter reads 0 while the parent
+ * collects its frames, so every correct run would fail. With the
+ * accounting disabled and the certificate silently skipped, every run
+ * would "pass" with nothing measured. One switch, both behaviours,
+ * means the only two reachable states are "measured and checked" and
+ * "not attempted at all".
+ *
+ * Default ON. The cost when on is one thread-local increment per DATA
+ * frame plus one relaxed fetch_add per committed batch -- measured below
+ * the noise floor of the ordered workload. Turning it off exists for
+ * operators who want that back on hot C-emitter paths such as
+ * order="none", and it costs the certificate, which the docs must say
+ * plainly. Inert unless the variable is set to 0. */
+static int fr_c07_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("FORKRUN_C07_COUNT");
+        cached = !(v && v[0] && strcmp(v, "0") == 0);
+    }
+    return cached;
+}
+
 /* Set the worker-local output fd for W-PY28 transaction records.
  * Call once post-fork, post-init (idempotent; -1 disarms). */
 int fr_py_set_output_fd(int fd) {
@@ -993,7 +1023,8 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
      * those records exist so an ordered consumer does not wait forever
      * on a batch that finished with no output. */
     if (src_len > 0)
-        fr_py_txn_pending_data++;
+        if (fr_c07_enabled())
+            fr_py_txn_pending_data++;
     return 0;
 }
 
@@ -1033,7 +1064,8 @@ static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
      * NO_RESULT are control records the parent filters. A zero-length
      * DATA (a UDF returning b"") is a real frame and IS counted. */
     if (disposition == FR_DISP_DATA)
-        fr_py_txn_pending_data++;
+        if (fr_c07_enabled())
+            fr_py_txn_pending_data++;
     return 0;
 }
 
@@ -2031,7 +2063,8 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
          * for data != NULL, so a null emission -- which writes no record
          * at all -- contributes nothing. A zero-length b"" DOES reach
          * here and IS a real DATA frame. */
-        fr_py_txn_pending_data++;
+        if (fr_c07_enabled())
+            fr_py_txn_pending_data++;
     }
 
     /* STAGE0: NO signal here.
@@ -3245,7 +3278,7 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
      *
      * __atomic_fetch_add, not a store: several workers share a node's
      * cache line, so a plain store would lose updates. */
-    if (fr_py_txn_pending_data) {
+    if (fr_py_txn_pending_data && fr_c07_enabled()) {
         uint32_t _sn = g_fr_config.ring_node_id < 0
                            ? UINT32_MAX
                            : (uint32_t)g_fr_config.ring_node_id;
@@ -3683,7 +3716,8 @@ int fr_py_recover_worker(int wid, int incarnation, int output_fd,
          * exercises a different situation than a real worker death, and
          * the process-level test is the one that establishes the real
          * behaviour. */
-        fr_py_txn_pending_data = 0;
+        if (fr_c07_enabled())
+            fr_py_txn_pending_data = 0;
     }
     return rc;
 }
