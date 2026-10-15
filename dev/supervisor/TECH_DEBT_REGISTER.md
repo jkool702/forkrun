@@ -472,3 +472,31 @@ Suggested order, cheap first:
   not a clean-room build or an execution-path verification. Every entry
   above was re-checked by reading this tree; none was verified by
   executing bash and Python side by side under the same workload.
+---
+
+## LATENT FLAKE: `test_slow_consumer_bounds_memory` (RSS high-water mark)
+
+Found while running WO-CR-ROI-2's final verification, **not caused by it**.
+Recorded so it is not rediscovered as a regression.
+
+`python/tests/test_streaming.py::test_slow_consumer_bounds_memory`
+samples `resource.getrusage(RUSAGE_SELF).ru_maxrss` before and after the
+run and asserts the delta is under 60 MB.
+
+`ru_maxrss` is the process's **peak** RSS, a high-water mark that never
+decreases. So `after - before` is not "memory this test used" -- it is
+"the largest transient allocation observed anywhere in the process
+between the two samples". A GC pause, an unrelated import, or another
+thread's buffer landing in that window can trip the assertion while the
+test's own behaviour is correct.
+
+Observed roughly 1 failure in 45 runs, and not correlated with the
+cleanroom default: 0/12 with the default on, 0/12 with
+`FORKRUN_CLEANROOM=0`, 0/8 on the pre-WO-CR-ROI-2 `run.py`, 0/20 on HEAD.
+It surfaces under load.
+
+A correct fix is non-trivial because `ru_maxrss` is the wrong instrument.
+Options, in rough order of cost: sample `/proc/self/statm` (current RSS)
+instead of the peak; or run the measurement in a fresh child process so
+the high-water mark is not shared with the rest of the suite. **Not
+done here** -- out of scope for WO-CR-ROI-2.
