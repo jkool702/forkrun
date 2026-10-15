@@ -2438,6 +2438,12 @@ _C07_RUN_DEPTH = [0]
 # that some other run committed inside its measurement window.
 _C07_RUNS_STARTED = [0]
 
+# C0.7 test hook state: the Nth DATA frame to drop on the observed side,
+# read once from FORKRUN_C07_DROP_FRAME. 0 (the default) drops nothing.
+# A list rather than a scalar so the walkers do not need `global`.
+_C07_DROP = [None]
+_C07_DROP_SEEN = [0]
+
 
 def _init_engine_and_fds(*, lines, bytes_, spec, num_nodes=None,
                          numa_map=None):
@@ -3140,6 +3146,20 @@ def _split_records_views(blob):
     off = 0
     n = len(blob)
     view = blob if isinstance(blob, memoryview) else memoryview(blob)
+    # C0.7 TEST HOOK: drop the Nth DATA frame on the OBSERVED side, so it
+    # was committed but never delivered -- the shape a completeness
+    # certificate exists to catch.
+    #
+    # Deliberately on this side of the comparison. Dropping at emission
+    # would drop the commit too, and both sides would fall together, which
+    # is precisely the case the certificate must NOT flag.
+    #
+    # Test-only and inert unless the variable is set, matching the
+    # existing FORKRUN_TEST_DIE_* convention in _shim.c. Read once and
+    # cached, so the hot path pays one dict lookup.
+    if _C07_DROP[0] is None:
+        _C07_DROP[0] = int(os.environ.get("FORKRUN_C07_DROP_FRAME", "0") or 0)
+        _C07_DROP_SEEN[0] = 0
     while True:
         rec_start = off
         if off + _HDR.size > n:
@@ -3162,6 +3182,16 @@ def _split_records_views(blob):
             off += ln
             continue
         _FRAME_STATS["complete"] += 1
+        # Counted against DATA frames specifically, not against
+        # "complete": complete also counts the filtered control records,
+        # so using it would skip the drop whenever a NO_RESULT preceded
+        # the target -- making the hook silently unreliable.
+        _C07_DROP_SEEN[0] += 1
+        if _C07_DROP[0] and _C07_DROP_SEEN[0] == _C07_DROP[0]:
+            # Committed, but never delivered. See the hook note above.
+            _FRAME_STATS["data_frames"] += 1
+            off += ln
+            continue
         _FRAME_STATS["data_frames"] += 1
         records.append((idx, view[off:off + ln]))
         off += ln
@@ -3198,6 +3228,16 @@ def _split_records(blob: bytes) -> tuple:
             off += ln
             continue
         _FRAME_STATS["complete"] += 1
+        # Counted against DATA frames specifically, not against
+        # "complete": complete also counts the filtered control records,
+        # so using it would skip the drop whenever a NO_RESULT preceded
+        # the target -- making the hook silently unreliable.
+        _C07_DROP_SEEN[0] += 1
+        if _C07_DROP[0] and _C07_DROP_SEEN[0] == _C07_DROP[0]:
+            # Committed, but never delivered. See the hook note above.
+            _FRAME_STATS["data_frames"] += 1
+            off += ln
+            continue
         _FRAME_STATS["data_frames"] += 1
         records.append((idx, blob[off:off + ln]))
         off += ln
