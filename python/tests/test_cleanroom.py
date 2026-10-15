@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import forkrun  # noqa: E402
 from forkrun.run import (  # noqa: E402
     _cleanroom_collect, _cleanroom_eligible, _cleanroom_enabled,
-    _cleanroom_explicit, _cleanroom_launcher_path, _read_cleanroom_stats,
+    _cleanroom_explicit, _cleanroom_launcher_path,
+    _cleanroom_route_enabled, _read_cleanroom_stats,
     _decode_launcher_status, _describe_launcher_failure,
     _source_is_reopenable)
 
@@ -235,25 +236,63 @@ class TestLauncherOutcomeContract(unittest.TestCase):
 class TestCleanroomHelpers(unittest.TestCase):
     """The envelope predicate -- pure, no plugin or launcher needed."""
 
-    def test_disabled_by_default(self):
-        # The default is OFF. It was briefly ON (5ae0b0a0) and reversed.
-        #
-        # That reversal was justified by two claims that are BOTH NOW
-        # FALSE, kept here so nobody re-derives them from the history:
-        # "the envelope excludes orchestrator=True, which is map()'s own
-        # default" (the envelope now REQUIRES orchestrator=True) and "the
-        # launcher runs no supervisor" (W-CR4 gave it one). So neither
-        # the reachability argument nor the missing-supervisor argument
-        # applies any more.
-        #
-        # The reasons it is still OFF are the ones that remain true: it
-        # is a beta, it is SLOWER in the shape callers actually use, and
-        # its envelope is narrower than the API. See
-        # run.py::_cleanroom_enabled for the measured numbers.
+    def test_default_is_map_plugin_only(self):
+        """WO-CR-ROI-2 Phase D moved the default, narrowly.
+
+        History, kept so nobody re-derives it: the default was briefly ON
+        in 5ae0b0a0 and reversed because of two claims that were both
+        FALSE -- "the envelope excludes orchestrator=True, which is
+        map()'s own default" (the envelope now REQUIRES orchestrator=True)
+        and "the launcher runs no supervisor" (W-CR4 gave it one).
+
+        It then stayed off for a while longer, on the grounds that it was
+        "SLOWER in the shape callers actually use". That claim is now
+        FALSIFIED by measurement on this host
+        (benchmarks/bench_cleanroom_default_on.py, paired interleaved
+        A/B, in-process/cleanroom):
+
+            startup, no ballast     1.77x
+            startup, 512 MB ballast 2.34x
+            throughput, 400k records 1.16x
+
+        No regime regresses -- including the throughput regime, where the
+        advantage is smallest and where a regression would most plausibly
+        hide.
+
+        So it is ON again, but for a different and much narrower reason
+        than 5ae0b0a0: exactly ONE route. map(plugin) is the only route
+        with real-exec proof plus current performance evidence. udf,
+        spawn and both stream routes remain opt-in.
+        """
         old = os.environ.pop("FORKRUN_CLEANROOM", None)
         try:
-            self.assertFalse(_cleanroom_enabled())
+            # Enabled...
+            self.assertTrue(_cleanroom_enabled())
+            # ...but NOT explicit. This is the load-bearing distinction:
+            # it is what keeps the decline warning quiet, so a user who
+            # never asked for the cleanroom does not get nagged when a
+            # call cannot use it.
             self.assertFalse(_cleanroom_explicit())
+        finally:
+            if old is not None:
+                os.environ["FORKRUN_CLEANROOM"] = old
+
+    def test_default_does_not_extend_to_other_routes(self):
+        """The narrowness of the new default, asserted.
+
+        A default that enabled "the cleanroom" rather than one route
+        would silently change four other envelopes.
+        """
+        old = os.environ.pop("FORKRUN_CLEANROOM", None)
+        try:
+            self.assertTrue(_cleanroom_route_enabled("map", "plugin"))
+            for entry, mode in (("map", "udf"), ("map", "spawn"),
+                                ("stream", "plugin"), ("stream", "udf"),
+                                ("stream", "spawn")):
+                with self.subTest(route="%s-%s" % (entry, mode)):
+                    self.assertFalse(
+                        _cleanroom_route_enabled(entry, mode),
+                        "%s-%s must stay opt-in" % (entry, mode))
         finally:
             if old is not None:
                 os.environ["FORKRUN_CLEANROOM"] = old

@@ -478,6 +478,9 @@ _CLEANROOM_FALSE_VALUES = ("", "0", "no", "off", "false")
 _CLEANROOM_ROUTES = ("map-plugin", "map-udf", "map-spawn",
                      "stream-plugin", "stream-udf")
 
+# Phase D default. Deliberately a single route.
+_DEFAULT_ROUTES = frozenset(("map-plugin",))
+
 
 def _cleanroom_selected_routes():
     """Parse FORKRUN_CLEANROOM into (enabled, routes, explicit).
@@ -493,7 +496,34 @@ def _cleanroom_selected_routes():
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:
-        return False, None, False
+        # WO-CR-ROI-2 Phase D: the default moved. map(plugin) is now ON
+        # by default; everything else stays opt-IN.
+        #
+        # This is the smallest default that the evidence supports. It is
+        # one route, not "the cleanroom", and the per-route selector is
+        # what makes it expressible -- before Phase C a default could only
+        # be all-or-nothing across five envelopes.
+        #
+        # Evidence, all four of the decision document's blockers closed:
+        #   * route proof  -- python/tests/test_cleanroom_routes.py execs
+        #     the REAL launcher for map(plugin) and compares bytes to an
+        #     in-process reference; mutation-proven (forcing the launcher
+        #     to "missing" turns it red).
+        #   * per-route gate -- Phase C, 6109dd93.
+        #   * packaging -- _forkrun_cleanroom ships inside the manylinux
+        #     wheel (verified in dist/), so a default is not a no-op for
+        #     installed users.
+        #   * performance -- python/benchmarks/
+        #     bench_cleanroom_default_on.py, re-measured on this host
+        #     with the in-repo plugin: startup 1.77x, startup+512MB
+        #     ballast 2.34x, throughput 1.16x, in-process/cleanroom.
+        #     No regime regresses, including the throughput regime where
+        #     the advantage is smallest.
+        #
+        # If the launcher is missing or exec fails, the caller falls
+        # back in-process, so a broken install degrades to the OLD
+        # behaviour rather than to a failure.
+        return True, _DEFAULT_ROUTES, False
     val = v.strip().lower()
     if val in _CLEANROOM_FALSE_VALUES:
         return False, None, True
@@ -4162,7 +4192,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             # to hear that the envelope could not be honoured.
             import warnings as _warnings
             _warnings.warn(
-                "forkrun: FORKRUN_CLEANROOM=1 ignored for this call "
+                "forkrun: requested cleanroom ignored for this call "
                 "(%s) — using the in-process path. The launcher covers "
                 "materialized file + C plugin + UMA + "
                 "order in ('none', 'index')." % (_why,),
@@ -4519,7 +4549,7 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
             elif _cleanroom_explicit() and _why:
                 import warnings as _warnings
                 _warnings.warn(
-                    "forkrun: FORKRUN_CLEANROOM=1 ignored for this "
+                    "forkrun: requested cleanroom ignored for this "
                     "stream() call (%s) \u2014 using the in-process path."
                     % (_why,), UserWarning, stacklevel=3)
         if orchestrator:

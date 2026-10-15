@@ -42,18 +42,38 @@ class TestSelectorGrammar(unittest.TestCase):
 
     # -- unset default: UNCHANGED in Phase C -----------------------
 
-    def test_unset_default_remains_off(self):
-        """Phase C adds a selector; it does not change the default.
+    def test_unset_default_is_map_plugin_only(self):
+        """Phase D moved the default: map(plugin) ON, everything else off.
 
-        Asserted because default-on is Phase D's decision, gated on its
-        own evidence. If it appears here, the selector change silently
-        turned it on.
+        The one route is the whole point. A default that enabled
+        "the cleanroom" would silently change udf, spawn and both stream
+        routes, which have different proof behind them.
         """
         os.environ.pop("FORKRUN_CLEANROOM", None)
         enabled, routes, explicit = R._cleanroom_selected_routes()
-        self.assertFalse(enabled, "unset must remain OFF in Phase C")
-        self.assertFalse(explicit, "and must read as not-explicit")
-        self.assertIsNone(routes)
+        self.assertTrue(enabled, "map(plugin) is default-on")
+        self.assertEqual(frozenset(("map-plugin",)), routes,
+                         "the default must be exactly ONE route")
+        self.assertFalse(explicit,
+                         "an unset variable is still NOT explicit -- this "
+                         "is what keeps the decline warning quiet")
+
+    def test_unset_default_enables_no_other_route(self):
+        os.environ.pop("FORKRUN_CLEANROOM", None)
+        self.assertTrue(R._cleanroom_route_enabled("map", "plugin"))
+        for entry, mode in (("map", "udf"), ("map", "spawn"),
+                            ("stream", "plugin"), ("stream", "udf"),
+                            ("stream", "spawn")):
+            with self.subTest(route="%s-%s" % (entry, mode)):
+                self.assertFalse(
+                    R._cleanroom_route_enabled(entry, mode),
+                    "only map-plugin may be on by default; %s-%s must "
+                    "stay opt-in" % (entry, mode))
+
+    def test_unset_default_does_not_raise(self):
+        """A default that raised on some host would be catastrophic."""
+        os.environ.pop("FORKRUN_CLEANROOM", None)
+        R._cleanroom_selected_routes()   # must not raise
 
     def test_explicit_off_never_enables_anything(self):
         for val in ("0", "", "no", "off", "false", "OFF", " False "):
