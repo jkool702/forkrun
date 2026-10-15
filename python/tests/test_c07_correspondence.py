@@ -74,10 +74,16 @@ class C07Correspondence(unittest.TestCase):
 
         out = forkrun.map(_up, path, workers=4, nodes="@2", order="index")
 
-        # No record is lost: the collected bytes are the whole input.
-        expected_bytes = sum(len(("line%d\n" % i).encode()) for i in range(27))
-        self.assertEqual(sum(len(r) for r in out), expected_bytes,
-                         "every input byte must appear in the output")
+        # BYTE IDENTITY, not a byte COUNT. Summing record lengths passes
+        # on same-length corruption -- a substituted or reordered record
+        # satisfies it. The expected sequence is built from the same
+        # generator that wrote the fixture.
+        expected_bytes = b"".join(("line%d\n" % i).encode()
+                                  for i in range(27))
+        self.assertEqual(
+            b"".join(bytes(r) for r in out), expected_bytes,
+            "the collected bytes must be IDENTICAL to the input, not "
+            "merely the same length")
 
         # WO-ROI-1-R1: the record COUNT is not an invariant and must not
         # be asserted as one.

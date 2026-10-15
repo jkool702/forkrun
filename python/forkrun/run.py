@@ -2321,9 +2321,17 @@ def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
 # NOT make forking safe in general: an unrelated application thread can
 # still hold a lock at fork time. See _warn_threaded_fork. One lock for
 # the whole pipeline: coarse, deterministic, v0-appropriate.
-# W-REL2/R10: RLock, not Lock. Same-thread nesting (a forkrun.map call
-# inside a live stream() iteration) is legitimate and must re-enter
-# instead of deadlocking; cross-thread contenders still serialize.
+# W-REL2/R10: RLock, not Lock, so that cross-thread contenders serialize
+# without deadlocking against the thread that owns the session.
+#
+# WO-ROI-1-R1 CORRECTED THIS. The original text said same-thread
+# nesting "is legitimate and must re-enter instead of deadlocking". That
+# was the reasoning that motivated a bare RLock, and it is exactly what
+# made nesting possible -- and unsafe, because the engine is
+# process-global. A bare RLock prevents a deadlock; it is not a safety
+# property, and a re-entrant lock admits the second session happily.
+# _RunLock now REFUSES same-thread re-entry before acquiring, so
+# nesting raises instead of re-entering. See _RunLock.__enter__.
 import threading as _threading
 
 _THREAD_WARNED = []
@@ -2504,8 +2512,14 @@ class _RunLock:
 _RUN_LOCK = _RunLock(_threading.RLock())
 
 # C0.7: how many forkrun runs are live in THIS process, counted across
-# nested execution (an RLock is reentrant, so a map() inside a stream()
-# is permitted and the outer run's workers keep running).
+# nested execution.
+#
+# WO-ROI-1-R1: the comment here used to say nesting "is permitted",
+# because an RLock is reentrant. That described the pre-guard behaviour
+# and is now WRONG: _RunLock refuses same-thread re-entry outright, so a
+# map() inside a live stream() is rejected rather than admitted. The
+# counter still exists because it is not redundant with the refusal --
+# see below -- but it no longer relies on nesting being allowed.
 #
 # The certificate's expected side is a DELTA of a counter that belongs to
 # the shared engine. That delta is only meaningful if no other producer
@@ -4499,10 +4513,15 @@ def _guarded_gen(guard, gen):
     this choke point, so all five stream executors (and the
     reactor executors they drive) serialize against concurrent
     run/map/stream in other threads — engine globals are
-    process-global. Same-thread nesting re-enters via RLock;
-    abandonment (close()/GeneratorExit) releases through the
-    with-finally together with the signal guard, riding the
-    existing W-PY6 cleanup.
+    process-global.
+
+    WO-ROI-1-R1 CORRECTED THIS. The line here used to read "Same-thread
+    nesting re-enters via RLock" -- true of a bare RLock, and the reason
+    the guard was needed. _RunLock now REFUSES same-thread re-entry
+    before acquiring, so nesting no longer re-enters anything; a nested
+    run inside a live stream raises RuntimeError. Abandonment
+    (close()/GeneratorExit) still releases through the with-finally
+    together with the signal guard, riding the existing W-PY6 cleanup.
     """
     with _RUN_LOCK:
         with guard as _sg:

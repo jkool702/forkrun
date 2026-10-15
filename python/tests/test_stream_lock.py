@@ -1,18 +1,30 @@
 """W-REL2/R10: _RUN_LOCK covers stream + reactor executors (RLock).
 
 Engine globals are process-global, so at most ONE engine session may be
-live per process. Two threads driving runs concurrently must serialize
-init/destroy -- that still works. Same-thread NESTING into a live
-session is REFUSED rather than re-entered: a second session replaces
-g_state, leaving the parent unable to supervise or recover its workers.
-Lazy-acquire on first __next__ keeps generator creation side-effect-free;
-abandonment releases via finally.
+live per process.
 
-Lock-in (each ×10 externally): two barrier-synced threads ×
-streams (init/destroy interleave probe + both byte-exact), and
-same-thread nested stream+map (inner exact, outer abandoned
-without wreckage — bounded join so a Lock-regression fails
-instead of hanging the suite).
+  * Two threads driving runs concurrently must serialize init/destroy.
+    That still works, and is still covered here.
+  * Same-thread NESTING into a live session is REFUSED, not re-entered.
+    A second session replaces g_state, leaving the parent unable to
+    supervise or recover its workers.
+  * A payload that starts a nested run inside a FORKED WORKER is refused
+    too, and the diagnostic names the worker as the cause -- the worker
+    inherits the session rather than having one of its own.
+
+Lazy-acquire on first __next__ keeps generator creation side-effect-free,
+and abandonment releases via finally, so the guard is never left live
+after an exception or an abandoned stream.
+
+Lock-in (each ×10 externally): two barrier-synced threads × streams
+(init/destroy interleave probe + both byte-exact), and same-thread
+nesting (refused promptly, outer byte-exact afterwards -- bounded join
+so a Lock regression fails instead of hanging the suite).
+
+WO-ROI-1-R1: the byte-exactness checks below compare the joined output
+against the expected BYTES, not their lengths. A count passes on
+same-length corruption, which is precisely the class a rollback or
+reordering bug would produce.
 """
 
 import os
@@ -38,6 +50,17 @@ except FileNotFoundError:
 
 def _up(batch):
     return bytes(batch.data)
+
+
+def _expected_bytes(path, fmt="line %d\n", n=2000):
+    """The exact byte stream a well-behaved run must return.
+
+    Built from the SAME generator write_lines() uses, so the fixture and
+    the expectation cannot drift apart. Comparing the joined output
+    against this is the property the refusal must not disturb;
+    comparing only its length would pass on same-length corruption.
+    """
+    return b"".join((fmt % i).encode() for i in range(n))
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
@@ -189,6 +212,8 @@ class TestNestedStreamMap(unittest.TestCase):
                     rest = list(gen)
                     outcome["first"] = first
                     outcome["rest"] = len(rest)
+                    outcome["bytes"] = b"".join(
+                        [bytes(first)] + [bytes(r) for r in rest])
                 except BaseException as exc:  # noqa: BLE001
                     outcome["error"] = exc
                 finally:
@@ -221,6 +246,14 @@ class TestNestedStreamMap(unittest.TestCase):
             self.assertGreater(outcome.get("rest", 0), 0,
                                "the outer stream must continue after the "
                                "nested attempt is refused")
+            # BYTE IDENTITY, and reported from the thread that actually
+            # consumed it. Counting records only proved the stream
+            # produced something of the right shape; this proves the
+            # content survived the refusal intact.
+            self.assertEqual(
+                outcome.get("bytes"), _expected_bytes(pa),
+                "the outer stream must be byte-IDENTICAL after the nested "
+                "attempt was refused, not merely the right length")
 
             # The guard must be RELEASED: a fresh top-level run works.
             after = forkrun.map(_up, pb, workers=2, order="index", nodes=1)
@@ -268,10 +301,6 @@ class TestNestedStreamMap(unittest.TestCase):
                             "the session marker leaked past close()")
         finally:
             os.unlink(pa)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestEveryExecutionPathIsGuarded(unittest.TestCase):
@@ -371,14 +400,19 @@ class TestEveryExecutionPathIsGuarded(unittest.TestCase):
             self.assertIsNotNone(first)
             self.assertTrue(rest, "the outer stream must still deliver")
             joined = b"".join([bytes(first)] + [bytes(r) for r in rest])
-            # Computed, not guessed: "line %d" is NOT a fixed width, so a
-            # hard-coded expectation would pass for the wrong reason.
-            # An earlier version used 2000 * len("line %d\n") and was wrong
-            # by 890 bytes -- which is exactly why it is not repeated.
-            expected = sum(len("line %d\n" % i) for i in range(2000))
+            # BYTE IDENTITY, not byte count. Comparing lengths would
+            # pass on same-length corruption: a substituted record, a
+            # duplicated-and-dropped pair, or a reordering of equal-sized
+            # batches would all satisfy it. The expected sequence is
+            # built from the same generator that produced the fixture.
+            expected = b"".join(
+                ("line %d\n" % i).encode() for i in range(2000))
             self.assertEqual(
-                len(joined), expected,
-                "the outer stream must remain byte-exact after every "
-                "refusal")
+                joined, expected,
+                "the outer stream must remain byte-IDENTICAL after every "
+                "refusal, not merely the same length")
         finally:
             os.unlink(pa)
+
+if __name__ == "__main__":
+    unittest.main()
