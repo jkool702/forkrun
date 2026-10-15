@@ -20,13 +20,21 @@ to ON would simultaneously enable, for UMA:
 |---|---|---|
 | `map(plugin)` | run.py:3877 | **Route asserted** (`_run_marked` spy) |
 | `map(udf)` | run.py:3877 | Output only |
-| `map(spawn)` | run.py:3877 | Output only |
+| `map(spawn)` | run.py:3877 | Output only (exec-verified in Phase A) |
 | `stream(plugin)` | run.py:4337 | Output only |
 | `stream(udf)` | run.py:4337 | Output only |
 
 Only **plugin** has a test that asserts the launcher route was taken.
 The other four assert output, which an in-process fallback also
 satisfies — precisely the failure mode this decision must not ship.
+
+*Updated in WO-CR-ROI-2 Phase A:* all five candidate routes were
+exec-verified with a wrapper that records its own `exec`, so the routes
+genuinely launch the binary. The gap is **test evidence, not
+capability** — `map(udf)`, `map(spawn)`, `stream(plugin)` and
+`stream(udf)` all work and have no route-level test. That is a testing
+debt, not a behavioural one, and it is what Phase B closes. See
+`CLEANROOM_ROUTE_INVENTORY.md`.
 
 WO-ROI-1 §2.3 is explicit: do not make cleanroom globally default-on if
 that would also enable envelopes that have not passed their own gate.
@@ -75,10 +83,19 @@ are asserted on the in-process path, not the launcher one.
 2. **No route-level assertion for `udf` or `spawn`.** Each needs the
    same parent-side spy `plugin` has. Cheap, and it is the difference
    between "works" and "known to work".
-3. **No cleanroom-specific performance evidence.** `C07_PERF_NOTE.md`
-   measures the C0.7 counter, not launcher-vs-in-process. The decision
-   does not depend on it today because the default is not moving, but it
-   would before (1).
+3. ~~**No cleanroom-specific performance evidence.**~~
+   **CORRECTED (WO-CR-ROI-2 Phase A): this was WRONG.** The evidence
+   exists. `python/benchmarks/bench_cleanroom.py` is a sound harness —
+   paired interleaved A/B, warmup discarded, medians with means, and an
+   exactness guard that refuses to report a number for wrong output —
+   and the `_cleanroom_enabled()` docstring records paired A/B startup
+   and end-to-end results at 30 MB / 554 MB / 2127 MB parent RSS in both
+   THP regimes on `map(plugin)`.
+
+   Status: **historical, provenance sound, currency unverified**. The
+   numbers predate C0.7 and the WO-ROI-1 changes, and no commit is
+   recorded. Phase D re-measures the smallest question rather than
+   trusting or discarding them.
 4. **A per-envelope gate does not exist.** Until it does, plugin cannot
    be enabled alone. This is the single structural blocker.
 
