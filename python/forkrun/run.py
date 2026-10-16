@@ -1565,8 +1565,8 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     if pid == 0:
         try:
             os.dup2(errfd, 2)
-            # CLEANROOM_DESIGN.md + frun.bash parity: the launcher gets
-            # the hard descriptor limit. Child-side only.
+            # CLEANROOM_DESIGN.md parity with the shell frontend: the
+            # launcher gets the hard descriptor limit. Child-side only.
             _raise_nofile_to_hard_limit()
             os.execv(launcher, argv)
         except BaseException:
@@ -2142,9 +2142,9 @@ def _raise_nofile_to_hard_limit():
     """Raise RLIMIT_NOFILE to its hard limit. CHILD-SIDE ONLY.
 
     CLEANROOM_DESIGN.md: "It also raises ulimit -n to the hard limit in
-    the cleanroom, which the launcher should do too." frun.bash does
-    exactly that as the first line of the cleanroom source
-    (`ulimit -n $(ulimit -Hn)`). The Python launch path did not, so a
+    the cleanroom, which the launcher should do too." The shell frontend
+    does exactly that, as the first line of the cleanroom source it
+    builds. The Python launch path did not, so a
     launcher inheriting a low soft limit could hit EMFILE mid-run --
     and the failure would surface as a confusing exec error or a partial
     result rather than as "out of descriptors".
@@ -2311,8 +2311,8 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     if launch_pid == 0:
         try:
             os.close(rr)
-            # CLEANROOM_DESIGN.md + frun.bash parity (see the other
-            # launch site). Child-side only.
+            # CLEANROOM_DESIGN.md parity with the shell frontend (see
+            # the other launch site). Child-side only.
             _raise_nofile_to_hard_limit()
             os.execv(launcher, argv)
         except BaseException:
