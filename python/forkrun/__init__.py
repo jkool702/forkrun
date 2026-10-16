@@ -8,7 +8,9 @@ Quick start::
 Modes (``mode=``): ``"python"`` (callable payload, default),
 ``"spawn"`` (external command), ``"plugin"`` (C callback in a
 ``.so``), ``"splice"`` (kernel passthrough, payload must be
-``None``). Entry points: ``run`` (fire-and-forget),
+``None``), ``"udf"`` (module-referenced Python callable; see
+``docs/MODES.md`` -- it needs the version-matched helper and is
+served on different routes than the other four). Entry points: ``run`` (fire-and-forget),
 ``map`` (collect), ``stream`` (live generator), ``sweep``
 (parameter combinations). ``Batch`` is the per-batch view
 (``.data`` borrowed memoryview — ``copy()`` to keep).

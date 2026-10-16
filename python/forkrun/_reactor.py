@@ -1,8 +1,21 @@
 """Python reactor: event-driven worker lifecycle management (W-PY19).
 
 Translates the bash wrapper's ring_poll reactor loop into Python.
-Manages worker spawning, death detection, respawn, trap-ACK
-confirmation, and poison batch tracking.
+Manages worker spawning, death detection, respawn, batch recovery
+classification, and poison batch tracking.
+
+RECOVERY IS PARENT-SIDE C, NOT A TRAP-ACK GRACE. Since W-PY28/W-PY29,
+`fr_py_recover_worker` classifies every death — including exit 0 — and
+the reactor respawns on its verdict (rc 0/1/3), frees the slot (rc 2),
+or aborts (rc 4/5). The 3-second trap-ACK grace described below is
+LEGACY: it is armed only in the `else` branch of `worker_died`, which
+runs only against a pre-W-PY28 `libforkrun_python.so` that lacks
+`fr_py_recover_worker` (mixed-version safety). On any build from this
+tree the symbol always exists, so no grace is ever armed and
+`trap_ack_deadlines` stays empty. The protocol constant
+`TRAP_ACK_GRACE_S` still matches `FR_TRAP_ACK_GRACE_MS_DEFAULT` in
+`forkrun_substrate.h`, which is why it reads as current: it matches
+numerically while being unreachable in practice.
 
 The reactor runs in the PARENT process. For map/run it supervises
 fork-and-wait to completion; for stream it supervises alongside the
@@ -12,9 +25,11 @@ Design mirrors the bash wrapper:
   - ring_poll → select on death pipes + spawn pipe + trap-ACK pipe
   - SPAWN event → fork new workers on the requested node
   - WORKER_DEATH → waitpid, classify, respawn if needed
-  - TRAP_ACK → confirm graceful failure (worker trapped before death)
+  - TRAP_ACK → poison-skip notices only; worker-death confirmation is
+    NOT carried here on the current path (legacy substrates only)
   - SCAN_DEATH → abort if the scanner failed
-  - TIMEOUT → worker died without trap-ACK inside the grace (fatal)
+  - TIMEOUT → legacy-substrate grace expiry (never armed from this tree;
+    the C recovery core raises instead)
 
 OPT-IN... no longer: since W-REL1/R1 the reactor is the DEFAULT
 (run/map/stream with orchestrator=None ride this module's loop);
@@ -43,10 +58,16 @@ import signal as _signal
 import time as _time
 from collections import defaultdict
 
-# Trap-ACK grace: bash protocol constant (3s). A worker that exits
-# non-zero must confirm via the trap-ACK pipe within this long, or
-# the reactor declares catastrophic failure. Matches
+# Trap-ACK grace: bash protocol constant (3s). Matches
 # FR_TRAP_ACK_GRACE_MS_DEFAULT in forkrun_substrate.h.
+#
+# LEGACY. Retained only for a pre-W-PY28 substrate that lacks
+# fr_py_recover_worker: there the reactor must distinguish a worker that
+# died cleanly from one that died without confirming, and this deadline
+# is the only signal available. On any build from this tree the C core
+# classifies every death instead, so no deadline is armed and this
+# constant is never consulted. Do not read it as live policy, and do
+# not delete it while mixed-version safety is still supported.
 TRAP_ACK_GRACE_S = 3.0
 
 # W-REL5-B5: bounded death-confirm spin for worker_died_poll.
@@ -145,8 +166,10 @@ class ReactorState:
       Mirrors fr_config_t.respawn_cap.
     spawn_ceiling: max LIVE workers (-1 = max_workers).
       Mirrors fr_config_t.spawn_ceiling.
-    trap_ack_grace: seconds to wait for trap-ACK after a non-zero
-      death before declaring catastrophic (default TRAP_ACK_GRACE_S).
+    trap_ack_grace: LEGACY-substrate only. Seconds to wait for trap-ACK
+      after a non-zero death before declaring catastrophic (default
+      TRAP_ACK_GRACE_S). Unused when fr_py_recover_worker is present,
+      which is every build from this tree.
     startup_deadline: seconds a forked worker may take to signal
       readiness (READY_BYTE) before it is SIGKILLed and treated as
       a death (W-REL6-3.1). None resolves via

@@ -253,8 +253,13 @@ envelopes at once. It is now a **route** selector:
 
 Route names: `map-plugin`, `map-udf`, `map-spawn`, `stream-plugin`,
 `stream-udf`. An unknown value raises rather than being treated as "on" —
-a typo must not silently widen the blast radius. The legacy boolean
-values (`0`, `off`, `false`, `no`, `""`) keep working exactly as before.
+a typo must not silently widen the blast radius.
+
+The false aliases (`0`, `no`, `off`, `false`, `""`, case-insensitive and
+whitespace-tolerant) are unchanged from before, and remain the documented
+way to restore the old behaviour. They are checked **before** route
+parsing, so they keep working; `test_off_values_disable_even_the_new_default`
+pins that they disable the new default too.
 
 Note the selector is **per route, not per mode**: `plugin` would still
 have enabled both `map(plugin)` and `stream(plugin)`.
@@ -3558,7 +3563,9 @@ record: `dev/supervisor/WREL5_D_REPORT.md`.
   break suites; ~150ns/batch is negligible).
 - **D-LEGS:** compat legs run `frun -k` round-trips ×10 (fresh shell
   each), not loads — 5.3 binds; UBI8/4.4/5.0/5.1/5.2 amber till the
-  blob cycle (causes cited); the 5.1 leg is the permanent guard.-----------------------------------------
+  blob cycle (causes cited); the 5.1 leg is the permanent guard.
+
+-----------------------------------------
 # C_PLUGIN.md
 
 ### `C_PLUGIN.md`
@@ -4611,7 +4618,7 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
 
 ### EXECUTION BACKENDS
 
-- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. Implemented via `posix_spawnp` — on glibc this uses `CLONE_VFORK` internally, so 'vfork engine' and 'posix_spawnp' describe the same fast path. *(NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).*
+- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. Implemented via `posix_spawnp` — on glibc this uses `CLONE_VFORK` internally, so 'vfork engine' and 'posix_spawnp' describe the same fast path. *(NOTE: If -U or -i are used, the ultra-fast-path is disabled, and this flag has no effect; -I stays on the fast path).*
 - `-C`, `--plugin <so:fn>`    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. See [`C_PLUGIN.md`](C_PLUGIN.md) for additional info.
 
 ### OUTPUT MODES
@@ -4650,7 +4657,7 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
   - `0,1`: Explicitly bind to physical NUMA nodes 0 and 1.
   - `0:3`: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
 - `-N`, `--dry-run`           : Dry run. Print the generated command strings instead of executing them.
-- `-v`, `--verbose`           : Increase verbosity (prints timing and flag summaries to `stderr`). Implies --stats.
+- `-v`, `--verbose`           : Increase verbosity (prints the worker-spawn summary, plugin-compile notes, and NUMA stats to `stderr`). Implies --stats.
 - `+v`, `--no-verbose`        : Decrease verbosity. Disables --stats.
 - `-V`, `--version`           : Prints forkrun version number
 -  `--stats`                  : Prints NUMA statistics to stderr (currently ignored for UMA)
@@ -4713,6 +4720,13 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
   - `auto` (default): Automatically detects SLURM environment via `SLURM_JOB_ID`.
   - `0` / `false`: Disable preemption handling entirely.
   - `1` / `true`: Force-enable preemption handling. When enabled, forkrun catches `SIGTERM` (scancel/preemption) and `SIGUSR1` (SLURM `--signal=B:USR1@<time>`) to instantly freeze the pipeline and generate a checkpoint for perfect resume capability.
+- `FORKRUN_DEBUG`: Engine diagnostics flag (read by the C substrate; forwarded into the cleanroom). Off by default.
+- `FORKRUN_TRUST_RESUME`: `=1` bypasses the interactive resume consent gate for unattended resumption (see `--resume` above). Prefer confirming.
+- `FORKRUN_C_STDIN`: Internal ambient mode flag for `-C` with `-s`/`-b` (plugin reads its batch from fd 0). Managed by the wrapper.
+- `FORKRUN_SWEEP_ARGS`: Internal sweep plumbing (serialized sweep dimensions). Managed by the wrapper.
+- `FORKRUN_TMPDIR`: Bootstrap override: preferred directory for the transient `.so` extraction (ahead of the XDG/runtime/shm/tmp fallbacks).
+- `FORKRUN_NUM_NODES`: Nodes in play, computed by the wrapper from `--nodes`/`--numa` (default 1). Read-only signal, not a knob — presetting it has no effect.
+- `FORKRUN_TEST_FALLOW_PIDFILE` / `FORKRUN_TEST_INDEXER_PIDFILE` / `FORKRUN_TEST_CLEANROOM_PIDFILE`: Test-only hooks (pidfile targeting for signal/chaos tests). No effect on production runs.
 
 -----------------------------------------
 # FORKRUN_OVERVIEW.md
@@ -4723,7 +4737,7 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
 
 **forkrun achieves:**
 
-- **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across mixed benchmarks
+- **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across 396 mixed benchmarks
 - **Born-local NUMA placement**: file ingest measures a median of 0.0% cross-socket chunks (tail up to ~20% on small-chunk and byte-mode runs). Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **Automatic recovery and retry** when a worker unexpectedly dies processing a batch
 
@@ -5221,7 +5235,7 @@ count are raised, not honored.
 **Origin**
 User-supplied `workers < nodes` left born-local rings permanently
 unworked (workers claim locally only; stealing covers orphans,
-not healthy unassigned rings). The F-NUMA1 drain guard made
+not healthy-but-unassigned rings). The F-NUMA1 drain guard made
 the resulting shortfall loud (RuntimeError at completion), but
 loud failure is still failure for a configuration the parent
 could have satisfied. Correctness of exactly-once delivery
@@ -5233,7 +5247,7 @@ Single normalization point
 (`_resolve_workers_numa(workers, num_nodes)`): `max(workers,
 num_nodes)` on multi-node topologies with one `UserWarning`
 (requested vs effective); UMA exempt; idempotent (effective
-counts pass through silently, downstream re-resolution never
+counts pass through silently, so downstream re-resolution never
 double-warns). Per-node distribution is round-robin from node 0,
 so `workers >= nodes` covers all nodes by construction. The
 F-NUMA1 drain guard stays as the backstop for genuine runtime
@@ -5518,12 +5532,16 @@ We maintain two dedicated branches specifically configured for sanitizer testing
 1. Checkout the desired testing branch and copy your modified `forkrun_ring.c` into it.
 2. Push, wait for the CI workflow, and merge the PR.
 3. **CRITICAL GOTCHA #1 (The `exec -c` Trap):**
-   Before running the tests, you must open `frun.bash` and modify the initial bash `exec` call.
-   Change:
-   `exec -c "${BASH:-bash}" --norc --noprofile -c ...`
-   To:
-   `exec "${BASH:-bash}" --norc --noprofile -c ...`
-   *(Removing the `-c` from the `exec` command is mandatory. If you leave it in, it clears the environment variables required by the sanitizers, silently disabling them).*
+   Never hand-edit the release `frun.bash` itself — hand edits are how the `-V` echo, `FORKRUN_RING_VERSION`, and `META` drift apart. The version is single-sourced: `frun --version` reads the engine `ring_version` builtin first, then `META`, so a version bump touches `META` (and the C default) only, never the wrapper text. For sanitizer runs, copy the wrapper to a scratch path and modify the copy:
+   ```bash
+   cp frun.bash /tmp/frun.san.bash
+   # In /tmp/frun.san.bash ONLY, change the initial bash exec call:
+   #   exec -c "${BASH:-bash}" --norc --noprofile -c ...
+   # To:
+   #   exec "${BASH:-bash}" --norc --noprofile -c ...
+   # Then run the suites against the copy (e.g. FRUN_SOURCE=/tmp/frun.san.bash).
+   ```
+   *(Dropping that first `-c` in the scratch copy is mandatory. If you leave it in, it clears the environment variables required by the sanitizers, silently disabling them. Discard the copy when done — never merge it back into the release file.)*
 
 4. **CRITICAL GOTCHA #2 (TSan Execution):**
    When testing on the `TESTING/TSAN` branch, you must force `LD_PRELOAD` to inject the TSan library. Run the test scripts like this:
@@ -5741,6 +5759,49 @@ Welcome to the physics department. The CS department is across the hall — they
 - The C source – the actual riverbed geometry
 
 -----------------------------------------
+# PYTHON_BEHAVIOR.md
+
+# forkrun Python frontend — behavioral notes
+
+Frontend contracts that are not derivable from `INVARIANTS.md` (which
+states the engine laws) or from the Bash frontend (which has no Python
+equivalent for these).
+
+**Provenance.** This content previously existed ONLY inside the generated
+aggregate `DOCS/DOCS_ALL.md`, with no source document owning it. That is
+exactly the drift `tools/gen_docs_all.py --check` exists to prevent, so
+the content was given a home here rather than deleted when the
+aggregate started being regenerated from sources.
+
+### W-REL5-B: Python behavioral correctness (behavioral notes)
+
+- `sink=` ownership: only `run()` owns a worker-side sink. The
+  collecting frontends (`map`/`stream`/`sweep`) reject it loudly
+  instead of ignoring it — the payload return value is the result
+  there, and a second result channel would be a silent-drop trap.
+- Stream taxonomy is uniform now: `SIGINT` during `stream()`
+  iteration raises `ForkrunInterrupted` (catchable as either
+  `forkrun.ForkrunInterrupted` or `KeyboardInterrupt`), exactly
+  like the blocking paths.
+- Ingest-reactor liveness: the spill supervises (death pipes,
+  trap-ACK deadlines, stall fork) per quantum even when the
+  source yields nothing for seconds. A pre-gate SIGKILL that
+  lands mid-claim still aborts loudly (claim-without-publish
+  race, rc==4) — observation is prompt; attribution limits are
+  engine semantics, unchanged by this wave.
+- Helper joins are bounded (10s; orderer 10s via
+  `ORDERER_REAP_TIMEOUT`; post-abort worker reaps 3s via
+  `WORKER_REAP_TIMEOUT`) with a naming alarm; worker completion
+  joins are unbounded by design.
+- `reactor_poll_once` blocks at most `poll_timeout` plus a
+  bounded 0.5s death-confirm spin; longer absences mean the
+  child is alive, not that the poll hung.
+- Worker-failure `RuntimeError`s carry `.signo` (first signal
+  death or `None`); the class contract is unchanged (signal
+  causes with taxonomy classes, engine faults plain
+  `RuntimeError`).
+
+-----------------------------------------
 # README.md
 
 # forkrun — NUMA-Aware Contention-Free Streaming Parallelization
@@ -5804,6 +5865,53 @@ frun -s -I bash -c 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique o
 - **forkrun:** ~90% aggregate (27.1 / 28 cores in steady-state default mode = 97%; 27.6/28 = 98.6% for default-mode sustained runs at ≥1B-line scale (100M-scale measures 24.5–25.5/28 for default -X); `-U` unsafe runs hit 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28) — *No centralized dispatcher; all cores do actual work when work exists.*
 - **GNU Parallel:** 9.6% total (2.68 / 28 cores), 6% useful work (1.68 / 28) — *1 full core used strictly for dispatching work; 1.68 cores doing actual work.*
 
+### Python Frontend (forkrun 0.17.0 — `python/`)
+
+*10M lines (large), median of 5, same i9-7940X class hardware. Method: `python/benchmarks/` (`run_all.py --scale large`). CPU% = attributable process-tree CPU (self + reaped children) over wall × cores — not system-wide. Full record: `python/benchmarks/results/large.md` + `large.csv`.*
+
+| Workload | forkrun Python | Baseline | Speedup | CPU% | Notes |
+|----------|---------------|----------|---------|------|-------|
+| Python no-op (map) | **182 M lines/s** | — | — | 6% | claim/ack via ctypes; overhead-bound at 10M, not compute-bound |
+| Python transform (upper) | **63 M lines/s** | 9.8 M/s serial | **6.4×** | 7% | `bytes(batch.data).upper()`; parent collect is the serial bottleneck |
+| Python compute (sum) | **53 M lines/s** | — | — | 21% | `sum(memoryview)` |
+| C plugin callback | **54 M lines/s** | — | — | 11% | ctypes → C function |
+| Spawn external (`cat`) | **15.1 M lines/s** | — | — | 12% | subprocess amortized by batching |
+| JSONL ingestion | **3.6 M records/s** | — | — | 27% | `json.loads` per record; highest CPU (payload-bound) |
+| Filter + transform | **31 M lines/s** | — | — | — | grep-like + upper |
+| Aggregation (sum) | **50 M lines/s** | — | — | — | int parse + sum |
+
+*Unmeasured cells show "—" (pool baselines are small-scale-only by design; per-row CPU was sampled on headline rows). No-op/upper/sum hold or improve from 1M (102→182M), i.e. fixed bring-up amortizes.*
+
+| Scenario | Input | Output | Peak RSS | Notes |
+|----------|-------|--------|----------|-------|
+| No output (discard) | 1→8MB | 0 | **+0MB** | perfectly flat, both scales |
+| map (collect-all) | 1→8MB | 1→8MB | **output-sized** | v0.5 design |
+| stream, slow consumer | 10MB | 50MB | **~40–175MB peak** | bounded by window, not stream; spread across runs under investigation (see `large.md`) |
+| stream, 5× amplification | 2MB | 10MB | **bounded** | backpressure active |
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| stream() vs map() | **1.8× faster** | drain overlaps produce (no collect); 1.4× at 1M |
+| ordered vs unordered | **1.34×** | reassembly cost grows with batch count (1.01× at 1M) |
+| First yield latency | **~7ms** | on a 0.5s job |
+
+> New to the Python frontend? Start at [`python/docs/QUICKSTART.md`](python/docs/QUICKSTART.md) — full guides (API, modes, fault tolerance, NUMA, streaming, examples, plugins, performance, troubleshooting, migration) live in [`python/docs/`](python/docs/).
+
+### What These Benchmarks Do NOT Measure
+
+- **NUMA multi-node scaling** — the headline table is UMA single-node
+  (`nodes=1`). NUMA exists and has its own leg (fake-NUMA, `numa=fake=N`),
+  but that is a separate measurement, not this table.
+- **Streamed input** — the headline table ingests from files. Streaming
+  ingest over pipes/sockets is implemented and has its own study
+  ([`benchmarks/results/streaming_vs_file_2026-10-02.md`](benchmarks/results/streaming_vs_file_2026-10-02.md)).
+- **aarch64** — x86_64 only; ARM legs are run manually on hardware.
+- **GPU workloads** — workers are CPU-only by design; GPU work belongs in the parent.
+- **Sub-100k-line jobs** — fixed ~30ms bring-up dominates; use serial Python.
+- **Spawn vs bash `-X`** — Python `subprocess` (~1–5ms/batch) vs `posix_spawnp` (~10µs); bash wins for external binaries by design.
+- **Cold I/O** — inputs are page-cached/tmpfs; cold disk adds a floor both sides.
+- **Pool baselines at scale** — `multiprocessing.Pool` rows are small-scale only (per-line pickling would blow the budget proving nothing new).
+
 ---
 
 ## 🧠 How It Works: The Physics of forkrun
@@ -5841,8 +5949,8 @@ forkrun is designed to run anywhere with zero friction:
 | 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; RHEL8 glibc (2.28) still below the 2.38 floor |
 | 5.0 | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable |
 | 5.1 | ✅ 10/10 incl. round-trips (D-SEGFIX, source-built 5.1.0 + extracted 5.1.16, byte-exact) | — (suites run on 5.2/5.3 only) | ✅ usable |
-| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 96 + 264, zero failures | **fully verified** |
-| 5.3 | ✅ 10/10 incl. round-trips | ✅ 96 + 264, zero failures | **fully verified** |
+| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+| 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
 
 > **Effective floor (W-REL5-D): bash ≥4.4.** D-SEGFIX landed (worker segfault root-caused to the engine's `ARRAY`-struct walk + fixed via pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in the v3.6.0 blob cycle. glibc ≥2.38 (D-TLS rebuild, this cycle).
 
@@ -5890,24 +5998,66 @@ This guarantees absolute, immediate failure detection without requiring the orch
 
 ---
 
-## §2. Transient Failure: Graceful Recovery & Self-Healing
+## §2. Transient Failure: Parent-Side Transaction Recovery (W-PY29)
 
-When a worker dies gracefully (e.g., a command returns a non-zero exit code while `-E` is active), the worker's `EXIT` trap executes a multi-step rollback and recovery protocol.
+Every batch runs inside a per-worker transaction record (`WorkerTxn`,
+one 128B cache line per worker in MAP_SHARED `GlobalState`). The
+worker publishes at claim and clears at ack; the PARENT recovers on
+any death. The worker's EXIT trap is cleanup-only (it must never
+escrow — that would double-deposit).
 
-### 2.1 Output Reversion (Transaction Rollback)
-To preserve Exactly-Once semantics, any partial data the failing worker wrote to its output buffer must be erased before the batch is retried. 
-The worker calls `ring_revert_output`, which uses `ftruncate` and `lseek` to roll the worker's output `memfd` back to the exact byte offset recorded prior to the batch starting. 
+### 2.1 The 4-State Machine
 
-### 2.2 The Escrow Deposit
-The worker calls `ring_escrow_put`, dropping the metadata for the failed batch (byte offset, number of lines) into the lock-free Escrow side-channel. Crucially, it increments the `num_kills` counter for this specific batch.
+```
+                    claim
+IDLE ─────────────→ CLAIMING ────── claim failed (EOF/abort) ─────→ IDLE
+                       │                      (only legal backward edge)
+                       │ successful publication (release store, LAST)
+                       ▼
+                    CLAIMED
+                       │
+                       │ begin ack side effects
+                       ▼
+                 COMMITTING
+                       │
+                       │ all ack side effects complete
+                       ▼
+                     IDLE
+```
 
-### 2.3 The `TRAP_ACK` Handshake
-The dying worker sends its `wID` down the `TRAP_ACK` pipe to the parent orchestrator, signaling: *"I have safely rolled back my state and secured the data."* The worker then exits.
+Happy-path cost is four cache-local release stores (~2ns total). No
+CAS, no fences beyond the publish/clear release-acquire pair, no
+syscalls on the claim path.
 
-### 2.4 The Orchestrator Respawn
-The `ring_poll` reactor observes the `WORKER_DEATH` event. Because the exit was non-zero, it instantly spawns a replacement worker on the same NUMA node to maintain pipeline capacity. Due to the **Escrow Priority Inversion** rule, the first thing the new (or any idle) worker does is check the Escrow pipe, claim the abandoned batch, and execute it. 
+### 2.2 Output Rollback Without lseek
 
-If the failure was transient, the replacement worker succeeds, and the pipeline continues with zero data loss and zero sequence corruption.
+Each worker holds a TLS `worker_output_end` cursor: the byte position
+right after the most recently completed batch. It is initialized once
+per worker (fresh or respawned) from the output fd's live position
+(the only cursor `lseek`), snapshotted as `output_start` at claim,
+and advanced only after a COMPLETE emit succeeds — never during
+partial emission. Recovery truncates regular files to `output_start`
+(`ftruncate` + `lseek`); pipes are at-least-once (guarded by
+`S_ISREG`, never grown).
+
+### 2.3 The Escrow Deposit (Parent-Side)
+
+Recovery deposits the orphan batch metadata into the lock-free Escrow
+side-channel with `num_kills + 1`, routed to the dead worker's NUMA
+node (locality survives death). The first idle worker re-claims it
+(Escrow Priority Inversion); the poison threshold converts loops
+into skips (§3). Both reactors call recovery for EVERY death,
+including exit 0 — the C state machine classifies:
+
+| State + death | Decision |
+|---|---|
+| `IDLE` + exit 0, or error at EOF | NORMAL_EXIT (free slot) |
+| `IDLE` + error mid-stream | NO_BATCH (respawn, nothing lost) |
+| `CLAIMING` + any death | RACE → abort/resume (ticket unattributable) |
+| `CLAIMED`, already committed | ALREADY_DONE (clear, respawn/free) |
+| `CLAIMED`, orphan, error exit | RECOVERED (revert + escrow + respawn) |
+| `CLAIMED`, orphan, exit 0 | FATAL (worker bug — abort) |
+| `COMMITTING` + any death | RACE → abort/resume (commit ambiguous) |
 
 ---
 
@@ -5920,15 +6070,38 @@ If a specific batch of data is fundamentally malformed, it will persistently kil
 3. **The Safe Skip:** The worker skips processing the batch entirely. It acknowledges (`ring_ack`) the batch to ensure global pipeline ordering continues, prints a warning to `stderr`, and alerts the orchestrator.
 4. **The Global State:** The orchestrator records the poisoned batch index and alters the final pipeline exit code to `3` to explicitly notify the user of partial data loss. 
 
+### 3.1 Final-Attempt Coredumps (W-PY30)
+
+Coredumps are disabled by default on every worker (soft
+`RLIMIT_CORE` 0 at startup; the generous hard limit is preserved so
+re-enabling needs no privilege). They are armed for exactly one
+batch execution: the final allowed escrow attempt — the running
+attempt with `num_kills + 1 == RETRY_LIMIT`, whose failure poisons
+the batch. Success, poison-skip, and soft-fail (escrow deposit)
+paths disarm, so the enabled limit never leaks into later batches.
+A death in the armed window produces exactly one core per poisoned
+batch; batches the auto-retry saves never dump. `coredump_filter`
+is pinned to `0x31` (anonymous-private + ELF headers + hugetlb-private) so the dump
+excludes the multi-GB shared ingress arenas. Accepted cost: the
+dump delays death-pipe visibility on final-attempt crashes — but
+that batch is being poisoned regardless, so the latency never
+delays a save. 
+
 ---
 
-## §4. Catastrophic Failure: The Seqlock Ledger & Checkpoints
+## §4. Catastrophic Failure: Conservative Abort + Seqlock Ledger
 
-If a worker suffers a catastrophic death (e.g., `SIGKILL`), it cannot execute its `EXIT` trap. It cannot revert its output, and it cannot deposit the batch into Escrow.
+A `CLAIMING` or `COMMITTING` death (§2.3, RACE) cannot be recovered
+locally: the ticket is unattributable (claim race) or the commit is
+ambiguous (ack race — re-execution could double-emit). The reactor
+aborts the run and the Seqlock ledger below carries the resume.
 
-### 4.1 The 3-Second Grace Period
-When the `ring_poll` reactor catches a `WORKER_DEATH` event, it increments a `trap_ack_pending` counter for that `wID`. If a corresponding `TRAP_ACK` arrives, the counter decrements to 0. 
-If the counter is > 0, an asynchronous 3,000-millisecond countdown begins. If the timer expires and the counter is still > 0, the orchestrator declares a **Catastrophic Failure** and triggers a global `ring_abort`. 
+### 4.1 No Grace Period
+
+There is no trap-ACK wait and no timeout: recovery runs
+synchronously in the death handler (revert + escrow deposit are a few
+microseconds), so every death is classified the moment the death pipe
+fires. `TRAP_ACK` carries poison-skip notices only.
 
 ### 4.2 The Seqlock Ledger
 The `ring_order` thread acts as a deterministic observer. As batches successfully complete, `ring_order` merges them. Because batches finish out of order, the leading edge of completed work is "jagged." 
@@ -5962,7 +6135,11 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
 *Preconditions:* output must go to a seekable file (truncation is impossible on pipes/terminals — those downgrade to at-least-once); the user must truncate to the byte count in the crash message before resuming; and the orchestrator must survive long enough to write the checkpoint (SIGKILL to `frun` itself yields no checkpoint — SIGTERM/SIGINT/SIGHUP and SLURM USR1 with `FORKRUN_PREEMPT_MODE` are trapped and checkpointed).
 
 * **Ordered (`-k`) & Buffered (`--buffered`) Modes: EXACTLY-ONCE DELIVERY.**
-  Because partial output is physically reverted (`ftruncate`) inside the per-worker `memfd` upon a graceful crash, and because catastrophic crashes trigger a mathematically absolute byte-coordinate resumption, surviving data is guaranteed to be committed to the final output stream exactly once. 
+  Because partial output is physically reverted (`ftruncate` to the
+  transaction cursor) by parent-side recovery on any crash, and
+  because ambiguous-window crashes abort into a mathematically
+  absolute byte-coordinate resumption, surviving data is guaranteed
+  to be committed to the final output stream exactly once. 
 * **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
   Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
 
@@ -5977,6 +6154,8 @@ Because resume files dictate commands and environment restoration, `forkrun` enf
 3. **Layer 3 (Authorization Decision Gate):** Double-token frame split; custom setup commands and functions are evaluated only after interactive user authorization.
 
 See [`SECURITY.md`](SECURITY.md) for the complete security specification.
+
+---
 
 ## §7. Verified Envelopes: Streaming + NUMA Tier-3 Recovery (W-PY34)
 
@@ -6056,7 +6235,6 @@ the dead worker's node (`txn->node`), never the parent's:
 - Realtime (`-u`) delivery (at-least-once by physics, §5.2).
 - Scheduling work onto unworked nodes (see 7.3.1 — documented
   constraint, not a tested path).
-
 
 -----------------------------------------
 # SECURITY.md
@@ -6179,7 +6357,6 @@ what will run.
    attacker with same-UID file-write can already do strictly worse. The
    sandbox contains the code's *effects* (dead PATH, restricted shell,
    re-render); it does not contain process-signal effects.
-
 
 -----------------------------------------
 # SHAPES.md
@@ -6383,31 +6560,3 @@ Check: MAINTAINERS.md §5. Match.
 ---
 
 *See also: INVARIANTS.md (the laws, as audit rules) · PHYSICS.md (the metaphor) · EOF_PROTOCOL.md (Shapes 3 & 5 in their purest form) · ARCHITECTURE.md §Core Invariant (§0's short form).*
-
-### W-REL5-B: Python behavioral correctness (behavioral notes)
-
-- `sink=` ownership: only `run()` owns a worker-side sink. The
-  collecting frontends (`map`/`stream`/`sweep`) reject it loudly
-  instead of ignoring it — the payload return value is the result
-  there, and a second result channel would be a silent-drop trap.
-- Stream taxonomy is uniform now: `SIGINT` during `stream()`
-  iteration raises `ForkrunInterrupted` (catchable as either
-  `forkrun.ForkrunInterrupted` or `KeyboardInterrupt`), exactly
-  like the blocking paths.
-- Ingest-reactor liveness: the spill supervises (death pipes,
-  trap-ACK deadlines, stall fork) per quantum even when the
-  source yields nothing for seconds. A pre-gate SIGKILL that
-  lands mid-claim still aborts loudly (claim-without-publish
-  race, rc==4) — observation is prompt; attribution limits are
-  engine semantics, unchanged by this wave.
-- Helper joins are bounded (10s; orderer 10s via
-  `ORDERER_REAP_TIMEOUT`; post-abort worker reaps 3s via
-  `WORKER_REAP_TIMEOUT`) with a naming alarm; worker completion
-  joins are unbounded by design.
-- `reactor_poll_once` blocks at most `poll_timeout` plus a
-  bounded 0.5s death-confirm spin; longer absences mean the
-  child is alive, not that the poll hung.
-- Worker-failure `RuntimeError`s carry `.signo` (first signal
-  death or `None`); the class contract is unchanged (signal
-  causes with taxonomy classes, engine faults plain
-  `RuntimeError`).

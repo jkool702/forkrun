@@ -424,6 +424,22 @@ def check_idl_fresh():
     return True
 
 
+@check("Docs: DOCS_ALL.md matches its source documents")
+def check_docs_all_fresh():
+    # DOCS_ALL.md is a generated AGGREGATE. check_twins() above only
+    # compares CHANGELOG headings, and it passed for a long time while six
+    # of the embedded documents were stale by ~130 lines: a heading check
+    # cannot see a body rewritten underneath it. This regenerates and
+    # compares, so "stale" is a detectable state.
+    #
+    # Mirrors the gen_idl.py --check gate (F6.3) for the same reason: a
+    # CI-only freshness test lets a stale regen sail through tagging.
+    proc = _run([sys.executable, "tools/gen_docs_all.py", "--check"],
+                timeout=300)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
+    return True
+
+
 @check("Reproducible: two substrate builds are byte-identical")
 def check_reproducible():
     proc = _run(["make", "-f", "Makefile.substrate",

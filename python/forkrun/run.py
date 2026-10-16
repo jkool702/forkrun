@@ -1,42 +1,63 @@
-"""forkrun.run / map / stream — Stage 4 Phase 2 (W-PY3) emitter path.
+"""forkrun.run / map / stream — the Python frontend entry points.
 
-v0.5 pipeline (single-node UMA, materializing input):
-  parent: validate -> load substrate -> fr_py_init -> spill source into an
-    ingress memfd -> fr_py_ingest_done -> fr_py_scan (publishes all slots
-    synchronously) -> create one OUTPUT memfd per worker -> fork N workers
-    (both memfds inherited) -> waitpid -> pread output memfds -> destroy.
-  worker (post-fork child): mmap the ingress memfd once -> claim/Batch/
-    payload/invalidate/flush/copy-to-output-memfd/ack loop with escrow
-    retry -> os._exit.
+WHAT THIS MODULE IS
+-------------------
+Dispatch, supervision and result collection for four public entry points
+(`run`, `map`, `stream`, `sweep`) over five payload modes
+(`_api._VALID_MODES`: python, spawn, plugin, splice, udf).
 
-Emitter (§3.9b, v0.5 stage): per-worker output memfds carrying keyed records
-(batch_idx u64 LE, length u64 LE, payload bytes). The emitter TRANSPORTS;
-it does not order — batch_index is the execution identity/ordering key and
-the parent does optional consumer-side reassembly (map(order="index")
-sorts; the C orderer is skipped by design). v0.5 drains after workers
-complete; true PIPE streaming (parent drains while workers run, closing the
-hydraulic backpressure loop) is v1. No Python pipe/queue carries payload
-bytes at any point; no pickle; no bash.
+This docstring previously described the "v0.5 pipeline" — a single-node,
+UMA, fully-materializing shape with `mode="python"` only. Every one of
+those limits has since been lifted, and the text was left asserting them
+next to code that contradicted it line by line. It is rewritten here to
+describe the shape that exists; the historical v0.5 pipeline is recorded
+in dev/supervisor/MOVER_REPORT.md rather than in the module header.
 
-Scope notes (v0.5 != the full plan):
-- Input AND output are materialized: bounded inputs/outputs only. TB-scale
-  boundedness (streaming ingest + fallow + windowed mmap + PIPE drain)
-  is v1/Stage 4 refinement, not this path.
-- Copy-on-return: payload returns bytes/memoryview/str/None; the wrapper
-  copies into the output memfd (stated cost; write-in-place OutputBatch
-  is demand-pulled Stage 6+).
-- No NUMA multi-node (nodes must be "auto"/1), no resume, no spawn/plugin
-  modes (mode must be "python").
-- Same-process retry: a failing batch is escrow-deposited (kills+1) and the
-  worker continues; it re-claims the batch via the escrow drain without a
-  respawn manager. Poisoned batches are skipped+acked. This preserves the
-  retry-then-poison counting of bash -E without a reactor.
-- map() is BATCH-granular (payload receives a Batch, one result per batch),
-  collected parent-side from the output memfds after waitpid.
-- run() with sink=None discards results; with a callable sink the sink runs
-  payload-side in the worker (zero crossing, §3.9a).
+EXECUTOR FAMILIES
+-----------------
+Dispatch selects a supervision model and an ingest shape. They are
+deliberately NOT one flag-driven executor (see DECISION-03): the plain
+waitpid path and the reactor path have different failure-detection,
+recovery and teardown contracts, and merging them would trade a real
+invariant for line count.
+
+  Materialized ingest        Streaming ingest
+  ------------------------    ------------------------
+  _execute_locked            _execute_ingest_locked        (plain)
+  _execute_reactor_locked    _execute_ingest_reactor_locked(reactor)
+  _execute_numa_locked       _execute_numa_stream
+  _execute_cleanroom         _execute_cleanroom_stream     (cleanroom)
+  _execute_streaming         _execute_ingest_stream
+                              _execute_streaming_reactor
+
+  orchestrator=None / True -> the reactor is the DEFAULT (W-REL1/R1)
+  orchestrator=False       -> plain waitpid path
+  nodes>1                  -> NUMA pipeline
+  eligible + FORKRUN_CLEANROOM -> cleanroom launcher (exec'd, no Python
+                             address space inherited by workers)
+
+INVARIANTS THIS MODULE OWNS
+---------------------------
+* No Python pipe/queue carries payload bytes, ever. No pickle.
+* Workers claim exactly one ring slot (INVARIANTS.md 1-4).
+* Escrow deposit and batch recovery are PARENT-side
+  (RESILIENCE_PROTOCOL.md 2, W-PY28/W-PY29). A worker's exit path is
+  cleanup only; depositing there would double-count.
+* Descriptor hygiene: every forked child scrubs to the engine + job fds
+  (`_fd_scrub.scrub_fds`); fd 2 is never redirected or closed.
+* Batching: `workers` is normalized so multi-node topologies cover every
+  node (INVARIANTS.md 18).
+* `FORKRUN_RETRY_LIMIT` is read through `_api._resolve_retry_limit()`
+  and never hardcoded at a worker-init site.
+
+WHAT IS STILL TRUE OF THE OLD TEXT
+----------------------------------
+"map() is batch-granular: one result per batch" and "run() with a
+callable sink runs the sink payload-side in the worker" both remain
+accurate. The emitter transports keyed records and does not order them;
+ordering is a separate concern (`order="none"` default vs
+`order="index"`).
 """
-
 from __future__ import annotations
 
 import os

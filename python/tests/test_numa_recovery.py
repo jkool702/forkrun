@@ -1,8 +1,8 @@
 """W-PY34.b NUMA Tier-3 recovery: WorkerTxn across NUMA nodes.
 
 Verifies the universal parent-side recovery (W-PY28/29) when workers
-live on non-parent nodes (booted with numa=fake=4; tests use
-nodes="@2"):
+live on non-parent nodes. The tests use FORCED-LOGICAL nodes="@2" on
+whatever hardware is present; they do not require a multi-socket boot:
 
   worker on node 1 crashes -> parent (node 0) reads WorkerTxn[wid]
   from MAP_SHARED GlobalState -> txn->node routes the escrow deposit
@@ -13,9 +13,13 @@ Kill-injection: file-gated payload modules (same pattern as
 test_recovery_adversarial.py). Each crashing batch fires exactly
 once; the respawned generation's retry succeeds.
 
-Topology guard: tests skip unless >= 2 NUMA nodes are online
-(boot with numa=fake=N). Worker coverage guard: every NUMA
-integration test uses workers >= nodes so each node has a worker
+Topology guard: `_multi_node()` now always returns True. It USED to
+require >= 2 online NUMA nodes, which meant every test in this file
+skipped on a UMA machine including CI, while the tests use forced
+logical nodes and contain no physical-placement call at all — the one
+suite verifying escrow routing by `txn->node` was the one suite that
+never ran. Worker coverage guard: every NUMA integration test uses
+workers >= nodes so each node has a worker.
 (an unworked node's ring is never claimed — silent loss by design
 of the born-local topology; see Part 4 notes).
 
@@ -49,18 +53,6 @@ except FileNotFoundError:
 
 NODES_2 = "@2"
 
-
-def _has_numa():
-    if not HAVE_LIB:
-        return False
-    try:
-        lib = get()
-        return all(hasattr(lib, s) for s in (
-            "fr_py_init_numa", "fr_py_recover_worker",
-            "fr_py_numa_ingest", "fr_py_indexer_numa",
-            "fr_py_numa_scanner"))
-    except Exception:
-        return False
 
 
 def _multi_node():
@@ -230,7 +222,7 @@ def _assert_deaths_occurred(testcase, plugin_dir, name, expect, where):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-@unittest.skipUnless(_multi_node(), "Requires multi-node NUMA")
+@unittest.skipUnless(_multi_node(), "multi-node NUMA bookkeeping")
 class TestNumaRecovery(unittest.TestCase):
     """NUMA Tier-3: WorkerTxn recovery across NUMA nodes."""
 
@@ -437,7 +429,7 @@ class TestNumaRecovery(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-@unittest.skipUnless(_multi_node(), "Requires multi-node NUMA")
+@unittest.skipUnless(_multi_node(), "multi-node NUMA bookkeeping")
 class TestStreamingNumaRecovery(unittest.TestCase):
     """Streaming + NUMA + crash recovery (all three together)."""
 

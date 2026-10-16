@@ -1,8 +1,15 @@
 # forkrun Execution Modes
 
-Four ways to say "what runs per batch". Same fan-out,
+Five ways to say "what runs per batch". Same fan-out,
 same batching, same recovery — only the per-batch executor
 changes.
+
+The five are exactly `_VALID_MODES` in `python/forkrun/_api.py`:
+`python`, `spawn`, `plugin`, `splice`, `udf`. This file previously
+enumerated only four; `udf` was reachable and tested but absent from
+the list, which is the same class of drift the doc-accuracy gate exists
+to catch. `udf` is documented in its own section below because its
+payload form, helper requirement and route set all differ.
 
 ## mode="python" (default)
 
@@ -46,6 +53,51 @@ forkrun.map(clean, "events.jsonl", workers=8, order="index")
   available to them; it is not quoted because forkrun does it
   automatically. See `python/benchmarks/results/RELEASE_v3.6.0.md`
   section 0.
+
+## mode="udf"
+
+A Python callable **referenced by module**, executed by an interpreter
+that lives *inside the cleanroom launcher* rather than in your process.
+
+### Why it is not the same as `mode="python"`
+
+These are two different calling conventions that share a language:
+
+| | `mode="python"` | `mode="udf"` |
+|---|---|---|
+| Payload | callable, **or** `"pkg.mod:func"` | `"pkg.mod:func"` **only** |
+| What the payload receives | a `forkrun.Batch` (data **plus** offsets, line counts, metadata) | a single `bytes` object |
+| What it may return | bytes / memoryview / str / None | `bytes` or `None` |
+| Where the callable is resolved | in **your** process, before any fork | inside the launcher, **after** `exec` |
+
+A `mode="udf"` function therefore has no access to `Batch` fields, and a
+`mode="python"` function must not assume it receives raw bytes. Passing a
+callable to `mode="udf"` raises `ValueError` rather than being coerced.
+
+### Requirements and limits
+
+- **A version-matched helper `.so` is required for the isolated path.**
+  Without it, `mode="udf"` still works, but it degrades: the spec is
+  resolved in your process and the callable runs in-process through the
+  `mode="python"` worker, wrapped by an adapter that restores the
+  bytes-in / bytes-or-None-out contract. The adapter exists because a
+  bare fallback would silently hand a `Batch` to a function written for
+  `bytes` — every batch would raise, retry and poison, and the caller
+  would see an empty result with no error naming the cause.
+- **Routes**: served wherever `mode="plugin"` is served — the same
+  launcher and the same envelopes. Selectable as the `map-udf` and
+  `stream-udf` routes. `stream(spawn)`-style unavailability does not
+  apply, but neither does `splice`-style availability: `stream(udf)`
+  requires `order="none"`, and `stream(udf, order="index")` declines and
+  falls back in-process.
+- **Not served** in the plain non-cleanroom worker loop as a distinct
+  mode; there it is the in-process degradation above.
+
+Implementation: `python/forkrun/_udf.py`, `fr_udf.c`,
+`fr_udf_helper.c`, `fr_udf_fork.c`. Tests: `test_udf_mode.py`,
+`test_udf_helper.py`, `test_udf_exactly_once.py`,
+`test_udf_stream_liveness.py`, `test_udf_version_barrier.py`.
+
 
 ## mode="spawn"
 
