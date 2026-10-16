@@ -245,10 +245,11 @@ To return to the previous behaviour: `FORKRUN_CLEANROOM=0`.
 envelopes at once. It is now a **route** selector:
 
     unset                     map-plugin only (the new default)
-    1 / yes / on / all        every eligible route (legacy, unchanged)
+    0 / no / off / false / "" disable, all routes
+    1 / yes / on / true / all every eligible route (legacy, unchanged)
     map-plugin                one route
     map-plugin,map-udf        a subset
-    anything else             ValueError
+    unknown route or bad value  ValueError
 
 Route names: `map-plugin`, `map-udf`, `map-spawn`, `stream-plugin`,
 `stream-udf`. An unknown value raises rather than being treated as "on" —

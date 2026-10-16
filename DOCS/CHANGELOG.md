@@ -14,15 +14,21 @@ To return to the previous behaviour: `FORKRUN_CLEANROOM=0`.
 envelopes at once. It is now a **route** selector:
 
     unset                     map-plugin only (the new default)
-    1 / yes / on / all        every eligible route (legacy, unchanged)
+    0 / no / off / false / "" disable, all routes
+    1 / yes / on / true / all every eligible route (legacy, unchanged)
     map-plugin                one route
     map-plugin,map-udf        a subset
-    anything else             ValueError
+    unknown route or bad value  ValueError
 
 Route names: `map-plugin`, `map-udf`, `map-spawn`, `stream-plugin`,
 `stream-udf`. An unknown value raises rather than being treated as "on" —
-a typo must not silently widen the blast radius. The legacy boolean
-values (`0`, `off`, `false`, `no`, `""`) keep working exactly as before.
+a typo must not silently widen the blast radius.
+
+The false aliases (`0`, `no`, `off`, `false`, `""`, case-insensitive and
+whitespace-tolerant) are unchanged from before, and remain the documented
+way to restore the old behaviour. They are checked **before** route
+parsing, so they keep working; `test_off_values_disable_even_the_new_default`
+pins that they disable the new default too.
 
 Note the selector is **per route, not per mode**: `plugin` would still
 have enabled both `map(plugin)` and `stream(plugin)`.

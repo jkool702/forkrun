@@ -87,6 +87,50 @@ class TestSelectorGrammar(unittest.TestCase):
                         self.assertFalse(
                             R._cleanroom_route_enabled(entry, mode))
 
+    def test_stream_spawn_is_not_selectable(self):
+        """stream(spawn) has no dispatch, so it must not be selectable.
+
+        Asserted as the USER sees it: naming the route in the env var is
+        an error. If this route were quietly accepted, the call would
+        silently take the in-process path and the user would believe they
+        had selected something.
+        """
+        os.environ["FORKRUN_CLEANROOM"] = "stream-spawn"
+        with self.assertRaises(ValueError) as cm:
+            R._cleanroom_selected_routes()
+        self.assertIn("unknown route", str(cm.exception))
+
+    def test_legacy_all_does_not_enable_an_unserved_route(self):
+        """Legacy "=1" must not report a route the product cannot serve.
+
+        "=1" used to return True for any (entry, mode) pair, so
+        stream(spawn) read as enabled. That was harmless only because
+        the stream predicate separately declines spawn -- i.e.
+        correctness depended on two unrelated checks agreeing. The gate
+        now refuses an unserved route on its own.
+        """
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        self.assertFalse(R._cleanroom_route_enabled("stream", "spawn"))
+        self.assertTrue(R._cleanroom_route_enabled("map", "spawn"),
+                        "map(spawn) IS served and must stay selectable")
+
+    def test_off_values_disable_even_the_new_default(self):
+        """The false aliases, which the new default makes load-bearing.
+
+        Before the default moved, an off value was merely a way to opt
+        out. Now it is the documented way to RESTORE the old behaviour,
+        so it must keep working exactly as it did.
+        """
+        for val in ("0", "no", "off", "false", "", "OFF", " False "):
+            with self.subTest(value=val):
+                os.environ["FORKRUN_CLEANROOM"] = val
+                enabled, routes, explicit = R._cleanroom_selected_routes()
+                self.assertFalse(enabled, "%r must disable" % val)
+                self.assertTrue(explicit)
+                self.assertFalse(R._cleanroom_route_enabled("map", "plugin"),
+                                 "%r must disable the DEFAULT route too"
+                                 % val)
+
     def test_legacy_one_preserves_every_eligible_route(self):
         for val in ("1", "yes", "on", "true", "all"):
             with self.subTest(value=val):
@@ -97,6 +141,10 @@ class TestSelectorGrammar(unittest.TestCase):
                                   "legacy =1 must keep routes unrestricted")
                 for entry in ("map", "stream"):
                     for mode in ("plugin", "udf", "spawn"):
+                        if mode == "spawn" and entry == "stream":
+                            continue          # unserved; see
+                                                 # test_legacy_all_does_not_
+                                                 # enable_an_unserved_route
                         self.assertTrue(
                             R._cleanroom_route_enabled(entry, mode),
                             "legacy behaviour must survive the selector")

@@ -636,10 +636,19 @@ def _cleanroom_route_enabled(entry, raw_mode):
     _enabled, routes, _explicit = _cleanroom_selected_routes()
     if not _enabled:
         return False
-    if routes is None:
-        return True
     route = _cleanroom_route_for(entry, raw_mode)
-    return route is not None and route in routes
+    # The route must EXIST before either branch is consulted. Legacy "=1"
+    # used to return True unconditionally, which reported stream(spawn) as
+    # "enabled" even though it has no dispatch -- the selector said yes to
+    # a route the product cannot serve. Harmless today only because the
+    # stream predicate separately declines spawn, so the envelope still
+    # refused it; that made correctness depend on two unrelated checks
+    # agreeing. One check is enough.
+    if route is None:
+        return False
+    if routes is None:
+        return True                      # legacy: every SERVED route
+    return route in routes
 
 
 def _cleanroom_explicit():

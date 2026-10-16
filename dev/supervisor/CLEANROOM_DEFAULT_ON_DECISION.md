@@ -145,11 +145,18 @@ plugin envelope is defensible on its own evidence.
 
 The selector (`6109dd93`):
 
-    FORKRUN_CLEANROOM unset            -> map-plugin only  (Phase D default)
-    FORKRUN_CLEANROOM=1 / yes / all    -> every eligible route (legacy)
-    FORKRUN_CLEANROOM=map-plugin      -> one route
-    FORKRUN_CLEANROOM=a,b              -> a subset
-    unknown value                      -> ValueError
+    FORKRUN_CLEANROOM unset              -> map-plugin only (Phase D default)
+    FORKRUN_CLEANROOM=0/no/off/false/"" -> disabled, all routes
+    FORKRUN_CLEANROOM=1/yes/on/true/all -> every eligible route (legacy)
+    FORKRUN_CLEANROOM=map-plugin        -> one route
+    FORKRUN_CLEANROOM=a,b                -> a subset
+    unknown route or bad value           -> ValueError
+
+The false aliases are checked BEFORE route parsing, so they are
+unaffected by the selector and remain the documented way to restore the
+old behaviour. `=1` means "every SERVED route": `stream-spawn` is not
+selectable and is not enabled by `=1`, because there is no dispatch
+behind it.
 
 Two properties make this narrow default safe rather than a disguised
 whole-feature default:

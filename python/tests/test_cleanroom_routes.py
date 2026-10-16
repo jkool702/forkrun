@@ -416,6 +416,40 @@ class TestSelectorControlsRealDispatch(_Fixtures):
         self.assertEqual(0, probe.read(),
                          "a rejected selector must not launch anything")
 
+    def test_stream_spawn_selector_is_rejected_and_launches_nothing(self):
+        """The user's view of the unserved route.
+
+        Naming it must FAIL LOUDLY rather than fall through in-process:
+        a silent fallback would leave the user believing they had selected
+        a cleanroom route.
+        """
+        self._set_gate("stream-spawn")
+        with LauncherExecProbe() as probe:
+            with self.assertRaises(ValueError):
+                list(forkrun.stream(["/bin/cat"], self.src, nodes=1,
+                                    workers=2, streaming=True,
+                                    output="bytes", order="none"))
+        self.assertEqual(0, probe.read())
+
+    def test_legacy_all_still_refuses_stream_spawn_end_to_end(self):
+        """"=1" enables every SERVED route -- not an unserved one."""
+        self._set_gate("1")
+        with LauncherExecProbe() as probe:
+            gen = forkrun.stream(["/bin/cat"], self.src, nodes=1,
+                                 workers=2, streaming=True,
+                                 output="bytes", order="none")
+            try:
+                list(gen)
+            except TypeError:
+                pass                            # payload form; not the point
+            finally:
+                try:
+                    gen.close()
+                except Exception:              # noqa: BLE001
+                    pass
+        self.assertEqual(0, probe.read(),
+                         "even legacy =1 must not launch for stream(spawn)")
+
     def test_explicit_off_never_launches_end_to_end(self):
         self._set_gate("off")
         with LauncherExecProbe() as probe:
