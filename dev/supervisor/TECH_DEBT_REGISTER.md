@@ -42,6 +42,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
 | TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN** (found by WO-PY-REL-1) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
+| TD-13 | streaming parent retains ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN** (found by WO-PY-REL-1) |
 
 ---
 
@@ -579,10 +580,14 @@ Suggested order, cheap first:
   executing bash and Python side by side under the same workload.
 ---
 
-## LATENT FLAKE: `test_slow_consumer_bounds_memory` (RSS high-water mark)
+## RESOLVED: `test_slow_consumer_bounds_memory` (RSS high-water mark)
 
-Found while running WO-CR-ROI-2's final verification, **not caused by it**.
-Recorded so it is not rediscovered as a regression.
+**Closed by WO-PY-REL-1.** The measurement defect is fixed and the test is
+now robust; see §TD-13 for what the corrected measurement revealed about
+the underlying streaming behaviour. Kept as a record of the defect and of
+why it passed 45 runs before failing.
+
+Original entry, for history:
 
 `python/tests/test_streaming.py::test_slow_consumer_bounds_memory`
 samples `resource.getrusage(RUSAGE_SELF).ru_maxrss` before and after the
@@ -600,11 +605,22 @@ cleanroom default: 0/12 with the default on, 0/12 with
 `FORKRUN_CLEANROOM=0`, 0/8 on the pre-WO-CR-ROI-2 `run.py`, 0/20 on HEAD.
 It surfaces under load.
 
-A correct fix is non-trivial because `ru_maxrss` is the wrong instrument.
-Options, in rough order of cost: sample `/proc/self/statm` (current RSS)
-instead of the peak; or run the measurement in a fresh child process so
-the high-water mark is not shared with the rest of the suite. **Not
-done here** -- out of scope for WO-CR-ROI-2.
+**RESOLUTION (WO-PY-REL-1).** Both suggested options were used, because
+both were needed: the measurement now runs in an isolated subprocess
+(`python/tests/_streaming_rss_probe.py`) sampling **current** RSS from
+`/proc/self/statm` inside the consumer loop. The assertion changed from an
+absolute peak-delta bound to a RELATIVE comparison against a
+collect-all control run in the same test, because the absolute number was
+not a property of anything (see §TD-13 for the measurements).
+
+Stability after the fix: **40 consecutive focused runs, 0 failures** — 30
+standalone plus 10 launched concurrently with a full-suite run, which is
+the load condition that used to trigger it. That is evidence the specific
+flakiness mechanism is gone; it is not a proof of immunity to every future
+source of memory pressure.
+
+**Does not establish:** that streaming is output-size bounded. It is not;
+see TD-13.
 
 ---
 
@@ -668,3 +684,52 @@ order.
 
 **Does not establish:** that any real workload reaches 2^32 poisoned
 batches; no such run was attempted.
+
+---
+
+### TD-13 — streaming parent retains ~0.5x OUTPUT bytes (high) — OPEN
+
+**Found by WO-PY-REL-1 while fixing the memory test's measurement, not by
+looking for it.** Measured, not inferred.
+
+`python/tests/test_streaming.py::test_slow_consumer_bounds_memory` claimed
+to verify that "streaming holds only the in-flight window" and that the
+parent does not grow with output size. Replacing its invalid `ru_maxrss`
+measurement with a valid one (current RSS, sampled during consumption, in
+an isolated process) shows the claim is **false as written**.
+
+Measured retention as a fraction of total output bytes, stable across a
+4x range of output size:
+
+| output | streaming | collect-all |
+|---|---|---|
+| 47 MB  | 0.52x | 1.24x |
+| 95 MB  | 0.50x | 1.21x |
+| 190 MB | 0.50x | 1.00x |
+| 380 MB | 0.50x | 1.00x |
+
+The streaming ratio is a constant **0.50**, not a constant number of
+bytes. So retention scales with output; streaming is roughly half the cost
+of naive collection and no better than that. The original test could not
+have detected this, for two independent reasons:
+
+1. it measured a process PEAK delta (see the flake entry), and
+2. its 60 MB bound sat **above** the measured collect-all figure for the
+   same workload (58.9 MB), so even a perfect measurement could not have
+   separated streaming from accumulation.
+
+Reproduce: `python3 python/tests/_streaming_rss_probe.py --amp 20` and
+again with `--collect`.
+
+**Not fixed here.** Closing it is an engine/ingest-window question, and the
+frozen-engine constraint applies to part of it. What WO-PY-REL-1 did fix
+is the measurement, and the replacement test now asserts the property that
+is actually true and actually regressible — streaming retains materially
+less than collect-all — instead of an output-independence claim that no
+measurement supported.
+
+**Does not establish:** the cause of the 0.50 ratio. It was not
+investigated; a half-output figure is consistent with a bounded window
+that happens to be about half the corpus here, and with a mid-drain
+sampling artifact. Distinguishing those needs a separate look at what the
+parent holds between batches, which this work order does not cover.

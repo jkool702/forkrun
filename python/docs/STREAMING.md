@@ -38,8 +38,27 @@ stop across the pipeline. No unbounded queues anywhere —
 with one documented exception: `order="index"` behind a
 poisoned/skipped head buffers the tail (above), which is
 ordering memory, not queueing, and warns at the high-water
-limit: a 10MB input with 5× amplification and a 1ms/batch consumer
-holds parent RSS flat (measured +0MB).
+limit.
+
+**Correction (WO-PY-REL-1).** This section previously claimed a 10MB
+input with 5× amplification and a 1ms/batch consumer "holds parent RSS
+flat (measured +0MB)". That was measured with `ru_maxrss` before/after,
+which is a process PEAK and therefore cannot attribute memory to a
+workload. Re-measured as CURRENT RSS, sampled during consumption, in an
+isolated process, the same workload retains about **0.50× the output
+bytes** — 24.7 MB for 47.4 MB of output — and that ratio is constant
+across output sizes from 47 MB to 380 MB, not a constant number of
+bytes.
+
+So the honest statement is: the parent stays flat **relative to a
+consumer that retains everything** (which measures ~1.0× output), but it
+does **not** stay flat in absolute terms. No unbounded queue is created
+and backpressure works as described above; retention still scales with
+output at about half the rate. See TD-13 in
+`dev/supervisor/TECH_DEBT_REGISTER.md`; reproducing it:
+
+    python3 python/tests/_streaming_rss_probe.py --amp 20
+    python3 python/tests/_streaming_rss_probe.py --amp 20 --collect
 
 Consequences worth knowing:
 
