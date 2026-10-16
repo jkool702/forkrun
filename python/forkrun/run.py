@@ -1565,9 +1565,6 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     if pid == 0:
         try:
             os.dup2(errfd, 2)
-            # CLEANROOM_DESIGN.md parity with the shell frontend: the
-            # launcher gets the hard descriptor limit. Child-side only.
-            _raise_nofile_to_hard_limit()
             os.execv(launcher, argv)
         except BaseException:
             os._exit(127)
@@ -2138,46 +2135,6 @@ def _cleanroom_collect(res_fd, views, order="none"):
             pass
 
 
-def _raise_nofile_to_hard_limit():
-    """Raise RLIMIT_NOFILE to its hard limit. CHILD-SIDE ONLY.
-
-    CLEANROOM_DESIGN.md: "It also raises ulimit -n to the hard limit in
-    the cleanroom, which the launcher should do too." The shell frontend
-    does exactly that, as the first line of the cleanroom source it
-    builds. The Python launch path did not, so a
-    launcher inheriting a low soft limit could hit EMFILE mid-run --
-    and the failure would surface as a confusing exec error or a partial
-    result rather than as "out of descriptors".
-
-    Two rules make this safe to call between fork and exec:
-
-    * ONLY the soft limit is raised, never the hard limit, so this can
-      never make a limit harder to restore;
-    * it is called in the forked CHILD, so the parent's own descriptor
-      budget -- and every other run in this process -- is untouched. A
-      limit is per-process; raising it in the parent would silently
-      widen the descriptor space of code that never asked for it.
-
-    Returns True on success. Failure is non-fatal: a hard limit that is
-    already at the soft limit, or a platform without resource limits,
-    leaves the inherited value in place, which is the status quo.
-    """
-    try:
-        import resource as _resource
-    except ImportError:                       # pragma: no cover
-        return False
-    try:
-        soft, hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
-        if soft >= hard:
-            return False                      # already at the ceiling
-        _resource.setrlimit(_resource.RLIMIT_NOFILE, (hard, hard))
-        return True
-    except (ValueError, OSError, AttributeError):
-        # Never fatal. A launcher that starts with the inherited limit
-        # behaves exactly as it did before this existed.
-        return False
-
-
 def _cleanroom_source_fd(source):
     """Resolve a cleanroom source to an fd, or None if it is not one.
 
@@ -2311,9 +2268,6 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     if launch_pid == 0:
         try:
             os.close(rr)
-            # CLEANROOM_DESIGN.md parity with the shell frontend (see
-            # the other launch site). Child-side only.
-            _raise_nofile_to_hard_limit()
             os.execv(launcher, argv)
         except BaseException:
             os._exit(127)
