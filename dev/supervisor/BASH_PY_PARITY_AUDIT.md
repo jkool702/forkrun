@@ -31,12 +31,12 @@ which is the pattern this audit follows.
 | # | Area | Finding | Class |
 |---|---|---|---|
 | F1 | Poison/recovery | Escrow deposit and batch recovery are **parent-side** in both frontends | **Intentional divergence — actually convergence** |
-| F2 | Poison stats | Plain *streaming* path reports `poisoned=0` beside a correct index list | **Confirmed defect (TD-09b)** |
-| F3 | Descriptor limit | Python cleanroom launcher did not get the hard `ulimit -n` bash gets | **Confirmed defect — FIXED** |
+| F2 | Poison stats | Plain *streaming* path reports `poisoned=0` beside a correct index list | **CONFIRMED DEFECT — OPEN (TD-09b)** |
+| F3 | Descriptor limit | Claimed the launcher lacked the hard `ulimit -n` | **FALSE POSITIVE — withdrawn**; the C launcher has always raised it |
 | F4 | Docs | `DOCS_ALL.md` drifted ~130 lines with a heading-only check passing | **Documentation drift — FIXED** |
 | F5 | Docs | Root README version, 4-of-5 mode lists, stale v0.5 module docstring, trap-ACK comments, NUMA test claims | **Documentation drift — FIXED** |
 | F6 | Cleanroom launch | Design proposes `posix_spawn`; implementation uses `fork()+execv()` | **Unresolved — decision report, no change** |
-| F7 | Cleanroom env | Python inherits the whole environment; bash reconstructs | **Unresolved — low exposure today, see §6** |
+| F7 | Cleanroom env | `CLEANROOM_DESIGN.md` says the launcher "must not inherit the parent's environment wholesale"; `os.execv()` inherits it | **OPEN — a stated contract that is not met** |
 | F8 | Cleanroom stream | Unreachable iterable producer with live control flow | **Confirmed defect — FIXED** |
 | F9 | Trap-ACK grace | Presented as the recovery mechanism; armed only on legacy substrates | **Documentation drift — FIXED** |
 | F10 | NUMA tests | Skip decorator claimed physical NUMA; guard returns `True` always | **Documentation drift — FIXED** |
@@ -161,11 +161,30 @@ structs). Python uses `scrub_fds(keep)` plus an `extra_keep_fds`
 parameter added this cycle. Both honour `INVARIANTS.md` §19's "fd 2 never
 redirected or closed".
 
-### F3 — confirmed defect, FIXED
+### F3 — FALSE POSITIVE, withdrawn
 
-`CLEANROOM_DESIGN.md` requires the launcher to get the hard `ulimit -n`;
-`frun.bash` does it; Python did not. See
-`CLEANROOM_LAUNCH_DECISION.md` §6.
+I claimed the Python cleanroom launcher did not receive the hard
+`ulimit -n` that bash gives it, implemented a fix, and reported it as
+fixed. **It was already correct.** `forkrun_cleanroom.c` has
+`raise_fd_limit()` (line 461), called from `main()` (line 1727) before
+`dlopen()` (line 1729) — ahead of any memfd, pipe or worker — and it is
+present identically in the baseline commit.
+
+The failure mode is worth recording. I observed that `run.py` had no
+`RLIMIT_NOFILE` reference, read "which the launcher should do too" as an
+unmet requirement, and never checked the launcher. The evidence was
+consistent with my hypothesis and I never tested it. Checking the place
+I expected the defect to be would have refuted it in one command.
+
+The test written to confirm it could not have detected the failure: it
+wrapped the launcher in a shell that recorded the limit and then `exec`ed
+the real binary, so it measured the limit *before* the C launcher raised
+its own. It proved my helper ran, not that anything was broken.
+
+A second, independent reason the change was wrong: the helper did
+`import resource` and Python work between `fork()` and `execv()`,
+precisely the pre-exec activity worth minimising when forking from a
+possibly-multithreaded host.
 
 ### F6 — unresolved: `posix_spawn`
 
@@ -174,19 +193,32 @@ own delivery plan gates integration on a **measured PoC that does not
 exist in the tree**. Full analysis and recommendation in
 `CLEANROOM_LAUNCH_DECISION.md`. No code changed.
 
-### F7 — unresolved: environment contract
+### F7 — OPEN: the environment contract is stated and not met
 
-Bash reconstructs (`--norc --noprofile`, explicit `LC_ALL=C`, `set +m`,
-`shopt -s extglob`). Python inherits everything via `os.execv()`.
+`CLEANROOM_DESIGN.md` §"Configuration contract" states:
 
-Measured exposure is small and worth stating precisely: the launcher
-reads **exactly one** environment variable,
-`FORKRUN_TEST_BREAK_DRAIN_WAKEUP`, a test-only hook. All real
-configuration crosses as argv. So today's safety is **accidental, not
-designed** — a caller's stray `FORKRUN_*` cannot affect the launcher
-because it reads none. The first `getenv` added to the launcher would
-silently change that. Recommendation in the decision report §7:
-document the contract now, before it becomes load-bearing.
+> The launcher must not inherit the parent's environment wholesale.
+
+Both Python launch sites call `os.execv()`, which inherits everything.
+Bash satisfies the contract by construction.
+
+**An earlier draft of this audit rated this "low exposure", on the
+argument that the launcher reads exactly one environment variable (a
+test-only hook) and all real configuration crosses as argv. That
+inference was wrong**, and it is withdrawn:
+
+* `map-spawn` and `map-udf` are **served cleanroom routes**. A spawned
+  command and a UDF module are user code and can read the environment.
+  What the *launcher* reads says nothing about what the *payload* reads.
+* `ld.so` consumes `LD_LIBRARY_PATH` / `LD_PRELOAD` **during `exec`**,
+  before `main()` runs. Auditing the launcher's source cannot see that.
+
+So this is a **stated contract the implementation does not meet**, not a
+matter of taste. Clearing the environment is not the obvious fix: a
+`mode="spawn"` payload plausibly needs `PATH` and a UDF module may need
+`PYTHONPATH`. The follow-up must compare Bash, in-process Python, and
+cleanroom plugin/spawn behaviour before any contract is chosen. See the
+decision report §7.
 
 ## 7. Source-of-truth and duplication
 
@@ -238,7 +270,45 @@ refactoring — was done, and produced F2/TD-09b rather than a refactor.
 That is the right outcome: **the investigation found a defect, not a
 duplication.**
 
-## 8. Deliberately not done
+## 8. Disposition list
+
+### Implemented and verified in this work order
+
+| ID | Change | Proof |
+|---|---|---|
+| F4 | `DOCS_ALL.md` made reproducible; `--check` wired into the release gate | `test_docs_all_freshness.py`, including a deliberate-drift test that proves the gate goes red |
+| F5 | Doc corrections: README version, 4-of-5 mode lists, `udf` documented, duplicate heading, v0.5 module docstring | release gate + `test_doc_accuracy.py` |
+| F8 | Unreachable iterable producer and its control flow removed from `_execute_cleanroom_stream`; stale docstrings corrected | cleanroom suites green on all three gate modes |
+| F9 | trap-ACK grace labelled legacy at all three sites | existing tests unchanged |
+| F10 | NUMA test claims corrected; dead `_has_numa()` removed | `test_numa_recovery.py`, 8 tests |
+| F14 | Left correctly flagged as unproven | no change made — this is the honest state |
+
+### Withdrawn
+
+| ID | Was claimed | Now |
+|---|---|---|
+| F3 | "The launcher did not get the hard `ulimit -n`" — confirmed defect, fixed | **FALSE POSITIVE.** `forkrun_cleanroom.c:461` `raise_fd_limit()`, called from `main()` at `:1727`, present in the baseline. Python-side helper and its tests reverted. |
+
+### Confirmed defects left OPEN
+
+| ID | Defect | Why not fixed here |
+|---|---|---|
+| **F2 / TD-09b** | `orchestrator=False` + streaming reports `poisoned=0` while reporting a correct, non-empty `poisoned_batches`. Since `total = completed + poisoned`, the headline number is wrong on that path only. | Verified pre-existing at `a65aa4ca`, i.e. not introduced by the TD-09 index fix. It is a **correctness defect, not a consolidation blocker**, and fixing it means routing that path's result through the shared poison funnel — a change in four call sites that belongs in its own work order. It is **deferred, not dismissed**. |
+| **F7** | `CLEANROOM_DESIGN.md` states the launcher "must not inherit the parent's environment wholesale"; both Python launch sites call `os.execv()`, which inherits it. | Answering it needs a deliberate compatibility decision (Bash reconstructs; clearing outright would break `mode="spawn"` payloads that need `PATH` and UDF modules that need `PYTHONPATH`). Requires comparing four behaviours first — see the decision report §7.4. |
+
+### Intentional divergence retained
+
+F1 (lifecycle/recovery — already converged), F11 (exit-code census),
+F12 (resume consent), F13 (realtime `-u`).
+
+### Needs a separate, measurement-first decision
+
+F6 (`posix_spawn`). Benchmark protocol specified in advance; see the
+decision report.
+
+---
+
+## 9. Deliberately not done
 
 * **No executor consolidation.** The pairs differ in supervision, failure
   detection, recovery and teardown contracts; the work order forbids
@@ -252,7 +322,7 @@ duplication.**
   (F7) — both need the decision report's evidence first.
 * **No engine or substrate change.** Frozen files untouched throughout.
 
-## 9. What this audit does NOT establish
+## 10. What this audit does NOT establish
 
 * No performance claim. Nothing here was benchmarked; the only
   performance-adjacent statement (the `fork()` cost argument for

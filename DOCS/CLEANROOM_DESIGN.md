@@ -70,8 +70,16 @@ launcher should do too.
        +<-- results on result fd
 ```
 
-`posix_spawn` uses `CLONE_VM | CLONE_VFORK`, so the spawn itself does
-not copy the page table at all. The launcher `dlopen`s the substrate and
+**SUPERSEDED PROPOSAL — see `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md`.**
+This is a proposal, not the shipped design. Both Python launch sites use
+`os.fork()` + `os.execv()`. The delivery plan below gated integration on
+a measured PoC that does not exist in the tree. The decision report
+recommends measuring first, and it corrects the mechanism here: glibc
+implements `posix_spawn` on **vfork(2)**, not `CLONE_VM` — the conclusion
+(no page-table copy) is right, the mechanism named is not.
+
+`posix_spawn` uses `vfork` (`CLONE_VM` is NOT what glibc does here), so
+the spawn itself does not copy the page table at all. The launcher `dlopen`s the substrate and
 then **forks** (no second exec), so the workers inherit the engine
 mapping by COW for free.
 
@@ -84,9 +92,23 @@ a live object therefore cannot be *carried* across the boundary.
 
 | mode | payload form | carried across `exec`? | shipped status |
 |---|---|---|---|
-| `mode="plugin"` | `"/path/plugin.so:func"` | **yes** — a path string | **served** |
-| `c_spawn_loop=True` | `argv` list | **yes** — plain data | **not reachable**: `_cleanroom_eligible` requires `raw_mode == "plugin"` |
-| Python UDF | a `callable`, or `"pkg.mod:func"` | **no** — not shipped |
+| `mode="plugin"` | `"/path/plugin.so:func"` | **yes** — a path string | **served** (`map-plugin`, `stream-plugin`) |
+| `mode="udf"` | `"pkg.mod:func"` only | **yes** — a spec string, re-imported after `exec` by the helper | **served** (`map-udf`, `stream-udf`); needs a version-matched helper, else it degrades to the in-process path |
+| `mode="spawn"` | `argv` list or command string | **yes** — plain data | **served for materialized** (`map-spawn`) via `c_spawn_loop`; **NOT served for `stream(spawn)`**, which has no dispatch and therefore no route identifier |
+| `mode="python"` | callable or spec | n/a | **not served** — declines to the in-process path |
+| `mode="splice"` | none | n/a | **not served** |
+
+**Corrected (WO Phase A).** Two rows in this table were stale and are now
+fixed. `mode="spawn"` was marked "not reachable: `_cleanroom_eligible`
+requires `raw_mode == 'plugin'`" — that gate now admits
+`("plugin", "udf", "spawn")`. Python UDF was marked "no — not shipped";
+it is implemented (`_udf.py`, `fr_udf*.c`) and is a first-class route.
+Note that the per-route distinction above is real and was not previously
+written down anywhere: **materialized spawn is served, streaming spawn
+is not**, because the stream path has no spawn dispatch at all.
+
+Streaming is likewise no longer follow-on work: `_execute_cleanroom_stream()`
+exists and serves the `stream-plugin` and `stream-udf` routes.
 
 `resolve_payload_parent()` documents the object-graph half: payloads are
 resolved in the parent and "cross by fork inheritance like the callable
@@ -181,7 +203,10 @@ what the engine sets itself, and every unrelated descriptor (the parent
 1. Design (this file).
 2. Launcher PoC: `posix_spawn` + `dlopen` + `fr_py_init` + fork N
    workers, with the fork tax **measured**. That number decides whether
-   the full integration is worth its risk.
+   the full integration is worth its risk. **NOT DONE.** No PoC,
+   measurement or recorded decision exists in the tree. The launch
+   currently uses `fork()`+`execv()`. See
+   `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md`.
 3. Full integration behind the flag only if the PoC pays.
 4. Re-run the isolated benchmark with the launcher on and off, so the
    delta is published rather than hidden.

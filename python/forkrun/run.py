@@ -877,12 +877,14 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
         #    strict_poison=True"
         # which is the intended error, not a fallback artefact.
 
-    # Sources: a materialized file, any already-open descriptor (int fd,
-    # fifo, socket, file object), or a Python iterable. The last is fed
-    # in by a forked producer child, which is how stream() has always
-    # worked, so map() now shares that machinery instead of demanding a
-    # file on disk. What is NOT servable is a source that is none of
-    # these -- notably a directory, or a path that does not exist.
+    # Sources: a materialized file or any already-open descriptor (int
+    # fd, fifo, socket, file object). Python iterables are NOT accepted:
+    # _api._reject_iterable_source refuses them ("Python is never an
+    # input pump"). A forked iterable producer used to be described
+    # here and in the eligibility comment below; it never ran on either
+    # path and has been removed from both. What is NOT servable is a
+    # source that is none of these -- notably a directory, or a path
+    # that does not exist.
     if isinstance(source, (str, bytes, os.PathLike)):
         try:
             path = os.fspath(source)
@@ -1430,18 +1432,14 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     #     passed straight through as --src. Nothing is pumped; the
     #     launcher reads it the way Bash's -s shape does. Proven by the
     #     SIGKILL tests, which feed a live pipe.
-    #   * a Python iterable -- a forked producer child pumps it into a
-    #     pipe. FORK, not a thread: the producer's closure must survive
-    #     copy-on-write, and nothing in a forked child may contend for
-    #     the GIL with the parent's collect. A thread would also be a
-    #     deadlock hazard in a process that has already forked workers.
     #   * neither -- not eligible; the envelope declines it first.
-    # Descriptors only. Unlike stream(), map()/run() must NOT accept a
-    # Python iterable: _api._reject_iterable_source rejects it outright
-    # ("Python is never an input pump"), so the branch that would fork a
-    # producer here is unreachable from the public API. It was removed
-    # rather than left as dead code -- an unreachable fork of a
-    # multi-threaded process is exactly the deadlock hazard the codebase
+    #
+    # DESCRIPTORS ONLY, on every path including stream().
+    # _api._reject_iterable_source rejects a Python iterable for map(),
+    # run() and stream() alike, so there is no iterable producer here or
+    # in _execute_cleanroom_stream(). Both used to carry one; both were
+    # removed rather than left as dead code -- an unreachable fork of a
+    # possibly-multithreaded process is exactly the hazard the codebase
     # comments warn about, and dead safety code is not safety.
     src_fd = _cleanroom_source_fd(source)
     if src_fd is None:
@@ -2183,29 +2181,30 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                               udf_attr=None, udf_roots=None):
     """W-CR3: STREAMING cleanroom -- yield results as they arrive.
 
-    Same envelope as the map() path (materialised-vs-streaming aside),
-    plus the producer/descriptor distinction:
+    Same envelope as the map() path (materialised-vs-streaming aside).
+    The source must already be a descriptor -- a path, a fifo, a socket,
+    an int fd or a file object -- and is passed straight through as
+    `--src`. Nothing is pumped.
 
-    * source already a descriptor (fifo, socket, int fd, file object):
-      passed straight through as --src. Nothing is pumped; the launcher
-      reads it exactly as Bash's `-s` shape does.
-    * source a Python iterable: forked producer child pumps it into a
-      pipe. NOTE this is currently unreachable -- _reject_iterable_source
-      refuses iterables for stream() as well -- so it is retained as
-      defence in depth, not as a supported input shape.
+    ACCEPTED INPUT SHAPE, precisely: there is no iterable producer and
+    no producer child. One used to exist here (a forked child pumping a
+    Python iterable into a pipe) but it was UNREACHABLE --
+    `_api._reject_iterable_source` refuses iterables for map(), run() and
+    stream() alike, "Python is never an input pump" -- while its waitpid
+    and teardown entries stayed live in this function's control flow. It
+    was removed; its sibling in `_execute_cleanroom()` had already been
+    removed for the same reason. A source that `_cleanroom_source_fd()`
+    cannot turn into a descriptor is a TypeError, not a forked pump.
 
     The parent only ever DRAINS. That is what makes it deadlock-free:
-    the launcher can block writing results, the spill child can block
-    reading the source, and the producer can block on a full pipe --
-    all three are relieved because the parent never stops reading
-    rr until EOF. Verified on a 200k-record pipe (first result at
-    2.8 ms) and on a deliberately slow producer (2.9 ms), neither of
-    which deadlocked.
+    the launcher can block writing results and the spill child can block
+    reading the source, and both are relieved because the parent never
+    stops reading rr until EOF.
 
     Teardown is explicit rather than best-effort: on abandonment
-    (GeneratorExit) both children are killed before the fds close, so
-    an early `break` out of the caller's loop cannot leave the launcher
-    writing into a closed pipe or the producer blocked forever.
+    (GeneratorExit) the launcher child is killed before the fds close,
+    so an early `break` out of the caller's loop cannot leave it
+    writing into a closed pipe.
     """
     import warnings as _warnings
     launcher = _cleanroom_launcher_path()

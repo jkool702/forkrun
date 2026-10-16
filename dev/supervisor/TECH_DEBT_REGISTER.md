@@ -40,7 +40,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-09 | `poisoned_batches` empty on `orchestrator=False` | high | **verified — FIXED** (WO-PY-REL-1); residual index-width item recorded as TD-12 and TD-09b |
 | TD-10 | Class payload silently produced empty results | high | **verified — FIXED** |
 | TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
-| TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN** (found by WO-PY-REL-1) |
+| TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN, DEFERRED BY DESIGN** (found by WO-PY-REL-1; re-confirmed in the parity audit) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
 | TD-13 | streaming parent retains ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN** (found by WO-PY-REL-1) |
 | TD-14 | `test_spawn_ordered` compared map/stream element-wise | low | **RECLASSIFIED — invalid test expectation, not a product defect** (WO-PY-REL-1 follow-up) |
@@ -630,6 +630,15 @@ see TD-13.
 **Found by WO-PY-REL-1 while testing the index fix, not by looking for
 it.** Verified identical at `a65aa4ca`, i.e. **pre-existing and unrelated to
 TD-09**.
+
+**Status: DEFERRED, not dismissed.** The parity audit's disposition list
+carries this as a confirmed OPEN correctness defect, not as a
+consolidation blocker: `total = completed + poisoned`, so the headline
+number is wrong on this path only. Fixing it means routing this path's
+result through the shared poison funnel (`_executor_core.report_poison`)
+rather than leaving it to a per-call-site write — four call sites, which
+belongs in its own work order. `dev/supervisor/BASH_PY_PARITY_AUDIT.md`
+§8, finding F2.
 
 Reproduction, 8 records with `BOOM` at 2 and 5, `mode="plugin"`,
 `lines=1`, `FORKRUN_RETRY_LIMIT=1`, `FORKRUN_CLEANROOM=0`:

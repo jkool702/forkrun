@@ -152,27 +152,30 @@ change.
 
 ### 4.3 The child-side code that would have to be replaced
 
-This is the concrete blocker for a drop-in swap:
+**CORRECTED.** An earlier draft of this section argued that the
+child-side descriptor-limit raise has no `posix_spawn` equivalent, making
+a backend swap awkward. **That argument was void, and it is withdrawn.**
 
-```python
-launch_pid = os.fork()
-if launch_pid == 0:
-    os.close(rr)
-    _raise_nofile_to_hard_limit()      # added by §6
-    os.execv(launcher, argv)
+The launcher raises its own soft `RLIMIT_NOFILE` to the hard limit before
+doing any work:
+
+```c
+static void raise_fd_limit(void) {          /* forkrun_cleanroom.c:461 */
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != rl.rlim_max) {
+        rl.rlim_cur = rl.rlim_max;
+        (void)setrlimit(RLIMIT_NOFILE, &rl);
+    }
+}
 ```
 
-`_raise_nofile_to_hard_limit()` is arbitrary child-side code: it calls
-`resource.setrlimit()`. `posix_spawn` has **no** rlimit hook. Porting it
-would mean either (a) setting the limit in the PARENT before the spawn
-and restoring it after — which changes the calling process's descriptor
-budget for the duration, affecting every other run in that process; or
-(b) having the launcher raise its own limit at startup, which moves the
-fix from the frontend into `forkrun_cleanroom.c` and changes the
-launcher's contract.
+called from `main()` at `forkrun_cleanroom.c:1727`, immediately before
+`dlopen()` at `:1729` — ahead of any memfd, pipe or worker. This predates
+the current work order and is present in the baseline commit.
 
-**Neither is free, and both are strictly worse than the current child-side
-call.** This is the finding that most constrains the decision.
+So there is **no rlimit migration cost**, in either direction. The
+launcher owns the limit whether it is started by `fork()+execv()` or by
+`posix_spawn`. Remove this from the cost list.
 
 ### 4.4 `vfork` semantics constrain the child
 
@@ -204,13 +207,26 @@ launcher was started** and would be untouched by a backend swap.
 
 ### 4.7 Multithreaded parent
 
-`fork()` from a multithreaded process is a known hazard, which this
-codebase already documents (`run.py` notes CPython's fork warning at the
-`os.fork()` sites). The plain cleanroom path has no explicit threads at
-launch time, so the hazard is currently theoretical — and `posix_spawn`
-is the textbook mitigation. That is a genuine argument **for** §3.2, and
-it is the strongest one, because it is a correctness property rather than
-a speed claim.
+**CORRECTED.** An earlier draft called this hazard "currently
+theoretical" on the grounds that the launch path starts no threads
+itself. That is not a valid inference and the characterisation is
+withdrawn.
+
+`forkrun` is an importable **library**. Threads it does not create are
+not evidence about the process it is called from — the calling
+application may already run a thread pool, a timer, a logging handler or
+an async runtime's executor. `os.fork()` from such a process is the
+documented hazard: only the forking thread survives in the child, any
+lock held by another thread at fork time stays locked, and the CPython
+runtime itself warns at `fork()` sites for this reason.
+
+This is not a theoretical concern. It is the strongest remaining
+argument **for** `posix_spawn`, and it is a correctness argument rather
+than a speed claim: `vfork`/`posix_spawn` avoids the problem structurally
+rather than relying on the parent happening to be idle.
+
+It is stated here as an argument, not as evidence of a defect. No
+failure has been reproduced from a threaded caller.
 
 ### 4.8 Both launch paths
 
@@ -251,74 +267,99 @@ equivalent. A win at low RSS is not evidence.
 
 ---
 
-## 6. The one finding implemented (no architectural decision needed)
+## 6. The finding previously implemented here — WITHDRAWN
 
-**The launcher did not receive the hard descriptor limit.**
+An earlier draft of this report recorded a "confirmed defect, FIXED": the
+launcher did not receive the hard descriptor limit. **That was a false
+positive and the change has been reverted** (see §4.3).
 
-`CLEANROOM_DESIGN.md`, on the Bash cleanroom:
+The error is worth recording because it is a specific, repeatable shape:
+I observed that `run.py` had no `RLIMIT_NOFILE` reference, read a
+sentence in `CLEANROOM_DESIGN.md` ("which the launcher should do too") as
+an unmet requirement, and never checked whether the launcher already
+satisfied it. It did, in C, before `dlopen`.
 
-> It also raises `ulimit -n` to the hard limit in the cleanroom, which the
-> launcher should do too.
+Two further reasons the change was wrong independently of being
+redundant:
 
-`frun.bash` does exactly this — `ulimit -n $(ulimit -Hn)` is the first
-line of the cleanroom source (`FORKRUN_FRUN_SRC`, `frun.bash:192`). The
-Python launch path had **no** `RLIMIT_NOFILE` reference at all.
+* The test I wrote could not have detected the failure it claimed to
+  address. It wrapped the launcher in a shell that recorded
+  `RLIMIT_NOFILE` and then `exec`ed the real binary, so it measured the
+  limit **before** the C launcher raised its own. It demonstrated that my
+  helper ran, not that anything was broken.
+* The helper performed `import resource` and Python work between
+  `fork()` and `execv()` — precisely the pre-exec activity worth
+  minimising when forking from a possibly-multithreaded host (§4.7).
 
-Consequence: a launcher started under a low soft limit hits `EMFILE`
-partway through a run, and that failure does not look like what it is —
-it surfaces as an exec error or a truncated result with nothing naming
-descriptor exhaustion.
+**Lesson recorded rather than quietly fixed:** checking the place I
+expected to find a defect is not a test of whether it exists there.
 
-Implemented as `_raise_nofile_to_hard_limit()`, called in the forked
-child between fork and execv at **both** launch sites. Only the *soft*
-limit moves (never the hard limit), it runs child-side so the parent is
-untouched, and failure is non-fatal.
+## 7. Environment contract — a stated contract that is violated
 
-This is implemented rather than merely recommended because it required no
-decision about the launch backend: it is correct under `fork()+execv()`
-today and would be the launcher's own responsibility under
-`posix_spawn` (§4.3). **It is therefore not evidence for or against
-either backend.**
+**Status revised from "low exposure" to "OPEN — the contract is stated
+and not met".** An earlier draft of this section argued the exposure was
+small because `forkrun_cleanroom.c` reads exactly one environment
+variable (a test-only hook) and all real configuration crosses as argv.
+**That inference was wrong, in three ways.**
 
-Mutation-verified: removing the raise makes the test observe the soft
-limit (64) instead of the hard limit (4096). Covered by
-`python/tests/test_cleanroom_nofile.py`.
+### 7.1 The contract is stated, and it is not met
 
----
+`CLEANROOM_DESIGN.md` §"Configuration contract":
 
-## 7. Environment contract (work order §4.3) — findings, not a decision
+> The launcher must not inherit the parent's environment wholesale.
 
-The work order asks what should cross the boundary. Evidence gathered:
+Both Python launch sites call `os.execv()`, which inherits the entire
+parent environment. The Bash frontend satisfies the contract by
+construction — `exec -c` with `--norc --noprofile` plus explicit
+`LC_ALL=C`, `set +m`, `shopt -s extglob`.
 
-* **Bash reconstructs.** `exec -c` with `--norc --noprofile`, plus
-  explicit `LC_ALL=C`, `set +m`, `shopt -s extglob`, `_FR_IN_CLEANROOM=1`
-  and a `ulimit -n` raise. `FORKRUN_EXTRA_VARS` / `_EXTRA_FUNCS` /
-  `_EXTRA_SETUP` are the *only* documented way to carry state in.
-* **Python inherits everything.** `os.execv()` inherits the full parent
-  environment; `run.py` sets nothing before either launch.
+So this is not an open design question. It is a **documented requirement
+that the implementation does not meet**, and it should be tracked as such
+rather than described as a consideration.
 
-**How much this matters is small, and that is the finding.** The launcher
-reads exactly **one** environment variable:
+### 7.2 Auditing the launcher's own `getenv` misses the actual exposure
 
-```
-$ grep -oE 'getenv\("[A-Z_]+"\)' forkrun_cleanroom.c | sort -u
-getenv("FORKRUN_TEST_BREAK_DRAIN_WAKEUP")
-```
+The "low exposure" argument counted `getenv()` calls inside the launcher.
+That misses two real consumers:
 
-That is a test-only hook. All real configuration crosses as **argv**.
-So the current exposure is: a caller's stray `FORKRUN_*` variable cannot
-affect the launcher today, because the launcher reads none — a safety
-property that is **accidental rather than designed**, and would be
-silently lost the moment the launcher grows its first `getenv`.
+* **User code runs in the launcher.** `map-spawn` and `map-udf` are
+  served routes (`_CLEANROOM_ROUTES`). A spawned command and a UDF module
+  are the user's own code and can read whatever they like from the
+  environment. The launcher's silence about the environment says nothing
+  about what the payload does with it.
+* **The dynamic loader reads it before `main()` runs.** `LD_LIBRARY_PATH`,
+  `LD_PRELOAD` and friends are consumed by `ld.so` during `exec`, before
+  any of the launcher's own code executes. No amount of auditing the
+  launcher's source can see those effects.
 
-**Recommendation, not implemented:** state the contract explicitly rather
-than leaving it to chance — either document "the launcher inherits the
-environment and deliberately reads nothing from it, so configuration
-crosses as argv", or define an allowlist and use `posix_spawn(env=...)`.
-This is documentation-level today precisely because nothing reads
-anything; it becomes a real decision the moment `getenv` is used.
+The correct question is not "what does the launcher read" but "what
+should cross the boundary".
 
----
+### 7.3 Do not simply clear it
+
+Clearing the environment is the obvious move and the wrong one. A
+`mode="spawn"` payload is a user command that very plausibly depends on
+`PATH`, and a UDF module may need `PYTHONPATH` to be importable at all.
+The Bash frontend's answer is an explicit, user-controlled list
+(`FORKRUN_EXTRA_VARS` / `_EXTRA_FUNCS` / `_EXTRA_SETUP`). Python needs
+an equivalent answer, and it needs one that is a deliberate compatibility
+decision rather than an accident of `execv`.
+
+### 7.4 What the follow-up should compare
+
+Before choosing a contract, measure all four behaviours — they are
+currently different and the difference is undocumented:
+
+1. Bash cleanroom (reconstructed environment),
+2. Python in-process (caller's environment, unmodified),
+3. Python cleanroom with a C plugin (inherits wholesale),
+4. Python cleanroom with `mode="spawn"` / `mode="udf"` (inherits
+   wholesale, and the payload can observe it).
+
+The question to answer is which of these a user could tell apart today,
+and which differences are acceptable to keep. That comparison is
+investigation, not redesign, and nothing here authorises changing the
+launch until it is done.
 
 ## 8. Recommendation
 
