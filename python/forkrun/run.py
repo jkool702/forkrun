@@ -2264,13 +2264,14 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     so = find_substrate()
 
     src_fd = _cleanroom_source_fd(source)
-    producer_pid = None
     if src_fd is None:
-        if not hasattr(source, "__iter__"):
-            raise TypeError(
-                "FORKRUN_CLEANROOM stream(): source must be a readable "
-                "descriptor or an iterable, got %r" % (type(source),))
-        sr, sw = os.pipe()
+        # Reachable as a VALIDATION (an unrecognised source), so it stays.
+        # What is NOT reachable is the iterable producer this used to
+        # guard: _api._reject_iterable_source refuses Python iterables
+        # before dispatch, so there is nothing to pump.
+        raise TypeError(
+            "FORKRUN_CLEANROOM stream(): source must be a readable "
+            "descriptor or a path, got %r" % (type(source),))
 
     rr, rw = os.pipe()
     if src_fd is not None:
@@ -2293,7 +2294,7 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
             "--bytes", str(int(bytes_ or 0)),
             "--on-error", str(_ON_ERROR_CODES.get(on_error, 0)),
             "--retry", str(int(_resolve_retry_limit())),
-            "--src", str(src_fd if src_fd is not None else sr),
+            "--src", str(src_fd),      # non-None: validated above
             "--result", str(rw),
             "--stats-fd", str(stats_fd)]
     if udf_helper:
@@ -2309,8 +2310,6 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     launch_pid = os.fork()
     if launch_pid == 0:
         try:
-            if src_fd is None:
-                os.close(sw)
             os.close(rr)
             # CLEANROOM_DESIGN.md + frun.bash parity (see the other
             # launch site). Child-side only.
@@ -2322,28 +2321,6 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     if src_fd is not None:
         os.close(src_fd)
     os.close(rw)
-    if src_fd is None:
-        producer_pid = os.fork()
-        if producer_pid == 0:
-            try:
-                os.close(rr)
-                for chunk in source:
-                    if isinstance(chunk, str):
-                        chunk = chunk.encode()
-                    elif not isinstance(chunk, (bytes, bytearray, memoryview)):
-                        raise TypeError(
-                            "stream source yielded %r; the cleanroom "
-                            "producer writes bytes" % (type(chunk),))
-                    view = memoryview(chunk)
-                    while view:
-                        n = os.write(sw, view[:1 << 20])
-                        view = view[n:]
-                os.close(sw)
-            except BaseException:
-                os._exit(1)
-            os._exit(0)
-        os.close(sw)
-
     tail = b""
     finished = False
     try:
@@ -2371,28 +2348,21 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
         # exits 0, so the caller would get plausible-looking truncated
         # results and no error.
         #
-        # HONEST SCOPE: this branch is currently UNREACHABLE from the
-        # public API. _api._reject_iterable_source refuses a Python
-        # iterable for map(), run() AND stream() alike ("Python is never
-        # an input pump"), so producer_pid is always None here and every
-        # real streaming source is a pipe/fd fed by the caller. That
-        # caller's failure is not detectable from in here -- there is no
-        # child to inspect -- so a writer that dies mid-stream is still
-        # silently truncated, and no check in this function can fix that.
+        # HONEST SCOPE, and it is a REAL limitation, not a hedge: this
+        # function cannot detect that a CALLER-FED pipe died mid-stream.
+        # There is no child of ours to inspect -- the writer is the
+        # caller's own process or thread -- so a writer that errors out
+        # simply EOFs the pipe, the launcher ingests a SHORT corpus and
+        # exits 0, and the caller receives plausible-looking truncated
+        # results with no error naming the cause.
         #
-        # It is kept as defence in depth, and it is the reason the
-        # producer block above was not deleted along with map()'s copy.
-        # Checked here rather than in the finally because a raise from a
-        # finally would mask the real error.
-        if producer_pid is not None:
-            _pp, pstatus = os.waitpid(producer_pid, 0)
-            producer_pid = None
-            if not (os.WIFEXITED(pstatus)
-                    and os.WEXITSTATUS(pstatus) == 0):
-                raise RuntimeError(
-                    "forkrun: cleanroom source producer failed (status "
-                    "%r); the input was truncated, so the results are "
-                    "not trustworthy" % (pstatus,))
+        # This used to be checkable, via a fork()ed Python producer that
+        # pumped an iterable. That branch was unreachable and was removed
+        # (WO Phase D.4): _api._reject_iterable_source refuses a Python
+        # iterable for map(), run() and stream() alike -- "Python is never
+        # an input pump" -- so the producer could never run, while its
+        # 30-odd lines and its waitpid/teardown entries stayed live in
+        # this function's control flow.
         # EOF on the result pipe is NOT proof of success. The launcher
         # exits non-zero for unrecoverable worker death, helper death,
         # spill failure, recovery failure and abort -- and in every one
@@ -2467,7 +2437,7 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
             os.close(rr)
         except OSError:
             pass
-        for pid in (launch_pid, producer_pid):
+        for pid in (launch_pid,):
             if pid is None:
                 continue
             try:
