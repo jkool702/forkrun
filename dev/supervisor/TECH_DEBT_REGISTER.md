@@ -37,9 +37,11 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-06 | Executor consolidation | med | **audited** — `EXECUTOR_CONSOLIDATION_AUDIT.md` |
 | TD-07 | README collapses v0 history into current capability | low | **unverified claim** |
 | TD-08 | `Mode` type omitted a shipped, tested mode | med | **verified — FIXED** |
-| TD-09 | `poisoned_batches` empty on `orchestrator=False` | high | **verified — documented, gap open** |
+| TD-09 | `poisoned_batches` empty on `orchestrator=False` | high | **verified — FIXED** (WO-PY-REL-1); residual index-width item recorded as TD-12 and TD-09b |
 | TD-10 | Class payload silently produced empty results | high | **verified — FIXED** |
 | TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
+| TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN** (found by WO-PY-REL-1) |
+| TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
 
 ---
 
@@ -221,7 +223,110 @@ payload form), and refusal **before input is consumed** (asserted with a
 nonexistent source, so a post-resolution check would fail with a file
 error instead).
 
-### TD-09 — `poisoned_batches` is empty on `orchestrator=False` (high)
+### TD-09 — `poisoned_batches` is empty on `orchestrator=False` (high) — FIXED
+
+> **Status: FIXED in WO-PY-REL-1.** The mechanism, the verified paths, the
+> width handling, the truncation rule and the mutation evidence are in
+> §TD-09-FIX below. The original analysis that follows is kept because the
+> *wrong* claim in it ("That is engine work, not a stats patch") is what
+> sent the work down the wrong path for as long as it stood.
+
+#### TD-09-FIX — mechanism and evidence
+
+**Mechanism.** Reused the existing bounded memfd transport the cleanroom
+already uses, wired to the plain path. `fr_py_claim()` in `_shim.c` had
+been calling `fr_py_poison_relay()` on the plain path the whole time, on
+the same `num_kills == threshold` edge that increments the shared poisoned
+count — so the index was relayed correctly and **discarded**, because no
+Python code ever created the receiving end. Three missing pieces, all
+Python:
+
+1. parent creates the poison stats memfd and writes the v2 header
+   (`_PoisonStatsChannel`, `run.py`);
+2. parent exports `$FRK_POISON_FD` around the fork, restoring the previous
+   value in a `finally` (`_ExportedPoisonFd`) — it is process-global, and a
+   stale fd number would make a later run relay into the wrong object;
+3. the descriptor is threaded into the four worker keep-sets
+   (`extra_keep_fds` through `fork_workers`, `_fork_c_plugin_worker`,
+   `_fork_c_spawn_worker`, `_fork_splice_worker`), because `scrub_fds`
+   closes everything outside `keep`.
+
+Indices are collected BEFORE `report_poison()`, so a `strict_poison` raise
+does not lose them. Truncation is `relayed < poisoned`, identical to the
+cleanroom, and is announced by a warning.
+
+**No frozen file was touched.** `_shim.c` was touched, and only to remove
+a stale-fd cache — see "the defect the fix exposed" below.
+
+**The defect the fix exposed.** `fr_py_poison_relay()` cached the
+transport fd in a `__thread` variable and never re-read it. A Python
+parent can call `fr_py_claim()` itself — `test_exactly_once.py` drives a
+batch to its retry limit exactly that way — and the first such call with
+`$FRK_POISON_FD` unset cached `-1` **permanently in that thread**. Every
+worker forked afterwards inherited `-1` through `fork()`, so the relay was
+dead for the rest of the process: correct count, permanently empty index
+list. That is TD-09 reproduced *by the fix for TD-09*, and it passed in
+isolation while failing only in the full suite. The cache is now removed;
+`getenv` runs per poisoned batch, which is a terminal event and not a hot
+path. This is why the full suite, not the focused suite, is the evidence
+that matters here.
+
+**Verified paths.** `map()` materialized, `map()` streaming, and `stream()`
+— each for `orchestrator=False` and `True`; the C plugin worker loop and
+the spawn worker loop separately, because each builds its own keep-set.
+All produce `poisoned=[2,5]` for the 8-record fixture whose records 2 and
+5 carry `BOOM`.
+
+**Index width: a real, pre-existing truncation that was NOT widened.**
+`fr_py_poison_relay(unsigned int)` is called with
+`(uint32_t)batch.batch_idx` while the engine's `batch_idx` is `uint64_t`
+(`forkrun_ring.c:1421`). An index ≥ 2^32 is silently truncated. **This
+already affected the shipped cleanroom path**; the reactor path is
+width-safe because it carries indices as formatted strings over the
+trap-ACK pipe. Widening it means changing the shared slot geometry
+(`FR_POISON_SLOT_U32`), the launcher's pre-size in `forkrun_cleanroom.c`,
+and `_STATS_SLOT_U32` in `run.py` — i.e. relaunching the shipped
+`_forkrun_cleanroom` binary and its CI build. Out of scope here; recorded
+as **TD-12**. The plain path is now consistent with the cleanroom path and
+introduces no new truncation.
+
+**Truncation.** Per-worker, `_STATS_CAPACITY = 1024` indices; the relay
+drops silently on overflow, so slot counts are a lower bound.
+Completeness is decided by comparing the aggregate against the exact
+scalar, never by the list length.
+
+**What failed before the change.**
+`test_poison_accounting.py::test_poisoned_batches_empty_on_non_reactor_path_KNOWN_GAP`
+— the file's own docstring said to delete that assertion and extend the
+reactor coverage when the gap closed, rather than relax it.
+
+**Mutation evidence** (`test_poison_accounting.py`, 17 tests):
+
+| Mutation | Result |
+|---|---|
+| plain path reports `[]` again | 8 failures |
+| one real poison index dropped | 8 failures |
+| truncated list marked complete | 2 failures |
+| scalar altered with no poison event (map) | 5 failures |
+| relay fd not kept (Python worker loop) | 8 failures |
+| keep removed from the C plugin loop only | 2 failures |
+| keep removed from the spawn loop only | 1 failure |
+| streaming index list emptied | 10 failures |
+
+The three keep-set mutations are why the loops are asserted separately: a
+fix threaded into one loop passes every other test here.
+
+**Residual, deliberately not asserted:** on the plain **streaming** path
+the scalar `poisoned` stays 0 while the reactor reports the true count.
+Verified identical at `a65aa4ca`, before this change — a separate defect
+from the index list, which now agrees. Recorded as **TD-09b**.
+
+**Does not establish:** anything about poison modes beyond
+retry/strict_poison and the skip policy checked in the matrix; the
+multi-worker slot aggregation rule is reasoned from the layout, not
+exhaustively tested beyond the single-worker truncation case.
+
+#### TD-09 — original analysis (kept; the conclusion was wrong)
 
 **Verified by reproduction, not by reading.** The audit asked whether plain,
 reactor and cleanroom execution share poison accounting rules. They do
@@ -500,3 +605,66 @@ Options, in rough order of cost: sample `/proc/self/statm` (current RSS)
 instead of the peak; or run the measurement in a fresh child process so
 the high-water mark is not shared with the rest of the suite. **Not
 done here** -- out of scope for WO-CR-ROI-2.
+
+---
+
+### TD-09b — plain streaming path leaves scalar `poisoned` at 0 (high) — OPEN
+
+**Found by WO-PY-REL-1 while testing the index fix, not by looking for
+it.** Verified identical at `a65aa4ca`, i.e. **pre-existing and unrelated to
+TD-09**.
+
+Reproduction, 8 records with `BOOM` at 2 and 5, `mode="plugin"`,
+`lines=1`, `FORKRUN_RETRY_LIMIT=1`, `FORKRUN_CLEANROOM=0`:
+
+```
+stream() orchestrator=False   out=6  poisoned=0   poisoned_batches=[2, 5]
+stream() orchestrator=True    out=6  poisoned=2   poisoned_batches=[2, 5]
+```
+
+The **index list now agrees** (WO-PY-REL-1 fixed that). The **scalar does
+not**: the plain streaming executors never write `_LAST_STATS["poisoned"]`,
+so `total = completed + poisoned` is computed as `6 + 0` while 2 batches
+were in fact dropped. That is the same class of headline-wrongness the
+scalar was added to prevent, so it is rated high.
+
+Not fixed here: it is a different defect from TD-09, in different
+executor code, and the work order scopes WO-PY-REL-1 to the index list.
+Worth noting the asymmetry is silent — `completed` is right and the
+missing batches are visible only as the gap between `total` and
+`completed + len(poisoned_batches)`.
+
+**Does not establish:** whether the reactor path is itself exact for every
+poison policy; only that the two disagree on this scenario.
+
+---
+
+### TD-12 — poison-index relay truncates u64 `batch_idx` to u32 (medium) — OPEN
+
+**Pre-existing; affects the shipped cleanroom path, not introduced by
+WO-PY-REL-1.**
+
+`forkrun_ring.c:1421` declares `uint64_t batch_idx`, and the Python
+out-param mirrors it (`_shim.c:87`). But the relay signature is
+`fr_py_poison_relay(unsigned int batch_idx)` (`_shim.c:34`), invoked as
+`fr_py_poison_relay((uint32_t)batch.batch_idx)` (`_shim.c:447`), and the
+slot layout stores indices as `u32`. A batch index ≥ 2^32 is silently
+truncated.
+
+The reactor path is width-safe: it formats indices as decimal strings over
+the trap-ACK pipe, which Python parses at full width.
+
+Reachability is bounded and stated rather than assumed: `batch_idx` is a
+monotonic counter from 0, so a truncating index needs ≥ 2^32 poisoned
+batches in a single run. No test constructs that (it is not practical), so
+this is a reasoned bound, **not a measured one**.
+
+Fixing it is not a local edit: the slot geometry `FR_POISON_SLOT_U32`, the
+launcher's pre-size in `forkrun_cleanroom.c`, the v2 header's stride field,
+and `_STATS_SLOT_U32` in `run.py` must all widen together, which means
+rebuilding and re-shipping the `_forkrun_cleanroom` binary. That is a
+release-level change, not a stats patch, and belongs in its own work
+order.
+
+**Does not establish:** that any real workload reaches 2^32 poisoned
+batches; no such run was attempted.

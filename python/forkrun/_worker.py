@@ -1001,7 +1001,7 @@ def _c_plugin_spec(payload_fn):
 
 def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
                            out_fd, signal_w, fallow_w, engine_fds,
-                           on_error="retry"):
+                           on_error="retry", extra_keep_fds=None):
     """Fork one C-loop plugin worker (W-PY26 mode="plugin" fast path).
 
     The child scrubs to engine + job fds, then runs
@@ -1024,6 +1024,8 @@ def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
                 keep.add(signal_w)
             if fallow_w is not None and fallow_w >= 0:
                 keep.add(fallow_w)
+            if extra_keep_fds:
+                keep.update(extra_keep_fds)
             from ._fd_scrub import scrub_fds
             scrub_fds(keep)
         except Exception:
@@ -1067,7 +1069,7 @@ def _c_spawn_spec(payload_fn):
 
 def _fork_c_spawn_worker(lib, wid, spawn_argv, memfd_fd,
                          out_fd, signal_w, fallow_w, engine_fds,
-                         on_error="retry"):
+                         on_error="retry", extra_keep_fds=None):
     """Fork one C-loop spawn worker (W-PY33 mode="spawn" fast path).
 
     The child scrubs to engine + job fds, then runs
@@ -1094,6 +1096,8 @@ def _fork_c_spawn_worker(lib, wid, spawn_argv, memfd_fd,
                 keep.add(signal_w)
             if fallow_w is not None and fallow_w >= 0:
                 keep.add(fallow_w)
+            if extra_keep_fds:
+                keep.update(extra_keep_fds)
             from ._fd_scrub import scrub_fds
             scrub_fds(keep)
         except Exception:

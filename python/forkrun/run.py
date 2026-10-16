@@ -1682,6 +1682,157 @@ _STATS_SLOT_U32 = 1024 + 1
 _STATS_CAPACITY = _STATS_SLOT_U32 - 1   # indices per slot, excluding count
 
 
+class _PoisonStatsChannel:
+    """Parent end of the bounded poison-index relay, for plain paths.
+
+    WO-PY-REL-1 / TD-09. The C relay (fr_py_poison_relay, _shim.c:447)
+    ALREADY runs on the plain path -- fr_py_claim() calls it on the same
+    `num_kills == threshold` edge that increments the shared poisoned
+    count. What was missing is the receiving end: nothing created the
+    stats memfd, nothing exported $FRK_POISON_FD, and the descriptor was
+    not in the worker keep-set, so the relay resolved g_poison_fd < 0 and
+    returned silently. The symptom -- a non-zero `poisoned` beside an
+    empty `poisoned_batches` -- is indistinguishable from "nothing was
+    poisoned", which is why it survived as long as it did.
+
+    This is the same bounded transport the cleanroom already uses, so
+    both paths now share one contract: `_STATS_CAPACITY` indices per
+    worker, silent drop on overflow, and completeness decided by
+    `relayed < poisoned` rather than by the length of the list.
+    """
+
+    __slots__ = ("fd", "workers")
+
+    def __init__(self, workers):
+        self.workers = max(1, int(workers))
+        self.fd = None
+
+    def open(self):
+        """Reset (or create) the shared stats memfd. Returns the fd.
+
+        ONE memfd for the whole process, reused across runs, and the fd
+        NUMBER is deliberately stable.
+
+        That stability is not a tidiness choice. fr_py_poison_relay()
+        caches the fd it read from $FRK_POISON_FD in a __thread variable
+        (_shim.c, g_poison_fd) and never re-reads it. A forked child
+        inherits the parent's cached copy. So creating a NEW memfd per run
+        leaves workers holding a stale fd number from an earlier run --
+        which writes indices into the wrong object, or into a recycled
+        fd. The symptom is a correct poisoned count with an empty index
+        list, i.e. exactly the bug TD-09 is about, reintroduced by the
+        fix itself. One fd, one cached number, always correct.
+
+        Per-run reset is by ftruncate to 0 and back: a memfd zero-fills
+        the grown region, so every slot count returns to 0 without a
+        separate clearing pass.
+        """
+        import struct as _struct
+        fd = os.memfd_create("fr_poison_stats")
+        self.fd = fd
+        need = _STATS_HEADER_BYTES + self.workers * _STATS_SLOT_U32 * 4
+        try:
+            size = os.fstat(fd).st_size
+        except OSError:
+            size = 0
+        if size != need:
+            try:
+                os.ftruncate(fd, 0)
+                os.ftruncate(fd, need)
+            except OSError:
+                # Grow-only fallback; a short region just reads back as
+                # fewer slots, and seal() reports that honestly.
+                try:
+                    os.ftruncate(fd, max(need, size))
+                except OSError:
+                    pass
+        hdr = _struct.pack("<IIII", 2, 0, self.workers, _STATS_SLOT_U32)
+        os.pwrite(fd, hdr, 0)
+        self.fd = fd
+        return fd
+
+    def seal(self, poisoned):
+        """Publish the authoritative count, then read indices back."""
+        import struct as _struct
+        if self.fd is None:
+            return [], 0
+        try:
+            os.pwrite(self.fd, _struct.pack("<I", int(poisoned)), 4)
+            _got, idxs, relayed = _read_cleanroom_stats(self.fd)
+        except OSError:
+            return [], 0
+        return sorted(set(idxs)), relayed
+
+    def close(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+
+
+class _ExportedPoisonFd:
+    """Export $FRK_POISON_FD across the fork, and ALWAYS restore it.
+
+    os.environ is process-global, so a plain set-and-forget would leak the
+    variable into every later run and sibling test in the same process --
+    and a stale fd number is worse than none: the relay would write into
+    whatever happens to occupy that number. Restoration is therefore in a
+    finally, not on the success path.
+    """
+
+    __slots__ = ("_prev", "_fd")
+
+    def __init__(self, fd):
+        self._fd = fd
+        self._prev = os.environ.get("FRK_POISON_FD")
+
+    def __enter__(self):
+        if self._fd is not None and self._fd >= 0:
+            os.environ["FRK_POISON_FD"] = str(self._fd)
+        return self
+
+    def __exit__(self, *exc):
+        if self._prev is None:
+            os.environ.pop("FRK_POISON_FD", None)
+        else:
+            os.environ["FRK_POISON_FD"] = self._prev
+        return False
+
+
+def _read_poison_count(lib):
+    """The engine's authoritative poisoned count, or 0 if unreadable."""
+    try:
+        return lib.fr_py_poisoned_count()
+    except Exception:
+        return 0
+
+
+def _collect_plain_poison(channel, poisoned, strict_truncation_warn=True):
+    """Fold plain-path poison indices into _LAST_STATS.
+
+    Called BEFORE report_poison(), because report_poison() may raise via
+    strict_poison and the post-exception stats then have to be inspectable.
+    """
+    if channel is None:
+        return
+    idxs, relayed = channel.seal(poisoned)
+    _trunc = relayed < int(poisoned or 0)
+    _LAST_STATS["poisoned_batches"] = list(idxs)
+    _LAST_STATS["poisoned_batches_truncated"] = bool(_trunc)
+    if _trunc and strict_truncation_warn:
+        import warnings as _warnings
+        _warnings.warn(
+            "forkrun: poisoned_batches is TRUNCATED — %d of %d poisoned "
+            "batch indices are missing because a worker's relay slot is "
+            "full (capacity %d indices per worker). The poisoned count is "
+            "exact; only the index list is incomplete."
+            % (int(poisoned or 0) - relayed, int(poisoned or 0),
+               _STATS_CAPACITY),
+            UserWarning, stacklevel=4)
+
+
 def _stats_ftruncate(fd, size):
     """Grow the stats memfd. Best-effort; absence is caught downstream."""
     try:
@@ -5170,7 +5321,7 @@ def _require_splice_symbol():
 
 
 def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
-                        engine_fds):
+                        engine_fds, extra_keep_fds=None):
     """Fork one C-loop passthrough worker (W-PY18 mode="splice").
 
     The child scrubs to engine + job fds, initializes worker state via
@@ -5190,6 +5341,8 @@ def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
                 keep.add(signal_w)
             if fallow_w is not None and fallow_w >= 0:
                 keep.add(fallow_w)
+            if extra_keep_fds:
+                keep.update(extra_keep_fds)
             scrub_fds(keep)
         except Exception:
             pass
@@ -5314,13 +5467,18 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # W-DEDUP: single fork dispatch (generator shape closes the
         # parent's signal-read end in the child for exact EOF).
         from ._executor_core import fork_workers as _core_fork
-        pids.extend(_core_fork(
-            lib, workers=workers, memfd=memfd, size=size,
-            out_fds=out_fds, signal_w=signal_w, fallow_w=None,
-            engine_fds=engine_fds, payload=payload, sink=None,
-            mode="python", on_error=on_error,
-            src_fd=src_fd, must_close=must_close,
-            signal_r_to_close=signal_r, spec=_spec))
+        # WO-PY-REL-1/TD-09: poison-index relay receiving end.
+        _poison_ch = _PoisonStatsChannel(workers)
+        _poison_keep = [_poison_ch.open()] or []
+        with _ExportedPoisonFd(_poison_keep[0]):
+            pids.extend(_core_fork(
+                lib, workers=workers, memfd=memfd, size=size,
+                out_fds=out_fds, signal_w=signal_w, fallow_w=None,
+                engine_fds=engine_fds, payload=payload, sink=None,
+                mode="python", on_error=on_error,
+                src_fd=src_fd, must_close=must_close,
+                signal_r_to_close=signal_r, spec=_spec,
+                extra_keep_fds=_poison_keep))
         # Parent drops its write copy: EOF on signal_r then means every
         # worker has exited (or abandoned teardown closed it).
         try:
@@ -5522,7 +5680,14 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # the engine: prefer the pre-teardown stash when the live
         # read comes back zero (npois_stashed is always defined in
         # this function — initialized beside statuses above).
-        # W-REL6-5: WARN + raise funnel through the core twin.
+        # WO-PY-REL-1/TD-09: collect indices BEFORE the poison summary,
+        # because report_poison raises under strict_poison and the
+        # post-exception stats must stay inspectable.
+        try:
+            _collect_plain_poison(globals().get("_poison_ch"),
+                                  max(npois, npois_stashed))
+        except Exception:
+            pass
         from ._executor_core import report_poison as _core_poison
         _core_poison(lib, strict_poison=strict_poison,
                      npois=max(npois, npois_stashed))
@@ -5536,6 +5701,12 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             pass
         raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
+        # WO-PY-REL-1/TD-09: close the poison-index stats memfd (see
+        # _execute_ingest_locked for why this is not optional).
+        try:
+            _poison_ch.close()
+        except (NameError, UnboundLocalError, AttributeError):
+            pass
         # Idempotent second layer: teardown already ran inside; these are
         # no-ops when it did (Nones/empties) and save abandon paths where
         # setup itself raised before forking.
@@ -5573,6 +5744,10 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
+    # WO-PY-REL-1/TD-09: holds the poison-index relay channel. Declared at
+    # function scope, not inside the nested forker: in this generator the
+    # fork and the poison summary sit in different scopes.
+    poison_state: dict = {}
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
@@ -5675,11 +5850,17 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             # child by exact preservation of the pre-dedup behavior —
             # EOF keys off write ends, so both shapes are correct).
             from ._executor_core import fork_workers as _core_fork
-            pids.extend(_core_fork(
-                lib, workers=workers, memfd=memfd, size=-1,
-                out_fds=out_fds, signal_w=signal_w, fallow_w=fallow_w,
-                engine_fds=engine_fds, payload=payload, sink=None,
-                mode="python", on_error=on_error, spec=_spec))
+            # WO-PY-REL-1/TD-09: poison-index relay receiving end. The
+            # fork is deferred here, so the channel is created with it.
+            poison_state["ch"] = _PoisonStatsChannel(workers)
+            _pk = [poison_state["ch"].open()] or []
+            with _ExportedPoisonFd(_pk[0]):
+                pids.extend(_core_fork(
+                    lib, workers=workers, memfd=memfd, size=-1,
+                    out_fds=out_fds, signal_w=signal_w, fallow_w=fallow_w,
+                    engine_fds=engine_fds, payload=payload, sink=None,
+                    mode="python", on_error=on_error, spec=_spec,
+                    extra_keep_fds=_pk))
             _drop_parent_copies()
             state["workers"] = True
             state["fork_at"] = _time.monotonic()
@@ -5932,8 +6113,17 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
 
         # W-REL6-5: WARN + raise funnel through the core twin
         # (identical text; _raise_for_poisoned stash preserved).
+        # WO-PY-REL-1/TD-09: collect indices BEFORE the poison summary,
+        # because report_poison raises under strict_poison and the
+        # post-exception stats must stay inspectable.
+        try:
+            _collect_plain_poison(poison_state.get("ch"),
+                                  _read_poison_count(lib))
+        except Exception:
+            pass
         from ._executor_core import report_poison as _core_poison
-        _core_poison(lib, strict_poison=strict_poison)
+        _core_poison(lib, strict_poison=strict_poison,
+                     npois=_read_poison_count(lib))
     except KeyboardInterrupt as _ki:
         # W-REL5-B2: stream taxonomy matches the six blocking
         # executors — abort, then ForkrunInterrupted (still a
@@ -5944,6 +6134,12 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             pass
         raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
+        # WO-PY-REL-1/TD-09: close the poison-index stats memfd (see
+        # _execute_ingest_locked for why this is not optional).
+        try:
+            poison_state["ch"].close()
+        except (KeyError, AttributeError):
+            pass
         _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                          src_fd, must_close,
                          extra_pids=[p for p in (fallow_pid, scan_pid)
@@ -6073,6 +6269,9 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
       into a forked C loop (results memfd read once at end);
       False keeps the parent-side memfd parse.
     """
+    # WO-PY-REL-1/TD-09: poison-index relay channel, created with the
+    # deferred fork (this path forks workers on first data publish).
+    poison_state: dict = {}
     use_drain = bool(c_drain) and collect
     if use_drain:
         _require_drain_symbol()
@@ -6159,12 +6358,17 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     "splice without collect has no output transport")
             # W-DEDUP: single fork dispatch (splice fail-loud / python
             # with fallow acks). Pids return in worker-index order.
-            pids.extend(_core_fork(
-                lib, workers=workers, memfd=memfd, size=-1,
-                out_fds=out_fds if collect else [], signal_w=signal_w
-                if use_drain else None, fallow_w=fallow_w,
-                engine_fds=engine_fds, payload=payload, sink=sink,
-                mode="python", on_error=on_error, spec=_spec))
+            # WO-PY-REL-1/TD-09: poison-index relay receiving end.
+            poison_state["ch"] = _PoisonStatsChannel(workers)
+            _pk = [poison_state["ch"].open()] or []
+            with _ExportedPoisonFd(_pk[0]):
+                pids.extend(_core_fork(
+                    lib, workers=workers, memfd=memfd, size=-1,
+                    out_fds=out_fds if collect else [], signal_w=signal_w
+                    if use_drain else None, fallow_w=fallow_w,
+                    engine_fds=engine_fds, payload=payload, sink=sink,
+                    mode="python", on_error=on_error, spec=_spec,
+                    extra_keep_fds=_pk))
             _drop_fallow_copies()
             workers_forked = True
             fork_at = _time.monotonic()
@@ -6357,8 +6561,17 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 except OSError:
                     pass
 
+        # WO-PY-REL-1/TD-09: collect indices BEFORE the poison summary,
+        # because report_poison raises under strict_poison and the
+        # post-exception stats must stay inspectable.
+        try:
+            _collect_plain_poison(poison_state.get("ch"),
+                                  _read_poison_count(lib))
+        except Exception:
+            pass
         from ._executor_core import report_poison as _core_poison
-        _core_poison(lib, strict_poison=strict_poison)
+        _core_poison(lib, strict_poison=strict_poison,
+                     npois=_read_poison_count(lib))
 
         if not collect:
             return None
@@ -6437,6 +6650,14 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 os.close(src_fd)
             except OSError:
                 pass
+        # WO-PY-REL-1/TD-09: close the poison-index stats memfd. Omitting
+        # this leaks one fd per call, which the fd-hygiene probes in
+        # test_executor_consistency detect: invisible to a caller, but
+        # unbounded across a long-lived process.
+        try:
+            poison_state["ch"].close()
+        except (KeyError, AttributeError):
+            pass
         try:
             lib.fr_py_destroy()
         except Exception:
@@ -6538,13 +6759,18 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
 
         from ._executor_core import fork_workers as _core_fork
         from ._executor_core import report_poison as _core_poison
-        pids = _core_fork(
-            lib, workers=workers, memfd=memfd, size=size,
-            out_fds=out_fds if collect else [], signal_w=signal_w
-            if use_drain else None, fallow_w=None, engine_fds=engine_fds,
-            payload=payload, sink=sink, mode="python", on_error=on_error,
-            plugin_spec=plugin_spec, spawn_argv=spawn_argv,
-            src_fd=src_fd, must_close=must_close, spec=_spec)
+        # WO-PY-REL-1/TD-09: receiving end of the poison-index relay.
+        _poison_ch = _PoisonStatsChannel(workers)
+        _poison_keep = [_poison_ch.open()] or []
+        with _ExportedPoisonFd(_poison_keep[0]):
+            pids = _core_fork(
+                lib, workers=workers, memfd=memfd, size=size,
+                out_fds=out_fds if collect else [], signal_w=signal_w
+                if use_drain else None, fallow_w=None, engine_fds=engine_fds,
+                payload=payload, sink=sink, mode="python", on_error=on_error,
+                plugin_spec=plugin_spec, spawn_argv=spawn_argv,
+                src_fd=src_fd, must_close=must_close, spec=_spec,
+                extra_keep_fds=_poison_keep)
 
         if use_drain:
             # Parent never writes signals and (no respawns here)
@@ -6670,7 +6896,17 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
         # Parent-side poison summary (g_state is MAP_SHARED: the parent
         # observes worker increments without IPC). Read BEFORE destroy.
         # W-DEDUP: single implementation in _executor_core.
-        _core_poison(lib, strict_poison=strict_poison)
+        #
+        # WO-PY-REL-1/TD-09: collect the index list FIRST. report_poison
+        # raises under strict_poison, and the contract is that stats stay
+        # inspectable after that raise -- which they cannot be if the
+        # indices are collected afterwards.
+        try:
+            _npois = lib.fr_py_poisoned_count()
+        except Exception:
+            _npois = 0
+        _collect_plain_poison(_poison_ch, _npois)
+        _core_poison(lib, strict_poison=strict_poison, npois=_npois)
 
         if not collect:
             return None
@@ -6715,6 +6951,10 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 os.close(results_fd)
             except OSError:
                 pass
+        try:
+            _poison_ch.close()
+        except (NameError, UnboundLocalError):
+            pass
         if signal_r is not None:
             try:
                 os.close(signal_r)

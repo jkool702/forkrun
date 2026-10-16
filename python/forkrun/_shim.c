@@ -41,17 +41,27 @@ void fr_py_poison_relay(unsigned int batch_idx);
 #include <sys/uio.h>
 
 void fr_py_poison_relay(uint32_t batch_idx) {
-    /* The relay moved here from forkrun_ring.c, so its fd cache moves
-     * with it. It lived in ring.c only because the function did; once the
-     * definition is here, keeping the cache in ring.c only worked by
-     * accident of _shim.c including that file into the same translation
-     * unit. The wheel build compiles _shim.c on its own and caught the
-     * dangling reference. -2 = not yet looked up. */
-    static __thread int g_poison_fd = -2;
-    if (g_poison_fd == -2) {
-        const char *e = getenv("FRK_POISON_FD");
-        g_poison_fd = (e && e[0]) ? atoi(e) : -1;
-    }
+    /* The fd is RE-READ on every call, deliberately, with no caching.
+     *
+     * It used to be cached in a __thread variable ("g_poison_fd"), which
+     * is wrong now that a Python parent owns the transport: the parent
+     * can call fr_py_claim() itself (python/tests/test_exactly_once.py
+     * drives a batch to its retry limit that way), and the first such call
+     * with $FRK_POISON_FD unset cached -1 FOREVER in that thread. Every
+     * worker forked afterwards inherited the -1 through fork(), so the
+     * relay was permanently dead for the rest of the process -- a correct
+     * poisoned count beside a permanently empty index list, i.e. exactly
+     * the TD-09 symptom, reintroduced by the fix that was meant to close
+     * it. It only showed up in the full suite, never in isolation.
+     *
+     * The cache bought nothing worth having: this function runs at most
+     * once per POISONED batch, which is a terminal event, so a getenv per
+     * call is not on any hot path. The cleanroom launcher still works
+     * unchanged -- it execs a fresh process per run, so it never shared
+     * a cache across runs either.
+     */
+    const char *e = getenv("FRK_POISON_FD");
+    int g_poison_fd = (e && e[0]) ? atoi(e) : -1;
     if (g_poison_fd < 0)
         return;
     const unsigned wid = g_fr_config.ring_wid;
