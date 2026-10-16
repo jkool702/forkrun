@@ -2552,12 +2552,6 @@ class TestDescriptorInheritance(unittest.TestCase):
             os.close(src)
             os.close(res)
             os.unlink(path)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 @unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
 class TestCleanroomStreamStrictPoison(unittest.TestCase):
     """P2 strict_poison for the streaming cleanroom path.
@@ -2776,3 +2770,7 @@ class TestLauncherUnavailableFallsBackObservably(unittest.TestCase):
             "the fallback must preserve the output BYTES exactly; if it "
             "does not, the fallback is a correctness bug, not a "
             "convenience")
+
+
+if __name__ == "__main__":
+    unittest.main()

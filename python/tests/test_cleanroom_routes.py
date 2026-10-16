@@ -363,11 +363,6 @@ class TestUnservedRoutesStayUnserved(_Fixtures):
         self.assertEqual(0, probe.read(),
                          "checkpoint/resume is not cleanroom-served; a "
                          "launcher must never be started for it")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 class TestSelectorControlsRealDispatch(_Fixtures):
     """Phase C: the selector must change what actually RUNS.
 
@@ -456,3 +451,7 @@ class TestSelectorControlsRealDispatch(_Fixtures):
             out = self._map_plugin()
         self.assertEqual(0, probe.read())
         self.assertTrue(out)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

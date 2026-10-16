@@ -169,11 +169,6 @@ class TestHookIsInertByDefault(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
             Rm._C07_DROP[0] = None
             Rm._C07_DROP_SEEN[0] = 0
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 class TestAccountingSwitchIsCoupled(unittest.TestCase):
     """Round 20 §6: one switch, both halves, or neither.
 
@@ -236,3 +231,7 @@ class TestAccountingSwitchIsCoupled(unittest.TestCase):
                           order="index")
         self.assertEqual(len(out), Rm.committed_frames()["total"],
                          "an enabled run must measure and correspond")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

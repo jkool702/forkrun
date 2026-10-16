@@ -60,16 +60,20 @@ PLUGIN_SRC = os.path.join(_ROOT, "python", "tests", "plugins",
 FUNC = "count_lines_v1"
 
 
-def reference_bytes(n_records):
-    """Exact expected output size for the in-repo plugin.
+def reference_output(n_records):
+    """Exact expected JOINED output for the in-repo plugin.
 
-    count_lines_v1 is the SIZE-PRESERVING pass-through: it emits exactly
-    one byte per input record, so a byte count IS a record count. That is
-    the property the cleanroom suite's assertions rely on, and this guard
-    depends on it -- writing the wrong expected size here would have made
-    the exactness guard reject correct output (as it did on first run).
+    count_lines_v1 is the size-preserving pass-through: it emits exactly
+    one 'x' byte per input record, so the joined output is known
+    independently of the engine. That is what makes this a check rather
+    than a tautology, and it is strictly stronger than the length check it
+    replaces, which would accept any same-length output.
+
+    The RECORD count is deliberately NOT part of this: batching differs
+    between the two paths (measured 13 vs 15 records for 50 input lines),
+    so only the joined bytes are stable.
     """
-    return n_records
+    return b"x" * n_records
 
 
 def build_plugin(tmp):
@@ -91,11 +95,22 @@ def write_corpus(path, n_records):
 
 
 def run_once(spec, path, workers):
+    """Return (elapsed, joined_output).
+
+    The joined BYTES are returned, not a length. A length check detects
+    truncation but is blind to wrong content of the same length -- and for
+    this fixture a same-length wrong answer is the plausible failure, since
+    the plugin emits a fixed-width record per input line, so a permuted or
+    partially transformed batch still sums to the same total.
+
+    Timing stops before the comparison, which happens in paired(), so the
+    guard costs nothing that is measured.
+    """
     t0 = time.perf_counter()
     out = forkrun.map(spec, path, workers=workers, nodes=1, mode="plugin",
                       output="bytes")
     dt = time.perf_counter() - t0
-    return dt, sum(len(bytes(x)) for x in out)
+    return dt, b"".join(bytes(x) for x in out)
 
 
 def paired(spec, path, workers, expect, repeat, warmup):
@@ -105,15 +120,20 @@ def paired(spec, path, workers, expect, repeat, warmup):
         for mode in order:
             os.environ["FORKRUN_CLEANROOM"] = "0" if mode == "in-process" \
                 else "1"
-            dt, n = run_once(spec, path, workers)
+            dt, joined = run_once(spec, path, workers)
             if i < warmup:
                 continue
             samples[mode].append(dt)
-            if n != expect:
+            if joined != expect:
+                # Report WHERE, not merely that it differs: a length-only
+                # complaint gives no clue whether the output was short,
+                # long, or simply wrong.
                 raise SystemExit(
-                    "EXACTNESS FAIL [%s]: got %d bytes, expected %d -- "
+                    "EXACTNESS FAIL [%s]: got %d bytes, expected %d; "
+                    "first difference at offset %d (got %r...) -- "
                     "refusing to report a number for wrong output"
-                    % (mode, n, expect))
+                    % (mode, len(joined), len(expect),
+                       _first_diff(joined, expect), joined[:12]))
     return samples
 
 
@@ -127,13 +147,20 @@ def fmt(samples):
             % (med, mean, lo, len(samples)))
 
 
+def _first_diff(got, want):
+    for i, (a, b) in enumerate(zip(got, want)):
+        if a != b:
+            return i
+    return min(len(got), len(want))
+
+
 def regime(name, spec, path, workers, records, repeat, warmup, ballast_mb):
     keep = None
     if ballast_mb:
         keep = bytearray(ballast_mb * 1024 * 1024)
     print("\n=== %s ===" % name)
     print("  ballast in parent: %d MB" % ballast_mb)
-    expect = reference_bytes(records)
+    expect = reference_output(records)
     s = paired(spec, path, workers, expect, repeat, warmup)
     print("  in-process : %s" % fmt(s["in-process"]))
     print("  cleanroom  : %s" % fmt(s["cleanroom"]))

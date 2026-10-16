@@ -196,11 +196,6 @@ class TestBaselineIsCapturedBeforeAnyFork(unittest.TestCase):
         baseline, current = 40, 56
         self.assertEqual(16, current - baseline,
                          "the inner run committed 16, not 56")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 class _CaptureFd2:
     """Capture file descriptor 2, not sys.stderr.
 
@@ -410,3 +405,7 @@ class TestKnownLimitations(unittest.TestCase):
                              "would make every later run refuse silently")
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

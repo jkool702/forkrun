@@ -434,16 +434,6 @@ def _require_plugin_loop_symbol():
             "python-substrate')")
 
 
-def _cleanroom_enabled():
-    """See the definition below, after the Phase C selector.
-
-    Kept as a forward declaration so any name resolved
-    before the selector is defined still binds; the body
-    below is the single implementation.
-    """
-
-
-
 def _cleanroom_route_for(entry, raw_mode):
     """The route identifier a public call would select, or None.
 
@@ -549,78 +539,36 @@ def _cleanroom_selected_routes():
 def _cleanroom_enabled():
     """Is the exec-based cleanroom launcher requested at all?
 
-    BETA. Opt-IN via FORKRUN_CLEANROOM; the default is deliberately OFF.
+    The WHOLE-ENVIRONMENT gate. Whether a given call may use it depends
+    additionally on _cleanroom_route_enabled(), so this being true does
+    NOT enable every envelope -- that separation is the point of the
+    per-route selector.
 
-    This is the WHOLE-ENVIRONMENT gate. Whether a given call may use it
-    additionally depends on _cleanroom_route_enabled below, so enabling
-    the environment does not enable every envelope.
+    Current semantics (WO-CR-ROI-2, see
+    dev/supervisor/CLEANROOM_DEFAULT_ON_DECISION.md for the evidence):
 
-    ---- performance evidence (historical; provenance sound, currency
-    unverified -- see dev/supervisor/CLEANROOM_ROUTE_INVENTORY.md) ----
-    Produced by python/benchmarks/bench_cleanroom.py: paired interleaved
-    A/B, warmup discarded, medians with means, and an exactness guard
-    that refuses to report a number for wrong output. UMA, 28 workers,
-    i9-7940X 14c/28t.
+        unset                map(plugin) only  [default]
+        0/no/off/false/""    nothing
+        1/yes/on/true/all    every SERVED route [legacy]
+        map-plugin[,...]     the named subset
+        unknown              ValueError
 
-PARENT-RSS SCALING, re-measured after these fixes in both THP
-    regimes (bench_cleanroom.py, paired interleaved, medians, 28
-    workers, UMA, exact record counts asserted; i9-7940X 14c/28t):
+    Two properties that are easy to get wrong:
 
-        parent RSS   startup THP=never   startup THP=always
-        30 MB        16.24 -> 6.34 (2.56x)   17.37 -> 11.05 (1.57x)
-        554 MB      118.88 -> 15.28 (7.78x)  200.58 -> 27.00 (7.43x)
-        2127 MB     454.68 -> 42.35 (10.74x) 734.83 -> 71.67 (10.25x)
+    * An OFF value is the supported way to restore pre-Phase-D
+      behaviour, since the default is now on for map(plugin). It is
+      checked before route parsing, so the selector cannot shadow it.
+    * "all" means all SERVED routes. stream(spawn) has no dispatch, so
+      it is neither selectable nor enabled by any value.
 
-        parent RSS   e2e THP=never       e2e THP=always
-        30 MB        294.5 -> 203.8 (1.45x)   264.0 -> 168.9 (1.56x)
-        554 MB       330.6 -> 212.9 (1.55x)   349.9 -> 189.4 (1.85x)
-        2127 MB      665.6 -> 248.3 (2.68x)   863.3 -> 228.3 (3.78x)
-
-    THP cuts both ways and the two effects are separable. Absolute
-    startup is WORSE under shmem=always at every RSS (6.3 -> 11.1 ms at
-    the floor): allocating and zeroing a 2 MB huge page lands inside a
-    short run's critical path, and the in-process path overlaps that
-    charge with ~17 ms of other startup work -- which is why the 30 MB
-    ratio compresses from 2.56x to 1.57x while the 2 GB ratio barely
-    moves. Throughput is BETTER under THP everywhere, and the ratio
-    widens with parent size, because the in-process arm degrades faster
-    as the address space grows.
-
-    The 30 MB row is not a crossover, it is the FLOOR -- interpreter
-    plus substrate, the smallest parent a real caller has. The cleanroom
-    wins there, so the crossover sits at or below any real Python
-    process. W-CR6 predicted a "negative crossover" for the pre-CRFIX1
-    launcher; it is now reached rather than predicted. Any future claim
-    must still state its parent RSS and THP state, or it is not a claim.
-
-    Remains OFF by default, for reasons that are still true:
-      * It is narrower than the API: mode="plugin" only, UMA only,
-        orchestrator=True only. Everything else declines to the
-        in-process path UNCHANGED, so enabling it would not alter
-        behaviour for any non-plugin caller -- only plugin callers
-        would change, and they would get 1.56x-3.78x on throughput.
-      * Real multi-node hardware has never exercised it; NUMA validation
-        here is fake-NUMA only.
-
-    The intent is that it eventually covers ALL modes and becomes the
-    default: the envelope still needs widening (mode="python", multi-node)
-    and real-NUMA validation, in that order.
-
-    NOT A CORRECTNESS BUG, despite appearances: the BATCH COUNT varies
-    between runs of identical input, which looks alarming and is not.
-    Measured over 15 runs of 200 records, workers=1:
-
-        blob-count distribution   7 x1, 23 x3, 25 x10, 50 x1
-        distinct joined digests   ONE (15/15)
-        joined bytes              12890 == input bytes
-        zero-length blobs         0
-
-    Every run returns every record exactly once; only the grouping into
-    batches differs, because batch boundaries depend on how much has been
-    ingested when the scanner looks. This is pre-existing and shared with
-    the in-process path. It was mistaken here for record loss by counting
-    BLOBS as records, so do not repeat that: compare JOINED BYTES, which
-    is what test_matches_in_process_content does and why it is stable.
+    The measured performance history (parent-RSS scaling in both THP
+    regimes, and the batch-count-variance note explaining why blob counts
+    are not record counts) lives in
+    dev/supervisor/CLEANROOM_ROUTE_INVENTORY.md and
+    dev/supervisor/CLEANROOM_DEFAULT_ON_DECISION.md. It is deliberately
+    NOT duplicated here: this docstring sat next to the gate for a long
+    time asserting "OFF by default" after the default moved, which is
+    exactly the failure mode comments are supposed to prevent.
     """
     enabled, _routes, _explicit = _cleanroom_selected_routes()
     return enabled
@@ -654,11 +602,14 @@ def _cleanroom_route_enabled(entry, raw_mode):
 def _cleanroom_explicit():
     """Did the user actually ask for the cleanroom?
 
-    Distinguishes "requested" from "not set". With the default OFF
-    this is simply "did the user ask", and it drives the one warning
-    worth emitting: an explicit request that the envelope cannot honour
-    is declined LOUDLY, so nobody believes they got the cleanroom when
-    they did not.
+    Distinguishes "requested" from "not set". Both decline-warning sites
+    are gated on this, and the default is now ON for map(plugin), so the
+    distinction carries more weight than it did: UNSET-ON is not the same
+    as ASKED-ON. A caller who never set the variable should not be warned
+    that their call quietly used the in-process path -- they did not ask
+    for anything. A caller who did set it, and whose call the envelope
+    declines, must be warned, or they will believe they got a cleanroom
+    they did not get.
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:

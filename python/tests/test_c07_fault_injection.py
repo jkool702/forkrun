@@ -284,11 +284,6 @@ class TestLossRemainsDetectable(_Engine):
         self.assertEqual([(idx, DISP_DATA, b"")], self.committed(),
                          "a NO_RESULT is filtered by the parent framer and "
                          "must not count as a collected frame")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 class TestPendingDoesNotSurviveAFreshGeneration(_Engine):
     """A real defect this work item surfaced, pinned so it cannot return.
 
@@ -518,3 +513,7 @@ class TestRealProcessDeath(_Engine):
             "REGRESSION GUARD: the committed count must be 1 after a real "
             "worker death and retry -- not 0 (the commit never flushed) "
             "and not 2 (the dead worker's pending leaked)")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -309,11 +309,6 @@ class TestOracleContractMatchesObservation(_Fixtures):
         self.assertEqual([], bad,
                          "the transcribed dispatch contract disagrees with "
                          "observation: %r" % bad)
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 class TestStructuralIndependence(unittest.TestCase):
     """The oracle and the prober must not share a source of truth.
 
@@ -495,3 +490,7 @@ class TestRemainingRouteFacts(_Fixtures):
             forkrun_run(lambda b: b, self.src, return_stats=True)
         with self.assertRaises(TypeError):
             list(forkrun_stream(lambda b: b, self.src, return_stats=True))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

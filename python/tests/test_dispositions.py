@@ -318,12 +318,6 @@ class TestDuplicationIsGone(unittest.TestCase):
         self.assertEqual([], offenders,
                          "these redeclare the record layout instead of "
                          "importing forkrun._worker._HDR: %s" % offenders)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTerminalControlDispositions(unittest.TestCase):
     """SKIPPED and POISONED (P5, DECISION-02 section 5.1).
 
@@ -434,3 +428,7 @@ def _loop_body(shim, name):
             if depth == 0:
                 return shim[start:i + 1]
     raise AssertionError("unbalanced braces in %s" % name)
+
+
+if __name__ == "__main__":
+    unittest.main()
