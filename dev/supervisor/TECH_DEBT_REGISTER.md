@@ -43,6 +43,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN** (found by WO-PY-REL-1) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
 | TD-13 | streaming parent retains ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN** (found by WO-PY-REL-1) |
+| TD-14 | `map(spawn)` returns memoryview, `stream(spawn)` returns bytes, under `FORKRUN_CLEANROOM=1` | medium | **verified — OPEN, PRE-EXISTING** (found by WO-PY-REL-1 validation) |
 
 ---
 
@@ -733,3 +734,41 @@ investigated; a half-output figure is consistent with a bounded window
 that happens to be about half the corpus here, and with a mid-drain
 sampling artifact. Distinguishing those needs a separate look at what the
 parent holds between batches, which this work order does not cover.
+
+---
+
+### TD-14 — spawn output element type differs between map() and stream() (medium) — OPEN
+
+**Found during WO-PY-REL-1's validation step 10.8, when the full suite was
+run with `FORKRUN_CLEANROOM=1`. PRE-EXISTING — verified by rebuilding the
+substrate from each source revision and running the same test, so it is
+not an artefact of an untracked build artifact.**
+
+```
+FORKRUN_CLEANROOM=1, mode="spawn", order="index", 1000 lines:
+  stream("cat", ...) -> [b'line 0\nline 1\n...']     (bytes)
+  map("cat",   ...) -> [<memory at 0x...>, ...]        (memoryview)
+  streamed == mapped           -> False
+  b"".join(streamed) == b"".join(bytes(x) for x in mapped) -> True
+```
+
+The BYTES are identical; only the element type differs, so
+`assertEqual(streamed, mapped)` in
+`python/tests/test_spawn.py::test_spawn_ordered` fails. The joined bytes
+are equal, which is why the repo's usual "compare joined bytes" rule is
+the right instinct and this test does not follow it.
+
+Cause: `map(spawn)` under the cleanroom gate takes the launcher route,
+which delivers views; `stream(spawn)` has no cleanroom dispatch and stays
+in-process, which delivers bytes. Not investigated further — this WO
+explicitly excludes cleanroom expansion.
+
+**Does not establish:** whether the cleanroom should return bytes, or
+views, or whether this is a launcher/parent asymmetry. Only that the two
+public entry points disagree on element type for the same payload.
+
+**Note for whoever fixes it:** the obvious fix is to change the test to
+compare joined bytes. That is CORRECT and is what the rest of this
+codebase does, but on its own it hides a real public inconsistency rather
+than fixing it — the type difference would remain for any caller that
+compares element-wise.
