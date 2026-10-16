@@ -143,3 +143,51 @@ Not a refactor. Two cheap things first:
 
 Both are investigation, not change, and both are cheap relative to a
 consolidation that turns out to be wrong.
+
+---
+
+## Addendum — Phase D of the parity work order
+
+The "Suggested next step" above asked two questions. Both are now
+answered, and the second produced a defect rather than a refactor.
+
+### 1. Characterising the fork_workers call sites — DONE
+
+`_executor_core.fork_workers()` is already the single worker-fork
+dispatch, and the twelve call sites are differentiated by an explicit
+`ExecutorSpec` lattice (`topology`, `ingest`, `supervision`, `shape`)
+plus per-path flags, not by ad-hoc branching. Three worker kinds exist
+(python, c-plugin loop, spawn loop), each with its own fd keep-set.
+
+The six executor pairs are characterised in
+`dev/supervisor/BASH_PY_PARITY_AUDIT.md` §7. **None was consolidated**:
+each pair differs in supervision model, failure detection, recovery or
+teardown contract, which is the property DECISION-03 and the work order
+both protect.
+
+One concrete finding from that characterisation, and it is the kind that
+only shows up when you look at all three keep-sets together: the
+poison-index stats descriptor has to be threaded into **four** separate
+scrub keep-sets. A fix applied to one of them passes every test written
+against the other. The three per-loop mutations that prove this are in
+`python/tests/test_poison_accounting.py`.
+
+### 2. Does poison accounting already diverge? — YES. TD-09b.
+
+**This is a defect, and it was found by running the measurement this
+document asked for rather than by refactoring.**
+
+`orchestrator=False` with a streaming source reports `poisoned=0` while
+reporting the correct `poisoned_batches` list — two incompatible accounts
+of one run. Since `total = completed + poisoned`, the headline number is
+wrong on that path only.
+
+Verified identical at `a65aa4ca`, i.e. pre-existing and not introduced by
+the TD-09 index fix. Recorded as **TD-09b** in `TECH_DEBT_REGISTER.md`.
+
+**Consequence for consolidation:** the answer to "is poison reporting
+common?" is *partly*. The scalar funnel (`report_poison`) and the index
+transport are shared; what differs is where each path writes the result
+into `_LAST_STATS`. That is four call sites, and the defect is one of
+them forgetting — which argues for routing the result through the shared
+funnel rather than for collapsing the executors.
