@@ -1,9 +1,17 @@
 # forkrun Streaming Guide
 
 `stream()` is `map()` with the collection removed: results
-yield live, while workers are still running, with bounded
-memory. Everything else — batching, modes, recovery,
-ordering contract — is identical.
+yield live, while workers are still running. Everything
+else — batching, modes, recovery, ordering contract — is
+identical.
+
+On memory: what is established is **live delivery and
+backpressure** (a slow consumer stops the pipeline instead
+of letting a queue grow) and **lower measured parent RSS
+than retaining every blob**, for the workload measured
+below. What is **not** established is output-size
+independence — measured peak RSS growth there is about
+half the output bytes, not a constant. See TD-13.
 
 ## Basic shape
 
@@ -29,7 +37,7 @@ for blob in forkrun.stream(process, "input.txt", workers=8):
   (`0` silences), else the dynamic default of 2x the largest
   batch x 32 in-flight depth allowance.
 
-## Backpressure (how memory stays flat)
+## Backpressure (why no unbounded queue forms)
 
 The workers signal one 16-byte index per record down a 1MB
 pipe. A slow consumer lets the pipe fill; the next signal
@@ -97,10 +105,17 @@ ordered, multi-death, SIGKILL, and NUMA topologies.
 | | `stream()` | `map()` |
 |---|---|---|
 | First result | immediately | at the end |
-| Parent memory | flat | output-sized |
+| Parent memory | not output-sized independent (TD-13); lower than retaining every blob, and no queue grows | output-sized |
 | Consumer | incremental | whole list |
 | Ordering | both orders | both orders |
 | Recovery | identical | identical |
 
 Use `stream()` when output is large or the consumer is
 incremental; `map()` when you want the whole answer.
+
+Note the two are not interchangeable element-wise: `map()`
+defaults to `output="view"` (zero-copy memoryviews) while
+`stream()` always yields `bytes` regardless of `output`
+(`docs/API.md`), and batch boundaries can differ between
+two runs of the same input. Compare joined bytes, not
+lists of records.

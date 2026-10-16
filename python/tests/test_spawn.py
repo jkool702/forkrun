@@ -173,18 +173,53 @@ class TestSpawnMode(unittest.TestCase):
             os.unlink(path)
 
     def test_spawn_ordered(self):
+        """Ordered spawn output, compared the way the contract allows.
+
+        CORRECTED (WO-PY-REL-1): this used to assert
+        `assertEqual(streamed, mapped)` element-wise, which fails under
+        `FORKRUN_CLEANROOM=1` for two documented reasons, neither of them
+        a defect:
+
+        1. `map()` defaults to `output="view"` and hands back zero-copy
+           memoryviews; `stream()` always yields `bytes` regardless of
+           `output` (docs/API.md). The element TYPES are meant to differ.
+        2. Batch boundaries are not guaranteed identical between two runs
+           of the same input -- this repo records that explicitly
+           (blob-count variance is valid and shared with the in-process
+           path; that is why the working rule everywhere else is to
+           compare JOINED bytes).
+
+        Measured before changing anything: under `FORKRUN_CLEANROOM=1`
+        the element-wise comparison fails while the joined bytes of both
+        are identical AND equal the input file, byte for byte. So the
+        output was correct and the expectation was wrong.
+
+        Reclassified in the debt register as TD-14: an invalid test
+        expectation, not a verified public-API inconsistency.
+        """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
             path = fh.name
         try:
             write_lines(path, 1000)
             streamed = list(forkrun.stream("cat", path, mode="spawn",
-                                           workers=2, order="index", nodes=1))
+                                           workers=2, order="index",
+                                           nodes=1))
             mapped = forkrun.map("cat", path, mode="spawn", workers=2,
                                  order="index", nodes=1)
-            self.assertEqual(streamed, mapped)
+            # Independent reference: the input itself, since `cat` is a
+            # pass-through. Comparing both paths to something neither of
+            # them produced is what makes this a check rather than a
+            # tautology.
             with open(path, "rb") as fh:
-                self.assertEqual(b"".join(streamed), fh.read())
+                expected = fh.read()
+            streamed_bytes = b"".join(bytes(x) for x in streamed)
+            mapped_bytes = b"".join(bytes(x) for x in mapped)
+            self.assertEqual(streamed_bytes, mapped_bytes,
+                             "stream() and map() must deliver the same "
+                             "bytes for the same ordered spawn workload")
+            self.assertEqual(streamed_bytes, expected)
+            self.assertEqual(mapped_bytes, expected)
             assert_no_zombies(self)
         finally:
             os.unlink(path)

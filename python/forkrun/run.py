@@ -1708,24 +1708,26 @@ class _PoisonStatsChannel:
         self.fd = None
 
     def open(self):
-        """Reset (or create) the shared stats memfd. Returns the fd.
+        """Create this run's stats memfd, pre-sized and headed.
 
-        ONE memfd for the whole process, reused across runs, and the fd
-        NUMBER is deliberately stable.
+        ONE memfd PER RUN, created here and closed in close(). An earlier
+        iteration of this code reused a single process-wide memfd so the
+        fd NUMBER stayed stable, because fr_py_poison_relay() used to
+        cache the fd it read from $FRK_POISON_FD in a __thread variable
+        and never re-read it; a fresh number per run would have left
+        workers holding a stale one.
 
-        That stability is not a tidiness choice. fr_py_poison_relay()
-        caches the fd it read from $FRK_POISON_FD in a __thread variable
-        (_shim.c, g_poison_fd) and never re-reads it. A forked child
-        inherits the parent's cached copy. So creating a NEW memfd per run
-        leaves workers holding a stale fd number from an earlier run --
-        which writes indices into the wrong object, or into a recycled
-        fd. The symptom is a correct poisoned count with an empty index
-        list, i.e. exactly the bug TD-09 is about, reintroduced by the
-        fix itself. One fd, one cached number, always correct.
+        That cache is GONE (see the comment on fr_py_poison_relay in
+        _shim.c -- it was the cause of TD-09 resurfacing under the full
+        suite), so the constraint no longer exists and the simpler
+        per-run memfd is both correct and self-healing: a descriptor
+        closed or recycled by anything else cannot invalidate it, because
+        it lives for exactly one call.
 
-        Per-run reset is by ftruncate to 0 and back: a memfd zero-fills
-        the grown region, so every slot count returns to 0 without a
-        separate clearing pass.
+        Pre-sizing matters: the slot convention relies on each worker's
+        region existing so its count word is readable. The header's
+        poisoned field is a placeholder -- the real count is known only
+        after the join, and seal() writes it.
         """
         import struct as _struct
         fd = os.memfd_create("fr_poison_stats")

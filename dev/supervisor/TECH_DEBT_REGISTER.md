@@ -43,7 +43,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN** (found by WO-PY-REL-1) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
 | TD-13 | streaming parent retains ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN** (found by WO-PY-REL-1) |
-| TD-14 | `map(spawn)` returns memoryview, `stream(spawn)` returns bytes, under `FORKRUN_CLEANROOM=1` | medium | **verified — OPEN, PRE-EXISTING** (found by WO-PY-REL-1 validation) |
+| TD-14 | `test_spawn_ordered` compared map/stream element-wise | low | **RECLASSIFIED — invalid test expectation, not a product defect** (WO-PY-REL-1 follow-up) |
 
 ---
 
@@ -671,10 +671,16 @@ truncated.
 The reactor path is width-safe: it formats indices as decimal strings over
 the trap-ACK pipe, which Python parses at full width.
 
-Reachability is bounded and stated rather than assumed: `batch_idx` is a
-monotonic counter from 0, so a truncating index needs ≥ 2^32 poisoned
-batches in a single run. No test constructs that (it is not practical), so
-this is a reasoned bound, **not a measured one**.
+Reachability, stated precisely — an earlier version of this entry got
+the quantity wrong. `batch_idx` comes from `read_idx`, which is
+incremented by `__atomic_fetch_add(..., 1, ...)` for **every batch
+claimed** (`forkrun_ring.c:6222`), poisoned or not. So the trigger is not
+"2^32 poisoned batches" but "a POISONED batch whose index is ≥ 2^32" —
+i.e. roughly 2^32 batches processed in total, of which only that one
+needs to be poisoned. The earlier phrasing overstated the requirement by
+counting only poisoned batches, which understates the workload and
+mislabels the mechanism. Still a very large run; no test constructs it,
+so this is a reasoned bound, **not a measured one**.
 
 Fixing it is not a local edit: the slot geometry `FR_POISON_SLOT_U32`, the
 launcher's pre-size in `forkrun_cleanroom.c`, the v2 header's stride field,
@@ -683,8 +689,8 @@ rebuilding and re-shipping the `_forkrun_cleanroom` binary. That is a
 release-level change, not a stats patch, and belongs in its own work
 order.
 
-**Does not establish:** that any real workload reaches 2^32 poisoned
-batches; no such run was attempted.
+**Does not establish:** that any real workload processes ~2^32 batches in
+a single run; no such run was attempted.
 
 ---
 
@@ -729,46 +735,78 @@ is actually true and actually regressible — streaming retains materially
 less than collect-all — instead of an output-independence claim that no
 measurement supported.
 
-**Does not establish:** the cause of the 0.50 ratio. It was not
-investigated; a half-output figure is consistent with a bounded window
-that happens to be about half the corpus here, and with a mid-drain
-sampling artifact. Distinguishing those needs a separate look at what the
-parent holds between batches, which this work order does not cover.
+**Does not establish:** the MECHANISM behind the 0.50 ratio. The probe
+measures peak observed RSS growth, which cannot by itself separate
+
+  * live retained output objects still held by the parent,
+  * drain/reassembly buffering, and
+  * pages the allocator has not returned to the OS after objects are freed
+
+— three very different situations that all look like "RSS went up", and
+only the first is a correctness-shaped problem. A half-output figure is
+equally consistent with a bounded window that happens to be about half
+this corpus, with genuine accumulation, and with a sampling artifact at
+the moment of peak drain.
+
+**What the next investigation must do** (per external review, and agreed):
+
+1. reproduce the scaling at MULTIPLE output sizes and fit the curve,
+   rather than quoting a single ratio;
+2. separate the observed RSS curve from any claim about live retained
+   payload bytes — e.g. by also reporting what the consumer itself holds,
+   so parent RSS can be decomposed rather than asserted about;
+3. only then decide whether a narrow correction is possible without
+   redesigning the frozen C engine.
+
+If the mechanism cannot be established safely, leave this OPEN and report
+the evidence. **Do not tune the test back to the old 60 MB bound** — the
+value of this finding is precisely that the test finally measures
+something, and a bound chosen to make it pass destroys that.
 
 ---
 
-### TD-14 — spawn output element type differs between map() and stream() (medium) — OPEN
+### TD-14 — `test_spawn_ordered` compared two paths element-wise (low) — RECLASSIFIED
 
-**Found during WO-PY-REL-1's validation step 10.8, when the full suite was
-run with `FORKRUN_CLEANROOM=1`. PRE-EXISTING — verified by rebuilding the
-substrate from each source revision and running the same test, so it is
-not an artefact of an untracked build artifact.**
+**First reported as a verified public-API inconsistency. That was wrong,
+and external review caught it. Correcting the record.**
+
+Original claim: under `FORKRUN_CLEANROOM=1`, `map(spawn)` returns
+memoryviews while `stream(spawn)` returns bytes, therefore the public API
+is inconsistent.
+
+It is not. `python/docs/API.md` documents this, in the `output` row:
+
+> `"view"` (zero-copy views) or `"bytes"`; `stream()` always yields
+> `bytes` regardless
+
+So `map()` defaulting to views while `stream()` always yields bytes is the
+**documented, intended** contract, not a divergence. There is a second,
+independent reason the element-wise expectation was never sound: batch
+boundaries are not guaranteed identical between two runs of the same
+input — this repo records that blob-count variance is valid and shared
+with the in-process path, which is why the working rule elsewhere is to
+compare JOINED bytes.
+
+Measured before the test was changed, under `FORKRUN_CLEANROOM=1`:
 
 ```
-FORKRUN_CLEANROOM=1, mode="spawn", order="index", 1000 lines:
-  stream("cat", ...) -> [b'line 0\nline 1\n...']     (bytes)
-  map("cat",   ...) -> [<memory at 0x...>, ...]        (memoryview)
-  streamed == mapped           -> False
-  b"".join(streamed) == b"".join(bytes(x) for x in mapped) -> True
+element-wise list equality   -> False
+joined bytes stream == map   -> True
+joined bytes == input file   -> True (both paths)
 ```
 
-The BYTES are identical; only the element type differs, so
-`assertEqual(streamed, mapped)` in
-`python/tests/test_spawn.py::test_spawn_ordered` fails. The joined bytes
-are equal, which is why the repo's usual "compare joined bytes" rule is
-the right instinct and this test does not follow it.
+The output was correct in every configuration; only the assertion was
+wrong. `test_spawn.py::test_spawn_ordered` now compares joined bytes and
+checks both paths against the input file as an independent reference, and
+passes under `FORKRUN_CLEANROOM` unset, `off` and `1`.
 
-Cause: `map(spawn)` under the cleanroom gate takes the launcher route,
-which delivers views; `stream(spawn)` has no cleanroom dispatch and stays
-in-process, which delivers bytes. Not investigated further — this WO
-explicitly excludes cleanroom expansion.
+**Kept as a low-priority entry** rather than deleted, because the
+underlying question is worth one line of memory: if two public entry
+points are meant to be drop-in replacements, a caller who writes
+`assertEqual(stream(a), b(a))` gets a confusing failure. Nothing in the
+documented contract promises element-level interchangeability, so this is
+a documentation/ergonomics consideration, not a defect. If that is ever
+wanted it is a deliberate API decision, not a bug fix.
 
-**Does not establish:** whether the cleanroom should return bytes, or
-views, or whether this is a launcher/parent asymmetry. Only that the two
-public entry points disagree on element type for the same payload.
-
-**Note for whoever fixes it:** the obvious fix is to change the test to
-compare joined bytes. That is CORRECT and is what the rest of this
-codebase does, but on its own it hides a real public inconsistency rather
-than fixing it — the type difference would remain for any caller that
-compares element-wise.
+**Does not establish:** anything about spawn correctness beyond the byte
+equality this test now checks.

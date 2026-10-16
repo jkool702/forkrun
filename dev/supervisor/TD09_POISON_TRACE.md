@@ -139,10 +139,13 @@ shipped `_forkrun_cleanroom` binary and its CI build — a blast radius well
 beyond this task, and one that would silently alter a shipped artifact's
 stats layout.
 
-Reachability is bounded and stated rather than assumed: `batch_idx` is a
-monotonic counter from 0, so a truncating index requires ≥ 2^32 distinct
-poisoned batches **in one run**. Recorded as a residual finding in the debt
-register rather than silently inherited.
+Reachability, stated precisely: `batch_idx` comes from `read_idx`, which
+increments for **every batch claimed** (`forkrun_ring.c:6222`), so the
+trigger is a POISONED batch whose index is ≥ 2^32 — roughly 2^32 batches
+processed in total, of which only that one need be poisoned. (A first
+draft of this note said "≥ 2^32 distinct poisoned batches", which
+mislabelled the quantity; corrected here and in the register.) Recorded
+as a residual finding rather than silently inherited.
 
 The plain path is now **consistent with the cleanroom path**, which is the
 contract C3 asks for, and it does not introduce a new truncation.
