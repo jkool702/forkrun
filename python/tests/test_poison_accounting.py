@@ -60,6 +60,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import warnings
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
@@ -68,6 +69,10 @@ sys.path.insert(0, os.path.join(_ROOT, "python"))
 
 import forkrun                                            # noqa: E402
 from forkrun.run import last_run_stats                    # noqa: E402
+# `forkrun.run` the ATTRIBUTE is the frontend function (re-exported in
+# forkrun/__init__.py), which shadows the submodule of the same name, so
+# reach the module object through sys.modules for patching.
+_run_mod = sys.modules["forkrun.run"]                    # noqa: E402
 
 # -I takes the DIRECTORY; passing the header path makes gcc warn
 # "not a directory" and then fail to find the include.
@@ -410,26 +415,48 @@ class TestTruncation(_PoisonBase):
 # C2b -- streaming plain path
 # --------------------------------------------------------------------------
 class TestStreamingPlainPath(_PoisonBase):
-    """stream() on the plain path.
+    """stream() on the plain path, for BOTH generator executors.
 
     Added after a mutation proved the coverage was missing: altering the
     poisoned COUNT on this path turned no test red, because the streaming
     executors were wired but never asserted. Wiring without asserting is
     how an unverified change looks like a verified one.
 
-    SCOPE NOTE -- a separate, PRE-EXISTING defect is deliberately not
-    asserted here: on the plain STREAMING path the scalar `poisoned`
-    stays 0 while the reactor reports the true count (verified identical
-    at a65aa4ca, before this change). The INDEX list, which is what TD-09
-    is about, now agrees. The scalar gap is recorded in the tech debt
-    register as a distinct open item; asserting it here would bless it.
+    TD-09b (fixed here) was two independent defects, one per generator
+    executor, both invisible to the assertions that existed at the time:
+
+    * `_execute_ingest_stream` (streaming=True) read the engine poison
+      count in the poison summary, which runs AFTER the branch `finally`
+      calls `_teardown_stream()` -> `fr_py_destroy()`. Once `g_state` is
+      NULL, `fr_py_poisoned_count()` returns 0, so `report_poison` never
+      reached `_raise_for_poisoned()` and the scalar stayed 0 while the
+      relay-backed index list was correct. Whether the engine was still
+      alive at summary time was a RACE: identical runs were observed
+      reporting 0 and 2.
+    * `_execute_streaming` (streaming=False) looked its relay channel up
+      with `globals().get("_poison_ch")`, but `_poison_ch` is a LOCAL of
+      the forking scope, so the lookup always yielded None. Index
+      collection silently no-oped and published an EMPTY
+      `poisoned_batches` next to a correct non-zero scalar -- the exact
+      inverse skew, from the same missing assertions.
+
+    Both executors are asserted on both fields, and both must agree with
+    the reactor.
     """
 
-    def _stream(self, src, orchestrator):
+    def _stream(self, src, orchestrator, streaming=True):
+        # stream() does NOT reset the stats stash (only map() does, by
+        # design -- a stream leaves the previous completed/total), so a
+        # previous run's poisoned_batches can survive into this one.
+        # Poison a DISTINCT index first: that makes any value observed
+        # after the stream attributable to the stream itself, and it is
+        # what makes a silently-skipped index collection observable
+        # rather than masked by a stale identical list.
+        self.run_map(self.corpus(8, boom={7}))
         gen = forkrun.stream(
             self.spec, src, mode="plugin", workers=1, lines=1,
-            streaming=True, on_error="retry", output="bytes", order="none",
-            orchestrator=orchestrator)
+            streaming=streaming, on_error="retry", output="bytes",
+            order="none", orchestrator=orchestrator)
         try:
             out = list(gen)
         finally:
@@ -439,6 +466,16 @@ class TestStreamingPlainPath(_PoisonBase):
                 pass
         return out, last_run_stats()
 
+    def _assert_both_fields(self, stats, where):
+        """Scalar and index list must describe the SAME poison events."""
+        self.assertEqual(stats["poisoned"], 2,
+                         "%s: poisoned scalar must be the true count" % where)
+        self.assertEqual(stats["poisoned_batches"], [2, 5],
+                         "%s: index list must match the scalar" % where)
+        self.assertFalse(stats["poisoned_batches_truncated"],
+                         "%s: a 2-batch run must never report truncation"
+                         % where)
+
     def test_streaming_plain_path_reports_the_exact_indices(self):
         src = self.corpus(8, boom={2, 5})
         out, stats = self._stream(src, orchestrator=False)
@@ -446,6 +483,32 @@ class TestStreamingPlainPath(_PoisonBase):
                          "the streaming plain path must relay indices too")
         self.assertFalse(stats["poisoned_batches_truncated"])
         self.assertEqual(len(out), 6, "the non-poisoned records still flow")
+
+    def test_materialized_ingest_plain_path_reports_both_fields(self):
+        """streaming=False exercises _execute_streaming, the second
+        generator executor. TD-09b's index half landed here."""
+        src = self.corpus(8, boom={2, 5})
+        _, stats = self._stream(src, orchestrator=False, streaming=False)
+        self._assert_both_fields(stats, "_execute_streaming")
+
+    def test_streaming_ingest_plain_path_reports_both_fields(self):
+        """streaming=True exercises _execute_ingest_stream, where
+        TD-09b's scalar half landed."""
+        src = self.corpus(8, boom={2, 5})
+        _, stats = self._stream(src, orchestrator=False, streaming=True)
+        self._assert_both_fields(stats, "_execute_ingest_stream")
+
+    def test_no_empty_index_list_next_to_a_nonzero_scalar(self):
+        """The exact shape of the _execute_streaming bug: scalar right,
+        list silently empty. Asserted directly so a regression cannot be
+        reintroduced by making the relay quietly no-op."""
+        src = self.corpus(8, boom={2, 5})
+        for streaming in (False, True):
+            _, stats = self._stream(src, orchestrator=False,
+                                   streaming=streaming)
+            self.assertTrue(stats["poisoned_batches"],
+                            "streaming=%s: a nonzero poisoned count must "
+                            "never publish an empty index list" % streaming)
 
     def test_streaming_index_lists_agree_across_paths(self):
         src = self.corpus(8, boom={2, 5})
@@ -455,6 +518,57 @@ class TestStreamingPlainPath(_PoisonBase):
                          reac["poisoned_batches"],
                          "TD-09 applies to stream() exactly as it does to "
                          "map(); the lists must agree")
+
+    def test_both_generators_agree_with_reactor_on_both_fields(self):
+        """Cross-check every generator executor against the reactor, on
+        the scalar as well as the list."""
+        src = self.corpus(8, boom={2, 5})
+        _, reac = self._stream(src, orchestrator=True)
+        for streaming in (False, True):
+            _, plain = self._stream(src, orchestrator=False,
+                                    streaming=streaming)
+            self.assertEqual(plain["poisoned"], reac["poisoned"],
+                             "streaming=%s: scalar must match the reactor"
+                             % streaming)
+            self.assertEqual(plain["poisoned_batches"],
+                             reac["poisoned_batches"],
+                             "streaming=%s: indices must match the reactor"
+                             % streaming)
+
+    def test_scalar_survives_a_post_teardown_engine_read(self):
+        """The ordering guarantee, asserted directly.
+
+        On the GENERATOR paths the poison summary runs after teardown, so
+        a live `fr_py_poisoned_count()` there can legitimately return 0
+        (its `if (!g_state) return 0` guard once fr_py_destroy() has run).
+        The scalar must therefore come from the count stashed BEFORE
+        teardown, and must not collapse to whatever the post-teardown
+        read happens to say.
+
+        Simulated here rather than raced for: whether the engine is still
+        alive at summary time is timing-dependent, so the unpremeditated
+        version of this test passed or failed by luck -- which is exactly
+        why the stash exists. Forcing the post-teardown read to 0 makes
+        the assertion deterministic in both directions.
+        """
+        src = self.corpus(8, boom={2, 5})
+        def dead_engine_read(lib):
+            # Mimic fr_py_poisoned_count() after fr_py_destroy(): g_state
+            # is NULL, so the accessor returns 0.
+            return 0
+
+        for streaming in (False, True):
+            with unittest.mock.patch.object(_run_mod, "_read_poison_count",
+                                            dead_engine_read):
+                _, stats = self._stream(src, orchestrator=False,
+                                        streaming=streaming)
+            self.assertEqual(
+                stats["poisoned"], 2,
+                "streaming=%s: a post-teardown engine read must not "
+                "overwrite the pre-teardown stashed count" % streaming)
+            self.assertEqual(stats["poisoned_batches"], [2, 5],
+                             "streaming=%s: indices still come from the "
+                             "relay and must be unaffected" % streaming)
 
 
 # --------------------------------------------------------------------------

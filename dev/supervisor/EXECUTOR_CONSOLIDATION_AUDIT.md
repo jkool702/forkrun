@@ -172,22 +172,35 @@ scrub keep-sets. A fix applied to one of them passes every test written
 against the other. The three per-loop mutations that prove this are in
 `python/tests/test_poison_accounting.py`.
 
-### 2. Does poison accounting already diverge? — YES. TD-09b.
+### 2. Does poison accounting already diverge? — YES. TD-09b. (NOW FIXED)
 
-**This is a defect, and it was found by running the measurement this
+**This was a defect, and it was found by running the measurement this
 document asked for rather than by refactoring.**
 
-`orchestrator=False` with a streaming source reports `poisoned=0` while
+`orchestrator=False` with a streaming source reported `poisoned=0` while
 reporting the correct `poisoned_batches` list — two incompatible accounts
-of one run. Since `total = completed + poisoned`, the headline number is
+of one run. Since `total = completed + poisoned`, the headline number was
 wrong on that path only.
 
 Verified identical at `a65aa4ca`, i.e. pre-existing and not introduced by
-the TD-09 index fix. Recorded as **TD-09b** in `TECH_DEBT_REGISTER.md`.
+the TD-09 index fix. Recorded as **TD-09b** in `TECH_DEBT_REGISTER.md`;
+**TD-09b is now FIXED**.
+
+**Correction to the reasoning below, now that it has been fixed.** The
+divergence was *not* "one of four call sites forgetting to write
+`_LAST_STATS`". The actual cause was an **ordering** defect, not a
+funnel-routing one: on the generator executors the poison summary runs
+*after* the inner `finally` calls `_teardown_stream()` →
+`fr_py_destroy()`, so the count was read from a NULL `g_state` and came
+back 0. The same change also uncovered an inverse defect (correct scalar,
+**empty** index list) where a `globals()` lookup missed a function-scope
+local. Routing the result through the shared funnel would **not** have
+fixed either, because both paths already called `report_poison`.
 
 **Consequence for consolidation:** the answer to "is poison reporting
-common?" is *partly*. The scalar funnel (`report_poison`) and the index
-transport are shared; what differs is where each path writes the result
-into `_LAST_STATS`. That is four call sites, and the defect is one of
-them forgetting — which argues for routing the result through the shared
-funnel rather than for collapsing the executors.
+common?" is *yes*, and the divergence was in **lifecycle ordering**, not
+in where each path writes the result. Every route already funnels through
+`report_poison`; what differed was whether the engine was still alive at
+the moment of the call. This weakens the "consolidate the call sites"
+argument and strengthens the case for leaving the executors separate while
+sharing the ordering discipline.

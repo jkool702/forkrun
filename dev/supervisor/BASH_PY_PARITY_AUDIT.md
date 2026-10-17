@@ -31,7 +31,7 @@ which is the pattern this audit follows.
 | # | Area | Finding | Class |
 |---|---|---|---|
 | F1 | Poison/recovery | Escrow deposit and batch recovery are **parent-side** in both frontends | **Intentional divergence — actually convergence** |
-| F2 | Poison stats | Plain *streaming* path reports `poisoned=0` beside a correct index list | **CONFIRMED DEFECT — OPEN (TD-09b)** |
+| F2 | Poison stats | Plain *streaming* path reported `poisoned=0` beside a correct index list | **CONFIRMED DEFECT — FIXED (TD-09b)** |
 | F3 | Descriptor limit | Claimed the launcher lacked the hard `ulimit -n` | **FALSE POSITIVE — withdrawn**; the C launcher has always raised it |
 | F4 | Docs | `DOCS_ALL.md` drifted ~130 lines with a heading-only check passing | **Documentation drift — FIXED** |
 | F5 | Docs | Root README version, 4-of-5 mode lists, stale v0.5 module docstring, trap-ACK comments, NUMA test claims | **Documentation drift — FIXED** |
@@ -95,17 +95,29 @@ branches on it; Python routes it through `_api._resolve_retry_limit()` and
 never hardcodes a literal at a worker-init site. Both observe
 `RING_POISONED` from the engine and relay a notice.
 
-### F2 — confirmed defect: the plain streaming scalar
+### F2 — confirmed defect: the plain streaming scalar — FIXED (TD-09b)
 
-`orchestrator=False` + streaming reports `poisoned=0` while reporting
+`orchestrator=False` + streaming reported `poisoned=0` while reporting
 `poisoned_batches=[2, 5]` — two incompatible stories about one run.
 Verified identical at `a65aa4ca`, i.e. pre-existing and **not** caused by
-the index-list fix that closed TD-09. Recorded as **TD-09b**.
+the index-list fix that closed TD-09. Recorded as **TD-09b**, now fixed.
 
 This is the answer to `EXECUTOR_CONSOLIDATION_AUDIT.md`'s own suggested
 next step ("check whether poison accounting already diverges in observable
-behaviour"). It does, and it is a defect rather than a consolidation
+behaviour"). It did, and it was a defect rather than a consolidation
 blocker.
+
+**Resolved, and larger than the single symptom recorded here.** Root
+cause: on the GENERATOR executors (`_execute_streaming`,
+`_execute_ingest_stream`) the poison summary sits *outside* the inner
+`try/finally`, so it runs after `_teardown_stream()` →
+`fr_py_destroy()` has NULLed `g_state` — and `fr_py_poisoned_count()`
+returns 0 in that state. The index list survived only because it is read
+from the relay memfd, not the engine. The second executor additionally
+read its channel via `globals()` and so published an **empty** index list
+beside a correct scalar. Engine liveness at summary time was a race:
+identical runs reported both 0 and 2. Both executors now stash the count
+before teardown; see TD-09b for the full account.
 
 ### F11 — intentional: exit-code census
 
@@ -293,7 +305,7 @@ duplication.**
 
 | ID | Defect | Why not fixed here |
 |---|---|---|
-| **F2 / TD-09b** | `orchestrator=False` + streaming reports `poisoned=0` while reporting a correct, non-empty `poisoned_batches`. Since `total = completed + poisoned`, the headline number is wrong on that path only. **A known correctness defect — deferred, not dismissed, and not intended behaviour.** | Verified pre-existing at `a65aa4ca`, i.e. not introduced by the TD-09 index fix. It is a **correctness defect, not a consolidation blocker**, and fixing it means routing that path's result through the shared poison funnel — a change in four call sites that belongs in its own work order. It is **deferred, not dismissed**. |
+| **F2 / TD-09b** | `orchestrator=False` + streaming reported `poisoned=0` while reporting a correct, non-empty `poisoned_batches`. Since `total = completed + poisoned`, the headline number was wrong on that path only. | **FIXED.** Pre-existing at `a65aa4ca`, i.e. not introduced by the TD-09 index fix. Root cause was summary-after-teardown on the generator executors, not call-site funnel divergence; the count is now stashed before `fr_py_destroy()` NULLs `g_state`. A second, inverse defect (empty index list, correct scalar) was found in the same change and is covered by the same tests. Mutation-proven. |
 | **F7** | `CLEANROOM_DESIGN.md` states the launcher "must not inherit the parent's environment wholesale"; both Python launch sites call `os.execv()`, which inherits it. | Answering it needs a deliberate compatibility decision (Bash reconstructs; clearing outright would break `mode="spawn"` payloads that need `PATH` and UDF modules that need `PYTHONPATH`). Requires comparing four behaviours first — see the decision report §7.4. |
 
 ### Intentional divergence retained

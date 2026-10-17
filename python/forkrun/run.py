@@ -5391,6 +5391,12 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
+    # TD-09b: declared at function scope because the poison summary below
+    # sits outside the scope that binds the real channel. Leaving it
+    # unbound there made globals().get() fall back to None, which
+    # silently skipped index collection and published an EMPTY
+    # poisoned_batches next to a non-zero poisoned count.
+    _poison_ch = None
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
@@ -5690,7 +5696,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # because report_poison raises under strict_poison and the
         # post-exception stats must stay inspectable.
         try:
-            _collect_plain_poison(globals().get("_poison_ch"),
+            _collect_plain_poison(_poison_ch,
                                   max(npois, npois_stashed))
         except Exception:
             pass
@@ -5754,6 +5760,14 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
     # function scope, not inside the nested forker: in this generator the
     # fork and the poison summary sit in different scopes.
     poison_state: dict = {}
+    # TD-09b: the engine poison count, captured while g_state is still
+    # live. The poison summary below runs AFTER the branch finallys call
+    # _teardown_stream -> fr_py_destroy(), and fr_py_poisoned_count()
+    # returns 0 once g_state is NULL, so the count must be stashed before
+    # teardown. Whether the engine happened to still be alive at summary
+    # time was a race (identical runs reported poisoned=0 and poisoned=2).
+    # Same idiom and rationale as _execute_streaming's npois_stashed.
+    npois_stashed = 0
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
@@ -6042,6 +6056,10 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                 drain_status = drain["status"]
                 drain_alive = drain["alive"]
                 exhausted = True
+                # Workers are gone: the engine poison count is final --
+                # stash it before the finally below destroys the engine
+                # (TD-09b).
+                npois_stashed = _poisoned_now(lib)
             finally:
                 _teardown_stream(lib, pids, signal_r, out_fds,
                                  out_hold, memfd, src_fd, must_close,
@@ -6061,6 +6079,9 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                                            statuses, order=order,
                                            stats=stats, pump=_pump):
                     yield blob
+                # Workers are gone: stash the engine poison count before
+                # the finally below destroys the engine (TD-09b).
+                npois_stashed = _poisoned_now(lib)
             finally:
                 _teardown_stream(lib, pids, signal_r, out_fds, out_hold,
                                  memfd, src_fd, must_close,
@@ -6124,12 +6145,14 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         # post-exception stats must stay inspectable.
         try:
             _collect_plain_poison(poison_state.get("ch"),
-                                  _read_poison_count(lib))
+                                  max(_read_poison_count(lib),
+                                      npois_stashed))
         except Exception:
             pass
         from ._executor_core import report_poison as _core_poison
         _core_poison(lib, strict_poison=strict_poison,
-                     npois=_read_poison_count(lib))
+                     npois=max(_read_poison_count(lib),
+                               npois_stashed))
     except KeyboardInterrupt as _ki:
         # W-REL5-B2: stream taxonomy matches the six blocking
         # executors — abort, then ForkrunInterrupted (still a

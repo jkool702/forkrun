@@ -40,7 +40,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-09 | `poisoned_batches` empty on `orchestrator=False` | high | **verified — FIXED** (WO-PY-REL-1); residual index-width item recorded as TD-12 and TD-09b |
 | TD-10 | Class payload silently produced empty results | high | **verified — FIXED** |
 | TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
-| TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN; DEFERRED pending its own work order** (a known CORRECTNESS defect; found by WO-PY-REL-1, re-confirmed in the parity audit) |
+| TD-09b | plain **streaming** path left scalar `poisoned` at 0 | high | **verified — FIXED** (two per-executor defects, both mutation-proven; found by WO-PY-REL-1, re-confirmed in the parity audit) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
 | TD-13 | streaming parent retains ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN** (found by WO-PY-REL-1) |
 | TD-14 | `test_spawn_ordered` compared map/stream element-wise | low | **RECLASSIFIED — invalid test expectation, not a product defect** (WO-PY-REL-1 follow-up) |
@@ -318,10 +318,12 @@ reactor coverage when the gap closed, rather than relax it.
 The three keep-set mutations are why the loops are asserted separately: a
 fix threaded into one loop passes every other test here.
 
-**Residual, deliberately not asserted:** on the plain **streaming** path
-the scalar `poisoned` stays 0 while the reactor reports the true count.
-Verified identical at `a65aa4ca`, before this change — a separate defect
-from the index list, which now agrees. Recorded as **TD-09b**.
+**Superseded note (TD-09 era):** this entry originally declined to assert
+the plain-streaming scalar, which stays 0 while the reactor reports the true
+count, deferring it to **TD-09b**. **TD-09b is now FIXED and that scalar is
+asserted** on both generator executors. The deferral is history — see
+TD-09b for why the defect was two bugs, not one, and why a scalar-only
+assertion would have missed the empty-index-list half.
 
 **Does not establish:** anything about poison modes beyond
 retry/strict_poison and the skip policy checked in the matrix; the
@@ -625,47 +627,68 @@ see TD-13.
 
 ---
 
-### TD-09b — plain streaming path leaves scalar `poisoned` at 0 (high) — OPEN
+### TD-09b — plain streaming path left scalar `poisoned` at 0 (high) — FIXED
 
 **Found by WO-PY-REL-1 while testing the index fix, not by looking for
 it.** Verified identical at `a65aa4ca`, i.e. **pre-existing and unrelated to
 TD-09**.
 
-**Status: OPEN — DEFERRED pending its own work order. This is a known
-CORRECTNESS defect, not intended product behaviour.** ("By design" was
-removed from the status label: it read as though the mismatch were a
-designed property, when it is the opposite — a decision to postpone a
-fix.) The parity audit's disposition list
-carries this as a confirmed OPEN correctness defect, not as a
-consolidation blocker: `total = completed + poisoned`, so the headline
-number is wrong on this path only. Fixing it means routing this path's
-result through the shared poison funnel (`_executor_core.report_poison`)
-rather than leaving it to a per-call-site write — four call sites, which
-belongs in its own work order. `dev/supervisor/BASH_PY_PARITY_AUDIT.md`
-§8, finding F2.
+**Status: FIXED. This was a known CORRECTNESS defect, not intended product
+behaviour.** It closed as two independent defects, one per generator
+executor, because that is what it turned out to be — the original entry
+described a single symptom, and one scalar-only test would have let either
+half be "fixed" while the other survived.
 
-Reproduction, 8 records with `BOOM` at 2 and 5, `mode="plugin"`,
-`lines=1`, `FORKRUN_RETRY_LIMIT=1`, `FORKRUN_CLEANROOM=0`:
+Reproduction before the fix, 8 records with `BOOM` at 2 and 5,
+`mode="plugin"`, `lines=1`, `FORKRUN_RETRY_LIMIT=1`, `FORKRUN_CLEANROOM=0`:
 
 ```
-stream() orchestrator=False   out=6  poisoned=0   poisoned_batches=[2, 5]
-stream() orchestrator=True    out=6  poisoned=2   poisoned_batches=[2, 5]
+stream() streaming=True  orchestrator=False   out=6  poisoned=0  poisoned_batches=[2, 5]
+stream() streaming=False orchestrator=False   out=6  poisoned=2  poisoned_batches=[]
+stream() orchestrator=True (both)             out=6  poisoned=2  poisoned_batches=[2, 5]
 ```
 
-The **index list now agrees** (WO-PY-REL-1 fixed that). The **scalar does
-not**: the plain streaming executors never write `_LAST_STATS["poisoned"]`,
-so `total = completed + poisoned` is computed as `6 + 0` while 2 batches
-were in fact dropped. That is the same class of headline-wrongness the
-scalar was added to prevent, so it is rated high.
+Note the two plain rows skew in **opposite directions** — one publishes a
+correct scalar with an empty list, the other an empty scalar with a correct
+list.
 
-Not fixed here: it is a different defect from TD-09, in different
-executor code, and the work order scopes WO-PY-REL-1 to the index list.
-Worth noting the asymmetry is silent — `completed` is right and the
-missing batches are visible only as the gap between `total` and
-`completed + len(poisoned_batches)`.
+**Root cause.** Both plain executors that are **generators**
+(`_execute_streaming`, `_execute_ingest_stream`) drain results inside an
+inner `try/finally`, and the **poison summary sits outside it**. That
+`finally` runs when the consumer exhausts or abandons the generator and
+calls `_teardown_stream()` → `fr_py_destroy()`, which NULLs `g_state`.
+`fr_py_poisoned_count()` then takes its `if (!g_state) return 0;` guard.
+
+1. `_execute_ingest_stream` read the count live in the summary, i.e.
+   **after** teardown, so `report_poison` received 0, never reached
+   `_raise_for_poisoned()`, and left the scalar unset. The **index list
+   survived** because it is read from the poison relay **memfd**, an object
+   independent of the engine's shared mapping — which is exactly why the
+   two fields could disagree.
+2. `_execute_streaming` already had a pre-teardown stash for the scalar,
+   but looked its relay channel up as `globals().get("_poison_ch")` while
+   `_poison_ch` is a **local** of the forking scope. The lookup always
+   yielded `None`, `_collect_plain_poison(None, ...)` returned early
+   without touching `_LAST_STATS`, and an **empty index list** was
+   published beside a correct scalar. The swallowed `NameError` is why
+   this stayed silent.
+
+**Whether the engine was still alive at summary time was a race.**
+Instrumenting the accessor with the `fr_py_abort_reason()` sentinel
+(`-1` exactly when `g_state` is NULL) showed the engine already destroyed on
+the plain path, and identical runs were observed reporting both
+`poisoned=0` and `poisoned=2`. A caller could rely on neither. **Do not
+re-diagnose this as "usually fine" — the observable value was
+timing-dependent.**
+
+**Fix.** Both executors now capture the count before teardown and the
+summary uses `max(live_read, stashed)`, reusing the `npois_stashed` idiom
+`_execute_streaming` already used; `_execute_streaming` binds its channel
+at function scope. No engine, supervision, or ABI change. Three mutations
+(ingest stash, stream channel, stream stash) each turn the new tests red.
 
 **Does not establish:** whether the reactor path is itself exact for every
-poison policy; only that the two disagree on this scenario.
+poison policy; only that the two now agree.
 
 ---
 
