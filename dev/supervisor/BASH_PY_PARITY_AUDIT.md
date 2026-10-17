@@ -35,7 +35,7 @@ which is the pattern this audit follows.
 | F3 | Descriptor limit | Claimed the launcher lacked the hard `ulimit -n` | **FALSE POSITIVE — withdrawn**; the C launcher has always raised it |
 | F4 | Docs | `DOCS_ALL.md` drifted ~130 lines with a heading-only check passing | **Documentation drift — FIXED** |
 | F5 | Docs | Root README version, 4-of-5 mode lists, stale v0.5 module docstring, trap-ACK comments, NUMA test claims | **Documentation drift — FIXED** |
-| F6 | Cleanroom launch | Design proposes `posix_spawn`; implementation uses `fork()+execv()` | **MEASURED, performance gate MET; production backend NOT adopted; descriptor-equivalence gate OUTSTANDING** |
+| F6 | Cleanroom launch | Design proposes `posix_spawn`; implementation uses `fork()+execv()` | **performance gate MET; production backend NOT adopted; descriptor gate ANSWERED (Stage 2); launch-semantic equivalence OUTSTANDING** |
 | F7 | Cleanroom env | `CLEANROOM_DESIGN.md` says the launcher "must not inherit the parent's environment wholesale"; `os.execv()` inherits it | **OPEN — a stated contract that is not met** |
 | F8 | Cleanroom stream | Unreachable iterable producer with live control flow | **Confirmed defect — FIXED** |
 | F9 | Trap-ACK grace | Presented as the recovery mechanism; armed only on legacy substrates | **Documentation drift — FIXED** |
@@ -227,9 +227,24 @@ sweeps; the `fork()` column varies run to run by up to ~25% at 1 GiB, the
 table, controls, and limits in `CLEANROOM_LAUNCH_DECISION.md` §1.1a.
 
 **Do not read "gate met" as "adopt".** §5's decision rule has two
-conditions. The second — proving a `posix_spawn` descriptor allowlist is
-equivalent to today's inherited set — has not been attempted. That is
-design work, and it is what now gates integration.
+conditions, and the **descriptor condition is now answered** by F6 Stage 2
+(`dev/supervisor/CLEANROOM_FD_CONTRACT.md`): two launch shapes, one
+`DUP2` action for the materialized route and **no** actions for the
+streaming route, neither needing `CLOSEFROM`, so the 3.10 floor is not a
+blocker.
+
+**What still gates integration is launch semantics, not descriptors.** A
+missing launcher exits **127** today (routed into a deliberate warning +
+in-process fallback) but raises synchronously in the parent under
+`posix_spawn`. Disposition is **CONDITIONAL GO** with four bounded
+conditions (C1–C4); production remains `fork()+execv()`.
+
+**Equivalence is not isolation.** An unrelated *inheritable* parent
+descriptor survives into the launcher under BOTH mechanisms — asserted by
+`test_equivalence_is_not_isolation`. Tightening the set is expressible
+(with a `POSIX_SPAWN_CLOSE` action) but is a behaviour change, not an
+equivalence-preserving optimisation, and it carries an enumeration race a
+host-side design cannot avoid.
 
 **Correction to this audit's own earlier entry.** A previous revision said
 the gate "does not exist in the tree" and an intermediate one recorded the

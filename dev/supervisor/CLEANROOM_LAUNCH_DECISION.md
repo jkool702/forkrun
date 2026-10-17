@@ -100,9 +100,19 @@ same substrate, same plugin, same worker count.
 
 **Ballast is RESIDENT, not virtual.** Each level is allocated with
 `mmap(MAP_ANONYMOUS|MAP_NORESERVE)` and then written **one byte per page**
-so every page is actually faulted in, and the resulting RSS is read back
-from `/proc/self/statm` and printed. A virtual-only allocation would have
+so every page is actually faulted in. A virtual-only allocation would have
 produced a flat, meaningless curve.
+
+**Residency measurement — which counter is authoritative.** The current
+verified sweep reads `/proc/self/smaps_rollup`, the kernel's accurate
+accounting, and prints it as authoritative; `/proc/self/statm` is retained
+only as a cross-check, with the disagreement between the two printed per
+level. The kernel documents `statm`'s resident figures as *potentially
+inaccurate* and recommends `smaps`/`smaps_rollup` where an accurate value
+is required, and `statm` was measured running 124–188 KiB above
+`smaps_rollup` at 256/1024/2048 MiB. The **earlier** sweep used `statm`
+as its primary reading; it is preserved below for comparison and its
+residency figures are therefore the weaker instrument.
 
 Command (one per level; `--ballast-mb` is the only thing that changes):
 
@@ -698,6 +708,30 @@ equivalence is. Scope for that work order:
    before it is tightened.
 3. **Only then** measure end-to-end workload time with the launcher on and
    off, so the delta is published rather than inferred.
+
+**F6 Stage 2 result (descriptor contract) — see
+`dev/supervisor/CLEANROOM_FD_CONTRACT.md`.** The descriptor half of the
+gate is now **answered**: there are only TWO launch shapes (five routes
+reach one of them), the materialized shape's whole `posix_spawn` action
+set is a single `DUP2(errfd, 2)`, and the streaming shape needs **no
+actions at all**. Neither needs `POSIX_SPAWN_CLOSEFROM`, so the Python
+3.10 floor is **not** a blocker for equivalence, and the equivalence action
+set references only descriptors the route itself created, so it carries no
+descriptor-enumeration race.
+
+What remains open is **launch semantics**, not descriptors: a missing or
+unlaunchable launcher exits **127** under `fork()+execv()` (which the
+existing code deliberately turns into a warning + in-process fallback) but
+raises `FileNotFoundError`/`PermissionError` **synchronously in the
+parent** under `posix_spawn`. That divergence must be designed for before
+integration. Signals are equivalent provided no `setsigdef`/`setsigmask`
+is passed — passing `setsigdef` measurably resets an inherited `SIG_IGN`.
+
+**Disposition: CONDITIONAL GO** — four bounded conditions (C1–C4) are
+listed in the contract document. C4 is the honest limit of that work:
+these tests prove the launch MECHANISM is equivalent under a faithful
+replication, not that the real launcher is, because observing the latter
+would have required a production change.
 
 **No production backend switch is authorised by anything in this document.**
 

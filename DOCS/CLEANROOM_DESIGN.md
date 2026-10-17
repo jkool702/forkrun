@@ -188,9 +188,32 @@ Explicitly passed:
 - `output` representation, `orchestrator`
 - fd limit to raise to
 
-Explicitly **not** inherited: environment, signal dispositions beyond
-what the engine sets itself, and every unrelated descriptor (the parent
-`scrub_fds()`s them, and the launcher re-scrubs after exec).
+> **STATUS — this list is the ORIGINAL DESIGN SKETCH, not the shipped
+> descriptor contract.** Measured inventory (F6 Stage 2,
+> `dev/supervisor/CLEANROOM_FD_CONTRACT.md`) shows the shipped routes
+> pass **more** than the two descriptors named above:
+>
+> | route shape | actually passed |
+> |---|---|
+> | materialized (`map`, mode plugin/udf/spawn) | `src_fd`, `res_fd`, `stats_fd`, optional `trace_fd`, **plus fd 2** — an error memfd duplicated over stderr by `os.dup2(errfd, 2)` |
+> | streaming (`stream(..., streaming=True)`) | `src_fd`, result **pipe** write end, `stats_fd`; stderr inherited directly, **no error memfd** |
+>
+> `stats_fd` is also the poison channel: the launcher sets
+> `FRK_POISON_FD` to that same descriptor number
+> (`forkrun_cleanroom.c:2014-2018`), so it carries two logical uses and
+> is **one** descriptor, not two.
+>
+> The "every unrelated descriptor" claim below is likewise **aspirational
+> for the launcher process**: the launcher does not scrub its own inherited
+> set. Scrubbing (`scrub_apply`) happens in the launcher's *children*
+> (`enter_child`), so isolation is enforced at the worker boundary, not at
+> the launcher boundary. Whether to tighten the descriptor set is an open
+> policy question, recorded in `CLEANROOM_FD_CONTRACT.md` §5.
+
+Explicitly **not** inherited (aspirational — see STATUS above):
+environment, signal dispositions beyond what the engine sets itself, and
+every unrelated descriptor (the parent `scrub_fds()`s them, and the
+launcher re-scrubs after exec).
 
 ## Rollback and rollout
 

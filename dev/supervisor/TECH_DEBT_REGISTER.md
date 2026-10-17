@@ -35,7 +35,7 @@ thinking they are untracked:
 
 | id | one-line status |
 |---|---|
-| F6 | `posix_spawn` **performance gate MET** (−88% to −96% at 1–5 GiB parent RSS); **production backend NOT adopted**; **descriptor-equivalence gate OUTSTANDING** — that is the blocker |
+| F6 | `posix_spawn` **performance gate MET** (−88% to −96% at 1–5 GiB parent RSS); **production backend NOT adopted**; **descriptor gate ANSWERED** (F6 Stage 2: 2 launch shapes, 1 `DUP2` action / 0 actions, no `CLOSEFROM` needed so the 3.10 floor is not a blocker); **launch-semantic equivalence OUTSTANDING** (startup-failure divergence); disposition **CONDITIONAL GO** (C1–C4) |
 | F7 | Wholesale environment inheritance **MEASURED** (all 112 parent vars cross; a malformed `PYTHONHASHSEED` kills the cleanroom child at interpreter init);**desired contract UNDECIDED** — needs a compatibility decision, not more evidence. |
 
 | id | entry | pri | status |
