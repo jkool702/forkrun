@@ -234,10 +234,21 @@ streaming route, neither needing `CLOSEFROM`, so the 3.10 floor is not a
 blocker.
 
 **What still gates integration is launch semantics, not descriptors.** A
-missing launcher exits **127** today (routed into a deliberate warning +
-in-process fallback) but raises synchronously in the parent under
-`posix_spawn`. Disposition is **CONDITIONAL GO** with four bounded
-conditions (C1–C4); production remains `fork()+execv()`.
+launcher that cannot be *executed* exits **127** today, and 127 is **not**
+in `_CR_EXIT_PRE_INGEST` — so `_cleanroom_may_fallback()` returns False
+and the caller gets a **`RuntimeError`; it does NOT fall back**. Only
+absence at *preflight* falls back, and that is a different case. Under
+`posix_spawn` the same failure raises synchronously in the parent with no
+wait status to classify. Recommended policy is **Policy A** (map the
+`OSError` onto today's caller-visible result); Policy B (treat it as
+pre-ingest) is defensible but unauthorised. Disposition is **CONDITIONAL
+GO** with five bounded conditions (C1–C5); production remains
+`fork()+execv()`.
+
+Also found: a **pre-existing** defect where, with fd 2 closed before
+allocation, a route descriptor is clobbered by `dup2(errfd, 2)`.
+`posix_spawn` behaves identically, so equivalence holds, but the case is
+neither verified nor fixed (tracked as C5).
 
 **Equivalence is not isolation.** An unrelated *inheritable* parent
 descriptor survives into the launcher under BOTH mechanisms — asserted by

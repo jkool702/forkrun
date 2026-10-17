@@ -304,31 +304,115 @@ without one.
 
 ### 8.1 Startup failures — a real divergence
 
-Measured with the shipped code paths:
+> **CORRECTION (Stage 2B).** An earlier revision of this section stated
+> that a child-side `execv()` failure (exit 127) is "routed into a
+> deliberate warn + in-process fallback". **That was wrong.** It
+> conflated two different cases. The error is corrected below and pinned
+> by `python/tests/test_launch_failure_contract.py`.
+
+**What actually happens today**, traced from source and confirmed by
+observation (a launcher made non-executable passes the existence preflight
+but fails `execv`):
+
+| case | source | caller-visible result |
+|---|---|---|
+| launcher **absent at preflight** | `_cleanroom_launcher_path()` returns `None` (run.py:1425-1432) | `UserWarning` "launcher binary is missing — using the in-process path", `return None` → **falls back** |
+| launcher **exists, `execv` fails in the child** | `os._exit(127)` (run.py:1581) | `UserWarning` "**NOT falling back**", then `RuntimeError` → **does NOT fall back** |
+
+The reason is the classification chain, and **127 is simply not in the
+set**:
+
+```
+_CR_EXIT_PRE_INGEST = {64, 69, 71, 78, 80, 81, 82}   # 127 ABSENT
+_decode_launcher_status()  -> pre_ingest = code in _CR_EXIT_PRE_INGEST
+_cleanroom_may_fallback()  -> bool(pre_ingest) and not forbidden
+```
+
+Measured against the real helpers:
+
+| exit | label | `pre_ingest` | `may_fallback` |
+|---|---|---|---|
+| 64, 69, 71, 78, 80 | pre-ingest refusals | True | **True** |
+| **127** | **unknown exit code 127** | **False** | **False** |
+| 70, 1 | internal / runtime | False | False |
+
+Because `may_fallback` is False and `forbidden` is False (127 is not in
+`_CR_EXIT_NO_FALLBACK` = `{79}`), control reaches the **unconditional**
+`raise RuntimeError` at run.py:1657.
+
+**The two routes also differ from each other** (answering a question the
+Stage 2 report left open):
+
+| route | exit 127 result |
+|---|---|
+| materialized (`map`) | `RuntimeError` — "the input may have been consumed, and the supplied source is a descriptor…" |
+| streaming (`stream`) | `RuntimeError` — "the stream is TRUNCATED and the records already yielded are incomplete" |
+
+Both raise; neither falls back; the rationales differ (input-consumption
+vs stream-truncation), and only the streaming path raises
+`_CleanroomPreIngestDecline` for genuinely pre-ingest exits.
+
+**A pre-existing messaging defect, found while tracing this:** the
+materialized `RuntimeError` states "the supplied source is a descriptor"
+unconditionally, but is reachable for a **path** source too — the
+observed reproduction used a path and produced that message. Recorded
+for a later correction; not fixed here (production is frozen).
+
+**The mechanism difference stands.** Under `posix_spawn` the same failure
+raises `FileNotFoundError`/`PermissionError` **synchronously in the
+parent**, with no child and therefore **no wait status to classify** —
+`_cleanroom_may_fallback()` cannot be consulted at all.
 
 | failure | `fork()+execv()` | `posix_spawn()` |
 |---|---|---|
-| executable missing | child exits **127** | parent raises **`FileNotFoundError`** |
-| exists, not executable | child exits **127** | parent raises **`PermissionError`** |
-| path is a directory | child exits **127** | parent raises **`PermissionError`** |
+| executable missing | child exits **127** → `RuntimeError` | parent raises `FileNotFoundError` |
+| exists, not executable | child exits **127** → `RuntimeError` | parent raises `PermissionError` |
+| path is a directory | child exits **127** → `RuntimeError` | parent raises `PermissionError` |
 
-This is the sharpest difference found, and it is **not** equivalent. Today
-a pre-exec failure becomes a wait status that `_execute_cleanroom`
-inspects, and then routes into a deliberate policy: warn and **fall back
-to the in-process path** (`return None`), or refuse, or raise
-`_CleanroomCompatRefusal`. With `posix_spawn` the failure is synchronous
-and would raise **past** all of that machinery.
+#### Failure-policy decision (Stage 2B)
 
-The codebase is explicit that falling back is the intended behaviour
-("slower and correct beats fast and missing"; the `_exit(127)` sites
-exist precisely so the parent can tell "launcher failed" from "exec
-never happened"). A naive `posix_spawn` swap would turn a designed
-fallback into an uncaught `OSError`.
+Two candidates were considered.
 
-It is **fixable** — wrap `posix_spawn` in `try/except OSError` and feed
-the failure into the same status-handling path — but that is an
-integration-time change, and it must close the already-created
-descriptors on the failure path (`src_fd` is opened before the launch).
+**Policy A — preserve current behaviour.** Map a spawn-time `OSError`
+into whatever the applicable existing failure path produces. For the
+materialized route that means raising the same `RuntimeError` a 127
+produces; for the streaming route, the same truncation `RuntimeError`.
+
+**Policy B — deliberately improve fallback.** Treat a spawn-time
+`OSError` as pre-ingestion and permit fallback.
+
+**Which `OSError`s actually prove no launcher code ran?** A `posix_spawn`
+that returns an error returns it **instead of a pid**: no child exists to
+reap, so the executable was never entered. That holds for every
+`OSError` it can raise — `ENOENT`, `EACCES`, `ENOTDIR`, `EISDIR`,
+`EMFILE`/`ENOMEM`. So Policy B is technically defensible, and the
+existing rule (`pre_ingest=True` → fallback permitted) would then apply
+on its own terms.
+
+**Compatibility consequence of Policy B:** it makes the backend *more
+permissive* than today. The same failure — a launcher that cannot be
+executed — would raise under `fork()+execv()` and succeed via fallback
+under `posix_spawn`. Callers could observe different outcomes for one
+identical condition depending on which backend ran. That is a real
+inconsistency, and it is also arguably a fix: today a launcher that is
+present but unexecutable is treated more harshly than one that merely
+declines with exit 64.
+
+**RECOMMENDATION: Policy A for the integration work order.** Reasons:
+
+1. Bundling a failure-policy change into a performance change is how
+   regressions hide. Policy B's benefit is real but separable.
+2. Policy B must be applied to **both** mechanisms to avoid the
+   inconsistency above — which means changing `_execute_cleanroom`'s
+   existing 127 handling. That is a deliberate behavioural change to
+   shipped failure semantics and deserves its own approval and tests.
+3. Policy A is verifiable without judgement: the existing exit-127 test
+   surface becomes the specification.
+
+**Policy B is recorded as a recommended separate improvement**, with the
+evidence needed (the `OSError`-implies-pre-ingest argument above) and the
+consistency requirement stated. **It is not authorised here, and nothing
+in this document should be read as describing it as existing behaviour.**
 
 ### 8.2 Signals
 
@@ -357,18 +441,50 @@ the authority and were not modified.
 
 ---
 
+### 8.4 A PRE-EXISTING DEFECT FOUND: a route descriptor can be clobbered on fd 2
+
+**Not introduced by `posix_spawn`, and not fixed here.** Audited per the
+Stage 2B work order and confirmed by observation:
+
+```
+fd 2 closed, then run.py's allocation order (run.py:1458-1473):
+    src_fd = 2   res_fd = 3   stats_fd = 4   errfd = 5
+then os.dup2(errfd, 2)   (run.py:1579)
+    fd 2 -> /memfd:fr_cleanroom_err
+```
+
+The launcher is then told `--src 2` and would read the **error memfd as
+input**. The triggering condition is: **stdin/stdout/stderr fd 2 closed
+in the host process before the route allocates.** Roles affected:
+`src_fd` (silently replaced), and by extension `res_fd`/`stats_fd` if
+they were the first allocation.
+
+This is pre-existing: `posix_spawn`'s `POSIX_SPAWN_DUP2(errfd, 2)` does
+exactly the same thing, so **descriptor equivalence still holds for this
+case** — both mechanisms are wrong in the same way. What the equivalence
+claim must not do is imply the case is *verified*; it is neither verified
+nor fixed.
+
+Pinned by `test_route_descriptor_can_land_on_fd2_and_be_clobbered` (in a
+subprocess, so the runner's own stderr is not corrupted). **C5** tracks
+it.
+
+---
+
 ## 9. Recommendation: CONDITIONAL GO
 
-**Not a GO**, because the descriptor question — the one this work order
-was asked to settle — is answered, but two material items are open:
+**Not a GO.** Two items are open, and the first is a correction of this
+document's own earlier error:
 
-1. **Startup-failure semantics (§8.1) are not equivalent and not yet
-   designed.** A design that routes `OSError` into the existing
-   fallback machinery, with descriptor cleanup on that path, is required
-   before integration.
-2. **Isolation vs equivalence (§5) is an open policy choice, not a
-   technical unknown.** The performance result is a strong argument for
-   the change; the contract change is not implied by it.
+1. **Startup-failure mapping (§8.1) is not designed.** The current
+   contract is now stated correctly — exit 127 raises, it does not fall
+   back — but the mapping from a spawn-time `OSError` onto that contract
+   is unbuilt. **Policy A** is recommended; **Policy B** (treat the
+   `OSError` as pre-ingest and fall back) is a defensible separate
+   improvement that is explicitly **not** authorised here.
+2. **Descriptor equivalence is not claimed for all layouts.** It is
+   claimed for the layouts tested, under the stated preconditions below.
+   In particular the closed-std-fd case (§8.4) is **not** covered.
 
 **Not a NO-GO**, because the hard technical questions have defensible
 answers:
@@ -377,55 +493,79 @@ answers:
   one shape and **zero actions** on the other;
 * neither needs `POSIX_SPAWN_CLOSEFROM`, so the **3.10 floor is not a
   blocker**;
-* signal semantics are equivalent when no `setsigdef` is passed;
+* signal semantics are equivalent provided **no `setsigdef`** is passed;
 * the equivalence action set references only descriptors the route itself
-  created, so it carries **no enumeration race**.
+  created, so it carries **no enumeration race**;
+* the failure contract is now **pinned by tests against the production
+  helpers**, so an integration cannot quietly inherit a wrong assumption
+  — mutating `_CR_EXIT_PRE_INGEST` to include 127 turns six of them red.
 
-**Conditions to close, each with the evidence that closes it:**
+**Conditions to close, each with its closing evidence:**
 
 | # | condition | closing evidence |
 |---|---|---|
-| C1 | `posix_spawn` `OSError` is routed into the existing warn/fallback path, with `src_fd`/`res_fd`/`stats_fd` closed on failure | a test that a missing launcher yields the same `UserWarning` + in-process completion as today |
+| C1 | a spawn-time `OSError` produces the **same caller-visible result** the applicable existing failure path produces today (Policy A) | a test per route: an unexecutable launcher raises the same exception type and message family as exit 127 does |
 | C2 | no `setsigdef`/`setsigmask` is passed | assertion in the integration test |
 | C3 | policy recorded: equivalence now, tightening (if any) later | a decision line in `CLEANROOM_LAUNCH_DECISION.md` §8 |
 | C4 | equivalence re-verified against the **real** launcher, not just the observer | one integration-mode test per shape comparing the launcher's actual inherited set |
-
-**C4 is the honest limit of this work order.** These tests prove the
-*mechanism* is equivalent under a faithful replication. They do not
-observe the real launcher. That required a production change, so it was
-not done.
-
-### Smallest next work order
-
-A single integration order scoped to: `posix_spawn` behind a private,
-explicitly-gated code path in `_execute_cleanroom` and
-`_execute_cleanroom_stream`; the `OSError`→fallback mapping (C1); the
-no-signal-options assertion (C2); and a real-launcher descriptor
-observation test (C4). No engine change, no environment change, no
-descriptor tightening, no route-eligibility change.
-
----
+| C5 | the closed-std-fd precondition is either fixed or documented as a precondition | a named precondition in `CLEANROOM_DESIGN.md`, or a scoped fix in a later order |
 
 ## 10. Evidence and reproduction
 
+Everything below is committed and runnable from the branch.
+
 ```
-# descriptor equivalence + negative controls (14 tests)
+# descriptor equivalence, negative controls, high-fd cases  (16 tests)
 python3 -m unittest python.tests.test_cleanroom_fd_contract -v
 
-# startup-failure and signal semantics (the §8 probes)
-#   executed ad hoc during this work order; NOT yet committed as tests
-#   -- see "Not yet a test" below.
+# launch-failure contract, signal semantics, closed-std-fd audit (13 tests)
+python3 -m unittest python.tests.test_launch_failure_contract -v
 ```
 
-`test_cleanroom_fd_contract.py` mutation-checked three ways, each caught:
+Both files compile their own C fixtures at test time (`_fd_observer.c`, and
+an inline signal-disposition probe) and skip cleanly if no compiler is
+present. Neither is wired into production, and neither reads the
+environment.
+
+**Mutation checks actually run against this evidence:**
 
 | mutation | result |
 |---|---|
-| pipe disambiguation removed | FAIL (streaming case) |
-| `identical` hard-coded `True` | FAIL (missing-dup2 control) |
-| fd ≤ 2 hard-coded to `stdN` | FAIL (2 tests) |
+| `_CR_EXIT_PRE_INGEST` gains 127 (**production**, reverted immediately) | **6 tests FAIL** |
+| pipe disambiguation removed from the role comparison | FAIL |
+| comparison's `identical` hard-coded `True` | FAIL |
+| fd ≤ 2 hard-coded to `stdN` | 2 tests FAIL |
+| closed-fd audit flipped to assert *equality* | FAIL |
 
-**Not yet a test:** the §8 startup-failure and signal probes were run as
-one-off scripts in this session, not committed. They are the two
-conditions (C1, C2) most likely to regress silently, so they should be
-committed before integration is attempted.
+The production mutation is the important one: it is what makes the
+"exit 127 does not fall back" claim testable rather than asserted.
+
+### What is observed vs derived vs untested
+
+**Directly observed** (executed, recorded above):
+
+* post-`exec` descriptor role sets, both mechanisms, both shapes;
+* high-numbered descriptor survival at fd 1500;
+* exit 127 classification and the resulting `RuntimeError` for both routes;
+* `posix_spawn` raising `FileNotFoundError`/`PermissionError`;
+* signal disposition with and without `setsigdef`;
+* the closed-fd clobbering.
+
+**Derived from source, not executed here:**
+
+* that `FRK_POISON_FD` and `stats_fd` are one descriptor (read at
+  `forkrun_cleanroom.c:2014-2018`, confirmed by search, not by tracing a
+  live run);
+* the route→launch-site matrix (confirmed by instrumenting the dispatch,
+  which is observation, but of the dispatcher rather than of the launcher);
+* that `main()` does not scrub its own inherited set (read from
+  `scrub_apply`'s only caller being `enter_child`).
+
+**Not tested, and not claimed:**
+
+* the **real** launcher's inherited set — the observer stands in for it;
+* Python 3.10–3.12 (host is 3.14.7 only);
+* descriptor behaviour with fd 0/1 closed, or fd 2 closed *and* a route
+  descriptor landing there — the latter is audited in §8.4, the former is
+  not covered at all;
+* any posix_spawn **integration** — none exists.

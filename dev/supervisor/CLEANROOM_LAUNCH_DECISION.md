@@ -720,12 +720,34 @@ set references only descriptors the route itself created, so it carries no
 descriptor-enumeration race.
 
 What remains open is **launch semantics**, not descriptors: a missing or
-unlaunchable launcher exits **127** under `fork()+execv()` (which the
-existing code deliberately turns into a warning + in-process fallback) but
-raises `FileNotFoundError`/`PermissionError` **synchronously in the
-parent** under `posix_spawn`. That divergence must be designed for before
-integration. Signals are equivalent provided no `setsigdef`/`setsigmask`
-is passed — passing `setsigdef` measurably resets an inherited `SIG_IGN`.
+unlaunchable launcher exits **127** under `fork()+execv()` but raises
+`FileNotFoundError`/`PermissionError` **synchronously in the parent**
+under `posix_spawn`.
+
+> **Stage 2B correction.** An earlier revision of the paragraph above
+> said exit 127 is "routed into a deliberate warning + in-process
+> fallback". **That was wrong** — 127 is not in `_CR_EXIT_PRE_INGEST`, so
+> `_cleanroom_may_fallback()` returns False and the caller receives a
+> **`RuntimeError`**; it does NOT fall back. The case that does fall back
+> is the launcher being *absent at preflight*, which is different and
+> must not be conflated with it. Confirmed by source trace and by
+> observation, and now pinned by
+> `python/tests/test_launch_failure_contract.py` (mutating
+> `_CR_EXIT_PRE_INGEST` to include 127 turns six tests red). The
+> recommended policy is **Policy A** — map the spawn-time `OSError` onto
+> the caller-visible result 127 produces today. Policy B (treating the
+> `OSError` as pre-ingest and falling back) is defensible but is a
+> deliberate failure-policy change, is **not authorised**, and would make
+> the backend more permissive than the path it replaces.
+
+Signals are equivalent provided no `setsigdef`/`setsigmask` is passed —
+passing `setsigdef` measurably resets an inherited `SIG_IGN`.
+
+**A pre-existing defect was also found** (`CLEANROOM_FD_CONTRACT.md`
+§8.4): with fd 2 closed before allocation, a route descriptor lands on fd
+2 and `dup2(errfd, 2)` destroys it, so the launcher would read the error
+memfd as input. `posix_spawn` does exactly the same, so equivalence holds
+— but the case is neither verified nor fixed.
 
 **Disposition: CONDITIONAL GO** — four bounded conditions (C1–C4) are
 listed in the contract document. C4 is the honest limit of that work:
