@@ -111,23 +111,43 @@ cc -O2 -o /tmp/bench tools/bench_cleanroom_launch.c
           <plugin.so> <func> 4 40 --ballast-mb <LEVEL>
 ```
 
-**Results** (i9-7940X @ 3.10 GHz, 28 threads, 128 GiB RAM,
-Linux 7.1.13-200.fc44.x86_64, glibc 2.43, gcc 16.2.1; workers=4;
-n=40 paired observations per arm per level; **0 failed, 0 timeouts,
-0 guard failures at every level**):
+**Results** — this is the SECOND, verification-tightened run; the first
+sweep's numbers are kept below for comparison because independent
+reproduction matters more here than a single tidy table. i9-7940X @
+3.10 GHz, 28 threads, 128 GiB RAM, Linux 7.1.13-200.fc44.x86_64, glibc
+2.43, gcc 16.2.1; workers=4; n=40 paired observations per arm per level;
+**0 failed, 0 timeouts, 0 guard failures at every level in both runs**.
 
-| parent ballast | RSS verified | fork+exec median | posix_spawn median | delta median | delta |
+| parent ballast | RSS verified (`smaps_rollup`) | fork+exec median | posix_spawn median | delta median | delta |
 |---|---|---|---|---|---|
-| 0 MiB | 1.3 MiB (no ballast) | 2.629 ms | 2.423 ms | **−0.202 ms** | **−7.7%** |
-| 256 MiB | 256.0 / 256.0 MiB (100%) | 9.230 ms | 2.928 ms | **−6.341 ms** | **−68.4%** |
-| 1 GiB | 1024.0 / 1024.0 MiB (100%) | 37.155 ms | 3.993 ms | **−33.178 ms** | **−89.3%** |
-| 2 GiB | 2048.0 / 2048.0 MiB (100%) | 60.659 ms | 3.864 ms | **−56.843 ms** | **−93.6%** |
-| 5 GiB | 5120.0 / 5120.0 MiB (100%) | 119.536 ms | 4.547 ms | **−114.980 ms** | **−96.1%** |
+| 0 MiB | n/a (control) | 2.842 ms | 2.717 ms | −0.117 ms | −4.1% |
+| 256 MiB | 256.0 / 256.0 MiB (100.00%) | 9.567 ms | 3.186 ms | **−6.378 ms** | **−66.7%** |
+| 1 GiB | 1024.0 / 1024.0 MiB (100.00%) | 29.415 ms | 3.495 ms | **−25.972 ms** | **−88.1%** |
+| 2 GiB | 2048.0 / 2048.0 MiB (100.00%) | 49.232 ms | 3.986 ms | **−45.257 ms** | **−91.9%** |
+| 5 GiB | 5120.0 / 5120.0 MiB (100.00%) | 112.016 ms | 4.181 ms | **−107.854 ms** | **−96.3%** |
 
-Spread (p95−min) at 5 GiB was 10.0 ms for `fork()+execv()` and 2.3 ms for
-`posix_spawn`; the separation at every level ≥ 256 MiB is many times the
-spread, so this is not a noise reading. Full per-arm min/median/mean/p95/max
-and the failure/time-out counts are printed by the harness itself.
+First sweep, for comparison (verified with `/proc/self/statm`): 0 MiB
+−7.7%, 256 MiB −68.4%, 1 GiB −89.3%, 2 GiB −93.6%, 5 GiB −96.1%. The
+`fork()+execv()` medians differ between runs by up to ~25% at 1 GiB
+(37.2 → 29.4 ms) — that column is noisy run to run. **The `posix_spawn`
+column is stable (~2.4–4.5 ms in both), and the conclusion is unchanged:
+the separation at every level ≥ 256 MiB is many times the spread.**
+
+Spread (p95−min) at 5 GiB was 5.5 ms for `fork()+execv()` and 2.3 ms for
+`posix_spawn`. Full per-arm min/median/mean/p95/max and the
+failure/timeout counts are printed by the harness itself.
+
+**Residency verification method — corrected.** The first sweep verified the
+ballast with `/proc/self/statm`. The kernel documents statm's resident
+figures as *potentially inaccurate* and recommends `smaps`/`smaps_rollup`
+where an accurate value is required. The harness now reports
+**`/proc/self/smaps_rollup` as authoritative**, with statm kept only as a
+cross-check, and prints the disagreement between them. Measured
+disagreement at 256 MiB–5 GiB is **0 KiB** on the verification run. The
+timing conclusion does not rest on this — the ballast is explicitly
+touched, and the latency separation is far larger than any accounting
+discrepancy — but the "resident" claim now stands on the kernel's accurate
+counter rather than the approximate one.
 
 **Reading.** The `fork()+execv()` launch cost grows roughly linearly with
 parent resident memory — about **23–35 ms per GiB** — while `posix_spawn`
@@ -216,14 +236,14 @@ times is the same one: open the file that decides the question.
 user's Python process (may be 5 GB RSS)" — that is the whole cost being
 avoided.
 
-**This has not been measured.** Per the performance policy in the work
-order, no claim is made here about whether `posix_spawn` would actually
-be faster; §5 specifies the protocol that would establish it. What is
-measurable today is the shape of the cost: `fork()` cost scales with the
-parent's mapped memory, so the penalty is largest exactly in the case the
-design exists to serve, and near zero for the small parents a benchmark
-process usually has — which is why a naive benchmark would report "no
-difference" and conclude wrongly.
+**This HAS now been measured.** §1.1a reports the sweep: `fork()` launch
+cost rises to ~29–112 ms at 1–5 GiB parent RSS against `posix_spawn`'s
+flat ~3–4 ms, i.e. **−88% to −96%**. The predicted shape is confirmed —
+the penalty scales with the parent's mapped memory, is largest exactly in
+the case the design exists to serve, and is near zero for small parents,
+which is why a naive benchmark reports "no difference" and concludes
+wrongly. (That is not hypothetical: this report's own first attempt did
+exactly that, and §1.1a records the correction.)
 
 ---
 
@@ -231,28 +251,51 @@ difference" and conclude wrongly.
 
 ### 3.1 Keep `fork()` + `execv()` (status quo)
 
-**Pros.** No behavioural risk. The child currently runs Python code
-between fork and exec (`os.close(rr)`, `_raise_nofile_to_hard_limit()`),
-which is trivially expressible here and awkward in `posix_spawn`.
+**Pros.** No behavioural risk. The child runs a little Python code
+between fork and exec — verified against current `run.py`, the two launch
+sites do `os.dup2(errfd, 2)` then `os.execv(...)`, and `os.close(rr)`
+then `os.execv(...)`. That is trivially expressible in `posix_spawn` file
+actions (`DUP2`, `CLOSE`) and awkward for anything else.
 Startup-failure reporting is exact: the child `_exit(127)`s, the parent
 reads a real wait status.
+
+**CORRECTED — this passage previously named
+`_raise_nofile_to_hard_limit()` as running in the child. No such helper
+exists anywhere in the tree** (verified by search across `*.py`, `*.c`,
+`*.h`); it appears nowhere but in this report. It was a residue of the
+withdrawn F3 descriptor-limit false positive and survived the revert.
+The real child-side sequence is the two lines quoted above.
 
 **Cons.** Page-table copy proportional to parent RSS — the design's
 stated motivation.
 
 ### 3.2 `os.posix_spawn()`
 
-Python's API (verified on this host) offers
-`POSIX_SPAWN_OPEN`, `POSIX_SPAWN_DUP2`, `POSIX_SPAWN_CLOSE` and
-`POSIX_SPAWN_CLOSEFROM` file actions, plus `close_fds`, `setsigdef` and
-`setsigmask` parameters. Each has to be checked against what this launch
-actually needs.
+Python's API offers `POSIX_SPAWN_OPEN`, `POSIX_SPAWN_DUP2`,
+`POSIX_SPAWN_CLOSE` and `POSIX_SPAWN_CLOSEFROM` file actions, plus
+`close_fds`, `setsigdef` and `setsigmask` parameters. Each has to be
+checked against what this launch actually needs.
+
+**VERSION FLOOR — this is a trap, and "verified on this host" hid it.**
+`os.POSIX_SPAWN_CLOSEFROM` was added in **Python 3.13** and is further
+conditional on the platform exposing
+`posix_spawn_file_actions_addclosefrom_np()`. It is present on this
+development host (Python 3.14.7) and a probe here would therefore
+"succeed" while being **unavailable on the supported floor**, which
+`setup.py` declares as `python_requires=">=3.10"`. Any descriptor-tightening
+design must therefore specify a path for 3.10–3.12 and for libc/platform
+combinations without that extension, or an explicit documented fallback
+to the current launcher. **Do not let a host-verified probe stand in for
+floor coverage.**
 
 ### 3.3 `os.posix_spawn` with `POSIX_SPAWN_CLOSEFROM`
 
-Available on this Python/glibc. It can close everything from N upward,
-which combined with explicit `DUP2` of the wanted descriptors would
-reproduce the scrub-then-exec discipline.
+**Available on this development host's Python (3.14.7) and glibc, and NOT
+on the supported floor** — see the VERSION FLOOR note in §3.2. It can close
+everything from N upward, which combined with explicit `DUP2` of the wanted
+descriptors would reproduce the scrub-then-exec discipline. This is the
+*shape* of the ideal design, **not** an available implementation for
+`python_requires=">=3.10"` without a documented fallback.
 
 ---
 
@@ -567,12 +610,37 @@ showing a stable opinion: the performance question moved from unmeasured,
 to apparently answered, to correctly answered once the ballast sweep ran.**
 
 **What should happen next**, as a separate, explicitly-scoped work order:
-design and prove the §4.1 descriptor allowlist — which descriptors must be
-inheritable, how the close action is expressed for the job fds, and what
-proves equivalence against `fork()+execv()` on every served route. Then
-measure end-to-end workload time with the launcher on and off, so the delta
-is published rather than inferred. **Performance is no longer the blocker;
-descriptor equivalence is.**
+**a descriptor/launch-contract DESIGN and equivalence exercise — not an
+implementation sprint.** Performance is no longer the blocker; descriptor
+equivalence is. Scope for that work order:
+
+1. **A descriptor/launch contract matrix** covering, at minimum:
+   * every currently served cleanroom route (`map-plugin`, `map-udf`,
+     `map-spawn`, `stream-plugin`, `stream-udf`) and the descriptors each
+     actually requires;
+   * `FD_CLOEXEC` disposition, descriptor duplication, stdin/stdout/stderr,
+     and closure of unrelated descriptors;
+   * the **Python 3.10–3.12 compatibility path** (see the VERSION FLOOR note
+     in §3.2 — `os.POSIX_SPAWN_CLOSEFROM` does not exist there), including
+     libc/platform combinations lacking
+     `posix_spawn_file_actions_addclosefrom_np()`, with an explicit
+     documented fallback to the current launcher where no path exists;
+   * environment inheritance, which **stays unchanged in that phase** —
+     F7 is a separate decision and must not be folded in;
+   * startup failure, signal mask/disposition, and fallback behaviour;
+   * observable equivalence tests, written **before** any integration.
+2. **Inventory the descriptors that actually reach the launcher**, not every
+   descriptor Python happens to have open. The current code deliberately
+   marks some inheritable and duplicates the error channel onto fd 2
+   (`os.dup2(errfd, 2)`); a spawn implementation must preserve the required
+   final layout and handle the optional stats, trace and poison channels
+   correctly. **A route that silently loses a channel is worse than no
+   change at all**, so the existing inherited behaviour must be understood
+   before it is tightened.
+3. **Only then** measure end-to-end workload time with the launcher on and
+   off, so the delta is published rather than inferred.
+
+**No production backend switch is authorised by anything in this document.**
 
 **No rlimit cost exists** and it is not part of this list — the launcher
 raises its own `RLIMIT_NOFILE` before `dlopen` (§4.3).

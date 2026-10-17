@@ -215,13 +215,16 @@ Design proposes `posix_spawn`; production uses `fork()+execv()` and
 
 **The measurement, briefly.** `tools/bench_cleanroom_launch.c` drives the
 real launcher in `--fork-only` mode, interleaved A/B, ballast allocated as
-resident (touched) memory and RSS verified from `/proc/self/statm`:
-`fork()+execv()` goes 2.6 ms (0 ballast) → 9.2 ms (256 MiB) → 37.2 ms
-(1 GiB) → 60.7 ms (2 GiB) → 119.5 ms (5 GiB), while `posix_spawn` stays
-flat at 2.4–4.5 ms. So the design's rationale is empirically confirmed:
-the `fork()` cost scales with the parent's memory and `posix_spawn` does
-not pay it. Full table, controls, and limits in `CLEANROOM_LAUNCH_DECISION.md`
-§1.1a.
+resident (touched) memory and verified from `/proc/self/smaps_rollup`
+(the kernel's accurate counter; `statm` is kept only as a cross-check and
+agrees to 0 KiB): `fork()+execv()` goes 2.8 ms (0 ballast) → 9.6 ms
+(256 MiB) → 29.4 ms (1 GiB) → 49.2 ms (2 GiB) → 112.0 ms (5 GiB), while
+`posix_spawn` stays flat at 2.7–4.2 ms. So the design's rationale is
+empirically confirmed: the `fork()` cost scales with the parent's memory
+and `posix_spawn` does not pay it. **Independently reproduced** across two
+sweeps; the `fork()` column varies run to run by up to ~25% at 1 GiB, the
+`posix_spawn` column does not, and the conclusion holds in both. Full
+table, controls, and limits in `CLEANROOM_LAUNCH_DECISION.md` §1.1a.
 
 **Do not read "gate met" as "adopt".** §5's decision rule has two
 conditions. The second — proving a `posix_spawn` descriptor allowlist is

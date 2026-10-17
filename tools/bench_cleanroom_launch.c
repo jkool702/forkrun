@@ -71,8 +71,13 @@ static int cmp_double(const void *a, const void *b)
 }
 
 /* ---------------------------------------------------------------- ballast */
-/* Current RSS in KiB, from /proc/self/statm field 2 (resident pages).
- * Preferred over ru_maxrss, which is a PEAK and would overstate. */
+/* RSS from /proc/self/statm field 2 (resident pages). Cheap -- one short
+ * read -- but the kernel documents statm's resident figures as
+ * "potentially inaccurate" and recommends smaps/smaps_rollup where an
+ * accurate value is required. Measured here, statm ran 124-188 KiB ABOVE
+ * smaps_rollup at 256/1024/2048 MiB. Small, but it is the wrong source to
+ * hang a "resident" claim on, so smaps_rollup below is authoritative and
+ * statm is kept only as a cross-check. */
 static long current_rss_kb(void)
 {
     int fd = open("/proc/self/statm", O_RDONLY);
@@ -85,6 +90,25 @@ static long current_rss_kb(void)
     long long total = 0, resident = 0;
     if (sscanf(buf, "%lld %lld", &total, &resident) != 2) return -1;
     return (long)resident * (sysconf(_SC_PAGESIZE) / 1024);
+}
+
+/* AUTHORITATIVE RSS: /proc/self/smaps_rollup "Rss:" in KiB. This is the
+ * kernel's own accurate accounting and is what the ballast-residency
+ * claim is now based on. Returns -1 if unavailable. */
+static long smaps_rss_kb(void)
+{
+    FILE *f = fopen("/proc/self/smaps_rollup", "r");
+    if (!f) return -1;
+    char line[256], key[64], unit[16];
+    long val = -1;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%63[^:]: %ld %15s", key, &val, unit) == 3
+            && strcmp(key, "Rss") == 0)
+            break;
+        val = -1;
+    }
+    fclose(f);
+    return val;
 }
 
 /* MemAvailable in KiB, from /proc/meminfo. */
@@ -306,9 +330,13 @@ int main(int argc, char **argv)
 
     printf("# launcher        : %s\n", launcher);
     printf("# ballast target  : %ld MiB\n", ballast_mb);
+    /* Both baselines captured BEFORE the ballast is allocated. */
     long rss0 = current_rss_kb();
-    printf("# RSS before ballast: %ld KiB (%.1f MiB)\n",
-           rss0, rss0 > 0 ? rss0 / 1024.0 : 0.0);
+    long sm0 = smaps_rss_kb();
+    printf("# RSS before ballast (smaps_rollup, AUTHORITATIVE): %ld KiB "
+           "(%.1f MiB)\n", sm0, sm0 > 0 ? sm0 / 1024.0 : 0.0);
+    printf("# RSS before ballast (statm, cross-check)           : %ld KiB "
+           "(%.1f MiB)\n", rss0, rss0 > 0 ? rss0 / 1024.0 : 0.0);
 
     /* Safety: do not allocate ballast that could exhaust the host. We
      * report and refuse rather than silently substituting a smaller
@@ -334,15 +362,25 @@ int main(int argc, char **argv)
         }
     }
     long rss1 = current_rss_kb();
-    printf("# RSS after ballast : %ld KiB (%.1f MiB)  delta=%.1f MiB "
-           "(target %ld MiB)\n",
-           rss1, rss1 > 0 ? rss1 / 1024.0 : 0.0,
-           (rss0 > 0 && rss1 > 0) ? (rss1 - rss0) / 1024.0 : 0.0, ballast_mb);
-    if (ballast_mb > 0 && rss0 > 0 && rss1 > 0) {
-        double got = (rss1 - rss0) / 1024.0;
-        double want = (double)ballast_mb;
-        printf("# ballast VERIFIED: %.1f MiB resident vs %.1f MiB target "
-               "(%.1f%%)\n", got, want, got / want * 100.0);
+    long sm1 = smaps_rss_kb();
+    printf("# RSS after ballast (smaps_rollup, AUTHORITATIVE): %ld KiB "
+           "(%.1f MiB)\n", sm1, sm1 > 0 ? sm1 / 1024.0 : 0.0);
+    printf("# RSS after ballast (statm, cross-check)           : %ld KiB "
+           "(%.1f MiB)\n", rss1, rss1 > 0 ? rss1 / 1024.0 : 0.0);
+    if (ballast_mb == 0) {
+        printf("# ballast: NONE requested (baseline control level); "
+               "statm/smaps disagreement %ld KiB\n",
+               (rss1 > 0 && rss0 > 0 && sm0 > 0 && sm1 > 0)
+                   ? (rss1 - rss0) - (sm1 - sm0) : 0);
+    } else if (sm0 > 0 && sm1 > 0) {
+        printf("# ballast VERIFIED (smaps_rollup): %.1f MiB resident vs "
+               "%.1f MiB target (%.2f%%); statm/smaps disagreement %ld KiB\n",
+               (sm1 - sm0) / 1024.0, (double)ballast_mb,
+               (sm1 - sm0) / 1024.0 / (double)ballast_mb * 100.0,
+               (rss1 > 0 && rss0 > 0) ? (rss1 - rss0) - (sm1 - sm0) : 0);
+    } else {
+        printf("# ballast VERIFICATION UNAVAILABLE (smaps_rollup "
+               "unreadable) — residency NOT confirmed\n");
     }
     printf("# workers          : %d\n# iters            : %d "
            "(interleaved A/B, 3 warmups discarded)\n", workers, iters);
