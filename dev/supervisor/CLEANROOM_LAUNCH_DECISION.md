@@ -61,9 +61,11 @@ Step 2 asks for a *measurement* to gate step 3.
 **That measurement now exists** — `tools/bench_cleanroom_launch.c`, run
 across the full §5 parent-RSS sweep. **Result: the performance half of the
 gate is met decisively.** At 1 GiB+ parent RSS `posix_spawn` launches in
-~4 ms where `fork()`+`execv()` takes 37–120 ms: a **−89% to −96%** launch
-latency reduction, and the saving grows with parent memory because the
-`fork()` cost does.
+~3.5–4.2 ms where `fork()`+`execv()` takes 29–112 ms: a **−88% to −96%**
+launch latency reduction, and the saving grows with parent memory because
+the `fork()` cost does. (Numbers here are the `smaps_rollup`-verified
+sweep in §1.1a; an earlier sweep gave 37–120 ms — same conclusion, and
+both are recorded there.)
 
 **The gate is nonetheless still closed**, because §5's decision rule has
 **two** conditions and only the first has been evaluated. The second —
@@ -273,8 +275,30 @@ stated motivation.
 
 Python's API offers `POSIX_SPAWN_OPEN`, `POSIX_SPAWN_DUP2`,
 `POSIX_SPAWN_CLOSE` and `POSIX_SPAWN_CLOSEFROM` file actions, plus
-`close_fds`, `setsigdef` and `setsigmask` parameters. Each has to be
-checked against what this launch actually needs.
+`setpgroup`, `setsid`, `setsigmask`, `setsigdef`, `resetids` and
+`scheduler` parameters. Each has to be checked against what this launch
+actually needs.
+
+**CORRECTED — there is NO `close_fds` parameter on `os.posix_spawn()`.**
+An earlier draft of this section listed one, and §4.1 went on to describe
+its behaviour. That was a **conflation of `subprocess.Popen` with
+`os.posix_spawn()`**: `close_fds` is a `Popen` keyword (default `True`),
+and does not appear in `os.posix_spawn`'s signature at all. Verified
+against the running interpreter rather than from documentation:
+
+```python
+>>> import os, inspect
+>>> inspect.signature(os.posix_spawn)
+(path, argv, env, /, *, file_actions=(), setpgroup=None, resetids=False,
+ setsid=False, setsigmask=(), setsigdef=(), scheduler=None)
+>>> 'close_fds' in dir(os)
+False
+```
+
+Descriptor work happens **through `file_actions`**, not through a
+flag. This matters especially because the next work order is precisely
+about designing descriptor equivalence — building on a parameter that
+does not exist would have wasted the exercise.
 
 **VERSION FLOOR — this is a trap, and "verified on this host" hid it.**
 `os.POSIX_SPAWN_CLOSEFROM` was added in **Python 3.13** and is further
@@ -303,9 +327,31 @@ descriptors would reproduce the scrub-then-exec discipline. This is the
 
 ### 4.1 Descriptor inheritance and closure
 
-The current child closes `rr` and inherits everything else the parent
-holds at fork time. The cleanroom design's whole premise is that the
-launcher inherits **only** the source fd and the result fd.
+**"Inherits everything else" was wrong about `exec`, and the correction
+changes what the inventory has to list.** The current child closes `rr`
+and then `execv`s. At **fork** the child does get a copy of the parent's
+entire descriptor table — but **`exec` then closes every descriptor marked
+close-on-exec**, so what the launcher actually starts with is only the
+non-`CLOEXEC` subset. Verified directly rather than assumed:
+
+```
+parent opens a plain pipe (fd 4) and a pipe2(O_CLOEXEC) (fd 6),
+then fork + execv("/bin/sh", ...) and lists /proc/self/fd:
+
+  child sees fd 4 -> pipe:[...]      <- plain: SURVIVES exec
+  child sees fd 6 -> (absent)        <- CLOEXEC: GONE after exec
+```
+
+So the phrase "the parent holds at fork time" describes the wrong moment
+for this purpose. **The inventory must be of the POST-`exec` effective
+descriptor set the launcher starts with** — which is a subset of what the
+parent holds, and can be *smaller* than the fork-time table. Auditing the
+parent's full table would over-count closable descriptors; auditing only
+the intended job fds without checking `CLOEXEC` disposition would
+under-count.
+
+The cleanroom design's premise remains that the launcher should effectively
+see **only** the source fd and the result fd.
 
 **CORRECTED.** An earlier draft said `posix_spawn` "does not inherit the
 parent's fd table the way `fork` does; it constructs the child's
@@ -324,10 +370,23 @@ to be done first. Concretely:
   actions — `open`, `dup2`, `close`, `closefrom` — and a `dup2` action
   whose source and destination are equal clears `FD_CLOEXEC`, which is
   often cheaper than re-opening.
-* Everything else must be made non-inheritable. `posix_spawn`'s
-  `close_fds=True` closes descriptors above the spawn action range rather
-  than applying an arbitrary allowlist, so a true allowlist still needs
-  deliberate `closefrom`/`close` actions.
+* Everything else must be made non-inheritable. **The mechanism is
+  `file_actions`, not a flag** — `os.posix_spawn()` has no `close_fds`
+  (see the correction in §3.2). The available actions are:
+  * `POSIX_SPAWN_CLOSE` — closes one named descriptor. Available on every
+    supported interpreter; safe but O(n) in the descriptor count.
+  * `POSIX_SPAWN_CLOSEFROM` — closes everything ≥ N in one action.
+    **Python 3.13+ only, and conditional on the platform exposing
+    `posix_spawn_file_actions_addclosefrom_np()`.** Absent on the 3.10
+    floor (see §3.2), so it cannot be the sole mechanism.
+  * A `dup2` action whose source and destination are equal clears
+    `FD_CLOEXEC` on that descriptor, which is how a wanted descriptor is
+    made inheritable.
+
+  A `closefrom` action cannot express an *arbitrary* allowlist — it is a
+  suffix — so a real allowlist with gaps still needs explicit `close`
+  actions, or the inherited set must be arranged so the wanted
+  descriptors are contiguous.
 
 Miss one descriptor and the launcher degrades to a fallback rather than
 failing loudly. That remains the largest correctness surface in the
@@ -571,7 +630,7 @@ Reasons, in order of weight:
 
 1. **The descriptor-equivalence half of the gate is untouched.** §5's
    decision rule has two conditions. The performance condition is now met
-   emphatically (§1.1a: −89% to −96% launch latency at 1–5 GiB parent
+   emphatically (§1.1a: −88% to −96% launch latency at 1–5 GiB parent
    RSS). The second — "the descriptor-enumeration change (§4.1) can be
    made provably equivalent" — has not been attempted at all. §4.1
    (corrected): `posix_spawn` does *not* hand you an allowlist — POSIX

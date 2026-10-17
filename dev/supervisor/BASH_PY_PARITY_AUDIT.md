@@ -210,7 +210,7 @@ Design proposes `posix_spawn`; production uses `fork()+execv()` and
 | production backend adopted? | **NO** — `fork()`+`execv()` remains |
 | small-parent measurement | **done, and superseded** (see below) |
 | parent-RSS sweep | **done** — 0/256 MiB/1/2/5 GiB, RSS verified 100% resident |
-| performance gate (§5 condition 1) | **MET** — −89% to −96% launch latency at 1-5 GiB |
+| performance gate (§5 condition 1) | **MET** — −88% to −96% launch latency at 1-5 GiB |
 | descriptor-equivalence gate (§5 condition 2) | **OUTSTANDING — this is the blocker** |
 
 **The measurement, briefly.** `tools/bench_cleanroom_launch.c` drives the

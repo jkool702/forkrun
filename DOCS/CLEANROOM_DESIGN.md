@@ -76,7 +76,7 @@ Both Python launch sites use `os.fork()` + `os.execv()`. **Production still
 does, and nothing in the tree switches it.** A measurement now exists: a
 launch-cost benchmark comparing the two mechanisms across parent resident
 memory from 0 MiB to 5 GiB (§1.1a of the decision report). At 1 GiB and
-above, `posix_spawn` launched in ~4 ms against 37-120 ms for
+above, `posix_spawn` launched in ~3.5-4.2 ms against 29-112 ms for
 `fork()`+`execv()` — a large win, because the `fork()` cost grows roughly
 linearly with the parent's memory. **No `posix_spawn` backend has been
 implemented or validated**, and the remaining gate is descriptor-set
@@ -241,8 +241,8 @@ what the engine sets itself, and every unrelated descriptor (the parent
    variable** (0 / 256 MiB / 1 / 2 / 5 GiB).
    **MEASURED** — `tools/bench_cleanroom_launch.c`, results in
    `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md` §1.1a. The saving is
-   large and grows with parent RSS: **−68% at 256 MiB, −89% at 1 GiB,
-   −94% at 2 GiB, −96% at 5 GiB**; `posix_spawn` stays flat at ~2.4-4.5 ms
+   large and grows with parent RSS: **−67% at 256 MiB, −88% at 1 GiB,
+   −92% at 2 GiB, −96% at 5 GiB**; `posix_spawn` stays flat at ~2.7-4.2 ms
    while `fork()`+`execv()` costs ~23-35 ms per GiB. Production launch is
    unchanged.
 3. Design and prove a `posix_spawn` **descriptor allowlist** (§4.1 of the
