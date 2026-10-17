@@ -74,15 +74,21 @@ launcher should do too.
 This is a proposal, not the shipped design. Both Python launch sites use
 `os.fork()` + `os.execv()`. The delivery plan below gated integration on
 a measured PoC that does not exist in the tree. The decision report
-recommends measuring first, and it corrects the mechanism here: glibc
-implements `posix_spawn` on **vfork(2)**, not `CLONE_VM` — the conclusion
-(no page-table copy) is right, the mechanism named is not.
+recommends measuring first.
 
-`posix_spawn` uses `clone` with `CLONE_VM | CLONE_VFORK` (glibc's
-`spawni.c`), so the spawn itself does not copy the page table at all, and
-`CLONE_VFORK` suspends the calling thread until the child `execve`s. The launcher `dlopen`s the substrate and
-then **forks** (no second exec), so the workers inherit the engine
-mapping by COW for free.
+**The mechanism described here is CORRECT and needed no correction.**
+glibc implements `posix_spawn` with the `clone` syscall using
+`CLONE_VM | CLONE_VFORK` and an allocated stack
+(`sysdeps/unix/sysv/linux/spawni.c`). `CLONE_VFORK` suspends the calling
+thread until the child `execve`s or exits, so the spawn itself does not
+copy the page table. An audit pass briefly "corrected" this to
+`vfork(2)`, which was wrong — glibc does not call `vfork(2)` for this
+path, though the semantics are vfork-like. See the decision report §1.2
+for that retraction.
+
+So the spawn does not copy the page table at all. The launcher
+`dlopen`s the substrate and then **forks** (no second exec), so the
+workers inherit the engine mapping by COW for free.
 
 One exec, then N cheap forks. That is the entire win.
 
