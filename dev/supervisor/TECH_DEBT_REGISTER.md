@@ -53,7 +53,7 @@ thinking they are untracked:
 | TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
 | TD-09b | plain **streaming** path left scalar `poisoned` at 0 | high | **verified — FIXED** (two per-executor defects, both mutation-proven; found by WO-PY-REL-1, re-confirmed in the parity audit) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
-| TD-13 | streaming **peak** retention ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN, re-diagnosed**: peak is a backpressure-free in-flight window, **NOT a Python-object leak** (post-drain `tracemalloc` ~27 KB, 0 live record objects). Real fix is engine-scope (frozen files). |
+| TD-13 | streaming **peak** retention ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN, re-diagnosed**: peak is a backpressure-free in-flight window, **NOT a Python-object leak** (post-drain `tracemalloc` 23.0 KB against a 43.1 MB peak; census corroborates but is GC-tracked-objects-only). Real fix is engine-scope (frozen files). Reproducible via committed `python/tests/_streaming_memory_probe.py`. |
 | TD-14 | `test_spawn_ordered` compared map/stream element-wise | low | **RECLASSIFIED — invalid test expectation, not a product defect** (WO-PY-REL-1 follow-up) |
 
 ---
@@ -772,14 +772,24 @@ live-object census, `gc.collect()`, and `/proc/self/smaps_rollup`:
 
 | quantity | at 98.4 MB output |
 |---|---|
-| peak RSS growth | 48.7 MB (ratio 0.50) |
-| **`tracemalloc` live after full drain** | **~27 KB** |
-| **live bytes/bytearray/memoryview after drain** | **0** |
+| peak RSS growth | 43.1 MB (ratio 0.459) |
+| **`tracemalloc` live after full drain** | **23.0 KB** |
+| GC-tracked record objects after drain (corroboration only) | 0 |
 | RSS growth after drain, pre- and post-`gc.collect()` | unchanged |
 
 **There is no Python-object leak.** After a complete drain, Python holds
-~27 KB and zero record objects, against a ~49 MB peak. The peak is
-transient in-flight data, not retained output.
+~23 KB against a ~43 MB peak. The peak is transient in-flight data, not
+retained output.
+
+**WHICH OF THOSE NUMBERS CARRIES THE ARGUMENT — stated so the census is
+not over-read.** The load-bearing figure is **`tracemalloc`'s post-drain
+live bytes**, because tracemalloc hooks the allocator and counts every
+tracked allocation. The live-object census is **corroboration only**:
+`gc.get_objects()` returns only objects the CYCLIC collector tracks, and
+**not every `bytes`/`bytearray`/`memoryview` is GC-tracked**, so a census
+of zero does not by itself prove the absence of every live bytes
+allocation. If the two ever disagree, tracemalloc wins. (Correction to an
+earlier draft of this entry, which led with the census.)
 
 **Mechanism, source-localized.** `_drain_worker_memfd_terminal()`
 (`run.py`) reads *all* new bytes from a worker's output memfd in one
@@ -798,8 +808,10 @@ reassembly buffer holds out-of-order records behind a hole.
 
 **Post-drain RSS is allocator behaviour, not retention.** Across runs the
 final RSS after a complete drain was either baseline + ~45 MB or baseline
-+ ~0.3 MB, with identical `tracemalloc` (27 KB) and zero live objects in
-both. Freed glibc arenas are sometimes returned and sometimes not. **An RSS
++ ~0.3 MB, with identical `tracemalloc` (~23-27 KB) and a zero census in
+both. The committed probe therefore reports the resident figure from
+`/proc/self/smaps_rollup` rather than `statm`, whose resident numbers the
+kernel documents as potentially inaccurate. Freed glibc arenas are sometimes returned and sometimes not. **An RSS
 reading after the run is therefore not evidence of a leak**, which is
 precisely why this diagnosis used `tracemalloc` and an object census.
 
@@ -825,10 +837,22 @@ read-ahead so a bounded window is real. Either needs a correctness review
 of poison/retry interaction — a worker blocked on output can no longer be
 reaped promptly.
 
-**Reproduce the leak/leakage discrimination:**
-`/tmp/opencode/td13_probe.py` logic, i.e. a stream drained to exhaustion
-with `tracemalloc.start()` before and `tracemalloc.get_traced_memory()`
-plus `gc.get_objects()` census after.
+**Reproduce the retention-vs-leak discrimination — committed, not
+scratch.** The discriminating probe lives in the tree:
+
+```
+python3 python/tests/_streaming_memory_probe.py --lines 1600000 --delay 0.01
+python3 python/tests/_streaming_memory_probe.py --lines 800000 --order index
+```
+
+It starts `tracemalloc` BEFORE the workload, drains the stream to
+exhaustion while discarding every record, then reports post-drain
+`tracemalloc` live bytes, a GC-tracked census (flagged in its own output
+as corroboration only), and `/proc/self/smaps_rollup`. It is a diagnostic,
+not a test: the leading underscore keeps it out of unittest discovery, so
+it cannot make the suite pass or fail. **An earlier draft pointed at a
+`/tmp` script for this, which meant the strongest evidence was not
+reproducible from the repository; that is fixed.**
 
 **Does not establish:** anything about the cleanroom launcher path (the
 probe exercises the in-process generator executors only); and whether the
