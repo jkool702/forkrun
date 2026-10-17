@@ -897,7 +897,21 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
     elif isinstance(source, int) and not isinstance(source, bool):
         pass                                  # descriptor; validated later
     elif hasattr(source, "fileno") or hasattr(source, "__iter__"):
-        pass                                  # file object or iterable
+        # Structural type acceptance ONLY. This does NOT mean an iterable
+        # is a supported cleanroom input:
+        #   * _api._reject_iterable_source refuses Python iterables at the
+        #     public API ("Python is never an input pump"), so no
+        #     user-facing call reaches here with one;
+        #   * an iterable reaching here at all came from an internal
+        #     caller that bypassed validation. It is accepted here because
+        #     the oracle (tools/capability_oracle.py) records that contract
+        #     -- the caller continues to the in-process path rather than
+        #     being refused -- and changing it would alter the recorded
+        #     capability matrix, which is a separate decision;
+        #   * there is no producer to pump one. The forked producer that
+        #     used to exist here was unreachable and was removed from
+        #     both cleanroom paths.
+        pass
     else:
         return False, ("source must be a path, an open descriptor, or "
                        "an iterable (got %r)" % (type(source),))

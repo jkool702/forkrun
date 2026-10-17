@@ -40,7 +40,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-09 | `poisoned_batches` empty on `orchestrator=False` | high | **verified — FIXED** (WO-PY-REL-1); residual index-width item recorded as TD-12 and TD-09b |
 | TD-10 | Class payload silently produced empty results | high | **verified — FIXED** |
 | TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
-| TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN, DEFERRED BY DESIGN** (found by WO-PY-REL-1; re-confirmed in the parity audit) |
+| TD-09b | plain **streaming** path leaves scalar `poisoned` at 0 | high | **verified — OPEN; DEFERRED pending its own work order** (a known CORRECTNESS defect; found by WO-PY-REL-1, re-confirmed in the parity audit) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
 | TD-13 | streaming parent retains ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN** (found by WO-PY-REL-1) |
 | TD-14 | `test_spawn_ordered` compared map/stream element-wise | low | **RECLASSIFIED — invalid test expectation, not a product defect** (WO-PY-REL-1 follow-up) |
@@ -631,7 +631,11 @@ see TD-13.
 it.** Verified identical at `a65aa4ca`, i.e. **pre-existing and unrelated to
 TD-09**.
 
-**Status: DEFERRED, not dismissed.** The parity audit's disposition list
+**Status: OPEN — DEFERRED pending its own work order. This is a known
+CORRECTNESS defect, not intended product behaviour.** ("By design" was
+removed from the status label: it read as though the mismatch were a
+designed property, when it is the opposite — a decision to postpone a
+fix.) The parity audit's disposition list
 carries this as a confirmed OPEN correctness defect, not as a
 consolidation blocker: `total = completed + poisoned`, so the headline
 number is wrong on this path only. Fixing it means routing this path's

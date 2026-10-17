@@ -78,8 +78,9 @@ recommends measuring first, and it corrects the mechanism here: glibc
 implements `posix_spawn` on **vfork(2)**, not `CLONE_VM` — the conclusion
 (no page-table copy) is right, the mechanism named is not.
 
-`posix_spawn` uses `vfork` (`CLONE_VM` is NOT what glibc does here), so
-the spawn itself does not copy the page table at all. The launcher `dlopen`s the substrate and
+`posix_spawn` uses `clone` with `CLONE_VM | CLONE_VFORK` (glibc's
+`spawni.c`), so the spawn itself does not copy the page table at all, and
+`CLONE_VFORK` suspends the calling thread until the child `execve`s. The launcher `dlopen`s the substrate and
 then **forks** (no second exec), so the workers inherit the engine
 mapping by COW for free.
 
@@ -131,9 +132,19 @@ GIL and exception marshalling, post-`exec` reconstruction of `sys.path`
 and module state, and exact `None`/`b""`/`str` return parity. That is a
 real project, not an impossibility.
 
-Until it is built, the shipped boundary is unchanged: **the cleanroom
-serves the C plugin path only**, and everything else declines to the
-in-process path. See `DOCS/FUTURE_WORK.md` Tier 4b item 46.
+**SUPERSEDED — corrected (WO Phase A).** This paragraph used to read
+"the cleanroom serves the C plugin path only, and everything else
+declines to the in-process path", which contradicted the corrected mode
+table above it. It described the state before UDF, spawn and streaming
+were built.
+
+**The shipped boundary today is five routes:** `map-plugin`,
+`stream-plugin`, `map-udf`, `stream-udf` and `map-spawn`. `mode="python"`
+and `mode="splice"` decline to the in-process path, as does
+`stream(spawn)`, which has no dispatch at all — and therefore no route
+identifier, because a selectable route that can never fire is worse than
+no route. See `_CLEANROOM_ROUTES` in `run.py` and
+`dev/supervisor/BASH_PY_PARITY_AUDIT.md` §6. See `DOCS/FUTURE_WORK.md` Tier 4b item 46.
 
 A side benefit worth noting: the comment above `resolve_payload_parent`
 mentions that forking a threaded host can inherit a frozen import lock

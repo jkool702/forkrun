@@ -293,7 +293,7 @@ duplication.**
 
 | ID | Defect | Why not fixed here |
 |---|---|---|
-| **F2 / TD-09b** | `orchestrator=False` + streaming reports `poisoned=0` while reporting a correct, non-empty `poisoned_batches`. Since `total = completed + poisoned`, the headline number is wrong on that path only. | Verified pre-existing at `a65aa4ca`, i.e. not introduced by the TD-09 index fix. It is a **correctness defect, not a consolidation blocker**, and fixing it means routing that path's result through the shared poison funnel — a change in four call sites that belongs in its own work order. It is **deferred, not dismissed**. |
+| **F2 / TD-09b** | `orchestrator=False` + streaming reports `poisoned=0` while reporting a correct, non-empty `poisoned_batches`. Since `total = completed + poisoned`, the headline number is wrong on that path only. **A known correctness defect — deferred, not dismissed, and not intended behaviour.** | Verified pre-existing at `a65aa4ca`, i.e. not introduced by the TD-09 index fix. It is a **correctness defect, not a consolidation blocker**, and fixing it means routing that path's result through the shared poison funnel — a change in four call sites that belongs in its own work order. It is **deferred, not dismissed**. |
 | **F7** | `CLEANROOM_DESIGN.md` states the launcher "must not inherit the parent's environment wholesale"; both Python launch sites call `os.execv()`, which inherits it. | Answering it needs a deliberate compatibility decision (Bash reconstructs; clearing outright would break `mode="spawn"` payloads that need `PATH` and UDF modules that need `PYTHONPATH`). Requires comparing four behaviours first — see the decision report §7.4. |
 
 ### Intentional divergence retained

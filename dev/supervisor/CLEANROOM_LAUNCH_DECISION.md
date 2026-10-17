@@ -66,15 +66,41 @@ contract the shipped code promised and broke. Recording it as "the
 implementation ignored the design" would be wrong; recording it as "no
 action needed" would leave the design permanently misleading.
 
-### 1.2 One factual correction to the design text
+### 1.2 The design text's mechanism claim is CORRECT — a correction withdrawn
 
-The claim "`posix_spawn` uses `CLONE_VM | CLONE_VFORK`" is imprecise.
-glibc implements `posix_spawn` on **`vfork(2)`** (`__vfork` /
-`__libc_vfork` are present in the libc on this host, glibc 2.43), not on
-`CLONE_VM`. The *conclusion* — no page-table copy at spawn — is correct,
-because `vfork` suspends the parent and shares the address space. The
-mechanism named in the document is wrong, and matters for a reason §3.4
-expands on: `vfork` semantics constrain what the child may do.
+An earlier draft of this report "corrected" the design's
+"`posix_spawn` uses `CLONE_VM | CLONE_VFORK`" as imprecise, on the
+grounds that glibc implements `posix_spawn` on `vfork(2)`. **That was
+wrong, and the correction is withdrawn.** The design document was right.
+
+glibc's own source says so in its first comment
+(`sysdeps/unix/sysv/linux/spawni.c`):
+
+> The Linux implementation of posix_spawn{p} uses the clone syscall
+> directly with CLONE_VM and CLONE_VFORK flags and an allocated stack.
+
+and the clone flags it builds are:
+
+```c
+.flags = ... | CLONE_CLEAR_SIGHAND | CLONE_VM | CLONE_VFORK,
+```
+
+`CLONE_VFORK` suspends the calling thread until the child `execve`s or
+exits, which is the property the design relies on. glibc does not invoke
+the `vfork(2)` syscall for this path, but the flags produce vfork-like
+shared-address-space semantics — which is what matters.
+
+**How the error happened, because it is the same shape as the F3 error.**
+I ran `strings libc.so.6 | grep vfork`, saw `__vfork` and
+`__libc_vfork`, and concluded `posix_spawn` used them. Those symbols
+exist in libc for other reasons — `vfork(2)` is used elsewhere — and
+their presence says nothing about which mechanism the spawn path takes. I
+treated weak evidence as conclusive without opening the source.
+
+That is the second time in this work order I gathered evidence consistent
+with a hypothesis and stopped. The rule that would have caught it both
+times is the same one: open the file that decides the question.
+(`grep raise_fd_limit forkrun_cleanroom.c` for F3; `spawni.c` here.)
 
 ---
 
@@ -132,14 +158,31 @@ The current child closes `rr` and inherits everything else the parent
 holds at fork time. The cleanroom design's whole premise is that the
 launcher inherits **only** the source fd and the result fd.
 
-`posix_spawn` does not inherit the parent's fd table the way `fork` does;
-it constructs the child's descriptors from file actions. That is
-*stronger* isolation and is arguably what the design wanted — but it
-changes which descriptors must be named explicitly, and **every** job fd
-(`src_fd`, result `res_fd`, `errfd`, `stats_fd`, the poison memfd) would
-have to be enumerated and re-opened or dup'd. Miss one and the launcher
-degrades to a fallback. This is the single largest correctness surface
-in the change.
+**CORRECTED.** An earlier draft said `posix_spawn` "does not inherit the
+parent's fd table the way `fork` does; it constructs the child's
+descriptors from file actions." That misstates POSIX. The child's initial
+descriptor set IS the parent's open descriptors, then modified by the
+specified file actions and close-on-exec disposition. `posix_spawn` does
+**not** hand you an allowlist.
+
+The practical conclusion is unchanged, but it must be reached correctly:
+producing a *deliberate* allowlist is work, and the inventory is what has
+to be done first. Concretely:
+
+* Every job descriptor (`src_fd`, result `res_fd`, `errfd`, `stats_fd`,
+  and the poison-index memfd added this cycle) must be enumerated and
+  confirmed **inheritable**. glibc's `spawni.c` shows the available
+  actions — `open`, `dup2`, `close`, `closefrom` — and a `dup2` action
+  whose source and destination are equal clears `FD_CLOEXEC`, which is
+  often cheaper than re-opening.
+* Everything else must be made non-inheritable. `posix_spawn`'s
+  `close_fds=True` closes descriptors above the spawn action range rather
+  than applying an arbitrary allowlist, so a true allowlist still needs
+  deliberate `closefrom`/`close` actions.
+
+Miss one descriptor and the launcher degrades to a fallback rather than
+failing loudly. That remains the largest correctness surface in the
+change — reached by inventory, not by re-opening everything.
 
 ### 4.2 Argument-vector fidelity
 
@@ -370,23 +413,44 @@ Reasons, in order of weight:
 
 1. **The design's own gate was never evaluated.** Step 2 of its delivery
    plan asked for a measured PoC whose result decides step 3. Running the
-   PoC is the correct next action, not adopting or rejecting the
-   topology by argument.
-2. **It is not a drop-in swap.** §4.3: the child-side rlimit raise has no
-   `posix_spawn` equivalent, and both alternatives are worse. §4.1: every
-   job descriptor would need explicit re-opening, which is the largest
-   correctness surface in the change and the easiest place to introduce a
-   silent fallback.
-3. **The concrete claim is unmeasured.** No performance statement should
-   be made from an unrun benchmark, and §5's protocol — in particular
-   the parent-RSS sweep — must run first or the result will be "no
-   difference" measured at the wrong ballast.
-4. **The one real defect found (§6) is fixed** and is backend-neutral.
+   PoC is the correct next action, not adopting or rejecting the topology
+   by argument.
+2. **The concrete claim is unmeasured.** No performance statement should
+   be made from an unrun benchmark. §5's protocol — in particular the
+   parent-RSS sweep — must run first, or the result will be "no
+   difference" measured at the wrong ballast and the question will appear
+   settled.
+3. **A deliberate descriptor allowlist is work that has not been done.**
+   §4.1 (corrected): `posix_spawn` does *not* hand you an allowlist —
+   POSIX gives the child the parent's open descriptors modified by file
+   actions. Producing an intentional one means inventorying which job
+   descriptors must be inheritable and closing everything else with
+   `closefrom`/`close` actions. Miss one and the launcher degrades to a
+   fallback instead of failing loudly.
+4. **The threaded-parent hazard is real and unresolved.** §4.7:
+   `forkrun` is an importable library, and `fork()` from a caller's
+   threaded process is a documented hazard. `posix_spawn` addresses it
+   structurally — which is an argument *for* the change and part of why
+   the benchmark should be run rather than the question left open.
+5. **Startup-error semantics would change.** §4.5: today a missing or
+   unlaunchable launcher is detected before the fork and a pre-exec
+   failure surfaces as the child's exit 127. With `posix_spawn` it
+   surfaces as an exception in the parent. That is arguably better, but
+   it is a different contract, and the tests that distinguish "launcher
+   missing" from "launcher failed" would need re-reading.
+
+**No rlimit cost exists** and it is not part of this list — the launcher
+raises its own `RLIMIT_NOFILE` before `dlopen` (§4.3).
+
+**This work order produced no defect in this area.** The one finding it
+initially reported here, F3, was a false positive and has been withdrawn
+(§6).
 
 **What should happen next**, as a separate, explicitly-scoped work order:
 run the §5 benchmark against a prototype; report launch latency at 0/256
-MB/1 GB/2 GB/5 GB; and only then decide. If the win is real, §4.1 and §4.3
-are the design work, and they are worth doing deliberately.
+MB/1 GB/2 GB/5 GB; and only then decide. If the win is real, §4.1's
+descriptor inventory is the design work, and it is worth doing
+deliberately.
 
 **Unchanged and explicitly out of scope:** the engine, the ring, the
 supervision models, and the existing cleanroom eligibility envelope. None
