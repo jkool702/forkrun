@@ -27,6 +27,17 @@ two are unverified structural claims that need mapping before anyone acts.
 
 ## Register
 
+Findings prefixed `F-` (the parity audit's ids, e.g. `F6`, `F7`) are **not**
+`TD-` entries and are tracked in `dev/supervisor/BASH_PY_PARITY_AUDIT.md`,
+with their analysis in `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md`. They
+are summarised here only so a reader of this register is not misled into
+thinking they are untracked:
+
+| id | one-line status |
+|---|---|
+| F6 | `posix_spawn` **performance gate MET** (−89% to −96% at 1–5 GiB parent RSS); **production backend NOT adopted**; **descriptor-equivalence gate OUTSTANDING** — that is the blocker |
+| F7 | Wholesale environment inheritance **MEASURED** (all 112 parent vars cross; a malformed `PYTHONHASHSEED` kills the cleanroom child at interpreter init);**desired contract UNDECIDED** — needs a compatibility decision, not more evidence. |
+
 | id | entry | pri | status |
 |---|---|---|---|
 | TD-01 | Record protocol defined in three independent places | high | **verified** |
@@ -42,7 +53,7 @@ two are unverified structural claims that need mapping before anyone acts.
 | TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
 | TD-09b | plain **streaming** path left scalar `poisoned` at 0 | high | **verified — FIXED** (two per-executor defects, both mutation-proven; found by WO-PY-REL-1, re-confirmed in the parity audit) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
-| TD-13 | streaming parent retains ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN** (found by WO-PY-REL-1) |
+| TD-13 | streaming **peak** retention ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN, re-diagnosed**: peak is a backpressure-free in-flight window, **NOT a Python-object leak** (post-drain `tracemalloc` ~27 KB, 0 live record objects). Real fix is engine-scope (frozen files). |
 | TD-14 | `test_spawn_ordered` compared map/stream element-wise | low | **RECLASSIFIED — invalid test expectation, not a product defect** (WO-PY-REL-1 follow-up) |
 
 ---
@@ -730,76 +741,101 @@ a single run; no such run was attempted.
 
 ---
 
-### TD-13 — streaming parent retains ~0.5x OUTPUT bytes (high) — OPEN
+### TD-13 — streaming peak retention ~0.5x OUTPUT bytes (high) — OPEN, re-diagnosed
 
-**Found by WO-PY-REL-1 while fixing the memory test's measurement, not by
-looking for it.** Measured, not inferred.
+**Re-investigated against current source (`357da3d9`..HEAD).** The
+0.50x figure REPRODUCES, but the entry above mis-framed it, and the
+mechanism question it explicitly left open is now answered.
 
-`python/tests/test_streaming.py::test_slow_consumer_bounds_memory` claimed
-to verify that "streaming holds only the in-flight window" and that the
-parent does not grow with output size. Replacing its invalid `ru_maxrss`
-measurement with a valid one (current RSS, sampled during consumption, in
-an isolated process) shows the claim is **false as written**.
+**Reproduce** (isolated probe, current-RSS sampling inside the consumer
+loop, consumer discards every yielded record):
 
-Measured retention as a fraction of total output bytes, stable across a
-4x range of output size:
+```
+python3 python/tests/_streaming_rss_probe.py --amp 5 --lines 400000 --delay 0.001
+```
 
-| output | streaming | collect-all |
+| output | peak growth | ratio |
 |---|---|---|
-| 47 MB  | 0.52x | 1.24x |
-| 95 MB  | 0.50x | 1.21x |
-| 190 MB | 0.50x | 1.00x |
-| 380 MB | 0.50x | 1.00x |
+| 23.4 MB | 11.6 MB | 0.519 |
+| 47.4 MB | 22.3 MB | 0.493 |
+| 94.9 MB | 43.0 MB | 0.476 |
 
-The streaming ratio is a constant **0.50**, not a constant number of
-bytes. So retention scales with output; streaming is roughly half the cost
-of naive collection and no better than that. The original test could not
-have detected this, for two independent reasons:
+So the core claim **stands**: retention scales with total output rather
+than holding to a constant byte budget, and streaming is NOT
+output-size independent. A four-fold output range gives a constant ratio,
+not a constant number.
 
-1. it measured a process PEAK delta (see the flake entry), and
-2. its 60 MB bound sat **above** the measured collect-all figure for the
-   same workload (58.9 MB), so even a perfect measurement could not have
-   separated streaming from accumulation.
+**What is now established that was not before.** The original entry said
+the probe "cannot by itself separate" live retained objects, drain
+buffering, and unreturned pages. It now can, by adding `tracemalloc`, a
+live-object census, `gc.collect()`, and `/proc/self/smaps_rollup`:
 
-Reproduce: `python3 python/tests/_streaming_rss_probe.py --amp 20` and
-again with `--collect`.
+| quantity | at 98.4 MB output |
+|---|---|
+| peak RSS growth | 48.7 MB (ratio 0.50) |
+| **`tracemalloc` live after full drain** | **~27 KB** |
+| **live bytes/bytearray/memoryview after drain** | **0** |
+| RSS growth after drain, pre- and post-`gc.collect()` | unchanged |
 
-**Not fixed here.** Closing it is an engine/ingest-window question, and the
-frozen-engine constraint applies to part of it. What WO-PY-REL-1 did fix
-is the measurement, and the replacement test now asserts the property that
-is actually true and actually regressible — streaming retains materially
-less than collect-all — instead of an output-independence claim that no
-measurement supported.
+**There is no Python-object leak.** After a complete drain, Python holds
+~27 KB and zero record objects, against a ~49 MB peak. The peak is
+transient in-flight data, not retained output.
 
-**Does not establish:** the MECHANISM behind the 0.50 ratio. The probe
-measures peak observed RSS growth, which cannot by itself separate
+**Mechanism, source-localized.** `_drain_worker_memfd_terminal()`
+(`run.py`) reads *all* new bytes from a worker's output memfd in one
+`os.pread`, parses them into a Python list, and `_drain_records()` yields
+from that list. The list stays alive for the whole yield loop, so peak
+retention is one read's worth of output. Because the workers write into
+**memfds with no backpressure**, a slow consumer lets them run arbitrarily
+far ahead, and the in-flight window is bounded only by how much has been
+produced since the last read — i.e. by output size, not by a window.
+Measured directly: the ratio rises with consumer slowness
+(0.409 at `--delay 0`, 0.519 at 1 ms, 0.561 at 10 ms).
 
-  * live retained output objects still held by the parent,
-  * drain/reassembly buffering, and
-  * pages the allocator has not returned to the OS after objects are freed
+`order="index"` is worse and by design: at the same 47.4 MB output its
+peak ratio is **1.20** versus 0.495 for `order="none"`, because the
+reassembly buffer holds out-of-order records behind a hole.
 
-— three very different situations that all look like "RSS went up", and
-only the first is a correctness-shaped problem. A half-output figure is
-equally consistent with a bounded window that happens to be about half
-this corpus, with genuine accumulation, and with a sampling artifact at
-the moment of peak drain.
+**Post-drain RSS is allocator behaviour, not retention.** Across runs the
+final RSS after a complete drain was either baseline + ~45 MB or baseline
++ ~0.3 MB, with identical `tracemalloc` (27 KB) and zero live objects in
+both. Freed glibc arenas are sometimes returned and sometimes not. **An RSS
+reading after the run is therefore not evidence of a leak**, which is
+precisely why this diagnosis used `tracemalloc` and an object census.
 
-**What the next investigation must do** (per external review, and agreed):
+**Contract check (D3).** `stream()`'s public docstring and
+`PYTHON_BEHAVIOR.md` promise **no** output-size independence and no
+bounded-memory guarantee; the only "bounded" claim is the out-of-order
+reassembly buffer, and even that is *warned* at a threshold rather than
+capped (`_reassembly.py`; its own warning text says a poisoned/skipped
+head "buffers the whole tail by design"). **The repo contains no unmet
+public promise here.** The old test's claim ("holds only the in-flight
+window") was a claim in the *test*, not in the API — already corrected.
 
-1. reproduce the scaling at MULTIPLE output sizes and fit the curve,
-   rather than quoting a single ratio;
-2. separate the observed RSS curve from any claim about live retained
-   payload bytes — e.g. by also reporting what the consumer itself holds,
-   so parent RSS can be decomposed rather than asserted about;
-3. only then decide whether a narrow correction is possible without
-   redesigning the frozen C engine.
+**Not fixed here, and why (D4).** The only real fix is backpressure
+between workers and the parent — an **engine** change in frozen files.
+A parent-side alternative (read a bounded amount per round) would lower
+measured parent RSS while leaving the same bytes resident in the memfd:
+metric movement, not improvement, and exactly what this register warns
+against. No speculative memory-management change was made.
 
-If the mechanism cannot be established safely, leave this OPEN and report
-the evidence. **Do not tune the test back to the old 60 MB bound** — the
-value of this finding is precisely that the test finally measures
-something, and a bound chosen to make it pass destroys that.
+**Follow-up proposal** (separate work order, engine scope): either add a
+per-worker output high-water mark that blocks the worker, or reduce worker
+read-ahead so a bounded window is real. Either needs a correctness review
+of poison/retry interaction — a worker blocked on output can no longer be
+reaped promptly.
+
+**Reproduce the leak/leakage discrimination:**
+`/tmp/opencode/td13_probe.py` logic, i.e. a stream drained to exhaustion
+with `tracemalloc.start()` before and `tracemalloc.get_traced_memory()`
+plus `gc.get_objects()` census after.
+
+**Does not establish:** anything about the cleanroom launcher path (the
+probe exercises the in-process generator executors only); and whether the
+0.50 ratio is stable across machines or allocator versions.
 
 ---
+
 
 ### TD-14 — `test_spawn_ordered` compared two paths element-wise (low) — RECLASSIFIED
 
