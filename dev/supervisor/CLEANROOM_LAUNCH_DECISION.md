@@ -56,15 +56,57 @@ itself.** Its own delivery plan (§"Delivery plan") is:
 > 4. Re-run the isolated benchmark with the launcher on and off, so the
 >    delta is published rather than hidden.
 
-Step 2 asks for a *measurement* to gate step 3. No such PoC, measurement,
-or recorded decision exists in the tree, and `tools/gen_idl.py`-style
-evidence of a reverted experiment does not exist either.
+Step 2 asks for a *measurement* to gate step 3.
 
-**Classification: unresolved architectural question — a design item whose
-own gate was never evaluated.** Not a correctness defect, and not a
-contract the shipped code promised and broke. Recording it as "the
-implementation ignored the design" would be wrong; recording it as "no
-action needed" would leave the design permanently misleading.
+**That measurement now exists** — `tools/bench_cleanroom_launch.c` (see §1.1a).
+Result: the fork tax `posix_spawn` would save is **≈0.2 ms per launch, with
+an inconsistent sign**, against a ~2.9 ms baseline launch cost. **Step 2's
+own gate is therefore not met**, so step 3 (full integration behind the
+flag) is not justified by this number.
+
+**Classification: an architectural question whose gate was evaluated and
+NOT met.** Not a correctness defect, and not a contract the shipped code
+promised and broke. `posix_spawn` is **not adopted**; `os.fork()` +
+`os.execv()` stays. Recording this as "the implementation ignored the
+design" would be wrong, and so would recording it as "no action needed" —
+the gate ran and returned a negative.
+
+### 1.1a Step-2 measurement — `posix_spawn` vs `fork`+`exec`
+
+Harness: `tools/bench_cleanroom_launch.c`, measurement only, no production
+path touched. It drives the **real** `_forkrun_cleanroom` binary with the
+launcher's existing `--fork-only` mode, alternating the two launch
+mechanisms within each iteration (interleaved A/B, so drift hits both arms),
+discarding 3 warmups, reporting min/median/mean/p95/max.
+
+| workers | n | fork+exec (ms) | posix_spawn (ms) | delta |
+|---|---|---|---|---|
+| 1 | 120 | 2.943 | 2.758 | **−0.186 (−6.3%)** |
+| 2 | 120 | 2.960 | 2.817 | **−0.143 (−4.8%)** |
+| 4 | 40 | 3.048 | 2.881 | **−0.167 (−5.5%)** |
+| 8 | 40 | 3.000 | 3.037 | **+0.037 (+1.2%)** |
+
+The launcher's own `fork_ms` stayed 0.17–0.57 ms across these runs, which is
+~10x SMALLER than the ~2.9 ms whole-launch cost, and is common to both arms
+by construction — it is the worker-fork tax, not the launch-mechanism tax.
+
+**Reading.** The two arms are separated by at most ~0.2 ms, and **the sign
+is not stable** (+1.2% at 8 workers, −5.5% at 4 with the same binary). That
+is noise around zero, not a saving. Even taking the most favourable reading
+(−6.3%), it is ~0.19 ms against a 2.9 ms baseline — roughly **6% of one
+launch, amortised over every batch in the run**.
+
+**What this does NOT establish:** correctness of `posix_spawn` on the route,
+anything about supervision/poison/retry, or end-to-end run time for a real
+workload. The harness measures process creation only. A future decision
+that cares about correctness rather than launch cost would need a different
+experiment; this one answers only the question step 2 actually asked.
+
+**Honest limitation of the harness:** occasional launcher hangs were observed
+at high iteration counts under load, bounded by a 10 s per-launch timeout and
+reported as exit 124 rather than blocking. Samples were re-taken at lower
+`n` for the affected worker counts. A future version should report the
+timeout count as a first-class number instead of a single "NOTE" line.
 
 ### 1.2 The design text's mechanism claim is CORRECT — a correction withdrawn
 
