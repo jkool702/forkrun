@@ -232,6 +232,53 @@ matter of taste. Clearing the environment is not the obvious fix: a
 cleanroom plugin/spawn behaviour before any contract is chosen. See the
 decision report §7.
 
+#### MEASURED (environment-boundary audit) — F7 is confirmed, not inferred
+
+The comparison the entry above asked for has now been run, with a purpose-
+built probe plugin that reports the child's environment back through its own
+output. It counts **every** variable rather than filtering by prefix, so a
+probe-side filter cannot manufacture a "scrubbed" result.
+
+| route | child env count | parent count | crosses wholesale? |
+|---|---|---|---|
+| `FORKRUN_CLEANROOM=0` (in-process) | 112 | 112 | n/a (same process) |
+| `FORKRUN_CLEANROOM=map-plugin` (exec'd launcher) | **113** | 112 | **yes — all 112, plus `FRK_POISON_FD`** |
+| `FORKRUN_CLEANROOM=map-spawn` | 112 | 112 | **yes — all 112** |
+
+Present in the cleanroom child and confirmed reachable by payload user code:
+`MARKER_FORKRUN_ENVPROBE`, `AWS_SECRET_ACCESS_KEY`, `LD_MARKER_INJECTED`,
+`PYTHONHASHSEED`. Nothing is dropped. The +1 on `map-plugin` is the
+`setenv("FRK_POISON_FD", ...)` at `forkrun_cleanroom.c:2017`; `map-spawn`
+does not carry it, which is itself worth noting but is not a scrubbing
+effect.
+
+**One concrete failure, not just a contract mismatch:** a *malformed*
+`PYTHONHASHSEED` in the parent kills the cleanroom child at interpreter
+init, before a single batch is read:
+
+```
+$ PYTHONHASHSEED=py-side FORKRUN_CLEANROOM=map-plugin ... map(...)
+Fatal Python error: config_init_hash_seed: PYTHONHASHSEED must be
+"random" or an integer in range [0; 4294967295]
+```
+
+So wholesale inheritance is already an **availability** exposure, not only a
+disclosure one: a value the user never meant as a forkrun setting can decide
+whether the cleanroom route runs at all.
+
+**The FD half of that same contract paragraph IS implemented** — `_fd_scrub.scrub_fds` is called on the child paths, and the design's descriptor claims hold. The divergence is **specific to the environment**, which narrows the fix and the review surface considerably.
+
+**Correction to my own first probe.** An initial run appeared to show the
+cleanroom child seeing only three variables, which would have meant the
+launcher scrubs. That was an artifact: the marker variables had not actually
+been exported into that process's environment. Re-run with the markers
+genuinely set, the child sees all 112. **Recorded because the wrong reading
+was plausible, cheap to reach, and would have closed F7 on a setup bug.**
+
+**Still not established:** what a `mode="spawn"` payload or UDF module
+legitimately *needs*. The contract stays OPEN — this measurement establishes
+what happens, not what should.
+
 ## 7. Source-of-truth and duplication
 
 ### F4 — FIXED: `DOCS_ALL.md`

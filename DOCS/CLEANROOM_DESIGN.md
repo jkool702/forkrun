@@ -160,6 +160,18 @@ because the forking process is single-threaded and purpose-built.
 
 ## Configuration contract
 
+> **STATUS — partly aspirational.** The *descriptor* half of this contract
+> is implemented (`_fd_scrub.scrub_fds` runs on the child paths). The
+> *environment* half is **NOT implemented**: both Python launch sites call
+> `os.execv()`, which inherits `environ` wholesale. Measured: a parent with
+> 112 variables yields a cleanroom child with all 112 (113 on
+> `map-plugin`, which adds `FRK_POISON_FD`). A malformed inherited
+> `PYTHONHASHSEED` kills the cleanroom child at interpreter init. Tracked
+> as **F7** in `dev/supervisor/BASH_PY_PARITY_AUDIT.md`, which remains
+> OPEN — clearing the environment outright would break `mode="spawn"`
+> payloads needing `PATH` and UDF modules needing `PYTHONPATH`, so the
+> contract still needs a deliberate decision, not a patch.
+
 The launcher must not inherit the parent's environment wholesale.
 Explicitly passed:
 
