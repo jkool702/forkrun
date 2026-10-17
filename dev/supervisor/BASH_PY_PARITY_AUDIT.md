@@ -35,7 +35,7 @@ which is the pattern this audit follows.
 | F3 | Descriptor limit | Claimed the launcher lacked the hard `ulimit -n` | **FALSE POSITIVE — withdrawn**; the C launcher has always raised it |
 | F4 | Docs | `DOCS_ALL.md` drifted ~130 lines with a heading-only check passing | **Documentation drift — FIXED** |
 | F5 | Docs | Root README version, 4-of-5 mode lists, stale v0.5 module docstring, trap-ACK comments, NUMA test claims | **Documentation drift — FIXED** |
-| F6 | Cleanroom launch | Design proposes `posix_spawn`; implementation uses `fork()+execv()` | **Unresolved — decision report, no change** |
+| F6 | Cleanroom launch | Design proposes `posix_spawn`; implementation uses `fork()+execv()` | **MEASURED, performance gate MET; production backend NOT adopted; descriptor-equivalence gate OUTSTANDING** |
 | F7 | Cleanroom env | `CLEANROOM_DESIGN.md` says the launcher "must not inherit the parent's environment wholesale"; `os.execv()` inherits it | **OPEN — a stated contract that is not met** |
 | F8 | Cleanroom stream | Unreachable iterable producer with live control flow | **Confirmed defect — FIXED** |
 | F9 | Trap-ACK grace | Presented as the recovery mechanism; armed only on legacy substrates | **Documentation drift — FIXED** |
@@ -198,14 +198,45 @@ A second, independent reason the change was wrong: the helper did
 precisely the pre-exec activity worth minimising when forking from a
 possibly-multithreaded host.
 
-### F6 — unresolved: `posix_spawn`
+### F6 — MEASURED (performance gate met); backend still not adopted
 
-Design proposes it; implementation uses `fork()+execv()`. The design's
-own delivery plan gates integration on a **measured PoC that does not
-exist in the tree**. Full analysis and recommendation in
-`CLEANROOM_LAUNCH_DECISION.md`. No code changed.
+Design proposes `posix_spawn`; production uses `fork()+execv()` and
+**still does**. No code changed.
 
-### F7 — OPEN: the environment contract is stated and not met
+**Status, stated in the same four parts everywhere it appears:**
+
+| part | state |
+|---|---|
+| production backend adopted? | **NO** — `fork()`+`execv()` remains |
+| small-parent measurement | **done, and superseded** (see below) |
+| parent-RSS sweep | **done** — 0/256 MiB/1/2/5 GiB, RSS verified 100% resident |
+| performance gate (§5 condition 1) | **MET** — −89% to −96% launch latency at 1-5 GiB |
+| descriptor-equivalence gate (§5 condition 2) | **OUTSTANDING — this is the blocker** |
+
+**The measurement, briefly.** `tools/bench_cleanroom_launch.c` drives the
+real launcher in `--fork-only` mode, interleaved A/B, ballast allocated as
+resident (touched) memory and RSS verified from `/proc/self/statm`:
+`fork()+execv()` goes 2.6 ms (0 ballast) → 9.2 ms (256 MiB) → 37.2 ms
+(1 GiB) → 60.7 ms (2 GiB) → 119.5 ms (5 GiB), while `posix_spawn` stays
+flat at 2.4–4.5 ms. So the design's rationale is empirically confirmed:
+the `fork()` cost scales with the parent's memory and `posix_spawn` does
+not pay it. Full table, controls, and limits in `CLEANROOM_LAUNCH_DECISION.md`
+§1.1a.
+
+**Do not read "gate met" as "adopt".** §5's decision rule has two
+conditions. The second — proving a `posix_spawn` descriptor allowlist is
+equivalent to today's inherited set — has not been attempted. That is
+design work, and it is what now gates integration.
+
+**Correction to this audit's own earlier entry.** A previous revision said
+the gate "does not exist in the tree" and an intermediate one recorded the
+gate as **not met** on small-parent data only. Both are superseded. §5
+warned in advance that "a sweep at low ballast will report 'no difference'
+and is worthless for this decision" — the small-parent sweep hit exactly
+that, and the warning was right. The measurement was never wrong; its scope
+was, and it was over-read.
+
+### F7 — OPEN: the environment contract is stated and not met (exposure MEASURED; contract UNDECIDED)
 
 `CLEANROOM_DESIGN.md` §"Configuration contract" states:
 
@@ -360,10 +391,11 @@ duplication.**
 F1 (lifecycle/recovery — already converged), F11 (exit-code census),
 F12 (resume consent), F13 (realtime `-u`).
 
-### Needs a separate, measurement-first decision
+### Needs a separate, design-first decision
 
-F6 (`posix_spawn`). Benchmark protocol specified in advance; see the
-decision report.
+F6 (`posix_spawn`). The measurement is **done** and met its half of the
+gate; what remains is descriptor-set equivalence, which is design work.
+See the decision report §8.
 
 ---
 
@@ -377,8 +409,10 @@ decision report.
   path keep a dedicated reassembly implementation; forcing it through the
   C orderer would be uniformity for its own sake, and the C interface
   needed to emit splice order packets is not established.
-* **No `posix_spawn` implementation** (F6) and no environment redesign
-  (F7) — both need the decision report's evidence first.
+* **No `posix_spawn` implementation** (F6) — its performance evidence now
+  exists and is positive, but the descriptor-equivalence gate is open and
+  no integration was authorised — and no environment redesign (F7), which
+  needs a separate compatibility decision, not evidence.
 * **No engine or substrate change.** Frozen files untouched throughout.
 
 ## 10. What this audit does NOT establish

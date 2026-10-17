@@ -70,11 +70,17 @@ launcher should do too.
        +<-- results on result fd
 ```
 
-**SUPERSEDED PROPOSAL — see `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md`.**
-This is a proposal, not the shipped design. Both Python launch sites use
-`os.fork()` + `os.execv()`. The delivery plan below gated integration on
-a measured PoC that does not exist in the tree. The decision report
-recommends measuring first.
+**PROPOSAL, NOT THE SHIPPED DESIGN — see
+`dev/supervisor/CLEANROOM_LAUNCH_DECISION.md`.**
+Both Python launch sites use `os.fork()` + `os.execv()`. **Production still
+does, and nothing in the tree switches it.** A measurement now exists: a
+launch-cost benchmark comparing the two mechanisms across parent resident
+memory from 0 MiB to 5 GiB (§1.1a of the decision report). At 1 GiB and
+above, `posix_spawn` launched in ~4 ms against 37-120 ms for
+`fork()`+`execv()` — a large win, because the `fork()` cost grows roughly
+linearly with the parent's memory. **No `posix_spawn` backend has been
+implemented or validated**, and the remaining gate is descriptor-set
+equivalence, not performance.
 
 **The mechanism described here is CORRECT and needed no correction.**
 glibc implements `posix_spawn` with the `clone` syscall using
@@ -229,13 +235,24 @@ what the engine sets itself, and every unrelated descriptor (the parent
 
 ## Delivery plan
 
-1. Design (this file).
-2. Launcher PoC: `posix_spawn` + `dlopen` + `fr_py_init` + fork N
-   workers, with the fork tax **measured**. That number decides whether
-   the full integration is worth its risk. **NOT DONE.** No PoC,
-   measurement or recorded decision exists in the tree. The launch
-   currently uses `fork()`+`execv()`. See
-   `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md`.
-3. Full integration behind the flag only if the PoC pays.
-4. Re-run the isolated benchmark with the launcher on and off, so the
-   delta is published rather than hidden.
+1. Design (this file). **Done.**
+2. Measure the fork tax of a `posix_spawn` launcher against the shipped
+   `fork()`+`execv()`, with **parent resident memory as the independent
+   variable** (0 / 256 MiB / 1 / 2 / 5 GiB).
+   **MEASURED** — `tools/bench_cleanroom_launch.c`, results in
+   `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md` §1.1a. The saving is
+   large and grows with parent RSS: **−68% at 256 MiB, −89% at 1 GiB,
+   −94% at 2 GiB, −96% at 5 GiB**; `posix_spawn` stays flat at ~2.4-4.5 ms
+   while `fork()`+`execv()` costs ~23-35 ms per GiB. Production launch is
+   unchanged.
+3. Design and prove a `posix_spawn` **descriptor allowlist** (§4.1 of the
+   decision report): which job descriptors must stay inheritable, and
+   what proves equivalence against `fork()`+`execv()` on every served
+   route. **NOT DONE — this is now the blocking item**, because
+   `posix_spawn` gives the child the parent's descriptors modified by file
+   actions; it does not hand you an allowlist.
+4. Full integration behind a flag only once 3 is proved. **NOT DONE, and
+   not authorised by the work order that produced these numbers.**
+5. Re-run the isolated benchmark with the launcher on and off, so the
+   delta is published rather than inferred. **NOT DONE** — the current
+   numbers are process-creation latency, not end-to-end workload time.

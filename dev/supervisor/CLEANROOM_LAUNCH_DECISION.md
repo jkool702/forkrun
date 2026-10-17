@@ -58,55 +58,119 @@ itself.** Its own delivery plan (§"Delivery plan") is:
 
 Step 2 asks for a *measurement* to gate step 3.
 
-**That measurement now exists** — `tools/bench_cleanroom_launch.c` (see §1.1a).
-Result: the fork tax `posix_spawn` would save is **≈0.2 ms per launch, with
-an inconsistent sign**, against a ~2.9 ms baseline launch cost. **Step 2's
-own gate is therefore not met**, so step 3 (full integration behind the
-flag) is not justified by this number.
+**That measurement now exists** — `tools/bench_cleanroom_launch.c`, run
+across the full §5 parent-RSS sweep. **Result: the performance half of the
+gate is met decisively.** At 1 GiB+ parent RSS `posix_spawn` launches in
+~4 ms where `fork()`+`execv()` takes 37–120 ms: a **−89% to −96%** launch
+latency reduction, and the saving grows with parent memory because the
+`fork()` cost does.
 
-**Classification: an architectural question whose gate was evaluated and
-NOT met.** Not a correctness defect, and not a contract the shipped code
-promised and broke. `posix_spawn` is **not adopted**; `os.fork()` +
-`os.execv()` stays. Recording this as "the implementation ignored the
-design" would be wrong, and so would recording it as "no action needed" —
-the gate ran and returned a negative.
+**The gate is nonetheless still closed**, because §5's decision rule has
+**two** conditions and only the first has been evaluated. The second —
+"the descriptor-enumeration change (§4.1) can be made provably
+equivalent" — has not been attempted. Integration remains gated behind a
+bounded follow-up, not behind another measurement.
 
-### 1.1a Step-2 measurement — `posix_spawn` vs `fork`+`exec`
+**Classification: an architectural question whose PERFORMANCE gate is met
+and whose EQUIVALENCE gate is untouched.** Not a correctness defect, and
+not a contract the shipped code promised and broke. `posix_spawn` is
+**still not adopted**; `os.fork()` + `os.execv()` remains in production,
+and this work order does not change that.
+
+> **Correction to this report's own earlier conclusion.** A previous
+> revision (§1.1a, commit `5b8b5088`) concluded the gate was **not met**
+> on the basis of a **small-parent-RSS-only** sweep showing ~0.2 ms and an
+> unstable sign. **That conclusion was premature and is superseded.** §5
+> explicitly warned that "a sweep at low ballast will report 'no
+> difference' and is worthless for this decision" — which is precisely
+> what happened, and the warning was correct. The measurement was sound;
+> its scope was not. Nothing in the earlier data was wrong; it was simply
+> measuring the wrong regime, and it was over-read as a decision.
+
+### 1.1a Step-2 measurement — `posix_spawn` vs `fork`+`exec` (parent-RSS sweep)
 
 Harness: `tools/bench_cleanroom_launch.c`, measurement only, no production
-path touched. It drives the **real** `_forkrun_cleanroom` binary with the
-launcher's existing `--fork-only` mode, alternating the two launch
-mechanisms within each iteration (interleaved A/B, so drift hits both arms),
-discarding 3 warmups, reporting min/median/mean/p95/max.
+path touched. It drives the **real** `_forkrun_cleanroom` binary in its
+existing `--fork-only` mode, alternating the two launch mechanisms **within
+each iteration** (interleaved A/B, so machine drift hits both arms),
+discarding 3 warmups. Both arms get identical launcher argv, same binary,
+same substrate, same plugin, same worker count.
 
-| workers | n | fork+exec (ms) | posix_spawn (ms) | delta |
-|---|---|---|---|---|
-| 1 | 120 | 2.943 | 2.758 | **−0.186 (−6.3%)** |
-| 2 | 120 | 2.960 | 2.817 | **−0.143 (−4.8%)** |
-| 4 | 40 | 3.048 | 2.881 | **−0.167 (−5.5%)** |
-| 8 | 40 | 3.000 | 3.037 | **+0.037 (+1.2%)** |
+**Ballast is RESIDENT, not virtual.** Each level is allocated with
+`mmap(MAP_ANONYMOUS|MAP_NORESERVE)` and then written **one byte per page**
+so every page is actually faulted in, and the resulting RSS is read back
+from `/proc/self/statm` and printed. A virtual-only allocation would have
+produced a flat, meaningless curve.
 
-The launcher's own `fork_ms` stayed 0.17–0.57 ms across these runs, which is
-~10x SMALLER than the ~2.9 ms whole-launch cost, and is common to both arms
-by construction — it is the worker-fork tax, not the launch-mechanism tax.
+Command (one per level; `--ballast-mb` is the only thing that changes):
 
-**Reading.** The two arms are separated by at most ~0.2 ms, and **the sign
-is not stable** (+1.2% at 8 workers, −5.5% at 4 with the same binary). That
-is noise around zero, not a saving. Even taking the most favourable reading
-(−6.3%), it is ~0.19 ms against a 2.9 ms baseline — roughly **6% of one
-launch, amortised over every batch in the run**.
+```
+cc -O2 -o /tmp/bench tools/bench_cleanroom_launch.c
+/tmp/bench python/forkrun/_forkrun_cleanroom \
+          python/forkrun/libforkrun_python.so \
+          <plugin.so> <func> 4 40 --ballast-mb <LEVEL>
+```
 
-**What this does NOT establish:** correctness of `posix_spawn` on the route,
-anything about supervision/poison/retry, or end-to-end run time for a real
-workload. The harness measures process creation only. A future decision
-that cares about correctness rather than launch cost would need a different
-experiment; this one answers only the question step 2 actually asked.
+**Results** (i9-7940X @ 3.10 GHz, 28 threads, 128 GiB RAM,
+Linux 7.1.13-200.fc44.x86_64, glibc 2.43, gcc 16.2.1; workers=4;
+n=40 paired observations per arm per level; **0 failed, 0 timeouts,
+0 guard failures at every level**):
 
-**Honest limitation of the harness:** occasional launcher hangs were observed
-at high iteration counts under load, bounded by a 10 s per-launch timeout and
-reported as exit 124 rather than blocking. Samples were re-taken at lower
-`n` for the affected worker counts. A future version should report the
-timeout count as a first-class number instead of a single "NOTE" line.
+| parent ballast | RSS verified | fork+exec median | posix_spawn median | delta median | delta |
+|---|---|---|---|---|---|
+| 0 MiB | 1.3 MiB (no ballast) | 2.629 ms | 2.423 ms | **−0.202 ms** | **−7.7%** |
+| 256 MiB | 256.0 / 256.0 MiB (100%) | 9.230 ms | 2.928 ms | **−6.341 ms** | **−68.4%** |
+| 1 GiB | 1024.0 / 1024.0 MiB (100%) | 37.155 ms | 3.993 ms | **−33.178 ms** | **−89.3%** |
+| 2 GiB | 2048.0 / 2048.0 MiB (100%) | 60.659 ms | 3.864 ms | **−56.843 ms** | **−93.6%** |
+| 5 GiB | 5120.0 / 5120.0 MiB (100%) | 119.536 ms | 4.547 ms | **−114.980 ms** | **−96.1%** |
+
+Spread (p95−min) at 5 GiB was 10.0 ms for `fork()+execv()` and 2.3 ms for
+`posix_spawn`; the separation at every level ≥ 256 MiB is many times the
+spread, so this is not a noise reading. Full per-arm min/median/mean/p95/max
+and the failure/time-out counts are printed by the harness itself.
+
+**Reading.** The `fork()+execv()` launch cost grows roughly linearly with
+parent resident memory — about **23–35 ms per GiB** — while `posix_spawn`
+stays **flat at ~2.4–4.5 ms** across a 5 GiB range. That is the mechanism the
+design predicted: `fork()` must copy the parent's page tables and
+`posix_spawn` does not. The design's rationale is **empirically confirmed**.
+
+The `fork()+execv()` arm also shows a spread that grows with ballast
+(p95−min 0.9 ms at 0 MiB → 10.0 ms at 5 GiB), consistent with the cost
+being proportional to the amount of page table being copied.
+
+**Separation of concerns.** The launcher's own self-reported `fork_ms`
+(its *worker* fork tax, 0.17–0.57 ms) is common to both arms by
+construction and is printed separately. It is **not** part of the delta and
+is never merged with it.
+
+**Invalid-sample accounting:** none required. Every level reported
+`failed=0 timeout=0 guard_fail=0`. An exact-output guard rejects any launch
+that does not exit 0 *and* emit `CLEANROOM workers=N fork_ms=`, so a
+benchmark of the wrong program cannot silently enter the averages.
+
+**Host safety.** Levels were attempted only after checking
+`MemAvailable` from `/proc/meminfo`; the harness refuses a level that would
+eat into a 4 GiB floor and **reports the skip rather than substituting a
+smaller value under the requested label**. On this host (84 GiB available)
+all five levels were feasible and none was skipped.
+
+**What this does NOT establish:**
+- **Correctness** of `posix_spawn` on any served route. Nothing here says a
+  `posix_spawn` launcher would be functionally equivalent.
+- Anything about **supervision, poison, retry, respawn, or NUMA** behaviour.
+- **End-to-end workload performance.** This is process-creation latency
+  only. Whether ~35 ms/GiB matters for a real run depends entirely on how
+  many launches a workload performs — a workload that launches once and
+  processes for minutes will not notice.
+- **Descriptor-set equivalence** (§4.1), which is the remaining half of the
+  decision rule and is untouched by this measurement.
+
+**Evidentiary limit worth stating plainly:** the curve was taken on one
+machine, one kernel, one libc, one worker count. The *shape* (flat vs
+linear-in-RSS) is what the mechanism predicts and is unlikely to invert
+elsewhere, but the *coefficient* (~23–35 ms/GiB) is hardware- and
+kernel-specific and should not be quoted as a portable figure.
 
 ### 1.2 The design text's mechanism claim is CORRECT — a correction withdrawn
 
@@ -324,6 +388,14 @@ removed (§D.4), so both are now plain "dup these fds, exec".
 
 ## 5. Benchmark methodology (to be run BEFORE any implementation)
 
+> **STATUS: this protocol has now been run.** Results are in §1.1a. It is
+> kept here verbatim because §5 was fixed **in advance** of seeing the
+> numbers, and that is what makes the result worth something — in
+> particular the "parent RSS as the independent variable" clause and the
+> "a sweep at low ballast will report 'no difference' and is worthless
+> for this decision" warning, both of which an earlier partial sweep
+> ignored to its own cost.
+
 Per the work order, established now so a candidate is not judged by a
 method chosen to favour it.
 
@@ -448,38 +520,59 @@ launch until it is done.
 
 ## 8. Recommendation
 
-**Retain `fork()` + `execv()` for now. Do not implement `posix_spawn` in
-this work order.**
+**Retain `fork()` + `execv()` in production. Do not implement
+`posix_spawn` in this work order** — but note that the reason has changed,
+and the previous reason is now known to be wrong.
 
 Reasons, in order of weight:
 
-1. **The design's own gate was never evaluated.** Step 2 of its delivery
-   plan asked for a measured PoC whose result decides step 3. Running the
-   PoC is the correct next action, not adopting or rejecting the topology
-   by argument.
-2. **The concrete claim is unmeasured.** No performance statement should
-   be made from an unrun benchmark. §5's protocol — in particular the
-   parent-RSS sweep — must run first, or the result will be "no
-   difference" measured at the wrong ballast and the question will appear
-   settled.
-3. **A deliberate descriptor allowlist is work that has not been done.**
-   §4.1 (corrected): `posix_spawn` does *not* hand you an allowlist —
-   POSIX gives the child the parent's open descriptors modified by file
-   actions. Producing an intentional one means inventorying which job
-   descriptors must be inheritable and closing everything else with
-   `closefrom`/`close` actions. Miss one and the launcher degrades to a
-   fallback instead of failing loudly.
-4. **The threaded-parent hazard is real and unresolved.** §4.7:
-   `forkrun` is an importable library, and `fork()` from a caller's
-   threaded process is a documented hazard. `posix_spawn` addresses it
-   structurally — which is an argument *for* the change and part of why
-   the benchmark should be run rather than the question left open.
-5. **Startup-error semantics would change.** §4.5: today a missing or
-   unlaunchable launcher is detected before the fork and a pre-exec
-   failure surfaces as the child's exit 127. With `posix_spawn` it
-   surfaces as an exception in the parent. That is arguably better, but
-   it is a different contract, and the tests that distinguish "launcher
-   missing" from "launcher failed" would need re-reading.
+1. **The descriptor-equivalence half of the gate is untouched.** §5's
+   decision rule has two conditions. The performance condition is now met
+   emphatically (§1.1a: −89% to −96% launch latency at 1–5 GiB parent
+   RSS). The second — "the descriptor-enumeration change (§4.1) can be
+   made provably equivalent" — has not been attempted at all. §4.1
+   (corrected): `posix_spawn` does *not* hand you an allowlist — POSIX
+   gives the child the parent's open descriptors modified by file actions.
+   Producing an intentional one means inventorying which job descriptors
+   must be inheritable and closing everything else with `closefrom`/`close`
+   actions. Miss one and the launcher degrades to a fallback instead of
+   failing loudly. **That is the real remaining work, and it is design
+   work, not measurement.**
+2. **Startup-error semantics would change.** §4.5: today a missing or
+   unlaunchable launcher is detected before the fork and a pre-exec failure
+   surfaces as the child's exit 127. With `posix_spawn` it surfaces as an
+   exception in the parent. That is arguably better, but it is a different
+   contract, and the tests that distinguish "launcher missing" from
+   "launcher failed" would need re-reading.
+3. **The saving's absolute magnitude is workload-dependent.** §1.1a
+   measures ~23–35 ms saved per GiB of parent RSS *per launch*. For a
+   workload that launches once and then processes for minutes this is
+   noise; for one that launches per call it may dominate. No end-to-end
+   measurement was taken, so the size of the prize in a real run is
+   **unknown**.
+4. **The threaded-parent hazard is real, and is an argument *for* the
+   change.** §4.7: `forkrun` is an importable library and `fork()` from a
+   caller's threaded process is a documented hazard. `posix_spawn`
+   addresses it structurally. This does not enter the weighting as a
+   reason to defer — it is the strongest argument for eventually acting,
+   once 1 and 2 are done.
+
+**Correction to this report's own earlier recommendation.** A previous
+revision of §8 said "the design's own gate was never evaluated" and "the
+concrete claim is unmeasured". **Both statements are now false** and have
+been removed. An intermediate revision went further and concluded the gate
+was **not met** on small-parent data; that conclusion is also superseded —
+see the correction note in §1.1. **Do not read this document's history as
+showing a stable opinion: the performance question moved from unmeasured,
+to apparently answered, to correctly answered once the ballast sweep ran.**
+
+**What should happen next**, as a separate, explicitly-scoped work order:
+design and prove the §4.1 descriptor allowlist — which descriptors must be
+inheritable, how the close action is expressed for the job fds, and what
+proves equivalence against `fork()+execv()` on every served route. Then
+measure end-to-end workload time with the launcher on and off, so the delta
+is published rather than inferred. **Performance is no longer the blocker;
+descriptor equivalence is.**
 
 **No rlimit cost exists** and it is not part of this list — the launcher
 raises its own `RLIMIT_NOFILE` before `dlopen` (§4.3).
@@ -487,12 +580,6 @@ raises its own `RLIMIT_NOFILE` before `dlopen` (§4.3).
 **This work order produced no defect in this area.** The one finding it
 initially reported here, F3, was a false positive and has been withdrawn
 (§6).
-
-**What should happen next**, as a separate, explicitly-scoped work order:
-run the §5 benchmark against a prototype; report launch latency at 0/256
-MB/1 GB/2 GB/5 GB; and only then decide. If the win is real, §4.1's
-descriptor inventory is the design work, and it is worth doing
-deliberately.
 
 **Unchanged and explicitly out of scope:** the engine, the ring, the
 supervision models, and the existing cleanroom eligibility envelope. None

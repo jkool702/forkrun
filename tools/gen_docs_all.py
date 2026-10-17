@@ -25,6 +25,27 @@ CONTRACT
   behavioral notes, present only in the aggregate) and was moved to
   `PYTHON_BEHAVIOR.md` rather than dropped.
 
+WHICH DOCUMENTS BELONG IN THE AGGREGATE
+---------------------------------------
+Being a file under `DOCS/` does NOT put a document in the aggregate. The
+two sets are deliberately different and the difference is not an
+oversight:
+
+  * `DOCS/` — every markdown document in the directory. This is the full
+    set of design and reference material.
+  * `DOCS_ALL.md` — the CANONICAL RELEASE-DOCUMENT subset named in
+    `DOCUMENTS` below. It is the aggregate that ships in the release
+    artifact and is gated for freshness.
+
+`CLEANROOM_DESIGN.md` is a concrete example: it is a substantial document
+under `DOCS/` and is deliberately NOT aggregated, because its live status
+is carried by `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md`.
+
+Adding a document is a deliberate act: write the source, then add it to
+`DOCUMENTS` here, then regenerate. Do not add one merely because it exists
+under `DOCS/` — the list below is the contract, and an unreviewed addition
+changes a release-gated artifact.
+
 USAGE
 -----
     python3 tools/gen_docs_all.py            # write DOCS/DOCS_ALL.md
