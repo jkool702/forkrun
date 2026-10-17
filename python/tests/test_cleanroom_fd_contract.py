@@ -241,6 +241,33 @@ def build_materialized(with_trace=False, extra_inheritable=0,
     return build
 
 
+def build_high_fd(target=1500):
+    """A route whose stats descriptor sits HIGH (>=1024), above the old
+    observer's fixed 1024 scan ceiling.
+
+    The ceiling mattered: with it, a descriptor at fd 1500 was invisible
+    to the observer, so "both arms agree" was true while neither had
+    observed it. The observer now scans to 4096 and this test asserts the
+    descriptor is ACTUALLY SEEN, not merely that the arms matched.
+    """
+    def build():
+        f = {}
+        f["src_fd"] = os.open("/etc/hostname", os.O_RDONLY)
+        f["res_fd"] = os.memfd_create("fr_cleanroom_result")
+        # move stats high via dup2 onto a high, inheritable slot
+        low = os.memfd_create("fr_cleanroom_stats")
+        high = target
+        os.dup2(low, high)
+        os.set_inheritable(high, True)
+        os.close(low)
+        f["stats_fd"] = high
+        f["errfd"] = os.memfd_create("fr_cleanroom_err")
+        os.set_inheritable(f["src_fd"], True)
+        os.set_inheritable(f["res_fd"], True)
+        return f
+    return build
+
+
 def build_streaming(extra_inheritable=0):
     """Replication of `_execute_cleanroom_stream` (run.py:2236-2284).
 
@@ -400,6 +427,52 @@ class TestCleanroomFdContract(unittest.TestCase):
             self.assertTrue(r["identical"],
                             "fillers=%d broke equivalence: %s / %s"
                             % (fillers, r["only_fork"], r["only_spawn"]))
+
+    def test_high_numbered_descriptor_survives_in_both_arms(self):
+        """stats_fd deliberately placed at fd 1500, above the old 1024
+        observer ceiling. Asserted as SEEN, not merely matched -- otherwise
+        a scan limit could make this pass vacuously."""
+        r = _compare(build_high_fd(1500),
+                     dup2_err_fn=lambda f: f["errfd"],
+                     actions_fn=mat_actions)
+        self.assertIn("stats_fd", r["fork"].values(),
+                      "the high descriptor was not observed in the fork "
+                      "arm -- the observer cannot see it, so this test "
+                      "would be vacuous")
+        self.assertIn("stats_fd", r["spawn"].values(),
+                      "the high descriptor was not observed in the spawn "
+                      "arm")
+        self.assertEqual(r["fork"].get(1500), "stats_fd")
+        self.assertTrue(r["identical"])
+
+    def test_high_descriptor_absence_is_detected(self):
+        """Negative control for the case above: if the high descriptor
+        does NOT reach the child, the comparison must notice."""
+        def build_missing():
+            def b():
+                f = {}
+                f["src_fd"] = os.open("/etc/hostname", os.O_RDONLY)
+                f["res_fd"] = os.memfd_create("fr_cleanroom_result")
+                low = os.memfd_create("fr_cleanroom_stats")
+                high = 1600
+                os.dup2(low, high)
+                os.set_inheritable(high, False)   # deliberately NOT inheritable
+                os.close(low)
+                f["stats_high"] = high
+                f["errfd"] = os.memfd_create("fr_cleanroom_err")
+                os.set_inheritable(f["src_fd"], True)
+                os.set_inheritable(f["res_fd"], True)
+                return f
+            return b
+        text, snap = _capture(build_missing(), "fork",
+                              dup2_err_fn=lambda f: f["errfd"])
+        roles = _roles(_parse(text), snap)
+        self.assertNotIn("stats_high", roles.values(),
+                         "a non-inheritable high descriptor must not reach "
+                         "the child")
+        self.assertNotIn(1600, roles,
+                         "the observer must be able to SEE that fd 1600 is "
+                         "closed, not merely fail to report it")
 
     # -------------------------------------------------- negative controls
     def test_equivalence_detects_a_missing_dup2_action(self):

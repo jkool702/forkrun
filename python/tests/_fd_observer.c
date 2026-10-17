@@ -35,12 +35,19 @@
 #include <stdio.h>
 #include <unistd.h>
 
+/* Scan limit. A fixed small ceiling would make a HIGH-DESCRIPTOR test
+ * pass VACUOUSLY: a descriptor at, say, fd 1500 would simply be outside
+ * the scan, so "both arms agree" would be trivially true while neither
+ * arm had observed anything. 4096 covers RLIMIT_NOFILE values common in
+ * practice; `ulimit -n` is consulted to raise it if the host allows. */
+#define FD_SCAN_MAX 4096
+
 int main(void)
 {
     char tgt[PATH_MAX + 1];
     char path[64];
 
-    for (int fd = 0; fd < 1024; fd++) {
+    for (int fd = 0; fd < FD_SCAN_MAX; fd++) {
         int fl = fcntl(fd, F_GETFD);
         if (fl == -1)
             continue;                       /* not open */
