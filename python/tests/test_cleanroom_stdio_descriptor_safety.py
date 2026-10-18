@@ -193,44 +193,67 @@ class TestRelocationLeavesTheStandardStreamGap(unittest.TestCase):
             [2], "/tmp/fr-reloc-case-c.txt")
         self.assertGreater(moved, 2, "relocation returned %d" % moved)
 
+    def _park_on_fd1(self, src):
+        """Put `src` on fd 1 and RESTORE fd 1 when the test finishes.
+
+        These two tests have to exercise the relocation of a descriptor
+        that actually sits on fd 1, which means overwriting the test
+        runner's own stdout. Forgetting to put it back does not fail here:
+        it silently breaks every LATER test in the run that writes to
+        stdout, and the damage surfaces hundreds of tests away as
+        unrelated failures. (It did exactly that once already.)
+        """
+        saved = os.dup(1)
+        # Cleanups run LAST-IN-FIRST-OUT, so the close must be registered
+        # BEFORE the dup2: that makes dup2 run first, while `saved` is
+        # still valid.
+        self.addCleanup(os.close, saved)
+        self.addCleanup(os.dup2, saved, 1)
+        os.dup2(src, 1)
+
     def test_relocation_is_identity_preserving(self):
         """Whatever it returns must be the same open file, and stay open."""
         r, w = os.pipe()
-        try:
-            st = os.fstat(r)
-            os.dup2(r, 1)
-            moved = _RUN._fd_above_stdio(1)
-            self.assertGreater(moved, 2)
-            after = os.fstat(moved)
-            self.assertEqual((after.st_dev, after.st_ino),
-                             (st.st_dev, st.st_ino),
-                             "relocated descriptor points at a different file")
-            # The source descriptor must still be readable at the new number.
-            self.assertEqual(os.read(moved, 0), b"")
-            os.close(moved)
-        finally:
-            for fd in {r, w}:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        st = os.fstat(r)
+        self._park_on_fd1(r)
+        moved = _RUN._fd_above_stdio(1)
+        self.assertGreater(moved, 2)
+        self.addCleanup(os.close, moved)
+        after = os.fstat(moved)
+        self.assertEqual((after.st_dev, after.st_ino),
+                         (st.st_dev, st.st_ino),
+                         "relocated descriptor points at a different file")
+        # The source descriptor must still be readable at the new number.
+        self.assertEqual(os.read(moved, 0), b"")
 
     def test_relocation_preserves_inheritable_flag(self):
         r, w = os.pipe()
-        try:
-            os.set_inheritable(r, True)
-            os.dup2(r, 1)
-            moved = _RUN._fd_above_stdio(1)
-            self.assertTrue(os.get_inheritable(moved),
-                            "FD_CLOEXEC was not cleared on the relocated "
-                            "descriptor, so it would not cross exec")
-            os.close(moved)
-        finally:
-            for fd in {r, w}:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        os.set_inheritable(r, True)
+        self._park_on_fd1(r)
+        moved = _RUN._fd_above_stdio(1)
+        self.addCleanup(os.close, moved)
+        self.assertTrue(os.get_inheritable(moved),
+                        "FD_CLOEXEC was not cleared on the relocated "
+                        "descriptor, so it would not cross exec")
+
+    def test_stdout_is_still_usable_afterwards(self):
+        """The guard for the guard: this suite must not leak fd damage."""
+        before = os.fstat(1)
+        self._park_on_fd1(os.open("/dev/null", os.O_RDONLY))
+        after = os.fstat(1)
+        self.assertNotEqual(
+            (before.st_dev, before.st_ino), (after.st_dev, after.st_ino),
+            "sanity: fd 1 really was replaced during the test")
+        self.doCleanups()
+        restored = os.fstat(1)
+        self.assertEqual((restored.st_dev, restored.st_ino),
+                         (before.st_dev, before.st_ino),
+                         "fd 1 was not restored, so every later test that "
+                         "writes to stdout is broken")
 
     def test_already_high_descriptor_is_returned_unchanged(self):
         r, w = os.pipe()

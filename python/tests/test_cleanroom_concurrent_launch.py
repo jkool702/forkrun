@@ -179,6 +179,12 @@ class TestConcurrentMapLaunches(_ConcurrentBase):
             finally:
                 stop.set()
                 flip.join(timeout=30)
+                self.assertFalse(
+                    flip.is_alive(),
+                    "the flipper thread outlived the test; a stray live "
+                    "thread makes every LATER os.fork() in the suite emit "
+                    "the multi-threaded fork() DeprecationWarning and can "
+                    "deadlock a child")
             self.assertTrue(seen, "no launches completed")
             for count in seen:
                 self.assertEqual(count, 8)
