@@ -139,10 +139,11 @@ class TestConcurrentMapLaunches(_ConcurrentBase):
             self.assertIn("t%d-payload" % i, text)
             return len(out)
 
+        prev = _RUN._set_cleanroom_launch_backend(backend)
         try:
             return self._run_threads(fn, threads)
         finally:
-            _RUN._set_cleanroom_launch_backend("forkexec")
+            _RUN._set_cleanroom_launch_backend(prev)
 
     def test_concurrent_map_with_posix_spawn(self):
         self._one("posix_spawn")
@@ -153,7 +154,7 @@ class TestConcurrentMapLaunches(_ConcurrentBase):
     def test_concurrent_mixed_backend_selection_is_one_or_other(self):
         """Switching the private selector mid-flight must never yield a
         half-configured state (e.g. spawn with fork actions or vice versa)."""
-        _RUN._set_cleanroom_launch_backend("posix_spawn")
+        prev = _RUN._set_cleanroom_launch_backend("posix_spawn")
         try:
             seen = []
             lock = threading.Lock()
@@ -182,7 +183,7 @@ class TestConcurrentMapLaunches(_ConcurrentBase):
             for count in seen:
                 self.assertEqual(count, 8)
         finally:
-            _RUN._set_cleanroom_launch_backend("forkexec")
+            _RUN._set_cleanroom_launch_backend(prev)
 
 
 class TestConcurrentStreamLaunches(_ConcurrentBase):
@@ -211,10 +212,11 @@ class TestConcurrentStreamLaunches(_ConcurrentBase):
             self.assertIn("s%d-payload" % i, text)
             return len(chunks)
 
+        prev = _RUN._set_cleanroom_launch_backend(backend)
         try:
             return self._run_threads(fn, threads)
         finally:
-            _RUN._set_cleanroom_launch_backend("forkexec")
+            _RUN._set_cleanroom_launch_backend(prev)
 
     def test_concurrent_stream_with_posix_spawn(self):
         self._one("posix_spawn")
@@ -230,7 +232,7 @@ class TestRepeatedLaunchDoesNotLeakDescriptors(_ConcurrentBase):
         return len(os.listdir("/proc/self/fd"))
 
     def _one(self, backend, rounds=12):
-        _RUN._set_cleanroom_launch_backend(backend)
+        prev = _RUN._set_cleanroom_launch_backend(backend)
         path = _corpus(self._tmp, "leak")
         # Warm up so one-off allocations are not counted as growth.
         forkrun.map(self.spec, path, mode="plugin", workers=2, lines=64)
@@ -253,7 +255,7 @@ class TestRepeatedLaunchDoesNotLeakDescriptors(_ConcurrentBase):
         self._one("forkexec")
 
     def test_streaming_releases_descriptors(self):
-        _RUN._set_cleanroom_launch_backend("posix_spawn")
+        prev = _RUN._set_cleanroom_launch_backend("posix_spawn")
         path = _corpus(self._tmp, "leakstream")
         try:
             for _ in range(3):
@@ -270,7 +272,7 @@ class TestRepeatedLaunchDoesNotLeakDescriptors(_ConcurrentBase):
                 after, before + 2,
                 "streaming descriptor count grew from %d to %d" % (before, after))
         finally:
-            _RUN._set_cleanroom_launch_backend("forkexec")
+            _RUN._set_cleanroom_launch_backend(prev)
 
 
 if __name__ == "__main__":

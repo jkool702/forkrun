@@ -29,11 +29,13 @@ The real launcher's entry descriptor set is observed by
 build, not against the shipped release binary. No test here claims
 otherwise.
 """
+import inspect
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 import unittest
 import warnings
 
@@ -154,26 +156,6 @@ class _Base(unittest.TestCase):
             if pattern in tgt:
                 n += 1
         return n
-
-
-class TestDefaultBackendIsUnchanged(_Base):
-    def test_default_is_forkexec(self):
-        """The shipped default must stay fork()+execv(); the candidate is
-        reachable only by an explicit private call."""
-        self.assertEqual(_R._CLEANROOM_LAUNCH_BACKEND, "forkexec")
-        self.assertFalse(hasattr(forkrun, "posix_spawn"),
-                         "no posix_spawn option may appear on the public "
-                         "API surface")
-
-    def test_no_public_selector_exists(self):
-        for forbidden in ("POSIX_SPAWN", "CLEANROOM_BACKEND",
-                          "CLEANROOM_LAUNCH", "FORKRUN_SPAWN"):
-            self.assertNotIn(forbidden, dir(forkrun),
-                             "%s would be a public selector" % forbidden)
-
-    def test_setter_rejects_unknown_backend(self):
-        with self.assertRaises(ValueError):
-            _R._set_cleanroom_launch_backend("nonsense")
 
 
 class TestBothBackendsProduceCorrectResults(_Base):
@@ -643,6 +625,73 @@ open(%(out)r, 'w').write('\n'.join(out))
         # number a descriptor gets is not something this test needs to
         # control; what it needs to assert is that relocation does not
         # damage the caller, and that is asserted above.
+
+
+class TestDefaultBackend(unittest.TestCase):
+    """F6 Stage 4: the default moved to posix_spawn.
+
+    Deliberately does NOT inherit the candidate suite's base class: that
+    base pins the backend to forkexec in setUp so every other test runs a
+    known backend, and a test asserting the DEFAULT would therefore read
+    the pin instead of the value the module actually ships.
+    """
+
+    def test_default_is_posix_spawn(self):
+        self.assertEqual(_R._CLEANROOM_LAUNCH_BACKEND, "posix_spawn")
+
+    def test_posix_spawn_is_available_on_this_platform(self):
+        """The default is only chosen when the platform actually has it."""
+        self.assertTrue(_R._POSIX_SPAWN_AVAILABLE)
+        self.assertTrue(hasattr(os, "posix_spawn"))
+
+    def test_default_is_posix_spawn_only_when_available(self):
+        """The guard is on the ATTRIBUTE, not on a runtime failure: a
+        spawn that fails at runtime must surface through the route's
+        exit-127 contract, not silently rerun as fork+exec."""
+        src = _R.__dict__.get("_CLEANROOM_LAUNCH_BACKEND")
+        self.assertIn(src, ("posix_spawn", "forkexec"))
+        if not _R._POSIX_SPAWN_AVAILABLE:
+            self.assertEqual(src, "forkexec")
+
+    def test_no_public_selector_exists(self):
+        """The backend is still NOT a public knob. F7 is unchanged: the
+        environment contract is identical for both backends."""
+        for forbidden in ("POSIX_SPAWN", "CLEANROOM_BACKEND",
+                          "CLEANROOM_LAUNCH", "FORKRUN_SPAWN"):
+            self.assertNotIn(forbidden, dir(forkrun),
+                             "%s would be a public selector" % forbidden)
+
+    def test_no_environment_selector_for_the_backend(self):
+        src = Path(_R.__file__).read_text()
+        for forbidden in ("FORKRUN_CLEANROOM_BACKEND",
+                          "FORKRUN_SPAWN_BACKEND",
+                          "FORKRUN_LAUNCH_BACKEND"):
+            self.assertNotIn(forbidden, src,
+                             "%s would let the environment choose the "
+                             "backend, which F7 forbids" % forbidden)
+
+    def test_setter_still_reaches_the_legacy_backend(self):
+        """forkexec remains reachable for regression bisection."""
+        prev = _R._CLEANROOM_LAUNCH_BACKEND
+        try:
+            self.assertEqual(_R._set_cleanroom_launch_backend("forkexec"),
+                             prev)
+            self.assertEqual(_R._CLEANROOM_LAUNCH_BACKEND, "forkexec")
+        finally:
+            _R._set_cleanroom_launch_backend(prev)
+
+    def test_setter_rejects_unknown_backend(self):
+        with self.assertRaises(ValueError):
+            _R._set_cleanroom_launch_backend("nonsense")
+
+    def test_no_oserror_retry_to_forkexec(self):
+        """Policy B is excluded: a spawn-time OSError must NOT fall back
+        and rerun the work. The route maps it to exit 127 instead."""
+        src = inspect.getsource(_R._spawn_or_fork)
+        self.assertNotIn("except OSError", src,
+                         "spawn-time OSError must not be caught and retried "
+                         "as fork+exec; the route classifies it instead")
+        self.assertEqual(_R._CR_SPAWN_FAILURE_STATUS, 127 << 8)
 
 
 if __name__ == "__main__":

@@ -1567,19 +1567,67 @@ def _source_is_reopenable(source):
 # default change: the shipped path is `fork()` + `execv()` and stays that
 # way until a separate adoption decision. Tests flip this module global;
 # nothing reachable from the public API can.
-_CLEANROOM_LAUNCH_BACKEND = "forkexec"
+# F6 Stage 4 -- DEFAULT LAUNCH BACKEND.
+#
+# `posix_spawn` is now the default. The reasons, in the order they mattered:
+#
+#   * CORRECTNESS OF DESCRIPTORS. posix_spawn's file_actions model states
+#     the post-exec descriptor set explicitly, so the route's contract is
+#     written down rather than inherited from whatever fork+execv happened
+#     to leave behind. The Stage 3 descriptor work (F_DUPFD relocation of
+#     the route's own descriptors above the standard-stream gap) had to be
+#     done for BOTH backends anyway; under posix_spawn it is the only thing
+#     standing between a caller and silent input corruption, so it is the
+#     backend where that matters most.
+#   * LARGE PARENTS. On a host whose address space is dominated by private
+#     anonymous memory -- CPython arena growth being the ordinary case for
+#     a real workload -- fork() copies page tables for the whole thing and
+#     then execve tears them down. Measured end to end on this repo's own
+#     route at 2 GiB of Python-heap ballast: 204.9 ms -> 140.6 ms, -31.4%.
+#     With no ballast the two are within noise (-3.4%). The win is real but
+#     it is bounded by how large the parent is; it is NOT a universal
+#     speedup and is not claimed as one.
+#   * THREAD SAFETY. posix_spawn is specified to be callable from a
+#     multithreaded process. That is also why the Stage 4 concurrent suite
+#     exists: not to prove fork+execv is broken here (it is not, because
+#     the route execs immediately rather than running Python between fork
+#     and exec), but to prove the route's OWN descriptor bookkeeping is
+#     per-call under concurrency.
+#
+# `forkexec` remains reachable through `_set_cleanroom_launch_backend()`
+# for tests and for bisecting any regression. There is deliberately no
+# environment selector and no keyword (F7): the environment contract is
+# unchanged, so the backend is not a knob a caller can flip by accident.
+#
+# COMPATIBILITY. `os.posix_spawn` is provided by libc, so it exists
+# wherever `fork`/`exec` do; on this platform it is always present. The
+# guard below is therefore narrow and honest: if the attribute is somehow
+# absent, the module uses fork+execv rather than raising at import time.
+# Note what is NOT here: no retry-on-OSError fallback to forkexec. A
+# spawn that fails at runtime is reported through the route's established
+# exit-127 path, because silently launching a second time could run the
+# work twice and would hide a real failure from the caller.
+_POSIX_SPAWN_AVAILABLE = hasattr(os, "posix_spawn")
+_CLEANROOM_LAUNCH_BACKEND = (
+    "posix_spawn" if _POSIX_SPAWN_AVAILABLE else "forkexec")
 
 
 def _set_cleanroom_launch_backend(name):
     """PRIVATE, test-only. Returns the previous value.
 
-    Accepts "forkexec" (default, shipped) or "posix_spawn" (candidate).
-    Raises on anything else rather than silently falling back, so a typo in
-    a test cannot quietly exercise the wrong backend.
+    Accepts "forkexec" or "posix_spawn". Raises on anything else rather
+    than silently falling back, so a typo in a test cannot quietly
+    exercise the wrong backend. Asking for "posix_spawn" where the
+    platform lacks it is an error too -- a test must not believe it is
+    exercising a backend that is not there.
     """
     global _CLEANROOM_LAUNCH_BACKEND
     if name not in ("forkexec", "posix_spawn"):
         raise ValueError("unknown cleanroom launch backend %r" % (name,))
+    if name == "posix_spawn" and not _POSIX_SPAWN_AVAILABLE:
+        raise ValueError(
+            "posix_spawn requested but os.posix_spawn is unavailable on "
+            "this platform")
     prev = _CLEANROOM_LAUNCH_BACKEND
     _CLEANROOM_LAUNCH_BACKEND = name
     return prev
