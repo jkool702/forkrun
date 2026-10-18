@@ -659,12 +659,15 @@ multiset pins all three apart.
   backend, and there is no environment selector for the backend.
 * **The performance win is conditional, not universal.** It depends on the
   parent's address space being dominated by private anonymous mappings.
-  Measured end to end at 2048 MiB with 15 paired, interleaved repetitions:
-  **-34.9%** for private ballast (paired difference median 74.67 ms, range
-  [71.09, 78.36] -- every pair large and positive) against **-1.6%** for
-  shared ballast (paired range [-3.56, 8.45], which straddles zero and is
-  therefore noise). Both cells verified by VMA permission word, not by
-  smaps totals. See `CLEANROOM_LAUNCH_DECISION.md` §8.1.
+  Measured end to end at 2048 MiB with 15 paired, interleaved repetitions
+  (corrected re-run, 2026-10-18): **-33.4%** for private ballast (paired
+  difference median 69.26 ms, range [63.13, 75.88] -- every pair large and
+  positive) against **-1.4%** for shared ballast (paired range
+  [-3.52, 8.03], which straddles zero and is therefore noise). Both cells
+  verified by VMA permission word, not by smaps totals, and a failed
+  mapping control now marks the artifact invalid and exits non-zero. See
+  `CLEANROOM_LAUNCH_DECISION.md` §8.1. The launch-cost decomposition in
+  §8.1b is indicative only and is **not** load-bearing for this decision.
 
 ### 8.5b Ownership model
 

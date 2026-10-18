@@ -16,11 +16,13 @@
     "--reps",
     "15",
     "--out",
-    "dev/supervisor/bench_artifacts/cleanroom_backends_2048MiB_20261018T165718Z.json"
+    "dev/supervisor/bench_artifacts/cleanroom_backends_2048MiB_20261018T201420Z.json"
   ],
   "cells": [
     {
       "cell": "MAP_PRIVATE (proxy for private inherited writable memory)",
+      "mapping_control_ok": true,
+      "valid": true,
       "rss_mib": 2070,
       "rollup_mib": {
         "Rss": 2070,
@@ -48,67 +50,67 @@
       },
       "samples_ms": {
         "forkexec": [
-          208.47,
-          212.31,
-          212.94,
-          215.62,
-          211.33,
-          209.55,
-          211.53,
-          215.83,
-          209.45,
-          216.28,
-          208.46,
-          214.26,
-          210.06,
-          211.05,
-          211.14
+          210.96,
+          211.46,
+          204.76,
+          206.76,
+          209.75,
+          207.77,
+          204.78,
+          214.42,
+          206.93,
+          207.98,
+          204.62,
+          202.54,
+          204.98,
+          209.34,
+          207.59
         ],
         "posix_spawn": [
-          134.77,
-          137.64,
-          136.14,
-          138.19,
-          137.91,
-          137.59,
-          135.4,
-          137.47,
-          138.35,
-          138.65,
-          137.29,
-          139.73,
-          134.72,
-          135.87,
-          137.78
+          139.9,
+          136.53,
+          141.63,
+          136.17,
+          137.52,
+          138.51,
+          138.06,
+          138.54,
+          139.53,
+          136.91,
+          138.21,
+          137.61,
+          141.1,
+          138.01,
+          139.29
         ]
       },
       "end_to_end": {
         "forkexec": {
           "n": 15,
-          "median": 211.33,
-          "min": 208.46,
-          "max": 216.28,
-          "sd": 2.52
+          "median": 207.59,
+          "min": 202.54,
+          "max": 214.42,
+          "sd": 3.04
         },
         "posix_spawn": {
           "n": 15,
-          "median": 137.59,
-          "min": 134.72,
-          "max": 139.73,
-          "sd": 1.42
+          "median": 138.21,
+          "min": 136.17,
+          "max": 141.63,
+          "sd": 1.51
         }
       },
       "isolated_spawn_ms": {
-        "forkexec": 28.39,
-        "posix_spawn": 0.28
+        "forkexec": 26.06,
+        "posix_spawn": 0.27
       },
       "paired_diff_ms": {
         "n": 15,
-        "median": 74.67,
-        "min": 71.09,
-        "max": 78.36
+        "median": 69.26,
+        "min": 63.13,
+        "max": 75.88
       },
-      "median_delta_pct": -34.9,
+      "median_delta_pct": -33.4,
       "fd_count": {
         "before": 5,
         "min": 5,
@@ -116,13 +118,13 @@
       },
       "smaps": [
         {
-          "range": "7f5c2fb6d000-7f5cafe6d000",
+          "range": "7fc1bc75d000-7fc23cb5d000",
           "perms": "rw-p",
           "vma_is_shared": false,
           "vmflags_has_sh": false,
-          "anonymous_mib": 2050,
-          "rss_mib": 2050,
-          "private_dirty_mib": 2050,
+          "anonymous_mib": 2051,
+          "rss_mib": 2051,
+          "private_dirty_mib": 2051,
           "shared_clean_mib": 0,
           "shared_dirty_mib": 0
         }
@@ -130,10 +132,12 @@
     },
     {
       "cell": "MAP_SHARED (the control, and what Stage 3 used)",
+      "mapping_control_ok": true,
+      "valid": true,
       "rss_mib": 2069,
       "rollup_mib": {
         "Rss": 2069,
-        "Pss": 2063,
+        "Pss": 2064,
         "Pss_Dirty": 2061,
         "Pss_Anon": 13,
         "Pss_File": 2,
@@ -158,66 +162,66 @@
       "samples_ms": {
         "forkexec": [
           144.21,
-          140.31,
-          138.92,
-          139.77,
-          140.61,
-          138.53,
-          137.96,
-          138.3,
-          134.59,
-          139.59,
-          138.8,
-          141.01,
-          137.34,
-          138.0,
-          145.14
+          137.73,
+          139.55,
+          141.06,
+          141.11,
+          137.89,
+          136.14,
+          139.93,
+          141.57,
+          137.32,
+          145.13,
+          138.97,
+          138.88,
+          139.66,
+          136.61
         ],
         "posix_spawn": [
-          139.2,
-          142.61,
-          136.49,
-          138.66,
-          140.1,
-          134.33,
-          138.15,
-          141.87,
-          132.37,
-          136.2,
-          140.01,
-          136.65,
-          136.58,
-          136.71,
-          136.68
+          140.4,
+          134.01,
+          139.33,
+          139.09,
+          137.62,
+          140.81,
+          136.64,
+          138.98,
+          137.03,
+          137.24,
+          137.11,
+          135.94,
+          138.44,
+          136.82,
+          140.13
         ]
       },
       "end_to_end": {
         "forkexec": {
           "n": 15,
-          "median": 138.92,
-          "min": 134.59,
-          "max": 145.14,
-          "sd": 2.51
+          "median": 139.55,
+          "min": 136.14,
+          "max": 145.13,
+          "sd": 2.5
         },
         "posix_spawn": {
           "n": 15,
-          "median": 136.71,
-          "min": 132.37,
-          "max": 142.61,
-          "sd": 2.63
+          "median": 137.62,
+          "min": 134.01,
+          "max": 140.81,
+          "sd": 1.79
         }
       },
       "isolated_spawn_ms": {
         "forkexec": 0.52,
-        "posix_spawn": 0.3
+        "posix_spawn": 0.28
       },
       "paired_diff_ms": {
         "n": 15,
-        "median": 1.29,
-        "min": -3.56,
-        "max": 8.45
+        "median": 1.97,
+        "min": -3.52,
+        "max": 8.03
       },
-      "median_delta_pct": -1.6,
+      "median_delta_pct": -1.4,
       "fd_count": {
         "before": 5,
         "min": 5,
@@ -225,7 +229,7 @@
       },
       "smaps": [
         {
-          "range": "7f5c2fc00000-7f5cafc00000",
+          "range": "7fc1bca00000-7fc23ca00000",
           "perms": "rw-s",
           "vma_is_shared": true,
           "vmflags_has_sh": true,
@@ -237,5 +241,7 @@
         }
       ]
     }
-  ]
+  ],
+  "valid": true,
+  "void_cells": []
 }

@@ -1,48 +1,64 @@
 #!/usr/bin/env python3
-"""F6 Stage 5 (Phase 3C): separating the launch-cost components.
+"""F6 Stage 5.1 (Phase 3C correction): the launch-cost timing windows.
 
-The end-to-end benchmark shows a large difference between the backends at
-2 GiB of private ballast. An earlier report explained the gap by
-subtracting the isolated spawn time from the end-to-end difference and
-calling the remainder "child-side teardown". That arithmetic is valid but
-the causal label was not earned: subtracting one wall-clock duration from
-another does not measure a concurrent activity, and this file exists to
-replace the inference with a measurement that does isolate it.
+This script exists because a previous revision of the F6 audit claimed to
+have MEASURED "child-side address-space teardown" at 40.19 ms, derived as
+B - A from two wall-clock windows. That claim was wrong, and the error was
+factual rather than a matter of wording: A stops its timer at fork() return
+BEFORE waitpid(), so A contains no reap at all, while B's timer includes
+waitpid(). The two windows are not nested, and B - A therefore also contains
+the child's startup path, process exit, the wakeup of the parent, scheduling
+and the reap syscall. Describing it as a teardown measurement overstated
+what was observed.
 
-WHAT IS MEASURED DIRECTLY, in the same process, same ballast:
+WHAT THIS SCRIPT NOW CLAIMS, and nothing more:
 
-  A  PARENT-SIDE FORK
-     Time from the call to os.fork() until it returns in the parent. This
-     is the page-table copy the parent pays, and nothing else.
+  A  fork() -> parent return
+     Timer stops at fork() return, before waitpid(). The parent-side
+     page-table copy. No reap.
 
-  B  CHILD-SIDE TEARDOWN
-     A is timed alone. B is timed as fork() + waitpid() with a child that
-     immediately _exit()s. Both pay the same parent-side copy and the same
-     reap/scheduling; the difference is the work the CHILD does discarding
-     its own copy of the address space. Because _exit() performs that
-     teardown and execve() performs the same teardown as part of replacing
-     the image, this measures the component directly rather than
-     inferring it from a difference of two unrelated totals.
+  B  fork() + reap, child _exit()
+     Timer includes waitpid(). A, plus child startup, teardown, exit,
+     wakeup, scheduling and reap.
 
-  C  EXEC OVER THE TOP
-     fork() + execve() + waitpid(), for completeness: it is B plus the
-     cost of loading and replacing the program image.
+  B1 fork() -> the child's pre-exit signal
+     The child writes one byte to a pipe on entry and then exits; the
+     timer stops in the parent when that byte is read. A, plus the child's
+     startup path. Excludes teardown, because the signal precedes exit.
 
-  D  posix_spawn EQUIVALENTS
-     The same three shapes with os.posix_spawn, which shares the address
-     space with the parent until execve (CLONE_VM | CLONE_VFORK), so it
-     pays no per-page copy.
+  B2 child's pre-exit signal -> reap
+     The window in which the kernel discards the child's address space and
+     the parent is woken and reaps it. This CONTAINS the teardown. It is
+     NOT a pure measurement of it: exit, wakeup, scheduling and the reap
+     are in the same window and cannot be separated without kernel-side
+     instrumentation, which this script deliberately does not add --
+     instrumenting the kernel path would change the behaviour being
+     measured.
 
-WHAT IS *NOT* MEASURED HERE, and is deliberately left to the end-to-end
-benchmark: the parent-side work that overlaps with the child's teardown,
-and any cache or bandwidth contention between them. A and B are measured
-serially in a quiet process; in a real route the two overlap, so
-A + B is an upper bound on the serial cost and the end-to-end paired
-difference is the number that actually matters.
+  C  fork() + open /dev/null + dup2 + execve + reap
+     Differs from B in MORE than image replacement: the child also opens
+     /dev/null and dup2s it onto stdout. So C - B is a difference between
+     two complete configurations, not a measurement of exec cost.
 
-The conclusion the default switch rests on is the END-TO-END paired
-difference, not this decomposition.
+  D  posix_spawn + reap
+     CLONE_VM | CLONE_VFORK: no per-page copy before exec.
+
+  B1 + B2 partitions the B - A interval into "before the child began
+  exiting" and "from then until it was reaped", which is strictly more
+  informative than B - A alone even though neither half is a pure
+  component.
+
+WHAT IS NOT MEASURED HERE, stated explicitly in the output and in the
+artifact's `what_is_NOT_measured` field: pure teardown duration, the
+overlap between parent post-launch work and child teardown in a real route,
+and the contention between them. A and B are serial windows measured in a
+quiet process; in a real route the two overlap.
+
+THE NUMBER THAT DECIDES THE DEFAULT SWITCH is the end-to-end paired
+difference in bench_cleanroom_backends.py. Nothing in this file is load
+bearing for that decision, and it should not be cited as if it were.
 """
+
 
 import argparse
 import json
@@ -89,7 +105,11 @@ def a_parent_fork(reps):
 
 
 def b_fork_exit(reps):
-    """fork() + reap, child immediately _exit(): adds child-side teardown."""
+    """fork() + reap, child immediately _exit().
+
+    NOTE the timer INCLUDES waitpid(), where a_parent_fork() stops before
+    it. These two windows are not nested; see the module docstring.
+    """
     out = []
     for _ in range(reps + 1):
         t0 = time.perf_counter()
@@ -98,6 +118,68 @@ def b_fork_exit(reps):
             os._exit(127)
         os.waitpid(pid, 0)
         out.append((time.perf_counter() - t0) * 1000.0)
+    return out[1:]
+
+
+def b1_fork_to_child_signal(reps):
+    """fork() -> the child signalling that it is about to _exit().
+
+    The child writes one byte to a pipe immediately on entry and then
+    exits. Timing stops in the PARENT when that byte is read, so this
+    covers the parent-side fork() plus the child's own startup path --
+    everything the child does before it begins tearing its address space
+    down. It deliberately does NOT include the teardown: the signal is
+    raised before the child exits.
+    """
+    out = []
+    for _ in range(reps + 1):
+        r, w = os.pipe()
+        t0 = time.perf_counter()
+        pid = os.fork()
+        if pid == 0:
+            os.close(r)
+            try:
+                os.write(w, b"x")
+            except OSError:
+                pass
+            os._exit(127)
+        os.close(w)
+        os.read(r, 1)
+        out.append((time.perf_counter() - t0) * 1000.0)
+        os.close(r)
+        os.waitpid(pid, 0)
+    return out[1:]
+
+
+def b2_signal_to_reap(reps):
+    """From the child's "about to exit" signal until waitpid() returns.
+
+    This is the window in which the kernel discards the child's copy of
+    the address space, the child becomes a zombie, and the parent is woken
+    and reaps it. It is the closest this experiment gets to the teardown,
+    and it is NOT a pure measurement of it: it also contains process exit,
+    the notification that wakes the parent, scheduling, and the reap
+    syscall itself. Those cannot be separated without kernel-side
+    instrumentation, which this script deliberately does not add.
+    """
+    out = []
+    for _ in range(reps + 1):
+        r, w = os.pipe()
+        t0 = time.perf_counter()
+        pid = os.fork()
+        if pid == 0:
+            os.close(r)
+            try:
+                os.write(w, b"x")
+            except OSError:
+                pass
+            os._exit(127)
+        os.close(w)
+        os.read(r, 1)
+        t1 = time.perf_counter()
+        os.waitpid(pid, 0)
+        out.append((t1 - t0) * 1000.0)
+        os.close(r)
     return out[1:]
 
 
@@ -147,50 +229,107 @@ def main():
     ballast = private_ballast(args.mib)
     rss = int(open("/proc/self/statm").read().split()[1]) * (_PAGE // 1024) \
         // 1024
-    print("=" * 74)
-    print("launch-cost decomposition | %d MiB private ballast (RSS %d MiB)"
+    print("=" * 78)
+    print("launch-cost timing windows | %d MiB private ballast (RSS %d MiB)"
           % (args.mib, rss))
     print("python %s | %s | libc %s | %d reps"
           % (platform.python_version(), platform.release(),
              "-".join(platform.libc_ver()), args.reps))
-    print("=" * 74)
+    print("=" * 78)
 
     A = a_parent_fork(args.reps)
     B = b_fork_exit(args.reps)
+    B1 = b1_fork_to_child_signal(args.reps)
+    B2 = b2_signal_to_reap(args.reps)
     C = c_fork_exec(args.reps, target)
     D = d_spawn(args.reps, target)
-    E = d_spawn(args.reps, target)
 
+    # Every row states EXACTLY what its timer window contains. The windows
+    # are NOT nested subsets of one another -- that was the error this
+    # script previously made, when A was described as differing from B
+    # only by the child teardown. A stops its timer BEFORE waitpid(), so A
+    # contains no reap at all.
     rows = [
-        ("A  parent-side fork() only", A,
-         "page-table copy, parent side"),
-        ("B  fork() + reap, child _exit()", B,
-         "A + child-side address-space teardown + reap"),
-        ("C  fork() + execve() + reap", C,
-         "B + loading and replacing the program image"),
-        ("D  posix_spawn + reap", E,
-         "no per-page copy: CLONE_VM | CLONE_VFORK until execve"),
+        ("A  fork() -> parent return",
+         A,
+         "TIMER STOPS AT fork() RETURN, BEFORE waitpid(). "
+         "Contains: the parent-side page-table copy. Contains NO reap."),
+        ("B  fork() + reap, child _exit()",
+         B,
+         "TIMER INCLUDES waitpid(). Contains: A, plus child startup, "
+         "child teardown, exit, parent wakeup and the reap."),
+        ("B1 fork() -> child signals",
+         B1,
+         "TIMER STOPS WHEN THE PARENT READS the child's pre-exit byte. "
+         "Contains: A, plus the child's startup path. Excludes teardown."),
+        ("B2 child's exit signal -> reap",
+         B2,
+         "TIMER STARTS at the child's pre-exit byte, ENDS after waitpid(). "
+         "Contains: teardown, process exit, wakeup, scheduling, reap."),
+        ("C  fork() + open /dev/null + dup2 + execve + reap",
+         C,
+         "TIMER INCLUDES waitpid(). Differs from B in more than exec: the "
+         "child also opens /dev/null and dup2s it onto stdout."),
+        ("D  posix_spawn + reap",
+         D,
+         "TIMER INCLUDES waitpid(). CLONE_VM|CLONE_VFORK: no per-page "
+         "copy before exec."),
     ]
     for label, vals, note in rows:
-        print("  %-32s median=%8.2f ms  sd=%6.2f  n=%d"
+        print("  %-46s median=%8.2f ms  sd=%6.2f  n=%d"
               % (label, med(vals), statistics.pstdev(vals), len(vals)))
-        print("      %s" % note)
+        for line in _wrap(note, 66):
+            print("      %s" % line)
 
-    a, b, c, e = med(A), med(B), med(C), med(E)
+    a, b, b1, b2, c, e = med(A), med(B), med(B1), med(B2), med(C), med(D)
     print()
-    print("  child-side teardown  (B - A) = %8.2f ms   <- MEASURED, not inferred"
-          % (b - a))
-    print("  exec over teardown   (C - B) = %8.2f ms   <- MEASURED"
-          % (c - b))
-    print("  forked vs spawn      (C - D) = %8.2f ms   <- MEASURED"
-          % (c - e))
+    print("  DERIVED -- each line states what it DOES and DOES NOT include:")
     print()
-    print("  NOTE: A and B are measured serially in a quiet process. In a real")
-    print("  route the parent's post-launch work OVERLAPS the child's")
-    print("  teardown, so A + B overstates the serial cost, and the two also")
-    print("  contend for cache and memory bandwidth. The number that decides")
-    print("  the default switch is the END-TO-END paired difference in")
-    print("  bench_cleanroom_backends.py, not this sum.")
+    print("  B - A  = %7.2f ms" % (b - a))
+    print("      the ADDITIONAL cost of completing fork-and-exit-and-reap")
+    print("      relative to parent-side fork-return latency alone.")
+    print("      Includes child startup, teardown, exit, wakeup, scheduling")
+    print("      and the reap syscall. This is NOT a measurement of")
+    print("      teardown: A's timer stops before waitpid(), so A contains")
+    print("      no reap and the two windows are not nested.")
+    print()
+    print("  B1 - A = %7.2f ms" % (b1 - a))
+    print("      the child's own startup path: everything it does between")
+    print("      fork() returning and raising its pre-exit signal.")
+    print()
+    print("  B2     = %7.2f ms" % b2)
+    print("      from the child's pre-exit signal until waitpid() returns.")
+    print("      This CONTAINS the address-space teardown but is not a pure")
+    print("      measurement of it: process exit, the wakeup of the parent,")
+    print("      scheduling and the reap are in the same window and cannot")
+    print("      be separated without kernel-side instrumentation, which")
+    print("      this script deliberately does not add.")
+    print()
+    split = (b1 - a) + b2
+    resid = (b - a) - split
+    print("  (B1 - A) + B2 = %7.2f ms" % split)
+    print("  B - A                 = %7.2f ms" % (b - a))
+    print("  UNEXPLAINED RESIDUAL  = %7.2f ms" % resid)
+    print("      The split does NOT fully account for B - A; this residue")
+    print("      is reported rather than folded into either part. The two")
+    print("      experiments are not the same experiment: the B1/B2 child")
+    print("      additionally closes a descriptor and writes to a pipe")
+    print("      before exiting, and the parent blocks on a read. Which")
+    print("      effect dominates is not established here, so no causal")
+    print("      story is attached to the residue. It is a reason to treat")
+    print("      this whole decomposition as indicative, not exact.")
+    print()
+    print("  C - B  = %7.2f ms" % (c - b))
+    print("      the difference between two COMPLETE timing configurations")
+    print("      that differ in more than image replacement: C's child also")
+    print("      opens /dev/null and dup2s it onto stdout before exec.")
+    print("      Not a pure image-replacement measurement.")
+    print()
+    print("  C - D  = %7.2f ms" % (c - e))
+    print("      a complete forked launch against a complete spawned one.")
+    print("      This is the figure that reconciles with the end-to-end")
+    print("      paired difference; it is a difference of two whole")
+    print("      operations, not of two isolated components.")
 
     out = args.out or os.path.join(
         tmp, "cleanroom_launch_decomposition_%dMiB.json" % args.mib)
@@ -200,21 +339,63 @@ def main():
             "kernel": platform.release(),
             "libc": "-".join(platform.libc_ver()),
             "mib": args.mib, "rss_mib": rss, "reps": args.reps,
-            "A_parent_fork_ms": [round(x, 2) for x in A],
-            "B_fork_exit_ms": [round(x, 2) for x in B],
-            "C_fork_exec_ms": [round(x, 2) for x in C],
-            "D_posix_spawn_ms": [round(x, 2) for x in E],
-            "derived": {
-                "child_side_teardown_ms": round(b - a, 2),
-                "exec_over_teardown_ms": round(c - b, 2),
-                "forked_minus_spawn_ms": round(c - e, 2),
+            "measurements_ms": {
+                "A_fork_return_no_reap": [round(x, 2) for x in A],
+                "B_fork_exit_reap": [round(x, 2) for x in B],
+                "B1_fork_to_child_signal": [round(x, 2) for x in B1],
+                "B2_child_signal_to_reap": [round(x, 2) for x in B2],
+                "C_fork_devnull_exec_reap": [round(x, 2) for x in C],
+                "D_posix_spawn_reap": [round(x, 2) for x in D],
             },
-            "caveat": "A and B are serial measurements in a quiet process; "
-                      "in a real route they overlap and contend.",
+            "timer_windows": {label.split("  ")[0]: note
+                              for label, _v, note in rows},
+            "derived_ms": {
+                "B_minus_A_additional_fork_exit_reap_cost": round(b - a, 2),
+                "B1_minus_A_child_startup": round(b1 - a, 2),
+                "B2_signal_to_reap_includes_teardown_plus_reap": round(b2, 2),
+                "split_B1_minus_A_plus_B2": round((b1 - a) + b2, 2),
+                "unexplained_residual_in_B_minus_A": round((b - a) - ((b1 - a) + b2), 2),
+                "C_minus_B_configuration_difference": round(c - b, 2),
+                "C_minus_D_complete_launch_difference": round(c - e, 2),
+            },
+            "what_is_NOT_measured": [
+                "Pure address-space teardown: B2 contains it but also "
+                "process exit, parent wakeup, scheduling and the reap, and "
+                "these are not separable without kernel instrumentation.",
+                "C - B is not pure image replacement: C's child also "
+                "opens /dev/null and dup2s it onto stdout.",
+                "The overlap between parent post-launch work and child "
+                "teardown in a real route, which serial windows here do "
+                "not reproduce.",
+                "The residual between B - A and the B1/B2 split: the two "
+                "are different experiments (the B1/B2 child also closes a "
+                "descriptor and writes to a pipe before exiting), and which "
+                "effect dominates is not established. The decomposition is "
+                "indicative, not exact.",
+            ],
         }, fh, indent=2)
     print()
     print("raw artifact: %s" % out)
+    print()
+    print("REMINDER: these are serial windows measured in a quiet process.")
+    print("In a real route the parent's post-launch work overlaps the")
+    print("child's teardown and the two contend for cache and bandwidth.")
+    print("The number that decides the default switch is the END-TO-END")
+    print("paired difference in bench_cleanroom_backends.py.")
     return 0
+
+
+def _wrap(text, width):
+    words, line, out = text.split(), "", []
+    for w in words:
+        if len(line) + len(w) + 1 > width:
+            out.append(line)
+            line = w
+        else:
+            line = (line + " " + w).strip()
+    if line:
+        out.append(line)
+    return out
 
 
 if __name__ == "__main__":

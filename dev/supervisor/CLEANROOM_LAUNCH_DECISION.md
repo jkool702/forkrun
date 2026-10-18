@@ -725,13 +725,21 @@ repetitions**, both mappings, raw per-trial samples in
 
 | mapping | fork+execv (sd) | posix_spawn (sd) | median delta | paired diff median (range) |
 |---|---|---|---|---|
-| MAP_PRIVATE | 211.33 (2.52) | 137.59 (1.42) | **−34.9%** | **74.67 ms** [71.09, 78.36] |
-| MAP_SHARED | 138.92 (2.51) | 136.71 (2.63) | −1.6% | 1.29 ms [−3.56, 8.45] |
+| MAP_PRIVATE | 207.59 (3.04) | 138.21 (1.51) | **−33.4%** | **69.26 ms** [63.13, 75.88] |
+| MAP_SHARED | 139.55 (2.50) | 137.62 (1.79) | −1.4% | 1.97 ms [−3.52, 8.03] |
 
-Every one of the 15 private pairs is large and positive; the shared pairs
-straddle zero. The shared cell's −1.6% does not conflict with the earlier
-+0.7% — both sit inside a range that spans zero, which is what the paired
-range shows and what a single median cannot.
+Corrected re-run of 2026-10-18, superseding the 15-rep figures of the
+previous revision (−34.9% / −1.6%), which were themselves a re-run of an
+earlier 9-rep pass. **The conclusion did not move across three independent
+runs**: the private cell is −33% to −35% with every pair large and
+positive, and the shared cell sits within noise. The run-to-run variation
+in the private figure (−33.4%, −34.9%) is smaller than the gap it measures.
+
+The shared cell's −1.4% does not conflict with the earlier +0.7% — both sit
+inside a range that spans zero, which is what the paired range shows and
+what a single median cannot. A failed mapping control now marks the
+artifact `"valid": false` and the script exits non-zero, so a cell that did
+not measure what it claims cannot be mistaken for a successful run.
 
 **The mapping control, and a trap worth recording.** The obvious way to
 verify that one cell is private and the other shared is to read smaps'
@@ -775,41 +783,64 @@ unmeasured". Both were false and are gone; an intermediate revision
 concluded the gate was **not met** on small-parent data, which was also
 superseded. **Do not read this document's history as a stable position.**
 
-### 8.1b Launch-cost decomposition — measured, not inferred
+### 8.1b Launch-cost timing windows — corrected, and deliberately inconclusive
 
-An earlier revision attributed the gap between the end-to-end difference
-and the isolated spawn time to "child-side teardown", obtained by
-subtracting one wall-clock duration from another. That arithmetic was valid
-but the causal label was not earned: a difference of two totals does not
-measure a concurrent activity.
+> **CORRECTION (F6 Stage 5.1).** An earlier revision of this section
+> claimed a **directly measured** "child-side address-space teardown" of
+> 40.19 ms, derived as `B - A` from two wall-clock windows. That claim was
+> factually wrong, not merely loose. `A` stops its timer at `fork()`
+> returning **before `waitpid()`**, so `A` contains no reap at all, while
+> `B`'s timer includes `waitpid()`. The two windows are not nested, and
+> `B - A` therefore also contains the child's startup path, process exit,
+> the wakeup of the parent, scheduling and the reap syscall. The original
+> justification — that "A and B pay the same parent-side copy and the same
+> reap" — was simply untrue of the code as written.
 
-`bench_launch_decomposition.py` now isolates the component directly, in one
-process with the same 2048 MiB ballast, 15 repetitions:
+Corrected measurements, 2048 MiB private ballast, 15 repetitions
+(`bench_launch_decomposition.py`). Every row states what its timer window
+contains:
 
-| measurement | median |
-|---|---|
-| A  parent-side `fork()` only (the page-table copy) | 28.67 ms |
-| B  `fork()` + reap, child immediately `_exit()` | 68.87 ms |
-| C  `fork()` + `execve()` + reap | 71.45 ms |
-| D  `posix_spawn()` + reap | 0.95 ms |
+| | measurement | timer window contains | median |
+|---|---|---|---|
+| **A** | `fork()` → parent return | the parent-side page-table copy. **No reap** | 28.16 ms |
+| **B** | `fork()` + reap, child `_exit()` | A, plus child startup, teardown, exit, wakeup, scheduling, reap | 68.26 ms |
+| **B1** | `fork()` → child's pre-exit signal | A, plus the child's startup path. Excludes teardown | 29.30 ms |
+| **B2** | child's pre-exit signal → reap | **contains** teardown, plus exit, wakeup, scheduling, reap | 30.52 ms |
+| **C** | `fork()` + `/dev/null` open + `dup2` + `execve` + reap | differs from B in more than exec | 69.65 ms |
+| **D** | `posix_spawn` + reap | no per-page copy (`CLONE_VM\|CLONE_VFORK`) | 0.99 ms |
 
-* **B - A = 40.19 ms is the child-side address-space teardown, MEASURED.**
-  A and B pay the same parent-side copy and the same reap; the difference is
-  the work the child does discarding its own copy. `_exit()` performs that
-  teardown and `execve()` performs the same teardown while replacing the
-  image, so measuring at `_exit` isolates it without instrumenting the child.
-* C - B = 2.58 ms is the cost of loading and replacing the program image.
-* C - D = 70.50 ms, which reconciles with the **74.67 ms** end-to-end paired
-  difference measured independently. Two unrelated experiments agreeing to
-  within paired-sample noise is the check that neither is measuring
-  something else.
+What may honestly be said:
 
-**What is still inferred.** A and B are *serial* measurements in a quiet
-process. In a real route the parent's post-launch work overlaps the child's
-teardown and the two contend for cache and memory bandwidth, so A + B
-overstates the serial cost and the components are not strictly additive.
-The number that decides the default switch is the end-to-end paired
-difference, not this sum.
+* **`B - A` = 40.10 ms** is the *additional cost of completing
+  fork-and-exit-and-reap relative to parent-side fork-return latency*. It
+  includes child startup, teardown, exit, wakeup, scheduling and the reap.
+  **It is not a measurement of teardown.**
+* **`B1 - A` = 1.14 ms** is the child's startup path. Child startup is
+  cheap; it is not where the time goes.
+* **`B2` = 30.52 ms** is the window from the child's pre-exit signal until
+  `waitpid()` returns. This **contains** the address-space teardown, but it
+  is not a pure measurement of it: process exit, the parent's wakeup,
+  scheduling and the reap are in the same window and are not separable
+  without kernel-side instrumentation, which this deliberately does not add.
+* **`C - B` = 1.39 ms** is a difference between two *complete* timing
+  configurations that differ in more than image replacement — C's child also
+  opens `/dev/null` and `dup2`s it onto stdout. Not a pure exec-cost figure.
+* **`C - D` = 68.72 ms** is a complete forked launch against a complete
+  spawned one — a difference of two whole operations, not of two isolated
+  components.
+
+**An unexplained residue, reported rather than hidden.** The B1/B2 split
+accounts for 31.66 ms of the 40.10 ms `B - A` interval, leaving **8.48 ms
+unaccounted**. The two are not the same experiment — the B1/B2 child also
+closes a descriptor and writes to a pipe before exiting, and the parent
+blocks on a read — and which effect dominates is not established. No causal
+story is attached to it. Its existence is itself a reason to treat this
+decomposition as **indicative, not exact**.
+
+**This section is not load-bearing.** The figure that decides the default
+switch is the end-to-end paired difference in §8.1, and nothing above should
+be cited as if it were. The earlier claim to have measured teardown directly
+is withdrawn.
 
 **No rlimit cost exists** and it is not part of this list — the launcher
 raises its own `RLIMIT_NOFILE` before `dlopen` (§4.3).

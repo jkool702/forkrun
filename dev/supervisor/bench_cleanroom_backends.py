@@ -368,6 +368,8 @@ def run_cell(name, ballast, spec, src, run_mod, probe, reps, expected,
 
     cell = {
         "cell": name,
+        "mapping_control_ok": None,   # filled in by the caller
+        "valid": False,               # no cell is valid until proven so
         "rss_mib": rss_mib(),
         "rollup_mib": rollup(),
         "samples_ms": {b: [round(x, 2) for x in v]
@@ -486,27 +488,50 @@ def main():
                          m["vmflags_has_sh"], m["anonymous_mib"],
                          m["rss_mib"], m["private_dirty_mib"]))
             big = [m for m in ev if m["rss_mib"] >= max(64, args.mib // 2)]
+            cell = artifact["cells"][-1]
             if not big:
-                print("      (NONE FOUND -- the mapping control is NOT "
-                      "established for this cell; the result is void)")
+                cell["mapping_control_ok"] = False
+                cell["void_reason"] = "no large writable VMA found"
+                print("      *** VOID: no large writable VMA found")
+            elif big[0]["vma_is_shared"] != want_shared:
+                cell["mapping_control_ok"] = False
+                cell["void_reason"] = (
+                    "expected a %s VMA, found perms=%s"
+                    % ("shared" if want_shared else "private",
+                       big[0]["perms"]))
+                print("      *** VOID: %s" % cell["void_reason"])
             else:
-                got_shared = big[0]["vma_is_shared"]
-                if got_shared != want_shared:
-                    print("      *** VOID: expected a %s VMA, found perms=%s"
-                          % ("shared" if want_shared else "private",
-                             big[0]["perms"]))
-                else:
-                    print("      control OK: ballast VMA is %s"
-                          % ("shared" if want_shared else "private"))
+                cell["mapping_control_ok"] = True
+                cell["valid"] = True
+                print("      control OK: ballast VMA is %s"
+                      % ("shared" if want_shared else "private"))
             print("      note: Private_Dirty is NOT the discriminator -- a "
                   "shared file VMA also reports dirty pages there.")
         del ballast
 
     probe.remove(run_mod)
+    all_valid = all(c.get("valid") for c in artifact["cells"])
+    artifact["valid"] = all_valid
+    artifact["void_cells"] = [c["cell"] for c in artifact["cells"]
+                             if not c.get("valid")]
     with open(out_path, "w") as fh:
         json.dump(artifact, fh, indent=2)
     print()
     print("raw per-trial artifact: %s" % out_path)
+    print()
+    if not all_valid:
+        print("=" * 78)
+        print("INVALID RUN -- mapping control failed for: %s"
+              % ", ".join(artifact["void_cells"]))
+        print("The timings above were measured against a process whose")
+        print("ballast was NOT the mapping the cell claims, so they do not")
+        print("support any conclusion. The artifact is written with")
+        print('"valid": false for downstream tooling to check, and this')
+        print("script exits NON-ZERO so a failed control cannot be mistaken")
+        print("for a successful experiment.")
+        print("=" * 78)
+        return 1
+    print("All cells passed their mapping control; artifact marked valid.")
     print()
     print("If BOTH mappings show the same delta, the delta is not about fork")
     print("page-table cost. If only MAP_PRIVATE does, it is -- and that is the")
