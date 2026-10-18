@@ -489,24 +489,46 @@ class TestClosedStandardDescriptorsAreSafe(_Base):
                               "(%s)\n%s" % (close, backend, text))
 
     def test_stdout_and_stderr_together(self):
-        """Documented, not asserted as correct: with BOTH fd 1 and fd 2
-        closed the child has no stdout, and the plugin ABI returns results
-        by writing to stdout -- so zero records is the honest outcome. The
-        pre-fix behaviour here was ACCIDENTALLY correct (the result memfd
-        happened to occupy fd 1 and stdout pointed into it), which is worse:
-        it depended on a descriptor-number coincidence."""
+        """F6 Stage 4 -- EXPECTATION CORRECTED, see below.
+
+        Stage 3 asserted ZERO records here. That expectation was wrong,
+        and it was wrong in the dangerous direction: the materialized route
+        returns results through the RESULT MEMFD -- the launcher redirects
+        the plugin's stdout onto it -- so the launcher's own fd 1 and fd 2
+        are not where results travel. The premise in the old docstring
+        ("the child has no stdout ... so zero records is the honest
+        outcome") described the plugin's stdout without noticing that the
+        launcher had already replaced it. What zero records actually means
+        is SILENT TOTAL DATA LOSS for any host that happens to run with
+        both streams closed, which is a normal thing for a daemon, a
+        container entrypoint, or a supervisor that closed them.
+
+        Stage 3 saw zero because the route's descriptors landed inside the
+        standard-stream gap and collided; the same collision the C5 fix
+        targets. With `F_DUPFD` relocation the route no longer aliases the
+        streams, the launcher collects from the result memfd, and the
+        correct answer -- all records, with the right payload -- comes
+        back. Both are now asserted, because a correct COUNT with wrong
+        CONTENT is exactly the failure mode C5 was about.
+        """
         import re
         for backend in BACKENDS:
             text = self._run_lowfd(backend, "1,2")
             m = re.search(r"MAP records=(\d+) tokens=(\d+)", text)
             self.assertIsNotNone(m, "no MAP line: %s\n%s" % (backend, text))
             self.assertEqual(
-                m.group(1), "0",
-                "with fd 1 and fd 2 both closed the child has no stdout, and "
-                "the plugin ABI returns results by writing there -- so the "
-                "materialized route must return ZERO records rather than "
-                "invent some. Got records=%s (%s)\n%s"
+                m.group(1), "8",
+                "with fd 1 and fd 2 both closed the route must still deliver "
+                "every record via the result memfd. Got records=%s (%s)\n%s"
                 % (m.group(1), backend, text))
+            self.assertEqual(
+                m.group(2), "8",
+                "records were returned but the payload tokens are wrong, "
+                "which means the result came from the wrong source (%s)\n%s"
+                % (backend, text))
+            self.assertIn("STREAM records=8 tokens=8 OK", text,
+                          "streaming must survive both streams closed too: "
+                          "%s\n%s" % (backend, text))
 
 
 class TestFdRelocationHelper(_Base):

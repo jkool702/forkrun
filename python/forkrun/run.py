@@ -64,6 +64,7 @@ import os
 import struct
 import mmap as _mmap_mod
 import ctypes
+import fcntl
 import functools
 import inspect
 import weakref
@@ -742,17 +743,37 @@ def _fd_above_stdio(fd):
     deliberately does NOT reopen the caller's fd 0/1/2 in the parent (that
     would change process state the caller owns), does NOT enumerate
     /proc/self/fd, and does NOT touch any descriptor the caller supplied:
-    `dup` shares the open file description but gets its OWN number, and
-    the caller keeps theirs.
+    every caller-supplied source is `os.dup()`ed by
+    `_cleanroom_source_fd()` first, so what arrives here is always a
+    route-owned copy and the original stays the caller's.
+
+    F6 Stage 4 -- WHY fcntl(F_DUPFD) AND NOT os.dup().
+    The Stage 3 version used `os.dup()`, which returns the LOWEST FREE
+    descriptor. That is not a relocation at all when the gap is partly
+    occupied: relocating a descriptor on fd 1 with fd 0 busy and fd 2 free
+    returns fd 2, and with fds 1 and 2 busy returns fd 0. Reproduced
+    deterministically before this fix:
+
+        close fd 0 and fd 2, put the source on fd 1
+        -> _fd_above_stdio(1) returned 0
+
+    The Stage 3 low-FD matrix missed this because it closed ALL THREE of
+    fd 0/1/2, which leaves the gap empty and makes the lowest free
+    descriptor happen to be 3. C5 was therefore only closed for the one
+    occupancy pattern the test happened to construct.
+
+    `fcntl(fd, F_DUPFD, 3)` makes "> 2" a guarantee: the kernel picks the
+    lowest descriptor at or above the given minimum, so the result cannot
+    land back in the gap no matter what else is open.
     """
     if fd is None or fd > 2:
         return fd
     try:
-        higher = os.dup(fd)
+        higher = fcntl.fcntl(fd, fcntl.F_DUPFD, 3)
     except OSError:
         return fd
     try:
-        # dup() clears FD_CLOEXEC on the new number, so the inheritable
+        # F_DUPFD clears FD_CLOEXEC on the new number, so the inheritable
         # state the route set on the ORIGINAL must be re-applied here or
         # the relocated descriptor would silently stop crossing exec.
         inheritable = os.get_inheritable(fd)
@@ -2500,7 +2521,20 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     src_fd = _fd_above_stdio(src_fd)
     own.add("src_fd", src_fd)
     rr, rw = os.pipe()
+    # F6 Stage 4. Stage 3 relocated `src_fd` here and then left the pipe
+    # ends exactly where `os.pipe()` put them, under a comment claiming
+    # "every route-owned descriptor must sit above fd 2". `os.pipe()`
+    # returns the LOWEST FREE pair, so with the standard-stream gap
+    # partly free these land INSIDE it -- and `rw` is then made
+    # inheritable and handed to the launcher as `--result`. A `rw` on fd 1
+    # is simultaneously the launcher's stdout, and a `rw` on fd 2 is its
+    # stderr: results are written into a channel the launcher also uses for
+    # diagnostics, and the parent drains a stream that never contained what
+    # it claimed to. Observed end to end before this fix, with fd 0/1/2
+    # closed: `--src 2`, then `2 worker(s) failed ... respawn cap reached`.
+    rr = _fd_above_stdio(rr)
     own.add("rr", rr)
+    rw = _fd_above_stdio(rw)
     own.add("rw", rw)
     os.set_inheritable(src_fd, True)
     os.set_inheritable(rw, True)
