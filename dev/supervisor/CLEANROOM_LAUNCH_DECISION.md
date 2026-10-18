@@ -713,6 +713,15 @@ Isolated launch latency (§1.1a) is not end-to-end. Measured through the
 public API, one `map()` over 200,000 records with `workers=4`, alternating
 backends, 5 samples after warmup (milliseconds):
 
+> **This table is the FIRST end-to-end measurement, kept because it is the
+> only data at the small and 1 GiB sizes.** It used 5 samples without
+> paired trials or a verified mapping control, so it is superseded by the
+> 15-pair controlled run below **at 2048 MiB only**. The 1 GiB and small
+> rows have not been re-measured under the Stage 5.2/5.3 methodology and
+> should be read as indicative, not as results of the same rig. Do not
+> compare a 5-sample figure against a 15-pair figure as though they were
+> equal.
+
 | parent heap | fork+execv median | posix_spawn median | delta |
 |---|---|---|---|
 | small (12 MiB RSS) | 141.33 | 138.77 | **−2.6 ms (−1.8%)** |
@@ -734,7 +743,7 @@ Source: `bench_artifacts/cleanroom_backends_2048MiB_20261018T215329Z.json`.
 `gen_bench_tables.py --check` fails if the two ever disagree. Stage 5.1 shipped a document whose figures did not match its own artifact, which is why these numbers are now generated rather than typed.
 
 Corrected re-run of 2026-10-18, superseding the previous revision's figures.
-**The conclusion has not moved across four independent runs**: the private
+**The conclusion has not moved across five independent runs**: the private
 cell is −29% to −35% with every one of the 15 pairs large and positive, and
 the shared cell sits within noise in every run. Run-to-run variation in the
 private figure is smaller than the gap it measures.
@@ -751,9 +760,12 @@ exactly this: the shared cell inherited the private cell's mappings, and
 the control caught it (`rw-p/2052MiB, rw-s/2048MiB`) rather than reporting
 the contaminated numbers. One process per cell removes the dependency.
 
-The shared cell's −1.4% does not conflict with the earlier +0.7% — both sit
-inside a range that spans zero, which is what the paired range shows and
-what a single median cannot. A failed mapping control now marks the
+The shared cell's −3.5% does not conflict with the earlier +0.7% or −1.4%:
+all sit inside a range that spans zero, which is what the paired range
+[-3.20, 18.62] shows and what a single median cannot. This is the least
+favourable shared-cell figure recorded, and the range is wide enough that
+the honest reading is "no measurable difference" rather than "a small
+improvement". A failed mapping control now marks the
 artifact `"valid": false` and the script exits non-zero, so a cell that did
 not measure what it claims cannot be mistaken for a successful run.
 
@@ -816,14 +828,6 @@ Corrected measurements, 2048 MiB private ballast, 15 repetitions
 (`bench_launch_decomposition.py`). Every row states what its timer window
 contains:
 
-| | measurement | timer window contains | median |
-|---|---|---|---|
-| **A** | `fork()` → parent return | parent-side page-table copy. **No reap** | 29.82 ms |
-| **B** | `fork()` + reap, child `_exit()` | A, plus child startup, teardown, exit, wakeup, scheduling, reap | 70.05 ms |
-| **B1** | `fork()` → child's pre-exit signal | A, plus the child's startup path. Excludes teardown | 29.94 ms |
-| **B2** | child's own pre-exit clock → reap | **contains** teardown, plus exit, wakeup, scheduling, reap | 41.73 ms |
-| **C** | `fork()` + `/dev/null` open + `dup2` + `execve` + reap | differs from B in more than exec | 72.68 ms |
-| **D** | `posix_spawn` + reap | no per-page copy (`CLONE_VM\|CLONE_VFORK`) | 1.00 ms |
 <!-- BEGIN GENERATED: bench-decomposition -->
 | | measurement | timer window contains | median |
 |---|---|---|---|

@@ -167,6 +167,14 @@ def render_decomp():
 
 DECISION = os.path.join(_HERE, "CLEANROOM_LAUNCH_DECISION.md")
 
+# Header rows that must appear exactly once in the whole document. These are
+# matched verbatim, so a duplicate table with even slightly different wording
+# is still caught by the region comparison or by a reviewer reading it.
+_TABLE_HEADERS = (
+    ("| mapping | fork+execv (sd) | posix_spawn (sd) |", "end-to-end"),
+    ("| | measurement | timer window contains | median |", "decomposition"),
+)
+
 E2E_BEGIN = "<!-- BEGIN GENERATED: bench-e2e -->"
 E2E_END = "<!-- END GENERATED: bench-e2e -->"
 DECOMP_BEGIN = "<!-- BEGIN GENERATED: bench-decomposition -->"
@@ -217,8 +225,31 @@ def check():
         problems.append("the decomposition table does not match the artifact")
         for line in _diff(have_dec.splitlines(), dec_now.strip().splitlines()):
             problems.append("    " + line)
+    # A DUPLICATE benchmark table outside the markers. Comparing the marked
+    # regions alone is not enough: an obsolete table left beside a correct
+    # generated one passes, and it is free to contradict it. Stage 5.3
+    # shipped exactly that -- an unmarked table carrying the previous run's
+    # numbers and the withdrawn "excludes teardown" wording, sitting directly
+    # above the corrected generated table. A reader comparing the two sees a
+    # contradiction, and the check reported the document as clean.
+    for header, label in _TABLE_HEADERS:
+        n = doc.count(header)
+        if n != 1:
+            problems.append(
+                "expected exactly ONE %s table in the document, found %d. "
+                "A duplicate outside the generated markers can contradict "
+                "the generated one, and the region comparison below cannot "
+                "see it." % (label, n))
+    for begin, end, label in ((E2E_BEGIN, E2E_END, "bench-e2e"),
+                              (DECOMP_BEGIN, DECOMP_END,
+                               "bench-decomposition")):
+        if doc.count(begin) != 1 or doc.count(end) != 1:
+            problems.append(
+                "expected exactly one %s marker pair, found %d begin / %d end"
+                % (label, doc.count(begin), doc.count(end)))
+
     if problems:
-        print("STALE OR EDITED DOCUMENT:")
+        print("STALE, EDITED OR DUPLICATED DOCUMENT:")
         for p in problems:
             print("  -", p)
         return 1

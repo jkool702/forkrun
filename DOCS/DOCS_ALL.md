@@ -261,6 +261,11 @@ large-heap process:
   parent's address space when that space is private anonymous memory —
   ordinary CPython arena growth. End to end on a 200k-record `map()`:
   −1.8% with a small parent (noise), −22.5% at 1 GiB, −32.9% at 2 GiB.
+  Those three figures are the first end-to-end measurement (5 samples, no
+  paired trials). A later controlled run — 15 paired/interleaved
+  repetitions, one process per mapping type, with the ballast's mapping
+  verified from the VMA permission word — measured **−31.6% at 2 GiB**,
+  within the same band.
   Callers with a small parent should expect no measurable change.
 * **Compatibility.** `os.posix_spawn` is provided by libc, so it is present
   wherever `fork`/`exec` are; the module checks for the attribute and uses
