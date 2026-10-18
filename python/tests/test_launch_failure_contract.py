@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -80,19 +81,38 @@ class TestExit127IsNotFallbackSafe(unittest.TestCase):
                          "forbidden -- it lands in the ordinary failure "
                          "path")
 
-    def test_preflight_missing_launcher_is_a_different_case(self):
-        """The confusion this file exists to prevent: absence at
-        preflight DOES fall back, and is not the same thing as a failure
-        to execute a launcher that exists."""
-        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                           "..", "python", "forkrun", "run.py")
-        from forkrun.run import _cleanroom_launcher_path
-        real = _cleanroom_launcher_path()
-        self.assertTrue(os.path.isfile(src))
-        # Documenting the distinction rather than mutating global state:
-        # preflight absence returns None (fallback); exec failure exits
-        # 127 (no fallback). Both facts are asserted independently above.
-        self.assertIsNotNone(real, "sanity: the launcher exists here")
+    def test_preflight_missing_launcher_returns_none_early(self):
+        """Launcher ABSENT AT PREFLIGHT: the launch function warns and
+        returns None BEFORE any fork.
+
+        This is the case that DOES fall back, and the one Stage 2B
+        conflated with the exec-failure case. It is exercised here by
+        patching the path resolver to return None -- the real
+        `_execute_cleanroom` body, not a copy.
+        """
+        import forkrun
+        from forkrun.run import _execute_cleanroom
+        R = sys.modules["forkrun.run"]
+        self.addCleanup(setattr, R, "_cleanroom_launcher_path",
+                        R._cleanroom_launcher_path)
+        R._cleanroom_launcher_path = lambda: None
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        src = os.path.join(d, "in.txt")
+        with open(src, "w") as fh:
+            fh.write("a\nb\n")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _execute_cleanroom(
+                src, lines=1, bytes_=None, workers=2,
+                plugin_path="/nonexistent.so", plugin_func="f",
+                on_error="retry", views=True)
+        self.assertIsNone(result, "absent launcher must decline early")
+        self.assertTrue(
+            any("launcher binary is missing" in str(w.message)
+                for w in caught),
+            "expected the missing-launcher warning, got %r"
+            % [str(w.message) for w in caught])
 
     def test_known_fallback_codes_still_fall_back(self):
         """Guard against "fixing" the table in the wrong direction."""
@@ -176,6 +196,132 @@ class TestMechanismDifference(unittest.TestCase):
                          "even when the failure is a status, 127 is not "
                          "fallback-safe; under posix_spawn there is no "
                          "status at all")
+
+
+class TestRouteLevelCallerVisibleResults(unittest.TestCase):
+    """Exercise the REAL launch functions, not their logic re-derived.
+
+    Stage 2B asserted what each route does on exit 127 from reading the
+    source. These tests execute it: a non-executable stand-in for the
+    launcher satisfies the existence preflight, fails execv, and the
+    production body runs to its own conclusion.
+
+    The two routes are asserted SEPARATELY and differently, because they
+    are different: materialized reports input consumption, streaming
+    reports a truncated stream. Asserting them together would hide that.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="routefail-")
+        self.addCleanup(shutil.rmtree, self._tmp, True)
+        self.fake = os.path.join(self._tmp, "not_a_launcher")
+        with open(self.fake, "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(self.fake, 0o644)
+        self.src = os.path.join(self._tmp, "in.txt")
+        with open(self.src, "w") as fh:
+            fh.write("a\nb\nc\n")
+        for name in ("FORKRUN_CLEANROOM", "FORKRUN_RETRY_LIMIT"):
+            old = os.environ.get(name)
+            self.addCleanup(self._restore, name, old)
+        os.environ.pop("FORKRUN_CLEANROOM", None)
+        os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+
+        # Patch the MODULE attribute. `from forkrun import run` yields the
+        # frontend FUNCTION, which shadows the submodule; patching that
+        # object silently does nothing and the real launcher runs.
+        import forkrun.run  # noqa: F401
+        R = sys.modules["forkrun.run"]
+        self.addCleanup(setattr, R, "_cleanroom_launcher_path",
+                        R._cleanroom_launcher_path)
+        R._cleanroom_launcher_path = lambda: self.fake
+
+    @staticmethod
+    def _restore(name, value):
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+    def _skip_without_substrate(self):
+        try:
+            from forkrun._bindings import find_substrate
+            if not find_substrate():
+                self.skipTest("substrate not built")
+        except Exception:
+            self.skipTest("substrate not available")
+
+    def test_materialized_route_raises_input_consumption_error(self):
+        """map-mode launch function: exit 127 -> RuntimeError about the
+        input possibly having been consumed. NOT a fallback."""
+        self._skip_without_substrate()
+        from forkrun.run import _execute_cleanroom
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with self.assertRaises(RuntimeError) as ctx:
+                _execute_cleanroom(
+                    self.src, lines=1, bytes_=None, workers=2,
+                    plugin_path="/nonexistent.so", plugin_func="f",
+                    on_error="retry", views=True)
+        msg = str(ctx.exception)
+        self.assertIn("exit 127", msg)
+        self.assertIn("consumed", msg,
+                      "materialized route must report the input-consumption "
+                      "rationale, got %r" % msg)
+        self.assertTrue(
+            any("NOT falling back" in str(w.message) for w in caught),
+            "the warning must say the run is NOT falling back")
+        # And the status classification is the production one.
+        st = 127 << 8
+        self.assertFalse(_cleanroom_may_fallback(st))
+        self.assertEqual(_decode_launcher_status(st)[3], False)
+
+    def test_streaming_route_raises_truncation_error(self):
+        """stream-mode launch function: exit 127 -> RuntimeError about a
+        TRUNCATED stream. Different message, same no-fallback outcome."""
+        self._skip_without_substrate()
+        from forkrun.run import _execute_cleanroom_stream
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("ignore")
+            gen = _execute_cleanroom_stream(
+                self.src, lines=1, bytes_=None, workers=2,
+                plugin_path="/nonexistent.so", plugin_func="f",
+                on_error="retry")
+            with self.assertRaises(RuntimeError) as ctx:
+                list(gen)
+        msg = str(ctx.exception)
+        self.assertIn("TRUNCATED", msg,
+                      "streaming route must report truncation, got %r" % msg)
+        self.assertIn("exit 127", msg)
+
+    def test_routes_report_differently_on_the_same_failure(self):
+        """The two routes must not be collapsed: same condition, two
+        caller-visible messages."""
+        self._skip_without_substrate()
+        from forkrun.run import (_execute_cleanroom,
+                                 _execute_cleanroom_stream)
+        msgs = []
+        for fn, drive in (
+                (_execute_cleanroom, "call"),
+                (_execute_cleanroom_stream, "gen")):
+            with warnings.catch_warnings(record=True):
+                warnings.simplefilter("ignore")
+                try:
+                    if drive == "call":
+                        fn(self.src, lines=1, bytes_=None, workers=2,
+                           plugin_path="/nonexistent.so", plugin_func="f",
+                           on_error="retry", views=True)
+                    else:
+                        list(fn(self.src, lines=1, bytes_=None, workers=2,
+                                plugin_path="/nonexistent.so",
+                                plugin_func="f", on_error="retry"))
+                except RuntimeError as e:
+                    msgs.append(str(e))
+        self.assertEqual(len(msgs), 2, "both routes must have raised")
+        self.assertNotEqual(
+            msgs[0], msgs[1],
+            "the routes report DIFFERENT reasons; if these are equal, a "
+            "routing change has collapsed them")
 
 
 class TestSignalSemantics(unittest.TestCase):

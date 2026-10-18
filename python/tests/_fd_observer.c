@@ -35,11 +35,25 @@
 #include <stdio.h>
 #include <unistd.h>
 
-/* Scan limit. A fixed small ceiling would make a HIGH-DESCRIPTOR test
- * pass VACUOUSLY: a descriptor at, say, fd 1500 would simply be outside
- * the scan, so "both arms agree" would be trivially true while neither
- * arm had observed anything. 4096 covers RLIMIT_NOFILE values common in
- * practice; `ulimit -n` is consulted to raise it if the host allows. */
+/* Scan limit: a FIXED compile-time ceiling, not an adaptive one.
+ *
+ * A small ceiling would make a HIGH-DESCRIPTOR test pass VACUOUSLY: a
+ * descriptor at, say, fd 1500 would sit outside the scan, so "both arms
+ * agree" would be trivially true while neither arm had observed
+ * anything. That is why this is 4096 and not 1024.
+ *
+ * WHAT IT DOES NOT COVER, stated plainly: a descriptor numbered 4096 or
+ * above is INVISIBLE to this observer, and a test asserting "the arms
+ * agree" would then be vacuous again at that altitude. This observer
+ * performs NO runtime check of RLIMIT_NOFILE or `ulimit -n` -- an earlier
+ * comment here claimed it did, which was false and would have led a
+ * reader to believe the ceiling tracked the host's limit. It does not.
+ *
+ * A descriptor that high would require the host to have had thousands of
+ * descriptors open; for the layout cases under test the ceiling is far
+ * above what is reachable, but the limitation is real and a future test
+ * that needs to go higher must raise this constant explicitly rather than
+ * assume the observer follows the process limit. */
 #define FD_SCAN_MAX 4096
 
 int main(void)
