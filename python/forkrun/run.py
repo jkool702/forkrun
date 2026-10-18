@@ -698,7 +698,18 @@ class _RouteFdSet:
         self._done = set()
 
     def add(self, name, fd):
-        """Register a freshly created descriptor."""
+        """Register a freshly created descriptor.
+
+        SHARP EDGE, recorded rather than defended against: registering a
+        name that is already owned OVERWRITES the entry without closing the
+        descriptor it held, which would leak that descriptor. This cannot
+        happen today -- audited across both route functions, every name is
+        added exactly once per call, and each call gets its own `_own` from
+        the decorator -- so this is a hazard for a future edit rather than a
+        live defect, and changing the behaviour here would widen the diff
+        for no currently-reachable failure. If a second `add()` for the
+        same name is ever introduced, it must close the previous value.
+        """
         if fd is not None and fd >= 0:
             self._owned[name] = fd
         return fd

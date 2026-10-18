@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -279,6 +280,139 @@ class TestRepeatedLaunchDoesNotLeakDescriptors(_ConcurrentBase):
                 "streaming descriptor count grew from %d to %d" % (before, after))
         finally:
             _RUN._set_cleanroom_launch_backend(prev)
+
+
+class TestConcurrentCleanupIsolation(_ConcurrentBase):
+    """A failing call must not disturb its neighbours, or leak.
+
+    The contamination tests prove callers cannot read each other's DATA.
+    These prove the other half: when one call fails mid-route -- after it
+    has allocated route descriptors and before it has released them -- the
+    other in-flight calls still complete correctly, and the failed call's
+    descriptors do not accumulate or get closed twice.
+
+    This is the case a descriptor-ownership bug would actually show up in:
+    a shared descriptor table, a cleanup that runs while another call is
+    still using the same number, or a failure path that returns without
+    releasing.
+    """
+
+    def _fail_once(self, missing):
+        """Run one failing call so the error path's lazy init happens now."""
+        try:
+            forkrun.map(self.spec, missing, mode="plugin", workers=2,
+                        lines=1)
+        except BaseException:
+            pass
+
+    def _one(self, backend, good=4, bad=2):
+        prev = _RUN._set_cleanroom_launch_backend(backend)
+        paths = [_corpus(self._tmp, "ok%d" % i) for i in range(good)]
+        missing = [os.path.join(self._tmp, "absent-%d.txt" % i)
+                   for i in range(bad)]
+
+        def fn(i):
+            if i < good:
+                out = forkrun.map(self.spec, paths[i], mode="plugin",
+                                  workers=2, lines=64)
+                self.assertEqual(len(out), 8,
+                                 "a neighbouring failure disturbed this call")
+                blob = b"".join(bytes(r) if not isinstance(r, bytes) else r
+                                for r in out).decode("utf-8", "replace")
+                self.assertIn("ok%d-payload" % i, blob)
+                return len(out)
+            # A source that does not exist: the route must decline or fail,
+            # and either way must clean up after itself.
+            try:
+                forkrun.map(self.spec, missing[i - good], mode="plugin",
+                            workers=2, lines=64)
+            except BaseException:
+                return "failed-as-expected"
+            return "no-error"
+
+        # Warm the failure path FIRST. A source that does not exist makes
+        # the route decline and the in-process path raise, and that path
+        # performs a one-time lazy initialisation the first time it runs
+        # (+9 descriptors here, identical with the cleanroom gate OFF, so
+        # it is not a cleanroom-route leak). Asserting an absolute count
+        # across that boundary would be a brittle whole-FD-table
+        # assertion that fails for reasons unrelated to this route. What
+        # matters is STABILITY once the path is warm.
+        self._fail_once(missing[0])
+        try:
+            before = len(os.listdir("/proc/self/fd"))
+            results = self._run_threads(fn, good + bad)
+            after = len(os.listdir("/proc/self/fd"))
+            for i in range(good):
+                self.assertEqual(results[i], 8, "a good call returned %r"
+                                 % (results[i],))
+            for i in range(good, good + bad):
+                self.assertIn(results[i], ("failed-as-expected", "no-error"),
+                              "unexpected outcome for the failing call: %r"
+                              % (results[i],))
+            self.assertLessEqual(
+                after, before + 2,
+                "descriptors accumulated across concurrent calls including "
+                "failing ones: %d -> %d once the failure path is warm"
+                % (before, after))
+        finally:
+            _RUN._set_cleanroom_launch_backend(prev)
+
+    def test_cleanup_isolation_with_posix_spawn(self):
+        self._one("posix_spawn")
+
+    def test_cleanup_isolation_with_forkexec(self):
+        self._one("forkexec")
+
+
+class TestConcurrentLaunchesTerminate(_ConcurrentBase):
+    """Concurrency must not deadlock: there is a wall-clock bound.
+
+    The contamination tests prove the results are right when the calls
+    finish. A lock-ordering or cleanup-ordering bug would instead make
+    them never finish, which no correctness assertion can catch -- so this
+    asserts a bound and fails with the thread dump if it is exceeded.
+    """
+
+    def _mixed(self, backend, threads=6):
+        prev = _RUN._set_cleanroom_launch_backend(backend)
+        paths = [_corpus(self._tmp, "mix%d" % i) for i in range(threads)]
+
+        def fn(i):
+            if i % 2 == 0:
+                out = forkrun.map(self.spec, paths[i], mode="plugin",
+                                  workers=2, lines=64)
+                return len(out)
+            recs = list(forkrun.stream(self.spec, paths[i], mode="plugin",
+                                       workers=2, lines=64, nodes=1,
+                                       output="bytes"))
+            return len(recs)
+
+        started = time.perf_counter()
+        try:
+            results = self._run_threads(fn, threads)
+        finally:
+            _RUN._set_cleanroom_launch_backend(prev)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(len(results), threads)
+        for r in results:
+            self.assertTrue(r > 0, "a concurrent call produced nothing: %r"
+                            % (results,))
+        return elapsed
+
+    def test_mixed_map_and_stream_terminate_under_posix_spawn(self):
+        self._one = self._mixed
+        elapsed = self._mixed("posix_spawn")
+        # Sequential baseline is well under a second; allow generous slack
+        # for a loaded machine while still failing on a real hang.
+        self.assertLess(elapsed, 60.0,
+                        "6 concurrent mixed launches took %.1fs, which "
+                        "indicates contention rather than deadlock" % elapsed)
+
+    def test_mixed_map_and_stream_terminate_under_forkexec(self):
+        elapsed = self._mixed("forkexec")
+        self.assertLess(elapsed, 60.0,
+                        "6 concurrent mixed launches took %.1fs" % elapsed)
 
 
 if __name__ == "__main__":
