@@ -1614,6 +1614,14 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         # function so it can be tested without re-implementing it.
         may_fallback = _cleanroom_may_fallback(status)
         _why_launcher = _read_launcher_stderr(errfd)
+        # FD-LEAK-1 (failure half): errfd's LAST parent-side use is the
+        # read above -- _read_launcher_stderr opens with closefd=False,
+        # so the read does NOT close it. Close here, BEFORE every raise
+        # and return below, so each of those exits releases it. Without
+        # this the descriptor survived every failed call as well as every
+        # successful one.
+        os.close(errfd)
+        errfd = -1
         if code in _CR_COMPAT_REFUSALS:
             # A compatibility refusal must NOT collapse into a bare
             # "return None": the dispatcher has to know WHY, because the
@@ -1662,6 +1670,14 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "so this call is refused rather than completed incorrectly. "
             "Pass a path (or seek the descriptor back to 0 yourself) if "
             "you want a retry." % (_describe_launcher_failure(status),))
+    else:
+        # FD-LEAK-1 (success half): the launcher exited cleanly, so
+        # nothing reads errfd -- the stderr tail is consulted only on
+        # failure. Without this the descriptor survived every successful
+        # call. `errfd = -1` after closing keeps a stray later close from
+        # hitting a RECYCLED descriptor number.
+        os.close(errfd)
+        errfd = -1
     if stats is None:
         # The counter record is missing, unreadable, or absent because the
         # launcher declined the payload. Refuse the
@@ -2402,6 +2418,21 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     finally:
         try:
             os.close(rr)
+        except OSError:
+            pass
+        # FD-LEAK-2: stats_fd was created for this launch and read only on
+        # the success path, so success, every failure raise, the
+        # strict_poison raise, and GENERATOR ABANDONMENT all left it
+        # open. The finally is the one place every exit passes through.
+        #
+        # Closing the parent's copy here cannot disturb a running child:
+        # after fork the two processes hold SEPARATE descriptor-table
+        # entries pointing at one shared open file description, so the
+        # child keeps its own reference and its writes still land. The
+        # read at the success path has already happened by this point in
+        # every non-raising case, so nothing is lost.
+        try:
+            os.close(stats_fd)
         except OSError:
             pass
         for pid in (launch_pid,):
