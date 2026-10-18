@@ -723,17 +723,30 @@ backends, 5 samples after warmup (milliseconds):
 repetitions**, both mappings, raw per-trial samples in
 `bench_artifacts/cleanroom_backends_2048MiB_20261018T165718Z.json`:
 
-| mapping | fork+execv (sd) | posix_spawn (sd) | median delta | paired diff median (range) |
-|---|---|---|---|---|
-| MAP_PRIVATE | 207.59 (3.04) | 138.21 (1.51) | **−33.4%** | **69.26 ms** [63.13, 75.88] |
-| MAP_SHARED | 139.55 (2.50) | 137.62 (1.79) | −1.4% | 1.97 ms [−3.52, 8.03] |
+| mapping | fork+execv (sd) | posix_spawn (sd) | median delta | paired diff median [range] | isolated spawn: fork / spawn |
+|---|---|---|---|---|---|
+| MAP_PRIVATE | 210.98 (2.48) | 141.91 (2.30) | **32.7%** | **69.99 ms** [64.26, 73.33] | 26.19 / 0.27 |
+| MAP_SHARED | 145.35 (3.19) | 143.60 (3.03) | **1.2%** | **1.71 ms** [-2.64, 8.98] | 0.91 / 0.29 |
 
-Corrected re-run of 2026-10-18, superseding the 15-rep figures of the
-previous revision (−34.9% / −1.6%), which were themselves a re-run of an
-earlier 9-rep pass. **The conclusion did not move across three independent
-runs**: the private cell is −33% to −35% with every pair large and
-positive, and the shared cell sits within noise. The run-to-run variation
-in the private figure (−33.4%, −34.9%) is smaller than the gap it measures.
+**Generated from the committed artifact, not transcribed.** `gen_bench_tables.py` reads `bench_artifacts/cleanroom_backends_2048MiB_20261018T203828Z.json` and emits this table; `gen_bench_tables.py --check` fails if the two ever disagree. Stage 5.1 shipped a document whose figures did not match its own artifact, which is why these numbers are now generated rather than typed.
+
+Corrected re-run of 2026-10-18, superseding the previous revision's figures.
+**The conclusion has not moved across four independent runs**: the private
+cell is −29% to −35% with every one of the 15 pairs large and positive, and
+the shared cell sits within noise in every run. Run-to-run variation in the
+private figure is smaller than the gap it measures.
+
+Each mapping cell now runs in **its own subprocess**. This was not
+fastidiousness: glibc raises its dynamic `mmap` threshold when a large
+mapping is freed, so a 2 GiB ballast allocated and released within one
+process is not reliably returned to the operating system, while a 1 GiB one
+is. Measured directly — after alloc then free, RSS returns to baseline at
+1 GiB (13 → 1038 → 13) but not at 2 GiB — and forcing `gc.collect()` does
+not help, because the memory is held by the allocator rather than by a
+Python reference. The Stage 5.2 run before this one was invalidated by
+exactly this: the shared cell inherited the private cell's mappings, and
+the control caught it (`rw-p/2052MiB, rw-s/2048MiB`) rather than reporting
+the contaminated numbers. One process per cell removes the dependency.
 
 The shared cell's −1.4% does not conflict with the earlier +0.7% — both sit
 inside a range that spans zero, which is what the paired range shows and
@@ -802,40 +815,53 @@ contains:
 
 | | measurement | timer window contains | median |
 |---|---|---|---|
-| **A** | `fork()` → parent return | the parent-side page-table copy. **No reap** | 28.16 ms |
-| **B** | `fork()` + reap, child `_exit()` | A, plus child startup, teardown, exit, wakeup, scheduling, reap | 68.26 ms |
-| **B1** | `fork()` → child's pre-exit signal | A, plus the child's startup path. Excludes teardown | 29.30 ms |
-| **B2** | child's pre-exit signal → reap | **contains** teardown, plus exit, wakeup, scheduling, reap | 30.52 ms |
-| **C** | `fork()` + `/dev/null` open + `dup2` + `execve` + reap | differs from B in more than exec | 69.65 ms |
-| **D** | `posix_spawn` + reap | no per-page copy (`CLONE_VM\|CLONE_VFORK`) | 0.99 ms |
+| **A** | `fork()` → parent return | parent-side page-table copy. **No reap** | 29.82 ms |
+| **B** | `fork()` + reap, child `_exit()` | A, plus child startup, teardown, exit, wakeup, scheduling, reap | 70.05 ms |
+| **B1** | `fork()` → child's pre-exit signal | A, plus the child's startup path. Excludes teardown | 29.94 ms |
+| **B2** | child's own pre-exit clock → reap | **contains** teardown, plus exit, wakeup, scheduling, reap | 41.73 ms |
+| **C** | `fork()` + `/dev/null` open + `dup2` + `execve` + reap | differs from B in more than exec | 72.68 ms |
+| **D** | `posix_spawn` + reap | no per-page copy (`CLONE_VM\|CLONE_VFORK`) | 1.00 ms |
+
+Generated from `bench_artifacts/launch_decomposition_2048MiB_20261018T203828Z.json`.
 
 What may honestly be said:
 
-* **`B - A` = 40.10 ms** is the *additional cost of completing
+* **`B - A` = 40.23 ms** is the *additional cost of completing
   fork-and-exit-and-reap relative to parent-side fork-return latency*. It
   includes child startup, teardown, exit, wakeup, scheduling and the reap.
-  **It is not a measurement of teardown.**
-* **`B1 - A` = 1.14 ms** is the child's startup path. Child startup is
+  **It is not a measurement of teardown**, because `A`'s timer stops before
+  `waitpid()` and so contains no reap at all.
+* **`B1 - A` = 0.12 ms** is the child's startup path. Child startup is
   cheap; it is not where the time goes.
-* **`B2` = 30.52 ms** is the window from the child's pre-exit signal until
-  `waitpid()` returns. This **contains** the address-space teardown, but it
-  is not a pure measurement of it: process exit, the parent's wakeup,
-  scheduling and the reap are in the same window and are not separable
-  without kernel-side instrumentation, which this deliberately does not add.
-* **`C - B` = 1.39 ms** is a difference between two *complete* timing
+* **`B2` = 41.73 ms** is the interval from the **child's own**
+  `CLOCK_MONOTONIC` reading, taken as its last action before `_exit()`, to
+  the completion of `waitpid()`. Because the anchor precedes `_exit()`, the
+  kernel's teardown of the child's address space necessarily falls inside
+  this window. It is still **not a pure measurement** of it: the remainder
+  of the pipe write, process exit, the parent's wakeup, scheduling and the
+  reap share the window and are not separable without kernel-side
+  instrumentation, which this deliberately does not add. The claim it
+  supports is *"the teardown is inside this window"*, not *"the teardown is
+  this long"*.
+* **`C - B` = 2.64 ms** is a difference between two *complete* timing
   configurations that differ in more than image replacement — C's child also
   opens `/dev/null` and `dup2`s it onto stdout. Not a pure exec-cost figure.
-* **`C - D` = 68.72 ms** is a complete forked launch against a complete
+* **`C - D` = 71.68 ms** is a complete forked launch against a complete
   spawned one — a difference of two whole operations, not of two isolated
   components.
 
-**An unexplained residue, reported rather than hidden.** The B1/B2 split
-accounts for 31.66 ms of the 40.10 ms `B - A` interval, leaving **8.48 ms
-unaccounted**. The two are not the same experiment — the B1/B2 child also
-closes a descriptor and writes to a pipe before exiting, and the parent
-blocks on a read — and which effect dominates is not established. No causal
-story is attached to it. Its existence is itself a reason to treat this
-decomposition as **indicative, not exact**.
+**B1 and B2 are not a decomposition of `B - A`.** The Stage 5.1 revision
+treated them as accounting for it and reported an unexplained residue; that
+framing was wrong, because B2 was not measuring what its name said — its
+`t0` was captured before `fork()` and its `t1` after the parent's `read()`,
+so it recorded the same window as B1. The committed artifact showed the two
+agreeing to 0.09 ms, which is the tell. No arithmetic relation between B1/B2
+and `B - A` is claimed.
+
+**Still not measured:** whether the teardown had already begun by the time
+the parent consumed the child's byte. B2 avoids depending on that by
+anchoring in the child's own clock, but the interval between that reading
+and the kernel entering `exit` remains unmeasured.
 
 **This section is not load-bearing.** The figure that decides the default
 switch is the end-to-end paired difference in §8.1, and nothing above should

@@ -71,10 +71,12 @@ Usage:
 """
 
 import argparse
+import gc
 import json
 import os
 import platform
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
@@ -258,21 +260,53 @@ class _Probe:
         self.observed = []
 
 
-def one_call(spec, path, expected_records):
-    """The COMPLETE public call: entry to last record delivered."""
+def expected_tokens(lines):
+    return {("PAYLOAD_%08d" % i).encode() for i in range(lines)}
+
+
+def one_call(spec, path, expected_records, want_tokens=None):
+    """The COMPLETE public call: entry to last record delivered.
+
+    CONTENT IS VERIFIED, not just the count. A defect that substituted one
+    descriptor for another, or truncated or duplicated records while
+    preserving how many there are, would pass a count check and still
+    invalidate the measurement -- the route would be doing different work
+    than the one being timed.
+
+    The verification runs AFTER the timer has stopped, so none of its cost
+    is charged to the reported time. It compares the exact set of payload
+    tokens against the expected set. The corpus gives every line a unique
+    token, so set equality plus the record count pins the content exactly:
+    a lost token fails the set check and a duplicated record fails the
+    count check.
+    """
     import forkrun
     t0 = time.perf_counter()
     out = forkrun.map(spec, path, mode="plugin", workers=4, lines=64)
     elapsed = (time.perf_counter() - t0) * 1000.0
+
     if len(out) != expected_records:
         raise AssertionError("expected %d records, got %d -- a trial that "
                              "does not produce the right answer is not a "
                              "timing sample"
                              % (expected_records, len(out)))
+    if want_tokens is not None:
+        blob = b"".join(bytes(r) if not isinstance(r, bytes) else r
+                        for r in out)
+        got = set(blob.split())
+        if got != want_tokens:
+            missing = len(want_tokens - got)
+            extra = len(got - want_tokens)
+            raise AssertionError(
+                "payload multiset mismatch: %d expected token(s) missing, "
+                "%d unexpected token(s) present -- a trial that returns the "
+                "right COUNT with the wrong CONTENT is not a timing sample"
+                % (missing, extra))
     return elapsed
 
 
-def paired(spec, path, run_mod, probe, reps, expected_records, warmup=1):
+def paired(spec, path, run_mod, probe, reps, expected_records, warmup=1,
+           want_tokens=None):
     samples = {b: [] for b in BACKENDS}
     fds = []
     for i in range(reps + warmup):
@@ -280,7 +314,8 @@ def paired(spec, path, run_mod, probe, reps, expected_records, warmup=1):
         for backend in order:
             run_mod._set_cleanroom_launch_backend(backend)
             probe.reset()
-            elapsed = one_call(spec, path, expected_records)
+            elapsed = one_call(spec, path, expected_records,
+                               want_tokens)
             if probe.observed != [backend] * len(probe.observed) or \
                     not probe.observed:
                 raise AssertionError(
@@ -357,9 +392,10 @@ def describe(vals):
 # ------------------------------------------------------------------ main
 
 def run_cell(name, ballast, spec, src, run_mod, probe, reps, expected,
-             artifact):
+             artifact, want_tokens=None):
     fds_before = len(os.listdir("/proc/self/fd"))
-    samples, fds = paired(spec, src, run_mod, probe, reps, expected)
+    samples, fds = paired(spec, src, run_mod, probe, reps, expected,
+                         want_tokens=want_tokens)
     iso = isolated_launch(spec, src, run_mod, expected_records=expected)
     diffs = paired_diffs(samples["forkexec"], samples["posix_spawn"])
     mf = statistics.median(samples["forkexec"])
@@ -386,6 +422,8 @@ def run_cell(name, ballast, spec, src, run_mod, probe, reps, expected,
         "median_delta_pct": round(-pct, 1),
         "fd_count": {"before": fds_before,
                      "min": min(fds), "max": max(fds)},
+        "per_trial_verification": "record count AND exact payload token set "
+                                  "checked after the timer stopped",
     }
     artifact["cells"].append(cell)
 
@@ -409,16 +447,119 @@ def run_cell(name, ballast, spec, src, run_mod, probe, reps, expected,
           % (iso["forkexec"] or 0.0, iso["posix_spawn"] or 0.0))
     print("    open fds across trials: %d..%d (no accumulation expected)"
           % (cell["fd_count"]["min"], cell["fd_count"]["max"]))
+    print("    per-trial verification: record count AND exact payload token "
+          "set (%d tokens), checked after the timer stopped" % len(want_tokens))
     # Keep the ballast alive until every number above is computed.
     return ballast
+
+
+# Each mapping cell runs in its OWN PROCESS. This is not fastidiousness:
+# glibc raises its dynamic mmap threshold when a large mapping is freed, so
+# a 2 GiB ballast allocated and released in one process is not reliably
+# returned to the operating system, while a 1 GiB one is. The second cell
+# would then silently inherit the first cell's private mappings and measure
+# the wrong thing. Measured directly: after alloc+free, RSS returns to
+# baseline at 1 GiB (13 -> 1038 -> 13) but not at 2 GiB. Forcing a
+# gc.collect() does not help, because the memory is retained by the
+# allocator rather than by a Python reference. Running one process per cell
+# removes the dependency entirely.
+_CELLS = {
+    "private": ("MAP_PRIVATE (proxy for private inherited writable memory)",
+                ballast_private_heap),
+    "shared": ("MAP_SHARED (the control, and what Stage 3 used)",
+               ballast_shared_mmap),
+}
+
+
+def run_one_cell(kind, args, out_path):
+    """Run a single mapping cell in THIS process and write a fragment."""
+    name, factory = _CELLS[kind]
+    os.environ["FORKRUN_CLEANROOM"] = "1"
+    os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+    import forkrun
+    run_mod = sys.modules["forkrun.run"]
+    probe = _Probe()
+    probe.install(run_mod)
+    try:
+        tmp = tempfile.mkdtemp(prefix="fr-bench-cell-")
+        src = os.path.join(tmp, "in.txt")
+        with open(src, "w") as fh:
+            for i in range(args.lines):
+                fh.write("PAYLOAD_%08d\n" % i)
+        expected = args.lines // 64
+        want_tokens = expected_tokens(args.lines)
+        artifact = {"cells": []}
+        print("-" * 78)
+        ballast, _ids = factory(args.mib)
+        run_cell(name, ballast, os.environ["FORKRUN_BENCH_SPEC"], src,
+                 run_mod, probe, args.reps, expected, artifact,
+                 want_tokens=want_tokens)
+
+        # MAPPING CONTROL. Each cell runs in its own process precisely so
+        # that this check is decidable: the process holds exactly one
+        # ballast, and if it does not hold exactly one -- or holds the
+        # wrong kind -- the cell's timings support no conclusion.
+        #
+        # Classified by the VMA permission word, NOT by smaps' private/
+        # shared counters: a MAP_SHARED mmap.mmap mapping is file-backed
+        # (/dev/zero), so it reports Anonymous: 0 kB and books its dirty
+        # page-cache pages under Private_Dirty. Reading the counters would
+        # call the shared ballast private and make both cells
+        # indistinguishable.
+        ev = large_vm_as(min_mib=max(64, args.mib // 2))
+        cell = artifact["cells"][-1]
+        cell["smaps"] = ev
+        want_shared = kind == "shared"
+        floor = max(64, args.mib // 2)
+        big = [m for m in ev if m["rss_mib"] >= floor]
+        kinds = sorted("%s/%dMiB" % (m["perms"], m["rss_mib"]) for m in big)
+        print("    large writable VMAs (classified by VMA perms):")
+        for m in ev:
+            print("      %s perms=%s shared=%s vmflags_sh=%s anon=%dMiB "
+                  "rss=%dMiB priv_dirty=%dMiB"
+                  % (m["range"], m["perms"], m["vma_is_shared"],
+                     m["vmflags_has_sh"], m["anonymous_mib"],
+                     m["rss_mib"], m["private_dirty_mib"]))
+        if not big:
+            cell["mapping_control_ok"] = False
+            cell["void_reason"] = "no large writable VMA found"
+            print("      *** VOID: no large writable VMA found")
+        elif len(big) > 1:
+            cell["mapping_control_ok"] = False
+            cell["void_reason"] = (
+                "expected exactly one large writable VMA, found %d: %s"
+                % (len(big), ", ".join(kinds)))
+            print("      *** VOID: %s" % cell["void_reason"])
+        elif big[0]["vma_is_shared"] != want_shared:
+            cell["mapping_control_ok"] = False
+            cell["void_reason"] = (
+                "expected a %s VMA, found perms=%s"
+                % ("shared" if want_shared else "private", big[0]["perms"]))
+            print("      *** VOID: %s" % cell["void_reason"])
+        else:
+            cell["mapping_control_ok"] = True
+            cell["valid"] = True
+            print("      control OK: exactly one large writable VMA, and it "
+                  "is %s" % ("shared" if want_shared else "private"))
+        print("      note: Private_Dirty is NOT the discriminator -- a "
+              "shared file VMA also reports dirty pages there.")
+
+        del ballast
+        gc.collect()
+        with open(out_path, "w") as fh:
+            json.dump(artifact, fh, indent=2)
+    finally:
+        probe.remove(run_mod)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mib", type=int, default=2048)
     ap.add_argument("--reps", type=int, default=15)
+    ap.add_argument("--lines", type=int, default=200000)
     ap.add_argument("--out", default=None)
-    ap.add_argument("--skip-iso", action="store_true")
+    ap.add_argument("--cell", choices=sorted(_CELLS), default=None,
+                    help="internal: run one cell in this process")
     args = ap.parse_args()
 
     spec = os.environ.get("FORKRUN_BENCH_SPEC")
@@ -427,20 +568,22 @@ def main():
               file=sys.stderr)
         return 2
 
-    os.environ["FORKRUN_CLEANROOM"] = "1"
-    os.environ["FORKRUN_RETRY_LIMIT"] = "1"
-    import forkrun
-    run_mod = sys.modules["forkrun.run"]
-    probe = _Probe()
-    probe.install(run_mod)
+    out_path = args.out or os.path.join(
+        tempfile.mkdtemp(prefix="fr-bench-"),
+        "cleanroom_backend_bench_%dMiB.json" % args.mib)
 
-    tmp = tempfile.mkdtemp(prefix="fr-bench-")
-    src = os.path.join(tmp, "in.txt")
-    lines = 200000
-    with open(src, "w") as fh:
-        for i in range(lines):
-            fh.write("PAYLOAD_%08d\n" % i)
-    expected = lines // 64
+    # Internal re-entry: one mapping cell, in its own process.
+    if args.cell:
+        run_one_cell(args.cell, args, out_path)
+        return 0
+
+    print("=" * 78)
+    print("F6 Stage 5.2 paired benchmark -- %d MiB, %d reps, one process "
+          "per mapping cell" % (args.mib, args.reps))
+    print("python %s | %s | libc %s"
+          % (platform.python_version(), platform.release(),
+             "-".join(platform.libc_ver())))
+    print("=" * 78)
 
     artifact = {
         "python": platform.python_version(),
@@ -450,72 +593,54 @@ def main():
         "cpu_count": os.cpu_count(),
         "mib": args.mib,
         "reps": args.reps,
-        "lines": lines,
-        "expected_records": expected,
+        "lines": args.lines,
+        "expected_records": args.lines // 64,
         "spec": spec,
         "argv": sys.argv,
+        "isolation": "one subprocess per mapping cell, so no cell can "
+                     "inherit another's mappings",
+        "per_trial_verification": "record count AND exact payload token "
+                                  "set, checked after the timer stopped",
         "cells": [],
     }
-    out_path = args.out or os.path.join(
-        tmp, "cleanroom_backend_bench_%dMiB.json" % args.mib)
 
-    print("=" * 78)
-    print("F6 Stage 5 paired benchmark -- %d MiB, %d reps, both mappings"
-          % (args.mib, args.reps))
-    print("python %s | %s | libc %s"
-          % (artifact["python"], artifact["kernel"], artifact["libc"]))
-    print("=" * 78)
+    env = dict(os.environ)
+    env["FORKRUN_BENCH_SPEC"] = spec
+    for kind in sorted(_CELLS):
+        frag = out_path + ".%s.json" % kind
+        cmd = [sys.executable, os.path.abspath(__file__),
+               "--mib", str(args.mib), "--reps", str(args.reps),
+               "--lines", str(args.lines), "--cell", kind,
+               "--out", frag]
+        proc = subprocess.run(cmd, env=env, capture_output=True,
+                              text=True, timeout=7200)
+        sys.stdout.write(proc.stdout)
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr)
+            artifact["valid"] = False
+            artifact["void_cells"] = artifact.get("void_cells", []) + [kind]
+            artifact["harness_error"] = (
+                "cell subprocess exited %d" % proc.returncode)
+            with open(out_path, "w") as fh:
+                json.dump(artifact, fh, indent=2)
+            print("=" * 78)
+            print("INVALID RUN -- the %s cell subprocess failed (%d)"
+                  % (kind, proc.returncode))
+            print("=" * 78)
+            return 1
+        with open(frag) as fh:
+            fragment = json.load(fh)
+        artifact["cells"].extend(fragment["cells"])
+        # The fragment is an intermediate; the aggregate is the artifact.
+        os.unlink(frag)
 
-    for name, factory in (("MAP_PRIVATE (proxy for private inherited "
-                           "writable memory)",
-                           ballast_private_heap),
-                          ("MAP_SHARED (the control, and what Stage 3 used)",
-                           ballast_shared_mmap)):
-        print()
-        print("-" * 78)
-        ballast, _ids = factory(args.mib)
-        run_cell(name, ballast, spec, src, run_mod, probe, args.reps,
-                 expected, artifact)
-        if ballast is not None:
-            ev = large_vm_as(min_mib=max(64, args.mib // 2))
-            artifact["cells"][-1]["smaps"] = ev
-            want_shared = "MAP_SHARED" in name
-            print("    large writable VMAs (classified by VMA perms):")
-            for m in ev:
-                print("      %s perms=%s shared=%s vmflags_sh=%s "
-                      "anon=%dMiB rss=%dMiB priv_dirty=%dMiB"
-                      % (m["range"], m["perms"], m["vma_is_shared"],
-                         m["vmflags_has_sh"], m["anonymous_mib"],
-                         m["rss_mib"], m["private_dirty_mib"]))
-            big = [m for m in ev if m["rss_mib"] >= max(64, args.mib // 2)]
-            cell = artifact["cells"][-1]
-            if not big:
-                cell["mapping_control_ok"] = False
-                cell["void_reason"] = "no large writable VMA found"
-                print("      *** VOID: no large writable VMA found")
-            elif big[0]["vma_is_shared"] != want_shared:
-                cell["mapping_control_ok"] = False
-                cell["void_reason"] = (
-                    "expected a %s VMA, found perms=%s"
-                    % ("shared" if want_shared else "private",
-                       big[0]["perms"]))
-                print("      *** VOID: %s" % cell["void_reason"])
-            else:
-                cell["mapping_control_ok"] = True
-                cell["valid"] = True
-                print("      control OK: ballast VMA is %s"
-                      % ("shared" if want_shared else "private"))
-            print("      note: Private_Dirty is NOT the discriminator -- a "
-                  "shared file VMA also reports dirty pages there.")
-        del ballast
-
-    probe.remove(run_mod)
     all_valid = all(c.get("valid") for c in artifact["cells"])
     artifact["valid"] = all_valid
     artifact["void_cells"] = [c["cell"] for c in artifact["cells"]
                              if not c.get("valid")]
     with open(out_path, "w") as fh:
         json.dump(artifact, fh, indent=2)
+
     print()
     print("raw per-trial artifact: %s" % out_path)
     print()
@@ -523,19 +648,17 @@ def main():
         print("=" * 78)
         print("INVALID RUN -- mapping control failed for: %s"
               % ", ".join(artifact["void_cells"]))
-        print("The timings above were measured against a process whose")
-        print("ballast was NOT the mapping the cell claims, so they do not")
-        print("support any conclusion. The artifact is written with")
-        print('"valid": false for downstream tooling to check, and this')
-        print("script exits NON-ZERO so a failed control cannot be mistaken")
-        print("for a successful experiment.")
+        print("The timings for those cells were measured against a process")
+        print("whose ballast was NOT the mapping the cell claims, so they")
+        print("support no conclusion. The artifact carries \"valid\": false")
+        print("for downstream tooling, and this script exits NON-ZERO.")
         print("=" * 78)
         return 1
     print("All cells passed their mapping control; artifact marked valid.")
     print()
     print("If BOTH mappings show the same delta, the delta is not about fork")
-    print("page-table cost. If only MAP_PRIVATE does, it is -- and that is the")
-    print("result that matters, because CPython arenas are private.")
+    print("page-table cost. If only MAP_PRIVATE does, it is -- and that is")
+    print("the result that matters, because CPython arenas are private.")
     return 0
 
 

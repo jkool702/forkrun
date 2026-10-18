@@ -65,6 +65,7 @@ import json
 import os
 import platform
 import statistics
+import struct
 import sys
 import tempfile
 import time
@@ -151,35 +152,67 @@ def b1_fork_to_child_signal(reps):
     return out[1:]
 
 
-def b2_signal_to_reap(reps):
-    """From the child's "about to exit" signal until waitpid() returns.
+def _monotonic_ns():
+    return int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1e9)
 
-    This is the window in which the kernel discards the child's copy of
-    the address space, the child becomes a zombie, and the parent is woken
-    and reaps it. It is the closest this experiment gets to the teardown,
-    and it is NOT a pure measurement of it: it also contains process exit,
-    the notification that wakes the parent, scheduling, and the reap
-    syscall itself. Those cannot be separated without kernel-side
-    instrumentation, which this script deliberately does not add.
+
+def b2_child_signal_to_reap(reps):
+    """The child's own pre-exit timestamp -> waitpid() returns.
+
+    F6 Stage 5.2. The previous implementation of this measurement was
+    simply wrong and was caught in review: it captured t0 BEFORE fork()
+    and t1 after the parent's read, so the recorded duration covered
+    fork-to-read -- the same window as B1. The committed artifact shows
+    the two agreeing to 0.09 ms (B1 25.93, B2 25.84), which is the tell.
+    Moving the append() could not have fixed it, because the timestamp
+    itself had already been sampled.
+
+    The interval is now anchored on the CHILD, not on the parent. The
+    child takes a CLOCK_MONOTONIC reading as its last action before
+    _exit() and writes those 8 bytes to the pipe. The parent reads them,
+    reaps, takes its own CLOCK_MONOTONIC reading, and reports the
+    difference. CLOCK_MONOTONIC is system-wide on Linux, so the two
+    readings are directly comparable.
+
+    Anchoring on the child matters. A parent-anchored interval that starts
+    when the buffered byte is CONSUMED cannot show that the teardown is
+    still running: the child may well have finished exiting before the
+    parent is scheduled to read. Because the timestamp is taken BEFORE
+    _exit(), everything the kernel does to discard the child's address
+    space necessarily falls inside the measured window.
+
+    WHAT THIS STILL IS NOT: a pure measurement of the teardown. The window
+    also contains the remainder of the pipe write, process exit, the
+    notification that wakes the parent, scheduling, and the reap syscall.
+    Those are not separable without kernel-side instrumentation, which
+    this script deliberately does not add -- instrumenting the kernel path
+    would change the behaviour being measured. The claim this supports is
+    "the teardown is inside this window", not "the teardown is this long".
     """
     out = []
     for _ in range(reps + 1):
         r, w = os.pipe()
-        t0 = time.perf_counter()
         pid = os.fork()
         if pid == 0:
             os.close(r)
             try:
-                os.write(w, b"x")
+                os.write(w, struct.pack("<q", _monotonic_ns()))
             except OSError:
                 pass
             os._exit(127)
         os.close(w)
-        os.read(r, 1)
-        t1 = time.perf_counter()
+        raw = b""
+        while len(raw) < 8:
+            chunk = os.read(r, 8 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
         os.waitpid(pid, 0)
-        out.append((t1 - t0) * 1000.0)
+        t_reap = _monotonic_ns()
         os.close(r)
+        if len(raw) == 8:
+            child_ts = struct.unpack("<q", raw)[0]
+            out.append((t_reap - child_ts) / 1e6)
     return out[1:]
 
 
@@ -240,7 +273,7 @@ def main():
     A = a_parent_fork(args.reps)
     B = b_fork_exit(args.reps)
     B1 = b1_fork_to_child_signal(args.reps)
-    B2 = b2_signal_to_reap(args.reps)
+    B2 = b2_child_signal_to_reap(args.reps)
     C = c_fork_exec(args.reps, target)
     D = d_spawn(args.reps, target)
 
@@ -262,10 +295,12 @@ def main():
          B1,
          "TIMER STOPS WHEN THE PARENT READS the child's pre-exit byte. "
          "Contains: A, plus the child's startup path. Excludes teardown."),
-        ("B2 child's exit signal -> reap",
+        ("B2 child's own pre-exit clock -> reap",
          B2,
-         "TIMER STARTS at the child's pre-exit byte, ENDS after waitpid(). "
-         "Contains: teardown, process exit, wakeup, scheduling, reap."),
+         "Anchored on the CHILD's CLOCK_MONOTONIC reading taken as its "
+         "last action before _exit(), ending after waitpid(). The teardown "
+         "necessarily falls inside it, but so do exit, wakeup, scheduling "
+         "and the reap."),
         ("C  fork() + open /dev/null + dup2 + execve + reap",
          C,
          "TIMER INCLUDES waitpid(). Differs from B in more than exec: the "
@@ -298,26 +333,27 @@ def main():
     print("      fork() returning and raising its pre-exit signal.")
     print()
     print("  B2     = %7.2f ms" % b2)
-    print("      from the child's pre-exit signal until waitpid() returns.")
-    print("      This CONTAINS the address-space teardown but is not a pure")
-    print("      measurement of it: process exit, the wakeup of the parent,")
-    print("      scheduling and the reap are in the same window and cannot")
-    print("      be separated without kernel-side instrumentation, which")
-    print("      this script deliberately does not add.")
+    print("      anchored on the CHILD's own CLOCK_MONOTONIC reading, taken")
+    print("      as its last action before _exit(), and ending after")
+    print("      waitpid() returns. Because the anchor precedes _exit(), the")
+    print("      kernel's teardown of the child's address space necessarily")
+    print("      falls inside this window.")
+    print("      It is NOT a pure measurement of the teardown: the rest of")
+    print("      the pipe write, process exit, the parent's wakeup,")
+    print("      scheduling and the reap share the window and are not")
+    print("      separable without kernel instrumentation, which this")
+    print("      deliberately does not add. The claim it supports is")
+    print("      'the teardown is inside this window', not 'the teardown")
+    print("      is this long'.")
     print()
-    split = (b1 - a) + b2
-    resid = (b - a) - split
-    print("  (B1 - A) + B2 = %7.2f ms" % split)
-    print("  B - A                 = %7.2f ms" % (b - a))
-    print("  UNEXPLAINED RESIDUAL  = %7.2f ms" % resid)
-    print("      The split does NOT fully account for B - A; this residue")
-    print("      is reported rather than folded into either part. The two")
-    print("      experiments are not the same experiment: the B1/B2 child")
-    print("      additionally closes a descriptor and writes to a pipe")
-    print("      before exiting, and the parent blocks on a read. Which")
-    print("      effect dominates is not established here, so no causal")
-    print("      story is attached to the residue. It is a reason to treat")
-    print("      this whole decomposition as indicative, not exact.")
+    print()
+    print("  Note: B1 and B2 are NOT a decomposition of B - A and are not")
+    print("  summed against it. B1 and B2 are a different experiment (the")
+    print("  child writes to a pipe and the parent blocks on a read), with")
+    print("  B2 anchored in the child's clock rather than the parent's. The")
+    print("  Stage 5.1 revision treated the split as accounting for B - A")
+    print("  and reported an unexplained residue; that framing was wrong,")
+    print("  because B2 was not measuring what its name said.")
     print()
     print("  C - B  = %7.2f ms" % (c - b))
     print("      the difference between two COMPLETE timing configurations")
@@ -343,7 +379,7 @@ def main():
                 "A_fork_return_no_reap": [round(x, 2) for x in A],
                 "B_fork_exit_reap": [round(x, 2) for x in B],
                 "B1_fork_to_child_signal": [round(x, 2) for x in B1],
-                "B2_child_signal_to_reap": [round(x, 2) for x in B2],
+                "B2_child_pre_exit_to_reap": [round(x, 2) for x in B2],
                 "C_fork_devnull_exec_reap": [round(x, 2) for x in C],
                 "D_posix_spawn_reap": [round(x, 2) for x in D],
             },
@@ -352,9 +388,7 @@ def main():
             "derived_ms": {
                 "B_minus_A_additional_fork_exit_reap_cost": round(b - a, 2),
                 "B1_minus_A_child_startup": round(b1 - a, 2),
-                "B2_signal_to_reap_includes_teardown_plus_reap": round(b2, 2),
-                "split_B1_minus_A_plus_B2": round((b1 - a) + b2, 2),
-                "unexplained_residual_in_B_minus_A": round((b - a) - ((b1 - a) + b2), 2),
+                "B2_child_pre_exit_to_reap": round(b2, 2),
                 "C_minus_B_configuration_difference": round(c - b, 2),
                 "C_minus_D_complete_launch_difference": round(c - e, 2),
             },
@@ -367,11 +401,14 @@ def main():
                 "The overlap between parent post-launch work and child "
                 "teardown in a real route, which serial windows here do "
                 "not reproduce.",
-                "The residual between B - A and the B1/B2 split: the two "
-                "are different experiments (the B1/B2 child also closes a "
-                "descriptor and writes to a pipe before exiting), and which "
-                "effect dominates is not established. The decomposition is "
-                "indicative, not exact.",
+                "B1 and B2 do not partition B - A. They are a separate "
+                "experiment, and B2 is anchored in the child's clock. No "
+                "arithmetic relation between them and B - A is claimed.",
+                "Whether the teardown had already begun by the time the "
+                "parent consumed the child's byte: B2 avoids this by "
+                "anchoring on the child's own pre-exit clock reading, but "
+                "the residual interval between that reading and the "
+                "kernel entering exit is still unmeasured.",
             ],
         }, fh, indent=2)
     print()

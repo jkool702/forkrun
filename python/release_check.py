@@ -424,6 +424,27 @@ def check_idl_fresh():
     return True
 
 
+@check("Bench: decision-record figures match the committed artifacts")
+def check_bench_docs_match_artifacts():
+    """The published benchmark figures must match the raw evidence.
+
+    F6 Stage 5.1 shipped a decision record whose §8.1/§8.1b numbers did not
+    match the committed JSON artifact -- the figures had been transcribed
+    from a console during one run while the artifact on disk came from a
+    later run into the same path, and they differed by around 10%. That is
+    not rounding, and a reader checking the evidence would have found it.
+
+    The tables are now GENERATED from the artifacts by
+    dev/supervisor/gen_bench_tables.py. This gate re-derives them and fails
+    if the document has drifted from the committed evidence, so the
+    mismatch cannot recur silently between runs.
+    """
+    proc = _run([sys.executable,
+                 "dev/supervisor/gen_bench_tables.py", "--check"],
+                timeout=300)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
+
+
 @check("Docs: DOCS_ALL.md matches its source documents")
 def check_docs_all_fresh():
     # DOCS_ALL.md is a generated AGGREGATE. check_twins() above only

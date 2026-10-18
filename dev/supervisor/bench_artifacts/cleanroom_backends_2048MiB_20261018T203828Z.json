@@ -1,0 +1,251 @@
+{
+  "python": "3.14.7",
+  "platform": "Linux-7.1.13-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "libc": "glibc-2.43",
+  "kernel": "7.1.13-200.fc44.x86_64",
+  "cpu_count": 28,
+  "mib": 2048,
+  "reps": 15,
+  "lines": 200000,
+  "expected_records": 3125,
+  "spec": "/tmp/opencode/benchplug/p.so:copy_v1",
+  "argv": [
+    "dev/supervisor/bench_cleanroom_backends.py",
+    "--mib",
+    "2048",
+    "--reps",
+    "15",
+    "--out",
+    "dev/supervisor/bench_artifacts/cleanroom_backends_2048MiB_20261018T203828Z.json"
+  ],
+  "isolation": "one subprocess per mapping cell, so no cell can inherit another's mappings",
+  "per_trial_verification": "record count AND exact payload token set, checked after the timer stopped",
+  "cells": [
+    {
+      "cell": "MAP_PRIVATE (proxy for private inherited writable memory)",
+      "mapping_control_ok": true,
+      "valid": true,
+      "rss_mib": 2090,
+      "rollup_mib": {
+        "Rss": 2090,
+        "Pss": 2084,
+        "Pss_Dirty": 2083,
+        "Pss_Anon": 2083,
+        "Pss_File": 1,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 7,
+        "Shared_Dirty": 0,
+        "Private_Clean": 0,
+        "Private_Dirty": 2083,
+        "Referenced": 2090,
+        "Anonymous": 2083,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "samples_ms": {
+        "forkexec": [
+          211.21,
+          215.76,
+          210.75,
+          206.72,
+          209.9,
+          209.68,
+          207.97,
+          214.83,
+          208.08,
+          211.79,
+          213.58,
+          208.57,
+          210.98,
+          212.72,
+          211.19
+        ],
+        "posix_spawn": [
+          141.21,
+          142.43,
+          143.4,
+          138.96,
+          139.24,
+          138.48,
+          141.33,
+          141.91,
+          142.2,
+          146.92,
+          142.11,
+          144.31,
+          145.91,
+          141.09,
+          140.85
+        ]
+      },
+      "end_to_end": {
+        "forkexec": {
+          "n": 15,
+          "median": 210.98,
+          "min": 206.72,
+          "max": 215.76,
+          "sd": 2.48
+        },
+        "posix_spawn": {
+          "n": 15,
+          "median": 141.91,
+          "min": 138.48,
+          "max": 146.92,
+          "sd": 2.3
+        }
+      },
+      "isolated_spawn_ms": {
+        "forkexec": 26.19,
+        "posix_spawn": 0.27
+      },
+      "paired_diff_ms": {
+        "n": 15,
+        "median": 69.99,
+        "min": 64.26,
+        "max": 73.33
+      },
+      "median_delta_pct": -32.7,
+      "fd_count": {
+        "before": 5,
+        "min": 5,
+        "max": 5
+      },
+      "per_trial_verification": "record count AND exact payload token set checked after the timer stopped",
+      "smaps": [
+        {
+          "range": "559e730d4000-559ef35e5000",
+          "perms": "rw-p",
+          "vma_is_shared": false,
+          "vmflags_has_sh": false,
+          "anonymous_mib": 2052,
+          "rss_mib": 2052,
+          "private_dirty_mib": 2052,
+          "shared_clean_mib": 0,
+          "shared_dirty_mib": 0
+        }
+      ]
+    },
+    {
+      "cell": "MAP_SHARED (the control, and what Stage 3 used)",
+      "mapping_control_ok": true,
+      "valid": true,
+      "rss_mib": 2091,
+      "rollup_mib": {
+        "Rss": 2091,
+        "Pss": 2086,
+        "Pss_Dirty": 2084,
+        "Pss_Anon": 36,
+        "Pss_File": 1,
+        "Pss_Shmem": 2048,
+        "Shared_Clean": 7,
+        "Shared_Dirty": 0,
+        "Private_Clean": 0,
+        "Private_Dirty": 2084,
+        "Referenced": 2091,
+        "Anonymous": 36,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "samples_ms": {
+        "forkexec": [
+          150.54,
+          153.13,
+          147.94,
+          141.66,
+          146.76,
+          145.3,
+          143.42,
+          140.71,
+          142.39,
+          144.83,
+          145.35,
+          145.81,
+          148.47,
+          145.08,
+          147.04
+        ],
+        "posix_spawn": [
+          142.72,
+          146.68,
+          140.63,
+          143.61,
+          147.36,
+          144.97,
+          143.6,
+          138.93,
+          140.48,
+          147.47,
+          144.49,
+          137.63,
+          139.49,
+          143.38,
+          145.91
+        ]
+      },
+      "end_to_end": {
+        "forkexec": {
+          "n": 15,
+          "median": 145.35,
+          "min": 140.71,
+          "max": 153.13,
+          "sd": 3.19
+        },
+        "posix_spawn": {
+          "n": 15,
+          "median": 143.6,
+          "min": 137.63,
+          "max": 147.47,
+          "sd": 3.03
+        }
+      },
+      "isolated_spawn_ms": {
+        "forkexec": 0.91,
+        "posix_spawn": 0.29
+      },
+      "paired_diff_ms": {
+        "n": 15,
+        "median": 1.71,
+        "min": -2.64,
+        "max": 8.98
+      },
+      "median_delta_pct": -1.2,
+      "fd_count": {
+        "before": 5,
+        "min": 5,
+        "max": 5
+      },
+      "per_trial_verification": "record count AND exact payload token set checked after the timer stopped",
+      "smaps": [
+        {
+          "range": "7fdbd9a00000-7fdc59a00000",
+          "perms": "rw-s",
+          "vma_is_shared": true,
+          "vmflags_has_sh": true,
+          "anonymous_mib": 0,
+          "rss_mib": 2048,
+          "private_dirty_mib": 2048,
+          "shared_clean_mib": 0,
+          "shared_dirty_mib": 0
+        }
+      ]
+    }
+  ],
+  "valid": true,
+  "void_cells": []
+}
