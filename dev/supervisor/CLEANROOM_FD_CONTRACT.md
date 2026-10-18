@@ -557,44 +557,69 @@ rather than done.
 
 ---
 
-## 9. Recommendation: CONDITIONAL GO
+## 9. Status: CONDITIONAL GO → technical gates MET, adoption OUTSTANDING
 
-**Not a GO.** Two items are open, and the first is a correction of this
-document's own earlier error:
+**Disposition: CONDITIONAL GO.** Every technical condition is now closed
+against named evidence; what remains is an ADOPTION decision, which this
+work order does not make and the default backend is unchanged.
 
-1. **Startup-failure mapping (§8.1) is not designed.** The current
-   contract is now stated correctly — exit 127 raises, it does not fall
-   back — but the mapping from a spawn-time `OSError` onto that contract
-   is unbuilt. **Policy A** is recommended; **Policy B** (treat the
-   `OSError` as pre-ingest and fall back) is a defensible separate
-   improvement that is explicitly **not** authorised here.
-2. **Descriptor equivalence is not claimed for all layouts.** It is
-   claimed for the layouts tested, under the stated preconditions below.
-   In particular the closed-std-fd case (§8.4) is **not** covered.
+### C1–C5 closure matrix
 
-**Not a NO-GO**, because the hard technical questions have defensible
-answers:
+| # | condition | status | evidence |
+|---|---|---|---|
+| **C1** | a spawn-time `OSError` produces the same caller-visible result the applicable existing failure path produces (Policy A) | **CLOSED** | Both backends verified byte-identical in exception type and message: materialized → `RuntimeError` "exit 127 … after the input may have been consumed" + "NOT falling back" warning; streaming → `RuntimeError` "exit 127 … stream is TRUNCATED". `test_posix_spawn_candidate.TestFailureContractIsBackendIndependent`; no raw `FileNotFoundError`/`PermissionError` escapes; no descriptor accumulates on the failure path. |
+| **C2** | no `setsigdef`/`setsigmask`/`setpgroup`/`setsid`/`resetids` | **CLOSED** | `_spawn_or_fork` passes none; asserted by `test_no_signal_or_session_options_are_passed`, which fails if `setsigdef` is added. The signal probe in `test_launch_failure_contract` shows why: it resets an inherited `SIG_IGN`. |
+| **C3** | record the equivalence-first policy | **CLOSED (ratified)** | `CLEANROOM_LAUNCH_DECISION.md` §4.1 and §8 now state equivalence-first explicitly and label tightening a separate proposal requiring its own approval. |
+| **C4** | re-verify against the REAL launcher's inherited set | **CLOSED** | `test_cleanroom_launcher_entry_fds.py` observes the real `forkrun_cleanroom` binary's entry descriptor set through a compile-time-guarded probe (`-DFORKRUN_ENTRY_FD_PROBE`), for both shapes and both backends: identical role sets, every required channel present, fd 2 carrying the error memfd, no route descriptor on a stdio number, and `FRK_POISON_FD == stats_fd`. The shipped launcher is byte-identical to a normal rebuild. |
+| **C5** | the closed-fd corruption | **CLOSED (defect fixed, not just documented)** | `_fd_above_stdio()` relocates route-owned descriptors above fd 2, preserving the caller's descriptors and the `FD_CLOEXEC`/inheritable state. Measured: with fd 2 closed, materialized went from **0 records / WRONG INPUT** to **8 records / correct PAYLOAD tokens**, on both backends. Asserted in subprocesses by `TestClosedStandardDescriptorsAreSafe`; the relocation helper itself is asserted directly (a dropped inheritable re-apply is a silent make-permissive mutation that route-level tests cannot see). |
 
-* the current descriptor contract is reproducible with **one action** on
-  one shape and **zero actions** on the other;
-* neither needs `POSIX_SPAWN_CLOSEFROM`, so the **3.10 floor is not a
-  blocker**;
-* signal semantics are equivalent provided **no `setsigdef`** is passed;
-* the equivalence action set references only descriptors the route itself
-  created, so it carries **no enumeration race**;
-* the failure contract is now **pinned by tests against the production
-  helpers**, so an integration cannot quietly inherit a wrong assumption
-  — mutating `_CR_EXIT_PRE_INGEST` to include 127 turns six of them red.
+### What remains, and is deliberately NOT claimed
 
-**Conditions to close, each with its closing evidence:**
+* **The default backend is still `fork()+execv()`.** The candidate is
+  private and test-gated; `_set_cleanroom_launch_backend` raises on an
+  unknown name and nothing on the public API reaches it.
+* **Descriptor tightening is not authorised** and is not implemented.
+* **Policy B is not implemented** — a spawn-time `OSError` is mapped onto
+  the existing exit-127 result, not turned into a fallback.
+* **F7 is untouched**; the candidate passes `os.environ` unchanged.
+* **End-to-end performance does not follow from launch latency.** Measured
+  at ~139 ms for a single-launch 200k-record workload: −1.3% with a small
+  parent, **+1.0% at 2 GiB**. The launch win is real but invisible for a
+  caller that launches once. See `CLEANROOM_LAUNCH_DECISION.md` §8.1.
 
-| # | condition | closing evidence |
-|---|---|---|
-| C1 | a spawn-time `OSError` produces the **same caller-visible result** the applicable existing failure path produces today (Policy A) | a test per route: an unexecutable launcher raises the same exception type and message family as exit 127 does |
-| C2 | no `setsigdef`/`setsigmask` is passed | assertion in the integration test |
-| C3 | policy recorded: equivalence now, tightening (if any) later | a decision line in `CLEANROOM_LAUNCH_DECISION.md` §8 |
-| C4 | equivalence re-verified against the **real** launcher, not just the observer | one integration-mode test per shape comparing the launcher's actual inherited set |
-| C5 | the closed-std-fd precondition is either fixed or documented as a precondition | a named precondition in `CLEANROOM_DESIGN.md`, or a scoped fix in a later order |
+### 8.5b Ownership model
+
+`_RouteFdSet` gives every route-owned descriptor a single owner:
+
+| call | meaning |
+|---|---|
+| `add(name, fd)` | the route just created it and owns it |
+| `close(name)` | release it now, at the point the last legitimate use has passed |
+| `release(name)` | ownership is being **transferred** elsewhere; this set must never close it |
+| `close_all()` | close whatever is still owned — run by the decorator on **every** exit |
+
+`release` is what keeps `_cleanroom_collect`'s ownership of `res_fd`
+intact: without it the cleanup would close the same number again, and if
+the collector had already closed it, that number may have been recycled —
+closing a descriptor the caller now owns.
+
+The decorator is generator-aware because `_execute_cleanroom_stream` is a
+generator: a plain wrapper would run the cleanup before the body ever
+executed. The generator form defers cleanup to generator exit, which is
+also what makes abandonment clean up.
+
+**Exception safety is now structural, not per-statement.** An exception
+during descriptor setup, argv construction, the spawn, `waitpid`, the
+stats or trace read, failure classification or result collection all pass
+through `close_all()`. This closes the residual Stage 2C had recorded —
+that an exception from `_read_cleanroom_stats`/`_read_cleanroom_trace`
+before the failure branch could still leak `errfd`.
+
+Ordering note for the streaming shape: the inner `finally` kills and reaps
+the child FIRST, and the decorator closes descriptors afterwards. Closing
+the parent's copies earlier cannot strand a running child (after `fork`
+the two processes hold separate descriptor-table entries sharing one open
+file description), but killing first is the safer order regardless.
 
 ## 10. Evidence and reproduction
 

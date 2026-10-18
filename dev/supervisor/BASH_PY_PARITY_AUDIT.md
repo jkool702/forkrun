@@ -227,7 +227,7 @@ sweeps; the `fork()` column varies run to run by up to ~25% at 1 GiB, the
 table, controls, and limits in `CLEANROOM_LAUNCH_DECISION.md` §1.1a.
 
 **Do not read "gate met" as "adopt".** §5's decision rule has two
-conditions, and the **descriptor condition is now answered** by F6 Stage 2
+conditions, and the **descriptor condition is now answered** by F6 Stage 2/3
 (`dev/supervisor/CLEANROOM_FD_CONTRACT.md`): two launch shapes, one
 `DUP2` action for the materialized route and **no** actions for the
 streaming route, neither needing `CLOSEFROM`, so the 3.10 floor is not a
@@ -242,7 +242,7 @@ absence at *preflight* falls back, and that is a different case. Under
 wait status to classify. Recommended policy is **Policy A** (map the
 `OSError` onto today's caller-visible result); Policy B (treat it as
 pre-ingest) is defensible but unauthorised. Disposition is **CONDITIONAL
-GO** with five bounded conditions (C1–C5); production remains
+GO** — conditions C1–C5 all CLOSED against named evidence in `CLEANROOM_FD_CONTRACT.md` §9; the remaining question is a separate ADOPTION decision and production remains
 `fork()+execv()`.
 
 Also found: a **pre-existing** defect where, with fd 2 closed before

@@ -222,6 +222,11 @@ Explicitly passed:
 > guard is recommended before any backend integration; see
 > `dev/supervisor/CLEANROOM_FD_CONTRACT.md` §8.4.
 
+> **STAGE 3 STATUS — UNCHANGED.** The `posix_spawn` candidate passes
+> `os.environ` through untouched: no reconstruction, no filtering, no
+> scrubbing. F7 remains OPEN and SEPARATE, and none of the descriptor
+> work touches it.
+
 Explicitly **not** inherited (aspirational — see STATUS above):
 environment, signal dispositions beyond what the engine sets itself, and
 every unrelated descriptor (the parent `scrub_fds()`s them, and the

@@ -67,17 +67,26 @@ the `fork()` cost does. (Numbers here are the `smaps_rollup`-verified
 sweep in §1.1a; an earlier sweep gave 37–120 ms — same conclusion, and
 both are recorded there.)
 
-**The gate is nonetheless still closed**, because §5's decision rule has
-**two** conditions and only the first has been evaluated. The second —
-"the descriptor-enumeration change (§4.1) can be made provably
-equivalent" — has not been attempted. Integration remains gated behind a
-bounded follow-up, not behind another measurement.
+**Both halves of the gate have now been evaluated** (Stage 2 and Stage 3):
 
-**Classification: an architectural question whose PERFORMANCE gate is met
-and whose EQUIVALENCE gate is untouched.** Not a correctness defect, and
-not a contract the shipped code promised and broke. `posix_spawn` is
-**still not adopted**; `os.fork()` + `os.execv()` remains in production,
-and this work order does not change that.
+* the **performance** condition is met (−88% to −96% launch latency at
+  1–5 GiB parent RSS);
+* the **descriptor/launch-semantic** condition is answered — two launch
+  shapes, a single `DUP2` for materialized and an **empty** action list for
+  streaming, neither needing `CLOSEFROM`; failure mapping onto the
+  established exit-127 contract on both backends; and the real launcher's
+  entry descriptor set observed directly via a compile-time-guarded
+  probe. See `CLEANROOM_FD_CONTRACT.md` for the C1–C5 closure matrix.
+
+**Integration is nevertheless NOT authorised by this document.** A private,
+test-gated candidate now exists in `run.py` (`_spawn_or_fork`), and the
+**default production backend is still `os.fork()` + `os.execv()`**. What
+remains is an ADOPTION decision, not a design question, and adoption must
+be a separate, explicitly-authorised step.
+
+**Classification: an architectural question whose technical gates are met
+and whose ADOPTION decision is outstanding.** Not a correctness defect,
+and not a contract the shipped code promised and broke.
 
 > **Correction to this report's own earlier conclusion.** A previous
 > revision (§1.1a, commit `5b8b5088`) concluded the gate was **not met**
@@ -664,151 +673,58 @@ launch until it is done.
 
 ## 8. Recommendation
 
-**Retain `fork()` + `execv()` in production. Do not implement
-`posix_spawn` in this work order** — but note that the reason has changed,
-and the previous reason is now known to be wrong.
+**Disposition: CONDITIONAL GO — conditions C1–C5 all CLOSED against named
+evidence (`CLEANROOM_FD_CONTRACT.md` §9). Default backend remains
+`fork()` + `execv()`; default adoption is NOT authorised here.**
+
+A private, test-gated `posix_spawn` candidate exists in `run.py`
+(`_spawn_or_fork`, selected only by `_set_cleanroom_launch_backend`, which
+no public API reaches). This document does **not** recommend flipping it
+and nothing here should be read as authorising that.
 
 Reasons, in order of weight:
 
-1. **The descriptor-equivalence half of the gate is untouched.** §5's
-   decision rule has two conditions. The performance condition is now met
-   emphatically (§1.1a: −88% to −96% launch latency at 1–5 GiB parent
-   RSS). The second — "the descriptor-enumeration change (§4.1) can be
-   made provably equivalent" — has not been attempted at all. §4.1
-   (corrected): `posix_spawn` does *not* hand you an allowlist — POSIX
-   gives the child the parent's open descriptors modified by file actions.
-   Producing an intentional one means inventorying which job descriptors
-   must be inheritable and closing everything else with `closefrom`/`close`
-   actions. Miss one and the launcher degrades to a fallback instead of
-   failing loudly. **That is the real remaining work, and it is design
-   work, not measurement.**
-2. **Startup-error semantics would change.** §4.5: today a missing or
-   unlaunchable launcher is detected before the fork and a pre-exec failure
-   surfaces as the child's exit 127. With `posix_spawn` it surfaces as an
-   exception in the parent. That is arguably better, but it is a different
-   contract, and the tests that distinguish "launcher missing" from
-   "launcher failed" would need re-reading.
-3. **The saving's absolute magnitude is workload-dependent.** §1.1a
-   measures ~23–35 ms saved per GiB of parent RSS *per launch*. For a
-   workload that launches once and then processes for minutes this is
-   noise; for one that launches per call it may dominate. No end-to-end
-   measurement was taken, so the size of the prize in a real run is
-   **unknown**.
-4. **The threaded-parent hazard is real, and is an argument *for* the
-   change.** §4.7: `forkrun` is an importable library and `fork()` from a
-   caller's threaded process is a documented hazard. `posix_spawn`
-   addresses it structurally. This does not enter the weighting as a
-   reason to defer — it is the strongest argument for eventually acting,
-   once 1 and 2 are done.
+1. **An adoption decision is a separate step, and this is not it.**
+   Everything technical is answered; what remains is a judgement about
+   defaulting a launcher mechanism for a library that is routinely called
+   from small processes — where the measured benefit is ~0 (see §8.1).
+2. **Descriptor tightening is not authorised and is not part of the
+   candidate.** Equivalence-first means reproducing today's set, including
+   the unrelated inheritable descriptors that currently leak into the
+   launcher. Tightening is a behaviour change with its own approval.
+3. **Startup-failure semantics are preserved, not improved.** Both
+   backends produce the same caller-visible exit-127 result, because the
+   candidate synthesises the same wait status the shipped child produces.
+   Policy B (falling back) remains unimplemented and unauthorised.
+4. **The threaded-parent hazard remains an argument FOR eventually
+   acting** (§4.7) — the candidate structurally removes the
+   fork-then-run-Python window at these two sites.
 
-**Correction to this report's own earlier recommendation.** A previous
-revision of §8 said "the design's own gate was never evaluated" and "the
-concrete claim is unmeasured". **Both statements are now false** and have
-been removed. An intermediate revision went further and concluded the gate
-was **not met** on small-parent data; that conclusion is also superseded —
-see the correction note in §1.1. **Do not read this document's history as
-showing a stable opinion: the performance question moved from unmeasured,
-to apparently answered, to correctly answered once the ballast sweep ran.**
+### 8.1 End-to-end timing: the launch win does NOT carry to a real run
 
-**What should happen next**, as a separate, explicitly-scoped work order:
-**a descriptor/launch-contract DESIGN and equivalence exercise — not an
-implementation sprint.** Performance is no longer the blocker; descriptor
-equivalence is. Scope for that work order:
+Isolated launch latency (§1.1a) is not end-to-end. Measured through the
+public API, one `map()` over 200,000 records with `workers=4`,
+alternating backends, 8 samples after warmup (milliseconds):
 
-1. **A descriptor/launch contract matrix** covering, at minimum:
-   * every currently served cleanroom route (`map-plugin`, `map-udf`,
-     `map-spawn`, `stream-plugin`, `stream-udf`) and the descriptors each
-     actually requires;
-   * `FD_CLOEXEC` disposition, descriptor duplication, stdin/stdout/stderr,
-     and closure of unrelated descriptors;
-   * the **Python 3.10–3.12 compatibility path** (see the VERSION FLOOR note
-     in §3.2 — `os.POSIX_SPAWN_CLOSEFROM` does not exist there), including
-     libc/platform combinations lacking
-     `posix_spawn_file_actions_addclosefrom_np()`, with an explicit
-     documented fallback to the current launcher where no path exists;
-   * environment inheritance, which **stays unchanged in that phase** —
-     F7 is a separate decision and must not be folded in;
-   * startup failure, signal mask/disposition, and fallback behaviour;
-   * observable equivalence tests, written **before** any integration.
-2. **Inventory the descriptors that actually reach the launcher**, not every
-   descriptor Python happens to have open. The current code deliberately
-   marks some inheritable and duplicates the error channel onto fd 2
-   (`os.dup2(errfd, 2)`); a spawn implementation must preserve the required
-   final layout and handle the optional stats, trace and poison channels
-   correctly. **A route that silently loses a channel is worse than no
-   change at all**, so the existing inherited behaviour must be understood
-   before it is tightened.
-3. **Only then** measure end-to-end workload time with the launcher on and
-   off, so the delta is published rather than inferred.
+| parent RSS | fork+execv median | posix_spawn median | delta |
+|---|---|---|---|
+| small | 138.5 | 136.7 | **−1.8 ms (−1.3%)** |
+| 2 GiB resident ballast | 139.3 | 140.7 | **+1.4 ms (+1.0%)** |
 
-**F6 Stage 2 result (descriptor contract) — see
-`dev/supervisor/CLEANROOM_FD_CONTRACT.md`.** The descriptor half of the
-gate is now **answered**: there are only TWO launch shapes (five routes
-reach one of them), the materialized shape's whole `posix_spawn` action
-set is a single `DUP2(errfd, 2)`, and the streaming shape needs **no
-actions at all**. Neither needs `POSIX_SPAWN_CLOSEFROM`, so the Python
-3.10 floor is **not** a blocker for equivalence, and the equivalence action
-set references only descriptors the route itself created, so it carries no
-descriptor-enumeration race.
+**The ~45 ms per-launch saving measured at 2 GiB in §1.1a is invisible
+here**, because this workload launches ONCE and spends ~139 ms doing
+work. A single-launch workload will not benefit. The saving is real but
+only materialises for a caller that launches repeatedly — which this
+benchmark does not represent, and which the tree has no measurement for.
 
-What remains open is **launch semantics**, not descriptors: a missing or
-unlaunchable launcher exits **127** under `fork()+execv()` but raises
-`FileNotFoundError`/`PermissionError` **synchronously in the parent**
-under `posix_spawn`.
+**Do not generalise the host coefficient** to other workloads, platforms
+or launch counts.
 
-> **Stage 2B correction.** An earlier revision of the paragraph above
-> said exit 127 is "routed into a deliberate warning + in-process
-> fallback". **That was wrong** — 127 is not in `_CR_EXIT_PRE_INGEST`, so
-> `_cleanroom_may_fallback()` returns False and the caller receives a
-> **`RuntimeError`**; it does NOT fall back. The case that does fall back
-> is the launcher being *absent at preflight*, which is different and
-> must not be conflated with it. Confirmed by source trace and by
-> observation, and now pinned by
-> `python/tests/test_launch_failure_contract.py` (mutating
-> `_CR_EXIT_PRE_INGEST` to include 127 turns six tests red). The
-> recommended policy is **Policy A** — map the spawn-time `OSError` onto
-> the caller-visible result 127 produces today. Policy B (treating the
-> `OSError` as pre-ingest and falling back) is defensible but is a
-> deliberate failure-policy change, is **not authorised**, and would make
-> the backend more permissive than the path it replaces.
-
-Signals are equivalent provided no `setsigdef`/`setsigmask` is passed —
-passing `setsigdef` measurably resets an inherited `SIG_IGN`.
-
-**A pre-existing defect was also found** (`CLEANROOM_FD_CONTRACT.md`
-§8.4): with fd 2 closed before allocation, a route descriptor lands on fd
-2 and `dup2(errfd, 2)` destroys it, so the launcher would read the error
-memfd as input. `posix_spawn` does exactly the same, so equivalence holds
-— but the case is neither verified nor fixed.
-
-**Disposition: CONDITIONAL GO** — five bounded conditions (C1–C5) are
-listed in the contract document. None is closed:
-
-* **C1** (map a spawn-time `OSError` onto today's caller-visible result)
-  is **open** — no backend exists to design it into.
-* **C2** (pass no `setsigdef`) is **open** — same reason.
-* **C3** (record the equivalence-first policy) is **open** as an explicit
-  decision line; §4.1 now states it, but it has not been ratified.
-* **C4** (re-verify against the REAL launcher's inherited set) is
-  **open, and cannot be closed without a production change** — the
-  observer stands in for the launcher, so it proves the MECHANISM is
-  equivalent under a faithful replication, not that the real launcher is.
-* **C5** (the closed-std-fd case) is **open**. The defect is pre-existing
-  and `posix_spawn` reproduces it identically, so equivalence holds — but
-  "both mechanisms mishandle it" is not "verified", and it is not fixed.
-
-**A pre-existing parent-side descriptor leak was also found and fixed**
-(Stage 2C): `_execute_cleanroom` never closed `errfd`, and
-`_execute_cleanroom_stream` never closed `stats_fd`. Both grew one
-descriptor per call, measured at 1/2/3/4/5 over five calls, on the success
-path, the exit-127 path, and on streaming generator abandonment. Now
-closed on every exit and pinned by
-`python/tests/test_cleanroom_fd_lifecycle.py` (reverting the fix turns six
-of its tests red). This was a lifecycle defect, not a regression, and it
-had to be closed before any backend work: carrying it into a `posix_spawn`
-integration would have inherited the leak.
-
-**No production backend switch is authorised by anything in this document.**
+**Correction to this report's earlier recommendation.** Previous revisions
+said the design's gate "was never evaluated" and "the concrete claim is
+unmeasured". Both were false and are gone; an intermediate revision
+concluded the gate was **not met** on small-parent data, which was also
+superseded. **Do not read this document's history as a stable position.**
 
 **No rlimit cost exists** and it is not part of this list — the launcher
 raises its own `RLIMIT_NOFILE` before `dlopen` (§4.3).
@@ -817,6 +733,6 @@ raises its own `RLIMIT_NOFILE` before `dlopen` (§4.3).
 initially reported here, F3, was a false positive and has been withdrawn
 (§6).
 
-**Unchanged and explicitly out of scope:** the engine, the ring, the
-supervision models, and the existing cleanroom eligibility envelope. None
-of this changes what the cleanroom *is*.
+**Explicitly out of scope and unchanged:** the engine, the ring, the
+supervision models, F7 environment inheritance, and the cleanroom
+eligibility envelope. None of this changes what the cleanroom *is*.
