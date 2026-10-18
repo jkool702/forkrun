@@ -64,6 +64,8 @@ import os
 import struct
 import mmap as _mmap_mod
 import ctypes
+import functools
+import inspect
 import weakref
 from collections import deque as _deque
 import sys
@@ -662,6 +664,138 @@ def _warn_cleanroom_multinode(num_nodes):
         "runs the dedicated NUMA pipeline. The launcher serves UMA "
         "single-node only." % (num_nodes,),
         UserWarning, stacklevel=3)
+
+
+# --------------------------------------------------------------------------
+# Route-owned descriptor discipline (F6 Stage 3)
+# --------------------------------------------------------------------------
+class _RouteFdSet:
+    """Descriptors a cleanroom route created, with single-owner release.
+
+    WHY THIS EXISTS. Every descriptor a route allocates must be closed on
+    EVERY exit -- including an exception raised during descriptor setup,
+    argv construction, the spawn itself, waitpid, the stats or trace read,
+    failure classification, or result collection. Adding a close statement
+    per exit leaves the next exceptional exit uncovered, which is exactly
+    how `errfd` and the streaming `stats_fd` came to leak on every call.
+
+    THREE RULES, because the alternative is double-closing a recycled
+    descriptor number:
+      * `add`    -- the route just created this fd and owns it;
+      * `close`  -- release it now (the common case, kept explicit so the
+                    ordering constraint is visible at the call site);
+      * `release`-- ownership is being TRANSFERRED elsewhere, so this set
+                    must never close it. `_cleanroom_collect` owns
+                    `res_fd` and closes it itself; without `release` the
+                    cleanup would race it.
+    """
+
+    __slots__ = ("_owned", "_done")
+
+    def __init__(self):
+        self._owned = {}
+        self._done = set()
+
+    def add(self, name, fd):
+        """Register a freshly created descriptor."""
+        if fd is not None and fd >= 0:
+            self._owned[name] = fd
+        return fd
+
+    def close(self, name):
+        """Close one descriptor now, if still owned. Idempotent."""
+        if name in self._done:
+            return
+        fd = self._owned.pop(name, None)
+        if fd is None:
+            return
+        self._done.add(name)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def release(self, name):
+        """Give up ownership WITHOUT closing (transferred elsewhere)."""
+        self._owned.pop(name, None)
+        self._done.add(name)
+
+    def close_all(self):
+        """Close everything still owned. Never raises."""
+        for name in list(self._owned):
+            self.close(name)
+
+
+def _fd_above_stdio(fd):
+    """Return a descriptor number guaranteed to be > 2 for the same open
+    file, or `fd` unchanged if it already is.
+
+    WHY (F6 Stage 3 / C5). The materialized route ends with
+    `os.dup2(errfd, 2)`. If the host process started with fd 2 CLOSED,
+    the kernel hands the route's FIRST allocation the number 2 -- so
+    `src_fd` can land on fd 2 and be silently overwritten by that dup2.
+    The launcher is then told `--src 2` and reads the ERROR MEMFD as its
+    input: a well-formed result computed from the wrong bytes, with no
+    error, no warning and no non-zero exit.
+
+    Relocating the route's own descriptor above 2 is the narrow fix. It
+    deliberately does NOT reopen the caller's fd 0/1/2 in the parent (that
+    would change process state the caller owns), does NOT enumerate
+    /proc/self/fd, and does NOT touch any descriptor the caller supplied:
+    `dup` shares the open file description but gets its OWN number, and
+    the caller keeps theirs.
+    """
+    if fd is None or fd > 2:
+        return fd
+    try:
+        higher = os.dup(fd)
+    except OSError:
+        return fd
+    try:
+        # dup() clears FD_CLOEXEC on the new number, so the inheritable
+        # state the route set on the ORIGINAL must be re-applied here or
+        # the relocated descriptor would silently stop crossing exec.
+        inheritable = os.get_inheritable(fd)
+        os.set_inheritable(higher, inheritable)
+    except OSError:
+        pass
+    os.close(fd)
+    return higher
+
+
+def _route_fd_cleanup(fn):
+    """Run a launch function with automatic cleanup of registered fds.
+
+    A decorator rather than an inline `try/finally` because both route
+    functions are long (250+ and 240+ lines) and re-indenting them to add
+    a `finally` would be exactly the wholesale restructure this change is
+    meant to avoid -- and would put the cleanup boundary nowhere near the
+    allocations it protects.
+
+    Generator-aware: `_execute_cleanroom_stream` is a generator, so its
+    body is lazy and a plain wrapper would run the cleanup BEFORE the body
+    ever executed. The generator form defers cleanup to generator exit,
+    which is also what makes abandonment clean up.
+    """
+    if inspect.isgeneratorfunction(fn):
+        @functools.wraps(fn)
+        def gen_wrapper(*args, _own=None, **kwargs):
+            own = _own if _own is not None else _RouteFdSet()
+            try:
+                for item in fn(*args, _own=own, **kwargs):
+                    yield item
+            finally:
+                own.close_all()
+        return gen_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args, _own=None, **kwargs):
+        own = _own if _own is not None else _RouteFdSet()
+        try:
+            return fn(*args, _own=own, **kwargs)
+        finally:
+            own.close_all()
+    return wrapper
 
 
 def _cleanroom_launcher_path():
@@ -1405,11 +1539,78 @@ def _source_is_reopenable(source):
     return False
 
 
+# --------------------------------------------------------------------------
+# Private candidate launch backend (F6 Stage 3) -- TEST-GATED ONLY
+# --------------------------------------------------------------------------
+# NOT a public option. There is no environment selector, no keyword, and no
+# default change: the shipped path is `fork()` + `execv()` and stays that
+# way until a separate adoption decision. Tests flip this module global;
+# nothing reachable from the public API can.
+_CLEANROOM_LAUNCH_BACKEND = "forkexec"
+
+
+def _set_cleanroom_launch_backend(name):
+    """PRIVATE, test-only. Returns the previous value.
+
+    Accepts "forkexec" (default, shipped) or "posix_spawn" (candidate).
+    Raises on anything else rather than silently falling back, so a typo in
+    a test cannot quietly exercise the wrong backend.
+    """
+    global _CLEANROOM_LAUNCH_BACKEND
+    if name not in ("forkexec", "posix_spawn"):
+        raise ValueError("unknown cleanroom launch backend %r" % (name,))
+    prev = _CLEANROOM_LAUNCH_BACKEND
+    _CLEANROOM_LAUNCH_BACKEND = name
+    return prev
+
+
+# A waitpid() status for a normally-exited child, used when posix_spawn
+# raises instead of returning a pid. 127 is exactly what the shipped
+# fork+execv child produces when execv fails (os._exit(127) in
+# _spawn_or_fork), so both backends converge on ONE failure path.
+_CR_SPAWN_FAILURE_STATUS = 127 << 8
+
+
+def _spawn_or_fork(launcher, argv, file_actions):
+    """Launch `launcher`, return the child pid, or raise OSError.
+
+    The default branch is the shipped code, unchanged: `os.fork()` then
+    `os.execv()` in the child. The candidate branch is `os.posix_spawn()`
+    with the EQUIVALENCE-FIRST action list -- it reproduces the current
+    post-exec descriptor set, INCLUDING unrelated inheritable descriptors.
+    It deliberately closes nothing the shipped path keeps.
+
+    No `setsigdef` / `setsigmask` / `setpgroup` / `setsid` / `resetids`:
+    those would change behaviour relative to fork+execv, and the signal
+    probe in test_launch_failure_contract shows `setsigdef` resetting an
+    inherited SIG_IGN to SIG_DFL. Environment is passed unchanged (F7).
+
+    Raises OSError from posix_spawn when the executable cannot be started.
+    There is then no wait status to classify, so the caller must map that
+    onto the route's established exit-127 result explicitly -- otherwise
+    the shipped failure contract would be bypassed.
+    """
+    if _CLEANROOM_LAUNCH_BACKEND != "posix_spawn":
+        pid = os.fork()
+        if pid == 0:
+            try:
+                for act in (file_actions or ()):
+                    if act[0] == os.POSIX_SPAWN_DUP2:
+                        os.dup2(act[1], act[2])
+                os.execv(launcher, argv)
+            except BaseException:
+                os._exit(127)
+        return pid
+    return os.posix_spawn(launcher, argv, os.environ,
+                          file_actions=tuple(file_actions or ()))
+
+
+@_route_fd_cleanup
 def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                        plugin_func, on_error, views, strict_poison=False,
                        order="none", orchestrator=True,
                        udf_helper=None, udf_module=None, udf_attr=None,
-                       udf_roots=None, spawn_argv=None):
+                       udf_roots=None, spawn_argv=None, _own=None):
     """W-CR1: materialized file + C plugin, orchestrated entirely in C.
 
     Everything (fr_py_init, spill to the ingress memfd, per-worker output
@@ -1455,22 +1656,31 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # removed rather than left as dead code -- an unreachable fork of a
     # possibly-multithreaded process is exactly the hazard the codebase
     # comments warn about, and dead safety code is not safety.
+    own = _own
     src_fd = _cleanroom_source_fd(source)
     if src_fd is None:
         return None
-    res_fd = os.memfd_create("fr_cleanroom_result")
+    # C5: keep every route-owned descriptor above fd 2 so the dup2(errfd, 2)
+    # below can never overwrite one of them when the host started with a
+    # closed standard stream.
+    src_fd = _fd_above_stdio(src_fd)
+    own.add("src_fd", src_fd)
+    res_fd = _fd_above_stdio(os.memfd_create("fr_cleanroom_result"))
+    own.add("res_fd", res_fd)
     # Counter channel. The launcher writes [u32 version][u32 poisoned]
     # here after joining every worker, which is what lets it serve
     # strict_poison and return_stats rather than declining them: without
     # it, _LAST_STATS["poisoned"] stayed 0 and a run with 10 poisoned
     # batches reported total=completed instead of completed+10.
-    stats_fd = os.memfd_create("fr_cleanroom_stats")
+    stats_fd = _fd_above_stdio(os.memfd_create("fr_cleanroom_stats"))
+    own.add("stats_fd", stats_fd)
     # The launcher's own stderr, captured so a failure can say WHY. See
     # _read_launcher_stderr: a stale substrate .so otherwise presents as
     # "exit 127 (unknown exit code 127)" with the real cause --
     # "missing fr_py_worker_spawn_loop" -- landing on the caller's
     # terminal where no test or captured exception can see it.
-    errfd = os.memfd_create("fr_cleanroom_err")
+    errfd = _fd_above_stdio(os.memfd_create("fr_cleanroom_err"))
+    own.add("errfd", errfd)
     # Pre-size so every worker owns a real slot. A memfd starts
     # zero-filled, which the slot-count convention relies on.
     #
@@ -1507,8 +1717,9 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # not as "we lost data".
     trace_fd = -1
     if _cleanroom_trace_enabled():
-        trace_fd = os.memfd_create("fr_cleanroom_trace")
+        trace_fd = _fd_above_stdio(os.memfd_create("fr_cleanroom_trace"))
         os.set_inheritable(trace_fd, True)
+        own.add("trace_fd", trace_fd)
         # Set O_APPEND on the SHARED open file description, before any
         # fork, so every child inherits the append semantics.
         _fcntl.fcntl(trace_fd, _fcntl.F_SETFL,
@@ -1573,20 +1784,38 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     if orchestrator is False:
         argv += ["--supervise", "fail-fast"]
 
-    pid = os.fork()
-    if pid == 0:
-        try:
-            os.dup2(errfd, 2)
-            os.execv(launcher, argv)
-        except BaseException:
-            os._exit(127)
+    # Equivalence-first candidate action list: the materialized child does
+    # exactly one descriptor transformation before exec, so the spawn
+    # equivalent is a single DUP2. `errfd` itself stays FD_CLOEXEC and is
+    # NOT closed -- that is what the shipped path does, and equivalence
+    # means reproducing it, not improving it.
+    _actions = ((os.POSIX_SPAWN_DUP2, errfd, 2),)
     # Only src_fd was the child's alone. res_fd MUST stay open here --
     # the parent reads the result memfd after waitpid. Closing it (an
     # earlier cut did) leaves the collector fstat-ing a closed
     # descriptor, and since the number is liable to be recycled that
     # surfaces as empty/corrupt output rather than a clean EBADF.
-    os.close(src_fd)
-    _wpid, status = os.waitpid(pid, 0)
+    try:
+        pid = _spawn_or_fork(launcher, argv, _actions)
+    except OSError:
+        # posix_spawn reports "cannot execute" by raising IN THE PARENT:
+        # there is no child, so there is no wait status to classify and no
+        # pid to reap.
+        #
+        # Rather than inventing a parallel error path -- which is how a
+        # backend swap ends up changing the PUBLIC failure contract -- this
+        # synthesises the SAME wait status a child produces when execv
+        # fails (127) and lets the existing classification below run
+        # untouched. Everything downstream (the "NOT falling back"
+        # warning, `_decode_launcher_status`, `_cleanroom_may_fallback`,
+        # the RuntimeError) is therefore identical by construction.
+        # Policy B -- treating this as pre-ingest and falling back -- is
+        # explicitly NOT done, and 127 is outside _CR_EXIT_PRE_INGEST.
+        status = _CR_SPAWN_FAILURE_STATUS
+    else:
+        own.close("src_fd")
+        _wpid, status = os.waitpid(pid, 0)
+    own.close("src_fd")
     # Unpack ONLY after the None check below. _read_cleanroom_stats
     # returns None for "no trustworthy count" -- notably when the
     # launcher declined the payload (a v0 plugin under FORKRUN_CLEANROOM=1
@@ -1596,14 +1825,14 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # test_plugin tests hit this with the gate ON and were green with it
     # off, which is why the cleanroom-OFF run alone never showed it.
     stats = _read_cleanroom_stats(stats_fd)
-    os.close(stats_fd)
+    own.close("stats_fd")
     # Read the trace AFTER waitpid: the launcher and every child are gone
     # by then, so the file is complete and its size is final.
     if trace_fd >= 0:
         _LAST_TRACE[:] = _read_cleanroom_trace(trace_fd)
-        os.close(trace_fd)
+        own.close("trace_fd")
     if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
-        os.close(res_fd)
+        own.close("res_fd")
         code, signum, label, pre_ingest = _decode_launcher_status(status)
         # CR-FIX1-F: a failed capability probe means the plugin's LOAD is
         # unsafe, so the in-process fallback -- which would dlopen it
@@ -1620,8 +1849,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         # and return below, so each of those exits releases it. Without
         # this the descriptor survived every failed call as well as every
         # successful one.
-        os.close(errfd)
-        errfd = -1
+        own.close("errfd")
         if code in _CR_COMPAT_REFUSALS:
             # A compatibility refusal must NOT collapse into a bare
             # "return None": the dispatcher has to know WHY, because the
@@ -1676,14 +1904,13 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         # failure. Without this the descriptor survived every successful
         # call. `errfd = -1` after closing keeps a stray later close from
         # hitting a RECYCLED descriptor number.
-        os.close(errfd)
-        errfd = -1
+        own.close("errfd")
     if stats is None:
         # The counter record is missing, unreadable, or absent because the
         # launcher declined the payload. Refuse the
         # cleanroom result rather than report completed-as-total: a
         # wrong-but-plausible total is worse than the slower path.
-        os.close(res_fd)
+        own.close("res_fd")
         _warnings.warn(
             "forkrun: cleanroom launcher returned no counter record; "
             "poison counts are unknown so total/poisoned would be wrong "
@@ -1710,6 +1937,11 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     _LAST_STATS["poisoned"] = npois
     _LAST_STATS["poisoned_batches"] = list(npois_idx)
     _LAST_STATS["poisoned_batches_truncated"] = _trunc
+    # Ownership TRANSFER: _cleanroom_collect closes res_fd itself. Without
+    # release() the decorator's cleanup would close the same number again,
+    # and if the collector had already closed it the number may have been
+    # recycled -- closing a descriptor the caller now owns.
+    own.release("res_fd")
     out = _cleanroom_collect(res_fd, views, order)
     # strict_poison is served now: the count came back over the stats
     # channel, so raising is a real enforcement rather than a guess.
@@ -2204,11 +2436,12 @@ def _cleanroom_source_fd(source):
     return fd
 
 
+@_route_fd_cleanup
 def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                               plugin_path, plugin_func, on_error,
                               strict_poison=False,
                               udf_helper=None, udf_module=None,
-                              udf_attr=None, udf_roots=None):
+                              udf_attr=None, udf_roots=None, _own=None):
     """W-CR3: STREAMING cleanroom -- yield results as they arrive.
 
     Same envelope as the map() path (materialised-vs-streaming aside).
@@ -2259,9 +2492,17 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
             "FORKRUN_CLEANROOM stream(): source must be a readable "
             "descriptor or a path, got %r" % (type(source),))
 
+    # C5: every route-owned descriptor must sit above fd 2. This shape has
+    # no dup2(errfd, 2), but a route descriptor landing on a standard-stream
+    # number would still alias what the host left there AND be handed to the
+    # launcher as that number.
+    own = _own
+    src_fd = _fd_above_stdio(src_fd)
+    own.add("src_fd", src_fd)
     rr, rw = os.pipe()
-    if src_fd is not None:
-        os.set_inheritable(src_fd, True)
+    own.add("rr", rr)
+    own.add("rw", rw)
+    os.set_inheritable(src_fd, True)
     os.set_inheritable(rw, True)
 
     # DECISION-02 / P2 strict_poison: the streaming launch contract had NO
@@ -2269,7 +2510,8 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     # -- it was not a dropped return value, the descriptor was never passed.
     # Same memfd convention as the map path, pre-sized so every worker owns a
     # real slot.
-    stats_fd = os.memfd_create("fr_cleanroom_stream_stats")
+    stats_fd = _fd_above_stdio(os.memfd_create("fr_cleanroom_stream_stats"))
+    own.add("stats_fd", stats_fd)
     _stats_ftruncate(stats_fd, _STATS_HEADER_BYTES
                      + max(int(workers), 1) * _STATS_SLOT_U32 * 4)
     os.set_inheritable(stats_fd, True)
@@ -2293,17 +2535,25 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     else:
         argv += ["--plugin", plugin_path, "--func", plugin_func]
 
-    launch_pid = os.fork()
-    if launch_pid == 0:
-        try:
-            os.close(rr)
-            os.execv(launcher, argv)
-        except BaseException:
-            os._exit(127)
+    # Equivalence-first candidate action list: EMPTY, and deliberately so.
+    # The streaming child closes `rr` before exec, but `rr` is ALREADY
+    # FD_CLOEXEC (os.pipe sets it), so the kernel removes it at exec in the
+    # shipped path too. Adding a POSIX_SPAWN_CLOSE for rr would imitate the
+    # SPELLING of os.close(rr) rather than its EFFECT; the post-exec
+    # descriptor state is already identical with no actions at all.
+    try:
+        launch_pid = _spawn_or_fork(launcher, argv, ())
+    except OSError:
+        # Same mapping as the materialized route: synthesise the exit-127
+        # status so the existing classification raises the STREAMING
+        # truncation error, not a materialized input-consumption one.
+        launch_pid = None
+        launch_status = _CR_SPAWN_FAILURE_STATUS
+    else:
+        launch_status = None
     # parent
-    if src_fd is not None:
-        os.close(src_fd)
-    os.close(rw)
+    own.close("src_fd")
+    own.close("rw")
     tail = b""
     finished = False
     try:
@@ -2361,80 +2611,81 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
         # would mask the real error and double-wait the child, hence the
         # explicit waitpid here and finished=1 (which tells the finally
         # the child is already reaped).
-        if launch_pid is not None:
+        if launch_status is not None:
+            # posix_spawn raised: no child exists, so judge the synthesised
+            # exit-127 through the SAME classification the reaped-child path
+            # uses. That preserves the STREAMING route's truncation error
+            # instead of a materialized-route message.
+            lstatus = launch_status
+        elif launch_pid is not None:
             _lp, lstatus = os.waitpid(launch_pid, 0)
             launch_pid = None
-            if not (os.WIFEXITED(lstatus)
-                    and os.WEXITSTATUS(lstatus) == 0):
-                # A PRE-INGESTION decline is categorically different from
-                # a failed run, and this function used to treat them the
-                # same. It raised on every nonzero exit because for the
-                # failures that class covers, records WERE yielded first
-                # and a partial stream must not look complete.
-                #
-                # But a refusal decided before the spill child is forked
-                # produced NO records, so "TRUNCATED" is false and raising
-                # loses a recoverable situation for no safety gain. The
-                # launcher's own classification answers which is which --
-                # the same one the map path has used since W-CR1, which
-                # is why this is a shared decision and not a second
-                # opinion formed at the stream call site.
-                _lc, _ls, _ll, _lpre = _decode_launcher_status(lstatus)
-                if _lpre and not _fallback_forbidden(lstatus):
-                    if _lc in _CR_COMPAT_REFUSALS:
-                        raise _CleanroomCompatRefusal(
-                            _ll, "", _CR_COMPAT_REFUSALS[_lc], code=_lc)
-                    raise _CleanroomPreIngestDecline(
-                        "cleanroom launcher declined before ingestion "
-                        "(%s)" % (_describe_launcher_failure(lstatus),))
-                raise RuntimeError(
-                    "forkrun: cleanroom launcher failed (%s); the "
-                    "stream is TRUNCATED and the records already yielded "
-                    "are incomplete"
-                    % (_describe_launcher_failure(lstatus),))
-            # DECISION-02: consume the poison count ONLY now, and ONLY
-            # after a confirmed-clean exit.
+        if lstatus is not None and not (os.WIFEXITED(lstatus)
+                                        and os.WEXITSTATUS(lstatus) == 0):
+            # A PRE-INGESTION decline is categorically different from
+            # a failed run, and this function used to treat them the
+            # same. It raised on every nonzero exit because for the
+            # failures that class covers, records WERE yielded first
+            # and a partial stream must not look complete.
             #
-            # The ordering is the safety property. A launcher that failed
-            # may have written a partial or absent count, and reading it
-            # anyway would report "0 poisoned" for a run that died -- i.e.
-            # it would disguise a failure as a clean stream. Reading it
-            # after the status check means the two facts stay independent.
-            # _read_cleanroom_stats returns (poisoned, poisoned_batches,
-            # truncated) -- a tuple, not a mapping.
-            stats = _read_cleanroom_stats(stats_fd)
-            if stats is not None:
-                npois, batch_idx, _trunc = stats
-                _LAST_STATS["poisoned"] = npois
-                _LAST_STATS["poisoned_batches"] = list(batch_idx or [])
-                _LAST_STATS["poisoned_batches_truncated"] = _trunc
-            else:
-                npois = 0
-            if npois and strict_poison:
-                raise RuntimeError(
-                    "forkrun: %d poisoned batch(es) skipped in a "
-                    "streaming run and strict_poison=True" % (npois,))
+            # But a refusal decided before the spill child is forked
+            # produced NO records, so "TRUNCATED" is false and raising
+            # loses a recoverable situation for no safety gain. The
+            # launcher's own classification answers which is which --
+            # the same one the map path has used since W-CR1, which
+            # is why this is a shared decision and not a second
+            # opinion formed at the stream call site.
+            _lc, _ls, _ll, _lpre = _decode_launcher_status(lstatus)
+            if _lpre and not _fallback_forbidden(lstatus):
+                if _lc in _CR_COMPAT_REFUSALS:
+                    raise _CleanroomCompatRefusal(
+                        _ll, "", _CR_COMPAT_REFUSALS[_lc], code=_lc)
+                raise _CleanroomPreIngestDecline(
+                    "cleanroom launcher declined before ingestion "
+                    "(%s)" % (_describe_launcher_failure(lstatus),))
+            raise RuntimeError(
+                "forkrun: cleanroom launcher failed (%s); the "
+                "stream is TRUNCATED and the records already yielded "
+                "are incomplete"
+                % (_describe_launcher_failure(lstatus),))
+        # DECISION-02: consume the poison count ONLY now, and ONLY
+        # after a confirmed-clean exit.
+        #
+        # The ordering is the safety property. A launcher that failed
+        # may have written a partial or absent count, and reading it
+        # anyway would report "0 poisoned" for a run that died -- i.e.
+        # it would disguise a failure as a clean stream. Reading it
+        # after the status check means the two facts stay independent.
+        # _read_cleanroom_stats returns (poisoned, poisoned_batches,
+        # truncated) -- a tuple, not a mapping.
+        stats = _read_cleanroom_stats(stats_fd)
+        if stats is not None:
+            npois, batch_idx, _trunc = stats
+            _LAST_STATS["poisoned"] = npois
+            _LAST_STATS["poisoned_batches"] = list(batch_idx or [])
+            _LAST_STATS["poisoned_batches_truncated"] = _trunc
+        else:
+            npois = 0
+        if npois and strict_poison:
+            raise RuntimeError(
+                "forkrun: %d poisoned batch(es) skipped in a "
+                "streaming run and strict_poison=True" % (npois,))
         finished = True
     finally:
-        try:
-            os.close(rr)
-        except OSError:
-            pass
-        # FD-LEAK-2: stats_fd was created for this launch and read only on
-        # the success path, so success, every failure raise, the
-        # strict_poison raise, and GENERATOR ABANDONMENT all left it
-        # open. The finally is the one place every exit passes through.
+        # Descriptor ownership: the decorator's close_all() runs when this
+        # generator exits -- on completion, on any raise, and on
+        # abandonment (GeneratorExit) -- so rr and stats_fd are released on
+        # every path without a close statement per exit.
         #
-        # Closing the parent's copy here cannot disturb a running child:
+        # Closing the parent's copies here cannot disturb a running child:
         # after fork the two processes hold SEPARATE descriptor-table
         # entries pointing at one shared open file description, so the
         # child keeps its own reference and its writes still land. The
-        # read at the success path has already happened by this point in
-        # every non-raising case, so nothing is lost.
-        try:
-            os.close(stats_fd)
-        except OSError:
-            pass
+        # stats read has already happened on every non-raising path.
+        #
+        # The child is killed BEFORE that close matters, because a child
+        # still blocked writing into a pipe whose read end just closed
+        # would otherwise linger until the pipe teardown below.
         for pid in (launch_pid,):
             if pid is None:
                 continue
