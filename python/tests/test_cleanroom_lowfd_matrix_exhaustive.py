@@ -46,7 +46,25 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "python"))
 
-EXPECTED_TOKENS = [b"PAYLOAD_%02d" % i for i in range(8)]
+# TWO corpora, because a set comparison is blind to duplication.
+#
+#   DISTINCT: eight different payloads, one per record. A set of the
+#     observed tokens equals the expected set if and only if nothing was
+#     lost OR gained -- so this corpus detects loss well.
+#
+#   DUPLICATED: eight IDENTICAL payloads, one per record. Every correct
+#     run yields the same single distinct token, so a set comparison sees
+#     "one token present" whether the route returned 8 records, 1 record,
+#     or 8 copies of one record. This is the corpus that makes duplication
+#     and loss visible, and it is why the assertions below compare a
+#     MULTISET (a sorted list, not a set) and not merely a token set.
+DISTINCT_TOKENS = [b"PAYLOAD_%02d" % i for i in range(8)]
+DUPLICATED_TOKEN = b"PAYLOAD_DUP"
+DUPLICATED_RECORDS = 8
+CORPORA = {
+    "distinct": DISTINCT_TOKENS,
+    "duplicated": [DUPLICATED_TOKEN] * DUPLICATED_RECORDS,
+}
 BACKENDS = ("forkexec", "posix_spawn")
 
 _PLUGIN_SRC = (
@@ -124,8 +142,8 @@ try:
     blob = b''.join(bytes(b) for b in out)
     log('MAP records %d' % len(out))
     log('MAP tokens %s' % ','.join(
-        t.decode() for t in sorted(set(
-            t for t in blob.split() if t.startswith(b'PAYLOAD')))))
+        t.decode() for t in sorted(
+            t for t in blob.split() if t.startswith(b'PAYLOAD'))))
     check('MAP')
 except BaseException as _e:
     log('MAP raised %s %s' % (type(_e).__name__, str(_e)[:120]))
@@ -138,8 +156,8 @@ try:
     blob = b''.join(recs)
     log('STREAM records %d' % len(recs))
     log('STREAM tokens %s' % ','.join(
-        t.decode() for t in sorted(set(
-            t for t in blob.split() if t.startswith(b'PAYLOAD')))))
+        t.decode() for t in sorted(
+            t for t in blob.split() if t.startswith(b'PAYLOAD'))))
     check('STREAM')
 except BaseException as _e:
     log('STREAM raised %s %s' % (type(_e).__name__, str(_e)[:120]))
@@ -154,9 +172,10 @@ class TestExhaustiveStandardStreamMatrix(unittest.TestCase):
         cls._tmp = tempfile.mkdtemp(prefix="s4-matrix-")
         cls.spec = _build(cls._tmp)
 
-    def _run(self, closed, backend):
-        report = "/tmp/fr-matrix-%s-%s.txt" % (
-            backend, "-".join(map(str, closed)) or "none")
+    def _run(self, closed, backend, corpus="distinct"):
+        tokens = CORPORA[corpus]
+        report = "/tmp/fr-matrix-%s-%s-%s.txt" % (
+            backend, corpus, "-".join(map(str, closed)) or "none")
         if os.path.exists(report):
             os.unlink(report)
         body = textwrap.dedent(_CHILD)
@@ -166,20 +185,21 @@ class TestExhaustiveStandardStreamMatrix(unittest.TestCase):
                 .replace("REPORT", repr(report))
                 .replace("SPEC", repr(self.spec))
                 .replace("CLOSED", repr(list(closed)))
-                .replace("TOKENS", repr(
-                    [t + b"\n" for t in EXPECTED_TOKENS])))
+                .replace("TOKENS", repr([t + b"\n" for t in tokens])))
         proc = subprocess.run([sys.executable, "-c", body],
                               capture_output=True, text=True, timeout=300)
         self.assertEqual(proc.returncode, 0,
-                         "child failed for %s/%s: %s"
-                         % (backend, closed, proc.stderr[-500:]))
+                         "child failed for %s/%s/%s: %s"
+                         % (backend, corpus, closed, proc.stderr[-500:]))
         self.assertTrue(os.path.exists(report),
                         "child wrote no report for %s/%s: %s"
                         % (backend, closed, proc.stderr[-500:]))
         return Path(report).read_text()
 
-    def _assert_case(self, closed, backend, report):
-        label = "closed=%s backend=%s" % (list(closed) or "none", backend)
+    def _assert_case(self, closed, backend, report, corpus="distinct"):
+        expected = CORPORA[corpus]
+        label = "closed=%s backend=%s corpus=%s" % (
+            list(closed) or "none", backend, corpus)
         self.assertNotIn("raised", report,
                          "%s: the route failed instead of completing\n%s"
                          % (label, report))
@@ -191,20 +211,22 @@ class TestExhaustiveStandardStreamMatrix(unittest.TestCase):
                     records = int(line.split()[-1])
             self.assertIsNotNone(records, "%s/%s: no record count\n%s"
                                  % (label, shape, report))
-            self.assertEqual(records, len(EXPECTED_TOKENS),
+            self.assertEqual(records, len(expected),
                              "%s/%s returned %d records, expected %d. A "
                              "short or empty result here is silent data loss."
-                             % (label, shape, records, len(EXPECTED_TOKENS)))
+                             % (label, shape, records, len(expected)))
 
             tokens = None
             for line in report.splitlines():
                 if line.startswith("%s tokens " % shape):
                     tokens = [t for t in line.split(" ", 2)[2].split(",") if t]
             self.assertEqual(
-                [t.encode() for t in tokens or []], EXPECTED_TOKENS,
-                "%s/%s returned the wrong PAYLOAD tokens. A correct record "
+                [t.encode() for t in tokens or []], expected,
+                "%s/%s returned the wrong PAYLOAD MULTISET. A correct record "
                 "COUNT with wrong CONTENT means the route read some other "
-                "descriptor -- the C5 failure mode.\n%s"
+                "descriptor -- the C5 failure mode. With the duplicated "
+                "corpus this also catches records lost or repeated, which a "
+                "set comparison could not.\n%s"
                 % (label, shape, report))
 
             for line in report.splitlines():
@@ -226,6 +248,24 @@ class TestExhaustiveStandardStreamMatrix(unittest.TestCase):
                 with self.subTest(closed=closed, backend=backend):
                     report = self._run(closed, backend)
                     self._assert_case(closed, backend, report)
+
+    def test_all_subsets_with_duplicated_payloads(self):
+        """The corpus a set comparison is blind to.
+
+        Eight records that all carry the SAME token is correct output. The
+        route also produces that observation if it returns ONE record eight
+        times, or if it drops seven. Comparing distinct tokens would call
+        all three correct, so the multiset is what makes this meaningful.
+        """
+        subsets = []
+        for size in range(4):
+            subsets.extend(itertools.combinations((0, 1, 2), size))
+        for closed in subsets:
+            for backend in BACKENDS:
+                with self.subTest(closed=closed, backend=backend):
+                    report = self._run(closed, backend, corpus="duplicated")
+                    self._assert_case(closed, backend, report,
+                                      corpus="duplicated")
 
     def test_materialized_action_list_is_exactly_one_dup2_to_two(self):
         """The equivalence-first action list must not drift per pattern."""
