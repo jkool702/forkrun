@@ -721,14 +721,17 @@ backends, 5 samples after warmup (milliseconds):
 
 **F6 Stage 5 re-measurement**, 2048 MiB, **15 paired/interleaved
 repetitions**, both mappings, raw per-trial samples in
-`bench_artifacts/cleanroom_backends_2048MiB_20261018T165718Z.json`:
-
+<!-- BEGIN GENERATED: bench-e2e -->
 | mapping | fork+execv (sd) | posix_spawn (sd) | median delta | paired diff median [range] | isolated spawn: fork / spawn |
 |---|---|---|---|---|---|
-| MAP_PRIVATE | 210.98 (2.48) | 141.91 (2.30) | **32.7%** | **69.99 ms** [64.26, 73.33] | 26.19 / 0.27 |
-| MAP_SHARED | 145.35 (3.19) | 143.60 (3.03) | **1.2%** | **1.71 ms** [-2.64, 8.98] | 0.91 / 0.29 |
+| MAP_PRIVATE | 206.61 (2.38) | 141.38 (2.33) | **-31.6%** | **62.85 ms** [56.98, 68.98] | 24.24 / 0.45 |
+| MAP_SHARED | 146.57 (4.00) | 141.49 (2.50) | **-3.5%** | **3.74 ms** [-3.20, 18.62] | 1.04 / 0.40 |
 
-**Generated from the committed artifact, not transcribed.** `gen_bench_tables.py` reads `bench_artifacts/cleanroom_backends_2048MiB_20261018T203828Z.json` and emits this table; `gen_bench_tables.py --check` fails if the two ever disagree. Stage 5.1 shipped a document whose figures did not match its own artifact, which is why these numbers are now generated rather than typed.
+Source: `bench_artifacts/cleanroom_backends_2048MiB_20261018T215329Z.json`.
+<!-- END GENERATED: bench-e2e -->
+
+**Generated from the committed artifact, not transcribed.** `gen_bench_tables.py` emits this table from the artifact named above;
+`gen_bench_tables.py --check` fails if the two ever disagree. Stage 5.1 shipped a document whose figures did not match its own artifact, which is why these numbers are now generated rather than typed.
 
 Corrected re-run of 2026-10-18, superseding the previous revision's figures.
 **The conclusion has not moved across four independent runs**: the private
@@ -821,34 +824,48 @@ contains:
 | **B2** | child's own pre-exit clock → reap | **contains** teardown, plus exit, wakeup, scheduling, reap | 41.73 ms |
 | **C** | `fork()` + `/dev/null` open + `dup2` + `execve` + reap | differs from B in more than exec | 72.68 ms |
 | **D** | `posix_spawn` + reap | no per-page copy (`CLONE_VM\|CLONE_VFORK`) | 1.00 ms |
+<!-- BEGIN GENERATED: bench-decomposition -->
+| | measurement | timer window contains | median |
+|---|---|---|---|
+| **A** | `fork()` → parent return | parent-side page-table copy. **No reap** | 29.73 ms |
+| **B** | `fork()` + reap, child `_exit()` | A, plus child startup, teardown, exit, wakeup, scheduling, reap | 70.37 ms |
+| **B1** | `fork()` → parent's read of the child's byte | fork-to-parent-read **latency**; a latency measurement, not a component — whether the teardown falls inside depends on scheduling | 30.39 ms |
+| **B2** | child's own pre-exit clock → reap | **contains** teardown, plus exit, wakeup, scheduling, reap | 40.18 ms |
+| **C** | `fork()` + `/dev/null` open + `dup2` + `execve` + reap | differs from B in more than exec | 69.12 ms |
+| **D** | `posix_spawn` + reap | no per-page copy (`CLONE_VM\|CLONE_VFORK`) | 1.12 ms |
 
-Generated from `bench_artifacts/launch_decomposition_2048MiB_20261018T203828Z.json`.
+Derived, with the same care about what each one is:
 
-What may honestly be said:
+* **`B - A` = 40.64 ms** — the additional cost of completing fork-and-exit-and-reap relative to parent-side fork-return latency. Includes child startup, teardown, exit, wakeup, scheduling and the reap. **Not a measurement of teardown**, because `A`'s timer stops before `waitpid()`.
+* **`B1 - A` = 0.66 ms** — the difference between two parent-observed latency measurements, fork-to-parent-read versus fork-return. **Not a measurement of child startup**: the windows differ by more than startup, and B1's relationship to teardown is scheduling-dependent.
+* **`C - B` = -1.25 ms** — a difference between two complete timing configurations that differ in more than image replacement; C's child also opens `/dev/null` and `dup2`s it onto stdout. Not a pure exec-cost figure.
+* **`C - D` = 68.00 ms** — a complete forked launch against a complete spawned one: a difference of two whole operations, not of two isolated components.
 
-* **`B - A` = 40.23 ms** is the *additional cost of completing
-  fork-and-exit-and-reap relative to parent-side fork-return latency*. It
-  includes child startup, teardown, exit, wakeup, scheduling and the reap.
-  **It is not a measurement of teardown**, because `A`'s timer stops before
-  `waitpid()` and so contains no reap at all.
-* **`B1 - A` = 0.12 ms** is the child's startup path. Child startup is
-  cheap; it is not where the time goes.
-* **`B2` = 41.73 ms** is the interval from the **child's own**
-  `CLOCK_MONOTONIC` reading, taken as its last action before `_exit()`, to
-  the completion of `waitpid()`. Because the anchor precedes `_exit()`, the
-  kernel's teardown of the child's address space necessarily falls inside
-  this window. It is still **not a pure measurement** of it: the remainder
-  of the pipe write, process exit, the parent's wakeup, scheduling and the
-  reap share the window and are not separable without kernel-side
-  instrumentation, which this deliberately does not add. The claim it
-  supports is *"the teardown is inside this window"*, not *"the teardown is
-  this long"*.
-* **`C - B` = 2.64 ms** is a difference between two *complete* timing
-  configurations that differ in more than image replacement — C's child also
-  opens `/dev/null` and `dup2`s it onto stdout. Not a pure exec-cost figure.
-* **`C - D` = 71.68 ms** is a complete forked launch against a complete
-  spawned one — a difference of two whole operations, not of two isolated
-  components.
+Source: `bench_artifacts/launch_decomposition_2048MiB_20261018T215329Z.json`.
+<!-- END GENERATED: bench-decomposition -->
+
+
+What may honestly be said is recorded, with its caveats, in the generated block above.
+
+**B2 brackets the teardown, and is still not a pure measurement of
+it.** Its anchor is the child's own `CLOCK_MONOTONIC` reading taken as its
+last action before `_exit()`, and it ends after `waitpid()` returns, so the
+kernel's teardown of the child's address space necessarily falls inside the
+window. But the remainder of the pipe write, process exit, the parent's
+wakeup, scheduling and the reap all share that window and are not separable
+without kernel-side instrumentation, which this deliberately does not add.
+The claim it supports is *"the teardown is inside this window"*, not
+*"the teardown is this long"*.
+
+**B1 is a latency, not a component.** Its window ends when the parent's
+`read()` of the child's byte returns, and the child writes that byte and *then*
+exits. Nothing forces the read to return before the child finishes exiting: if the
+parent is descheduled, the child can complete its teardown and exit
+first, and the buffered byte is consumed afterwards. B1 therefore neither
+reliably includes nor reliably excludes the teardown — that depends on scheduling
+this measurement does not control or record. The Stage 5.2 revision
+described it as "the child's startup path, excluding teardown", and
+both halves of that description were wrong.
 
 **B1 and B2 are not a decomposition of `B - A`.** The Stage 5.1 revision
 treated them as accounting for it and reported an unexplained residue; that

@@ -85,7 +85,7 @@ def decomp_rows():
         "C": med(m["C_fork_devnull_exec_reap"]),
         "D": med(m["D_posix_spawn_reap"]),
         "B_minus_A": dv["B_minus_A_additional_fork_exit_reap_cost"],
-        "B1_minus_A": dv["B1_minus_A_child_startup"],
+        "B1_minus_A": dv["B1_minus_A_latency_difference_NOT_startup"],
         "C_minus_B": dv["C_minus_B_configuration_difference"],
         "C_minus_D": dv["C_minus_D_complete_launch_difference"],
         "source": os.path.basename(
@@ -100,12 +100,20 @@ def render_e2e():
                "| paired diff median [range] | isolated spawn: fork / spawn |")
     out.append("|---|---|---|---|---|---|")
     for r in rows:
-        out.append("| %s | %.2f (%.2f) | %.2f (%.2f) | **%.1f%%** | "
+        # The sign is PRESERVED, not taken by absolute value. The artifact
+        # stores median_delta_pct as a reduction, i.e. negative when
+        # posix_spawn is faster. Printing abs() of it rendered "32.7%" in a
+        # column headed "median delta" while the prose said "-32.7%": the
+        # same quantity with opposite signs in one document, and under that
+        # column heading a positive number reads as a slowdown.
+        out.append("| %s | %.2f (%.2f) | %.2f (%.2f) | **%+.1f%%** | "
                    "**%.2f ms** [%.2f, %.2f] | %.2f / %.2f |"
                    % (r["name"], r["fork"], r["fork_sd"], r["spawn"],
-                      r["spawn_sd"], abs(r["delta"]), r["pd_med"],
+                      r["spawn_sd"], r["delta"], r["pd_med"],
                       r["pd_min"], r["pd_max"], r["iso_fork"],
                       r["iso_spawn"]))
+    out.append("")
+    out.append("Source: `bench_artifacts/%s`." % rows[0]["source"])
     return "\n".join(out), rows
 
 
@@ -119,8 +127,10 @@ def render_decomp():
     out.append("| **B** | `fork()` + reap, child `_exit()` | A, plus child "
                "startup, teardown, exit, wakeup, scheduling, reap | "
                "%.2f ms |" % d["B"])
-    out.append("| **B1** | `fork()` → child's pre-exit signal | A, plus the "
-               "child's startup path. Excludes teardown | %.2f ms |" % d["B1"])
+    out.append("| **B1** | `fork()` → parent's read of the child's byte | "
+               "fork-to-parent-read **latency**; a latency measurement, not "
+               "a component — whether the teardown falls inside depends on "
+               "scheduling | %.2f ms |" % d["B1"])
     out.append("| **B2** | child's own pre-exit clock → reap | **contains** "
                "teardown, plus exit, wakeup, scheduling, reap | %.2f ms |"
                % d["B2"])
@@ -128,44 +138,103 @@ def render_decomp():
                "reap | differs from B in more than exec | %.2f ms |" % d["C"])
     out.append("| **D** | `posix_spawn` + reap | no per-page copy "
                "(`CLONE_VM\\|CLONE_VFORK`) | %.2f ms |" % d["D"])
+    out.append("")
+    out.append("Derived, with the same care about what each one is:")
+    out.append("")
+    out.append("* **`B - A` = %.2f ms** — the additional cost of completing "
+               "fork-and-exit-and-reap relative to parent-side fork-return "
+               "latency. Includes child startup, teardown, exit, wakeup, "
+               "scheduling and the reap. **Not a measurement of teardown**, "
+               "because `A`'s timer stops before `waitpid()`."
+               % d["B_minus_A"])
+    out.append("* **`B1 - A` = %.2f ms** — the difference between two "
+               "parent-observed latency measurements, fork-to-parent-read "
+               "versus fork-return. **Not a measurement of child startup**: "
+               "the windows differ by more than startup, and B1's "
+               "relationship to teardown is scheduling-dependent."
+               % d["B1_minus_A"])
+    out.append("* **`C - B` = %.2f ms** — a difference between two complete "
+               "timing configurations that differ in more than image "
+               "replacement; C's child also opens `/dev/null` and `dup2`s it "
+               "onto stdout. Not a pure exec-cost figure." % d["C_minus_B"])
+    out.append("* **`C - D` = %.2f ms** — a complete forked launch against a "
+               "complete spawned one: a difference of two whole operations, "
+               "not of two isolated components." % d["C_minus_D"])
+    out.append("")
+    out.append("Source: `bench_artifacts/%s`." % d["source"])
     return "\n".join(out), d
 
 
 DECISION = os.path.join(_HERE, "CLEANROOM_LAUNCH_DECISION.md")
 
+E2E_BEGIN = "<!-- BEGIN GENERATED: bench-e2e -->"
+E2E_END = "<!-- END GENERATED: bench-e2e -->"
+DECOMP_BEGIN = "<!-- BEGIN GENERATED: bench-decomposition -->"
+DECOMP_END = "<!-- END GENERATED: bench-decomposition -->"
+
+
+def region(doc, begin, end):
+    """Return the text between two markers, or None if absent."""
+    i = doc.find(begin)
+    j = doc.find(end)
+    if i < 0 or j < 0 or j < i:
+        return None
+    return doc[i + len(begin):j].strip()
+
 
 def check():
-    """Fail if the document's figures no longer match the artifacts."""
+    """Compare the GENERATED REGIONS against freshly generated tables.
+
+    Stage 5.2's check searched the whole document for each number. That is
+    too weak in two ways, both of which this commit was caught by: it did
+    not check the SIGN of a value (so a table showing "32.7%" while the
+    prose said "-32.7%" passed), and it did not tie a number to the table
+    it belonged to (so a value appearing anywhere in the document
+    satisfied it).
+
+    This compares the marked regions byte for byte against what the
+    artifacts generate now, which pins value, sign, order and formatting
+    together. A hand-edited table, a stale artifact, or a sign flip all
+    fail here.
+    """
     doc = open(DECISION).read()
     problems = []
-    rows = e2e_rows()
-    for r in rows:
-        for label, val in (("forkexec", r["fork"]), ("spawn", r["spawn"]),
-                           ("paired", r["pd_med"])):
-            needle = "%.2f" % val
-            if needle not in doc:
-                problems.append("%s %s median %s missing from the document"
-                                % (r["name"], label, needle))
-    d = decomp_rows()
-    for k in ("A", "B", "B1", "B2", "C", "D"):
-        needle = "%.2f ms" % d[k]
-        if needle not in doc:
-            problems.append("decomposition %s = %s missing from the document"
-                            % (k, needle))
-    for k in ("B_minus_A", "B1_minus_A", "C_minus_B", "C_minus_D"):
-        needle = "%.2f" % d[k]
-        if needle not in doc:
-            problems.append("derived %s = %s missing from the document"
-                            % (k, needle))
+    e2e_now, _ = render_e2e()
+    dec_now, _ = render_decomp()
+    have_e2e = region(doc, E2E_BEGIN, E2E_END)
+    have_dec = region(doc, DECOMP_BEGIN, DECOMP_END)
+    if have_e2e is None:
+        problems.append("the end-to-end table is not marked with %s / %s"
+                        % (E2E_BEGIN, E2E_END))
+    elif have_e2e != e2e_now.strip():
+        problems.append("the end-to-end table does not match the artifact")
+        for line in _diff(have_e2e.splitlines(), e2e_now.strip().splitlines()):
+            problems.append("    " + line)
+    if have_dec is None:
+        problems.append("the decomposition table is not marked with %s / %s"
+                        % (DECOMP_BEGIN, DECOMP_END))
+    elif have_dec != dec_now.strip():
+        problems.append("the decomposition table does not match the artifact")
+        for line in _diff(have_dec.splitlines(), dec_now.strip().splitlines()):
+            problems.append("    " + line)
     if problems:
-        print("STALE DOCUMENT -- these figures are in the artifacts but not "
-              "in the document:")
+        print("STALE OR EDITED DOCUMENT:")
         for p in problems:
             print("  -", p)
         return 1
-    print("document figures match %s and %s"
-          % (rows[0]["source"], d["source"]))
+    print("generated tables match the committed artifacts exactly "
+          "(value, sign, order and formatting)")
     return 0
+
+
+def _diff(have, want):
+    out = []
+    for i in range(max(len(have), len(want))):
+        a = have[i] if i < len(have) else "<missing>"
+        b = want[i] if i < len(want) else "<extra>"
+        if a != b:
+            out.append("line %d: document %r != artifact %r" % (i + 1, a, b))
+    return out
 
 
 def main():

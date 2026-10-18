@@ -123,14 +123,29 @@ def b_fork_exit(reps):
 
 
 def b1_fork_to_child_signal(reps):
-    """fork() -> the child signalling that it is about to _exit().
+    """FORK-TO-PARENT-READ LATENCY. Not a component measurement.
 
-    The child writes one byte to a pipe immediately on entry and then
-    exits. Timing stops in the PARENT when that byte is read, so this
-    covers the parent-side fork() plus the child's own startup path --
-    everything the child does before it begins tearing its address space
-    down. It deliberately does NOT include the teardown: the signal is
-    raised before the child exits.
+    F6 Stage 5.3 correction. This was previously documented as "the
+    child's startup path, excluding teardown". Both halves of that were
+    wrong.
+
+    The window runs from before fork() to the moment the parent's
+    os.read() of the child's one-byte signal returns. The child writes
+    that byte and THEN exits. Nothing forces the parent's read to return
+    before the child finishes exiting: if the parent is descheduled, the
+    child can complete its teardown and exit first, and the buffered byte
+    is consumed afterwards. So the window neither reliably includes nor
+    reliably excludes the teardown -- its relationship to teardown depends
+    on scheduling, which this measurement does not control or record.
+
+    It is therefore reported as what it literally is: how long it took for
+    the parent to observe the child's signal. For the same reason
+    `B1 - A` is not used as a measurement of child startup -- it is a
+    difference between two parent-observed latency measurements whose
+    windows differ by more than the thing being named.
+
+    B2 is the measurement that genuinely brackets the teardown, because its
+    anchor is taken in the child's own clock before _exit().
     """
     out = []
     for _ in range(reps + 1):
@@ -293,8 +308,11 @@ def main():
          "child teardown, exit, parent wakeup and the reap."),
         ("B1 fork() -> child signals",
          B1,
-         "TIMER STOPS WHEN THE PARENT READS the child's pre-exit byte. "
-         "Contains: A, plus the child's startup path. Excludes teardown."),
+         "TIMER STOPS WHEN THE PARENT'S READ of the child's byte "
+         "returns. A latency measurement, NOT a component: the child "
+         "writes the byte and then exits, so whether the teardown falls "
+         "inside this window depends on scheduling the run does not "
+         "control."),
         ("B2 child's own pre-exit clock -> reap",
          B2,
          "Anchored on the CHILD's CLOCK_MONOTONIC reading taken as its "
@@ -329,8 +347,11 @@ def main():
     print("      no reap and the two windows are not nested.")
     print()
     print("  B1 - A = %7.2f ms" % (b1 - a))
-    print("      the child's own startup path: everything it does between")
-    print("      fork() returning and raising its pre-exit signal.")
+    print("      the difference between two parent-observed latency")
+    print("      measurements: fork-to-parent-read versus fork-return.")
+    print("      NOT a measurement of child startup -- the windows differ")
+    print("      by more than startup, and B1's relationship to teardown is")
+    print("      scheduling-dependent (see the B1 docstring).")
     print()
     print("  B2     = %7.2f ms" % b2)
     print("      anchored on the CHILD's own CLOCK_MONOTONIC reading, taken")
@@ -387,12 +408,17 @@ def main():
                               for label, _v, note in rows},
             "derived_ms": {
                 "B_minus_A_additional_fork_exit_reap_cost": round(b - a, 2),
-                "B1_minus_A_child_startup": round(b1 - a, 2),
+                "B1_minus_A_latency_difference_NOT_startup": round(b1 - a, 2),
                 "B2_child_pre_exit_to_reap": round(b2, 2),
                 "C_minus_B_configuration_difference": round(c - b, 2),
                 "C_minus_D_complete_launch_difference": round(c - e, 2),
             },
             "what_is_NOT_measured": [
+                "Child startup: B1 - A is a difference between two "
+                "parent-observed latencies, not a component measurement, "
+                "and B1's relationship to teardown is scheduling-dependent "
+                "because the parent's read can return after the child has "
+                "already exited.",
                 "Pure address-space teardown: B2 contains it but also "
                 "process exit, parent wakeup, scheduling and the reap, and "
                 "these are not separable without kernel instrumentation.",

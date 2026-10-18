@@ -71,6 +71,7 @@ Usage:
 """
 
 import argparse
+import collections
 import gc
 import json
 import os
@@ -261,7 +262,20 @@ class _Probe:
 
 
 def expected_tokens(lines):
-    return {("PAYLOAD_%08d" % i).encode() for i in range(lines)}
+    """Expected payload tokens AS A COUNTER, not a set.
+
+    A set comparison proves every expected token is present. It says
+    nothing about multiplicity, so a result that kept all of them and
+    appended an extra copy of one would pass -- and the record count would
+    be unchanged, because duplicating a token inside a record does not
+    change how many records there are. Counter comparison closes that.
+
+    This corpus happens to give every line a unique token, so for a clean
+    run set and Counter agree. The check is written for the corrupt cases
+    rather than the clean one.
+    """
+    return collections.Counter(
+        ("PAYLOAD_%08d" % i).encode() for i in range(lines))
 
 
 def one_call(spec, path, expected_records, want_tokens=None):
@@ -274,11 +288,14 @@ def one_call(spec, path, expected_records, want_tokens=None):
     than the one being timed.
 
     The verification runs AFTER the timer has stopped, so none of its cost
-    is charged to the reported time. It compares the exact set of payload
-    tokens against the expected set. The corpus gives every line a unique
-    token, so set equality plus the record count pins the content exactly:
-    a lost token fails the set check and a duplicated record fails the
-    count check.
+    is charged to the reported time and there is no reason to weaken it.
+
+    It compares a Counter of the observed tokens against the expected
+    Counter, so it pins multiplicity as well as membership:
+      * a lost token          -> counter mismatch (missing entry)
+      * a duplicated token    -> counter mismatch (count too high)
+      * a substituted token   -> counter mismatch (missing + unexpected)
+    A set comparison would have passed the second of those.
     """
     import forkrun
     t0 = time.perf_counter()
@@ -293,15 +310,19 @@ def one_call(spec, path, expected_records, want_tokens=None):
     if want_tokens is not None:
         blob = b"".join(bytes(r) if not isinstance(r, bytes) else r
                         for r in out)
-        got = set(blob.split())
+        got = collections.Counter(blob.split())
         if got != want_tokens:
-            missing = len(want_tokens - got)
-            extra = len(got - want_tokens)
+            missing = want_tokens - got
+            extra = got - want_tokens
             raise AssertionError(
-                "payload multiset mismatch: %d expected token(s) missing, "
-                "%d unexpected token(s) present -- a trial that returns the "
-                "right COUNT with the wrong CONTENT is not a timing sample"
-                % (missing, extra))
+                "payload multiset mismatch: %d expected token(s) missing "
+                "(e.g. %r), %d unexpected token(s) present (e.g. %r) -- a "
+                "trial that returns the right COUNT with the wrong CONTENT, "
+                "or with duplicated content, is not a timing sample"
+                % (len(missing),
+                   sorted(missing)[0] if missing else None,
+                   len(extra),
+                   sorted(extra)[0] if extra else None))
     return elapsed
 
 
@@ -328,7 +349,8 @@ def paired(spec, path, run_mod, probe, reps, expected_records, warmup=1,
     return samples, fds
 
 
-def isolated_launch(spec, path, run_mod, reps=5, expected_records=1):
+def isolated_launch(spec, path, run_mod, reps=5, expected_records=1,
+                    want_tokens=None):
     """Median cost of the spawn call alone. Reported separately."""
     probe = _Probe()
     probe.install(run_mod)
@@ -338,7 +360,12 @@ def isolated_launch(spec, path, run_mod, reps=5, expected_records=1):
             for backend in BACKENDS:
                 run_mod._set_cleanroom_launch_backend(backend)
                 probe.reset()
-                one_call(spec, path, expected_records)
+                # want_tokens is passed here too. This loop's calls exist to
+                # warm the path, but they are still map() calls: leaving
+                # them content-unverified would mean the one place that
+                # exercises the isolated-launch timings did not hold the
+                # result to the same standard as the paired trials.
+                one_call(spec, path, expected_records, want_tokens)
                 if probe.observed:
                     samples[backend].append(0.0)  # replaced below
         # Re-measure with real timing of just the spawn call.
@@ -364,7 +391,7 @@ def isolated_launch(spec, path, run_mod, reps=5, expected_records=1):
         for i in range(reps + 1):
             for backend in BACKENDS:
                 run_mod._set_cleanroom_launch_backend(backend)
-                one_call(spec, path, expected_records)
+                one_call(spec, path, expected_records, want_tokens)
     finally:
         run_mod._spawn_or_fork = real
     return {k: (statistics.median(v[1:]) if len(v) > 1 else None)
@@ -396,7 +423,8 @@ def run_cell(name, ballast, spec, src, run_mod, probe, reps, expected,
     fds_before = len(os.listdir("/proc/self/fd"))
     samples, fds = paired(spec, src, run_mod, probe, reps, expected,
                          want_tokens=want_tokens)
-    iso = isolated_launch(spec, src, run_mod, expected_records=expected)
+    iso = isolated_launch(spec, src, run_mod, expected_records=expected,
+                         want_tokens=want_tokens)
     diffs = paired_diffs(samples["forkexec"], samples["posix_spawn"])
     mf = statistics.median(samples["forkexec"])
     mp = statistics.median(samples["posix_spawn"])
