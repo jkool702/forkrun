@@ -728,8 +728,15 @@ class _RouteFdSet:
 
 
 def _fd_above_stdio(fd):
-    """Return a descriptor number guaranteed to be > 2 for the same open
-    file, or `fd` unchanged if it already is.
+    """Relocate `fd` above fd 2, or return it unchanged if it already is.
+
+    OWNERSHIP: this function takes ownership of `fd`. On any failure path it
+    closes `fd` itself and raises. Every call site passes a ROUTE-OWNED
+    descriptor -- a memfd it just created, one end of a pipe it just made,
+    or the `os.dup()` that `_cleanroom_source_fd()` made of the caller's
+    source -- so closing is correct, and it is what stops a failure during
+    relocation from leaking a descriptor that was never registered with
+    `_RouteFdSet` (the call sites register only after this returns).
 
     WHY (F6 Stage 3 / C5). The materialized route ends with
     `os.dup2(errfd, 2)`. If the host process started with fd 2 CLOSED,
@@ -765,21 +772,53 @@ def _fd_above_stdio(fd):
     `fcntl(fd, F_DUPFD, 3)` makes "> 2" a guarantee: the kernel picks the
     lowest descriptor at or above the given minimum, so the result cannot
     land back in the gap no matter what else is open.
+
+    F6 Stage 5 -- FAILURE MUST NOT DISABLE THE GUARD.
+    The Stage 4 version swallowed the OSError and returned `fd` unchanged,
+    which meant that if the relocation itself failed -- EMFILE, or any other
+    reason the kernel could not supply a number at or above 3 -- the helper
+    returned a descriptor INSIDE the standard-stream gap and the route
+    carried on. That is the C5 corruption, reached by a different road: the
+    guard quietly stopped guarding. Injected with fcntl stubbed to raise
+    EMFILE, it returned fd 1, and the route would have launched with
+    `--src 1`.
+
+    So a failure here is now fatal to the route rather than silent. The
+    same applies to the inheritable-state restore below: F_DUPFD clears
+    FD_CLOEXEC on the new number, so if the original's flag cannot be read
+    back there is no way to know whether the relocated descriptor should
+    cross exec. Guessing would either leak a descriptor across exec or hide
+    one from the launcher, and neither failure is visible to the caller.
     """
     if fd is None or fd > 2:
         return fd
     try:
         higher = fcntl.fcntl(fd, fcntl.F_DUPFD, 3)
-    except OSError:
-        return fd
+    except OSError as exc:
+        os.close(fd)
+        raise OSError(
+            exc.errno,
+            "forkrun: could not place a cleanroom route descriptor above "
+            "fd 2 (F_DUPFD failed for descriptor %d); proceeding would hand "
+            "the launcher a descriptor inside the standard-stream gap, "
+            "which silently corrupts the input it reads" % (fd,),
+        ) from exc
     try:
         # F_DUPFD clears FD_CLOEXEC on the new number, so the inheritable
         # state the route set on the ORIGINAL must be re-applied here or
         # the relocated descriptor would silently stop crossing exec.
         inheritable = os.get_inheritable(fd)
         os.set_inheritable(higher, inheritable)
-    except OSError:
-        pass
+    except OSError as exc:
+        os.close(fd)
+        os.close(higher)
+        raise OSError(
+            exc.errno,
+            "forkrun: could not restore the inheritable flag while "
+            "relocating cleanroom descriptor %d; the descriptor's "
+            "close-on-exec state would be wrong in an unknown direction"
+            % (fd,),
+        ) from exc
     os.close(fd)
     return higher
 
