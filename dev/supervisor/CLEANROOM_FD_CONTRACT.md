@@ -605,6 +605,49 @@ Both fixes are mutation-checked: reverting `F_DUPFD` fails 4 tests, and
 reverting the streaming relocation fails the isolated pipe case
 (`--result=1`).
 
+### C5 CORRECTION, ROUND 2 (F6 Stage 5) -- the guard could disable ITSELF
+
+The Stage 4 fix made `F_DUPFD` make "> 2" a guarantee, but the guarantee
+was conditional on the syscall succeeding:
+
+    try:
+        higher = fcntl.fcntl(fd, fcntl.F_DUPFD, 3)
+    except OSError:
+        return fd          # <-- returns a descriptor INSIDE the gap
+
+If relocation could not be performed -- EMFILE, or anything else that stops
+the kernel supplying a number at or above 3 -- the helper returned the
+input unchanged. The guard stopped guarding and handed back the very
+descriptor it existed to move, which is C5 reached by a different road.
+Injected with `fcntl` stubbed to raise EMFILE, it returned fd 1, and the
+route would have launched with `--src 1`.
+
+The same applied to the inheritable-flag restore: `F_DUPFD` clears
+`FD_CLOEXEC`, so a swallowed failure left the descriptor's close-on-exec
+state wrong in an unknown direction -- either leaking a descriptor across
+exec or hiding one from the launcher, neither of which a caller can see.
+
+Both paths now close the descriptor and raise, with a message naming the
+invariant. `_fd_above_stdio` documents that it takes OWNERSHIP of its
+argument, which is what stops the acquire-then-register window leaking: the
+call sites create a memfd or a pipe end and pass it in, then register it
+with `_RouteFdSet` only AFTER this returns. Five distinct windows exist
+(source dup, result, stats, error and trace memfds, streaming pipe ends);
+all are covered. Verified by injection: five forced failures, open
+descriptors 4 -> 4, memfds 0 -> 0.
+
+### Matrix completeness (F6 Stage 5)
+
+The closure matrix now runs all 2^3 = 8 subsets of {0,1,2} against both
+backends, both shapes, and TWO corpora, comparing a **multiset** of payload
+tokens rather than a set.
+
+The second corpus exists because a set comparison cannot see duplication:
+eight records that all carry the SAME payload is correct output, and a set
+check would report the same single distinct token for 8 correct records, for
+1 record repeated eight times, and for seven records dropped. The
+multiset pins all three apart.
+
 ### What remains, and is deliberately NOT claimed
 
 * **Descriptor tightening is not authorised** and is not implemented.
@@ -616,11 +659,12 @@ reverting the streaming relocation fails the isolated pipe case
   backend, and there is no environment selector for the backend.
 * **The performance win is conditional, not universal.** It depends on the
   parent's address space being dominated by private anonymous mappings.
-  End to end on this repo's own route: −1.8% at 0 MiB (noise), −22.5% at
-  1 GiB, −32.9% at 2 GiB. The earlier "+1.0% at 2 GiB" figure was an
-  artefact of ballasting the parent with `mmap.mmap(-1, n)`, which is
-  `MAP_SHARED` and therefore never carried the `fork()` tax in the first
-  place. See `CLEANROOM_LAUNCH_DECISION.md` §8.1.
+  Measured end to end at 2048 MiB with 15 paired, interleaved repetitions:
+  **-34.9%** for private ballast (paired difference median 74.67 ms, range
+  [71.09, 78.36] -- every pair large and positive) against **-1.6%** for
+  shared ballast (paired range [-3.56, 8.45], which straddles zero and is
+  therefore noise). Both cells verified by VMA permission word, not by
+  smaps totals. See `CLEANROOM_LAUNCH_DECISION.md` §8.1.
 
 ### 8.5b Ownership model
 

@@ -35,7 +35,7 @@ which is the pattern this audit follows.
 | F3 | Descriptor limit | Claimed the launcher lacked the hard `ulimit -n` | **FALSE POSITIVE — withdrawn**; the C launcher has always raised it |
 | F4 | Docs | `DOCS_ALL.md` drifted ~130 lines with a heading-only check passing | **Documentation drift — FIXED** |
 | F5 | Docs | Root README version, 4-of-5 mode lists, stale v0.5 module docstring, trap-ACK comments, NUMA test claims | **Documentation drift — FIXED** |
-| F6 | Cleanroom launch | `posix_spawn` is the DEFAULT cleanroom launch backend; `fork()+execv()` retained as a private fallback | **DONE — performance gate MET; descriptor gate ANSWERED (Stage 2); launch-semantic equivalence CLOSED (C1–C5); backend ADOPTED as default (Stage 4)** |
+| F6 | Cleanroom launch | `posix_spawn` is the DEFAULT cleanroom launch backend; `fork()+execv()` retained as a private fallback | **DONE — performance gate MET; descriptor gate ANSWERED (Stage 2); launch-semantic equivalence CLOSED (C1–C5); backend ADOPTED as default (Stage 4); independent Stage 5 audit passed, incl. a fix to the relocation guard itself** |
 | F7 | Cleanroom env | `CLEANROOM_DESIGN.md` says the launcher "must not inherit the parent's environment wholesale"; `os.execv()` inherits it | **OPEN — a stated contract that is not met** |
 | F8 | Cleanroom stream | Unreachable iterable producer with live control flow | **Confirmed defect — FIXED** |
 | F9 | Trap-ACK grace | Presented as the recovery mechanism; armed only on legacy substrates | **Documentation drift — FIXED** |

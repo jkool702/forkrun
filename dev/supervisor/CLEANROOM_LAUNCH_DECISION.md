@@ -719,6 +719,33 @@ backends, 5 samples after warmup (milliseconds):
 | 1 GiB | 179.46 | 139.06 | **−40.4 ms (−22.5%)** |
 | 2 GiB | 201.43 | 135.07 | **−66.4 ms (−32.9%)** |
 
+**F6 Stage 5 re-measurement**, 2048 MiB, **15 paired/interleaved
+repetitions**, both mappings, raw per-trial samples in
+`bench_artifacts/cleanroom_backends_2048MiB_20261018T165718Z.json`:
+
+| mapping | fork+execv (sd) | posix_spawn (sd) | median delta | paired diff median (range) |
+|---|---|---|---|---|
+| MAP_PRIVATE | 211.33 (2.52) | 137.59 (1.42) | **−34.9%** | **74.67 ms** [71.09, 78.36] |
+| MAP_SHARED | 138.92 (2.51) | 136.71 (2.63) | −1.6% | 1.29 ms [−3.56, 8.45] |
+
+Every one of the 15 private pairs is large and positive; the shared pairs
+straddle zero. The shared cell's −1.6% does not conflict with the earlier
++0.7% — both sit inside a range that spans zero, which is what the paired
+range shows and what a single median cannot.
+
+**The mapping control, and a trap worth recording.** The obvious way to
+verify that one cell is private and the other shared is to read smaps'
+private/shared counters. That is wrong here. `mmap.mmap(-1, n)` really is
+`MAP_SHARED` (VMA perms `rw-s`, backed by `/dev/zero (deleted)`), but
+because it is *file-backed* it reports `Anonymous: 0 kB`, so a classifier
+keyed on `Anonymous:` sees nothing; and the kernel books its dirty
+page-cache pages under `Private_Dirty` (2048 MiB), so a naive reading calls
+the "shared" ballast private — which would make the two cells
+indistinguishable and the comparison meaningless. The benchmark therefore
+classifies by the **VMA permission word**, corroborated by the `sh` bit in
+`VmFlags`, and reports VOID if a cell's ballast is not the kind of mapping
+it claims.
+
 **The earlier version of this table said +1.0% at 2 GiB, and that number
 was wrong because the benchmark was measuring the wrong parent.** It
 ballasted the parent with `mmap.mmap(-1, n)`, which on Linux is
@@ -747,6 +774,42 @@ said the design's gate "was never evaluated" and "the concrete claim is
 unmeasured". Both were false and are gone; an intermediate revision
 concluded the gate was **not met** on small-parent data, which was also
 superseded. **Do not read this document's history as a stable position.**
+
+### 8.1b Launch-cost decomposition — measured, not inferred
+
+An earlier revision attributed the gap between the end-to-end difference
+and the isolated spawn time to "child-side teardown", obtained by
+subtracting one wall-clock duration from another. That arithmetic was valid
+but the causal label was not earned: a difference of two totals does not
+measure a concurrent activity.
+
+`bench_launch_decomposition.py` now isolates the component directly, in one
+process with the same 2048 MiB ballast, 15 repetitions:
+
+| measurement | median |
+|---|---|
+| A  parent-side `fork()` only (the page-table copy) | 28.67 ms |
+| B  `fork()` + reap, child immediately `_exit()` | 68.87 ms |
+| C  `fork()` + `execve()` + reap | 71.45 ms |
+| D  `posix_spawn()` + reap | 0.95 ms |
+
+* **B - A = 40.19 ms is the child-side address-space teardown, MEASURED.**
+  A and B pay the same parent-side copy and the same reap; the difference is
+  the work the child does discarding its own copy. `_exit()` performs that
+  teardown and `execve()` performs the same teardown while replacing the
+  image, so measuring at `_exit` isolates it without instrumenting the child.
+* C - B = 2.58 ms is the cost of loading and replacing the program image.
+* C - D = 70.50 ms, which reconciles with the **74.67 ms** end-to-end paired
+  difference measured independently. Two unrelated experiments agreeing to
+  within paired-sample noise is the check that neither is measuring
+  something else.
+
+**What is still inferred.** A and B are *serial* measurements in a quiet
+process. In a real route the parent's post-launch work overlaps the child's
+teardown and the two contend for cache and memory bandwidth, so A + B
+overstates the serial cost and the components are not strictly additive.
+The number that decides the default switch is the end-to-end paired
+difference, not this sum.
 
 **No rlimit cost exists** and it is not part of this list — the launcher
 raises its own `RLIMIT_NOFILE` before `dlopen` (§4.3).
