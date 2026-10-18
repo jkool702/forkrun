@@ -1461,6 +1461,57 @@ static int fr_wake_drain_committed(int sig_w, int wid, int out_fd)
     return 0;
 }
 
+/* =====================================================================
+ * TEST-ONLY entry-descriptor probe (F6 Stage 3, condition C4).
+ *
+ * COMPILE-TIME GUARDED AND OFF BY DEFAULT. The normal launcher build
+ * defines nothing, so this code does not exist in the shipped binary:
+ * there is no new flag to pass, no new behaviour, and no measurable cost.
+ * Only the test build adds -DFORKRUN_ENTRY_FD_PROBE.
+ *
+ * WHY IT EXISTS. `--fd-selfcheck` runs inside enter_child(), AFTER exec,
+ * and only checks that descriptors on the launcher's own keep-list
+ * survived the launcher's own scrub. That is the wrong moment for the
+ * question "which descriptors was the launcher HANDED", which is exactly
+ * what a posix_spawn backend must reproduce. This probe answers it at
+ * main() entry, before the launcher touches anything.
+ *
+ * WHAT IT DOES NOT DO. It never reads or prints the environment: no
+ * getenv, no environ walk, nothing that could carry a secret into the
+ * report. It reports only descriptor number, the kernel's own readlink
+ * of that descriptor, and whether FD_CLOEXEC is set on it. The output
+ * path arrives as a command-line argument, not an environment variable,
+ * so enabling the probe cannot perturb what it measures.
+ * ===================================================================== */
+#ifdef FORKRUN_ENTRY_FD_PROBE
+static int entry_fd_probe(const char *out_path, const struct opts *o) {
+    char line[4096], tgt[PATH_MAX + 1], path[64];
+    int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return -1;
+    dprintf(fd, "# entry descriptor set at main() entry\n");
+    dprintf(fd, "# argv --src=%d --result=%d --stats-fd=%d trace=%d\n",
+            o->source_fd, o->result_fd, o->stats_fd, o->trace_fd);
+    for (int i = 0; i < 4096; i++) {
+        int fl = fcntl(i, F_GETFD);
+        if (fl == -1) continue;
+        snprintf(path, sizeof path, "/proc/self/fd/%d", i);
+        ssize_t m = readlink(path, tgt, sizeof tgt - 1);
+        if (m < 0) m = 0;
+        tgt[m] = '\0';
+        dprintf(fd, "FD %d cloexec=%d target=%s\n",
+                i, (fl & FD_CLOEXEC) ? 1 : 0, tgt);
+    }
+    dprintf(fd, "FD -- end\n");
+    /* The poison relay fd is reported as the NUMBER the launcher will
+     * export, without printing its value: the point is that it equals
+     * --stats-fd, which is a relationship, not a secret. */
+    dprintf(fd, "POISON_FD_EQUALS_STATS_FD %d\n",
+            (o->stats_fd >= 0) ? 1 : 0);
+    close(fd);
+    return 0;
+}
+#endif /* FORKRUN_ENTRY_FD_PROBE */
+
 int main(int argc, char **argv) {
     struct opts o;
     memset(&o, 0, sizeof o);
@@ -1469,6 +1520,16 @@ int main(int argc, char **argv) {
     o.respawn_cap = 64;
     o.trace_fd = -1;
     o.supervise = 1;   /* recovering is the historical behaviour */
+
+#ifdef FORKRUN_ENTRY_FD_PROBE
+    /* The parser rejects unrecognised arguments with exit 64, so the
+     * probe flag has to be recognised INSIDE the loop rather than after
+     * it. Recording the path and acting on it once parsing completes is
+     * what makes the report describe a FULLY POPULATED opts -- an early
+     * hook would report o.stats_fd == -1 and could not show the
+     * poison/stats relationship this probe exists to establish. */
+    const char *entry_probe_path = NULL;
+#endif
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--so") && i + 1 < argc)        o.so_path = argv[++i];
@@ -1519,8 +1580,18 @@ int main(int argc, char **argv) {
             else { fprintf(stderr, "forkrun-cleanroom: --supervise must be "
                             "recover|fail-fast, got %s\n", m); return 64; }
         }
+#ifdef FORKRUN_ENTRY_FD_PROBE
+        else if (!strcmp(argv[i], "--entry-fd-probe") && i + 1 < argc)
+            entry_probe_path = argv[++i];
+#endif
         else { fprintf(stderr, "forkrun-cleanroom: bad arg %s\n", argv[i]); return 64; }
     }
+#ifdef FORKRUN_ENTRY_FD_PROBE
+    /* Record the entry descriptor state, then exit without doing any
+     * launcher work. Argument parsing above only READS argv, so the
+     * descriptors are still exactly as the parent left them. */
+    if (entry_probe_path) return entry_fd_probe(entry_probe_path, &o) == 0 ? 0 : 65;
+#endif
     if (!o.so_path || o.source_fd < 0) {
         fprintf(stderr, "forkrun-cleanroom: --so --src required\n");
         return 64;
