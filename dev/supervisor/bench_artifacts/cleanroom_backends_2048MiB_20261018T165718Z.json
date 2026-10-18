@@ -1,0 +1,241 @@
+{
+  "python": "3.14.7",
+  "platform": "Linux-7.1.13-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "libc": "glibc-2.43",
+  "kernel": "7.1.13-200.fc44.x86_64",
+  "cpu_count": 28,
+  "mib": 2048,
+  "reps": 15,
+  "lines": 200000,
+  "expected_records": 3125,
+  "spec": "/tmp/opencode/benchplug/p.so:copy_v1",
+  "argv": [
+    "dev/supervisor/bench_cleanroom_backends.py",
+    "--mib",
+    "2048",
+    "--reps",
+    "15",
+    "--out",
+    "dev/supervisor/bench_artifacts/cleanroom_backends_2048MiB_20261018T165718Z.json"
+  ],
+  "cells": [
+    {
+      "cell": "MAP_PRIVATE (proxy for private inherited writable memory)",
+      "rss_mib": 2070,
+      "rollup_mib": {
+        "Rss": 2070,
+        "Pss": 2065,
+        "Pss_Dirty": 2063,
+        "Pss_Anon": 2063,
+        "Pss_File": 2,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 6,
+        "Shared_Dirty": 0,
+        "Private_Clean": 0,
+        "Private_Dirty": 2063,
+        "Referenced": 2070,
+        "Anonymous": 2063,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "samples_ms": {
+        "forkexec": [
+          208.47,
+          212.31,
+          212.94,
+          215.62,
+          211.33,
+          209.55,
+          211.53,
+          215.83,
+          209.45,
+          216.28,
+          208.46,
+          214.26,
+          210.06,
+          211.05,
+          211.14
+        ],
+        "posix_spawn": [
+          134.77,
+          137.64,
+          136.14,
+          138.19,
+          137.91,
+          137.59,
+          135.4,
+          137.47,
+          138.35,
+          138.65,
+          137.29,
+          139.73,
+          134.72,
+          135.87,
+          137.78
+        ]
+      },
+      "end_to_end": {
+        "forkexec": {
+          "n": 15,
+          "median": 211.33,
+          "min": 208.46,
+          "max": 216.28,
+          "sd": 2.52
+        },
+        "posix_spawn": {
+          "n": 15,
+          "median": 137.59,
+          "min": 134.72,
+          "max": 139.73,
+          "sd": 1.42
+        }
+      },
+      "isolated_spawn_ms": {
+        "forkexec": 28.39,
+        "posix_spawn": 0.28
+      },
+      "paired_diff_ms": {
+        "n": 15,
+        "median": 74.67,
+        "min": 71.09,
+        "max": 78.36
+      },
+      "median_delta_pct": -34.9,
+      "fd_count": {
+        "before": 5,
+        "min": 5,
+        "max": 5
+      },
+      "smaps": [
+        {
+          "range": "7f5c2fb6d000-7f5cafe6d000",
+          "perms": "rw-p",
+          "vma_is_shared": false,
+          "vmflags_has_sh": false,
+          "anonymous_mib": 2050,
+          "rss_mib": 2050,
+          "private_dirty_mib": 2050,
+          "shared_clean_mib": 0,
+          "shared_dirty_mib": 0
+        }
+      ]
+    },
+    {
+      "cell": "MAP_SHARED (the control, and what Stage 3 used)",
+      "rss_mib": 2069,
+      "rollup_mib": {
+        "Rss": 2069,
+        "Pss": 2063,
+        "Pss_Dirty": 2061,
+        "Pss_Anon": 13,
+        "Pss_File": 2,
+        "Pss_Shmem": 2048,
+        "Shared_Clean": 6,
+        "Shared_Dirty": 0,
+        "Private_Clean": 0,
+        "Private_Dirty": 2061,
+        "Referenced": 2069,
+        "Anonymous": 13,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "samples_ms": {
+        "forkexec": [
+          144.21,
+          140.31,
+          138.92,
+          139.77,
+          140.61,
+          138.53,
+          137.96,
+          138.3,
+          134.59,
+          139.59,
+          138.8,
+          141.01,
+          137.34,
+          138.0,
+          145.14
+        ],
+        "posix_spawn": [
+          139.2,
+          142.61,
+          136.49,
+          138.66,
+          140.1,
+          134.33,
+          138.15,
+          141.87,
+          132.37,
+          136.2,
+          140.01,
+          136.65,
+          136.58,
+          136.71,
+          136.68
+        ]
+      },
+      "end_to_end": {
+        "forkexec": {
+          "n": 15,
+          "median": 138.92,
+          "min": 134.59,
+          "max": 145.14,
+          "sd": 2.51
+        },
+        "posix_spawn": {
+          "n": 15,
+          "median": 136.71,
+          "min": 132.37,
+          "max": 142.61,
+          "sd": 2.63
+        }
+      },
+      "isolated_spawn_ms": {
+        "forkexec": 0.52,
+        "posix_spawn": 0.3
+      },
+      "paired_diff_ms": {
+        "n": 15,
+        "median": 1.29,
+        "min": -3.56,
+        "max": 8.45
+      },
+      "median_delta_pct": -1.6,
+      "fd_count": {
+        "before": 5,
+        "min": 5,
+        "max": 5
+      },
+      "smaps": [
+        {
+          "range": "7f5c2fc00000-7f5cafc00000",
+          "perms": "rw-s",
+          "vma_is_shared": true,
+          "vmflags_has_sh": true,
+          "anonymous_mib": 0,
+          "rss_mib": 2048,
+          "private_dirty_mib": 2048,
+          "shared_clean_mib": 0,
+          "shared_dirty_mib": 0
+        }
+      ]
+    }
+  ]
+}
