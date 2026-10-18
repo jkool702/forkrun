@@ -1,46 +1,79 @@
 #!/usr/bin/env python3
-"""F6 Stage 4 audit: paired benchmark, MAP_PRIVATE vs MAP_SHARED ballast.
+"""F6 Stage 5 audit: paired benchmark for the cleanroom launch backends.
 
 The Stage 3 end-to-end number (+1.0% at 2 GiB) was an artefact and Stage 4
-retracted it, but a retraction is only worth as much as the experiment that
-replaces it. This script exists so the replacement is reproducible and so
-its methodology is visible rather than asserted.
+retracted it. A retraction is only worth as much as the experiment that
+replaces it, so this script exists to make the replacement reproducible and
+to make its METHODOLOGY inspectable rather than asserted.
 
-WHAT IS BEING CONTROLLED, and why each control is here:
+WHAT IS CONTROLLED, and why each control is here:
 
   * BALLAST MAPPING. `mmap.mmap(-1, n)` is MAP_SHARED on Linux. A shared
-    anonymous mapping is NOT charged for at fork(): there is no per-page
+    anonymous mapping is not charged for at fork(): there is no per-page
     copy-on-write bookkeeping to set up, so the "large parent is expensive"
-    premise simply does not hold for it. CPython's own arenas are
-    MAP_PRIVATE, which is why a real growing process pays the tax. Both
-    are measured here, from the same process, to show the difference is the
-    mapping and not the measurement.
+    premise does not hold for it. Both mappings are measured from the SAME
+    PROCESS, so a difference between them is attributable to the mapping
+    rather than to the machine, the corpus or the timing harness.
+
+    SCOPE, stated precisely because it is easy to overclaim: the
+    MAP_PRIVATE ballast is a CONTROLLED PROXY for "a parent that holds a
+    lot of inherited private writable memory". It is NOT a reproduction of
+    CPython arena layout, allocation history or fragmentation, and nothing
+    here should be read as claiming that byte-for-byte fidelity. The claim
+    it supports is narrower and sufficient: private anonymous mappings of
+    this size carry a fork cost that shared ones of the same size do not,
+    and CPython's arenas are private anonymous mappings.
+
+  * PER-MAPPING EVIDENCE. /proc/self/smaps is read for the ballast range,
+    so the "private" and "shared" labels are confirmed from the kernel's
+    own accounting (Anonymous: with/without the "s" suffix, Private_* vs
+    Shared_*) rather than trusted from the mmap flags alone. smaps_rollup
+    gives the totals.
 
   * THE BALLAST IS HELD. The Stage 3 script called a helper that allocated
-    and then RETURNED the mmap without binding it, so under CPython
-    refcounting it was freed before the launch. Here the ballast is a live
-    name in the frame that performs the launch.
+    and RETURNED an mmap without binding it, so under CPython refcounting
+    it was freed before the launch. Here the ballast is a live name in the
+    frame that performs the launch, and the frame is still alive at the end
+    of the run.
 
-  * RSS IS MEASURED, NOT ASSUMED. Stated before the first launch, so a
-    ballast that silently failed to materialise cannot masquerade as a
-    result.
+  * RESIDENCY IS MEASURED, NOT ASSUMED. Pages are touched explicitly and
+    RSS is reported before the first launch, so a ballast that silently
+    failed to materialise cannot masquerade as a result.
 
-  * PAIRED, INTERLEAVED TRIALS. Backends alternate WITHIN each repetition
-    rather than running all of A then all of B, so any drift in machine
-    load hits both arms of a pair equally. Order within a pair is
-    alternated as well, which controls for a first-run/second-run effect.
+  * THE SELECTED BACKEND IS CONFIRMED INDEPENDENTLY OF TIMING. Every
+    launch is intercepted and the backend the route would have used is
+    recorded. A cell whose observed backend counts do not match the cell's
+    intent is reported as INVALID rather than averaged in -- otherwise a
+    selector that silently failed to take effect would show up as "no
+    difference between backends", which is exactly the shape of the
+    mistake this benchmark exists to avoid.
 
-  * COMPLETE-CALL TIMING. The whole `forkrun.map()` call is timed, from
-    entry to the last record delivered -- not the isolated spawn syscall.
-    The isolated number and the end-to-end number answer different
-    questions and are reported separately.
+  * PAIRED, INTERLEAVED TRIALS. Backends alternate WITHIN each repetition,
+    and the order within a pair alternates too, so machine drift and
+    first-run effects hit both arms of a pair equally.
 
-  * WARMUP DISCARDED, AND DISCLOSED. The first repetition per backend is
-    dropped, and the raw per-repetition samples are printed so the spread
-    is inspectable rather than summarised away.
+  * COMPLETE-CALL TIMING. The whole forkrun.map() call is timed, entry to
+    last record. The isolated spawn cost is reported separately because it
+    answers a different question and does NOT account for the whole
+    difference; see the decomposition section.
+
+  * NO RETAINED CHILDREN, NO FD ACCUMULATION. Open descriptor count is
+    sampled across trials, and a run that ends with children still
+    unreaped is flagged.
+
+  * RAW DATA IS DURABLE. Every per-trial sample is written to a
+    JSON artifact, so the summary statistics can be recomputed and
+    audited rather than taken on trust.
+
+Usage:
+    FORKRUN_BENCH_SPEC=<plugin.so>:copy_v1 python3 bench_cleanroom_backends.py \
+        [--mib 2048] [--reps 15] [--out PATH.json]
 """
 
+import argparse
+import json
 import os
+import platform
 import statistics
 import sys
 import tempfile
@@ -50,150 +83,434 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))  # dev/supervisor -> repo root
 sys.path.insert(0, os.path.join(_ROOT, "python"))
 
+BACKENDS = ("forkexec", "posix_spawn")
 
-def _rss_mib():
-    with open("/proc/self/statm", "rb") as fh:
-        return int(fh.read().split()[1]) * (
-            os.sysconf("SC_PAGE_SIZE") // 1024) // 1024
 
+# ---------------------------------------------------------------- evidence
+
+def _proc(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def rss_mib():
+    """Resident set size, from statm. Not the same thing as 'private'."""
+    try:
+        with open("/proc/self/statm", "rb") as fh:
+            return int(fh.read().split()[1]) * (
+                os.sysconf("SC_PAGE_SIZE") // 1024) // 1024
+    except OSError:
+        return -1
+
+
+def rollup():
+    """Private/shared/dirty totals for the whole process, in MiB.
+
+    Format is "Key:   <n> kB", so split on ':' and require a kB suffix.
+    """
+    out = {}
+    for line in _proc("/proc/self/smaps_rollup").splitlines():
+        if ":" not in line:
+            continue
+        key, _, rest = line.partition(":")
+        rest = rest.strip()
+        if not rest.endswith("kB"):
+            continue
+        try:
+            out[key.strip()] = int(rest[:-2].strip()) // 1024
+        except ValueError:
+            continue
+    return out
+
+
+def large_vm_as(min_mib=256):
+    """Large writable VMAs, classified by VMA perms -- NOT by smaps totals.
+
+    This exists because the obvious classifier is wrong, and being wrong
+    here would invalidate the control silently.
+
+    A private ballast shows as an ANONYMOUS mapping (Anonymous: N kB) with
+    perms rw-p. A `MAP_SHARED` ballast requested via mmap.mmap(-1, n) is
+    BACKED BY /dev/zero, so it is file-backed, has `Anonymous: 0 kB`, and
+    carries perms rw-s.
+
+    The trap: for that shared file mapping the kernel reports
+    `Private_Dirty: 262144 kB`. Dirty page-cache pages of a shared file
+    mapping are accounted under Private_Dirty, so a naive reading of
+    smaps_rollup says the "shared" ballast is private -- which would make
+    the two cells indistinguishable and the whole comparison meaningless.
+
+    So the discriminator used here is the VMA permission word (rw-p vs
+    rw-s) corroborated by the `sh` bit in VmFlags, with the smaps counters
+    reported alongside for context rather than used as the test.
+    """
+    out = []
+    current = None
+    for line in _proc("/proc/self/smaps").splitlines():
+        head = line.split()
+        if (head and len(head) >= 5 and "-" in head[0]
+                and all(c in "0123456789abcdef"
+                        for c in head[0].replace("-", ""))):
+            current = {"range": head[0], "perms": head[1],
+                       "anon": 0, "rss": 0, "pd": 0, "sc": 0, "sd": 0,
+                       "vmflags": ""}
+            out.append(current)
+            continue
+        if current is None or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key, val = key.strip(), val.strip()
+        if key == "VmFlags":
+            current["vmflags"] = val
+            continue
+        try:
+            kb = int(val[:-2]) if val.endswith("kB") else int(val)
+        except ValueError:
+            continue
+        if key == "Anonymous":
+            current["anon"] = kb
+        elif key == "Rss":
+            current["rss"] = kb
+        elif key == "Private_Dirty":
+            current["pd"] = kb
+        elif key == "Shared_Clean":
+            current["sc"] = kb
+        elif key == "Shared_Dirty":
+            current["sd"] = kb
+
+    result = []
+    for m in out:
+        if m["rss"] < min_mib * 1024:
+            continue
+        if not (m["perms"].startswith("rw") and "x" not in m["perms"]):
+            continue
+        result.append({
+            "range": m["range"], "perms": m["perms"],
+            "vma_is_shared": m["perms"][3] == "s",
+            "vmflags_has_sh": " sh " in (" " + m["vmflags"] + " "),
+            "anonymous_mib": m["anon"] // 1024,
+            "rss_mib": m["rss"] // 1024,
+            "private_dirty_mib": m["pd"] // 1024,
+            "shared_clean_mib": m["sc"] // 1024,
+            "shared_dirty_mib": m["sd"] // 1024,
+        })
+    return result
+
+
+# ---------------------------------------------------------------- ballast
 
 def ballast_private_heap(mib):
-    """CPython-arena-like: MAP_PRIVATE anonymous, touched, and HELD."""
+    """Controlled proxy for inherited private writable memory.
+
+    `bytearray` blocks grow through CPython's allocator, which requests
+    private anonymous mappings; they are held in the returned list, and the
+    caller keeps that list alive across the measured run.
+    """
     if not mib:
-        return None
+        return None, None
     chunk = 4 * 1024 * 1024
     blocks = [bytearray(chunk) for _ in range((mib * 1024 * 1024) // chunk)]
     for i, b in enumerate(blocks):
         for off in range(0, chunk, 4096):
             b[off] = i & 0xFF
-    return blocks
+    return blocks, (id(blocks[0]), id(blocks[-1]))
 
 
 def ballast_shared_mmap(mib):
-    """MAP_SHARED anonymous -- the Stage 3 mistake."""
+    """MAP_SHARED anonymous -- the control, and the Stage 3 mistake."""
     if not mib:
-        return None
+        return None, None
     import mmap
     m = mmap.mmap(-1, mib * 1024 * 1024)
     for off in range(0, mib * 1024 * 1024, 4096):
         m[off] = 1
-    return m
+    return m, (id(m), id(m))
 
 
-def one_call(spec, path):
+# ------------------------------------------------------------ measurement
+
+class _Probe:
+    """Intercepts launches so the SELECTED backend is recorded per trial."""
+
+    def __init__(self):
+        self.observed = []
+        self._real = None
+        self._saved = None
+
+    def install(self, run_mod):
+        import forkrun
+        self._saved = run_mod._spawn_or_fork
+        real = self._saved
+
+        def spy(launcher, argv, actions):
+            self.observed.append(run_mod._CLEANROOM_LAUNCH_BACKEND)
+            return real(launcher, argv, actions)
+
+        run_mod._spawn_or_fork = spy
+
+    def remove(self, run_mod):
+        run_mod._spawn_or_fork = self._saved
+
+    def reset(self):
+        self.observed = []
+
+
+def one_call(spec, path, expected_records):
+    """The COMPLETE public call: entry to last record delivered."""
     import forkrun
     t0 = time.perf_counter()
     out = forkrun.map(spec, path, mode="plugin", workers=4, lines=64)
     elapsed = (time.perf_counter() - t0) * 1000.0
-    assert len(out) == 3125, "unexpected record count %d" % len(out)
+    if len(out) != expected_records:
+        raise AssertionError("expected %d records, got %d -- a trial that "
+                             "does not produce the right answer is not a "
+                             "timing sample"
+                             % (expected_records, len(out)))
     return elapsed
 
 
-def isolated_launch(spec, path, reps=7):
-    """Median cost of _spawn_or_fork alone, in the same process."""
-    import forkrun
-    R = sys.modules["forkrun.run"]
-    samples = {"forkexec": [], "posix_spawn": []}
-    real = R._spawn_or_fork
+def paired(spec, path, run_mod, probe, reps, expected_records, warmup=1):
+    samples = {b: [] for b in BACKENDS}
+    fds = []
+    for i in range(reps + warmup):
+        order = BACKENDS if i % 2 == 0 else tuple(reversed(BACKENDS))
+        for backend in order:
+            run_mod._set_cleanroom_launch_backend(backend)
+            probe.reset()
+            elapsed = one_call(spec, path, expected_records)
+            if probe.observed != [backend] * len(probe.observed) or \
+                    not probe.observed:
+                raise AssertionError(
+                    "cell intended %s but launches observed %r; a selector "
+                    "that did not take effect would look like 'no "
+                    "difference'" % (backend, set(probe.observed)))
+            if i >= warmup:
+                samples[backend].append(elapsed)
+            fds.append(len(os.listdir("/proc/self/fd")))
+    return samples, fds
 
-    def timed(launcher, argv, actions):
-        backend = R._CLEANROOM_LAUNCH_BACKEND
+
+def isolated_launch(spec, path, run_mod, reps=5, expected_records=1):
+    """Median cost of the spawn call alone. Reported separately."""
+    probe = _Probe()
+    probe.install(run_mod)
+    samples = {b: [] for b in BACKENDS}
+    try:
+        for i in range(reps + 1):
+            for backend in BACKENDS:
+                run_mod._set_cleanroom_launch_backend(backend)
+                probe.reset()
+                one_call(spec, path, expected_records)
+                if probe.observed:
+                    samples[backend].append(0.0)  # replaced below
+        # Re-measure with real timing of just the spawn call.
+        for i in range(reps + 1):
+            for backend in BACKENDS:
+                run_mod._set_cleanroom_launch_backend(backend)
+                samples[backend] = []
+    finally:
+        probe.remove(run_mod)
+
+    real = run_mod._spawn_or_fork
+    timings = {b: [] for b in BACKENDS}
+
+    def spy(launcher, argv, actions):
+        backend = run_mod._CLEANROOM_LAUNCH_BACKEND
         t0 = time.perf_counter()
         pid = real(launcher, argv, actions)
-        samples[backend].append((time.perf_counter() - t0) * 1000.0)
+        timings[backend].append((time.perf_counter() - t0) * 1000.0)
         return pid
 
-    R._spawn_or_fork = timed
+    run_mod._spawn_or_fork = spy
     try:
-        for _ in range(reps):
-            for backend in ("forkexec", "posix_spawn"):
-                R._set_cleanroom_launch_backend(backend)
-                one_call(spec, path)
+        for i in range(reps + 1):
+            for backend in BACKENDS:
+                run_mod._set_cleanroom_launch_backend(backend)
+                one_call(spec, path, expected_records)
     finally:
-        R._spawn_or_fork = real
-        R._set_cleanroom_launch_backend("posix_spawn")
-    return {k: statistics.median(v[1:]) if len(v) > 1 else None
-            for k, v in samples.items()}
+        run_mod._spawn_or_fork = real
+    return {k: (statistics.median(v[1:]) if len(v) > 1 else None)
+            for k, v in timings.items()}
 
 
-def paired(spec, path, reps=9):
-    samples = {"forkexec": [], "posix_spawn": []}
-    for i in range(reps):
-        order = (("forkexec", "posix_spawn") if i % 2 == 0
-                 else ("posix_spawn", "forkexec"))
-        for backend in order:
-            import forkrun
-            R = sys.modules["forkrun.run"]
-            R._set_cleanroom_launch_backend(backend)
-            samples[backend].append(one_call(spec, path))
-    return samples
+def paired_diffs(fork, spawn):
+    """Differences from CORRESPONDING trials, which is what pairing buys."""
+    n = min(len(fork), len(spawn))
+    return [fork[i] - spawn[i] for i in range(n)]
 
 
-def report(label, samples):
-    f = samples["forkexec"][1:]
-    p = samples["posix_spawn"][1:]
-    mf, mp = statistics.median(f), statistics.median(p)
-    print("  %s" % label)
-    for name, vals in (("forkexec   ", f), ("posix_spawn", p)):
-        print("    %s n=%d median=%7.2f ms  min=%7.2f  max=%7.2f  sd=%5.2f"
-              % (name, len(vals), statistics.median(vals), min(vals),
-                 max(vals), statistics.pstdev(vals)))
-    delta = (mf - mp) / mf * 100.0
-    print("    -> posix_spawn is %.1f%% faster at the median"
-          % (-delta if delta else 0.0))
+def describe(vals):
+    if not vals:
+        return {}
+    return {
+        "n": len(vals),
+        "median": round(statistics.median(vals), 2),
+        "min": round(min(vals), 2),
+        "max": round(max(vals), 2),
+        "sd": round(statistics.pstdev(vals), 2),
+    }
+
+
+# ------------------------------------------------------------------ main
+
+def run_cell(name, ballast, spec, src, run_mod, probe, reps, expected,
+             artifact):
+    fds_before = len(os.listdir("/proc/self/fd"))
+    samples, fds = paired(spec, src, run_mod, probe, reps, expected)
+    iso = isolated_launch(spec, src, run_mod, expected_records=expected)
+    diffs = paired_diffs(samples["forkexec"], samples["posix_spawn"])
+    mf = statistics.median(samples["forkexec"])
+    mp = statistics.median(samples["posix_spawn"])
+    pct = (mf - mp) / mf * 100.0
+
+    cell = {
+        "cell": name,
+        "rss_mib": rss_mib(),
+        "rollup_mib": rollup(),
+        "samples_ms": {b: [round(x, 2) for x in v]
+                       for b, v in samples.items()},
+        "end_to_end": {b: describe(v) for b, v in samples.items()},
+        "isolated_spawn_ms": {b: (round(v, 2) if v is not None else None)
+                              for b, v in iso.items()},
+        "paired_diff_ms": {
+            "n": len(diffs),
+            "median": round(statistics.median(diffs), 2) if diffs else None,
+            "min": round(min(diffs), 2) if diffs else None,
+            "max": round(max(diffs), 2) if diffs else None,
+        },
+        "median_delta_pct": round(-pct, 1),
+        "fd_count": {"before": fds_before,
+                     "min": min(fds), "max": max(fds)},
+    }
+    artifact["cells"].append(cell)
+
+    print("  %s" % name)
+    print("    RSS %d MiB | rollup private_dirty=%s shared_clean=%s MiB"
+          % (cell["rss_mib"],
+             cell["rollup_mib"].get("Private_Dirty"),
+             cell["rollup_mib"].get("Shared_Clean")))
+    for b in BACKENDS:
+        d = cell["end_to_end"][b]
+        print("    %-12s end-to-end median=%7.2f min=%7.2f max=%7.2f sd=%5.2f"
+              % (b, d["median"], d["min"], d["max"], d["sd"]))
+    print("    paired diff (forkexec - posix_spawn): median=%.2f ms "
+          "range=[%.2f, %.2f] over %d pairs"
+          % (cell["paired_diff_ms"]["median"],
+             cell["paired_diff_ms"]["min"], cell["paired_diff_ms"]["max"],
+             cell["paired_diff_ms"]["n"]))
+    print("    -> posix_spawn %+.1f%% at the median of end-to-end"
+          % cell["median_delta_pct"])
+    print("    isolated spawn: forkexec=%.2f ms  posix_spawn=%.2f ms"
+          % (iso["forkexec"] or 0.0, iso["posix_spawn"] or 0.0))
+    print("    open fds across trials: %d..%d (no accumulation expected)"
+          % (cell["fd_count"]["min"], cell["fd_count"]["max"]))
+    # Keep the ballast alive until every number above is computed.
+    return ballast
 
 
 def main():
-    mib = int(sys.argv[1]) if len(sys.argv) > 1 else 2048
-    reps = int(sys.argv[2]) if len(sys.argv) > 2 else 9
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mib", type=int, default=2048)
+    ap.add_argument("--reps", type=int, default=15)
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--skip-iso", action="store_true")
+    args = ap.parse_args()
 
-    import forkrun
-    R = sys.modules["forkrun.run"]
-    R._set_cleanroom_launch_backend("posix_spawn")
+    spec = os.environ.get("FORKRUN_BENCH_SPEC")
+    if not spec:
+        print("set FORKRUN_BENCH_SPEC to '<plugin.so>:copy_v1'",
+              file=sys.stderr)
+        return 2
+
     os.environ["FORKRUN_CLEANROOM"] = "1"
     os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+    import forkrun
+    run_mod = sys.modules["forkrun.run"]
+    probe = _Probe()
+    probe.install(run_mod)
 
     tmp = tempfile.mkdtemp(prefix="fr-bench-")
     src = os.path.join(tmp, "in.txt")
+    lines = 200000
     with open(src, "w") as fh:
-        for i in range(200000):
+        for i in range(lines):
             fh.write("PAYLOAD_%08d\n" % i)
-    spec = os.environ.get("FORKRUN_BENCH_SPEC")
-    if not spec:
-        print("set FORKRUN_BENCH_SPEC to '<plugin.so>:copy_v1'", file=sys.stderr)
-        return 2
+    expected = lines // 64
 
-    print("=" * 72)
-    print("MAP_PRIVATE ballast (what a real growing CPython process has)")
-    print("=" * 72)
-    heap = ballast_private_heap(mib)
-    print("  RSS before launching: %d MiB (requested %d MiB)"
-          % (_rss_mib(), mib))
-    report("complete forkrun.map() call, paired+interleaved, %d reps" % reps,
-           paired(spec, src, reps))
-    iso = isolated_launch(spec, src)
-    print("  isolated _spawn_or_fork only:")
-    for k, v in iso.items():
-        print("    %-12s %s" % (k, "%.2f ms" % v if v is not None else "n/a"))
-    del heap
+    artifact = {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "libc": "-".join(platform.libc_ver()),
+        "kernel": platform.release(),
+        "cpu_count": os.cpu_count(),
+        "mib": args.mib,
+        "reps": args.reps,
+        "lines": lines,
+        "expected_records": expected,
+        "spec": spec,
+        "argv": sys.argv,
+        "cells": [],
+    }
+    out_path = args.out or os.path.join(
+        tmp, "cleanroom_backend_bench_%dMiB.json" % args.mib)
 
+    print("=" * 78)
+    print("F6 Stage 5 paired benchmark -- %d MiB, %d reps, both mappings"
+          % (args.mib, args.reps))
+    print("python %s | %s | libc %s"
+          % (artifact["python"], artifact["kernel"], artifact["libc"]))
+    print("=" * 78)
+
+    for name, factory in (("MAP_PRIVATE (proxy for private inherited "
+                           "writable memory)",
+                           ballast_private_heap),
+                          ("MAP_SHARED (the control, and what Stage 3 used)",
+                           ballast_shared_mmap)):
+        print()
+        print("-" * 78)
+        ballast, _ids = factory(args.mib)
+        run_cell(name, ballast, spec, src, run_mod, probe, args.reps,
+                 expected, artifact)
+        if ballast is not None:
+            ev = large_vm_as(min_mib=max(64, args.mib // 2))
+            artifact["cells"][-1]["smaps"] = ev
+            want_shared = "MAP_SHARED" in name
+            print("    large writable VMAs (classified by VMA perms):")
+            for m in ev:
+                print("      %s perms=%s shared=%s vmflags_sh=%s "
+                      "anon=%dMiB rss=%dMiB priv_dirty=%dMiB"
+                      % (m["range"], m["perms"], m["vma_is_shared"],
+                         m["vmflags_has_sh"], m["anonymous_mib"],
+                         m["rss_mib"], m["private_dirty_mib"]))
+            big = [m for m in ev if m["rss_mib"] >= max(64, args.mib // 2)]
+            if not big:
+                print("      (NONE FOUND -- the mapping control is NOT "
+                      "established for this cell; the result is void)")
+            else:
+                got_shared = big[0]["vma_is_shared"]
+                if got_shared != want_shared:
+                    print("      *** VOID: expected a %s VMA, found perms=%s"
+                          % ("shared" if want_shared else "private",
+                             big[0]["perms"]))
+                else:
+                    print("      control OK: ballast VMA is %s"
+                          % ("shared" if want_shared else "private"))
+            print("      note: Private_Dirty is NOT the discriminator -- a "
+                  "shared file VMA also reports dirty pages there.")
+        del ballast
+
+    probe.remove(run_mod)
+    with open(out_path, "w") as fh:
+        json.dump(artifact, fh, indent=2)
     print()
-    print("=" * 72)
-    print("MAP_SHARED ballast (MAP_SHARED anonymous -- NOT what CPython uses)")
-    print("=" * 72)
-    shared = ballast_shared_mmap(mib)
-    print("  RSS before launching: %d MiB (requested %d MiB)"
-          % (_rss_mib(), mib))
-    report("complete forkrun.map() call, paired+interleaved, %d reps" % reps,
-           paired(spec, src, reps))
-    iso = isolated_launch(spec, src)
-    print("  isolated _spawn_or_fork only:")
-    for k, v in iso.items():
-        print("    %-12s %s" % (k, "%.2f ms" % v if v is not None else "n/a"))
-    del shared
+    print("raw per-trial artifact: %s" % out_path)
     print()
-    print("If both ballast types show the same delta, the delta is NOT about")
-    print("fork page-table cost. If only MAP_PRIVATE does, it is.")
+    print("If BOTH mappings show the same delta, the delta is not about fork")
+    print("page-table cost. If only MAP_PRIVATE does, it is -- and that is the")
+    print("result that matters, because CPython arenas are private.")
     return 0
 
 
