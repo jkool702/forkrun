@@ -210,6 +210,18 @@ Explicitly passed:
 > the launcher boundary. Whether to tighten the descriptor set is an open
 > policy question, recorded in `CLEANROOM_FD_CONTRACT.md` §5.
 
+> **PRECONDITION (open, tracked as F6/C5).** This contract assumes
+> **fd 2 is open** in the host process when a cleanroom launch begins. If
+> the host closed fd 2 beforehand, the route's own allocation can place
+> `src_fd` on fd 2, and `dup2(errfd, 2)` then overwrites it — the launcher
+> would be handed `--src 2` and read the error memfd as its input. The
+> result is **silently wrong**, with no error, warning, or non-zero exit.
+> This is pre-existing and is NOT specific to `posix_spawn` (its
+> `DUP2` action behaves identically), so it is a correctness gap in the
+> shipped route rather than a backend incompatibility. A narrowly scoped
+> guard is recommended before any backend integration; see
+> `dev/supervisor/CLEANROOM_FD_CONTRACT.md` §8.4.
+
 Explicitly **not** inherited (aspirational — see STATUS above):
 environment, signal dispositions beyond what the engine sets itself, and
 every unrelated descriptor (the parent `scrub_fds()`s them, and the

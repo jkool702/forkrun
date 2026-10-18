@@ -360,8 +360,35 @@ parent's full table would over-count closable descriptors; auditing only
 the intended job fds without checking `CLOEXEC` disposition would
 under-count.
 
-The cleanroom design's premise remains that the launcher should effectively
-see **only** the source fd and the result fd.
+> **STAGE 2C CORRECTION — the "source + result only" premise below was
+> the ORIGINAL TWO-DESCRIPTOR SKETCH, and it is not what the shipped routes
+> do.** Measured inventory (`CLEANROOM_FD_CONTRACT.md` §2):
+>
+> | route shape | descriptors that actually reach the launcher |
+> |---|---|
+> | materialized (`map`, mode plugin/udf/spawn) | `src_fd`, `res_fd`, `stats_fd`, optional `trace_fd`, **plus fd 2** — an error memfd duplicated over stderr |
+> | streaming (`stream(..., streaming=True)`) | `src_fd`, result **pipe** write end, `stats_fd`; stderr inherited directly |
+>
+> **`stats_fd` and the poison channel are ONE descriptor**, not two.
+> `forkrun_cleanroom.c:2014-2018` sets `FRK_POISON_FD` to `o.stats_fd` and
+> assigns `g_poison_stats_fd` from the same value; the launcher writes the
+> counter record to it and the workers append poison indices to it. Listing
+> "the poison-index memfd" as a separate descriptor -- as an earlier
+> revision of this section did -- double-counts.
+>
+> **The current F6 recommendation is EQUIVALENCE FIRST.** A `posix_spawn`
+> backend must reproduce the set above, including the descriptors it would
+> prefer to close. Tightening to a smaller allowlist is a **separate
+> policy change requiring its own approval**, not part of this
+> optimisation. The bullets below describe how a deliberate allowlist
+> *would* be built; they are **not** authorisation to build one.
+
+The launcher does not scrub its OWN inherited set — `scrub_apply()` runs
+only from `enter_child()`, i.e. in the launcher's children. Isolation is
+therefore enforced at the **worker** boundary, not the launcher boundary,
+and an unrelated inheritable parent descriptor does reach the launcher
+today. That asymmetry is what "equivalence vs isolation" turns on
+(`CLEANROOM_FD_CONTRACT.md` §5).
 
 **CORRECTED.** An earlier draft said `posix_spawn` "does not inherit the
 parent's fd table the way `fork` does; it constructs the child's
@@ -370,19 +397,24 @@ descriptor set IS the parent's open descriptors, then modified by the
 specified file actions and close-on-exec disposition. `posix_spawn` does
 **not** hand you an allowlist.
 
-The practical conclusion is unchanged, but it must be reached correctly:
-producing a *deliberate* allowlist is work, and the inventory is what has
-to be done first. Concretely:
+Producing a *deliberate* allowlist is real work, and the inventory has to
+come first. Concretely — **as a description of the tightening proposal,
+not as a requirement of the equivalence change**:
 
-* Every job descriptor (`src_fd`, result `res_fd`, `errfd`, `stats_fd`,
-  and the poison-index memfd added this cycle) must be enumerated and
-  confirmed **inheritable**. glibc's `spawni.c` shows the available
-  actions — `open`, `dup2`, `close`, `closefrom` — and a `dup2` action
-  whose source and destination are equal clears `FD_CLOEXEC`, which is
-  often cheaper than re-opening.
-* Everything else must be made non-inheritable. **The mechanism is
-  `file_actions`, not a flag** — `os.posix_spawn()` has no `close_fds`
-  (see the correction in §3.2). The available actions are:
+* Every job descriptor (`src_fd`, `res_fd`, `stats_fd`, optional
+  `trace_fd`, and `errfd` — which reaches the launcher only as the
+  duplicate on fd 2) must be enumerated and confirmed **inheritable**.
+  glibc's `spawni.c` shows the available actions — `open`, `dup2`,
+  `close`, `closefrom` — and a `dup2` action whose source and destination
+  are equal clears `FD_CLOEXEC`, which is often cheaper than re-opening.
+* For EQUIVALENCE, none of this needs a close action at all: the
+  equivalence action set is one `DUP2` for the materialized shape and
+  **empty** for the streaming shape, because every required descriptor is
+  already inheritable and the unwanted pipe end is already `FD_CLOEXEC`.
+* Tightening — "everything else must be made non-inheritable" — is the
+  SEPARATE proposal, and it is where the mechanisms matter. **The
+  mechanism is `file_actions`, not a flag** — `os.posix_spawn()` has no
+  `close_fds` (see the correction in §3.2). The available actions are:
   * `POSIX_SPAWN_CLOSE` — closes one named descriptor. Available on every
     supported interpreter; safe but O(n) in the descriptor count.
   * `POSIX_SPAWN_CLOSEFROM` — closes everything ≥ N in one action.
@@ -749,11 +781,32 @@ passing `setsigdef` measurably resets an inherited `SIG_IGN`.
 memfd as input. `posix_spawn` does exactly the same, so equivalence holds
 — but the case is neither verified nor fixed.
 
-**Disposition: CONDITIONAL GO** — four bounded conditions (C1–C4) are
-listed in the contract document. C4 is the honest limit of that work:
-these tests prove the launch MECHANISM is equivalent under a faithful
-replication, not that the real launcher is, because observing the latter
-would have required a production change.
+**Disposition: CONDITIONAL GO** — five bounded conditions (C1–C5) are
+listed in the contract document. None is closed:
+
+* **C1** (map a spawn-time `OSError` onto today's caller-visible result)
+  is **open** — no backend exists to design it into.
+* **C2** (pass no `setsigdef`) is **open** — same reason.
+* **C3** (record the equivalence-first policy) is **open** as an explicit
+  decision line; §4.1 now states it, but it has not been ratified.
+* **C4** (re-verify against the REAL launcher's inherited set) is
+  **open, and cannot be closed without a production change** — the
+  observer stands in for the launcher, so it proves the MECHANISM is
+  equivalent under a faithful replication, not that the real launcher is.
+* **C5** (the closed-std-fd case) is **open**. The defect is pre-existing
+  and `posix_spawn` reproduces it identically, so equivalence holds — but
+  "both mechanisms mishandle it" is not "verified", and it is not fixed.
+
+**A pre-existing parent-side descriptor leak was also found and fixed**
+(Stage 2C): `_execute_cleanroom` never closed `errfd`, and
+`_execute_cleanroom_stream` never closed `stats_fd`. Both grew one
+descriptor per call, measured at 1/2/3/4/5 over five calls, on the success
+path, the exit-127 path, and on streaming generator abandonment. Now
+closed on every exit and pinned by
+`python/tests/test_cleanroom_fd_lifecycle.py` (reverting the fix turns six
+of its tests red). This was a lifecycle defect, not a regression, and it
+had to be closed before any backend work: carrying it into a `posix_spawn`
+integration would have inherited the leak.
 
 **No production backend switch is authorised by anything in this document.**
 

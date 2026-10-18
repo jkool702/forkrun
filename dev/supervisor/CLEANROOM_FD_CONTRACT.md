@@ -469,6 +469,92 @@ Pinned by `test_route_descriptor_can_land_on_fd2_and_be_clobbered` (in a
 subprocess, so the runner's own stderr is not corrupted). **C5** tracks
 it.
 
+**Decision on whether an open fd 2 is an acceptable precondition (D3).**
+
+*It does not conflict with an existing binding contract.* `INVARIANTS.md`
+records "fd 2 never redirected/closed" as a standing guarantee about
+forkrun's own fork sites. The cleanroom route deliberately REDIRECTS fd 2
+via `dup2(errfd, 2)` — a documented deviation — but it never *closes* fd 2,
+so the invariant is not violated. No API doc promises behaviour with a
+closed stderr, and no test asserts one.
+
+*So a precondition could be documented — and it is, in
+`CLEANROOM_DESIGN.md`. But documenting it is NOT sufficient, and C5 stays
+OPEN regardless.*
+
+The reason is severity, not convenience. Every other precondition in this
+document degrades performance or adds a mechanism. This one produces
+**silent input corruption**: the launcher is handed `--src 2` and reads the
+error memfd as its input, so the caller receives a well-formed result
+computed from the wrong bytes. There is no error, no warning, and no
+non-zero exit — the failure is indistinguishable from success.
+
+A precondition is the right instrument for "we cannot support this
+configuration". It is the wrong instrument for "supporting this
+configuration silently returns wrong answers", because a caller who does
+not read the precondition gets no signal at all.
+
+**Recommended for the integration work order:** a narrowly scoped guard
+rather than documentation alone. The cheapest correct shape is to ensure
+the route's own descriptors are allocated ABOVE fd 2 before the error
+memfd is created, so `dup2(errfd, 2)` cannot overwrite a route
+descriptor. That is a few lines and does not touch the engine, the launch
+mechanism, or the failure contract.
+
+**Not done here.** This work order forbids changing production behaviour
+for closed standard descriptors, and the fix is a production change. The
+precondition is documented; the fix is recommended and left open.
+
+**Do not read mechanism equivalence as covering this.** `posix_spawn`'s
+`POSIX_SPAWN_DUP2(errfd, 2)` does exactly what `os.dup2` does here, so the
+two launch mechanisms are equivalent — and both mishandle the layout.
+Equivalence is a statement about *matching* the shipped behaviour, not
+about that behaviour being correct.
+
+---
+
+### 8.5 Parent-side descriptor lifecycles (Stage 2C)
+
+Two parent-owned descriptors leaked on **every** cleanroom call. Measured
+before the fix: 1, 2, 3, 4, 5 open descriptors named `fr_cleanroom_err`
+after 1..5 materialized calls, and the same for
+`fr_cleanroom_stream_stats` after streaming calls.
+
+| descriptor | owner | leaked on | closed now at |
+|---|---|---|---|
+| `errfd` (materialized) | parent | success, exit-127, every failure raise/return | after `_read_launcher_stderr` (failure branch), and in an `else` on the success branch |
+| `stats_fd` (streaming) | parent | success, every failure raise, `strict_poison` raise, **generator abandonment** | the `finally`, which every exit passes through |
+
+Why the streaming fix is safe: after `fork`, parent and child hold
+**separate descriptor-table entries** sharing one open file description.
+Closing the parent's entry does not affect the child's, so the close in
+`finally` cannot disturb a still-running child, and on the success path
+the read has already happened.
+
+`errfd`'s close is deliberately placed **before** the failure branch's
+raises and returns, and duplicated as an `else` on the success path,
+because the branch raises internally — a single close after the `if` would
+be skipped by every failure exit. `errfd = -1` follows each close so a
+stray later close cannot hit a recycled descriptor number.
+
+Both are pre-existing lifecycle defects, **not regressions**, and had to be
+closed before any backend work: carrying them into a `posix_spawn`
+integration would have inherited the leak.
+
+Pinned by `python/tests/test_cleanroom_fd_lifecycle.py` — 8 tests,
+exercising the production launch functions through the public API, counting
+named memfds in `/proc/self/fd`. Reverting the production fix turns six
+red; removing only the streaming close turns four red. The real build
+artifact's mode is never changed: the exec-failure cases patch
+`_cleanroom_launcher_path` to a temporary non-executable file.
+
+**Residual uncovered path (B3):** an unexpected exception raised by
+`_read_cleanroom_stats()` or `_read_cleanroom_trace()` in the materialized
+path, before the failure branch is reached, would still leak `errfd`.
+Closing that would mean wrapping that region in `try/finally`, which is a
+wider restructure than this work order's "bounded fix" and is recorded
+rather than done.
+
 ---
 
 ## 9. Recommendation: CONDITIONAL GO
@@ -518,8 +604,11 @@ Everything below is committed and runnable from the branch.
 # descriptor equivalence, negative controls, high-fd cases  (16 tests)
 python3 -m unittest python.tests.test_cleanroom_fd_contract -v
 
-# launch-failure contract, signal semantics, closed-std-fd audit (13 tests)
+# launch-failure contract, route-level results, signals, closed-fd (16)
 python3 -m unittest python.tests.test_launch_failure_contract -v
+
+# parent-side descriptor lifecycle / leak regression        (8 tests)
+python3 -m unittest python.tests.test_cleanroom_fd_lifecycle -v
 ```
 
 Both files compile their own C fixtures at test time (`_fd_observer.c`, and
