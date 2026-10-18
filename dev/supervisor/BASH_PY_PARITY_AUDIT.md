@@ -35,7 +35,7 @@ which is the pattern this audit follows.
 | F3 | Descriptor limit | Claimed the launcher lacked the hard `ulimit -n` | **FALSE POSITIVE — withdrawn**; the C launcher has always raised it |
 | F4 | Docs | `DOCS_ALL.md` drifted ~130 lines with a heading-only check passing | **Documentation drift — FIXED** |
 | F5 | Docs | Root README version, 4-of-5 mode lists, stale v0.5 module docstring, trap-ACK comments, NUMA test claims | **Documentation drift — FIXED** |
-| F6 | Cleanroom launch | Design proposes `posix_spawn`; implementation uses `fork()+execv()` | **performance gate MET; production backend NOT adopted; descriptor gate ANSWERED (Stage 2); launch-semantic equivalence OUTSTANDING** |
+| F6 | Cleanroom launch | `posix_spawn` is the DEFAULT cleanroom launch backend; `fork()+execv()` retained as a private fallback | **DONE — performance gate MET; descriptor gate ANSWERED (Stage 2); launch-semantic equivalence CLOSED (C1–C5); backend ADOPTED as default (Stage 4)** |
 | F7 | Cleanroom env | `CLEANROOM_DESIGN.md` says the launcher "must not inherit the parent's environment wholesale"; `os.execv()` inherits it | **OPEN — a stated contract that is not met** |
 | F8 | Cleanroom stream | Unreachable iterable producer with live control flow | **Confirmed defect — FIXED** |
 | F9 | Trap-ACK grace | Presented as the recovery mechanism; armed only on legacy substrates | **Documentation drift — FIXED** |
@@ -241,9 +241,7 @@ absence at *preflight* falls back, and that is a different case. Under
 `posix_spawn` the same failure raises synchronously in the parent with no
 wait status to classify. Recommended policy is **Policy A** (map the
 `OSError` onto today's caller-visible result); Policy B (treat it as
-pre-ingest) is defensible but unauthorised. Disposition is **CONDITIONAL
-GO** — conditions C1–C5 all CLOSED against named evidence in `CLEANROOM_FD_CONTRACT.md` §9; the remaining question is a separate ADOPTION decision and production remains
-`fork()+execv()`.
+pre-ingest) is defensible but unauthorised. Disposition is **GO** — conditions C1–C5 all CLOSED against named evidence in `CLEANROOM_FD_CONTRACT.md` §9, and the ADOPTION decision has since been taken: `posix_spawn` is the default backend, with `fork()+execv()` retained as a private fallback. Stage 4 additionally corrected the C5 closure, which had been recorded as sound on a relocation helper that could still return a descriptor inside the standard-stream gap.
 
 Also found: a **pre-existing** defect where, with fd 2 closed before
 allocation, a route descriptor is clobbered by `dup2(errfd, 2)`.

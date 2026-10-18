@@ -72,15 +72,28 @@ launcher should do too.
 
 **PROPOSAL, NOT THE SHIPPED DESIGN — see
 `dev/supervisor/CLEANROOM_LAUNCH_DECISION.md`.**
-Both Python launch sites use `os.fork()` + `os.execv()`. **Production still
-does, and nothing in the tree switches it.** A measurement now exists: a
-launch-cost benchmark comparing the two mechanisms across parent resident
-memory from 0 MiB to 5 GiB (§1.1a of the decision report). At 1 GiB and
-above, `posix_spawn` launched in ~3.5-4.2 ms against 29-112 ms for
-`fork()`+`execv()` — a large win, because the `fork()` cost grows roughly
-linearly with the parent's memory. **No `posix_spawn` backend has been
-implemented or validated**, and the remaining gate is descriptor-set
-equivalence, not performance.
+Both Python launch sites use `os.posix_spawn()`, with `os.fork()` +
+`os.execv()` retained as a private fallback backend. **The `posix_spawn`
+backend is implemented, validated and is now the default.** The launch-cost
+benchmark compares the two mechanisms across parent resident memory from
+0 MiB to 5 GiB (§1.1a of the decision report). At 1 GiB and above,
+`posix_spawn` launched in ~3.5-4.2 ms against 29-112 ms for `fork()`+
+`execv()` — a large win, because the `fork()` cost grows roughly linearly
+with the parent's memory.
+
+That benchmark's benefit is real but **conditional on how the parent's
+memory is mapped**, which is worth stating precisely because it was
+measured wrong at first. A C harness using `MAP_PRIVATE|MAP_ANONYMOUS`
+sees the full 29-112 ms tax. A *real* CPython process whose heap has
+grown behaves the same way, because arenas are private anonymous
+mappings: with 2 GiB of heap ballast, fork+exec costs ~70 ms. But
+`mmap.mmap(-1, n)` in Python defaults to `MAP_SHARED|MAP_ANONYMOUS`,
+which does **not** carry the tax (~1.8 ms). An end-to-end timing that
+ballasted the parent that way showed no benefit at all — not because the
+benefit is illusory, but because it had constructed a parent that never
+had the cost to remove. Measured end to end on this repo's own route with
+realistic Python-heap ballast: 0 MiB −1.8% (noise), 1 GiB −22.5%,
+2 GiB −32.9%.
 
 **The mechanism described here is CORRECT and needed no correction.**
 glibc implements `posix_spawn` with the `clone` syscall using
@@ -168,8 +181,9 @@ because the forking process is single-threaded and purpose-built.
 
 > **STATUS — partly aspirational.** The *descriptor* half of this contract
 > is implemented (`_fd_scrub.scrub_fds` runs on the child paths). The
-> *environment* half is **NOT implemented**: both Python launch sites call
-> `os.execv()`, which inherits `environ` wholesale. Measured: a parent with
+> *environment* half is **NOT implemented**: both Python launch sites pass
+> `os.environ` straight to `posix_spawn()` (or to `os.execv()` on the
+> fallback backend), so `environ` is inherited wholesale either way. Measured: a parent with
 > 112 variables yields a cleanroom child with all 112 (113 on
 > `map-plugin`, which adds `FRK_POISON_FD`). A malformed inherited
 > `PYTHONHASHSEED` kills the cleanroom child at interpreter init. Tracked
@@ -210,22 +224,30 @@ Explicitly passed:
 > the launcher boundary. Whether to tighten the descriptor set is an open
 > policy question, recorded in `CLEANROOM_FD_CONTRACT.md` §5.
 
-> **PRECONDITION (open, tracked as F6/C5).** This contract assumes
+> **PRECONDITION (CLOSED, F6 Stage 4).** This contract used to assume
 > **fd 2 is open** in the host process when a cleanroom launch begins. If
-> the host closed fd 2 beforehand, the route's own allocation can place
-> `src_fd` on fd 2, and `dup2(errfd, 2)` then overwrites it — the launcher
-> would be handed `--src 2` and read the error memfd as its input. The
-> result is **silently wrong**, with no error, warning, or non-zero exit.
-> This is pre-existing and is NOT specific to `posix_spawn` (its
-> `DUP2` action behaves identically), so it is a correctness gap in the
-> shipped route rather than a backend incompatibility. A narrowly scoped
-> guard is recommended before any backend integration; see
-> `dev/supervisor/CLEANROOM_FD_CONTRACT.md` §8.4.
+> the host closed a standard stream beforehand, the route's own allocation
+> could place `src_fd` on a standard-stream number, and `dup2(errfd, 2)`
+> would overwrite it — the launcher would be handed `--src 2` and read the
+> error memfd as its input. The result is **silently wrong**, with no
+> error, warning, or non-zero exit. This was pre-existing and not specific
+> to `posix_spawn` (its `DUP2` action behaves identically), so it was a
+> correctness gap in the route rather than a backend incompatibility.
+>
+> It is now closed for both backends. Every route-owned descriptor is
+> relocated above the gap with `fcntl(fd, F_DUPFD, 3)` before use, and the
+> streaming result pipe is relocated too. `F_DUPFD` rather than `dup()`
+> specifically: `dup()` returns the *lowest free* descriptor, so with the
+> gap only partly free it would hand back a number still inside it. An
+> earlier fix used `dup()` and its test passed only because the test
+> closed all three standard streams at once, leaving the gap empty. See
+> `dev/supervisor/CLEANROOM_FD_CONTRACT.md` §9.
 
-> **STAGE 3 STATUS — UNCHANGED.** The `posix_spawn` candidate passes
-> `os.environ` through untouched: no reconstruction, no filtering, no
-> scrubbing. F7 remains OPEN and SEPARATE, and none of the descriptor
-> work touches it.
+> **STAGE 3/4 STATUS.** The `posix_spawn` backend passes `os.environ`
+> through untouched: no reconstruction, no filtering, no scrubbing. F7
+> remains OPEN and SEPARATE, and none of the descriptor work touches it.
+> There is still no environment selector for the backend, so the F7
+> contract is identical whichever backend is running.
 
 Explicitly **not** inherited (aspirational — see STATUS above):
 environment, signal dispositions beyond what the engine sets itself, and

@@ -1,5 +1,42 @@
 # forkrun Changelog
 
+## Unreleased — F6 Stage 4: `posix_spawn` is the default cleanroom launcher
+
+**Behaviour change, no API change.** The cleanroom routes now start the
+launcher with `os.posix_spawn()` instead of `os.fork()` + `os.execv()`.
+There is no new keyword and no new environment variable: the backend is not
+a caller-facing knob, and `FORKRUN_CLEANROOM` keeps exactly the meaning it
+had. `fork()` + `execv()` remains in the tree as a private fallback.
+
+**What a caller should expect.** Results, ordering, supervision, poison
+accounting, signal dispositions and the environment are unchanged — the
+descriptor contract was held to equivalence deliberately rather than
+tightened. What changes is the failure mode of a host that runs with a
+standard stream already closed, and the cost of launching from a
+large-heap process:
+
+* **Correctness fix — standard-stream descriptors.** The route now relocates
+  its own descriptors above the fd 0/1/2 gap before handing them to the
+  launcher, and does so with `fcntl(F_DUPFD, 3)` rather than `dup()`. `dup()`
+  returns the *lowest free* descriptor, so it could relocate a descriptor
+  straight back into the gap; the streaming result pipe had not been
+  relocated at all. A route descriptor landing on a standard-stream number
+  made the launcher read the wrong bytes as input — a well-formed result
+  computed from the wrong data, with no error and no non-zero exit. With a
+  stream closed, the routes now return the correct records with the correct
+  payload, where the materialised route previously could return nothing at
+  all.
+* **Performance, conditional on the caller.** `fork()` cost scales with the
+  parent's address space when that space is private anonymous memory —
+  ordinary CPython arena growth. End to end on a 200k-record `map()`:
+  −1.8% with a small parent (noise), −22.5% at 1 GiB, −32.9% at 2 GiB.
+  Callers with a small parent should expect no measurable change.
+* **Compatibility.** `os.posix_spawn` is provided by libc, so it is present
+  wherever `fork`/`exec` are; the module checks for the attribute and uses
+  `fork()`+`execv()` if it is somehow absent. There is deliberately **no**
+  fallback if a spawn fails at runtime — that is reported through the
+  existing exit-127 path rather than silently re-running the work.
+
 ## Unreleased — WO-CR-ROI-2: `map(plugin)` is default-on
 
 **Behaviour change.** When `FORKRUN_CLEANROOM` is unset, `map(plugin)` now

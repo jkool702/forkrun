@@ -35,7 +35,7 @@ thinking they are untracked:
 
 | id | one-line status |
 |---|---|
-| F6 | `posix_spawn` **performance gate MET** (−88% to −96% at 1–5 GiB parent RSS); **production backend NOT adopted**; **descriptor gate ANSWERED** (F6 Stage 2: 2 launch shapes, 1 `DUP2` action / 0 actions, no `CLOSEFROM` so the 3.10 floor is not a blocker); **launch-semantic equivalence OUTSTANDING** (exit 127 does NOT fall back — 127 absent from `_CR_EXIT_PRE_INGEST`; `posix_spawn` would raise instead); disposition **CONDITIONAL GO — C1–C5 CLOSED** (`CLEANROOM_FD_CONTRACT.md` §9); failure policy **A** implemented; **default backend unchanged**, adoption decision outstanding |
+| F6 | `posix_spawn` **performance gate MET** (−88% to −96% at 1–5 GiB parent RSS); **backend ADOPTED as default (F6 Stage 4)**; **descriptor gate ANSWERED** (F6 Stage 2: 2 launch shapes, 1 `DUP2` action / 0 actions, no `CLOSEFROM` so the 3.10 floor is not a blocker); **launch-semantic equivalence OUTSTANDING** (exit 127 does NOT fall back — 127 absent from `_CR_EXIT_PRE_INGEST`; `posix_spawn` would raise instead); disposition **GO — C1–C5 CLOSED and backend adopted** (`CLEANROOM_FD_CONTRACT.md` §9); failure policy **A** implemented; **default backend is now `posix_spawn`**, `fork()+execv()` retained as private fallback |
 | F7 | Wholesale environment inheritance **MEASURED** (all 112 parent vars cross; a malformed `PYTHONHASHSEED` kills the cleanroom child at interpreter init);**desired contract UNDECIDED** — needs a compatibility decision, not more evidence. |
 
 | id | entry | pri | status |

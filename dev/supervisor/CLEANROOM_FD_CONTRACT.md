@@ -557,11 +557,13 @@ rather than done.
 
 ---
 
-## 9. Status: CONDITIONAL GO → technical gates MET, adoption OUTSTANDING
+## 9. Status: ADOPTED — `posix_spawn` is the default backend
 
-**Disposition: CONDITIONAL GO.** Every technical condition is now closed
-against named evidence; what remains is an ADOPTION decision, which this
-work order does not make and the default backend is unchanged.
+**Disposition: GO, and the default backend is now `posix_spawn`.** Every
+technical condition is closed against named evidence. `fork()+execv()`
+remains reachable through the private `_set_cleanroom_launch_backend()` for
+regression bisection; there is no public keyword and no environment
+selector.
 
 ### C1–C5 closure matrix
 
@@ -571,21 +573,54 @@ work order does not make and the default backend is unchanged.
 | **C2** | no `setsigdef`/`setsigmask`/`setpgroup`/`setsid`/`resetids` | **CLOSED** | `_spawn_or_fork` passes none; asserted by `test_no_signal_or_session_options_are_passed`, which fails if `setsigdef` is added. The signal probe in `test_launch_failure_contract` shows why: it resets an inherited `SIG_IGN`. |
 | **C3** | record the equivalence-first policy | **CLOSED (ratified)** | `CLEANROOM_LAUNCH_DECISION.md` §4.1 and §8 now state equivalence-first explicitly and label tightening a separate proposal requiring its own approval. |
 | **C4** | re-verify against the REAL launcher's inherited set | **CLOSED** | `test_cleanroom_launcher_entry_fds.py` observes the real `forkrun_cleanroom` binary's entry descriptor set through a compile-time-guarded probe (`-DFORKRUN_ENTRY_FD_PROBE`), for both shapes and both backends: identical role sets, every required channel present, fd 2 carrying the error memfd, no route descriptor on a stdio number, and `FRK_POISON_FD == stats_fd`. The shipped launcher is byte-identical to a normal rebuild. |
-| **C5** | the closed-fd corruption | **CLOSED (defect fixed, not just documented)** | `_fd_above_stdio()` relocates route-owned descriptors above fd 2, preserving the caller's descriptors and the `FD_CLOEXEC`/inheritable state. Measured: with fd 2 closed, materialized went from **0 records / WRONG INPUT** to **8 records / correct PAYLOAD tokens**, on both backends. Asserted in subprocesses by `TestClosedStandardDescriptorsAreSafe`; the relocation helper itself is asserted directly (a dropped inheritable re-apply is a silent make-permissive mutation that route-level tests cannot see). |
+| **C5** | the closed-fd corruption | **CLOSED (defect fixed, not just documented)** | See the CORRECTION below. `_fd_above_stdio()` relocates route-owned descriptors above the standard-stream gap, and the streaming result pipe is relocated as well. Asserted directly by `TestRelocationLeavesTheStandardStreamGap` and `TestStreamingPipeEndsAreRelocated`, and end to end by `TestClosedStandardDescriptorsAreSafe` and `TestRouteDescriptorsAboveStdioBothShapes`. |
+
+### C5 CORRECTION (F6 Stage 4) — the Stage 3 closure was not sound
+
+Stage 3 recorded C5 as closed on the strength of `_fd_above_stdio()`, which
+relocated with `os.dup()`. **`os.dup()` returns the LOWEST FREE
+descriptor**, so when the standard-stream gap is only partly free it
+returns a number still inside the gap:
+
+```
+close fd 0 and fd 2; put the source on fd 1
+-> _fd_above_stdio(1) returned 0
+```
+
+Relocating a descriptor on fd 1 with fd 0 busy and fd 2 free returns fd 2.
+The Stage 3 matrix did not catch this because it closed **all three** of
+fd 0/1/2, leaving the gap empty so the lowest free descriptor happened to
+be 3. C5 was therefore closed only for the one occupancy pattern the test
+happened to construct.
+
+Stage 4 fixed it with `fcntl(fd, F_DUPFD, 3)`, whose minimum argument makes
+"> 2" a guarantee rather than a hope, and found a second gap in the same
+area: the **streaming** result pipe was never relocated at all, despite a
+comment immediately above `os.pipe()` claiming every route-owned
+descriptor sat above fd 2. With fd 0/1/2 closed, `rw` landed on fd 1 — the
+launcher's own stdout — which is handed to the launcher as `--result`.
+Observed: `--src 2`, then `2 worker(s) failed … respawn cap reached`.
+
+Both fixes are mutation-checked: reverting `F_DUPFD` fails 4 tests, and
+reverting the streaming relocation fails the isolated pipe case
+(`--result=1`).
 
 ### What remains, and is deliberately NOT claimed
 
-* **The default backend is still `fork()+execv()`.** The candidate is
-  private and test-gated; `_set_cleanroom_launch_backend` raises on an
-  unknown name and nothing on the public API reaches it.
 * **Descriptor tightening is not authorised** and is not implemented.
 * **Policy B is not implemented** — a spawn-time `OSError` is mapped onto
-  the existing exit-127 result, not turned into a fallback.
-* **F7 is untouched**; the candidate passes `os.environ` unchanged.
-* **End-to-end performance does not follow from launch latency.** Measured
-  at ~139 ms for a single-launch 200k-record workload: −1.3% with a small
-  parent, **+1.0% at 2 GiB**. The launch win is real but invisible for a
-  caller that launches once. See `CLEANROOM_LAUNCH_DECISION.md` §8.1.
+  the existing exit-127 result, not turned into a fallback. There is no
+  retry-on-`OSError` path to `fork()+execv()`, because silently launching a
+  second time could run the work twice and would hide a real failure.
+* **F7 is untouched**; `os.environ` passes through unchanged on either
+  backend, and there is no environment selector for the backend.
+* **The performance win is conditional, not universal.** It depends on the
+  parent's address space being dominated by private anonymous mappings.
+  End to end on this repo's own route: −1.8% at 0 MiB (noise), −22.5% at
+  1 GiB, −32.9% at 2 GiB. The earlier "+1.0% at 2 GiB" figure was an
+  artefact of ballasting the parent with `mmap.mmap(-1, n)`, which is
+  `MAP_SHARED` and therefore never carried the `fork()` tax in the first
+  place. See `CLEANROOM_LAUNCH_DECISION.md` §8.1.
 
 ### 8.5b Ownership model
 

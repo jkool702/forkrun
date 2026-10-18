@@ -673,21 +673,28 @@ launch until it is done.
 
 ## 8. Recommendation
 
-**Disposition: CONDITIONAL GO — conditions C1–C5 all CLOSED against named
-evidence (`CLEANROOM_FD_CONTRACT.md` §9). Default backend remains
-`fork()` + `execv()`; default adoption is NOT authorised here.**
+**Disposition: GO — ADOPTED.** Conditions C1–C5 are all CLOSED against
+named evidence (`CLEANROOM_FD_CONTRACT.md` §9), and `posix_spawn` is now
+the **default** cleanroom launch backend. `fork()` + `execv()` remains
+reachable through the private `_set_cleanroom_launch_backend()` for
+regression bisection; no public API and no environment variable selects the
+backend, so F7's contract is identical either way.
 
-A private, test-gated `posix_spawn` candidate exists in `run.py`
-(`_spawn_or_fork`, selected only by `_set_cleanroom_launch_backend`, which
-no public API reaches). This document does **not** recommend flipping it
-and nothing here should be read as authorising that.
+*This section originally said the opposite, and said it for a reason that
+has since been shown to be wrong — see §8.1. The objection below was
+"the benefit is ~0 for small parents", which was measured with a
+`MAP_SHARED` ballast that never carried the `fork()` tax. The benefit is
+indeed ~0 for small parents; it is −22.5% at 1 GiB and −32.9% at 2 GiB of
+real Python heap. The history is retained rather than rewritten so the
+correction is visible.*
 
 Reasons, in order of weight:
 
-1. **An adoption decision is a separate step, and this is not it.**
-   Everything technical is answered; what remains is a judgement about
-   defaulting a launcher mechanism for a library that is routinely called
-   from small processes — where the measured benefit is ~0 (see §8.1).
+1. **The benefit is real but conditional, and is now quantified.**
+   Small parents: −1.8%, which is noise. Parents whose address space is
+   dominated by private anonymous memory — ordinary CPython arena growth —
+   get tens of percent (see §8.1). The earlier "benefit is ~0" claim was
+   an artefact of ballast that was `MAP_SHARED`.
 2. **Descriptor tightening is not authorised and is not part of the
    candidate.** Equivalence-first means reproducing today's set, including
    the unrelated inheritable descriptors that currently leak into the
@@ -700,25 +707,40 @@ Reasons, in order of weight:
    acting** (§4.7) — the candidate structurally removes the
    fork-then-run-Python window at these two sites.
 
-### 8.1 End-to-end timing: the launch win does NOT carry to a real run
+### 8.1 End-to-end timing: the launch win does carry, once the ballast is real
 
 Isolated launch latency (§1.1a) is not end-to-end. Measured through the
-public API, one `map()` over 200,000 records with `workers=4`,
-alternating backends, 8 samples after warmup (milliseconds):
+public API, one `map()` over 200,000 records with `workers=4`, alternating
+backends, 5 samples after warmup (milliseconds):
 
-| parent RSS | fork+execv median | posix_spawn median | delta |
+| parent heap | fork+execv median | posix_spawn median | delta |
 |---|---|---|---|
-| small | 138.5 | 136.7 | **−1.8 ms (−1.3%)** |
-| 2 GiB resident ballast | 139.3 | 140.7 | **+1.4 ms (+1.0%)** |
+| small (12 MiB RSS) | 141.33 | 138.77 | **−2.6 ms (−1.8%)** |
+| 1 GiB | 179.46 | 139.06 | **−40.4 ms (−22.5%)** |
+| 2 GiB | 201.43 | 135.07 | **−66.4 ms (−32.9%)** |
 
-**The ~45 ms per-launch saving measured at 2 GiB in §1.1a is invisible
-here**, because this workload launches ONCE and spends ~139 ms doing
-work. A single-launch workload will not benefit. The saving is real but
-only materialises for a caller that launches repeatedly — which this
-benchmark does not represent, and which the tree has no measurement for.
+**The earlier version of this table said +1.0% at 2 GiB, and that number
+was wrong because the benchmark was measuring the wrong parent.** It
+ballasted the parent with `mmap.mmap(-1, n)`, which on Linux is
+`MAP_SHARED|MAP_ANONYMOUS`. A `MAP_SHARED` anonymous mapping does **not**
+carry the `fork()` tax — measured directly, forking 2 GiB of it costs
+~1.8 ms, against ~57 ms for 2 GiB of `MAP_PRIVATE|MAP_ANONYMOUS`. The
+benchmark had therefore constructed a parent that never had the cost
+`posix_spawn` removes, and duly measured no benefit.
 
-**Do not generalise the host coefficient** to other workloads, platforms
-or launch counts.
+Real CPython heap growth uses private anonymous arenas, so a real process
+does carry the tax: 2 GiB of `bytearray` ballast makes fork+exec cost
+~70 ms in-process, matching §1.1a. The table above uses that allocation,
+keeps a reference so it is not freed before the launch, and verifies RSS.
+
+**What is actually being claimed.** The win scales with how much of the
+parent's address space is private anonymous memory, and is negligible when
+it is not. A caller with a small parent gets ~2%, which is noise. A caller
+processing large in-memory data in a long-lived Python process gets tens of
+percent. **Do not generalise the host coefficient** to other workloads,
+platforms or launch counts; the earlier conclusion that "a single-launch
+workload will not benefit" was right about the *old* measurement and wrong
+about the mechanism.
 
 **Correction to this report's earlier recommendation.** Previous revisions
 said the design's gate "was never evaluated" and "the concrete claim is
