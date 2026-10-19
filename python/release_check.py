@@ -304,6 +304,12 @@ def check_twins():
     return True
 
 
+# The nested suite's deadline. It is a NAMED constant so the message
+# below cannot drift from the budget actually applied, and so the
+# parent test can read it instead of hard-coding a second number.
+SUITE_DEADLINE_S = 2400
+
+
 @check("Tests: full suite passes")
 def check_tests():
     # Anti-recursion: the suite contains
@@ -325,13 +331,29 @@ def check_tests():
         proc = subprocess.run(
             [sys.executable, "-m", "unittest", "discover",
              "-s", "python/tests"], capture_output=True, text=True,
-            timeout=2400, cwd=REPO_ROOT, env=env)
+            timeout=SUITE_DEADLINE_S, cwd=REPO_ROOT, env=env)
     except subprocess.TimeoutExpired as exc:
+        # A timeout is a DEADLINE being reached, not a verdict. The
+        # suite did not finish, so it is NOT known whether the cause was
+        # load, a hang, or a regression -- the check below must not
+        # claim otherwise. The partial output is preserved so the run
+        # stays diagnosable: it names the tests that completed.
+        partial_out = exc.stdout or ""
+        partial_err = exc.stderr or ""
+        if isinstance(partial_out, bytes):
+            partial_out = partial_out.decode("utf-8", "replace")
+        if isinstance(partial_err, bytes):
+            partial_err = partial_err.decode("utf-8", "replace")
         raise AssertionError(
-            "the full suite did not finish within 2400s -- this is the "
-            "HARNESS limit, not a test failure: the suite costs ~5 minutes "
-            "on an idle machine and much longer under load. No test "
-            "result is reported here because none completed.") from exc
+            ("the full suite did not finish within %ds. That is a "
+             "DEADLINE being reached; the result is INCOMPLETE, and "
+             "without a finished run it cannot be said whether the cause "
+             "was load, a hang, or a regression. The suite costs ~5 "
+             "minutes on an idle machine and much longer under load. "
+             "Partial output follows.\n--- stdout ---\n%s\n"
+             "--- stderr ---\n%s")
+            % (SUITE_DEADLINE_S, partial_out[-3000:],
+               partial_err[-2000:])) from exc
     assert proc.returncode == 0, proc.stderr[-2000:]
     return True
 
