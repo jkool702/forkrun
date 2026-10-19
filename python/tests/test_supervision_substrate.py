@@ -53,7 +53,8 @@ int copy_slow(int argc, char **argv, const struct forkrun_ctx *ctx){
 ''' % SLEEP_MS
 
 _POLICY = re.compile(
-    r"forkrun-sup: policy role=(\w+) recoverable=(\d) node_scoped=(\d)")
+    r"forkrun-sup: policy role=(\w+) recoverable=(\d) node_scoped=(\d) "
+    r"clean_window=(\w+)")
 _REGISTER = re.compile(
     r"forkrun-sup: register role=(\w+) wid=(-?\d+) node=(-?\d+) "
     r"pid=(\d+) incarnation=(\d+)")
@@ -94,10 +95,13 @@ class TestSupervisionSubstrate(unittest.TestCase):
     # -- harness -------------------------------------------------------
 
     def _run(self, extra_env=None, kill_ingest_delay=None,
-             kill_worker_after=None, timeout=30):
+             kill_worker_after=None, kill_worker_immediately=False,
+             kill_budget=0, workers=2, respawn_cap=None, timeout=30):
         """Run the launcher, optionally killing families mid-run.
 
-        `kill_worker_after` is `(wid, delay_s)`. Returns
+        `kill_worker_after` is `(wid, delay_s)`. `kill_worker_immediately`
+        SIGKILLs each worker generation as soon as it registers, up to
+        `kill_budget` kills -- the slot-pressure regression. Returns
         (rc, elapsed, lines, ingest_pid, worker_pids).
         """
         env = {k: v for k, v in os.environ.items()
@@ -111,12 +115,14 @@ class TestSupervisionSubstrate(unittest.TestCase):
                          os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
         argv = [
             str(_LAUNCHER), "--so", str(_SUBSTRATE),
-            "--workers", "2", "--lines", str(BATCH), "--bytes", "0",
+            "--workers", str(workers), "--lines", str(BATCH), "--bytes", "0",
             "--on-error", "0", "--retry", "3",
             "--src", str(src_fd), "--result", str(out_fd),
             "--stats-fd", "-1",
             "--plugin", self.plugin, "--func", "copy_slow",
         ]
+        if respawn_cap is not None:
+            argv += ["--respawn-cap", str(respawn_cap)]
         try:
             proc = subprocess.Popen(
                 argv, env=env, pass_fds=(src_fd, out_fd),
@@ -140,6 +146,7 @@ class TestSupervisionSubstrate(unittest.TestCase):
         worker_pids = {}
         killed_ingest = False
         killed_worker = False
+        kills = 0
         t0 = time.time()
         deadline = t0 + timeout
         try:
@@ -169,6 +176,9 @@ class TestSupervisionSubstrate(unittest.TestCase):
                         time.sleep(kill_worker_after[1])
                         self._kill(int(m.group(4)))
                         killed_worker = True
+                    if (kill_worker_immediately and kills < kill_budget):
+                        self._kill(int(m.group(4)))
+                        kills += 1
 
             try:
                 rc = proc.wait(timeout=max(1.0, deadline - time.time()))
@@ -186,6 +196,11 @@ class TestSupervisionSubstrate(unittest.TestCase):
             self.assertTrue(killed_ingest,
                             "ingest was never registered, so the fatal "
                             "injection could not have fired")
+        if kill_worker_immediately:
+            self.assertGreaterEqual(
+                kills, kill_budget,
+                "the respawn injection stopped firing before the budget: "
+                "%d of %d kills" % (kills, kill_budget))
         return rc, time.time() - t0, lines, ingest_pid, worker_pids
 
     @staticmethod
@@ -229,16 +244,19 @@ class TestSupervisionSubstrate(unittest.TestCase):
         for line in lines:
             m = _POLICY.search(line)
             if m:
-                policy[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+                policy[m.group(1)] = (int(m.group(2)), int(m.group(3)),
+                                      m.group(4))
         self.assertEqual(
             set(policy),
             {"worker", "orderer", "indexer", "scanner", "fallow",
              "ingest", "drain"},
             "a family without an explicit policy is a hole in the model")
-        self.assertEqual(policy["worker"], (1, 1))
-        for role in ("orderer", "indexer", "scanner", "fallow", "ingest",
-                     "drain"):
-            self.assertEqual(policy[role], (0, 0), role)
+        self.assertEqual(policy["worker"], (1, 1, "never"))
+        # Clean-exit windows are part of the policy, not an implicit
+        # "exit 0 means done": only ingest completes at EOF.
+        self.assertEqual(policy["ingest"], (0, 0, "eof"))
+        for role in ("orderer", "indexer", "scanner", "fallow", "drain"):
+            self.assertEqual(policy[role], (0, 0, "teardown"), role)
 
     def test_healthy_run_reaps_helper_cleanly_and_transfers_all_bytes(self):
         rc, _dt, lines, ingest_pid, worker_pids = self._run()
@@ -346,6 +364,69 @@ class TestSupervisionSubstrate(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertEqual(sum(_FATAL in line for line in lines), 1,
                          "the abort path ran more than once")
+        self.assertLess(dt, 10.0)
+        self._assert_no_survivors(ingest_pid, worker_pids)
+
+    def test_registry_slots_are_reused_across_generations(self):
+        """Slot pressure regression: more respawns than spare slots.
+
+        Registration used to allocate a NEW slot per generation, so
+        SUP_MAX_PROCS (520) was consumed by history, not by live
+        children. The registry cap is lowered to 8 here so the same
+        allocation boundary is crossed deterministically: one helper
+        plus one worker leaves 6 new slots, and 30 killed generations
+        must not exhaust them. Every regeneration must be a REUSE of the
+        worker's single slot."""
+        budget = 30
+        rc, _dt, lines, ingest_pid, worker_pids = self._run(
+            extra_env={"FORKRUN_TEST_SUP_MAX": "8"},
+            kill_worker_immediately=True, kill_budget=budget,
+            workers=1, respawn_cap=10000, timeout=120)
+        regs = [line for line in lines if "register role=worker" in line]
+        reuses = [line for line in lines if "reuse role=worker" in line]
+        self.assertGreaterEqual(
+            len(regs), 8,
+            "only %d worker registrations; slot reuse was not exercised"
+            % len(regs))
+        self.assertGreaterEqual(
+            len(reuses), 6,
+            "only %d slot reuses; generations consumed new slots"
+            % len(reuses))
+        self.assertNotIn("supervision registry full", "\n".join(lines),
+                         "the registry ran out of slots")
+        self.assertEqual(rc, 0, "the run failed under slot pressure")
+
+        recs = self._records(self._result())
+        payload = b"".join(p for _i, _d, p in recs)
+        self.assertEqual(sorted(payload.splitlines()),
+                         sorted(self.corpus_bytes.splitlines()),
+                         "output was lost under repeated respawns")
+        self._assert_no_survivors(ingest_pid, worker_pids)
+
+    def test_unexpected_clean_helper_exit_is_fatal(self):
+        """Exit status zero outside the role's window is not success.
+
+        The sentinel is registered as an orderer (clean window:
+        teardown) and exits 0 while the pipeline is still running. The
+        registry must treat that as an abnormal, non-recoverable death.
+        """
+        rc, dt, lines, ingest_pid, worker_pids = self._run(
+            extra_env={"FORKRUN_TEST_HELPER_ROLE": "orderer",
+                       "FORKRUN_TEST_HELPER_EXIT_CLEAN_EARLY": "1"})
+        self.assertNotEqual(rc, 0, "an unexpected clean exit exited 0")
+        self.assertTrue(any("register role=orderer" in line for line in lines),
+                        "the sentinel was not registered under the "
+                        "override role, so the policy was not exercised")
+        self.assertTrue(any("exited 0 before its completion window" in line
+                            for line in lines),
+                        "the clean-exit window did not classify the death")
+        self.assertTrue(any("is not recoverable -- aborting" in line
+                            for line in lines))
+        death = [m for line in lines
+                 for m in [_DEATH.search(line)]
+                 if m and m.group(1) == "orderer"]
+        self.assertTrue(death and death[0].group(7) == "clean",
+                        "the injected exit was not clean")
         self.assertLess(dt, 10.0)
         self._assert_no_survivors(ingest_pid, worker_pids)
 

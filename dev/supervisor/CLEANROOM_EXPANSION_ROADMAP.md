@@ -384,6 +384,49 @@ data, not exercised as live process families; wiring the real NUMA helpers is
 step C. Everything here is logical-identity validation on a single physical
 NUMA node. No spawn-pipe/W-EXP-3 work is included.
 
+#### W-EXP-2 step B follow-up — registry lifecycle and role-aware clean exits
+
+Two findings from the external review of `25ec5193`, fixed before Step C.
+
+**1. Registry slots were consumed by respawn history.** `sup_retire()` left the
+slot in place and `sup_register_worker()` allocated a fresh one per generation,
+so `g_sup_n` grew with the number of respawns rather than the number of live
+children. At 512 workers the registry would exhaust after a handful of
+respawns overall. Fixed: one CURRENT entry per worker id, reused across
+generations (`forkrun-sup: reuse role=worker ...`); `g_sup_n` is now bounded
+by `workers + helpers`. A registration over an entry that is still `active`
+is refused loudly rather than overwritten, and helper registrations are never
+eligible for worker-slot reuse. Identity checks are unchanged, so a stale
+`(wid, pid, incarnation)` cannot reach the replacement. A test-only
+`FORKRUN_TEST_SUP_MAX` can only LOWER the allocation bound (default stays
+`SUP_MAX_PROCS = 520`), letting the regression cross the boundary
+deterministically; a manual 560-kill run against the production bound also
+completed cleanly with the fix.
+
+**2. Clean exit is now role-aware.** `sup_apply_policy()` no longer accepts
+exit status zero on its own. Each policy declares a clean-exit window:
+
+| Window | Meaning | Roles |
+|---|---|---|
+| `eof` | a clean exit is a normal terminal condition at any stage | `ingest` |
+| `teardown` | a clean exit is expected only once completion has begun (`g_sup_stopping`) | `orderer`, `indexer`, `scanner`, `fallow`, `drain` |
+| `never` | clean exit means the generation finished; the recoverable branch owns it | `worker` |
+
+The strict `teardown` window for orderer/indexer/scanner is deliberate: their
+real completion happens before teardown, but the launcher cannot yet prove the
+completion stage for them. **Step C must add the per-role completion handshake
+(EOF published, orderer input closed) before relaxing those windows** — until
+then an unexpected early clean exit is logged and fatal. Exit status alone is
+never treated as proof of pipeline completion.
+
+**Tests.** `python/tests/test_supervision_substrate.py` now has 9 cases. New:
+slot reuse across 30 killed generations with the cap lowered to 8 (fails as
+`supervision registry full` without the fix); unexpected clean exit of an
+`orderer`-registered sentinel aborts (fails as exit 0 if the window is
+ignored). Regression recap: both mutants die (`per-generation slots` →
+launcher dies at the 7th respawn; `any clean exit accepted` → early-exit test
+exits 0).
+
 #### Hard dependency graph (corrected — the previous list was incomplete)
 
 * **Phase 0** contracts and measurements gate the expansion work they inform.

@@ -1260,20 +1260,53 @@ enum sup_role {
     SUP_ROLE__COUNT
 };
 
+/* Exit status zero is NOT proof that a helper finished its pipeline
+ * work. Each role declares when a clean exit is expected:
+ *
+ *   EOF       clean exit is a normal terminal condition at any stage
+ *             (ingest: source EOF).
+ *   TEARDOWN  clean exit is expected only after the supervisor has begun
+ *             its completion phase (`g_sup_stopping`). Before that, an
+ *             exit 0 is an unexpected early exit and is FATAL.
+ *   NEVER     the role is worker-style: clean exit means the generation
+ *             completed its work and the recoverable branch owns it.
+ *
+ * The pre-C choice for orderer/indexer/scanner is deliberately the strict
+ * TEARDOWN window. Their legitimate completion happens before teardown,
+ * but the launcher cannot yet prove the completion stage for them; Step C
+ * must add the per-role completion handshake (EOF published / orderer
+ * input closed) BEFORE relaxing those windows. Encoding the strict rule
+ * now means a mismatched clean exit fails loudly instead of passing on
+ * exit status alone. */
+enum sup_clean_window {
+    SUP_CLEAN_NEVER = 0,
+    SUP_CLEAN_AT_EOF,
+    SUP_CLEAN_AT_TEARDOWN
+};
+
 struct sup_policy {
     const char *name;
     int recoverable;    /* 1: supervisor owns recovery and respawn      */
     int node_scoped;    /* 1: identity carries a logical NUMA node      */
+    enum sup_clean_window clean;
 };
 
+static const char *sup_clean_name(enum sup_clean_window w) {
+    switch (w) {
+    case SUP_CLEAN_AT_EOF:      return "eof";
+    case SUP_CLEAN_AT_TEARDOWN: return "teardown";
+    default:                    return "never";
+    }
+}
+
 static const struct sup_policy g_sup_policy[SUP_ROLE__COUNT] = {
-    [SUP_ROLE_WORKER]  = { "worker",  1, 1 },
-    [SUP_ROLE_ORDERER] = { "orderer", 0, 0 },
-    [SUP_ROLE_INDEXER] = { "indexer", 0, 0 },
-    [SUP_ROLE_SCANNER] = { "scanner", 0, 0 },
-    [SUP_ROLE_FALLOW]  = { "fallow",  0, 0 },
-    [SUP_ROLE_INGEST]  = { "ingest",  0, 0 },
-    [SUP_ROLE_DRAIN]   = { "drain",   0, 0 },
+    [SUP_ROLE_WORKER]  = { "worker",  1, 1, SUP_CLEAN_NEVER },
+    [SUP_ROLE_ORDERER] = { "orderer", 0, 0, SUP_CLEAN_AT_TEARDOWN },
+    [SUP_ROLE_INDEXER] = { "indexer", 0, 0, SUP_CLEAN_AT_TEARDOWN },
+    [SUP_ROLE_SCANNER] = { "scanner", 0, 0, SUP_CLEAN_AT_TEARDOWN },
+    [SUP_ROLE_FALLOW]  = { "fallow",  0, 0, SUP_CLEAN_AT_TEARDOWN },
+    [SUP_ROLE_INGEST]  = { "ingest",  0, 0, SUP_CLEAN_AT_EOF },
+    [SUP_ROLE_DRAIN]   = { "drain",   0, 0, SUP_CLEAN_AT_TEARDOWN },
 };
 
 #define SUP_MAX_PROCS     520
@@ -1303,6 +1336,8 @@ struct sup_proc {
 
 static int g_sup_on;
 static int g_sup_bad;
+static int g_sup_stopping;
+static int g_sup_max = SUP_MAX_PROCS;
 static int g_sup_ctl_w = -1;
 static struct sup_proc g_sup[SUP_MAX_PROCS];
 static int g_sup_n;
@@ -1314,11 +1349,26 @@ static void sup_init(void) {
         return;
     g_sup_n = 0;
     g_sup_bad = 0;
+    /* Test-only cap on NEW slot allocations, so the exhaustion
+     * boundary can be reached deterministically instead of racing a
+     * 6-second kill loop against the corpus drain. It can only LOWER
+     * the production bound; values outside [2, SUP_MAX_PROCS] are
+     * ignored, and the production default is unchanged. */
+    {
+        const char *cap = getenv("FORKRUN_TEST_SUP_MAX");
+        if (cap != NULL) {
+            long v = strtol(cap, NULL, 10);
+            if (v >= 2 && v <= SUP_MAX_PROCS)
+                g_sup_max = (int)v;
+        }
+    }
     for (int r = 0; r < SUP_ROLE__COUNT; r++)
         fprintf(stderr,
-                "forkrun-sup: policy role=%s recoverable=%d node_scoped=%d\n",
+                "forkrun-sup: policy role=%s recoverable=%d node_scoped=%d "
+                "clean_window=%s\n",
                 g_sup_policy[r].name, g_sup_policy[r].recoverable,
-                g_sup_policy[r].node_scoped);
+                g_sup_policy[r].node_scoped,
+                sup_clean_name(g_sup_policy[r].clean));
 }
 
 static struct sup_proc *sup_find_pid(pid_t pid) {
@@ -1365,13 +1415,25 @@ static int sup_apply_policy(struct sup_proc *e, int status, int have_status) {
     int clean = have_status
         ? (WIFEXITED(status) && WEXITSTATUS(status) == 0)
         : (e->exit_known && e->exit_rc == 0);
+    /* Exit 0 is acceptable only inside the role's declared window. A
+     * clean exit outside it is the "unexpectedly early exit with status
+     * zero" the registry must not wave through. */
+    int acceptable = clean &&
+        (pol->clean == SUP_CLEAN_AT_EOF ||
+         (pol->clean == SUP_CLEAN_AT_TEARDOWN && g_sup_stopping));
     fprintf(stderr,
             "forkrun-sup: death role=%s wid=%d node=%d pid=%d incarnation=%u "
-            "status=%d class=%s recoverable=%d\n",
+            "status=%d class=%s recoverable=%d clean_window=%s\n",
             pol->name, e->wid, e->logical_node, (int)e->pid, e->incarnation,
             have_status ? death_cause(status) : e->exit_rc,
-            clean ? "clean" : "abnormal", pol->recoverable);
-    if (pol->recoverable || clean)
+            clean ? "clean" : "abnormal", pol->recoverable,
+            sup_clean_name(pol->clean));
+    if (clean && !acceptable)
+        fprintf(stderr,
+                "forkrun-sup: role=%s exited 0 before its completion window "
+                "(%s) -- treating as abnormal\n",
+                pol->name, sup_clean_name(pol->clean));
+    if (pol->recoverable || acceptable)
         return 0;
     fprintf(stderr,
             "forkrun-sup: role=%s is not recoverable -- aborting the run\n",
@@ -1387,12 +1449,16 @@ static void sup_register_worker(int wid, unsigned incarnation, pid_t pid,
     struct sup_proc *e = NULL;
     if (!g_sup_on)
         return;
+    /* One CURRENT entry per worker slot, reused across generations.
+     * A respawn must not consume a new slot: with 512 workers the
+     * registry would otherwise exhaust on the eighth respawn overall.
+     * Only worker entries are eligible for this reuse, so a helper
+     * registration can never be overwritten. */
     for (int i = 0; i < g_sup_n; i++)
-        if (g_sup[i].active && g_sup[i].role == SUP_ROLE_WORKER &&
-            g_sup[i].wid == wid)
+        if (g_sup[i].role == SUP_ROLE_WORKER && g_sup[i].wid == wid)
             e = &g_sup[i];
     if (!e) {
-        if (g_sup_n >= SUP_MAX_PROCS)
+        if (g_sup_n >= g_sup_max)
             die("supervision registry full");
         e = &g_sup[g_sup_n++];
         memset(e, 0, sizeof *e);
@@ -1400,7 +1466,22 @@ static void sup_register_worker(int wid, unsigned incarnation, pid_t pid,
         e->role = SUP_ROLE_WORKER;
         e->wid = wid;
         e->note_fd = -1;
+    } else if (e->active) {
+        /* A live generation must be reaped and retired before its slot
+         * is reused. Silently overwriting one would hide a bookkeeping
+         * bug and lose the old generation's identity. */
+        fprintf(stderr,
+                "forkrun-sup: internal error: wid=%d still registered "
+                "(pid=%d) at respawn -- refusing to overwrite\n",
+                wid, (int)e->pid);
+        die("supervision re-registered a live worker");
+    } else {
+        fprintf(stderr,
+                "forkrun-sup: reuse role=worker wid=%d slot=%d "
+                "generation=%u\n",
+                wid, (int)(e - g_sup), incarnation);
     }
+    e->active = 1;
     e->pid = pid;
     e->incarnation = incarnation;
     e->logical_node = node;
@@ -1500,7 +1581,8 @@ static int sup_wait_note(int ms) {
  * cleanly only when the launcher closes the control pipe at teardown,
  * which also proves descriptor ownership: if any worker had inherited
  * the write end, the sentinel would never see EOF. */
-static void sup_sentinel_child(int ctl_r, int note_w, unsigned incarnation) {
+static void sup_sentinel_child(int ctl_r, int note_w, unsigned incarnation,
+                               enum sup_role role, int early_clean) {
     struct sup_note n;
     char c;
     die_with_parent();
@@ -1509,15 +1591,22 @@ static void sup_sentinel_child(int ctl_r, int note_w, unsigned incarnation) {
     keep_add(&k, ctl_r);
     keep_add(&k, note_w);
     enter_child("sup-helper", &k);
-    for (;;) {
-        ssize_t rd = read(ctl_r, &c, 1);
-        if (rd < 0 && errno == EINTR)
-            continue;
-        break;
+    if (early_clean) {
+        /* Test-only: an exit 0 OUTSIDE the role's completion window.
+         * The parent must classify this as abnormal despite the status,
+         * which is the policy distinction the review asked to encode. */
+        usleep(100000);
+    } else {
+        for (;;) {
+            ssize_t rd = read(ctl_r, &c, 1);
+            if (rd < 0 && errno == EINTR)
+                continue;
+            break;
+        }
     }
     memset(&n, 0, sizeof n);
     n.magic = SUP_NOTE_MAGIC;
-    n.role = SUP_ROLE_INGEST;
+    n.role = (uint32_t)role;
     n.pid = (int32_t)getpid();
     n.rc = 0;
     n.incarnation = incarnation;
@@ -1525,13 +1614,26 @@ static void sup_sentinel_child(int ctl_r, int note_w, unsigned incarnation) {
     _exit(0);
 }
 
+static enum sup_role sup_role_from_name(const char *name) {
+    for (int r = 0; r < SUP_ROLE__COUNT; r++)
+        if (strcmp(name, g_sup_policy[r].name) == 0)
+            return (enum sup_role)r;
+    return SUP_ROLE_INGEST;
+}
+
 static void sup_fork_helper(void) {
     int ctl[2], note[2];
     pid_t p;
     struct sup_proc *e;
+    enum sup_role role = SUP_ROLE_INGEST;
+    int early_clean = 0;
+    const char *role_env = getenv("FORKRUN_TEST_HELPER_ROLE");
 
     if (!g_sup_on)
         return;
+    if (role_env != NULL)
+        role = sup_role_from_name(role_env);
+    early_clean = getenv("FORKRUN_TEST_HELPER_EXIT_CLEAN_EARLY") != NULL;
     if (pipe2(ctl, O_CLOEXEC) != 0)
         die("pipe2(sup ctl)");
     if (pipe2(note, O_CLOEXEC) != 0)
@@ -1542,26 +1644,26 @@ static void sup_fork_helper(void) {
     if (p == 0) {
         close(ctl[1]);
         close(note[0]);
-        sup_sentinel_child(ctl[0], note[1], 0);
+        sup_sentinel_child(ctl[0], note[1], 0, role, early_clean);
         _exit(127);
     }
     close(ctl[0]);
     close(note[1]);
     g_sup_ctl_w = ctl[1];
-    if (g_sup_n >= SUP_MAX_PROCS)
+    if (g_sup_n >= g_sup_max)
         die("supervision registry full");
     e = &g_sup[g_sup_n++];
     memset(e, 0, sizeof *e);
     e->active = 1;
-    e->role = SUP_ROLE_INGEST;
+    e->role = role;
     e->wid = -1;
     e->logical_node = -1;
     e->pid = p;
     e->incarnation = 0;
     e->note_fd = note[0];
     fprintf(stderr,
-            "forkrun-sup: register role=ingest wid=-1 node=-1 pid=%d "
-            "incarnation=0\n", (int)p);
+            "forkrun-sup: register role=%s wid=-1 node=-1 pid=%d "
+            "incarnation=0\n", g_sup_policy[role].name, (int)p);
 }
 
 static int sup_helper_active(void) {
@@ -1579,6 +1681,7 @@ static void sup_guillotine(void) {
     int signalled = 0, reaped = 0;
     if (!g_sup_on)
         return;
+    g_sup_stopping = 1;
     if (g_sup_ctl_w >= 0) {
         close(g_sup_ctl_w);
         g_sup_ctl_w = -1;
@@ -1622,6 +1725,7 @@ static void sup_guillotine(void) {
 static int sup_stop_helpers(void) {
     if (!g_sup_on)
         return 0;
+    g_sup_stopping = 1;
     if (g_sup_ctl_w >= 0) {
         close(g_sup_ctl_w);
         g_sup_ctl_w = -1;
@@ -2745,7 +2849,12 @@ int main(int argc, char **argv) {
             if (g_sup_bad) { bad = 1; break; }
             p = waitpid(-1, &st, WNOHANG);
             if (p == 0) {
-                (void)sup_wait_note(50);
+                /* A short slice keeps note service prompt without
+                 * delaying worker reaping: this poll is the only point
+                 * at which a worker death waits. 50 ms made every
+                 * respawn cost a scheduling quantum (the slot-pressure
+                 * regression measured ~28 s for 560 respawns). */
+                (void)sup_wait_note(10);
                 if (g_sup_bad) { bad = 1; break; }
                 continue;
             }
