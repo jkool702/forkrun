@@ -1312,6 +1312,16 @@ static const struct sup_policy g_sup_policy[SUP_ROLE__COUNT] = {
 #define SUP_MAX_PROCS     520
 #define SUP_NOTE_MAGIC    0x53555042u   /* "SUPB" */
 #define SUP_REAP_BUDGET_MS 2000
+/* A clean exit is only expected when the child also published the
+ * completion event its role ends on. The flag rides the same note as
+ * the death identity, so it is checked against the CURRENT registered
+ * (role, pid, incarnation) -- a stale process cannot assert completion
+ * for its replacement.
+ *
+ * This is a TEST MODEL for Step B. Step C must connect real ingest
+ * completion to the engine's EOF condition (fr_py_ingest_eof_posted),
+ * not to a child's self-report or to launcher teardown. */
+#define SUP_NOTE_COMPLETE 0x1u
 
 struct sup_note {
     uint32_t magic;
@@ -1319,7 +1329,7 @@ struct sup_note {
     int32_t  pid;
     int32_t  rc;
     uint32_t incarnation;
-    uint32_t reserved;
+    uint32_t flags;         /* SUP_NOTE_COMPLETE when completion happened */
 };
 
 struct sup_proc {
@@ -1332,6 +1342,7 @@ struct sup_proc {
     int note_fd;            /* death-note read end; helpers only */
     int exit_known;
     int exit_rc;
+    int completion_evidence;
 };
 
 static int g_sup_on;
@@ -1404,6 +1415,8 @@ static int sup_reconcile_note(const struct sup_note *n) {
     }
     e->exit_known = 1;
     e->exit_rc = n->rc;
+    if (n->flags & SUP_NOTE_COMPLETE)
+        e->completion_evidence = 1;
     return 1;
 }
 
@@ -1415,24 +1428,38 @@ static int sup_apply_policy(struct sup_proc *e, int status, int have_status) {
     int clean = have_status
         ? (WIFEXITED(status) && WEXITSTATUS(status) == 0)
         : (e->exit_known && e->exit_rc == 0);
-    /* Exit 0 is acceptable only inside the role's declared window. A
-     * clean exit outside it is the "unexpectedly early exit with status
-     * zero" the registry must not wave through. */
-    int acceptable = clean &&
-        (pol->clean == SUP_CLEAN_AT_EOF ||
-         (pol->clean == SUP_CLEAN_AT_TEARDOWN && g_sup_stopping));
+    /* Exit 0 is acceptable only with evidence for the role's declared
+     * terminus. An EOF role must have published its completion event;
+     * a teardown role must be exiting after teardown began. Status zero
+     * alone proves neither. Workers are outside this rule: their clean
+     * exit is normal completion owned by the recoverable branch. */
+    int acceptable;
+    if (pol->clean == SUP_CLEAN_AT_EOF)
+        acceptable = clean && e->completion_evidence;
+    else if (pol->clean == SUP_CLEAN_AT_TEARDOWN)
+        acceptable = clean && g_sup_stopping;
+    else
+        acceptable = clean;
     fprintf(stderr,
             "forkrun-sup: death role=%s wid=%d node=%d pid=%d incarnation=%u "
-            "status=%d class=%s recoverable=%d clean_window=%s\n",
+            "status=%d class=%s recoverable=%d clean_window=%s evidence=%d\n",
             pol->name, e->wid, e->logical_node, (int)e->pid, e->incarnation,
             have_status ? death_cause(status) : e->exit_rc,
             clean ? "clean" : "abnormal", pol->recoverable,
-            sup_clean_name(pol->clean));
-    if (clean && !acceptable)
-        fprintf(stderr,
-                "forkrun-sup: role=%s exited 0 before its completion window "
-                "(%s) -- treating as abnormal\n",
-                pol->name, sup_clean_name(pol->clean));
+            sup_clean_name(pol->clean), e->completion_evidence);
+    /* NEVER-role clean exits are already acceptable above, so only a
+     * helper that missed its evidence/window can reach this. */
+    if (clean && !acceptable) {
+        if (pol->clean == SUP_CLEAN_AT_EOF)
+            fprintf(stderr,
+                    "forkrun-sup: role=%s exited 0 without ingest-completion "
+                    "evidence -- treating as abnormal\n", pol->name);
+        else
+            fprintf(stderr,
+                    "forkrun-sup: role=%s exited 0 before its completion "
+                    "window (%s) -- treating as abnormal\n",
+                    pol->name, sup_clean_name(pol->clean));
+    }
     if (pol->recoverable || acceptable)
         return 0;
     fprintf(stderr,
@@ -1487,6 +1514,7 @@ static void sup_register_worker(int wid, unsigned incarnation, pid_t pid,
     e->logical_node = node;
     e->exit_known = 0;
     e->exit_rc = 0;
+    e->completion_evidence = 0;
     fprintf(stderr,
             "forkrun-sup: register role=worker wid=%d node=%d pid=%d "
             "incarnation=%u\n", wid, node, (int)pid, incarnation);
@@ -1516,10 +1544,31 @@ static void sup_reconcile_worker_reap(int wid, pid_t pid,
  * match the current generation is dropped (never applied to a
  * replacement); EOF without a note means the child died without a
  * statement, and waitpid alone classifies it. */
-static int sup_process_note(struct sup_proc *e, int block_ms) {
+/* Consume a pending note without reaping. Safe to call after the
+ * catch-all waitpid has already reaped the child: the pipe write
+ * happened-before the exit, so the data is still readable. */
+static int sup_take_note(struct sup_proc *e) {
     struct pollfd pf;
     struct sup_note n;
     ssize_t r;
+    int pr;
+
+    if (!e->active || e->note_fd < 0)
+        return 0;
+    pf.fd = e->note_fd;
+    pf.events = POLLIN;
+    pf.revents = 0;
+    pr = poll(&pf, 1, 0);
+    if (pr <= 0 || !(pf.revents & (POLLIN | POLLHUP | POLLERR)))
+        return 0;
+    r = read(e->note_fd, &n, sizeof n);
+    if (r == (ssize_t)sizeof n && n.magic == SUP_NOTE_MAGIC)
+        (void)sup_reconcile_note(&n);
+    return 1;
+}
+
+static int sup_process_note(struct sup_proc *e, int block_ms) {
+    struct pollfd pf;
     int pr, st = 0;
     pid_t w;
 
@@ -1533,9 +1582,7 @@ static int sup_process_note(struct sup_proc *e, int block_ms) {
         return 0;
     if (!(pf.revents & (POLLIN | POLLHUP | POLLERR)))
         return 0;
-    r = read(e->note_fd, &n, sizeof n);
-    if (r == (ssize_t)sizeof n && n.magic == SUP_NOTE_MAGIC)
-        (void)sup_reconcile_note(&n);
+    (void)sup_take_note(e);
     w = waitpid(e->pid, &st, WNOHANG);
     if (w == e->pid) {
         (void)sup_apply_policy(e, st, 1);
@@ -1610,6 +1657,12 @@ static void sup_sentinel_child(int ctl_r, int note_w, unsigned incarnation,
     n.pid = (int32_t)getpid();
     n.rc = 0;
     n.incarnation = incarnation;
+    /* Modeled ingest completion: the control pipe is this helper's
+     * source, so its EOF is the completion event. `early_clean` models
+     * a process that exits 0 WITHOUT that event -- the case the
+     * supervisor must reject. Step C replaces this self-report with
+     * engine-backed EOF evidence. */
+    n.flags = early_clean ? 0u : (uint32_t)SUP_NOTE_COMPLETE;
     (void)write(note_w, &n, sizeof n);
     _exit(0);
 }
@@ -2896,6 +2949,10 @@ int main(int argc, char **argv) {
             if (g_sup_on) {
                 struct sup_proc *se = sup_find_pid(p);
                 if (se && se->role != SUP_ROLE_WORKER) {
+                    /* The catch-all waitpid can win the race with the
+                     * note reader; the write happened-before the exit,
+                     * so read it now or completion evidence is lost. */
+                    (void)sup_take_note(se);
                     if (sup_apply_policy(se, st, 1))
                         bad = 1;
                     sup_retire(se);

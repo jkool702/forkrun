@@ -268,8 +268,16 @@ class TestSupervisionSubstrate(unittest.TestCase):
         self.assertEqual(len(death), 1, "expected exactly one sentinel death")
         self.assertEqual(death[0].group(7), "clean")
         self.assertEqual(death[0].group(6), "0")
+        ingest_line = [line for line in lines if "death role=ingest" in line][0]
+        self.assertIn("evidence=1", ingest_line,
+                      "the accepted clean exit carried no completion "
+                      "evidence, so the acceptance was status-only")
         self.assertFalse(any("guillotine" in line for line in lines),
                          "a clean run must not resort to the guillotine")
+        self.assertFalse(
+            any("role=worker exited 0 before" in line for line in lines),
+            "a normal worker completion was logged as an unexpected "
+            "helper exit")
 
         # The sentinel exits only when the launcher closes the control
         # pipe: the clean death also proves no worker inherited the write
@@ -401,6 +409,30 @@ class TestSupervisionSubstrate(unittest.TestCase):
         self.assertEqual(sorted(payload.splitlines()),
                          sorted(self.corpus_bytes.splitlines()),
                          "output was lost under repeated respawns")
+        self._assert_no_survivors(ingest_pid, worker_pids)
+
+    def test_early_clean_ingest_without_evidence_is_fatal(self):
+        """The EOF window requires the completion event, not status 0.
+
+        The sentinel is the default ingest role but exits 0 early
+        WITHOUT publishing its modeled completion event. That must be
+        fatal: a valid-looking prefix is not proof the source was fully
+        ingested.
+        """
+        rc, dt, lines, ingest_pid, worker_pids = self._run(
+            extra_env={"FORKRUN_TEST_HELPER_EXIT_CLEAN_EARLY": "1"})
+        self.assertNotEqual(rc, 0, "an unproven clean ingest exit exited 0")
+        self.assertTrue(
+            any("without ingest-completion evidence" in line for line in lines),
+            "the EOF window accepted a clean exit without evidence")
+        self.assertTrue(any("is not recoverable -- aborting" in line
+                            for line in lines))
+        deaths = [line for line in lines if "death role=ingest" in line]
+        self.assertTrue(deaths, "the ingest death was never classified")
+        self.assertIn("class=clean", deaths[0])
+        self.assertIn("evidence=0", deaths[0],
+                      "the injected exit unexpectedly carried evidence")
+        self.assertLess(dt, 10.0)
         self._assert_no_survivors(ingest_pid, worker_pids)
 
     def test_unexpected_clean_helper_exit_is_fatal(self):

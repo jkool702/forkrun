@@ -408,24 +408,48 @@ exit status zero on its own. Each policy declares a clean-exit window:
 
 | Window | Meaning | Roles |
 |---|---|---|
-| `eof` | a clean exit is a normal terminal condition at any stage | `ingest` |
+| `eof` | a clean exit is expected only WITH the identity-checked completion event | `ingest` |
 | `teardown` | a clean exit is expected only once completion has begun (`g_sup_stopping`) | `orderer`, `indexer`, `scanner`, `fallow`, `drain` |
-| `never` | clean exit means the generation finished; the recoverable branch owns it | `worker` |
+| `never` | clean exit means the generation finished normally; the recoverable branch owns it | `worker` |
+
+**The `eof` window is evidence-based, not status-based.** `SUP_CLEAN_AT_EOF`
+requires the completion flag on the helper's identity-checked death note, and
+that note is accepted only when `(role, pid, incarnation)` matches the current
+registered generation. A clean exit without the flag is fatal: a valid-looking
+prefix is not proof the source was fully ingested. The catch-all `waitpid`
+path consumes the note before classifying, so evidence cannot be lost to the
+reap race. This completion flag is a **test model**: the sentinel's control
+pipe is its source, so its EOF is its completion event. **Step C must replace
+the self-report with engine-backed evidence (`fr_py_ingest_eof_posted`) before
+real ingest can satisfy the window.**
 
 The strict `teardown` window for orderer/indexer/scanner is deliberate: their
 real completion happens before teardown, but the launcher cannot yet prove the
 completion stage for them. **Step C must add the per-role completion handshake
 (EOF published, orderer input closed) before relaxing those windows** — until
 then an unexpected early clean exit is logged and fatal. Exit status alone is
-never treated as proof of pipeline completion.
+never treated as proof of pipeline completion. Worker clean exits are
+classified by the `never` window as normal completion and never emit the
+helper diagnostic.
 
-**Tests.** `python/tests/test_supervision_substrate.py` now has 9 cases. New:
+**Tests.** `python/tests/test_supervision_substrate.py` has 10 cases. New:
 slot reuse across 30 killed generations with the cap lowered to 8 (fails as
 `supervision registry full` without the fix); unexpected clean exit of an
-`orderer`-registered sentinel aborts (fails as exit 0 if the window is
-ignored). Regression recap: both mutants die (`per-generation slots` →
-launcher dies at the 7th respawn; `any clean exit accepted` → early-exit test
-exits 0).
+`orderer`-registered sentinel aborts; early clean ingest exit WITHOUT the
+completion flag aborts (status-only acceptance fails this test); the healthy
+ingest death carries `evidence=1`; and a normal worker completion emits no
+helper diagnostic. Mutation recap: `per-generation slots` → launcher dies at
+the 7th respawn; `any clean exit accepted` → early-exit test exits 0;
+`status-only EOF acceptance` → unproven ingest exit exits 0;
+`worker clean classified unacceptable` → worker emits the bogus diagnostic.
+
+**Step C capacity gate (added by the same review).** The registry is a fixed
+`SUP_MAX_PROCS = 520` array. The target topology (512 workers + 4 indexers +
+4 scanners + 3 global helpers = 523) already exceeds it before any extra
+process. Step C must size the registry from the requested worker count, node
+count and fixed-role counts — or validate and publish an explicit supported
+configuration limit BEFORE spawning. It must not discover the mismatch
+halfway through startup and terminate via `die("supervision registry full")`.
 
 #### Hard dependency graph (corrected — the previous list was incomplete)
 
