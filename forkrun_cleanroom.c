@@ -1216,6 +1216,431 @@ static int fr_run_worker(const worker_desc *d,
     }
 }
 
+/* =====================================================================
+ * W-EXP-2 step B: typed supervision substrate (experimental, opt-in).
+ *
+ * The supervisor historically knew ONE kind of child: a worker. It
+ * reaped by pid, and every non-worker was an untyped "helper death is
+ * fatal" check against three pids. That model cannot carry the NUMA
+ * route, where indexer, scanner, fallow, ingest and orderer exist as
+ * separate processes with DIFFERENT recovery policies, and a worker's
+ * identity is (wid, incarnation, logical node), not a pid.
+ *
+ * This registry is that model. It is INERT unless
+ * FORKRUN_SUPERVISE_TYPED=1 is set; the production cleanroom path is
+ * byte-for-byte unchanged when the variable is absent.
+ *
+ * Exit-gate rules encoded here:
+ *  1. Every family has an explicit policy; there is no default role.
+ *  2. A death note is acted on only when (role, pid, incarnation)
+ *     matches the CURRENT registered generation. A stale note is
+ *     logged and dropped -- it must never reach a replacement. Creating
+ *     a death pipe is not supervision; reconciling its identity against
+ *     the registry is.
+ *  3. Workers stay recoverable and respawn onto the SAME wid and
+ *     logical node with incarnation+1. Helpers are NOT recoverable:
+ *     re-forking one would resume with a different pipeline generation
+ *     and no re-execution capability, which W-EXP-2 forbids inventing.
+ *  4. Teardown is bounded by SUP_REAP_BUDGET_MS and reports leftovers.
+ *
+ * Only ONE helper process exists in this step: the sentinel forked by
+ * sup_fork_helper(). Wiring the real pipeline helpers through this
+ * registry is step C, after the harness in
+ * python/tests/test_supervision_substrate.py proves the transitions.
+ * ===================================================================== */
+
+enum sup_role {
+    SUP_ROLE_WORKER = 0,
+    SUP_ROLE_ORDERER,
+    SUP_ROLE_INDEXER,
+    SUP_ROLE_SCANNER,
+    SUP_ROLE_FALLOW,
+    SUP_ROLE_INGEST,
+    SUP_ROLE_DRAIN,
+    SUP_ROLE__COUNT
+};
+
+struct sup_policy {
+    const char *name;
+    int recoverable;    /* 1: supervisor owns recovery and respawn      */
+    int node_scoped;    /* 1: identity carries a logical NUMA node      */
+};
+
+static const struct sup_policy g_sup_policy[SUP_ROLE__COUNT] = {
+    [SUP_ROLE_WORKER]  = { "worker",  1, 1 },
+    [SUP_ROLE_ORDERER] = { "orderer", 0, 0 },
+    [SUP_ROLE_INDEXER] = { "indexer", 0, 0 },
+    [SUP_ROLE_SCANNER] = { "scanner", 0, 0 },
+    [SUP_ROLE_FALLOW]  = { "fallow",  0, 0 },
+    [SUP_ROLE_INGEST]  = { "ingest",  0, 0 },
+    [SUP_ROLE_DRAIN]   = { "drain",   0, 0 },
+};
+
+#define SUP_MAX_PROCS     520
+#define SUP_NOTE_MAGIC    0x53555042u   /* "SUPB" */
+#define SUP_REAP_BUDGET_MS 2000
+
+struct sup_note {
+    uint32_t magic;
+    uint32_t role;
+    int32_t  pid;
+    int32_t  rc;
+    uint32_t incarnation;
+    uint32_t reserved;
+};
+
+struct sup_proc {
+    int active;
+    enum sup_role role;
+    int wid;                /* worker slot, -1 for helpers */
+    int logical_node;       /* worker node, -1 for whole-run helpers */
+    pid_t pid;
+    unsigned incarnation;
+    int note_fd;            /* death-note read end; helpers only */
+    int exit_known;
+    int exit_rc;
+};
+
+static int g_sup_on;
+static int g_sup_bad;
+static int g_sup_ctl_w = -1;
+static struct sup_proc g_sup[SUP_MAX_PROCS];
+static int g_sup_n;
+
+static void sup_init(void) {
+    const char *on = getenv("FORKRUN_SUPERVISE_TYPED");
+    g_sup_on = (on != NULL && on[0] != '\0' && strcmp(on, "0") != 0);
+    if (!g_sup_on)
+        return;
+    g_sup_n = 0;
+    g_sup_bad = 0;
+    for (int r = 0; r < SUP_ROLE__COUNT; r++)
+        fprintf(stderr,
+                "forkrun-sup: policy role=%s recoverable=%d node_scoped=%d\n",
+                g_sup_policy[r].name, g_sup_policy[r].recoverable,
+                g_sup_policy[r].node_scoped);
+}
+
+static struct sup_proc *sup_find_pid(pid_t pid) {
+    for (int i = 0; i < g_sup_n; i++)
+        if (g_sup[i].active && g_sup[i].pid == pid)
+            return &g_sup[i];
+    return NULL;
+}
+
+static void sup_retire(struct sup_proc *e) {
+    if (e->note_fd >= 0) {
+        close(e->note_fd);
+        e->note_fd = -1;
+    }
+    e->active = 0;
+}
+
+/* Strict identity reconciliation, shared by the pipe path and by the
+ * harness's stale-note injection. Returns 1 only for the generation
+ * that is registered RIGHT NOW. */
+static int sup_reconcile_note(const struct sup_note *n) {
+    struct sup_proc *e = sup_find_pid(n->pid);
+    const char *cur = e ? g_sup_policy[e->role].name : "none";
+    if (!e || e->role != (enum sup_role)n->role ||
+        e->incarnation != n->incarnation) {
+        fprintf(stderr,
+                "forkrun-sup: stale note role=%s pid=%d incarnation=%u "
+                "(current role=%s pid=%d incarnation=%u) -- ignored\n",
+                n->role < SUP_ROLE__COUNT ? g_sup_policy[n->role].name : "?",
+                (int)n->pid, n->incarnation, cur,
+                e ? (int)e->pid : -1, e ? e->incarnation : 0u);
+        return 0;
+    }
+    e->exit_known = 1;
+    e->exit_rc = n->rc;
+    return 1;
+}
+
+/* Apply the family policy. Helpers are fatal when they die abnormally;
+ * a clean helper exit is treated as normal completion (scanner EOF is
+ * the reference case) and is left to the caller's join. */
+static int sup_apply_policy(struct sup_proc *e, int status, int have_status) {
+    const struct sup_policy *pol = &g_sup_policy[e->role];
+    int clean = have_status
+        ? (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        : (e->exit_known && e->exit_rc == 0);
+    fprintf(stderr,
+            "forkrun-sup: death role=%s wid=%d node=%d pid=%d incarnation=%u "
+            "status=%d class=%s recoverable=%d\n",
+            pol->name, e->wid, e->logical_node, (int)e->pid, e->incarnation,
+            have_status ? death_cause(status) : e->exit_rc,
+            clean ? "clean" : "abnormal", pol->recoverable);
+    if (pol->recoverable || clean)
+        return 0;
+    fprintf(stderr,
+            "forkrun-sup: role=%s is not recoverable -- aborting the run\n",
+            pol->name);
+    if (p_abort)
+        p_abort();
+    g_sup_bad = 1;
+    return 1;
+}
+
+static void sup_register_worker(int wid, unsigned incarnation, pid_t pid,
+                                int node) {
+    struct sup_proc *e = NULL;
+    if (!g_sup_on)
+        return;
+    for (int i = 0; i < g_sup_n; i++)
+        if (g_sup[i].active && g_sup[i].role == SUP_ROLE_WORKER &&
+            g_sup[i].wid == wid)
+            e = &g_sup[i];
+    if (!e) {
+        if (g_sup_n >= SUP_MAX_PROCS)
+            die("supervision registry full");
+        e = &g_sup[g_sup_n++];
+        memset(e, 0, sizeof *e);
+        e->active = 1;
+        e->role = SUP_ROLE_WORKER;
+        e->wid = wid;
+        e->note_fd = -1;
+    }
+    e->pid = pid;
+    e->incarnation = incarnation;
+    e->logical_node = node;
+    e->exit_known = 0;
+    e->exit_rc = 0;
+    fprintf(stderr,
+            "forkrun-sup: register role=worker wid=%d node=%d pid=%d "
+            "incarnation=%u\n", wid, node, (int)pid, incarnation);
+}
+
+/* Reconcile a worker reap against the registry. The wait status is the
+ * authority for reaping; this only records whether the identity the
+ * supervisor believed in is the one that actually died. */
+static void sup_reconcile_worker_reap(int wid, pid_t pid,
+                                      unsigned incarnation, int status) {
+    struct sup_proc *e;
+    if (!g_sup_on)
+        return;
+    e = sup_find_pid(pid);
+    if (!e || e->role != SUP_ROLE_WORKER || e->wid != wid ||
+        e->incarnation != incarnation) {
+        fprintf(stderr,
+                "forkrun-sup: stale worker reap wid=%d pid=%d incarnation=%u "
+                "-- ignored\n", wid, (int)pid, incarnation);
+        return;
+    }
+    (void)sup_apply_policy(e, status, 1);
+    sup_retire(e);
+}
+
+/* Read and reconcile one helper's death channel. A note that does not
+ * match the current generation is dropped (never applied to a
+ * replacement); EOF without a note means the child died without a
+ * statement, and waitpid alone classifies it. */
+static int sup_process_note(struct sup_proc *e, int block_ms) {
+    struct pollfd pf;
+    struct sup_note n;
+    ssize_t r;
+    int pr, st = 0;
+    pid_t w;
+
+    if (!e->active || e->note_fd < 0)
+        return 0;
+    pf.fd = e->note_fd;
+    pf.events = POLLIN;
+    pf.revents = 0;
+    pr = poll(&pf, 1, block_ms);
+    if (pr <= 0)
+        return 0;
+    if (!(pf.revents & (POLLIN | POLLHUP | POLLERR)))
+        return 0;
+    r = read(e->note_fd, &n, sizeof n);
+    if (r == (ssize_t)sizeof n && n.magic == SUP_NOTE_MAGIC)
+        (void)sup_reconcile_note(&n);
+    w = waitpid(e->pid, &st, WNOHANG);
+    if (w == e->pid) {
+        (void)sup_apply_policy(e, st, 1);
+        sup_retire(e);
+        return 1;
+    }
+    if (w < 0 && errno == ECHILD)
+        return 1;               /* reaped by the catch-all waitpid */
+    /* Waitability lags the write-end close by microseconds; yield
+     * rather than spin on the still-readable EOF. */
+    usleep(1000);
+    return 1;
+}
+
+static int sup_sweep(void) {
+    int did = 0;
+    if (!g_sup_on)
+        return 0;
+    for (int i = 0; i < g_sup_n; i++)
+        if (g_sup[i].active)
+            did |= sup_process_note(&g_sup[i], 0);
+    return did;
+}
+
+/* Block briefly on the registered death channels. The hook-mode
+ * supervision loop uses this when waitpid(-1, WNOHANG) found nothing,
+ * so a helper death is acted on without waiting for an unrelated
+ * worker to move. */
+static int sup_wait_note(int ms) {
+    if (!g_sup_on)
+        return 0;
+    for (int i = 0; i < g_sup_n; i++)
+        if (g_sup[i].active && g_sup[i].note_fd >= 0)
+            return sup_process_note(&g_sup[i], ms);
+    usleep((useconds_t)ms * 1000u);
+    return 0;
+}
+
+/* The sentinel helper is the only pipeline helper the launcher forks in
+ * this step. It is a REAL process registered under a real policy
+ * (INGEST): SIGKILL produces pipe EOF and no note, which the parent
+ * must classify as an abnormal, non-recoverable family death. It exits
+ * cleanly only when the launcher closes the control pipe at teardown,
+ * which also proves descriptor ownership: if any worker had inherited
+ * the write end, the sentinel would never see EOF. */
+static void sup_sentinel_child(int ctl_r, int note_w, unsigned incarnation) {
+    struct sup_note n;
+    char c;
+    die_with_parent();
+    cr_keep k;
+    keep_init(&k);
+    keep_add(&k, ctl_r);
+    keep_add(&k, note_w);
+    enter_child("sup-helper", &k);
+    for (;;) {
+        ssize_t rd = read(ctl_r, &c, 1);
+        if (rd < 0 && errno == EINTR)
+            continue;
+        break;
+    }
+    memset(&n, 0, sizeof n);
+    n.magic = SUP_NOTE_MAGIC;
+    n.role = SUP_ROLE_INGEST;
+    n.pid = (int32_t)getpid();
+    n.rc = 0;
+    n.incarnation = incarnation;
+    (void)write(note_w, &n, sizeof n);
+    _exit(0);
+}
+
+static void sup_fork_helper(void) {
+    int ctl[2], note[2];
+    pid_t p;
+    struct sup_proc *e;
+
+    if (!g_sup_on)
+        return;
+    if (pipe2(ctl, O_CLOEXEC) != 0)
+        die("pipe2(sup ctl)");
+    if (pipe2(note, O_CLOEXEC) != 0)
+        die("pipe2(sup note)");
+    p = fork();
+    if (p < 0)
+        die("fork(sup helper)");
+    if (p == 0) {
+        close(ctl[1]);
+        close(note[0]);
+        sup_sentinel_child(ctl[0], note[1], 0);
+        _exit(127);
+    }
+    close(ctl[0]);
+    close(note[1]);
+    g_sup_ctl_w = ctl[1];
+    if (g_sup_n >= SUP_MAX_PROCS)
+        die("supervision registry full");
+    e = &g_sup[g_sup_n++];
+    memset(e, 0, sizeof *e);
+    e->active = 1;
+    e->role = SUP_ROLE_INGEST;
+    e->wid = -1;
+    e->logical_node = -1;
+    e->pid = p;
+    e->incarnation = 0;
+    e->note_fd = note[0];
+    fprintf(stderr,
+            "forkrun-sup: register role=ingest wid=-1 node=-1 pid=%d "
+            "incarnation=0\n", (int)p);
+}
+
+static int sup_helper_active(void) {
+    for (int i = 0; i < g_sup_n; i++)
+        if (g_sup[i].active && g_sup[i].role != SUP_ROLE_WORKER)
+            return 1;
+    return 0;
+}
+
+/* Bounded, one-shot guillotine for helper families. Workers are owned
+ * by kill_all(); this only addresses the registry's helpers. Reports
+ * leftovers rather than waiting forever. */
+static void sup_guillotine(void) {
+    long t0;
+    int signalled = 0, reaped = 0;
+    if (!g_sup_on)
+        return;
+    if (g_sup_ctl_w >= 0) {
+        close(g_sup_ctl_w);
+        g_sup_ctl_w = -1;
+    }
+    for (int i = 0; i < g_sup_n; i++)
+        if (g_sup[i].active && g_sup[i].role != SUP_ROLE_WORKER) {
+            (void)kill(g_sup[i].pid, SIGKILL);
+            signalled++;
+        }
+    t0 = now_ns();
+    for (int round = 0; round < SUP_REAP_BUDGET_MS / 10; round++) {
+        int live = 0;
+        for (int i = 0; i < g_sup_n; i++) {
+            struct sup_proc *e = &g_sup[i];
+            int st = 0;
+            pid_t w;
+            if (!e->active || e->role == SUP_ROLE_WORKER)
+                continue;
+            w = waitpid(e->pid, &st, WNOHANG);
+            if (w == e->pid || (w < 0 && errno == ECHILD)) {
+                sup_retire(e);
+                reaped++;
+            } else {
+                live++;
+            }
+        }
+        if (!live)
+            break;
+        usleep(10000);
+    }
+    fprintf(stderr,
+            "forkrun-sup: guillotine signalled=%d reaped=%d leftover=%d "
+            "ms=%.1f\n", signalled, reaped, sup_helper_active(),
+            (double)(now_ns() - t0) / 1e6);
+}
+
+/* Success-path helper stop: close the control channel, wait for the
+ * sentinel's clean exit and note within the budget, and fall back to
+ * the guillotine if it will not go. A helper that refuses to exit is a
+ * descriptor-ownership bug, so it is reported as fatal for the run. */
+static int sup_stop_helpers(void) {
+    if (!g_sup_on)
+        return 0;
+    if (g_sup_ctl_w >= 0) {
+        close(g_sup_ctl_w);
+        g_sup_ctl_w = -1;
+    }
+    for (int round = 0; round < SUP_REAP_BUDGET_MS / 10; round++) {
+        if (!sup_helper_active())
+            return 0;
+        (void)sup_sweep();
+        if (!sup_helper_active())
+            return 0;
+        usleep(10000);
+    }
+    fprintf(stderr,
+            "forkrun-sup: helper survived control EOF past the reap budget "
+            "-- guillotine\n");
+    sup_guillotine();
+    return sup_helper_active() ? -1 : 0;
+}
+
 static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
                        int fall_w, fn_worker_plugin_loop wloop,
                        fn_worker_spawn_loop s_wloop,
@@ -2136,6 +2561,11 @@ int main(int argc, char **argv) {
         die("invalid worker arguments");
     }
 
+    /* W-EXP-2 step B: typed registry + sentinel helper. Both are inert
+     * unless FORKRUN_SUPERVISE_TYPED is set; production is unchanged. */
+    sup_init();
+    sup_fork_helper();
+
     /* workers */
     for (int i = 0; i < o.workers; i++) {
         pid_t p = spawn_wid(i, memfd, out_fds[i], sigp[1], fallp[1],
@@ -2145,6 +2575,7 @@ int main(int argc, char **argv) {
         if (p < 0) die("fork(worker)");
         pids[i] = p;
         live++;
+        sup_register_worker(i, 0, p, 0);
     }
     /* Keep a SPARE of the write ends for respawns, exactly as run.py's
      * spare_signal_w does, then drop the originals so EOF still means
@@ -2308,7 +2739,19 @@ int main(int argc, char **argv) {
                   FR_TRACE_NA, FR_TRACE_NA, 0, live);
     while (live > 0 && !bad) {
         int st = 0;
-        pid_t p = waitpid(-1, &st, 0);
+        pid_t p;
+        if (g_sup_on) {
+            (void)sup_sweep();
+            if (g_sup_bad) { bad = 1; break; }
+            p = waitpid(-1, &st, WNOHANG);
+            if (p == 0) {
+                (void)sup_wait_note(50);
+                if (g_sup_bad) { bad = 1; break; }
+                continue;
+            }
+        } else {
+            p = waitpid(-1, &st, 0);
+        }
         if (p < 0) {
             if (errno == EINTR)
                 continue;
@@ -2341,6 +2784,17 @@ int main(int argc, char **argv) {
         for (int i = 0; i < o.workers; i++)
             if (pids[i] == p) { wid = i; break; }
         if (wid < 0) {
+            if (g_sup_on) {
+                struct sup_proc *se = sup_find_pid(p);
+                if (se && se->role != SUP_ROLE_WORKER) {
+                    if (sup_apply_policy(se, st, 1))
+                        bad = 1;
+                    sup_retire(se);
+                    if (bad)
+                        break;
+                    continue;
+                }
+            }
             /* A helper death is NOT a neutral event. Both references
              * treat it as fatal: bash's ring_poll watches the scanner
              * and fallow death pipes alongside the worker ones, and
@@ -2400,6 +2854,8 @@ int main(int argc, char **argv) {
          * that surviving descendant is exactly what must be killed. */
         pid_t dead_wid = pids[wid];
         pids[wid] = -1;
+        sup_reconcile_worker_reap(wid, dead_wid,
+                                  (unsigned)incarn[wid], st);
         /* DECISION-03 section 7.3 -- the worker-exit POLICY.
          *
          * The fail-fast branch RETURNS before the recovery call is ever
@@ -2563,6 +3019,34 @@ int main(int argc, char **argv) {
         if (np < 0) { bad = 1; break; }
         pids[wid] = np;
         live++;
+        if (g_sup_on) {
+            unsigned prev_inc = (unsigned)incarn[wid] - 1u;
+            sup_register_worker(wid, (unsigned)incarn[wid], np, 0);
+            if (getenv("FORKRUN_TEST_STALE_NOTE_AFTER_RESPAWN") != NULL) {
+                /* Two stale shapes, both of which must be dropped:
+                 * the retired pid, and the CURRENT pid carrying the
+                 * previous incarnation. The second one is the reason
+                 * the incarnation is part of the identity -- pid reuse
+                 * alone cannot reject it. */
+                struct sup_note old_pid = {
+                    SUP_NOTE_MAGIC, (uint32_t)SUP_ROLE_WORKER,
+                    (int32_t)dead_wid, 137, prev_inc, 0
+                };
+                struct sup_note old_gen = {
+                    SUP_NOTE_MAGIC, (uint32_t)SUP_ROLE_WORKER,
+                    (int32_t)np, 137, prev_inc, 0
+                };
+                int rejected;
+                (void)sup_reconcile_note(&old_pid);
+                rejected = !sup_reconcile_note(&old_gen);
+                fprintf(stderr,
+                        "forkrun-sup: stale-check role=worker wid=%d pid=%d "
+                        "given_incarnation=%u current_incarnation=%u "
+                        "rejected=%d\n",
+                        wid, (int)np, prev_inc, (unsigned)incarn[wid],
+                        rejected);
+            }
+        }
         fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_SUP_RESPAWN,
                       (int32_t)wid, (int32_t)incarn[wid], 0, (int32_t)np);
         if (o.verbose)
@@ -2574,6 +3058,8 @@ int main(int argc, char **argv) {
     if (o.verbose)
         fprintf(stderr, "LOOP_DONE live=%d bad=%d spill_done=%d\n", live,
                 bad, spill_done);
+    if (g_sup_on && sup_stop_helpers() != 0)
+        bad = 1;
 
     /* ---- CR-FIX1-B: fatal teardown is bounded ----
      *
@@ -2592,6 +3078,7 @@ int main(int argc, char **argv) {
      * A failed run reports failure; it does not try to finish. */
     if (bad) {
         if (p_abort) p_abort();
+        sup_guillotine();
         int n_slots = o.workers + 4;
         pid_t *slots = calloc((size_t)n_slots, sizeof(pid_t));
         if (slots) {

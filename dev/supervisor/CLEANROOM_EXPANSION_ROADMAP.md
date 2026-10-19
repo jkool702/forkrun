@@ -318,6 +318,72 @@ compare the engine's own committed count rather than an arithmetic
 expectation; a `ceil()` formula would have reported a false shortfall on every
 NUMA run.
 
+#### W-EXP-2 step B — typed supervision substrate (implemented, opt-in)
+
+**Status: gate met.** `forkrun_cleanroom.c` now carries a typed family
+registry (`enum sup_role`, `g_sup_policy`, `struct sup_proc`). It is **inert
+unless `FORKRUN_SUPERVISE_TYPED=1`**: with the variable absent, every
+registry call returns without touching the loop, and the supervision loop is
+the original blocking `waitpid(-1, &st, 0)`. Production behaviour is
+unchanged, which is asserted by a dedicated test.
+
+**Role / policy inventory (the required written model).** Identity is what a
+death notification must match before it is acted on; nothing is inferred from
+a pid alone.
+
+| Role | Identity on death | Recoverable | Node scope | Policy on abnormal death |
+|---|---|---|---|---|
+| `worker` | `(wid, incarnation, node)` | **yes** | logical node, stable across respawn | recover, then respawn the *same* wid/node with `incarnation+1`; bounded by `--retry` and `--respawn-cap` |
+| `orderer` | `(role, pid, incarnation)` | no | whole run | fatal: output correctness depends on it |
+| `indexer` | `(role, pid, incarnation)` | no | whole run | fatal: the ring cannot be built without it |
+| `scanner` | `(role, pid, incarnation)` | no | whole run | fatal: its finalization (EOF blast) is what releases workers |
+| `fallow` | `(role, pid, incarnation)` | no | whole run | fatal: escrow/reclamation stops |
+| `ingest` | `(role, pid, incarnation)` | no | whole run | fatal on abnormal death; a clean exit is EOF and benign |
+| `drain` | `(role, pid, incarnation)` | no | whole run | fatal: no output can be delivered |
+
+The table has no default arm: `SUP_ROLE__COUNT` is the loop bound and every
+role is initialised explicitly. Helper families are **not** recoverable:
+re-forking one would resume with a different pipeline generation and no
+re-execution capability, which W-EXP-2 forbids inventing.
+
+**Death notification identity, not just a pipe.** A helper's note is a fixed
+record `{magic, role, pid, rc, incarnation}`. It is applied only when
+`(role, pid, incarnation)` matches the generation registered **now**; a stale
+note is logged (`forkrun-sup: stale note ... -- ignored`) and dropped, so it
+cannot reach a replacement. EOF without a valid note is classified by
+`waitpid` alone; the pipe is the notification channel, the registry match is
+the proof. Worker deaths still classify from the wait status, and the typed
+mode reconciles the reaped `(wid, pid, incarnation)` against the registry
+without moving policy into the reaper.
+
+**The sentinel.** The only helper this step actually forks is a sentinel
+registered as `ingest`. It is a real long-lived process whose control pipe is
+owned by the launcher: closing it at teardown yields a clean exit and a clean
+note, while `SIGKILL` yields EOF with no note and must be classified as an
+abnormal, non-recoverable family death. Because every worker scrubs that
+write end, the sentinel's clean exit doubles as a descriptor-ownership proof.
+
+**Bounded teardown.** `sup_guillotine()` signals each registered helper once
+and reaps within `SUP_REAP_BUDGET_MS` (2 s), reporting `leftover=` rather than
+blocking. The success path's `sup_stop_helpers()` closes the control channel,
+waits the same budget and falls back to the guillotine; a helper that refuses
+to exit is reported as fatal.
+
+**Tests** (`python/tests/test_supervision_substrate.py`): policy inventory is
+explicit; worker respawn keeps the node and increments the incarnation; a
+stale note is ignored and does not disturb the replacement; a fatal helper
+death aborts within bound with no surviving registered descendants; two fatal
+events in flight converge on one bounded abort; a healthy run reaps the
+sentinel cleanly; the registry is completely inert without the env hook.
+Every case drives the launcher as a real process and asserts the injection
+actually fired.
+
+**Limits, stated rather than implied.** Helpers other than the sentinel are
+not yet forked by the launcher, so their policies are modelled and tested as
+data, not exercised as live process families; wiring the real NUMA helpers is
+step C. Everything here is logical-identity validation on a single physical
+NUMA node. No spawn-pipe/W-EXP-3 work is included.
+
 #### Hard dependency graph (corrected — the previous list was incomplete)
 
 * **Phase 0** contracts and measurements gate the expansion work they inform.
