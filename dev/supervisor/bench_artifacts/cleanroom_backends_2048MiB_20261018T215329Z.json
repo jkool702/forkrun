@@ -19,7 +19,7 @@
     "dev/supervisor/bench_artifacts/cleanroom_backends_2048MiB_20261018T215329Z.json"
   ],
   "isolation": "one subprocess per mapping cell, so no cell can inherit another's mappings",
-  "per_trial_verification": "record count AND exact payload token set, checked after the timer stopped",
+  "per_trial_verification": "record count AND exact payload token multiset (Counter), checked after the timer stopped",
   "cells": [
     {
       "cell": "MAP_PRIVATE (proxy for private inherited writable memory)",
@@ -118,7 +118,7 @@
         "min": 5,
         "max": 5
       },
-      "per_trial_verification": "record count AND exact payload token set checked after the timer stopped",
+      "per_trial_verification": "record count AND exact payload token multiset (Counter), checked after the timer stopped",
       "smaps": [
         {
           "range": "562f6b904000-562febe1a000",
@@ -230,7 +230,7 @@
         "min": 5,
         "max": 5
       },
-      "per_trial_verification": "record count AND exact payload token set checked after the timer stopped",
+      "per_trial_verification": "record count AND exact payload token multiset (Counter), checked after the timer stopped",
       "smaps": [
         {
           "range": "7fbcd0600000-7fbd50600000",

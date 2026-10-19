@@ -88,6 +88,19 @@ sys.path.insert(0, os.path.join(_ROOT, "python"))
 
 BACKENDS = ("forkexec", "posix_spawn")
 
+# The description of the per-trial content check, in ONE place.
+#
+# Stage 5.5: this used to be written out literally at three emission sites
+# and had already drifted -- the aggregate and per-cell forms differed by a
+# comma -- and both said "payload token set" while the implementation has
+# compared a collections.Counter since Stage 5.3. A set discards
+# multiplicity, so the string described a weaker check than the one that
+# runs. One constant now feeds the artifact aggregate, the per-cell
+# metadata, and the console line, so they cannot diverge again.
+PER_TRIAL_VERIFICATION = (
+    "record count AND exact payload token multiset (Counter), checked "
+    "after the timer stopped")
+
 
 # ---------------------------------------------------------------- evidence
 
@@ -450,8 +463,7 @@ def run_cell(name, ballast, spec, src, run_mod, probe, reps, expected,
         "median_delta_pct": round(-pct, 1),
         "fd_count": {"before": fds_before,
                      "min": min(fds), "max": max(fds)},
-        "per_trial_verification": "record count AND exact payload token set "
-                                  "checked after the timer stopped",
+        "per_trial_verification": PER_TRIAL_VERIFICATION,
     }
     artifact["cells"].append(cell)
 
@@ -475,8 +487,10 @@ def run_cell(name, ballast, spec, src, run_mod, probe, reps, expected,
           % (iso["forkexec"] or 0.0, iso["posix_spawn"] or 0.0))
     print("    open fds across trials: %d..%d (no accumulation expected)"
           % (cell["fd_count"]["min"], cell["fd_count"]["max"]))
-    print("    per-trial verification: record count AND exact payload token "
-          "set (%d tokens), checked after the timer stopped" % len(want_tokens))
+    print("    per-trial verification: %s (%d distinct tokens, %d total "
+          "occurrences)"
+          % (PER_TRIAL_VERIFICATION, len(want_tokens),
+             sum(want_tokens.values())))
     # Keep the ballast alive until every number above is computed.
     return ballast
 
@@ -627,8 +641,7 @@ def main():
         "argv": sys.argv,
         "isolation": "one subprocess per mapping cell, so no cell can "
                      "inherit another's mappings",
-        "per_trial_verification": "record count AND exact payload token "
-                                  "set, checked after the timer stopped",
+        "per_trial_verification": PER_TRIAL_VERIFICATION,
         "cells": [],
     }
 

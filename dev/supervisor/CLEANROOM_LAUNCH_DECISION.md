@@ -680,21 +680,55 @@ reachable through the private `_set_cleanroom_launch_backend()` for
 regression bisection; no public API and no environment variable selects the
 backend, so F7's contract is identical either way.
 
+### Evidence levels — read these as different grades of evidence
+
+This summary previously cited the small-parent, 1 GiB and 2 GiB figures as
+though they were established results. They are not, and the difference
+matters when a reader is deciding whether to rely on them:
+
+* **Preliminary / indicative.** The small-parent (−1.8%), 1 GiB (−22.5%)
+  and 2 GiB (−32.9%) end-to-end figures are the FIRST measurement: five
+  samples, alternating backends, **no paired trials and no verified
+  mapping control**. They are retained as historical evidence and are not
+  deleted, but they have **not** been remeasured under the controlled
+  methodology, and they should be read as indicative only.
+* **Controlled.** The later experiment used 15 paired/interleaved
+  repetitions at 2048 MiB, ran each mapping in its own process, and
+  verified the ballast's mapping from the VMA permission word. It observed
+  a **−31.6%** median end-to-end delta for the verified private-memory proxy
+  (paired difference 62.85 ms, range [56.98, 68.98] — every pair large and
+  positive).
+* **Control.** The same rig measured the shared mapping at **−3.5%** with a
+  paired range of [-3.20, 18.62], which spans zero. The honest reading is
+  **no measurable difference**, not "a small improvement".
+
+Two limits on the controlled result, stated here so they are not lost in
+§8.1:
+
+* The controlled `MAP_PRIVATE` ballast is a **proxy for inherited private
+  writable memory**, not an exact reproduction of CPython's arena
+  allocation pattern, fragmentation history or growth curve.
+* The measured percentage describes **this** host and **this** workload.
+  It does not generalise to other hosts, workloads or launch counts, and it
+  is not claimed to.
+
 *This section originally said the opposite, and said it for a reason that
-has since been shown to be wrong — see §8.1. The objection below was
-"the benefit is ~0 for small parents", which was measured with a
-`MAP_SHARED` ballast that never carried the `fork()` tax. The benefit is
-indeed ~0 for small parents; it is −22.5% at 1 GiB and −32.9% at 2 GiB of
-real Python heap. The history is retained rather than rewritten so the
-correction is visible.*
+has since been shown to be wrong — see §8.1. The objection was "the benefit
+is ~0 for small parents", which was measured with a `MAP_SHARED` ballast
+that never carried the `fork()` tax at all. The history is retained rather
+than rewritten so the correction stays visible.*
 
 Reasons, in order of weight:
 
-1. **The benefit is real but conditional, and is now quantified.**
-   Small parents: −1.8%, which is noise. Parents whose address space is
-   dominated by private anonymous memory — ordinary CPython arena growth —
-   get tens of percent (see §8.1). The earlier "benefit is ~0" claim was
-   an artefact of ballast that was `MAP_SHARED`.
+1. **The benefit is real but conditional, and the controlled experiment
+   quantifies it at one size.** The verified private-memory proxy at
+   2048 MiB shows **−31.6%**; the shared control shows no measurable
+   difference. The small-parent and 1 GiB figures remain preliminary and
+   were not remeasured under the controlled rig, so the *magnitude* at
+   those sizes is not established — only that the mechanism depends on how
+   much of the parent's address space is private anonymous memory. The
+   earlier "benefit is ~0" claim was an artefact of `MAP_SHARED` ballast.
+
 2. **Descriptor tightening is not authorised and is not part of the
    candidate.** Equivalence-first means reproducing today's set, including
    the unrelated inheritable descriptors that currently leak into the

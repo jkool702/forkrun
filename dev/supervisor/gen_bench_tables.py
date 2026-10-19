@@ -167,9 +167,37 @@ def render_decomp():
 
 DECISION = os.path.join(_HERE, "CLEANROOM_LAUNCH_DECISION.md")
 
-# Header rows that must appear exactly once in the whole document. These are
-# matched verbatim, so a duplicate table with even slightly different wording
-# is still caught by the region comparison or by a reviewer reading it.
+# WHAT THIS CHECKER GUARANTEES -- and, more usefully, what it does not.
+#
+# Enforced mechanically, today:
+#
+#   1. Each marked GENERATED region matches, byte for byte, the tables
+#      rendered from the currently committed artifacts. That pins value,
+#      sign, row order, formatting and the artifact filename inside the
+#      region.
+#   2. Each header string listed in _TABLE_HEADERS occurs EXACTLY ONCE in
+#      the whole document.
+#   3. Each configured BEGIN/END marker occurs EXACTLY ONCE.
+#
+# NOT guaranteed, and deliberately not claimed:
+#
+#   * This is NOT a general Markdown duplicate-table detector. Rule 2
+#     recognises only the literal header strings configured below. A
+#     duplicated benchmark table whose header has been materially reworded
+#     -- different column names, a reformat, a rewritten separator row --
+#     would NOT be counted by rule 2, and because it would sit outside the
+#     markers, rule 1 would not see it either.
+#   * The same applies to a duplicate that reuses a configured header but
+#     lives inside a region the checker does not compare.
+#
+# So a reworded duplicate is caught by a reviewer, not by this script. That
+# is a real limit and is stated here rather than papered over. Closing it
+# properly means parsing Markdown tables, which is a redesign of this
+# checker and was explicitly out of scope.
+#
+# Matching is verbatim; the strings below are the headers the generator
+# currently emits. If the generator's header wording changes, these must
+# change with it or rule 2 will start reporting a spurious count.
 _TABLE_HEADERS = (
     ("| mapping | fork+execv (sd) | posix_spawn (sd) |", "end-to-end"),
     ("| | measurement | timer window contains | median |", "decomposition"),
@@ -225,13 +253,17 @@ def check():
         problems.append("the decomposition table does not match the artifact")
         for line in _diff(have_dec.splitlines(), dec_now.strip().splitlines()):
             problems.append("    " + line)
-    # A DUPLICATE benchmark table outside the markers. Comparing the marked
-    # regions alone is not enough: an obsolete table left beside a correct
-    # generated one passes, and it is free to contradict it. Stage 5.3
-    # shipped exactly that -- an unmarked table carrying the previous run's
-    # numbers and the withdrawn "excludes teardown" wording, sitting directly
-    # above the corrected generated table. A reader comparing the two sees a
-    # contradiction, and the check reported the document as clean.
+    # Duplicate detection, for the CONFIGURED HEADERS ONLY. Comparing the
+    # marked regions alone is not enough: an obsolete table left beside a
+    # correct generated one passes rule 1, and it is free to contradict it.
+    # Stage 5.3 shipped exactly that -- an unmarked table carrying the
+    # previous run's numbers and the withdrawn "excludes teardown" wording,
+    # sitting directly above the corrected generated table, while the check
+    # reported the document as clean.
+    #
+    # Scope limit, stated in the _TABLE_HEADERS comment above: this counts
+    # the exact configured header strings. It is not a general Markdown
+    # duplicate-table detector and does not claim to be.
     for header, label in _TABLE_HEADERS:
         n = doc.count(header)
         if n != 1:

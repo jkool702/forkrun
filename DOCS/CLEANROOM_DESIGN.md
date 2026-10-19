@@ -91,9 +91,18 @@ mappings: with 2 GiB of heap ballast, fork+exec costs ~70 ms. But
 which does **not** carry the tax (~1.8 ms). An end-to-end timing that
 ballasted the parent that way showed no benefit at all — not because the
 benefit is illusory, but because it had constructed a parent that never
-had the cost to remove. Measured end to end on this repo's own route with
-realistic Python-heap ballast: 0 MiB −1.8% (noise), 1 GiB −22.5%,
-2 GiB −32.9%.
+had the cost to remove.
+
+The first end-to-end measurement gave 0 MiB −1.8% (noise), 1 GiB −22.5%,
+2 GiB −32.9% — five samples, no paired trials, no verified mapping
+control, so treat those three as preliminary. A later controlled run (15
+paired/interleaved repetitions, one process per mapping type, ballast
+mapping verified from the VMA permission word) measured **−31.6% at
+2 GiB**, within the same band. The 0 MiB and 1 GiB sizes were not
+remeasured under that rig. The controlled ballast is a *proxy* for
+inherited private writable memory, not a reproduction of CPython's arena
+allocation pattern, and the figure describes this host and this workload
+only.
 
 **The mechanism described here is CORRECT and needed no correction.**
 glibc implements `posix_spawn` with the `clone` syscall using
