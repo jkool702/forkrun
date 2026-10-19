@@ -317,6 +317,20 @@ int fr_py_ingest_done(void) {
     return 0;
 }
 
+/* Bind the LOGICAL node the next fr_py_worker_init call will use.
+ *
+ * -1 clears the binding, which restores the historical behaviour: the
+ * node argument of fr_py_worker_init decides. The binding exists so the
+ * multi-node launcher can select a ring without a second copy of the
+ * worker loop body (the parity test requires the three modes to share
+ * one lifecycle, and a duplicate body would be a fourth place for a fix
+ * to miss). */
+static int g_fr_bound_node = -1;
+
+void fr_py_worker_bind_node(int node_id) {
+    g_fr_bound_node = node_id;
+}
+
 /* Initialize worker-local state in the CALLING process (call post-fork).
  * Fills g_fr_config directly — no env vars, no bash. Mirrors the
  * ring_worker inc fill point plus node resolution and active_workers
@@ -328,6 +342,10 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
     if (!state || !g_state)
         return 1;
     g_fr_config.ring_wid = wid;
+    /* A bound node (the multi-node launcher's selector) OVERRIDES the
+     * argument, and is range-checked exactly as the argument is. */
+    if (g_fr_bound_node >= 0)
+        node_id = g_fr_bound_node;
     if (node_id >= 0 && node_id < (int)global_num_nodes)
         g_fr_config.ring_node_id = node_id;
     else
@@ -3961,6 +3979,40 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
         fr_py_escrow_deposit(claimed.num_kills + 1);
         continue;
     }
+}
+
+/* Node-taking plugin loop (W-EXP-2 step C).
+ *
+ * The loop body is NOT duplicated: it lives in fr_py_worker_plugin_loop,
+ * and this entry point runs it with the node bound first. The three
+ * worker modes share one lifecycle (poison skip, zero-length sentinel,
+ * the whole on_error ladder) and the parity test enforces that; a
+ * fourth copy of the body would be a fourth place for a fix to miss.
+ *
+ * The node is applied by setting the ring node id BEFORE the loop's own
+ * fr_py_worker_init call, which then reads it. node_id < 0 is refused:
+ * the launcher's own validation already rejects a bad topology, and an
+ * unbound worker would silently claim the wrong ring.
+ *
+ * 0 IS NOT INTERCHANGEABLE WITH -1 for the node: fr_py_worker_init maps
+ * a node_id < 0 to ring_node_id = -1, and the C0.7 commit counter is
+ * attributed BY ring_node_id, so with -1 it is skipped entirely and
+ * every run reports ZERO committed DATA frames. */
+int fr_py_worker_plugin_loop_numa(int wid, const char *path,
+                                  const char *func_name, int ingress_fd,
+                                  int out_fd, int signal_fd, int fallow_fd,
+                                  int order_fd, int trap_ack_fd,
+                                  int wincarn, int retry_limit,
+                                  int on_error, int node_id) {
+    if (node_id < 0)
+        return 1;
+    fr_py_worker_bind_node(node_id);
+    int rc = fr_py_worker_plugin_loop(wid, path, func_name, ingress_fd,
+                                      out_fd, signal_fd, fallow_fd,
+                                      order_fd, trap_ack_fd, wincarn,
+                                      retry_limit, on_error);
+    fr_py_worker_bind_node(-1);
+    return rc;
 }
 
 

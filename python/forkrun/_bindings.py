@@ -163,6 +163,28 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # W-EXP-2 step C: the same plugin loop with an explicit logical
+        # node id (last argument). The exec-based cleanroom launcher
+        # resolves this by name; Python keeps the binding so the ABI
+        # surface stays fully covered by the drift check.
+        lib.fr_py_worker_plugin_loop_numa.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int]
+        lib.fr_py_worker_plugin_loop_numa.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # Bind the logical node the next fr_py_worker_init call uses.
+        # Used by the multi-node launcher to select a ring without a
+        # second copy of the worker loop body.
+        lib.fr_py_worker_bind_node.argtypes = [ctypes.c_int]
+        lib.fr_py_worker_bind_node.restype = None
+    except AttributeError:
+        pass
+    try:
         # W-PY33: C spawn worker loop (claim→spawn→signal→ack).
         # argv: NULL-terminated arg vector; argc is a redundancy
         # check (argv[argc] must be NULL). Rest mirrors the plugin

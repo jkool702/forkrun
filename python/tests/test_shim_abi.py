@@ -269,7 +269,34 @@ class TestShimBindings(unittest.TestCase):
         # symbol except the cleanroom launcher, which treats "no symbol",
         # "symbol says disabled", and "symbol says enabled" as three
         # distinct cases and only certifies in the third.
-        self.assertEqual((n_ext, n_st), (56, 16),
+        #
+        # W-EXP-2 step C adds ONE extern:
+        #
+        #   extern  fr_py_worker_plugin_loop_numa
+        #                                 The plugin loop with an explicit
+        #                                 logical node id. It is the same
+        #                                 loop body; fr_py_worker_init
+        #                                 already accepted node_id and the
+        #                                 Python paths already supply it,
+        #                                 so this only exposes an existing
+        #                                 operation to the exec-based
+        #                                 launcher. fr_py_worker_plugin_loop
+        #                                 is unchanged. No existing symbol
+        #                                 changed signature.
+        #
+        #   extern  fr_py_worker_bind_node
+        #                                 Bind the logical node the next
+        #                                 fr_py_worker_init call will use.
+        #                                 It exists so the multi-node
+        #                                 launcher can select a ring
+        #                                 WITHOUT a second copy of the
+        #                                 worker loop body: the parity
+        #                                 test requires the three worker
+        #                                 modes to share one lifecycle, and
+        #                                 a duplicated body would be a
+        #                                 fourth place for a fix to miss.
+        #                                 Inert (-1) unless called.
+        self.assertEqual((n_ext, n_st), (58, 16),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

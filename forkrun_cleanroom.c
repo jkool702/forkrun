@@ -165,6 +165,24 @@ static fn_abort_reason_fn p_abort_reason;
 
 typedef int (*fn_drain_loop)(int signal_r, const int *out_fds,
                              int num_workers, int results_fd, int mode);
+/* W-EXP-2 step C: NUMA entry points already exported by the substrate
+ * (see _shim.c). The launcher resolves them only when --nodes > 1 and
+ * refuses to start if one is missing. */
+typedef int (*fn_init_numa)(int lines, int bytes, int num_nodes,
+                            const char *numa_map);
+typedef int (*fn_numa_ingest)(int infd, int outfd, int num_nodes);
+typedef int (*fn_indexer_numa)(int memfd, int node);
+typedef int (*fn_numa_scanner)(int memfd, int node, int spawn_fd,
+                               int num_nodes);
+typedef int (*fn_fallow_phys)(int fd_in, int fd_file);
+typedef int (*fn_orderer)(int order_r, int output_fd, int unordered,
+                          int numa);
+typedef int (*fn_eof_posted)(void);
+static fn_eof_posted p_eof_posted;   /* engine-backed ingest completion */
+typedef int (*fn_worker_plugin_loop_numa)(int wid, const char *path,
+        const char *func_name, int ingress_fd, int out_fd, int signal_fd,
+        int fallow_fd, int order_fd, int trap_ack_fd, int wincarn,
+        int retry_limit, int on_error, int node_id);
 
 struct opts {
     const char *so_path;
@@ -200,6 +218,9 @@ struct opts {
     int fork_only;
     int trace_fd;       /* opt-in structured trace; -1 = disabled */
     int supervise;      /* 1 = recover+respawn, 0 = fail-fast (DECISION-03) */
+    int num_nodes;      /* 1 = UMA; >1 selects the NUMA pipeline */
+    const char *numa_map;   /* comma-separated physical IDs, --nodes long */
+    int order_index;    /* run the C orderer (NUMA only) */
 };
 
 static int fr_memfd_create(const char *name) {
@@ -302,7 +323,23 @@ static int snap_fds(int *out, int max, int *truncated) {
  * Either way, an incomplete enumeration is an error, never a silent
  * success. */
 
-#define CR_MAX_KEEP 256
+/* The keep-list is a per-child descriptor set, and the DRAIN child must
+ * hold one output descriptor PER WORKER. The old fixed 256 therefore
+ * capped the launcher at ~250 workers -- silently, and as a confusing
+ * "child could not be given a complete descriptor set" failure in the
+ * middle of startup.
+ *
+ * The bound is now derived from the ENGINE's own worker ceiling
+ * (MAX_TXN_WORKERS = 1024 in forkrun_ring.c:1535): a worker id at or
+ * above that is rejected by the engine itself, so a larger keep-list
+ * would only describe configurations the engine cannot run. The
+ * headroom covers the other descriptors a child keeps (engine eventfds,
+ * the signal/fallow/order pipes, the source and result descriptors).
+ *
+ * A configuration above this is refused BEFORE any fork, with the
+ * count it would have needed -- never discovered halfway through
+ * startup. */
+#define CR_MAX_KEEP (1024 + 64)
 
 typedef struct {
     int fd[CR_MAX_KEEP];
@@ -1190,9 +1227,12 @@ static int fr_validate_worker_desc(const worker_desc *d) {
 static int fr_run_worker(const worker_desc *d,
                          fn_worker_plugin_loop p_wloop,
                          fn_worker_spawn_loop s_wloop,
+                         fn_worker_plugin_loop_numa p_wnuma,
                          int wid, int ingress_fd, int out_fd,
-                         int signal_fd, int fallow_fd, int trap_ack_fd,
-                         int wincarn, int retry_limit, int on_error) {
+                         int signal_fd, int fallow_fd, int order_fd,
+                         int trap_ack_fd,
+                         int wincarn, int retry_limit, int on_error,
+                         int node) {
     switch (d->kind) {
     case WK_SPAWN:
         if (!s_wloop)
@@ -1208,11 +1248,15 @@ static int fr_run_worker(const worker_desc *d,
                        on_error);
     case WK_PLUGIN:
     default:
+        if (p_wnuma != NULL && node >= 0)
+            return p_wnuma(wid, d->a, d->b, ingress_fd, out_fd,
+                           signal_fd, fallow_fd, order_fd, trap_ack_fd,
+                           wincarn, retry_limit, on_error, node);
         if (!p_wloop)
             return UDF_SETUP_GENERIC;
         return p_wloop(wid, d->a, d->b, ingress_fd, out_fd, signal_fd,
-                       fallow_fd, -1, trap_ack_fd, wincarn, retry_limit,
-                       on_error);
+                       fallow_fd, order_fd, trap_ack_fd, wincarn,
+                       retry_limit, on_error);
     }
 }
 
@@ -1302,14 +1346,22 @@ static const char *sup_clean_name(enum sup_clean_window w) {
 static const struct sup_policy g_sup_policy[SUP_ROLE__COUNT] = {
     [SUP_ROLE_WORKER]  = { "worker",  1, 1, SUP_CLEAN_NEVER },
     [SUP_ROLE_ORDERER] = { "orderer", 0, 0, SUP_CLEAN_AT_TEARDOWN },
-    [SUP_ROLE_INDEXER] = { "indexer", 0, 0, SUP_CLEAN_AT_TEARDOWN },
-    [SUP_ROLE_SCANNER] = { "scanner", 0, 0, SUP_CLEAN_AT_TEARDOWN },
+    /* Step C: indexer/scanner complete when ingest EOF is POSTED, not
+     * when the launcher begins teardown. They legitimately exit before
+     * the supervision loop ends. The evidence is the engine's own
+     * sentinel (fr_py_ingest_eof_posted), never the child's exit status. */
+    [SUP_ROLE_INDEXER] = { "indexer", 0, 0, SUP_CLEAN_AT_EOF },
+    [SUP_ROLE_SCANNER] = { "scanner", 0, 0, SUP_CLEAN_AT_EOF },
     [SUP_ROLE_FALLOW]  = { "fallow",  0, 0, SUP_CLEAN_AT_TEARDOWN },
     [SUP_ROLE_INGEST]  = { "ingest",  0, 0, SUP_CLEAN_AT_EOF },
     [SUP_ROLE_DRAIN]   = { "drain",   0, 0, SUP_CLEAN_AT_TEARDOWN },
 };
 
-#define SUP_MAX_PROCS     520
+/* Explicit supported ceiling. The registry itself is sized from the
+ * requested topology (workers + helpers); this only bounds absurd
+ * requests before anything is forked. 512 workers + 2*nodes helpers is
+ * well inside it for the engine's 512-node ceiling. */
+#define SUP_MAX_PROCS_HARD 8192
 #define SUP_NOTE_MAGIC    0x53555042u   /* "SUPB" */
 #define SUP_REAP_BUDGET_MS 2000
 /* A clean exit is only expected when the child also published the
@@ -1348,31 +1400,39 @@ struct sup_proc {
 static int g_sup_on;
 static int g_sup_bad;
 static int g_sup_stopping;
-static int g_sup_max = SUP_MAX_PROCS;
+static int g_sup_max;
 static int g_sup_ctl_w = -1;
-static struct sup_proc g_sup[SUP_MAX_PROCS];
+static struct sup_proc *g_sup;
 static int g_sup_n;
 
-static void sup_init(void) {
+/* force: NUMA cannot be supervised by the flat pid table, so the typed
+ * registry is mandatory there regardless of the opt-in hook. UMA keeps
+ * the hook (production byte-for-byte unchanged). required: exact number
+ * of entries this configuration can register. */
+static void sup_init(int force, int required) {
     const char *on = getenv("FORKRUN_SUPERVISE_TYPED");
-    g_sup_on = (on != NULL && on[0] != '\0' && strcmp(on, "0") != 0);
+    g_sup_on = force || (on != NULL && on[0] != '\0' &&
+                         strcmp(on, "0") != 0);
     if (!g_sup_on)
         return;
     g_sup_n = 0;
     g_sup_bad = 0;
-    /* Test-only cap on NEW slot allocations, so the exhaustion
-     * boundary can be reached deterministically instead of racing a
-     * 6-second kill loop against the corpus drain. It can only LOWER
-     * the production bound; values outside [2, SUP_MAX_PROCS] are
-     * ignored, and the production default is unchanged. */
+    g_sup_max = required;
+    /* Test-only cap on NEW slot allocations. It can only LOWER the
+     * configured bound; values outside [2, required] are ignored. */
     {
         const char *cap = getenv("FORKRUN_TEST_SUP_MAX");
         if (cap != NULL) {
             long v = strtol(cap, NULL, 10);
-            if (v >= 2 && v <= SUP_MAX_PROCS)
+            if (v >= 2 && v <= required)
                 g_sup_max = (int)v;
         }
     }
+    g_sup = calloc((size_t)g_sup_max, sizeof *g_sup);
+    if (!g_sup)
+        die("calloc(supervision registry)");
+    fprintf(stderr, "forkrun-sup: capacity entries=%d required=%d\n",
+            g_sup_max, required);
     for (int r = 0; r < SUP_ROLE__COUNT; r++)
         fprintf(stderr,
                 "forkrun-sup: policy role=%s recoverable=%d node_scoped=%d "
@@ -1420,6 +1480,21 @@ static int sup_reconcile_note(const struct sup_note *n) {
     return 1;
 }
 
+/* Did the engine post ingest EOF? THE evidence for every EOF-window
+ * family. A test-only hook can withhold it, which models the case the
+ * evidence exists to catch: a helper that exited cleanly while the
+ * source was never fully consumed.
+ *
+ * The hook is inert unless the variable is set, and it can only
+ * WITHHOLD evidence -- it can never manufacture it. */
+static int sup_eof_evidence(void) {
+    if (getenv("FORKRUN_TEST_NO_EOF_EVIDENCE") != NULL)
+        return 0;
+    if (p_eof_posted == NULL)
+        return 0;
+    return p_eof_posted() == 1;
+}
+
 /* Apply the family policy. Helpers are fatal when they die abnormally;
  * a clean helper exit is treated as normal completion (scanner EOF is
  * the reference case) and is left to the caller's join. */
@@ -1433,6 +1508,14 @@ static int sup_apply_policy(struct sup_proc *e, int status, int have_status) {
      * a teardown role must be exiting after teardown began. Status zero
      * alone proves neither. Workers are outside this rule: their clean
      * exit is normal completion owned by the recoverable branch. */
+    /* Engine-backed completion for the real EOF families. The note flag
+     * remains the sentinel's TEST MODEL; a real ingest/indexer/scanner
+     * has no note pipe, so its acceptance is decided by the engine's
+     * ingest_eof sentinel, exactly as the in-process reactor does
+     * (_watch_numa_pipeline). Exit status alone is never evidence. */
+    if (pol->clean == SUP_CLEAN_AT_EOF && !e->completion_evidence &&
+        sup_eof_evidence())
+        e->completion_evidence = 1;
     int acceptable;
     if (pol->clean == SUP_CLEAN_AT_EOF)
         acceptable = clean && e->completion_evidence;
@@ -1450,10 +1533,15 @@ static int sup_apply_policy(struct sup_proc *e, int status, int have_status) {
     /* NEVER-role clean exits are already acceptable above, so only a
      * helper that missed its evidence/window can reach this. */
     if (clean && !acceptable) {
-        if (pol->clean == SUP_CLEAN_AT_EOF)
+        if (pol->clean == SUP_CLEAN_AT_EOF && e->role == SUP_ROLE_INGEST)
             fprintf(stderr,
                     "forkrun-sup: role=%s exited 0 without ingest-completion "
                     "evidence -- treating as abnormal\n", pol->name);
+        else if (pol->clean == SUP_CLEAN_AT_EOF)
+            fprintf(stderr,
+                    "forkrun-sup: role=%s exited 0 without completion "
+                    "evidence (ingest EOF was never posted) -- treating as "
+                    "abnormal\n", pol->name);
         else
             fprintf(stderr,
                     "forkrun-sup: role=%s exited 0 before its completion "
@@ -1469,6 +1557,37 @@ static int sup_apply_policy(struct sup_proc *e, int status, int have_status) {
         p_abort();
     g_sup_bad = 1;
     return 1;
+}
+
+/* Register a real helper family. note_fd < 0 means the family has no
+ * death-note channel: waitpid() plus the engine evidence is the
+ * authority, which is why the identity is still (role, pid). Helper
+ * entries are never reused (respawn applies only to workers). */
+static void sup_register_helper(enum sup_role role, pid_t pid, int node,
+                                int note_fd) {
+    struct sup_proc *e;
+    if (!g_sup_on)
+        return;
+    if (g_sup_n >= g_sup_max) {
+        /* Exact sizing runs before any fork; reaching this is an
+         * internal bookkeeping error, not a user configuration. */
+        fprintf(stderr, "forkrun-sup: internal error: capacity %d "
+                        "exhausted registering role=%s\n",
+                g_sup_max, g_sup_policy[role].name);
+        die("supervision registry full");
+    }
+    e = &g_sup[g_sup_n++];
+    memset(e, 0, sizeof *e);
+    e->active = 1;
+    e->role = role;
+    e->wid = -1;
+    e->logical_node = node;
+    e->pid = pid;
+    e->incarnation = 0;
+    e->note_fd = note_fd;
+    fprintf(stderr,
+            "forkrun-sup: register role=%s wid=-1 node=%d pid=%d "
+            "incarnation=0\n", g_sup_policy[role].name, node, (int)pid);
 }
 
 static void sup_register_worker(int wid, unsigned incarnation, pid_t pid,
@@ -1798,13 +1917,41 @@ static int sup_stop_helpers(void) {
     return sup_helper_active() ? -1 : 0;
 }
 
+/* Join one registered helper and apply its policy if the supervision
+ * loop had not already reaped it. ECHILD therefore means "already
+ * classified"; a fatal classification would have taken the bad path. */
+static void sup_join_helper(pid_t pid, int *bad) {
+    int st = 0;
+    pid_t w;
+    struct sup_proc *e;
+    if (pid <= 0)
+        return;
+    w = waitpid(pid, &st, 0);
+    if (w != pid) {
+        if (w < 0 && errno == ECHILD)
+            return;
+        *bad = 1;
+        return;
+    }
+    e = sup_find_pid(pid);
+    if (e) {
+        if (sup_apply_policy(e, st, 1))
+            *bad = 1;
+        sup_retire(e);
+    } else if (!(WIFEXITED(st) && WEXITSTATUS(st) == 0)) {
+        *bad = 1;
+    }
+}
+
 static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
-                       int fall_w, fn_worker_plugin_loop wloop,
+                       int fall_w, int order_w,
+                       fn_worker_plugin_loop wloop,
+                       fn_worker_plugin_loop_numa wnuma,
                        fn_worker_spawn_loop s_wloop,
                        const worker_desc *desc,
                        int retry_limit, int on_error,
                        const int *engine_fd, int n_engine,
-                       int wincarn) {
+                       int wincarn, int node) {
     fr_trace_emit(FR_ROLE_LAUNCHER, FR_EV_FORK_REQUEST,
                   (int32_t)wid, (int32_t)wincarn, 0, 0);
     pid_t p = fr_fork();
@@ -1828,6 +1975,7 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
         keep_init(&k);
         keep_add(&k, memfd); keep_add(&k, out_fd);
         keep_add(&k, sig_w);  keep_add(&k, fall_w);
+        if (order_w >= 0) keep_add(&k, order_w);
         /* KEEP THE ENGINE'S OWN FDS. Scrubbing them away looks tidy
          * and is catastrophic: do_lockfree_claim 3-way-polls the ring
          * data and EOF eventfds, and with those descriptors closed
@@ -1866,9 +2014,9 @@ static pid_t spawn_wid(int wid, int memfd, int out_fd, int sig_w,
          *
          * It is also plugin-ABI-visible: ctx->worker_incarn is defined
          * as the respawn generation of the calling worker. */
-        int rc = fr_run_worker(desc, wloop, s_wloop, wid,
-                               memfd, out_fd, sig_w, fall_w,
-                               -1, wincarn, retry_limit, on_error);
+        int rc = fr_run_worker(desc, wloop, s_wloop, wnuma, wid,
+                               memfd, out_fd, sig_w, fall_w, order_w,
+                               -1, wincarn, retry_limit, on_error, node);
         if (rc < 0)
             _exit(70);   /* no loop for this mode -- infrastructure */
         fr_trace_emit(FR_ROLE_WORKER, FR_EV_CHILD_EXIT,
@@ -1947,6 +2095,31 @@ static void kill_worker_group(pid_t pid) {
          * mistake impossible rather than merely unlikely. */
         (void)kill(-pid, SIGKILL);
         (void)kill(pid, SIGKILL);
+    }
+}
+
+/* Reap every child that has already exited, without waiting for one
+ * that has not. The fatal path needs this AFTER it has signalled the
+ * workers: a SIGKILLed worker is reapable a moment later, and exiting
+ * before reaping leaves it as a zombie that outlives the launcher --
+ * a "descendant survived the run" observation for a process that was
+ * in fact already dead.
+ *
+ * Bounded by construction: the loop gives up after a fixed number of
+ * passes and never blocks, so a child wedged in uninterruptible sleep
+ * cannot hold the teardown open. */
+static void reap_all_bounded(void) {
+    for (int spin = 0; spin < 200; spin++) {
+        int st = 0;
+        pid_t p = waitpid(-1, &st, WNOHANG);
+        if (p > 0)
+            continue;
+        if (p < 0 && errno == EINTR)
+            continue;
+        {
+            struct timespec ts = {0, 1000000L};   /* 1 ms */
+            nanosleep(&ts, NULL);
+        }
     }
 }
 
@@ -2111,6 +2284,7 @@ int main(int argc, char **argv) {
     o.respawn_cap = 64;
     o.trace_fd = -1;
     o.supervise = 1;   /* recovering is the historical behaviour */
+    o.num_nodes = 1;
 
 #ifdef FORKRUN_ENTRY_FD_PROBE
     /* The parser rejects unrecognised arguments with exit 64, so the
@@ -2164,6 +2338,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--fd-selfcheck"))         fd_selfcheck = 1;
         else if (!strcmp(argv[i], "--trace-fd") && i + 1 < argc)
             o.trace_fd = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--nodes") && i + 1 < argc)
+            o.num_nodes = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--numa-map") && i + 1 < argc)
+            o.numa_map = argv[++i];
+        else if (!strcmp(argv[i], "--order") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (!strcmp(m, "none"))       o.order_index = 0;
+            else if (!strcmp(m, "index")) o.order_index = 1;
+            else { fprintf(stderr, "forkrun-cleanroom: --order must be "
+                            "none|index, got %s\n", m); return 64; }
+        }
         else if (!strcmp(argv[i], "--supervise") && i + 1 < argc) {
             const char *m = argv[++i];
             if (!strcmp(m, "recover"))        o.supervise = 1;
@@ -2219,6 +2404,92 @@ int main(int argc, char **argv) {
         return 64;
     }
     if (o.workers < 1) o.workers = 1;
+
+    /* The worker ceiling is the ENGINE's (MAX_TXN_WORKERS in
+     * forkrun_ring.c): a worker id at or above it is rejected by the
+     * engine, so accepting more workers here would only produce a
+     * configuration that cannot run. Refused up front, with the count,
+     * rather than discovered by a child mid-startup. */
+    if (o.workers > 1024) {
+        fprintf(stderr, "forkrun-cleanroom: workers=%d exceeds the "
+                        "engine's worker ceiling (1024) -- refusing before "
+                        "startup\n", o.workers);
+        return 64;
+    }
+
+    /* W-EXP-2 step C topology validation. Everything here is checked
+     * BEFORE the engine is initialised or any process is forked: a
+     * configuration the launcher cannot honour must cost no input. */
+    if (o.num_nodes < 1 || o.num_nodes > 512) {
+        fprintf(stderr, "forkrun-cleanroom: --nodes must be 1..512, got %d\n",
+                o.num_nodes);
+        return 64;
+    }
+    if (o.num_nodes > 1) {
+        /* NUMA workers are plugin workers: the node-taking loop exists
+         * for that envelope. UDF (W-EXP-1.5) and spawn NUMA are not
+         * wired, and silently running them as node 0 would be a lie. */
+        if (!o.plugin_path) {
+            fprintf(stderr, "forkrun-cleanroom: --nodes > 1 currently "
+                            "requires --plugin/--func (no UDF/spawn NUMA)\n");
+            return 64;
+        }
+        if (o.fork_only) {
+            fprintf(stderr, "forkrun-cleanroom: --fork-only is UMA-only\n");
+            return 64;
+        }
+        if (!o.numa_map || !o.numa_map[0]) {
+            fprintf(stderr, "forkrun-cleanroom: --nodes %d requires "
+                            "--numa-map\n", o.num_nodes);
+            return 64;
+        }
+        {
+            int entries = 1, digits = 0, bad = 0;
+            for (const char *q = o.numa_map; ; q++) {
+                if (*q == ',' || *q == '\0') {
+                    if (digits == 0) { bad = 1; break; }
+                    digits = 0;
+                    if (*q == '\0') break;
+                    entries++;
+                } else if (*q >= '0' && *q <= '9') {
+                    if (++digits > 6) { bad = 1; break; }
+                } else { bad = 1; break; }
+            }
+            if (bad || entries != o.num_nodes) {
+                fprintf(stderr, "forkrun-cleanroom: --numa-map must hold "
+                                "%d comma-separated physical node ids\n",
+                        o.num_nodes);
+                return 64;
+            }
+        }
+    } else if (o.order_index) {
+        fprintf(stderr, "forkrun-cleanroom: --order index requires "
+                        "--nodes > 1\n");
+        return 64;
+    }
+    /* The registry is sized from the configuration BEFORE any fork.
+     * The target topology is 512 workers + 4 indexers + 4 scanners +
+     * fallow + ingest + orderer = 523 entries, so a fixed 520 array
+     * would fail halfway through startup. Exact sizing makes that
+     * impossible; the hard ceiling is an explicit supported limit
+     * rejected up front, never discovered after the pipeline started. */
+    {
+        int required;
+        if (o.num_nodes <= 1) {
+            required = o.workers + 1;          /* workers + sentinel */
+        } else {
+            required = o.workers + o.num_nodes * 2 + 3;
+        }
+        if (required > SUP_MAX_PROCS_HARD) {
+            fprintf(stderr, "forkrun-cleanroom: configuration needs %d "
+                            "supervision entries (workers=%d nodes=%d); "
+                            "the supported ceiling is %d -- refusing before "
+                            "startup\n", required, o.workers, o.num_nodes,
+                    SUP_MAX_PROCS_HARD);
+            return 66;
+        }
+        sup_init(o.num_nodes > 1, required);
+    }
 
     /* Activate the trace BEFORE anything forks, so the launcher-init
      * boundary is the first record and every child inherits an open fd.
@@ -2418,6 +2689,36 @@ int main(int argc, char **argv) {
     p_c07_enabled = (fn_c07_enabled_fn) dlsym(h, "fr_py_c07_counting_enabled");
     p_abort                = (fn_abort_fn)               sym(h, "fr_py_abort");
 
+    /* W-EXP-2 step C: NUMA entry points. Resolved only for a multi-node
+     * run, and REQUIRED there -- falling back to the UMA symbols after
+     * --nodes 2 was accepted would run the wrong pipeline with no
+     * observable difference in the command line. */
+    fn_init_numa         p_init_numa = NULL;
+    fn_numa_ingest       p_numa_ingest = NULL;
+    fn_indexer_numa      p_indexer = NULL;
+    fn_numa_scanner      p_nscanner = NULL;
+    fn_fallow_phys       p_fphys = NULL;
+    fn_orderer           p_orderer = NULL;
+    fn_worker_plugin_loop_numa p_wnuma = NULL;
+    int numa = (o.num_nodes > 1);
+    if (numa) {
+        p_init_numa  = (fn_init_numa)  sym(h, "fr_py_init_numa");
+        p_numa_ingest= (fn_numa_ingest)sym(h, "fr_py_numa_ingest");
+        p_indexer    = (fn_indexer_numa)sym(h, "fr_py_indexer_numa");
+        p_nscanner   = (fn_numa_scanner)sym(h, "fr_py_numa_scanner");
+        p_fphys      = (fn_fallow_phys) sym(h, "fr_py_fallow_phys");
+        p_orderer    = (fn_orderer)     sym(h, "fr_py_orderer");
+        p_wnuma      = (fn_worker_plugin_loop_numa)
+                           sym(h, "fr_py_worker_plugin_loop_numa");
+        p_eof_posted = (fn_eof_posted)  sym(h, "fr_py_ingest_eof_posted");
+        if (!p_nscanner || !p_eof_posted || !p_wnuma) {
+            fprintf(stderr, "forkrun-cleanroom: substrate lacks the "
+                            "node-taking worker loop or ingest-EOF "
+                            "evidence -- refusing the NUMA route\n");
+            return 69;
+        }
+    }
+
     /* ---- P1-3: UDF mode ----
      *
      * Load and INITIALISE the interpreter here, before any fork. This is
@@ -2475,9 +2776,15 @@ int main(int argc, char **argv) {
                 MAX_TRACK_FDS);
         return 72;
     }
-    if (p_init(o.lines, o.bytes) != 0) {
-        fprintf(stderr, "forkrun-cleanroom: fr_py_init failed\n");
-        return 71;
+    {
+        int irc = numa
+            ? p_init_numa(o.lines, o.bytes, o.num_nodes, o.numa_map)
+            : p_init(o.lines, o.bytes);
+        if (irc != 0) {
+            fprintf(stderr, "forkrun-cleanroom: fr_py_init%s failed\n",
+                    numa ? "_numa" : "");
+            return 71;
+        }
     }
     int npost = snap_fds(post_fd, MAX_TRACK_FDS, &post_trunc);
     if (npost < 0 || post_trunc) {
@@ -2537,7 +2844,9 @@ int main(int argc, char **argv) {
      */
     fr_trace_emit(FR_ROLE_SPILL, FR_EV_FORK_REQUEST,
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-    pid_t spill_pid = fr_fork();
+    pid_t spill_pid = -1;
+    if (!numa) {
+    spill_pid = fr_fork();
     if (spill_pid < 0) die("fork(spill)");
     if (spill_pid == 0) {
         die_with_parent();
@@ -2611,7 +2920,33 @@ int main(int argc, char **argv) {
     }
     fr_trace_emit(FR_ROLE_SPILL, FR_EV_FORK_RETURN,
                   FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)spill_pid);
-    close(o.source_fd);      /* only the spill child reads the source */
+    } else {
+        /* NUMA: the ingest OWNS the source and performs placement per
+         * chunk. ring_numa_ingest publishes ChunkMeta and propagates
+         * EOF internally (ingest_eof), so the launcher must NOT call
+         * fr_py_ingest_done. Its clean exit is accepted only after the
+         * engine reports EOF posted (sup policy + p_eof_posted). */
+        spill_pid = fr_fork();
+        if (spill_pid < 0) die("fork(ingest)");
+        if (spill_pid == 0) {
+            die_with_parent();
+            cr_keep k;
+            keep_init(&k);
+            keep_add(&k, o.source_fd); keep_add(&k, memfd);
+            keep_add_engine(&k, engine_fd, n_engine);
+            enter_child("ingest", &k);
+            {
+                int rc = p_numa_ingest(o.source_fd, memfd, o.num_nodes);
+                fr_trace_emit(FR_ROLE_SPILL, FR_EV_CHILD_EXIT,
+                              FR_TRACE_NA, FR_TRACE_NA, 0, rc);
+                _exit(rc == 0 ? 0 : 1);
+            }
+        }
+        fr_trace_emit(FR_ROLE_SPILL, FR_EV_FORK_RETURN,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)spill_pid);
+        sup_register_helper(SUP_ROLE_INGEST, spill_pid, -1, -1);
+    }
+    close(o.source_fd);      /* only the ingest/spill child reads it */
 
     int *out_fds = calloc((size_t)o.workers, sizeof(int));
     if (!out_fds) die("calloc(out_fds)");
@@ -2632,6 +2967,13 @@ int main(int argc, char **argv) {
     }
     int fallp[2];
     if (pipe(fallp) != 0) die("pipe(fallow)");
+    /* Ordered NUMA collection uses the engine's C orderer; workers ack
+     * OrderPackets to orderp[1] instead of signalling the drain. */
+    int orderp[2] = {-1, -1};
+    if (numa && o.order_index) {
+        if (pipe(orderp) != 0) die("pipe(order)");
+        (void)fcntl(orderp[1], 1031, 4096);
+    }
 
     pid_t *pids = calloc((size_t)o.workers, sizeof(pid_t));
     if (!pids) die("calloc(pids)");
@@ -2640,13 +2982,29 @@ int main(int argc, char **argv) {
     for (int i = 0; i < o.workers; i++) pids[i] = -1;
     int live = 0;
     int spill_done = 0;
+    /* Same mapping as _numa.wid_to_node: contiguous per-node blocks,
+     * round-robin counts. Stable for the run so a respawn keeps its
+     * node (and therefore its claim ring and output memfd). */
+    int *wid_node = calloc((size_t)o.workers, sizeof(int));
+    if (!wid_node) die("calloc(wid_node)");
+    {
+        int base = o.workers / (numa ? o.num_nodes : 1);
+        int rem = o.workers % (numa ? o.num_nodes : 1);
+        int at = 0;
+        for (int nd = 0; nd < (numa ? o.num_nodes : 1); nd++) {
+            int cnt = base + (nd < rem ? 1 : 0);
+            for (int k = 0; k < cnt; k++) wid_node[at++] = nd;
+        }
+    }
 
     long t0 = now_ns();
 
     /* fallow reaper child */
     fr_trace_emit(FR_ROLE_FALLOW, FR_EV_FORK_REQUEST,
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-    pid_t fallow_pid = fr_fork();
+    pid_t fallow_pid = -1;
+    if (!numa) {
+    fallow_pid = fr_fork();
     if (fallow_pid < 0) die("fork(fallow)");
     if (fallow_pid == 0) {
         die_with_parent();
@@ -2674,6 +3032,70 @@ int main(int argc, char **argv) {
     }
     fr_trace_emit(FR_ROLE_FALLOW, FR_EV_FORK_RETURN,
                   FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)fallow_pid);
+    } else {
+        fallow_pid = fr_fork();
+        if (fallow_pid < 0) die("fork(fallow-phys)");
+        if (fallow_pid == 0) {
+            die_with_parent();
+            cr_keep k;
+            keep_init(&k);
+            keep_add(&k, fallp[0]); keep_add(&k, memfd);
+            keep_add_engine(&k, engine_fd, n_engine);
+            enter_child("fallow-phys", &k);
+            {
+                int rc = p_fphys(fallp[0], memfd);
+                fr_trace_emit(FR_ROLE_FALLOW, FR_EV_CHILD_EXIT,
+                              FR_TRACE_NA, FR_TRACE_NA, 0, rc);
+                _exit(rc == 0 ? 0 : 1);
+            }
+        }
+        fr_trace_emit(FR_ROLE_FALLOW, FR_EV_FORK_RETURN,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)fallow_pid);
+        sup_register_helper(SUP_ROLE_FALLOW, fallow_pid, -1, -1);
+    }
+
+    pid_t *idx_pids = NULL;
+    pid_t *scan_pids = NULL;
+    if (numa) {
+        idx_pids = calloc((size_t)o.num_nodes, sizeof(pid_t));
+        scan_pids = calloc((size_t)o.num_nodes, sizeof(pid_t));
+        if (!idx_pids || !scan_pids) die("calloc(numa helper pids)");
+        for (int node = 0; node < o.num_nodes; node++) {
+            pid_t ip = fr_fork();
+            if (ip < 0) die("fork(indexer)");
+            if (ip == 0) {
+                die_with_parent();
+                cr_keep k;
+                keep_init(&k);
+                keep_add(&k, memfd);
+                keep_add_engine(&k, engine_fd, n_engine);
+                enter_child("indexer", &k);
+                _exit(p_indexer(memfd, node) == 0 ? 0 : 1);
+            }
+            idx_pids[node] = ip;
+            sup_register_helper(SUP_ROLE_INDEXER, ip, node, -1);
+        }
+        for (int node = 0; node < o.num_nodes; node++) {
+            pid_t sp = fr_fork();
+            if (sp < 0) die("fork(numa-scanner)");
+            if (sp == 0) {
+                die_with_parent();
+                cr_keep k;
+                keep_init(&k);
+                keep_add(&k, memfd);
+                keep_add_engine(&k, engine_fd, n_engine);
+                enter_child("numa-scanner", &k);
+                /* spawn_fd = -1: the launcher forks its full worker
+                 * complement up front, so it cannot service dynamic
+                 * spawn requests. Disarming is the engine's documented
+                 * way to run a plain scan. */
+                _exit(p_nscanner(memfd, node, -1, o.num_nodes) == 0
+                          ? 0 : 1);
+            }
+            scan_pids[node] = sp;
+            sup_register_helper(SUP_ROLE_SCANNER, sp, node, -1);
+        }
+    }
 
     /* Poison relay: tell workers which fd to append batch indices to.
      * getenv-in-the-child is the established mechanism here (see
@@ -2718,21 +3140,26 @@ int main(int argc, char **argv) {
         die("invalid worker arguments");
     }
 
-    /* W-EXP-2 step B: typed registry + sentinel helper. Both are inert
-     * unless FORKRUN_SUPERVISE_TYPED is set; production is unchanged. */
-    sup_init();
-    sup_fork_helper();
+    /* W-EXP-2 step B/A: the sentinel is the UMA typed-mode test model.
+     * A NUMA run has real ingest/indexer/scanner/fallow families, so it
+     * registers those instead (and the registry is mandatory). */
+    if (!numa)
+        sup_fork_helper();
 
     /* workers */
     for (int i = 0; i < o.workers; i++) {
-        pid_t p = spawn_wid(i, memfd, out_fds[i], sigp[1], fallp[1],
-                            p_wloop, s_wloop, &wd,
+        pid_t p = spawn_wid(i, memfd, out_fds[i],
+                            (numa && o.order_index) ? -1 : sigp[1],
+                            fallp[1],
+                            (numa && o.order_index) ? orderp[1] : -1,
+                            p_wloop, numa ? p_wnuma : NULL, s_wloop, &wd,
                             o.retry_limit, o.on_error,
-                            engine_fd, n_engine, /*wincarn=*/0);
+                            engine_fd, n_engine, /*wincarn=*/0,
+                            wid_node[i]);
         if (p < 0) die("fork(worker)");
         pids[i] = p;
         live++;
-        sup_register_worker(i, 0, p, 0);
+        sup_register_worker(i, 0, p, wid_node[i]);
     }
     /* Keep a SPARE of the write ends for respawns, exactly as run.py's
      * spare_signal_w does, then drop the originals so EOF still means
@@ -2772,14 +3199,21 @@ int main(int argc, char **argv) {
 
     int spare_sig = dup(sigp[1]);
     int spare_fall = dup(fallp[1]);
-    if (spare_sig < 0 || spare_fall < 0) die("dup(signal/fallow)");
+    int spare_order = (numa && o.order_index) ? dup(orderp[1]) : -1;
+    if (spare_sig < 0 || spare_fall < 0 ||
+        ((numa && o.order_index) && spare_order < 0))
+        die("dup(signal/fallow/order)");
     close(sigp[1]);
     close(fallp[1]);
+    if (numa && o.order_index)
+        close(orderp[1]);
 
     /* scanner child: pre-flight, ramp, publish */
     fr_trace_emit(FR_ROLE_SCAN, FR_EV_FORK_REQUEST,
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-    pid_t scan_pid = fr_fork();
+    pid_t scan_pid = -1;
+    if (!numa) {
+    scan_pid = fr_fork();
     if (scan_pid < 0) die("fork(scan)");
     if (scan_pid == 0) {
         die_with_parent();
@@ -2810,6 +3244,7 @@ int main(int argc, char **argv) {
     }
     fr_trace_emit(FR_ROLE_SCAN, FR_EV_FORK_RETURN,
                   FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)scan_pid);
+    }
 
     long t1 = now_ns();
 
@@ -2824,10 +3259,14 @@ int main(int argc, char **argv) {
         _exit(0);
     }
 
-    /* drain child: move worker output memfds -> result fd */
+    /* drain child: move worker output memfds -> result fd.
+     * In ordered NUMA mode the C orderer plays this role instead. */
     fr_trace_emit(FR_ROLE_DRAIN, FR_EV_FORK_REQUEST,
                   FR_TRACE_NA, FR_TRACE_NA, 0, 0);
-    pid_t drain_pid = fr_fork();
+    pid_t drain_pid = -1;
+    pid_t order_pid = -1;
+    if (!(numa && o.order_index)) {
+    drain_pid = fr_fork();
     if (drain_pid < 0) die("fork(drain)");
     if (drain_pid == 0) {
         die_with_parent();
@@ -2856,6 +3295,34 @@ int main(int argc, char **argv) {
     close(sigp[0]);
     fr_trace_emit(FR_ROLE_DRAIN, FR_EV_FORK_RETURN,
                   FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)drain_pid);
+    if (numa)
+        sup_register_helper(SUP_ROLE_DRAIN, drain_pid, -1, -1);
+    } else {
+        /* C orderer: writes the globally ordered stream straight to the
+         * result fd. It needs every worker output memfd (it reads the
+         * payloads named by the OrderPackets) and the engine fds. */
+        order_pid = fr_fork();
+        if (order_pid < 0) die("fork(orderer)");
+        if (order_pid == 0) {
+            die_with_parent();
+            cr_keep k;
+            keep_init(&k);
+            keep_add(&k, orderp[0]); keep_add(&k, o.result_fd);
+            for (int i = 0; i < o.workers; i++) keep_add(&k, out_fds[i]);
+            keep_add_engine(&k, engine_fd, n_engine);
+            enter_child("orderer", &k);
+            {
+                int rc = p_orderer(orderp[0], o.result_fd, 0, 1);
+                fr_trace_emit(FR_ROLE_DRAIN, FR_EV_CHILD_EXIT,
+                              FR_TRACE_NA, FR_TRACE_NA, 0, rc);
+                _exit(rc == 0 ? 0 : 1);
+            }
+        }
+        close(orderp[0]);
+        sup_register_helper(SUP_ROLE_ORDERER, order_pid, -1, -1);
+        fr_trace_emit(FR_ROLE_DRAIN, FR_EV_FORK_RETURN,
+                      FR_TRACE_NA, FR_TRACE_NA, 0, (int32_t)order_pid);
+    }
 
     int alive = o.workers + 2;   /* workers + scan + fallow (+drain) */
     (void)alive;
@@ -2930,7 +3397,7 @@ int main(int argc, char **argv) {
          *
          * A spill child that exits 0 has simply reached source EOF,
          * which is the normal path and must NOT abort anything. */
-        if (p == spill_pid) {
+        if (!numa && p == spill_pid) {
             spill_done = 1;
             if (!(WIFEXITED(st) && WEXITSTATUS(st) == 0)) {
                 fprintf(stderr, "forkrun-cleanroom: spill child died "
@@ -3168,11 +3635,17 @@ int main(int argc, char **argv) {
         }
         incarn[wid]++;
         int rs = dup(spare_sig), rf = dup(spare_fall);
-        if (rs < 0 || rf < 0) { bad = 1; break; }
-        pid_t np = spawn_wid(wid, memfd, out_fds[wid], rs, rf, p_wloop,
-                             s_wloop, &wd,
+        int ro = (spare_order >= 0) ? dup(spare_order) : -1;
+        if (rs < 0 || rf < 0 || (spare_order >= 0 && ro < 0)) {
+            bad = 1; break;
+        }
+        pid_t np = spawn_wid(wid, memfd, out_fds[wid],
+                             (numa && o.order_index) ? -1 : rs, rf,
+                             ro, p_wloop, numa ? p_wnuma : NULL, s_wloop,
+                             &wd,
                              o.retry_limit, o.on_error,
-                             engine_fd, n_engine, incarn[wid]);
+                             engine_fd, n_engine, incarn[wid],
+                             wid_node[wid]);
         /* The child inherited its own copy of rs/rf; the launcher's must
          * be dropped or every respawn PERMANENTLY holds the signal and
          * fallow pipe write ends open. That is precisely what the drain
@@ -3182,12 +3655,14 @@ int main(int argc, char **argv) {
          * supervision loop has already finished cleanly. */
         close(rs);
         close(rf);
+        if (ro >= 0) close(ro);
         if (np < 0) { bad = 1; break; }
         pids[wid] = np;
         live++;
         if (g_sup_on) {
             unsigned prev_inc = (unsigned)incarn[wid] - 1u;
-            sup_register_worker(wid, (unsigned)incarn[wid], np, 0);
+            sup_register_worker(wid, (unsigned)incarn[wid], np,
+                                wid_node[wid]);
             if (getenv("FORKRUN_TEST_STALE_NOTE_AFTER_RESPAWN") != NULL) {
                 /* Two stale shapes, both of which must be dropped:
                  * the retired pid, and the CURRENT pid carrying the
@@ -3224,9 +3699,6 @@ int main(int argc, char **argv) {
     if (o.verbose)
         fprintf(stderr, "LOOP_DONE live=%d bad=%d spill_done=%d\n", live,
                 bad, spill_done);
-    if (g_sup_on && sup_stop_helpers() != 0)
-        bad = 1;
-
     /* ---- CR-FIX1-B: fatal teardown is bounded ----
      *
      * The old code killed the workers and then walked into FOUR blocking
@@ -3245,6 +3717,27 @@ int main(int argc, char **argv) {
     if (bad) {
         if (p_abort) p_abort();
         sup_guillotine();
+        if (numa) {
+            /* Helpers are registered and were signalled by the
+             * guillotine; only workers need the process-group kill. */
+            for (int i = 0; i < o.workers; i++) {
+                pid_t _p = pids[i]; pids[i] = -1;
+                kill_worker_group(_p);
+            }
+            /* Reap what the kills just terminated. Without this the
+             * launcher exits on top of its own dead workers, and they
+             * are still observable as processes after it is gone. */
+            reap_all_bounded();
+            close(spare_sig);
+            close(spare_fall);
+            if (spare_order >= 0) close(spare_order);
+            fprintf(stderr,
+                    "forkrun-cleanroom: fatal -- terminated the NUMA "
+                    "pipeline (workers and registered helpers signalled, "
+                    "all children reaped); the input source may have been "
+                    "left partially read\n");
+            return 1;
+        }
         int n_slots = o.workers + 4;
         pid_t *slots = calloc((size_t)n_slots, sizeof(pid_t));
         if (slots) {
@@ -3289,6 +3782,33 @@ int main(int argc, char **argv) {
      * seen, which is what keeps the drain alive across respawns. */
     close(spare_sig);
     close(spare_fall);
+    if (numa) {
+        /* Teardown begins: the orderer/fallow clean windows open only
+         * now, and every write end of their pipes is closed above.
+         * Join the consumer first (orderer/drain), then the producers,
+         * and the ingest LAST -- it is routinely the last to flush, and
+         * its clean exit is only acceptable after ingest EOF was
+         * posted (enforced by sup_apply_policy via p_eof_posted). */
+        g_sup_stopping = 1;
+        if (spare_order >= 0) close(spare_order);
+        if (order_pid > 0)
+            sup_join_helper(order_pid, &bad);
+        else if (drain_pid > 0)
+            sup_join_helper(drain_pid, &bad);
+        for (int node = 0; node < o.num_nodes; node++)
+            sup_join_helper(scan_pids[node], &bad);
+        for (int node = 0; node < o.num_nodes; node++)
+            sup_join_helper(idx_pids[node], &bad);
+        sup_join_helper(fallow_pid, &bad);
+        sup_join_helper(spill_pid, &bad);
+        if (p_eof_posted && p_eof_posted() != 1) {
+            fprintf(stderr, "forkrun-cleanroom: ingest EOF was never "
+                            "posted -- refusing to report success\n");
+            bad = 1;
+        }
+    } else {
+    if (g_sup_on && sup_stop_helpers() != 0)
+        bad = 1;
     { int st; if (waitpid(scan_pid, &st, 0) > 0 &&
           !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1; }
     { int st; if (waitpid(fallow_pid, &st, 0) > 0 &&
@@ -3302,6 +3822,7 @@ int main(int argc, char **argv) {
      * the class of bug this project refuses. */
     { int st; if (waitpid(spill_pid, &st, 0) > 0 &&
           !(WIFEXITED(st) && WEXITSTATUS(st) == 0)) bad = 1; }
+    }
 
     if (o.verbose)
         fprintf(stderr, "PHASE spawn_to_scanner=%.2fms rss_kb=%ld bad=%d\n",
