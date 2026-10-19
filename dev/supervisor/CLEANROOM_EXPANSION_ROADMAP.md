@@ -195,6 +195,62 @@ supervision interface is specified and frozen in Phase 0, or one branch is
 integrated and rebased before the other.** Which is decided in Phase 0; the
 acceptance gates stay separate either way.
 
+#### W-EXP-2 step A — ordering identity: resolved in source, confirmed by probe
+
+**Status: closed. The source conclusion and the probe agree, and the probe
+is pinned as a test rather than left as a one-off measurement.**
+
+**The identity for global ordering is `(major, minor)`, not `batch_idx`.**
+Reading the claim path directly:
+
+* `out->batch_idx = my_read_idx` (`forkrun_ring.c:6385`), where
+  `local_state = &state[my_numa_node]` (`ring.c:6158`, `4166`). The claim
+  counter is per node, so `batch_idx` is a per-node ticket: two nodes both
+  emit 0, 1, 2, ...
+* The global ordering key is `(major, minor)`, packed by `FR_PACK_KEY`, and
+  the C orderer sorts on the packed key in numa mode (`ring.c:7673`).
+* The wire framing `<QQII>` is `(batch_idx, len, disposition, reserved)` --
+  `major`/`minor` **never reach the parent**. Nothing the parent collects
+  carries the global key on its own.
+
+**[V] The probe confirms, and does not overrule, the source.** On a corpus
+large enough that both logical nodes claim (5.4 MB, several
+`SCANNER_CHUNK_SIZE` chunks), at `lines=4096`: 150 records, `batch_idx`
+spanning `0..86` with **63 collisions**. And the consequence is visible:
+sorting the collision by `batch_idx` yields **wrong order**; the first
+mismatch puts node 1's `batch_idx=0` (`u0116508`) where the input expects
+`u0004096`. With `lines=512`: 1175 records, orderer byte-exact, fallback
+sort wrong. Both granularities agree.
+
+**[V] The production orderer path is byte-exact.** `order="index"` under
+`@2` with the orderer returns exactly the input sequence, byte for byte,
+at both granularities -- because collection reads from `coll_fd`, the
+orderer's output pipe (`_iter_records(lib, coll_fd)`); the parent does not
+sort, the engine already did, by the packed key. In-process `@4` was also
+byte-exact.
+
+**Design consequence for the cleanroom, now explicit.** The cleanroom's
+current `order="index"` is a parent-side sort on `batch_idx`
+(`_cleanroom_collect`), which is valid only where `batch_idx` is a global
+sequence -- UMA. A cleanroom NUMA route must instead run the **existing C
+orderer** in the launcher so the result stream arrives in global order,
+and the parent must collect it **without sorting** (already-ordered). The
+parent-side `batch_idx` sort must never be the cross-node mechanism, and
+the fallback hazard is pinned by test so a small-input run cannot make it
+look safe again.
+
+**Guard against the "limited test" trap.** The committed test asserts
+per-run node liveness by probing `fr_py_diag_node` inside the drain-audit
+window, and the multi-chunk corpus size is asserted (a 4608-byte mutation
+is rejected at setUpClass). A run that did not engage both nodes' claim
+counters cannot pass, so absent collisions can never be mistaken for
+evidence of global uniqueness.
+
+**`python/tests/test_numa_ordering_identity.py` -- 4 tests,
+mutation-checked on the corpus premise.** This host has one physical NUMA
+node: everything here is logical `@N`, i.e. protocol validation. Physical
+locality and bandwidth remain unmeasured.
+
 #### W-EXP-2 Phase B — source-level design audit (no code written)
 
 Audit only. Nothing in this section is implemented, and nothing here should be
