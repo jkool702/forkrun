@@ -1724,6 +1724,68 @@ def _spawn_or_fork(launcher, argv, file_actions):
                           file_actions=tuple(file_actions or ()))
 
 
+# W-EXP-2 Phase A: cleanroom completeness certificate.
+#
+# _LAST_COMMITTED carries what the launcher computed
+# for THIS invocation. The recorder below is the only thing that decides
+# what a mismatch means, and it is deliberately asymmetric:
+#
+#   expected is None  -> NO VERDICT. Recorded, never fatal. This covers an
+#                       older substrate with no accessor, a failed node
+#                       read, a sum that would not fit, and counting
+#                       disabled by FORKRUN_C07_COUNT=0. In every one of
+#                       those the counter says nothing about this run, and
+#                       inventing a verdict from it is how a complete run
+#                       gets failed.
+#   expected != seen  -> LOUD. A proven shortfall is a RuntimeError.
+#
+# The disposition differs from the in-process ORDERED certificate on
+# purpose. That one warns, because its envelope can be under-covered and a
+# warning is the honest thing to say about a partially-proven count. Here
+# the count is absolute, per-invocation, and read after every worker has
+# joined, so a mismatch is not "we are not sure" -- it is "the engine
+# published more DATA frames than the caller received". A warning-plus-
+# partial-output is exactly the silent-success shape this certificate
+# exists to prevent.
+_CLEANROOM_C07 = {"verdict": None, "expected": None, "observed": None,
+                  "reason": None}
+
+# The committed-frame count for the most recent cleanroom invocation, or
+# None when the launcher could not supply one.
+#
+# This is deliberately NOT a key of _LAST_STATS. The stats dict is a
+# documented public contract that callers compare exactly, and this is an
+# internal transport detail feeding one certificate -- publishing it
+# would widen the public surface, and break exact-match assertions, for
+# no consumer outside this module. Kept private; None means "no verdict".
+_LAST_COMMITTED = None
+
+
+def _cleanroom_c07_record(expected, observed, *, poisoned=0, reason=None):
+    """Record -- and on a proven shortfall, refuse -- the cleanroom result."""
+    _CLEANROOM_C07["expected"] = expected
+    _CLEANROOM_C07["observed"] = int(observed)
+    _CLEANROOM_C07["reason"] = reason
+    if expected is None:
+        _CLEANROOM_C07["verdict"] = "no-verdict"
+        return
+    expected = int(expected)
+    if expected == int(observed):
+        _CLEANROOM_C07["verdict"] = "complete"
+        return
+    # A shortfall. More published than received is the dangerous direction
+    # and is fatal; receiving MORE than published means the two sides are
+    # not describing the same universe, which is a defect in the check
+    # itself and is also refused rather than silently accepted.
+    _CLEANROOM_C07["verdict"] = "incomplete"
+    raise RuntimeError(
+        "forkrun: cleanroom output is INCOMPLETE -- the launcher reported "
+        "%d committed DATA frame(s) but the caller received %d (poisoned "
+        "batches: %d). A clean exit status is not evidence of complete "
+        "output: packets can be lost after the engine committed them."
+        % (expected, int(observed), int(poisoned)))
+
+
 @_route_fd_cleanup
 def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                        plugin_func, on_error, views, strict_poison=False,
@@ -1815,6 +1877,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # comment at face value.
     _stats_ftruncate(stats_fd, _STATS_HEADER_BYTES
                      + max(int(workers), 1) * _STATS_SLOT_U32 * 4)
+    _stats_stamp_header(stats_fd, workers)
     os.set_inheritable(src_fd, True)
     os.set_inheritable(res_fd, True)
     os.set_inheritable(stats_fd, True)
@@ -1944,6 +2007,12 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # test_plugin tests hit this with the gate ON and were green with it
     # off, which is why the cleanroom-OFF run alone never showed it.
     stats = _read_cleanroom_stats(stats_fd)
+    # W-EXP-2 Phase A: publish the launcher's committed DATA-frame count for
+    # THIS invocation before the descriptor goes away. None when the
+    # launcher could not supply it -- never 0.
+    global _LAST_COMMITTED
+    _LAST_COMMITTED = (stats[3] if (stats is not None and len(stats) > 3)
+                       else None)
     own.close("stats_fd")
     # Read the trace AFTER waitpid: the launcher and every child are gone
     # by then, so the file is complete and its size is final.
@@ -2036,7 +2105,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "(or strict_poison unenforceable) — using the in-process "
             "path.", UserWarning, stacklevel=3)
         return None
-    npois, npois_idx, nrelayed = stats
+    npois, npois_idx, nrelayed = stats[:3]
     # Surface, don't hide: a bounded slot means the list can be a strict
     # prefix of the count. Say so once, loudly, rather than letting a
     # caller infer completeness from a number that quietly stopped
@@ -2062,6 +2131,36 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # recycled -- closing a descriptor the caller now owns.
     own.release("res_fd")
     out = _cleanroom_collect(res_fd, views, order)
+
+    # ---- W-EXP-2 Phase A: CLEANROOM COMPLETENESS CERTIFICATE ----
+    #
+    # `exit 0` and EOF are not evidence that output is complete: a run can
+    # return everything it still had after losing a packet, and the parent
+    # would see a clean exit and a short result. The launcher's committed
+    # DATA-frame count is the one number the parent cannot derive itself,
+    # because counting what ARRIVED counts the loss too.
+    #
+    # The comparison is only meaningful when both sides describe the same
+    # universe, so it is skipped -- not faked -- when the launcher's count
+    # is unavailable (older substrate, failed node read, sum overflow) or
+    # when the run poisoned batches, where DATA and control dispositions
+    # are deliberately not equal.
+    _committed = _LAST_COMMITTED
+    if _committed is None:
+        _cleanroom_c07_record(None, len(out), poisoned=npois,
+                              reason="launcher did not supply a committed "
+                                     "DATA-frame count")
+    elif npois:
+        # A poisoned batch emits a POISONED disposition, not DATA, so the
+        # counts are legitimately unequal. Comparing them would fail a
+        # correct run, which is the other way to be wrong.
+        _cleanroom_c07_record(None, len(out), poisoned=npois,
+                              reason="run poisoned %d batch(es); committed "
+                                     "DATA and collected records are not "
+                                     "expected to match" % npois)
+    else:
+        _cleanroom_c07_record(int(_committed), len(out), poisoned=0)
+
     # strict_poison is served now: the count came back over the stats
     # channel, so raising is a real enforcement rather than a guess.
     # Default (False) keeps warn-and-return-partial semantics.
@@ -2071,10 +2170,16 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
 
 
 # Stats channel geometry, mirrored by the launcher (v2 header) and by
-# fr_poison_relay() in forkrun_ring.c. All three must agree:
+# fr_poison_relay() in forkrun_ring.c and the v3 header in
+# forkrun_cleanroom.c. All must agree:
 #   header : [u32 version][u32 poisoned][u32 workers][u32 slot_stride]
+#            [u32 committed_data_frames]        <- v3, appended
 #   slot   : [u32 count][count x u32 batch_idx], one per worker
-_STATS_HEADER_BYTES = 16
+#
+# v3 APPENDS a word rather than filling a v2 pad: [2] and [3] are the
+# worker count and the slot stride, and both are load-bearing for walking
+# the per-worker slots.
+_STATS_HEADER_BYTES = 20
 # Slot STRIDE in u32, not capacity: one count word followed by the indices.
 # Must equal FR_POISON_SLOT_U32 + 1 in forkrun_ring.c, which is also what
 # the launcher puts in the v2 header's stride field.
@@ -2148,7 +2253,15 @@ class _PoisonStatsChannel:
                     os.ftruncate(fd, max(need, size))
                 except OSError:
                     pass
-        hdr = _struct.pack("<IIII", 2, 0, self.workers, _STATS_SLOT_U32)
+        # v3, 5 words, matching _STATS_HEADER_BYTES. The committed word is
+        # written as the UNAVAILABLE sentinel, not zero: this relay is
+        # used by the in-process/plain paths where no launcher runs, so
+        # nothing will ever fill it in, and a zero-filled word would read
+        # as "this run committed no DATA frames" -- a fabricated count
+        # that the certificate could then fail a complete run on. The
+        # sentinel is read back as "unavailable", i.e. no verdict.
+        hdr = _struct.pack("<IIIII", 3, 0, self.workers, _STATS_SLOT_U32,
+                           0xFFFFFFFF)
         os.pwrite(fd, hdr, 0)
         self.fd = fd
         return fd
@@ -2160,7 +2273,7 @@ class _PoisonStatsChannel:
             return [], 0
         try:
             os.pwrite(self.fd, _struct.pack("<I", int(poisoned)), 4)
-            _got, idxs, relayed = _read_cleanroom_stats(self.fd)
+            _got, idxs, relayed = _read_cleanroom_stats(self.fd)[:3]
         except OSError:
             return [], 0
         return sorted(set(idxs)), relayed
@@ -2239,6 +2352,33 @@ def _stats_ftruncate(fd, size):
     """Grow the stats memfd. Best-effort; absence is caught downstream."""
     try:
         os.ftruncate(fd, size)
+    except OSError:
+        pass
+
+
+def _stats_stamp_header(fd, workers):
+    """Write the header BEFORE any worker can write a slot.
+
+    The poison relay derives its slot offset from the version word the
+    header carries (see fr_py_poison_relay), because a hardcoded word
+    count silently drifted once already and turned a correct index list
+    into a plausible wrong one. That only works if the version is on the
+    wire while the workers are running -- but the launcher writes its
+    header at the very END, after the join. So during the run the region
+    is still zero-filled, version reads as 0, and the relay would lay
+    its slots out on the v2 boundary while the parent later reads them
+    on the v3 one: an empty index list, and `poisoned_batches_truncated`
+    wrongly True.
+
+    So the parent stamps the version up front. The launcher overwrites
+    the same header at the end with the real counts and the same
+    version, so this declares the layout rather than competing for the
+    writer's place.
+    """
+    import struct as _struct
+    try:
+        os.pwrite(fd, _struct.pack("<IIIII", 3, 0, int(workers),
+                                   _STATS_SLOT_U32, 0xFFFFFFFF), 0)
     except OSError:
         pass
 
@@ -2370,20 +2510,46 @@ def _read_cleanroom_stats(stats_fd):
     version, poisoned = struct.unpack_from("<II", raw, 0)
     if version < 1:
         return None
+    # W-EXP-2 Phase A: v3 carries the committed DATA-frame count for THIS
+    # invocation. It is an absolute count, not a delta: the launcher calls
+    # fr_py_init() itself, so the shared state it reads starts zero-filled
+    # for this run and there is no previous invocation to subtract.
+    #
+    # UINT32_MAX is the "not available" sentinel (older substrate, a failed
+    # node read, or a sum that would not fit) and is deliberately NOT
+    # zero: a fabricated zero would fail a complete result or pass a
+    # truncated one. None here means "no verdict", never "no frames".
+    committed = None
+    if version >= 3 and len(raw) >= 20:
+        (committed,) = struct.unpack_from("<I", raw, 16)
+        if committed == 0xFFFFFFFF:
+            committed = None
     if version == 1:
-        return int(poisoned), [], 0
-    # v2: poisoned batch indices follow the header, one bounded slot per
-    # worker. Anything malformed degrades to the scalar alone, which is
-    # still authoritative for total and strict_poison.
-    if len(raw) < _STATS_HEADER_BYTES:
-        return int(poisoned), [], 0
+        return int(poisoned), [], 0, committed
+    # The slot base is DERIVED FROM THE VERSION, not from a constant.
+    #
+    # It used to be _STATS_HEADER_BYTES, which silently assumed every
+    # writer used the current header. A v2 region -- anything built before
+    # v3 existed, including test fixtures that construct a header by hand
+    # -- lays its slots out 4 bytes earlier, so reading them at the v3
+    # offset returned a plausible-looking WRONG list rather than an
+    # error. Deriving the base from the version the writer actually
+    # stamped makes old and new regions both parse correctly, and means
+    # the next header version cannot repeat this bug.
+    hdr_u32 = 5 if version >= 3 else 4
+    slot_base = hdr_u32 * 4
+    # v2/v3: poisoned batch indices follow the header, one bounded slot
+    # per worker. Anything malformed degrades to the scalar alone, which
+    # is still authoritative for total and strict_poison.
+    if len(raw) < slot_base:
+        return int(poisoned), [], 0, committed
     _ver, _poi, workers, stride = struct.unpack_from("<IIII", raw, 0)
     if not stride:
-        return int(poisoned), [], 0
+        return int(poisoned), [], 0, committed
     idxs = []
     relayed = 0
     for wid in range(min(int(workers), 4096)):
-        base = _STATS_HEADER_BYTES + wid * stride * 4
+        base = slot_base + wid * stride * 4
         if base + 4 > len(raw):
             break
         (n,) = struct.unpack_from("<I", raw, base)
@@ -2407,7 +2573,7 @@ def _read_cleanroom_stats(stats_fd):
     # does not need to -- both mean the list is incomplete, which is the
     # one thing a caller has to know before trusting len(). Deriving this
     # from data that already crosses keeps the on-wire layout unchanged.
-    return int(poisoned), sorted(set(idxs)), relayed
+    return int(poisoned), sorted(set(idxs)), relayed, committed
 
 
 def _cleanroom_collect(res_fd, views, order="none"):
@@ -2646,6 +2812,7 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     own.add("stats_fd", stats_fd)
     _stats_ftruncate(stats_fd, _STATS_HEADER_BYTES
                      + max(int(workers), 1) * _STATS_SLOT_U32 * 4)
+    _stats_stamp_header(stats_fd, workers)
     os.set_inheritable(stats_fd, True)
 
     argv = [launcher, "--so", so,
@@ -2792,7 +2959,13 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
         # truncated) -- a tuple, not a mapping.
         stats = _read_cleanroom_stats(stats_fd)
         if stats is not None:
-            npois, batch_idx, _trunc = stats
+            npois, batch_idx, _trunc = stats[:3]
+            # W-EXP-2 Phase A: committed DATA frames for THIS invocation,
+            # or None when the launcher could not supply it. Published so
+            # the completeness certificate can read it without re-reading
+            # the (already closed) stats descriptor.
+            globals()["_LAST_COMMITTED"] = (stats[3] if len(stats) > 3
+                                           else None)
             _LAST_STATS["poisoned"] = npois
             _LAST_STATS["poisoned_batches"] = list(batch_idx or [])
             _LAST_STATS["poisoned_batches_truncated"] = _trunc
@@ -7463,7 +7636,15 @@ _LAST_STATS: dict = {"total": None, "completed": None,
                      # False means "the index list is the complete truth".
                      # Only the cleanroom's bounded relay slot can make it
                      # True; the in-process path keeps every index.
-                     "poisoned_batches_truncated": False}
+                     "poisoned_batches_truncated": False,
+                     # W-EXP-2 Phase A: committed DATA frames for the LAST
+                     # cleanroom invocation, summed over logical nodes by the
+                     # launcher. None means "the launcher could not supply
+                     # it" (older substrate, failed node read, or a sum
+                     # that would not fit) and is NEVER 0: a fabricated
+                     # zero would fail a complete result or pass a
+                     # truncated one.
+                     }
 
 
 def _reset_stats() -> None:

@@ -67,8 +67,31 @@ void fr_py_poison_relay(uint32_t batch_idx) {
     const unsigned wid = g_fr_config.ring_wid;
     if (wid >= 4096u)
         return;
-    /* header is 4 u32; slot is [count][idx...] with a fixed capacity. */
-    const off_t slot = (off_t)(4 + (size_t)wid * (FR_POISON_SLOT_U32 + 1)) * 4;
+    /* The header size is READ FROM THE REGION, not hardcoded.
+     *
+     * It used to be a literal 4 (v2's four u32 words). When stats v3
+     * appended a fifth word the writer was left behind, and the two
+     * sides disagreed by exactly one word: the relay placed each worker's
+     * slot at the v2 offset while the reader walked the v3 one. Nothing
+     * raised -- poisoned_batches just came back as a plausible-looking
+     * WRONG list ([0, 5] instead of [2, 5]), which is the worst possible
+     * failure for a poisoned-batch index. A literal here is a shared
+     * constant across two files with no compiler to connect them, so it
+     * is derived from the version word the header actually carries:
+     *
+     *     v1/v2 -> 4 u32 header      v3 -> 5 u32 header
+     *
+     * An unknown/short version falls back to 4, the pre-v3 layout, so a
+     * malformed header degrades to the old behaviour instead of writing
+     * indices into the wrong place. Slot is [count][idx...] with a fixed
+     * capacity. */
+    uint32_t hdr_ver = 0;
+    if (pread(g_poison_fd, &hdr_ver, sizeof hdr_ver, 0) !=
+        (ssize_t)sizeof hdr_ver)
+        hdr_ver = 0;
+    const uint32_t hdr_u32 = (hdr_ver >= 3u) ? 5u : 4u;
+    const off_t slot =
+        (off_t)(hdr_u32 + (size_t)wid * (FR_POISON_SLOT_U32 + 1)) * 4;
     uint32_t n = 0;
     if (pread(g_poison_fd, &n, sizeof n, slot) != (ssize_t)sizeof n)
         return;
@@ -2764,6 +2787,19 @@ int fr_py_ingest_eof_posted(void) {
  *
  * This is not the generic "complete frame" statistic, which includes
  * non-DATA dispositions the parent framer filters. */
+/* W-EXP-2 Phase A: is the committed-frame counter LIVE for this process?
+ *
+ * Exists because "zero frames were committed" and "counting is switched
+ * off" are otherwise indistinguishable from outside, and the difference
+ * decides whether a certificate means anything. With counting disabled by
+ * FORKRUN_C07_COUNT=0 the counter never increments, so a launcher that
+ * read it without asking would see 0 while real DATA frames existed -- and
+ * a certificate comparing that against collected records would fail every
+ * COMPLETE run. The caller must treat a disabled counter as "no verdict",
+ * never as zero.
+ */
+int fr_py_c07_counting_enabled(void) { return fr_c07_enabled(); }
+
 int fr_py_committed_data_frames(int node, uint64_t *out) {
     if (!out || !state || node < 0 || node >= (int)global_num_nodes)
         return -1;

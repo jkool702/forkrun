@@ -8,7 +8,7 @@
  *
  * Scope: declarations, argument types, return types only.
  * No semantic contracts (see test_invariant_gate.py §3/§6/§9).
- * Extern entries are the dlsym-visible ABI surface (55);
+ * Extern entries are the dlsym-visible ABI surface (56);
  * static entries are internal (16, listed with linkage in
  * shim_signatures.json, omitted here).
  *
@@ -35,6 +35,7 @@ int fr_py_ack(int fallow_fd, int target_fd);
 int fr_py_ack_direct(int fallow_fd, int target_fd);
 int fr_py_ack_init(int fd);
 uint64_t fr_py_backlog_node(int node);
+int fr_py_c07_counting_enabled(void);
 int fr_py_claim(fr_py_batch_t *out);
 int fr_py_committed_data_frames(int node, uint64_t *out);
 int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx, int fallow_fd, int out_fd, const char *data, uint64_t data_len);
