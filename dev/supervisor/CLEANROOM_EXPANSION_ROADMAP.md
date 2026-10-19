@@ -451,6 +451,121 @@ count and fixed-role counts — or validate and publish an explicit supported
 configuration limit BEFORE spawning. It must not discover the mismatch
 halfway through startup and terminate via `die("supervision registry full")`.
 
+#### W-EXP-2 step C — the multi-node cleanroom envelope (implemented, opt-in)
+
+**Status: gate met, for the logical-`@N` envelope.** The launcher now runs
+the real NUMA pipeline under the typed registry: a NUMA ingest, one indexer
+and one scanner per logical node, a physical fallow, and the engine's C
+orderer for ordered collection. Five families, five identities, one
+supervisor.
+
+**What is wired, and how it is known to be right.**
+
+* **The launcher owns the topology.** `--nodes N --numa-map MAP` selects the
+  logical topology; `fr_py_init_numa` builds the per-node rings, and the
+  launcher forks the families itself (`fr_py_numa_ingest`, `fr_py_indexer_numa`,
+  `fr_py_numa_scanner`, `fr_py_fallow_phys`, `fr_py_orderer`). Every one of
+  those entry points already existed in the substrate; Phase B's finding was
+  that the wiring did not, and that is what this step adds.
+* **Node-taking worker loops.** `fr_py_worker_plugin_loop` hardcoded node 0,
+  so a multi-node launcher would have run every worker on one ring while
+  claiming a multi-node run. The shim now exposes
+  `fr_py_worker_plugin_loop_numa(..., node_id)` — the same loop body with the
+  node supplied — which the roadmap's standing constraint already sanctioned
+  (`fr_py_worker_init` accepts `node_id`; the Python paths already pass it).
+  The existing symbol is unchanged and still passes `-1` (auto/UMA). ABI
+  surface: 57 externs / 16 statics (was 56/16).
+* **Ordering is the engine's job, not the parent's.** The cleanroom's
+  `order="index"` was a parent-side sort on `batch_idx`, which is a PER-NODE
+  ticket (step A: two nodes both emit 0, 1, 2, ...; 63 collisions on the
+  probe corpus). Under the multi-node envelope the launcher runs the C
+  orderer and the parent collects WITHOUT sorting. Measured: `@2` and `@4`,
+  `order="index"`, **byte-exact** against the input at both node counts;
+  `order="none"` yields the complete multiset. The parent-side sort remains
+  for UMA, where `batch_idx` IS a global sequence.
+* **Completeness is certified, not assumed.** The launcher's v3 counter
+  carries committed DATA frames summed over nodes, and the parent refuses a
+  shortfall. Measured through the public API: expected 9 == observed 9,
+  verdict `complete`.
+* **The EOF window is engine-backed.** A clean ingest/indexer/scanner exit is
+  accepted only when the ENGINE reports ingest EOF posted
+  (`fr_py_ingest_eof_posted`), never on exit status and never on the child's
+  own report. The step B note flag remains only as the sentinel's test model.
+  A clean exit without that evidence is fatal.
+* **The registry is sized from the configuration.** `SUP_MAX_PROCS = 520` is
+  gone; the registry is `calloc`'d to exactly what the request needs
+  (workers + 2 per node + fallow + ingest + orderer/drain). The reviewed
+  topology — 512 workers + 4 indexers + 4 scanners + 3 global helpers = **523
+  entries** — is now accepted and runs, where the fixed array would have
+  failed halfway through startup. An explicit hard ceiling (8192) is
+  enforced BEFORE any fork, and the worker count is checked against the
+  engine's own `MAX_TXN_WORKERS` ceiling up front, so an unservable
+  configuration costs no input.
+
+**Two limits found and fixed on the way, both pre-existing.**
+
+* **The descriptor keep-list capped the launcher at ~250 workers.** The
+  drain child must hold one output descriptor per worker, and the keep-list
+  was a fixed 256 entries — so a 512-worker run failed in a CHILD with
+  "could not be given a complete descriptor set", mid-startup, with the
+  real cause invisible. The bound is now derived from the engine's own
+  worker ceiling (`MAX_TXN_WORKERS = 1024`) plus headroom, and an oversized
+  worker count is refused before the first fork.
+* **The multi-node fatal path left its killed workers unreaped**, so
+  dead workers were still observable as processes after the launcher exited.
+  The path now reaps what it signalled.
+
+**Fault injection across helper families.** Killing the ingest, an indexer,
+a scanner or the fallow aborts the run, and the run leaves no surviving
+registered descendant. The classification matches the in-process reference
+(`check_scanner_death`): clean exit is normal, anything else is fatal.
+
+**Routing, and why it is opt-in.** The multi-node envelope is served
+through `FORKRUN_CLEANROOM_NUMA=1`, a separate switch from the
+`FORKRUN_CLEANROOM` route selector. The route selector names DISPATCH
+routes (entry x mode); the multi-node envelope is a different dimension
+(topology), and folding it into that namespace would silently change what
+an existing `FORKRUN_CLEANROOM=map-plugin` means. It stays OFF because
+Decision 3 (multi-node default-on) is gated on real multi-socket evidence,
+which this host cannot produce. Without the switch, a multi-node call runs
+the in-process NUMA path exactly as before — the launcher is not merely
+decline-and-warn, it is never asked.
+
+**Tests** (`python/tests/test_cleanroom_numa.py`, 18 cases): `@2`/`@4`
+byte-exact for `order="index"`; complete multiset for `order="none"`; every
+family registered under its own role with workers distributed across nodes;
+the ingest death carries `evidence=1`; a clean exit without EOF evidence is
+fatal; the registry capacity equals the requirement and exceeds the old
+fixed array; an oversized topology is refused before any process starts; a
+mismatched `--numa-map` is refused; `--order index` requires a multi-node
+topology; a helper death in each of the four families aborts the run and
+leaves no survivors; the public-API route serves the launcher only when
+opted in, and the certificate holds on both sides of it.
+
+**Mutation recap.** Six mutants, all killed: re-sorting the launcher's
+ordered stream by `batch_idx` → `EXACT False`; a fixed 520-entry registry
+→ the 523-entry topology dies; a recoverable indexer policy → the run hangs
+instead of aborting; status-only EOF acceptance → an unproven clean exit
+exits 0; the multi-node route ignoring its opt-in → the launcher serves a
+call that did not ask for it; an unvalidated `--numa-map` → the refusal
+disappears.
+
+**Scope, stated rather than implied.**
+
+* **UDF and spawn NUMA are NOT served** (W-EXP-1.5): the node-taking loop
+  exists for the plugin loop, and running a UDF or a command on node 0 while
+  claiming a multi-node run would be a lie about where the work happened.
+  The launcher refuses that combination rather than falling back.
+* **Streaming NUMA is NOT served**: the streaming cleanroom path is a
+  different collection contract, and the orderer writes one ordered stream,
+  not a live feed.
+* **The NUMA scanner's dynamic spawn is disarmed** (`-1`): the launcher
+  forks its whole worker complement up front, so it cannot service spawn
+  requests. That is the W-EXP-3 optimisation, not a gap.
+* **Everything here is LOGICAL `@N`.** This host has one physical NUMA
+  node, so no claim about physical locality, binding or bandwidth is made
+  or supported by this evidence.
+
 #### Hard dependency graph (corrected — the previous list was incomplete)
 
 * **Phase 0** contracts and measurements gate the expansion work they inform.

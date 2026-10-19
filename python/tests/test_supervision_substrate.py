@@ -253,9 +253,12 @@ class TestSupervisionSubstrate(unittest.TestCase):
             "a family without an explicit policy is a hole in the model")
         self.assertEqual(policy["worker"], (1, 1, "never"))
         # Clean-exit windows are part of the policy, not an implicit
-        # "exit 0 means done": only ingest completes at EOF.
-        self.assertEqual(policy["ingest"], (0, 0, "eof"))
-        for role in ("orderer", "indexer", "scanner", "fallow", "drain"):
+        # "exit 0 means done". Ingest, indexer and scanner complete when
+        # the engine posts ingest EOF (Step C); orderer/fallow/drain only
+        # once teardown has begun.
+        for role in ("ingest", "indexer", "scanner"):
+            self.assertEqual(policy[role], (0, 0, "eof"), role)
+        for role in ("orderer", "fallow", "drain"):
             self.assertEqual(policy[role], (0, 0, "teardown"), role)
 
     def test_healthy_run_reaps_helper_cleanly_and_transfers_all_bytes(self):

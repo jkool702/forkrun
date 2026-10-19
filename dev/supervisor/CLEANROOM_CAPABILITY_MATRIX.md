@@ -15,7 +15,7 @@ public entry point actually takes.
 | Cells enumerated | 40320 |
 | Public-VALID cells | 6624 (16.4% of grid) |
 | Cells rejected by public validation | 33696 |
-| Predicate accepts (of valid) | 288 |
+| Predicate accepts (of valid) | 480 |
 | **Launcher selected (of valid)** | **168 (2.54%)** |
 | Distinct routes | 7 |
 
@@ -142,7 +142,7 @@ interchangeable on that boundary, and the earlier assumption that
 a missing artifact stops selection was wrong for `map()`.
 
 Invalid configurations were counted against the capability
-denominator. **352 cells were reported as served that no public call
+denominator. **544 cells were reported as served that no public call
 could ever make** -- every one of them an iterable source, which
 `_api._reject_iterable_source` rejects before any envelope check.
 
@@ -152,11 +152,12 @@ could ever make** -- every one of them an iterable source, which
 
 | Outcome | Cells | Reason fragment |
 |---|---:|---|
-| `DECLINE_NODES` | 4416 | UMA single-node only (got nodes=2) |
-| `DECLINE_RESUME` | 1008 | resume=/checkpoint_file= is not served; the launcher neith |
+| `DECLINE_NODES` | 3456 | multi-node is served for mode='plugin' only (got 'udf') |
+| `DECLINE_RESUME` | 1728 | resume=/checkpoint_file= is not served; the launcher neith |
 | `DECLINE_MODE` | 864 | mode='plugin', 'udf' or 'spawn' only (got 'python') |
-| `SERVED` | 288 |  |
-| `DECLINE_STREAM_ORDER` | 24 | stream(order='index') is not served; the stream path has n |
+| `SERVED` | 480 |  |
+| `DECLINE_STREAM_ORDER` | 48 | stream(order='index') is not served; the stream path has n |
+| `DECLINE_STREAM_NODES` | 24 | multi-node streaming is not served; the launcher's ordered |
 | `DECLINE_MODE_STREAM_SPAWN` | 24 | stream(mode='spawn') is not served; the streaming path has |
 
 ---
@@ -165,12 +166,13 @@ could ever make** -- every one of them an iterable source, which
 
 | Rule | Fires on | Citation |
 |---|---|---|
-| `R1` | 0 | docstring: 'UMA single node -- no multi-node rings' |
+| `R1` | 0 | docstring: 'multi-node -- SERVED for mode=plugin ... UDF and |
 | `R2` | 0 | docstring: 'mode=plugin -- it dlopens an object and calls an |
 | `R4` | 0 | docstring: 'order in (none, index)'. The launcher forks no C |
 | `R5` | 0 | CR-FIX1-K: the launcher neither transports nor implements ch |
 | `R2b` | 0 | stream(mode='spawn') is not served; the streaming path has n |
 | `R6` | 0 | docstring + inline note: the stream path has no collect step |
+| `R6b` | 0 | docstring: 'neither is multi-node STREAMING (the launcher's  |
 | `R8` | 0 | inline: a path that does not exist is not servable |
 | `R9` | 0 | inline: a directory is not servable |
 | `R10` | 0 | inline: source must be a path, an open descriptor, or an ite |

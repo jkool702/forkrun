@@ -641,29 +641,71 @@ def _cleanroom_explicit():
     return v.strip().lower() not in ("", "0", "no", "off", "false")
 
 
+def _cleanroom_multinode_route_enabled(raw_mode):
+    """May THIS call take the multi-node cleanroom route?
+
+    Both conditions are required: the route must be opted into (see
+    _cleanroom_multinode_enabled) and the mode must be one the
+    multi-node envelope serves.
+    """
+    if not _cleanroom_multinode_enabled():
+        return False
+    route_ok = _cleanroom_route_enabled("map", raw_mode)
+    return bool(route_ok)
+
+
+def _cleanroom_multinode_enabled():
+    """Is the MULTI-NODE cleanroom route opted into?
+
+    W-EXP-2 step C makes the launcher able to serve the multi-node
+    plugin envelope, but serving it is not the same as DEFAULTING it.
+    Decision 3 (multi-node default-on) is gated by W-EXP-2 *and* by
+    real multi-socket evidence, and the second half does not exist on a
+    single-node host: there is no way to prove here that the NUMA route
+    behaves on real hardware, so defaulting it would claim an
+    unevidenced win.
+
+    The route selector (FORKRUN_CLEANROOM) names DISPATCH routes
+    (entry x mode). The multi-node envelope is a different dimension --
+    topology -- and folding it into that namespace would silently
+    change what an existing FORKRUN_CLEANROOM=map-plugin means. So it
+    has its own explicit switch, and it stays OFF until Decision 3.
+
+    Returns False for an unset/garbage value; only an explicit truthy
+    value turns it on.
+    """
+    v = os.environ.get("FORKRUN_CLEANROOM_NUMA")
+    if v is None:
+        return False
+    v = v.strip().lower()
+    return v not in ("", "0", "no", "off", "false") and v not in (
+        "none", "auto")
+
+
 def _warn_cleanroom_multinode(num_nodes):
-    """Multi-node routes AROUND the cleanroom envelope entirely.
+    """Multi-node did NOT take the cleanroom: say so, if it was asked for.
 
     Every `if num_nodes > 1:` branch RETURNS before
     _cleanroom_eligible is consulted, so an explicit
     FORKRUN_CLEANROOM used to be dropped here in silence. That
     contradicted the envelope's own rule ("a user who set
-    FORKRUN_CLEANROOM must learn they did not get it") and read as the
+    FORRUN_CLEANROOM must learn they did not get it") and read as the
     cleanroom quietly ignoring them.
 
-    Multi-node is also the launcher's largest remaining gap -- it builds
-    one ring in one process and has no node-bound worker placement -- so
-    the message says so plainly rather than implying a transient miss.
-    It must be called from each branch: the envelope check cannot cover
-    these, because it is never reached.
+    Step C changed the shape of this: multi-node plugin CAN take the
+    launcher, but only when the multi-node route is opted into. When it
+    is not, this message is the difference between "the launcher
+    declined" and "the launcher was never asked" -- and a user who
+    asked for the cleanroom must be able to tell.
     """
     if not (_cleanroom_enabled() and _cleanroom_explicit()):
         return
     import warnings as _warnings
     _warnings.warn(
         "forkrun: FORKRUN_CLEANROOM ignored -- multi-node (nodes=%r) "
-        "runs the dedicated NUMA pipeline. The launcher serves UMA "
-        "single-node only." % (num_nodes,),
+        "runs the dedicated NUMA pipeline. The launcher serves the "
+        "multi-node plugin envelope only when FORKRUN_CLEANROOM_NUMA=1 "
+        "is set (Decision 3 is not passed yet)." % (num_nodes,),
         UserWarning, stacklevel=3)
 
 
@@ -941,9 +983,17 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
       back, rather than returning silently wrong results. An earlier
       draft of this comment claimed v0 plugins were served "fine too";
       nine existing plugin tests disproved that.
-    * UMA single node -- no multi-node rings.
-    * order in ("none", "index") -- the launcher does NOT run the C
-      orderer (ring_order is forked only by the in-process reactor, for
+    * multi-node -- SERVED for mode="plugin" (W-EXP-2 step C): the
+      launcher builds the real per-node rings and runs the ingest,
+      indexers, scanners and fallow families itself. UDF and spawn
+      multi-node are NOT served (the node-taking worker loop exists for
+      the plugin loop only), and neither is multi-node STREAMING (the
+      launcher's ordered stream is not a live feed). The multi-node
+      route is opt-in behind FORKRUN_CLEANROOM_NUMA because Decision 3
+      (multi-node default-on) is gated on real multi-socket evidence,
+      which a single-node host cannot produce.
+    * order in ("none", "index") -- for UMA the launcher does NOT run the
+      C orderer (ring_order is forked only by the in-process reactor, for
       memory reasons), but it does not need to. The ordering is applied
       downstream by shared code: map/collect sorts by index in
       collect_records, and stream() reassembles parent-side from the
@@ -969,7 +1019,26 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
       supervises -- there is no flag and no non-supervised mode.
     """
     if num_nodes != 1:
-        return False, "UMA single-node only (got nodes=%r)" % (num_nodes,)
+        # W-EXP-2 step C: the launcher now serves the multi-node PLUGIN
+        # envelope -- real ingest/indexer/scanner/fallow families under
+        # the typed registry, with the engine's own C orderer for
+        # order="index".
+        #
+        # UDF and spawn NUMA are NOT wired: the node-taking worker loop
+        # exists only for the plugin loop, and running a UDF or a command
+        # on node 0 while claiming a multi-node run would be a lie about
+        # where the work happened. Those envelopes are W-EXP-1.5.
+        #
+        # Streaming is not wired either: the streaming cleanroom path is
+        # a different collection contract (no collect step to sort), and
+        # the NUMA orderer writes one ordered stream, not a live feed.
+        if raw_mode != "plugin":
+            return False, ("multi-node is served for mode='plugin' only "
+                           "(got %r)" % (raw_mode,))
+        # The streaming declines live in the streaming block below, which
+        # owns every streaming refusal. Returning here would pre-empt
+        # them, so a streaming multi-node call is declined by the block
+        # that is responsible for declining it.
     # mode="udf" is served wherever mode="plugin" is: same launcher, same
     # envelope, same supervision. It differs only in WHICH loop the
     # launcher selects (fr_py_worker_udf_loop) and that an interpreter is
@@ -1063,6 +1132,14 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
             return False, ("stream(order=%r) is not served; the stream "
                            "path has no collect step to sort with"
                            % (order,))
+        # W-EXP-2 step C: multi-node streaming is not served. The
+        # launcher's ordered NUMA stream is one ordered output, not a
+        # live feed, so there is no streaming collection contract to
+        # honour.
+        if num_nodes != 1:
+            return False, ("multi-node streaming is not served; the "
+                           "launcher's ordered stream has no live-feed "
+                           "contract")
         # strict_poison IS served for stream() now. The decline said "no
         # poison count reaches a streaming caller" -- true when it was
         # written, and false since P2 (c3c321af) wired a statistics
@@ -1791,7 +1868,8 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                        plugin_func, on_error, views, strict_poison=False,
                        order="none", orchestrator=True,
                        udf_helper=None, udf_module=None, udf_attr=None,
-                       udf_roots=None, spawn_argv=None, _own=None):
+                       udf_roots=None, spawn_argv=None,
+                       num_nodes=1, numa_map="", _own=None):
     """W-CR1: materialized file + C plugin, orchestrated entirely in C.
 
     Everything (fr_py_init, spill to the ingress memfd, per-worker output
@@ -1911,6 +1989,19 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "--workers", str(int(workers)),
             "--lines", str(int(lines or 0)),
             "--bytes", str(int(bytes_ or 0)),
+            # W-EXP-2 step C: the topology the launcher must build. The
+            # map is the physical-id list (one entry per LOGICAL node),
+            # so a logical @N run on a one-node host sends the same
+            # physical id N times -- which is exactly what
+            # _numa.build_numa_map produces for the '@N' form.
+            "--nodes", str(int(num_nodes or 1)),
+            "--numa-map", str(numa_map or ""),
+            # The launcher runs the engine's C orderer for the ordered
+            # multi-node envelope, so the parent must NOT sort by
+            # batch_idx afterwards (batch_idx is a PER-NODE ticket and
+            # collides across nodes -- see the step A finding).
+            "--order", ("index" if (num_nodes > 1 and order == "index")
+                        else "none"),
             # Transport the fault policy rather than refusing it: the
             # launcher already accepts both codes, and _ON_ERROR_CODES
             # is the same table the C worker loop uses.
@@ -2130,7 +2221,17 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # and if the collector had already closed it the number may have been
     # recycled -- closing a descriptor the caller now owns.
     own.release("res_fd")
-    out = _cleanroom_collect(res_fd, views, order)
+    # W-EXP-2 step C: the multi-node ordered envelope runs the engine's
+    # C orderer INSIDE the launcher, so the result stream is ALREADY in
+    # global order. Sorting it again by batch_idx would be wrong twice
+    # over: batch_idx is a per-NODE ticket (two nodes both emit 0, 1,
+    # 2, ...), so the sort is not even a stable re-implementation of
+    # what the orderer produced -- it can move a record across the
+    # stream. The parent-side batch_idx sort stays for the UMA path,
+    # where batch_idx IS a global sequence.
+    launcher_ordered = (int(num_nodes or 1) > 1 and order == "index")
+    out = _cleanroom_collect(res_fd, views,
+                             "none" if launcher_ordered else order)
 
     # ---- W-EXP-2 Phase A: CLEANROOM COMPLETENESS CERTIFICATE ----
     #
@@ -4711,6 +4812,58 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         collect=True, c_drain=c_drain, views=output)
 
     if num_nodes > 1:
+        # W-EXP-2 step C: the launcher can serve the multi-node PLUGIN
+        # envelope. It is OPT-IN (FORKRUN_CLEANROOM_NUMA=1) because
+        # Decision 3 (multi-node default-on) is gated on real multi-socket
+        # evidence, which this host cannot produce.
+        #
+        # The attempt happens BEFORE the in-process NUMA executor, and a
+        # decline falls through to it unchanged -- so an opted-in run
+        # that the launcher refuses (missing symbol, wrong mode) still
+        # produces correct results, just slower.
+        if _cleanroom_multinode_route_enabled(mode):
+            _ok, _why = _cleanroom_eligible(
+                source, mode, num_nodes, kwargs.get("order", "none"),
+                kwargs.get("strict_poison", False), orchestrator,
+                bool(return_stats),
+                resume=kwargs.get("resume"),
+                checkpoint_file=kwargs.get("checkpoint_file"))
+            if _ok and mode == "plugin":
+                _p, _sep, _f = payload.rpartition(":")
+                if _p and _f:
+                    with _signal_guard(
+                            kwargs.get("signal_policy",
+                                       "default")) as _sg:
+                        with _RUN_LOCK:
+                            out, _ip_p, _ip_m = _cleanroom_attempt(
+                                lambda: _execute_cleanroom(
+                                    source,
+                                    lines=kwargs.get("lines"),
+                                    bytes_=kwargs.get("bytes"),
+                                    workers=base["workers"],
+                                    plugin_path=_p, plugin_func=_f,
+                                    on_error=kwargs.get("on_error",
+                                                        "retry"),
+                                    views=base["views"],
+                                    strict_poison=bool(
+                                        kwargs.get("strict_poison",
+                                                   False)),
+                                    order=kwargs.get("order", "none"),
+                                    orchestrator=orchestrator,
+                                    num_nodes=num_nodes,
+                                    numa_map=numa_map_str),
+                                payload, mode)
+                        _sg.check()
+                    if _ip_m is not None:
+                        payload, mode = _ip_p, _ip_m
+                    if out is not None:
+                        return _map_return(out, return_stats)
+            else:
+                import warnings as _warnings
+                _warnings.warn(
+                    "forkrun: requested cleanroom ignored for this call "
+                    "(%s) — using the in-process NUMA path." % (_why,),
+                    UserWarning, stacklevel=3)
         _warn_cleanroom_multinode(num_nodes)
         _require_numa_symbol()
         payload, mode = _coerce_payload(payload, mode)

@@ -351,6 +351,11 @@ class TestCleanroomHelpers(unittest.TestCase):
                 (p, "plugin", 1, "none", True, True),     # strict_poison
                 (p, "plugin", 1, "none", False, True, True),   # + stats
                 (p, "plugin", 1, "none", False, False),  # fail-fast policy
+                # W-EXP-2 step C: the multi-node PLUGIN envelope is
+                # served. The launcher builds the real per-node rings and
+                # runs the ingest/indexer/scanner/fallow families itself.
+                (p, "plugin", 2, "none", False, True),    # multi-node
+                (p, "plugin", 4, "index", False, True),   # multi-node, ordered
         ):
             ok, why = _cleanroom_eligible(*args)
             self.assertTrue(ok, "should accept %r (%s)" % (args, why))
@@ -361,7 +366,13 @@ class TestCleanroomHelpers(unittest.TestCase):
         # while testing nothing.
         for args in (
                 (p, "python", 1, "none", False, True),    # not a plugin
-                (p, "plugin", 4, "none", False, True),    # multi-node
+                # W-EXP-2 step C: multi-node is declined for every mode
+                # EXCEPT plugin -- the node-taking worker loop exists for
+                # the plugin loop only. A UDF or a command run on node 0
+                # while the call claims a multi-node run would be a lie
+                # about where the work happened.
+                (p, "udf", 4, "none", False, True),       # multi-node UDF
+                (p, "spawn", 4, "none", False, True),     # multi-node spawn
                 (p, "plugin", 1, "hash", False, True),    # unknown order
                 ("/no/such/file", "plugin", 1, "none", False, True),
         ):

@@ -194,7 +194,11 @@ SERVED = "SERVED"
 
 OUTCOMES = {
     SERVED: None,
-    "DECLINE_NODES": "UMA single-node only",
+    # W-EXP-2 step C: the multi-node refusal names the mode it is
+    # restricted to. The anchor is the distinctive half of that text --
+    # NOT "only (got", which is DECLINE_MODE's anchor and would
+    # classify this refusal as a mode refusal.
+    "DECLINE_NODES": "multi-node is served for mode",
     # Anchor is a SUBSTRING of the predicate's refusal text, so it must
     # track it. Widened with P1-3 when mode='udf' was admitted alongside
     # mode='plugin'; a stale anchor here shows up as UNCLASSIFIED on
@@ -205,6 +209,7 @@ OUTCOMES = {
     "DECLINE_ORDER": "is not served; the launcher relies on downstream",
     "DECLINE_RESUME": "resume=/checkpoint_file= is not served",
     "DECLINE_STREAM_ORDER": "the stream path has no collect step",
+    "DECLINE_STREAM_NODES": "multi-node streaming is not served",
     "DECLINE_MODE_STREAM_SPAWN": "the streaming path has no spawn "
                                   "dispatch",
     "DECLINE_SOURCE_MISSING": "source is not an existing file",
@@ -230,10 +235,31 @@ def classify(ok, reason):
 # ---------------------------------------------------------------------------
 
 RULES = [
+    # R1: the multi-node envelope.
+    #
+    # W-EXP-2 step C made the launcher able to SERVE the multi-node
+    # plugin envelope: it builds the real per-node rings and runs the
+    # ingest, indexers, scanners and fallow families itself. The
+    # contract as it now stands, from the predicate's docstring:
+    #
+    #   * multi-node is SERVED for mode="plugin";
+    #   * multi-node is NOT served for mode="udf" or mode="spawn" -- the
+    #     node-taking worker loop exists for the plugin loop only, and
+    #     running either on node 0 while claiming a multi-node run would
+    #     be a lie about where the work happened;
+    #   * multi-node is NOT served for STREAMING -- the launcher's
+    #     ordered stream is one ordered output, not a live feed.
+    #
+    # So the decline is CONDITIONAL on the mode, and it is still R1: it
+    # outranks the later rules, because a multi-node call that is going
+    # to be refused for its topology should be told about the topology
+    # first.
     ("R1", "nodes",
-     lambda f: f.nodes != 1,
+     lambda f: f.nodes != 1 and f.mode != "plugin",
      "DECLINE_NODES",
-     "docstring: 'UMA single node -- no multi-node rings'"),
+     "docstring: 'multi-node -- SERVED for mode=plugin ... UDF and "
+     "spawn multi-node are NOT served ... neither is multi-node "
+     "STREAMING'"),
 
     ("R2", "mode",
      lambda f: f.mode not in ("plugin", "udf", "spawn"),
@@ -306,6 +332,15 @@ RULES = [
      "with, and its parent-side reassembly handles order='none' only. "
      "NOTE the asymmetry with R4: map SERVES order='index', stream does "
      "not. A single predicate holds both, deliberately"),
+
+    # R6b: multi-node STREAMING. Ordered AFTER R6, because the
+    # streaming block refuses in the order spawn, ORDER, then NODES --
+    # so an ordered streaming call is told about the ORDERING first.
+    ("R6b", "stream+nodes",
+     lambda f: f.streaming and f.nodes != 1 and f.mode == "plugin",
+     "DECLINE_STREAM_NODES",
+     "docstring: 'neither is multi-node STREAMING (the launcher's ordered "
+     "stream is not a live feed)'"),
 
     # R7 REMOVED. It declined stream(strict_poison=True) on the grounds
     # that "no poison count reaches a streaming caller" -- true when
@@ -399,12 +434,20 @@ REGRESSIONS = [
      SERVED, "R0",
      "the stream path's actual envelope"),
 
+    # W-EXP-2 step C: the multi-node refusal is CONDITIONAL on the mode
+    # (plugin is served), so this cell no longer declines on topology.
+    # It now declines on the ORDER, which is the first rule that matches
+    # it -- and that is the contract, not an accident: the cell still
+    # carries a resume/checkpoint request and an unsupported order, and
+    # the ordering rule (R4) precedes the resume rule (R5).
     ("descending_precedence_puts_orchestrator_before_order",
      Facts("map", "path", "plugin", 2, "sorted", False, True, True,
            "s.json", "c.json"),
-     "DECLINE_NODES", "R1",
-     "five decline conditions hold simultaneously. R1 wins, so the caller "
-     "is told about nodes first rather than about the last thing checked"),
+     "DECLINE_ORDER", "R4",
+     "the cell still holds several decline conditions at once. R1 no "
+     "longer matches it -- multi-node is served for mode='plugin' -- so "
+     "the first rule that does is R4 (order). The caller is told about "
+     "the unsupported order, which is the first thing wrong with it"),
 
     ("resume_outranks_stream_order",
      Facts("stream", "path", "plugin", 1, "index", True, False, False,
