@@ -195,6 +195,73 @@ supervision interface is specified and frozen in Phase 0, or one branch is
 integrated and rebased before the other.** Which is decided in Phase 0; the
 acceptance gates stay separate either way.
 
+#### W-EXP-2 Phase B — source-level design audit (no code written)
+
+Audit only. Nothing in this section is implemented, and nothing here should be
+read as a claim that NUMA works in the cleanroom.
+
+**1. Supervision — the largest structural gap.** `forkrun_cleanroom.c`
+supervises a **flat `pids[wid]` array in a single global worker-id space** and
+has no node concept at all: no `--nodes`, no `num_nodes`, no per-node
+scheduling. The in-process path instead forks fallow-phys + N indexers + N
+scanners + ingest and reaps them from Python. Promoting NUMA to the cleanroom
+therefore moves *five* process families under C supervision at once, not one,
+and §6.3's per-worker death pipes become a prerequisite rather than a
+follow-up. Treating this as "wire up NUMA" would understate it by a wide
+margin.
+
+**2. Capability inventory — the capability is there; the wiring is not.** Every
+NUMA entry point already exists in the generated ABI: `fr_py_init_numa`,
+`fr_py_fallow_phys`, `fr_py_indexer_numa`, `fr_py_numa_scanner`,
+`fr_py_numa_ingest`, `fr_py_orderer`, `fr_py_set_order_pipe`. The launcher
+resolves six symbols and **none** of them are NUMA entry points. So Phase C is
+wiring and supervision design, not new engine capability — but the supervisor
+must be built before the capability can be used safely.
+
+**3. Topology resolver — sound, and it fails closed. [V]** `python/forkrun/_numa.py`
+validates a physical request against `/sys/devices/system/node/online` and
+raises `ValueError` when fewer nodes are online than asked
+("silently running UMA after nodes=4 was requested would be a benchmarking
+lie"). Verified here: `nodes=2` on this machine raises
+`nodes=2 requested but only 1 NUMA node(s) online ([0])`. The `@N` form is an
+explicit, labelled escape hatch for *logical* nodes on a single-socket box.
+
+**This machine has exactly one NUMA node** (`node0`, online mask `0`,
+28 CPUs). Consequently **no physical multi-node claim can be validated here at
+all.** The mandatory NUMA matrix can only ever run in logical `@N` mode, and
+that must be labelled as such in any evidence. This is a standing limit on
+what W-EXP-2 can prove on this host, not something implementation can fix.
+
+**4. Ordering — proven in-process, unresolved for the cleanroom. [V]** The
+cleanroom launcher runs **no orderer**; `order="index"` is implemented in Python
+by sorting each record's own `batch_idx` after collection
+(`_cleanroom_collect`), because the launcher's drain is in batch-*completion*
+order. Under UMA `batch_idx` is a global `0..N-1` sequence, so the sort is
+valid — verified end to end.
+
+In-process NUMA ordering is already correct: `nodes="@2"` and `nodes="@4"`
+with `order="index"` both return **byte-exact input order**. So the *engine*
+ordering works. What is unresolved is whether `batch_idx` is globally unique
+once batch boundaries are per-node — this audit did not settle that, and it is
+the blocking question for the cleanroom's post-hoc sort. **A sort cannot
+detect a gap**, which is precisely why Phase A's count comparison, not the
+sort, is the completeness mechanism for `order="index"`.
+
+**5. `already_ordered` — the distinction the work order asked about.** In the
+cleanroom there is no engine ordering to trust: "ordered" is a post-hoc sort in
+Python. In-process, the orderer runs. These are different guarantees behind one
+API flag, and the cleanroom certificate must remain the thing that detects loss
+in both.
+
+**6. Record-count arithmetic is not `ceil(total/lines)`. [V]** Under NUMA the
+source is partitioned per node, so a global batch boundary splits: 512 lines at
+`lines=64` yields **9** records under `@2`/`@4`, not 8 — one 960-byte batch
+arrives as 255 + 705. Total bytes are exact and the output is an exact multiset
+match of the input (no loss, no duplication). This validates Phase A's choice to
+compare the engine's own committed count rather than an arithmetic
+expectation; a `ceil()` formula would have reported a false shortfall on every
+NUMA run.
+
 #### Hard dependency graph (corrected — the previous list was incomplete)
 
 * **Phase 0** contracts and measurements gate the expansion work they inform.
