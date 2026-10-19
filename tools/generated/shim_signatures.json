@@ -189,6 +189,16 @@
     "linkage": "static",
     "return": "void"
   },
+  "fr_py_node_index_complete": {
+    "args": "int node",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_node_scan_complete": {
+    "args": "int node",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_nonblock": {
     "args": "int fd",
     "linkage": "static",

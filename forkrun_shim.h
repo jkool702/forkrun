@@ -8,7 +8,7 @@
  *
  * Scope: declarations, argument types, return types only.
  * No semantic contracts (see test_invariant_gate.py §3/§6/§9).
- * Extern entries are the dlsym-visible ABI surface (58);
+ * Extern entries are the dlsym-visible ABI surface (60);
  * static entries are internal (16, listed with linkage in
  * shim_signatures.json, omitted here).
  *
@@ -60,6 +60,8 @@ int fr_py_init(int lines, int bytes);
 int fr_py_init_numa(int lines, int bytes, int num_nodes, const char *numa_map);
 int fr_py_is_resume_mode(void);
 int fr_py_map_readonly(int fd, uint64_t length, uint64_t *out_addr);
+int fr_py_node_index_complete(int node);
+int fr_py_node_scan_complete(int node);
 int fr_py_notify_committed(int signal_fd, int out_fd, uint64_t wid);
 int fr_py_numa_ingest(int infd, int outfd, int num_nodes);
 int fr_py_numa_scanner(int memfd, int node_id, int fd_spawn, int num_nodes);

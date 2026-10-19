@@ -177,6 +177,19 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # W-EXP-2 step C follow-up: PER-NODE completion evidence.
+        # The global ingest-EOF marker is not a per-node completion
+        # signal -- it says the source was consumed, not that this
+        # node's indexer consumed its chunks or that this node's
+        # scanner finished its ring state. Read-only: 1 complete,
+        # 0 not complete, -1 no verdict.
+        lib.fr_py_node_index_complete.argtypes = [ctypes.c_int]
+        lib.fr_py_node_index_complete.restype = ctypes.c_int
+        lib.fr_py_node_scan_complete.argtypes = [ctypes.c_int]
+        lib.fr_py_node_scan_complete.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
         # Bind the logical node the next fr_py_worker_init call uses.
         # Used by the multi-node launcher to select a ring without a
         # second copy of the worker loop body.

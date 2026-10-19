@@ -2773,6 +2773,63 @@ int fr_py_ingest_eof_posted(void) {
                            __ATOMIC_ACQUIRE) != ~(uint64_t)0 ? 1 : 0;
 }
 
+/* =====================================================================
+ * W-EXP-2 step C follow-up: PER-NODE completion evidence.
+ *
+ * The global ingest-EOF marker is NOT a per-node completion signal. It
+ * says the source was consumed; it says nothing about whether a given
+ * node's indexer consumed the chunks published for THAT node, or
+ * whether that node's scanner finished publishing its final ring
+ * state. A helper that exits cleanly after the global marker but before
+ * its own work is done has left its node short, and treating that as
+ * healthy turns a lost chunk into a hang.
+ *
+ * The two conditions are read straight out of the engine's own
+ * publication protocol:
+ *
+ *   INDEXER -- ring_indexer_numa_main (forkrun_ring.c:3701) exits
+ *   successfully when the global EOF is posted AND its node's
+ *   chunk_queue_head has not moved past the chunk it last took. Each
+ *   indexed chunk advances that node's chunk_ready_head
+ *   (forkrun_ring.c:3833). So the node is fully indexed exactly when
+ *   chunk_ready_head has caught up with chunk_queue_head -- and only
+ *   then can the global marker mean "no more chunks are coming".
+ *
+ *   SCANNER -- ring_numa_scanner_main publishes the node's final
+ *   write_idx and THEN sets scanner_finished
+ *   (forkrun_ring.c:5913-5914), with the EOF evfd blasted only after
+ *   that. scanner_finished is therefore the node's own completion
+ *   state, published after its final ring state.
+ *
+ * Both accessors are READ-ONLY. Returns 1 = complete, 0 = not
+ * complete, -1 = no verdict (bad node, no engine state). A -1 is
+ * never read as "complete": the supervisor treats an unavailable
+ * verdict as an absent one.
+ * ===================================================================== */
+int fr_py_node_index_complete(int node) {
+    if (!g_state || !state || node < 0 || node >= (int)global_num_nodes)
+        return -1;
+    /* The global marker first: without it the node could still receive
+     * another chunk, so a caught-up frontier proves nothing. */
+    if (__atomic_load_n(&g_state->ingest_eof_idx, __ATOMIC_ACQUIRE)
+        == ~(uint64_t)0)
+        return 0;
+    {
+        uint64_t head = __atomic_load_n(&state[node].chunk_queue_head,
+                                        __ATOMIC_ACQUIRE);
+        uint64_t ready = __atomic_load_n(&state[node].chunk_ready_head,
+                                         __ATOMIC_ACQUIRE);
+        return ready >= head ? 1 : 0;
+    }
+}
+
+int fr_py_node_scan_complete(int node) {
+    if (!g_state || !state || node < 0 || node >= (int)global_num_nodes)
+        return -1;
+    return __atomic_load_n(&state[node].scanner_finished,
+                           __ATOMIC_ACQUIRE) ? 1 : 0;
+}
+
 /* F-NUMA1 diagnostic snapshot (env-gated consumer in run.py; read-only).
  *
  * Per-node completion state for the NUMA drain-verification audit:

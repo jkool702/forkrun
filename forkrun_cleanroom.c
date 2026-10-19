@@ -179,6 +179,9 @@ typedef int (*fn_orderer)(int order_r, int output_fd, int unordered,
                           int numa);
 typedef int (*fn_eof_posted)(void);
 static fn_eof_posted p_eof_posted;   /* engine-backed ingest completion */
+typedef int (*fn_node_complete)(int node);
+static fn_node_complete p_index_complete;  /* per-node indexing frontier */
+static fn_node_complete p_scan_complete;   /* per-node scanner finalization */
 typedef int (*fn_worker_plugin_loop_numa)(int wid, const char *path,
         const char *func_name, int ingress_fd, int out_fd, int signal_fd,
         int fallow_fd, int order_fd, int trap_ack_fd, int wincarn,
@@ -1325,6 +1328,11 @@ enum sup_role {
 enum sup_clean_window {
     SUP_CLEAN_NEVER = 0,
     SUP_CLEAN_AT_EOF,
+    /* The per-node families: the GLOBAL ingest-EOF marker is not their
+     * completion signal. An indexer's node must have consumed every
+     * chunk published for it, and a scanner's node must have published
+     * its final ring state. */
+    SUP_CLEAN_AT_NODE_COMPLETE,
     SUP_CLEAN_AT_TEARDOWN
 };
 
@@ -1338,6 +1346,7 @@ struct sup_policy {
 static const char *sup_clean_name(enum sup_clean_window w) {
     switch (w) {
     case SUP_CLEAN_AT_EOF:      return "eof";
+    case SUP_CLEAN_AT_NODE_COMPLETE: return "node-complete";
     case SUP_CLEAN_AT_TEARDOWN: return "teardown";
     default:                    return "never";
     }
@@ -1346,12 +1355,15 @@ static const char *sup_clean_name(enum sup_clean_window w) {
 static const struct sup_policy g_sup_policy[SUP_ROLE__COUNT] = {
     [SUP_ROLE_WORKER]  = { "worker",  1, 1, SUP_CLEAN_NEVER },
     [SUP_ROLE_ORDERER] = { "orderer", 0, 0, SUP_CLEAN_AT_TEARDOWN },
-    /* Step C: indexer/scanner complete when ingest EOF is POSTED, not
-     * when the launcher begins teardown. They legitimately exit before
-     * the supervision loop ends. The evidence is the engine's own
-     * sentinel (fr_py_ingest_eof_posted), never the child's exit status. */
-    [SUP_ROLE_INDEXER] = { "indexer", 0, 0, SUP_CLEAN_AT_EOF },
-    [SUP_ROLE_SCANNER] = { "scanner", 0, 0, SUP_CLEAN_AT_EOF },
+    /* Step C follow-up: indexer/scanner complete on their OWN node's
+     * state, not on the global ingest-EOF marker. The marker says the
+     * SOURCE was consumed; it does not say this node's indexer consumed
+     * its chunks, nor that this node's scanner published its final
+     * ring state. A clean exit with the marker set but the node short
+     * is a lost chunk, and treating it as healthy turns it into a
+     * hang. */
+    [SUP_ROLE_INDEXER] = { "indexer", 0, 0, SUP_CLEAN_AT_NODE_COMPLETE },
+    [SUP_ROLE_SCANNER] = { "scanner", 0, 0, SUP_CLEAN_AT_NODE_COMPLETE },
     [SUP_ROLE_FALLOW]  = { "fallow",  0, 0, SUP_CLEAN_AT_TEARDOWN },
     [SUP_ROLE_INGEST]  = { "ingest",  0, 0, SUP_CLEAN_AT_EOF },
     [SUP_ROLE_DRAIN]   = { "drain",   0, 0, SUP_CLEAN_AT_TEARDOWN },
@@ -1480,19 +1492,39 @@ static int sup_reconcile_note(const struct sup_note *n) {
     return 1;
 }
 
-/* Did the engine post ingest EOF? THE evidence for every EOF-window
- * family. A test-only hook can withhold it, which models the case the
- * evidence exists to catch: a helper that exited cleanly while the
- * source was never fully consumed.
+/* The engine-backed completion evidence for ONE helper.
  *
- * The hook is inert unless the variable is set, and it can only
- * WITHHOLD evidence -- it can never manufacture it. */
-static int sup_eof_evidence(void) {
+ * Each role has its OWN condition, and the per-node families are
+ * keyed to the node they were registered under:
+ *
+ *   ingest   -- the global ingest-EOF marker (the source was consumed).
+ *   indexer  -- this node's chunk frontier has caught up with the
+ *               chunks published for it, AND the global marker is set
+ *               (so no further chunk can arrive).
+ *   scanner  -- this node's scanner_finished flag, published after its
+ *               final ring state.
+ *
+ * A -1 from an accessor means "no verdict", and is never read as
+ * "complete": an unavailable verdict is an absent one.
+ *
+ * The test-only hook can withhold evidence, which models the case the
+ * evidence exists to catch: a helper that exited cleanly while its own
+ * work was unfinished. It can only WITHHOLD -- never manufacture. */
+static int sup_completion_evidence(struct sup_proc *e) {
     if (getenv("FORKRUN_TEST_NO_EOF_EVIDENCE") != NULL)
         return 0;
-    if (p_eof_posted == NULL)
+    switch (e->role) {
+    case SUP_ROLE_INGEST:
+        return p_eof_posted != NULL && p_eof_posted() == 1;
+    case SUP_ROLE_INDEXER:
+        return p_index_complete != NULL
+               && p_index_complete(e->logical_node) == 1;
+    case SUP_ROLE_SCANNER:
+        return p_scan_complete != NULL
+               && p_scan_complete(e->logical_node) == 1;
+    default:
         return 0;
-    return p_eof_posted() == 1;
+    }
 }
 
 /* Apply the family policy. Helpers are fatal when they die abnormally;
@@ -1513,11 +1545,13 @@ static int sup_apply_policy(struct sup_proc *e, int status, int have_status) {
      * has no note pipe, so its acceptance is decided by the engine's
      * ingest_eof sentinel, exactly as the in-process reactor does
      * (_watch_numa_pipeline). Exit status alone is never evidence. */
-    if (pol->clean == SUP_CLEAN_AT_EOF && !e->completion_evidence &&
-        sup_eof_evidence())
+    if ((pol->clean == SUP_CLEAN_AT_EOF
+         || pol->clean == SUP_CLEAN_AT_NODE_COMPLETE)
+        && !e->completion_evidence && sup_completion_evidence(e))
         e->completion_evidence = 1;
     int acceptable;
-    if (pol->clean == SUP_CLEAN_AT_EOF)
+    if (pol->clean == SUP_CLEAN_AT_EOF
+        || pol->clean == SUP_CLEAN_AT_NODE_COMPLETE)
         acceptable = clean && e->completion_evidence;
     else if (pol->clean == SUP_CLEAN_AT_TEARDOWN)
         acceptable = clean && g_sup_stopping;
@@ -1533,7 +1567,12 @@ static int sup_apply_policy(struct sup_proc *e, int status, int have_status) {
     /* NEVER-role clean exits are already acceptable above, so only a
      * helper that missed its evidence/window can reach this. */
     if (clean && !acceptable) {
-        if (pol->clean == SUP_CLEAN_AT_EOF && e->role == SUP_ROLE_INGEST)
+        if (pol->clean == SUP_CLEAN_AT_NODE_COMPLETE)
+            fprintf(stderr,
+                    "forkrun-sup: role=%s node=%d exited 0 without "
+                    "node-completion evidence -- treating as abnormal\n",
+                    pol->name, e->logical_node);
+        else if (pol->clean == SUP_CLEAN_AT_EOF && e->role == SUP_ROLE_INGEST)
             fprintf(stderr,
                     "forkrun-sup: role=%s exited 0 without ingest-completion "
                     "evidence -- treating as abnormal\n", pol->name);
@@ -1747,6 +1786,46 @@ static int sup_wait_note(int ms) {
  * cleanly only when the launcher closes the control pipe at teardown,
  * which also proves descriptor ownership: if any worker had inherited
  * the write end, the sentinel would never see EOF. */
+/* TEST-ONLY: make a per-node helper exit 0 as soon as the GLOBAL
+ * ingest-EOF marker is published, while its own node is still short.
+ *
+ * This is the dangerous shape the policy has to reject: the source is
+ * consumed, the helper exits cleanly, and the node's work is NOT done.
+ * The child prints the state it observed, so the test can PROVE the
+ * setup (marker set, node incomplete) instead of assuming it.
+ *
+ * The hook names one (role, node) pair, so the OTHER node's helpers
+ * run normally and the run has a real reference to compare against.
+ * Inert unless the variable is set. */
+static int sup_early_clean_for(const char *role, int node) {
+    const char *spec = getenv("FORKRUN_TEST_EARLY_CLEAN");
+    char want[64];
+    if (!spec || !spec[0])
+        return 0;
+    snprintf(want, sizeof want, "%s:%d", role, node);
+    return strcmp(spec, want) == 0;
+}
+
+/* Wait (bounded) for the global ingest-EOF marker, then report the
+ * observed state and exit 0 WITHOUT doing this node's work. */
+static void sup_early_clean_exit(const char *role, int node) {
+    int eof = 0;
+    int complete = -1;
+    for (int i = 0; i < 5000; i++) {
+        if (p_eof_posted && p_eof_posted() == 1) { eof = 1; break; }
+        usleep(1000);
+    }
+    if (role && strcmp(role, "indexer") == 0 && p_index_complete)
+        complete = p_index_complete(node);
+    else if (role && strcmp(role, "scanner") == 0 && p_scan_complete)
+        complete = p_scan_complete(node);
+    fprintf(stderr,
+            "forkrun-sup: early-clean role=%s node=%d eof_posted=%d "
+            "node_complete=%d\n", role, node, eof, complete);
+    fflush(stderr);
+    _exit(0);
+}
+
 static void sup_sentinel_child(int ctl_r, int note_w, unsigned incarnation,
                                enum sup_role role, int early_clean) {
     struct sup_note n;
@@ -2405,18 +2484,6 @@ int main(int argc, char **argv) {
     }
     if (o.workers < 1) o.workers = 1;
 
-    /* The worker ceiling is the ENGINE's (MAX_TXN_WORKERS in
-     * forkrun_ring.c): a worker id at or above it is rejected by the
-     * engine, so accepting more workers here would only produce a
-     * configuration that cannot run. Refused up front, with the count,
-     * rather than discovered by a child mid-startup. */
-    if (o.workers > 1024) {
-        fprintf(stderr, "forkrun-cleanroom: workers=%d exceeds the "
-                        "engine's worker ceiling (1024) -- refusing before "
-                        "startup\n", o.workers);
-        return 64;
-    }
-
     /* W-EXP-2 step C topology validation. Everything here is checked
      * BEFORE the engine is initialised or any process is forked: a
      * configuration the launcher cannot honour must cost no input. */
@@ -2488,7 +2555,23 @@ int main(int argc, char **argv) {
                     SUP_MAX_PROCS_HARD);
             return 66;
         }
+        /* The plan is reported BEFORE the worker ceiling is applied, so
+         * the sizing model is observable on a configuration that is
+         * refused for another reason -- with no process forked at all.
+         * A test can then pin the formula exactly instead of only at
+         * scale. */
         sup_init(o.num_nodes > 1, required);
+        /* The worker ceiling is the ENGINE's (MAX_TXN_WORKERS in
+         * forkrun_ring.c): a worker id at or above it is rejected by
+         * the engine, so accepting more workers here would only produce
+         * a configuration that cannot run. Refused up front, with the
+         * count, rather than discovered by a child mid-startup. */
+        if (o.workers > 1024) {
+            fprintf(stderr, "forkrun-cleanroom: workers=%d exceeds the "
+                            "engine's worker ceiling (1024) -- refusing "
+                            "before startup\n", o.workers);
+            return 64;
+        }
     }
 
     /* Activate the trace BEFORE anything forks, so the launcher-init
@@ -2711,10 +2794,16 @@ int main(int argc, char **argv) {
         p_wnuma      = (fn_worker_plugin_loop_numa)
                            sym(h, "fr_py_worker_plugin_loop_numa");
         p_eof_posted = (fn_eof_posted)  sym(h, "fr_py_ingest_eof_posted");
-        if (!p_nscanner || !p_eof_posted || !p_wnuma) {
+        p_index_complete = (fn_node_complete)
+                           sym(h, "fr_py_node_index_complete");
+        p_scan_complete = (fn_node_complete)
+                          sym(h, "fr_py_node_scan_complete");
+        if (!p_nscanner || !p_eof_posted || !p_wnuma
+            || !p_index_complete || !p_scan_complete) {
             fprintf(stderr, "forkrun-cleanroom: substrate lacks the "
-                            "node-taking worker loop or ingest-EOF "
-                            "evidence -- refusing the NUMA route\n");
+                            "node-taking worker loop or the per-node "
+                            "completion evidence -- refusing the NUMA "
+                            "route\n");
             return 69;
         }
     }
@@ -3070,6 +3159,8 @@ int main(int argc, char **argv) {
                 keep_add(&k, memfd);
                 keep_add_engine(&k, engine_fd, n_engine);
                 enter_child("indexer", &k);
+                if (sup_early_clean_for("indexer", node))
+                    sup_early_clean_exit("indexer", node);
                 _exit(p_indexer(memfd, node) == 0 ? 0 : 1);
             }
             idx_pids[node] = ip;
@@ -3085,6 +3176,8 @@ int main(int argc, char **argv) {
                 keep_add(&k, memfd);
                 keep_add_engine(&k, engine_fd, n_engine);
                 enter_child("numa-scanner", &k);
+                if (sup_early_clean_for("scanner", node))
+                    sup_early_clean_exit("scanner", node);
                 /* spawn_fd = -1: the launcher forks its full worker
                  * complement up front, so it cannot service dynamic
                  * spawn requests. Disarming is the engine's documented

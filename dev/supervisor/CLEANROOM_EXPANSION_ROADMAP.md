@@ -542,13 +542,25 @@ topology; a helper death in each of the four families aborts the run and
 leaves no survivors; the public-API route serves the launcher only when
 opted in, and the certificate holds on both sides of it.
 
-**Mutation recap.** Six mutants, all killed: re-sorting the launcher's
+**Mutation recap.** Eleven mutants, all killed: re-sorting the launcher's
 ordered stream by `batch_idx` → `EXACT False`; a fixed 520-entry registry
 → the 523-entry topology dies; a recoverable indexer policy → the run hangs
 instead of aborting; status-only EOF acceptance → an unproven clean exit
 exits 0; the multi-node route ignoring its opt-in → the launcher serves a
 call that did not ask for it; an unvalidated `--numa-map` → the refusal
-disappears.
+disappears; the keep-list back at 256 → a 260-worker run dies in a child;
+the fatal-path reap removed → four workers survive; and the policy falling
+back to the GLOBAL EOF for the per-node families → the node's work is
+skipped and the run HANGS, which is exactly the failure the per-node
+evidence exists to prevent.
+
+**The premature-clean-exit cases.** Two live-process tests force an indexer
+and a scanner to exit 0 once the global marker is published but BEFORE
+their own node's completion condition holds. The launcher proves the setup
+before the exit -- the child reports the marker and its own node's state
+-- so the test cannot pass by accident on a run where the marker never
+arrived. Each then asserts a bounded fatal abort with no surviving
+registered descendant.
 
 **Scope, stated rather than implied.**
 

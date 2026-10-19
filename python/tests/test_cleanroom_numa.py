@@ -339,6 +339,56 @@ class TestCleanroomNuma(unittest.TestCase):
         self.assertLess(dt, 20.0)
         self._assert_no_survivors(reg)
 
+    def _assert_node_early_clean_is_fatal(self, role):
+        """A clean exit that skips this node's OWN work is fatal.
+
+        The global ingest-EOF marker says the SOURCE was consumed. It
+        does not say that this node's indexer consumed the chunks
+        published for it, nor that this node's scanner published its
+        final ring state. A helper that exits cleanly once the marker
+        is set but before its own work is done has left its node short,
+        and accepting that turns a lost chunk into a hang.
+
+        The launcher proves the setup before the exit: the child waits
+        for the global marker, then reports the marker and its own
+        node's completion state. The test asserts THAT, so it cannot
+        pass by accident on a run where the marker never arrived.
+        """
+        # A short timeout ON PURPOSE: if the policy accepts the exit,
+        # the node's work never completes and the run HANGS. That hang
+        # IS the failure this test exists to catch, so it must be
+        # detected fast rather than waited out.
+        rc, dt, lines, blob, reg = self._run(
+            nodes=2, order="index",
+            extra_env={"FORKRUN_TEST_EARLY_CLEAN": "%s:1" % role},
+            timeout=30)
+        self.assertNotEqual(rc, 0,
+                            "a clean exit with the node incomplete exited 0")
+        setup = [l for l in lines
+                 if "early-clean role=%s node=1" % role in l]
+        self.assertEqual(len(setup), 1,
+                         "the early-clean setup did not happen: %r"
+                         % [l for l in lines if "early-clean" in l])
+        self.assertIn("eof_posted=1", setup[0],
+                      "the global ingest EOF was never published, so the "
+                      "test did not reach the dangerous state: %s" % setup[0])
+        self.assertIn("node_complete=0", setup[0],
+                      "the node was already complete, so the test proved "
+                      "nothing: %s" % setup[0])
+        # The refusal must name the node's own completion.
+        self.assertTrue(
+            any("without node-completion evidence" in l for l in lines),
+            "the node-specific completion evidence was not demanded: %r"
+            % [l for l in lines if "abnormal" in l][:3])
+        self.assertLess(dt, 20.0, "the abort was not bounded")
+        self._assert_no_survivors(reg)
+
+    def test_indexer_clean_exit_before_its_node_is_indexed_is_fatal(self):
+        self._assert_node_early_clean_is_fatal("indexer")
+
+    def test_scanner_clean_exit_before_its_node_finished_is_fatal(self):
+        self._assert_node_early_clean_is_fatal("scanner")
+
     def test_registry_capacity_is_sized_from_the_topology(self):
         """The reviewer's capacity gate, as a live assertion.
 
@@ -362,6 +412,42 @@ class TestCleanroomNuma(unittest.TestCase):
                            "this configuration is supposed to exceed the "
                            "old fixed array")
 
+    def test_the_capacity_model_is_exact_and_needs_no_processes(self):
+        """The sizing formula, pinned without forking anything.
+
+        The registry is sized workers + 2 per node + fallow + ingest +
+        orderer/drain. An oversized configuration is refused BEFORE the
+        first fork, and the refusal names the count it would have
+        needed -- so the model can be checked exactly, with no process
+        burst at all. That matters: the suite's runtime is sensitive to
+        bursts, and this is the same property the 512-worker case
+        demonstrates at scale, checked here for free.
+        """
+        # 2000 workers is under the registry's hard ceiling (so the
+        # PLAN is reported) and over the engine's worker ceiling (so the
+        # configuration is refused). Both refusals happen before a
+        # single process is forked.
+        for nodes, workers, expected in ((2, 2000, 2000 + 2 * 2 + 3),
+                                         (4, 2000, 2000 + 2 * 4 + 3)):
+            rc, _dt, lines, _blob, _reg = self._run(
+                nodes=nodes, order="index", workers=workers, lines=1,
+                timeout=60)
+            self.assertNotEqual(rc, 0)
+            # The PLAN is reported before anything is refused or forked,
+            # so the formula is observable exactly.
+            self.assertTrue(
+                any("capacity entries=%d required=%d" % (expected, expected)
+                    in l for l in lines),
+                "the capacity plan did not match the model for "
+                "nodes=%d workers=%d: %r" % (nodes, workers, lines[:5]))
+            self.assertFalse(any("forkrun-sup: register" in l
+                                 for l in lines),
+                             "the launcher started processes before "
+                             "refusing")
+            self.assertTrue(any("worker ceiling" in l for l in lines),
+                            "the worker ceiling was not applied: %r"
+                            % lines[:5])
+
     def test_oversized_topology_is_refused_before_any_input_is_read(self):
         """An unservable configuration must cost no input.
 
@@ -372,8 +458,10 @@ class TestCleanroomNuma(unittest.TestCase):
         rc, _dt, lines, _blob, _reg = self._run(
             nodes=2, order="index", workers=9000, lines=1, timeout=60)
         self.assertNotEqual(rc, 0, "an oversized topology was accepted")
+        # 9000 workers needs 9007 registry entries, which is over the
+        # hard ceiling -- refused before anything is forked.
         self.assertTrue(
-            any("worker ceiling" in l for l in lines),
+            any("supported ceiling" in l for l in lines),
             "the refusal did not name the ceiling: %r" % lines[:5])
         self.assertFalse(any("forkrun-sup: register" in l for l in lines),
                          "the launcher started processes before refusing")

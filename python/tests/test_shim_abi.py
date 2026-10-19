@@ -296,7 +296,29 @@ class TestShimBindings(unittest.TestCase):
         #                                 a duplicated body would be a
         #                                 fourth place for a fix to miss.
         #                                 Inert (-1) unless called.
-        self.assertEqual((n_ext, n_st), (58, 16),
+        #
+        #   extern  fr_py_node_index_complete
+        #                                 Whether this NODE's indexer has
+        #                                 consumed every chunk published
+        #                                 for it, and the global ingest
+        #                                 EOF is posted (so no further
+        #                                 chunk can arrive). The global
+        #                                 marker alone is NOT a per-node
+        #                                 completion signal: it says the
+        #                                 source was consumed, not that
+        #                                 this node's work is done.
+        #                                 Read-only. 1 complete, 0 not,
+        #                                 -1 no verdict.
+        #
+        #   extern  fr_py_node_scan_complete
+        #                                 Whether this NODE's scanner
+        #                                 finished publishing its final
+        #                                 ring state (scanner_finished,
+        #                                 published after the final
+        #                                 write_idx and before the EOF
+        #                                 evfd blast). Read-only. Same
+        #                                 1/0/-1 convention.
+        self.assertEqual((n_ext, n_st), (60, 16),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

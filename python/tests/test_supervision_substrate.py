@@ -54,7 +54,7 @@ int copy_slow(int argc, char **argv, const struct forkrun_ctx *ctx){
 
 _POLICY = re.compile(
     r"forkrun-sup: policy role=(\w+) recoverable=(\d) node_scoped=(\d) "
-    r"clean_window=(\w+)")
+    r"clean_window=([\w-]+)")
 _REGISTER = re.compile(
     r"forkrun-sup: register role=(\w+) wid=(-?\d+) node=(-?\d+) "
     r"pid=(\d+) incarnation=(\d+)")
@@ -253,11 +253,14 @@ class TestSupervisionSubstrate(unittest.TestCase):
             "a family without an explicit policy is a hole in the model")
         self.assertEqual(policy["worker"], (1, 1, "never"))
         # Clean-exit windows are part of the policy, not an implicit
-        # "exit 0 means done". Ingest, indexer and scanner complete when
-        # the engine posts ingest EOF (Step C); orderer/fallow/drain only
-        # once teardown has begun.
-        for role in ("ingest", "indexer", "scanner"):
-            self.assertEqual(policy[role], (0, 0, "eof"), role)
+        # "exit 0 means done". The ingest completes at the GLOBAL
+        # ingest-EOF marker; the indexer and scanner complete on their
+        # OWN node's state (the global marker says the source was
+        # consumed, not that this node's work is done); orderer, fallow
+        # and drain only once teardown has begun.
+        self.assertEqual(policy["ingest"], (0, 0, "eof"), "ingest")
+        for role in ("indexer", "scanner"):
+            self.assertEqual(policy[role], (0, 0, "node-complete"), role)
         for role in ("orderer", "fallow", "drain"):
             self.assertEqual(policy[role], (0, 0, "teardown"), role)
 
