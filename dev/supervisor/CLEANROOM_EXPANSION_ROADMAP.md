@@ -531,28 +531,40 @@ which this host cannot produce. Without the switch, a multi-node call runs
 the in-process NUMA path exactly as before — the launcher is not merely
 decline-and-warn, it is never asked.
 
-**Tests** (`python/tests/test_cleanroom_numa.py`, 18 cases): `@2`/`@4`
+**Tests** (`python/tests/test_cleanroom_numa.py`, 23 cases): `@2`/`@4`
 byte-exact for `order="index"`; complete multiset for `order="none"`; every
 family registered under its own role with workers distributed across nodes;
 the ingest death carries `evidence=1`; a clean exit without EOF evidence is
 fatal; the registry capacity equals the requirement and exceeds the old
-fixed array; an oversized topology is refused before any process starts; a
-mismatched `--numa-map` is refused; `--order index` requires a multi-node
-topology; a helper death in each of the four families aborts the run and
-leaves no survivors; the public-API route serves the launcher only when
-opted in, and the certificate holds on both sides of it.
+fixed array; the sizing MODEL is pinned exactly with no process burst; an
+oversized topology is refused before any process starts; a mismatched
+`--numa-map` is refused; `--order index` requires a multi-node topology; a
+helper death in each of the four families aborts the run and leaves no
+survivors; an indexer and a scanner that exit cleanly before their OWN
+node is complete abort the run; the public-API route serves the launcher
+only when opted in, and the certificate holds on both sides of it.
 
-**Mutation recap.** Eleven mutants, all killed: re-sorting the launcher's
-ordered stream by `batch_idx` → `EXACT False`; a fixed 520-entry registry
-→ the 523-entry topology dies; a recoverable indexer policy → the run hangs
-instead of aborting; status-only EOF acceptance → an unproven clean exit
-exits 0; the multi-node route ignoring its opt-in → the launcher serves a
-call that did not ask for it; an unvalidated `--numa-map` → the refusal
-disappears; the keep-list back at 256 → a 260-worker run dies in a child;
-the fatal-path reap removed → four workers survive; and the policy falling
-back to the GLOBAL EOF for the per-node families → the node's work is
-skipped and the run HANGS, which is exactly the failure the per-node
-evidence exists to prevent.
+**Mutation recap.** Ten mutants, all killed, each by the case named
+beside it:
+
+| # | Mutation | Killed by | Effect |
+|---|---|---|---|
+| 1 | the parent re-sorts the launcher's ordered stream by `batch_idx` | `test_multinode_route_serves_the_launcher_when_opted_in` | `EXACT False` |
+| 2 | a fixed 520-entry registry | `test_registry_capacity_is_sized_from_the_topology` | the 523-entry topology dies |
+| 3 | a recoverable indexer policy | `test_indexer_death_aborts_the_run` | the run hangs instead of aborting |
+| 4 | status-only EOF acceptance | `test_clean_exit_without_eof_evidence_is_fatal` | an unproven clean exit exits 0 |
+| 5 | the multi-node route ignores its opt-in | `test_multinode_route_requires_the_explicit_opt_in` | the launcher serves a call that did not ask for it |
+| 6 | an unvalidated `--numa-map` | `test_a_tampered_topology_is_refused` | the refusal disappears |
+| 7 | the keep-list back at 256 | `test_a_large_worker_complement_is_servable` | a 260-worker run dies in a child |
+| 8 | the fatal-path reap removed | `test_a_helper_death_leaves_no_surviving_descendant` | four workers survive |
+| 9 | the INDEXER's evidence falls back to the global EOF | `test_indexer_clean_exit_before_its_node_is_indexed_is_fatal` | the node's work is skipped and the run HANGS |
+| 10 | the SCANNER's evidence falls back to the global EOF | `test_scanner_clean_exit_before_its_node_finished_is_fatal` | the node's work is skipped and the run HANGS |
+
+Mutants 9 and 10 are the per-node corrections, one per family, and each
+is killed by its own family's case: the global marker is enough for the
+INGEST, and only for the ingest. The hang is the failure the per-node
+evidence exists to prevent, so those two cases time out quickly rather
+than wait it out.
 
 **The premature-clean-exit cases.** Two live-process tests force an indexer
 and a scanner to exit 0 once the global marker is published but BEFORE
