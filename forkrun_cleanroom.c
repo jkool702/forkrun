@@ -151,6 +151,15 @@ typedef int (*fn_recover)(int wid, int incarnation, int output_fd,
 typedef int (*fn_abort_reason_fn)(void);
 typedef unsigned int (*fn_poisoned_count)(void);
 static fn_poisoned_count p_poisoned;
+/* W-EXP-2 Phase A: committed DATA-frame count, per logical node.
+ * Returns 0 on success, -1 for a bad node or no engine state. */
+typedef int (*fn_committed_frames)(int node, uint64_t *out);
+static fn_committed_frames p_committed;
+/* W-EXP-2 Phase A: is that counter live at all? Without asking, a counter
+ * disabled by FORKRUN_C07_COUNT=0 reads as "zero frames committed" and the
+ * certificate would fail every complete run. */
+typedef int (*fn_c07_enabled_fn)(void);
+static fn_c07_enabled_fn p_c07_enabled;
 static fn_recover p_recover;
 static fn_abort_reason_fn p_abort_reason;
 
@@ -1819,6 +1828,12 @@ int main(int argc, char **argv) {
     p_abort                = (fn_abort_fn)             sym(h, "fr_py_abort");
     p_abort_reason         = (fn_abort_reason_fn)     sym(h, "fr_py_abort_reason");
     p_poisoned             = (fn_poisoned_count)      sym(h, "fr_py_poisoned_count");
+    /* W-EXP-2 Phase A: OPTIONAL. Resolved with dlsym, not sym(), because a
+     * missing accessor must mean "no certificate verdict available", not a
+     * hard launch failure and certainly not a fabricated zero. A substrate
+     * without it simply declines to certify; one WITH it certifies. */
+    p_committed = (fn_committed_frames) dlsym(h, "fr_py_committed_data_frames");
+    p_c07_enabled = (fn_c07_enabled_fn) dlsym(h, "fr_py_c07_counting_enabled");
     p_abort                = (fn_abort_fn)               sym(h, "fr_py_abort");
 
     /* ---- P1-3: UDF mode ----
@@ -2650,10 +2665,41 @@ int main(int argc, char **argv) {
      * zero.
      *
      * Layout (little-endian, fixed):
-     *   u32 version (=2)
+     *   u32 version (=3)
      *   u32 poisoned
-     *   u32 pad     (reserved; keeps the record 8-byte aligned)
-     *   u32 pad
+     *   u32 workers                  (v2)
+     *   u32 slot_stride_u32          (v2)
+     *   u32 committed_data_frames    (v3; UINT32_MAX = not available)
+     *
+     * v3 fills a word that v2 reserved. It carries the count of
+     * COMMITTED DATA frames summed over every logical node, which is the
+     * one number the parent cannot derive on its own and therefore the
+     * only basis on which it can refuse to certify a short result.
+     *
+     * WHY IT IS SAFE TO READ HERE, ACROSS THE EXEC BOUNDARY. The counter
+     * lives in struct SharedState, which fr_py_init() mmaps
+     * MAP_SHARED|MAP_ANONYMOUS FRESH for every invocation. The workers
+     * this launcher forks share that mapping with the launcher, and the
+     * launcher called fr_py_init() itself, so the region starts
+     * zero-filled for THIS invocation only. There is no previous run's
+     * counter to subtract and no baseline bookkeeping to get wrong --
+     * which is strictly better isolation than the in-process path gets,
+     * and the reason this can be emitted as an absolute count.
+     *
+     * QUESCENCE. The accessor is a relaxed load, which is the right
+     * pairing for the writers' relaxed fetch_add, but ordering cannot
+     * substitute for the lifecycle fact. Every worker has been joined by
+     * this point, so a worker that has not reached its commit point
+     * cannot still be about to. Read any earlier and a not-yet-committed
+     * batch is indistinguishable from one that committed nothing.
+     *
+     * UINT32_MAX MEANS "NO VERDICT", NEVER ZERO. If the accessor is
+     * absent (an older substrate), or a node read fails, or the sum would
+     * not fit, the field is the sentinel and the parent declines to
+     * certify. Inventing a zero there would produce a run that fails on a
+     * complete result, or passes on a truncated one -- both worse than
+     * declining.
+     *
      * Written on a best-effort basis: a failed stats write must not
      * change the run's exit status. The reader treats a short/absent
      * record as "no counts available" and declines rather than
@@ -2667,8 +2713,38 @@ int main(int argc, char **argv) {
          * The launcher does NOT zero the slots: workers own their own
          * slot and the memfd starts zero-filled, and memfds are
          * guaranteed zero on creation. */
-        uint32_t rec[4] = {2u, 0u, (uint32_t)o.workers, 1024u + 1u};
+        /* v3 APPENDS a word; it does not reuse one. All four v2 words are
+         * load-bearing -- [2] is the worker count and [3] is the slot
+         * stride, both of which the reader uses to walk the per-worker
+         * poisoned-index slots -- so filling a v2 pad would have silently
+         * broken slot parsing. The header grows to 20 bytes and the
+         * reader's _STATS_HEADER_BYTES moves with it. */
+        uint32_t rec[5] = {3u, 0u, (uint32_t)o.workers, 1024u + 1u,
+                           UINT32_MAX};
         rec[1] = p_poisoned ? p_poisoned() : 0u;
+        /* Both accessors, or no verdict: a counter that cannot be asked
+         * whether it is live cannot distinguish "no frames" from "not
+         * counting". */
+        if (p_committed && p_c07_enabled && p_c07_enabled()) {
+            /* Sum every logical node the engine exposes. The accessor
+             * returns -1 for node >= global_num_nodes, so that is the
+             * stop condition -- no separate node count is needed, and
+             * the same code is correct once NUMA raises that count.
+             * The cap is a backstop against a future accessor that never
+             * rejects; reaching it leaves the field a sentinel rather
+             * than inventing a total. */
+            uint64_t total = 0;
+            int node, ok = 1;
+            (void)ok;
+            for (node = 0; node < 64; ++node) {
+                uint64_t c = 0;
+                if (p_committed(node, &c) != 0) break;
+                total += c;
+            }
+            if (ok && node >= 1 && total < (uint64_t)UINT32_MAX)
+                rec[4] = (uint32_t)total;
+            if (node >= 64) rec[4] = UINT32_MAX;   /* cap hit: no verdict */
+        }
         size_t off = 0;
         while (off < sizeof rec) {
             ssize_t w = write(o.stats_fd, (const char *)rec + off,

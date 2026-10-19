@@ -240,7 +240,36 @@ class TestShimBindings(unittest.TestCase):
         # point cannot make an uncovered run look certified. Nothing is
         # written by this symbol; the counter it reads is maintained by
         # the commit flush in fr_py_ack_core.
-        self.assertEqual((n_ext, n_st), (55, 16),
+        #
+        # W-EXP-2 Phase A extern (55 -> 56): fr_py_c07_counting_enabled().
+        # The companion to fr_py_committed_data_frames, and it exists
+        # because that counter is NOT self-describing. With
+        # FORKRUN_C07_COUNT=0 nothing increments, so the counter reads
+        # zero -- indistinguishable, from outside, from a run that
+        # genuinely committed no DATA frames. The cleanroom launcher
+        # would then sum 0 against the records it actually collected and
+        # the completeness certificate would fail every COMPLETE run. A
+        # caller can only avoid that by asking whether the counter is
+        # live, so the launcher dlsyms this and reports "unavailable"
+        # rather than a fabricated zero. No existing symbol changed
+        # arity or signature.
+        #
+        #   extern  fr_py_c07_counting_enabled  Whether the committed-DATA
+        #                                 counter is live in this process.
+        #                                 Read-only and inert; consults
+        #                                 the same fr_c07_enabled() gate
+        #                                 that decides whether commits are
+        #                                 counted at all. Its absence on
+        #                                 an older substrate is treated as
+        #                                 "unavailable", which is
+        #                                 fail-OPEN into "no verdict" --
+        #                                 never into a pass.
+        #
+        # Behavior delta: none on any existing path. Nothing calls this
+        # symbol except the cleanroom launcher, which treats "no symbol",
+        # "symbol says disabled", and "symbol says enabled" as three
+        # distinct cases and only certifies in the third.
+        self.assertEqual((n_ext, n_st), (56, 16),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

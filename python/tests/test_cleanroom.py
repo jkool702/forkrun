@@ -2119,10 +2119,14 @@ class TestPoisonRelayTruncation(unittest.TestCase):
         """The ordinary case: every poison relayed, nothing truncated."""
         fd = self._memfd(poisoned=10)
         try:
-            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+            poisoned, idxs, relayed, committed = _read_cleanroom_stats(fd)
         finally:
             os.close(fd)
         self.assertEqual(poisoned, 10)
+        # This fixture stamps a v2 header, which carries no committed
+        # count. The reader must say "unavailable" (None) rather than
+        # fall back to zero, which would read as a fabricated count.
+        self.assertIsNone(committed)
         self.assertEqual(len(idxs), 10)
         self.assertEqual(relayed, 10)
         self.assertFalse(relayed < poisoned,
@@ -2132,7 +2136,7 @@ class TestPoisonRelayTruncation(unittest.TestCase):
         """Exactly at capacity: complete, so still not truncated."""
         fd = self._memfd(poisoned=self.CAP)
         try:
-            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+            poisoned, idxs, relayed, committed = _read_cleanroom_stats(fd)
         finally:
             os.close(fd)
         self.assertEqual(poisoned, self.CAP)
@@ -2144,7 +2148,7 @@ class TestPoisonRelayTruncation(unittest.TestCase):
         """Past capacity: the list is short and must be recognisable."""
         fd = self._memfd(poisoned=self.CAP + 76)
         try:
-            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+            poisoned, idxs, relayed, committed = _read_cleanroom_stats(fd)
         finally:
             os.close(fd)
         # Count stays exact -- that is what total and strict_poison use.
@@ -2163,7 +2167,7 @@ class TestPoisonRelayTruncation(unittest.TestCase):
                          per_worker=[list(range(self.CAP)),
                                      list(range(50000, 50500))])
         try:
-            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+            poisoned, idxs, relayed, committed = _read_cleanroom_stats(fd)
         finally:
             os.close(fd)
         self.assertEqual(poisoned, 2048)

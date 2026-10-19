@@ -873,6 +873,65 @@ an emit failure; per-node ring counters complete while ordered output is not.
 > **[V] "Successful drain plus empty heap" is not a certificate.** A missing
 > *terminal* packet leaves nothing in the heap to expose the gap.
 
+#### C0.7 at the cleanroom boundary — W-EXP-2 Phase A (implemented)
+
+**Status: the in-process certificate exists; the cleanroom boundary did
+not, and now does.** Reconciling the three states honestly, because they
+are genuinely different:
+
+* **Proven (pre-existing).** `fr_py_committed_data_frames` and the
+  in-process evaluators in `_execute_reactor_locked` /
+  `_execute_numa_locked`. All 44 pre-existing C0.7 tests pass — and none
+  of them mentions `FORKRUN_CLEANROOM`. That absence *was* the defect:
+  the certificate was proven only where it could not be lost.
+* **Implemented (this phase).** The launcher resolves
+  `fr_py_committed_data_frames` (and its new liveness companion) out of the
+  `.so` it already dlopens, sums it across logical nodes **after every
+  worker has joined**, and publishes it as a fifth header word (stats v3).
+  The parent compares it against the records it actually collected.
+* **Still cleanroom-open.** Nothing in this phase proves the count under
+  NUMA. That is Phase B onward, and it remains blocked.
+
+**The disposition is deliberately asymmetric, and differs from the
+in-process ORDERED certificate, which warns.** A proven shortfall at the
+cleanroom boundary raises. The in-process path can only warn because its
+envelope can be under-covered, which is the honest description of a
+partially-proven count; the cleanroom count is absolute, per-invocation,
+and read after quiescence, so a mismatch is not "we are not sure" but
+"the engine published more DATA frames than the caller received".
+Warning-plus-partial-output is the exact shape this certificate exists to
+prevent.
+
+**Unavailable is never zero.** Three distinct cases are all "no verdict",
+never a pass and never a fabricated count: the accessor is absent (older
+substrate), the count was disabled (`FORKRUN_C07_COUNT=0`), or the sum was
+unavailable. The third exists because **`fr_py_committed_data_frames` is
+not self-describing** — with counting disabled nothing increments, so the
+counter reads zero, which is indistinguishable from a run that genuinely
+committed nothing. Reading it without asking would fail every *complete*
+run. Hence `fr_py_c07_counting_enabled` (extern 55 → 56).
+
+**[V] A silent-corruption defect found and fixed while landing this.**
+The poison relay hardcoded the header length as 4 u32 and the header grew
+to 5, so writer and reader disagreed by one word. Nothing raised:
+`poisoned_batches` came back as `[0, 5]` instead of `[2, 5]`. A plausible
+wrong index list is worse than an error for exactly the kind of evidence a
+poisoned-batch test exists to provide. Both sides now **derive** the
+layout from the version word the region carries, and the parent stamps
+that version before spawning any writer (the launcher only writes its
+header at the end, after the join, so during the run the word was 0).
+
+**Evidence — `python/tests/test_c07_cleanroom_boundary.py`, 17 tests,
+mutation-proven.** Disabling the certificate fails 12 of them. Covers:
+healthy complete run; interior packet missing with later packets present;
+final expected packet missing; all-but-one missing; truncation is *not*
+loss; worker death before commit and before notify (both still certify —
+the counter sits at commit, not emit, so a recovered run re-converges);
+counting disabled → no verdict; repeated invocations do not accumulate.
+
+**Not established, and not claimed:** NUMA, the orderer route, and
+physical topology. This phase certifies the UMA cleanroom boundary only.
+
 #### C0.7 design — the engine-free route, and the measurement that enables it
 
 **The premise was tested, not assumed.** The obvious counter-argument is
