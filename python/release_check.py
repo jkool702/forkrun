@@ -314,10 +314,24 @@ def check_tests():
     # every other test still runs, so coverage is intact.
     env = dict(os.environ)
     env["FORKRUN_UNDER_RELEASE_CHECK"] = "1"
-    proc = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover",
-         "-s", "python/tests"], capture_output=True, text=True,
-        timeout=1200, cwd=REPO_ROOT, env=env)
+    # The budget is set for the LOADED case, not the quiet one. The
+    # suite costs ~5 minutes on an idle box and ~11 minutes on a loaded
+    # one (it forks hundreds of worker processes, and the machine's
+    # other tenants compete for the same cores), and a run that
+    # exceeded a 20-minute budget failed the GATE without a single test
+    # failing -- a harness limit reported as a product defect. The gate
+    # itself is unchanged: every test must still pass.
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover",
+             "-s", "python/tests"], capture_output=True, text=True,
+            timeout=2400, cwd=REPO_ROOT, env=env)
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            "the full suite did not finish within 2400s -- this is the "
+            "HARNESS limit, not a test failure: the suite costs ~5 minutes "
+            "on an idle machine and much longer under load. No test "
+            "result is reported here because none completed.") from exc
     assert proc.returncode == 0, proc.stderr[-2000:]
     return True
 

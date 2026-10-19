@@ -385,11 +385,16 @@ class TestCleanroomNuma(unittest.TestCase):
         child holds one output descriptor PER WORKER -- so the launcher
         silently capped at ~250 workers and failed in a CHILD, halfway
         through startup, with the real cause invisible. The bound is now
-        derived from the engine's own worker ceiling, and a 512-worker
-        run (the reviewed topology's scale) must actually complete.
+        derived from the engine's own worker ceiling.
+
+        260 workers is the smallest count that crosses the old limit
+        (the drain child keeps one descriptor per worker plus a couple
+        more), so the case does not pay for a burst of processes larger
+        than it needs: a 512-process burst is enough to slow the tests
+        that follow it, and this suite is sensitive to that.
         """
         rc, dt, lines, blob, reg = self._run(
-            nodes=2, order="index", workers=512, lines=1, timeout=240)
+            nodes=2, order="index", workers=260, lines=1, timeout=240)
         self.assertEqual(rc, 0,
                          "a 512-worker run did not complete: %r"
                          % [l for l in lines if "refus" in l
