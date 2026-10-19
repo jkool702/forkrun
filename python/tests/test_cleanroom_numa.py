@@ -378,6 +378,26 @@ class TestCleanroomNuma(unittest.TestCase):
         self.assertFalse(any("forkrun-sup: register" in l for l in lines),
                          "the launcher started processes before refusing")
 
+    def test_a_large_worker_complement_is_servable(self):
+        """The keep-list must hold one output descriptor per worker.
+
+        The descriptor keep-list was a fixed 256 entries, and the drain
+        child holds one output descriptor PER WORKER -- so the launcher
+        silently capped at ~250 workers and failed in a CHILD, halfway
+        through startup, with the real cause invisible. The bound is now
+        derived from the engine's own worker ceiling, and a 512-worker
+        run (the reviewed topology's scale) must actually complete.
+        """
+        rc, dt, lines, blob, reg = self._run(
+            nodes=2, order="index", workers=512, lines=1, timeout=240)
+        self.assertEqual(rc, 0,
+                         "a 512-worker run did not complete: %r"
+                         % [l for l in lines if "refus" in l
+                            or "could not be given" in l][:3])
+        self.assertTrue(reg.get("worker"),
+                        "no workers were registered at all")
+        self.assertLess(dt, 240.0)
+
     def test_ingest_death_aborts_the_run(self):
         rc, dt, lines, _blob, reg = self._run(
             nodes=2, order="index", kill_role="ingest")
@@ -414,6 +434,23 @@ class TestCleanroomNuma(unittest.TestCase):
         self.assertTrue(any("is not recoverable -- aborting" in l
                             for l in lines))
         self.assertLess(dt, 20.0)
+        self._assert_no_survivors(reg)
+
+    def test_a_helper_death_leaves_no_surviving_descendant(self):
+        """The fatal path must reap what it killed.
+
+        The multi-node fatal path signalled the worker groups and then
+        exited WITHOUT reaping them, so a dead worker was still
+        observable as a process after the launcher was gone -- which
+        reads as "a descendant survived the run" for a process that was
+        in fact already dead.
+        """
+        rc, _dt, _lines, _blob, reg = self._run(
+            nodes=2, order="index", kill_role="scanner")
+        self.assertNotEqual(rc, 0)
+        # The workers are the descendants that outlive a naive teardown.
+        workers = reg.get("worker", [])
+        self.assertTrue(workers, "no workers were registered")
         self._assert_no_survivors(reg)
 
     def test_a_tampered_topology_is_refused(self):
