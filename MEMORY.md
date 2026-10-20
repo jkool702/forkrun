@@ -942,9 +942,10 @@ fire before running the A/B.**
 
 **Path dependence, measured (4M lines, amp 5, 4 reps, medians).**
 Plain supervision (`orchestrator=False`): peak retention -24% to -65%,
-throughput equal or better, first-result latency unchanged. Reactor
+throughput unchanged (no demonstrated penalty), first-result latency
+unchanged. Reactor
 supervision (the DEFAULT): retention -0.4% to +3.7%, throughput and
-latency equal or better. The reactor drains the notification pipe
+latency unchanged. The reactor drains the notification pipe
 eagerly (up to `DRAIN_BURST` completions per round), so it never falls
 behind at the NOTIFICATION level; its retention is the parent's own
 parsed-record queue, and the workers' read-ahead is bounded by
@@ -1057,3 +1058,37 @@ experiment. It was not: it was the chain telling us which link was
 missing, and it pointed at a 100ms park in the reactor's poll loop that
 nobody was looking for. **When a backpressure lever does nothing, find
 the missing link before tuning the one you can see.**
+
+**A REVIEWER FOUND A REAL GAP, AND THE FIX FOR IT FOUND A REAL TRADE.**
+The `-4` tests asserted that the failure ladder was not entered, that
+there was no duplicate execution, and that the run terminated. They did
+NOT assert what the CALLER observed -- "the worker exited" is not "the
+caller got complete output or a visible failure". Two further tests now
+cover both permitted outcomes, at two corpus sizes: a ONE-batch run
+completes (the live silent-truncation check), and an EIGHT-batch run
+fails closed. A test that only exercised the failing branch would leave
+the truncation check as dead code -- and the first attempt at this
+assertion did exactly that.
+
+**And the new test is discriminating: it FAILS when the `-4` fix is
+reverted.** Measured at the 8-batch corpus:
+
+  * fix reverted: the run **SUCCEEDS** -- 4 records, 56 bytes, all 8
+    lines delivered, no duplicate execution. It reports success after a
+    committed-but-unnotified batch.
+  * fix present: the run **fails closed** (ForkrunWorkerFailure).
+
+**So the fix trades "continue, correctly, BY LUCK" for "fail closed, BY
+CONTRACT", and the contract is the reason to take it.** The reverted
+path happens to deliver complete output only because the engine does
+not re-offer an already-committed batch -- exactly the behaviour the C
+code says not to rely on ("a caller that retries on those would
+re-execute committed work"). The reverted path also re-arms an
+already-committed batch in the escrow slot and reports a misleading
+error ("output write failed on batch N" for a batch whose output WAS
+written and committed).
+
+**Lesson worth keeping: a test that asserts an intermediate property
+is not a test of the contract.** The ladder-entry assertion proved the
+MECHANISM; only an outcome assertion proves what the user gets. Ask
+what the CALLER can observe, not only what the implementation did.

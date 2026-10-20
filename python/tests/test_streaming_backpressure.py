@@ -423,9 +423,10 @@ class TestNotifyFailureContract(_PipeCapacityBase):
     unambiguously.
     """
 
-    def _run_with_injected_notify_failure(self, retry_limit="3"):
+    def _run_with_injected_notify_failure(self, retry_limit="3",
+                                          order="none", nlines=8):
         src = os.path.join(self.d, "in.txt")
-        write_lines(src, 8)
+        write_lines(src, nlines)
         inv_log = os.path.join(self.d, "invocations.txt")
         mark = os.path.join(self.d, "fired.marker")
         ladder_log = os.path.join(self.d, "ladder.txt")
@@ -449,8 +450,11 @@ class TestNotifyFailureContract(_PipeCapacityBase):
         env["FORKRUN_TEST_NOTIFY_FAIL_ONCE"] = "1"
         env["FORKRUN_TEST_NOTIFY_FAIL_MARK"] = mark
         env["FORKRUN_RETRY_LIMIT"] = retry_limit
-        err = None
-        out = []
+        # The child's OUTCOME has to reach the parent, or the parent
+        # cannot assert it. The child reports what happened in a result
+        # file; catching the exception and exiting 0 would make a
+        # failed run indistinguishable from a successful one.
+        result_path = os.path.join(self.d, "outcome.json")
         # The child writes to stderr; capture it so a deliberately
         # injected fault does not spray the suite's output. The run may
         # legitimately fail closed (the worker died and the parent hit
@@ -459,6 +463,8 @@ class TestNotifyFailureContract(_PipeCapacityBase):
         try:
             pid = os.fork()
             if pid == 0:
+                outcome = {"error": None, "error_type": None, "records": 0,
+                           "bytes": 0, "lines": []}
                 try:
                     fd = os.open(child_err,
                                  os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -466,17 +472,46 @@ class TestNotifyFailureContract(_PipeCapacityBase):
                     os.environ.update(env)
                     out = list(forkrun.stream(payload, src, workers=1,
                                                nodes=1, streaming=True,
-                                               order="none"))
+                                               order=order))
+                    outcome["records"] = len(out)
+                    for blob in out:
+                        outcome["bytes"] += len(blob)
+                        # str, not bytes: json.dump cannot serialise bytes,
+                        # and a TypeError here would escape the finally
+                        # below, leaving the CHILD to fall through into
+                        # the parent's code path -- where it would run
+                        # the test framework's cleanups and delete the
+                        # temporary directory out from under the parent.
+                        outcome["lines"].extend(
+                            bytes(blob).decode(errors="replace")
+                            .splitlines())
                 except BaseException as exc:  # noqa: BLE001
-                    try:
-                        os.write(2, ("CHILD-ERROR %r\n" % (exc,)).encode())
-                    except OSError:
-                        pass
+                    outcome["error_type"] = type(exc).__name__
+                    outcome["error"] = "%s: %s" % (type(exc).__name__, exc)
                 finally:
+                    # The child MUST exit here, whatever happened. A
+                    # child that falls through runs the rest of the
+                    # parent's code -- including the test framework's
+                    # cleanups, which would remove the temporary
+                    # directory while the parent is still using it.
+                    try:
+                        import json as _json
+                        with open(result_path, "w") as fh:
+                            _json.dump(outcome, fh)
+                    except BaseException:  # noqa: BLE001
+                        pass
                     os._exit(0)
             os.waitpid(pid, 0)
         finally:
             W._escrow_deposit_retry = orig_escrow
+
+        outcome = {"error": "child produced no result file",
+                   "error_type": "NoResult", "records": 0, "bytes": 0,
+                   "lines": []}
+        if os.path.exists(result_path):
+            import json as _json
+            with open(result_path) as fh:
+                outcome = _json.load(fh)
 
         inv = []
         if os.path.exists(inv_log):
@@ -487,10 +522,10 @@ class TestNotifyFailureContract(_PipeCapacityBase):
             with open(ladder_log) as fh:
                 calls = [ln.strip() for ln in fh if ln.strip()]
         fired = os.path.exists(mark)
-        return inv, calls, fired
+        return inv, calls, fired, outcome
 
     def test_notify_failure_does_not_enter_the_failure_ladder(self):
-        inv, calls, fired = self._run_with_injected_notify_failure()
+        inv, calls, fired, _outcome = self._run_with_injected_notify_failure()
 
         # Positive evidence the fault actually fired. Without this the
         # assertion below would also hold in a run where nothing was
@@ -509,7 +544,7 @@ class TestNotifyFailureContract(_PipeCapacityBase):
             "commit had not happened'. All escrow deposits: %r" % (calls,))
 
     def test_notify_failure_does_not_duplicate_a_batch(self):
-        inv, _calls, fired = self._run_with_injected_notify_failure()
+        inv, _calls, fired, _outcome = self._run_with_injected_notify_failure()
         self.assertTrue(fired, "the fault was never injected")
         self.assertTrue(inv, "the payload never ran")
         dupes = sorted({ln for ln in inv if inv.count(ln) > 1})
@@ -527,6 +562,82 @@ class TestNotifyFailureContract(_PipeCapacityBase):
         self.assertLess(elapsed, TEARDOWN_TIMEOUT_S,
                         "the notify-failure path hung instead of exiting")
         assert_no_zombies(self)
+
+    def test_notify_failure_does_not_silently_truncate(self):
+        """The outcome must be either complete output or a VISIBLE failure.
+
+        The C contract's permitted outcomes for a committed-but-unnotified
+        batch are "recovery notification" or "aborting the run without
+        claiming success". What is NOT permitted is returning
+        successfully with missing output -- that is silent truncation,
+        and it is the failure mode this assertion exists to exclude.
+
+        Two corpus sizes are used, because the two permitted outcomes
+        occur at different scales and BOTH branches must stay live:
+
+        * ONE batch: the run completes. The fault fires once, the worker
+          is respawned, and the committed record is delivered. This is
+          the branch that can silently truncate, so it is the one that
+          must be checked for completeness.
+        * EIGHT batches: the fault fires once per worker GENERATION
+          (the C hook is per-process), so every respawned worker fails
+          again and the run exhausts its respawn budget and fails CLOSED.
+
+        A test that only exercised the failing branch would leave the
+        truncation check dead code.
+        """
+        expected = sorted("line %d" % i for i in range(1))
+        expected_bytes = len(expected) * len("line 0\n")
+
+        for order in ("none", "index"):
+            with self.subTest(order=order, nlines=1):
+                _inv, _calls, fired, outcome = \
+                    self._run_with_injected_notify_failure(order=order,
+                                                          nlines=1)
+                self.assertTrue(
+                    fired,
+                    "the post-commit notification failure was never "
+                    "injected, so this test proved nothing")
+                self.assertIsNone(
+                    outcome["error"],
+                    "a single-batch run must complete after one lost "
+                    "notification; it failed instead: %r"
+                    % (outcome["error"],))
+                self.assertEqual(
+                    expected, sorted(outcome["lines"]),
+                    "the run reported SUCCESS but the output is missing "
+                    "records -- silent truncation")
+                self.assertEqual(
+                    expected_bytes, outcome["bytes"],
+                    "the run reported SUCCESS but the output byte count "
+                    "is short -- silent truncation")
+
+    def test_notify_failure_fails_visibly_rather_than_truncating(self):
+        """The other permitted outcome: abort WITHOUT claiming success.
+
+        When the lost notification repeats across worker generations the
+        run must FAIL LOUDLY. The thing to exclude is the opposite: a
+        run that cannot deliver everything yet reports success anyway.
+        """
+        _inv, _calls, fired, outcome = self._run_with_injected_notify_failure(
+            nlines=8)
+        self.assertTrue(
+            fired,
+            "the post-commit notification failure was never injected, so "
+            "this test proved nothing")
+        self.assertIsNotNone(
+            outcome["error"],
+            "the run could not deliver every batch and yet reported "
+            "SUCCESS -- that is the silent-truncation failure mode")
+        self.assertNotEqual(
+            "NoResult", outcome["error_type"],
+            "the child never reported an outcome at all")
+        self.assertNotEqual(
+            "", outcome["error_type"].strip(),
+            "the failure was reported with no exception type")
+        self.assertNotEqual(
+            "", outcome["error"].split(":", 1)[-1].strip(),
+            "the failure was reported with no cause")
 
 
 if __name__ == "__main__":

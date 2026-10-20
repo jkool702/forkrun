@@ -923,7 +923,10 @@ the two Python paths:
   notification is not read until the consumer asks for the next record.
   The consumer's slowness stops the drain, the notification pipe fills,
   and the workers block. Measured: peak retention **-24% to -65%**,
-  throughput equal or better, first-result latency unchanged.
+  throughput **unchanged** -- no demonstrated penalty. The small-pipe
+  arms measured HIGHER in the plain-path cells, which is consistent with
+  less read-ahead pressure, but it is NOT characterised well enough to
+  call a speedup. First-result latency unchanged.
 - **Reactor supervision (the default): the chain is BROKEN AT ITS FIRST
   LINK.** Its drain collects into a `_pending` list and pops one record
   at a time (`run.py:9207`), and the reactor pulls up to `DRAIN_BURST`
@@ -931,7 +934,7 @@ the two Python paths:
   slowness is absorbed by a **Python list**, not by a pipe: the
   notification pipe never fills, the ack-pipe analogue never engages,
   and the parent's own memory grows instead. Measured: **no change**
-  (-0.4% to +3.7%), throughput equal or better.
+  (-0.4% to +3.7%), throughput unchanged.
 
 **The missing piece on the default path is bash's stdout-pipe
 analogue** — a bounded transport between the drain and the consumer that

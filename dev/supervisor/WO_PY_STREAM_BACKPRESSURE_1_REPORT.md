@@ -22,10 +22,10 @@ path, and no measurable cost on either.**
   completions) instead of 1 MB (65536) on the five `stream()`-reachable
   executors. `map()`/`run()` are unchanged.
 - On **plain supervision** (`orchestrator=False`) this cuts peak
-  retention **24–65 %** with throughput equal or better and first-result
-  latency unchanged.
+  retention **24–65 %** with throughput unchanged (no demonstrated
+  penalty) and first-result latency unchanged.
 - On the **default reactor path** it changes retention by **−0.4 % to
-  +3.7 %** — no benefit. Throughput and latency are equal or better.
+  +3.7 %** — no benefit. Throughput and latency are unchanged.
 - It is **not** a byte bound, and it does **not** close TD-13.
 - The `-4` mismatch is fixed and the fix is proven by a mutation check.
 
@@ -78,6 +78,12 @@ not that.
 **Consequence for the follow-up.** The missing piece on the default path
 is a *stdout-pipe analogue*: a bounded transport between the drain and
 the consumer that blocks the producer when the consumer falls behind.
+**Do not assume that fixing the C drain makes the small notification
+pipe redundant.** They constrain different stages: the results pipe is
+the downstream transport, and the notification pipe still bounds how far
+the workers get ahead while the drain is blocked. If a fixed C drain
+does make the small pipe unnecessary on some route, that must be
+decided from a fresh measurement, not from expectation.
 Making the reactor's drain consumer-paced like the plain path's is NOT
 an option — `DRAIN_BURST` exists to bound death-detection latency, and a
 fully consumer-paced drain would starve the supervisor. The C drain
@@ -194,6 +200,46 @@ in the new process; the run can therefore reach the respawn cap and fail
 correct behaviour for a genuinely lost notification (the parent is gone,
 `EPIPE`), but it means an *injected* fault ends the run. The test
 asserts "terminated, did not hang", not "succeeded", and says so.
+
+**The outcome assertion, and what it revealed.** An earlier version of
+this work asserted only that the failure ladder was not entered, that
+there was no duplicate execution, and that the run terminated. It did
+**not** assert what the caller actually observed. That is a real gap:
+"the worker exited" is not the same as "the caller got either complete
+output or a visible failure". Two further tests now cover it, and both
+permitted outcomes are exercised, at two corpus sizes:
+
+| corpus | outcome | what it pins |
+|---|---|---|
+| 1 batch | run **completes**; the committed record is delivered | the LIVE silent-truncation check: a run that reports success must deliver every byte |
+| 8 batches | run **fails closed** (`ForkrunWorkerFailure`) | the other permitted outcome: abort **without claiming success** |
+
+A test that only exercised the failing branch would leave the truncation
+check dead code, and the first attempt at this assertion did exactly
+that (both corpus sizes raised, so the completeness branch was never
+reached).
+
+**And it is discriminating: it fails when the `-4` fix is reverted.**
+Reverted, an 8-batch run **succeeds** — it reports success after a
+committed-but-unnotified batch, which is the outcome the C contract
+excludes. With the fix, it fails visibly. Measured side by side at the
+8-batch corpus:
+
+| | outcome | records | bytes | complete? | duplicate executions? |
+|---|---|---|---|---|---|
+| fix reverted | **SUCCEEDED** | 4 | 56 | yes | none |
+| fix present | **ForkrunWorkerFailure** | 0 | 0 | n/a (failed) | none |
+
+**Stated plainly, because it is a trade and not a pure win:** the
+reverted path *happens* to deliver complete output today, because the
+engine does not re-offer an already-committed batch. That is the
+behaviour the C contract explicitly says not to rely on — "a caller
+that retries on those would re-execute committed work" — and the
+reverted path does exactly what the contract forbids: it re-arms an
+already-committed batch in the escrow slot, with a misleading error
+message ("output write failed on batch N" for a batch whose output was
+written and committed). The fix trades "continue, correctly, by luck"
+for "fail closed, by contract".
 
 ---
 
