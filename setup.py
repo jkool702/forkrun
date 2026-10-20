@@ -57,22 +57,42 @@ CR_NAME = "_forkrun_cleanroom"
 # forkrun/_udf.py still finds it in a SOURCE CHECKOUT, so the
 # development path keeps working -- it is only the WHEEL that declines
 # to vouch for it.
-def _freethreaded_interpreter():
-    """Is THIS interpreter a free-threaded (no-GIL) CPython build?
+_RUNTIME_UDF = None
+
+
+def _runtime_udf_module():
+    """forkrun/_udf.py, loaded by path.
+
+    It has no relative imports, so it can be loaded without importing
+    the package (whose __init__ is Linux-only and would fail on a
+    non-Linux builder).
+    """
+    global _RUNTIME_UDF
+    if _RUNTIME_UDF is None:
+        import importlib.util
+        path = os.path.join(REPO_ROOT, "python", "forkrun", "_udf.py")
+        spec = importlib.util.spec_from_file_location("forkrun._udf_abi",
+                                                      path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RUNTIME_UDF = mod
+    return _RUNTIME_UDF
+
+
+def _freethreaded_interpreter(suffix=None):
+    """Is THIS suffix / interpreter free-threaded (no-GIL) CPython?
 
     Delegates to the RUNTIME's answer rather than keeping a second copy
     of the rule: the packaging and the runtime must agree about which
     configurations are supported, and two copies of that rule is how
-    they drift. `forkrun/_udf.py` has no relative imports, so it can be
-    loaded by path without importing the package (whose __init__ is
-    Linux-only and would fail on a non-Linux builder).
+    they drift.
+
+    `suffix` asks the question about a CANDIDATE artifact's suffix
+    rather than the running interpreter's; the runtime's detector takes
+    both, so the packaging can ask about either side with the SAME
+    function.
     """
-    import importlib.util
-    path = os.path.join(REPO_ROOT, "python", "forkrun", "_udf.py")
-    spec = importlib.util.spec_from_file_location("forkrun._udf_abi", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.freethreaded_interpreter()
+    return _runtime_udf_module().freethreaded_interpreter(suffix=suffix)
 
 
 def _udf_helper_for_this_interpreter(pkg_dir=None, suffix=None):
@@ -102,9 +122,18 @@ def _udf_helper_for_this_interpreter(pkg_dir=None, suffix=None):
     # exercised against one. Shipping it would be shipping an UNMEASUREED
     # configuration, so the wheel declines to claim it.
     minor = "%d%d" % sys.version_info[:2]
-    if ("cpython-%st-" % minor) in suffix:
-        return None
-    if _freethreaded_interpreter():
+    # The candidate must be the SAME FLAVOUR as the running interpreter:
+    # a free-threaded helper links libpython3.Xt and a GIL one links
+    # libpython3.X, so the two are not interchangeable.
+    #
+    # BOTH sides of that question go through the shared runtime
+    # detector, so there is one rule and not two: asking it about the
+    # CANDIDATE's suffix and about the RUNNING interpreter's flavour,
+    # and requiring the answers to agree. That covers both directions
+    # -- a free-threaded candidate on a GIL interpreter, and a GIL
+    # candidate on a free-threaded one -- and it leaves no local copy of
+    # the flavour test to drift from the runtime's.
+    if _freethreaded_interpreter(suffix=suffix) != _freethreaded_interpreter():
         return None
     name = "_fr_udf" + suffix
     if not os.path.exists(os.path.join(pkg_dir, name)):

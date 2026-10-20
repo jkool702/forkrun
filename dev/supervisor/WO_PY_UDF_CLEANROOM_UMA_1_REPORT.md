@@ -255,11 +255,31 @@ runtime's answer by loading that module by path (it has no relative
 imports, so no package import is needed), rather than keeping a second
 copy of the rule. A test asserts the two layers AGREE.
 
+**One local copy of the flavour test was still left in `setup.py`,** and
+it was worth removing: a second copy of the rule is exactly how the two
+layers would come to disagree, and it also let the simulated
+free-threaded test return EARLY without the shared decision ever being
+consulted. The packaging now asks the shared detector about **both
+sides** of the question — the candidate's suffix and the running
+interpreter's flavour — and requires the answers to agree, which covers
+both directions (a free-threaded candidate on a GIL interpreter, and a
+GIL candidate on a free-threaded one) with no local flavour test left
+to drift.
+
+**And the refusal is now proven at the RUNTIME lookup, with a candidate
+helper in it** — not only in the packaging. The test puts a helper where
+the runtime looks for one (the package directory is redirected by
+patching the module's `__file__`, so nothing is written into the real
+package) and asserts that a simulated free-threaded interpreter is
+refused it, with a GIL positive control so the refusal is not vacuous.
+**Mutation check:** removing the runtime's refusal fails exactly that
+test.
+
 The consequence is that on a free-threaded interpreter the capability
 reports False, the launcher is never handed a helper to load, and the
 route degrades to the in-process path.
 
-`python/tests/test_udf_packaging.py` now has **14 tests**, and they
+`python/tests/test_udf_packaging.py` now has **15 tests**, and they
 exercise the values `setup.py` ACTUALLY computes — the loader executes
 setup.py's real module-level code with `setup()` stubbed out, so the
 tag under test is the real one rather than a re-implementation of the
@@ -281,7 +301,11 @@ the tag is WRITTEN — pip consults the tag set:
   detection sees what it would see on a real one): no helper, no
   per-minor tag, no ABI tag;
 - the runtime declines a free-threaded interpreter, and the packaging and
-  the runtime agree about it.
+  the runtime agree about it — on this host AND under the simulated
+  free-threaded configuration;
+- the RUNTIME LOOKUP refuses a candidate helper that is sitting where it
+  looks for one, under simulated free-threaded conditions, with a GIL
+  positive control.
 
 **Mutation check:** reverting the ABI tag to `none` — the exact bug the
 review found — fails **2** of the 10 tests. The tests are not vacuous.

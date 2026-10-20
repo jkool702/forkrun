@@ -48,6 +48,7 @@ Run: cd python/tests && python3 -m unittest test_udf_packaging
 """
 
 import os
+import shutil
 import sys
 import sysconfig
 import tempfile
@@ -175,6 +176,11 @@ class TestUdfWheelTagRule(unittest.TestCase):
             "cpython-%d%dt" % sys.version_info[:2],
             "cpython-%d%d" % sys.version_info[:2])
 
+    def _free_threaded_suffix(self):
+        """The free-threaded extension suffix for this minor."""
+        return ".cpython-%d%dt-x86_64-linux-gnu.so" % (
+            sys.version_info[0], sys.version_info[1])
+
     def test_a_gil_helper_for_this_minor_is_detected(self):
         # The GIL flavour of this minor IS eligible, on any host.
         suffix = self._gil_suffix()
@@ -255,18 +261,85 @@ class TestUdfWheelTagRule(unittest.TestCase):
             "a GIL suffix was misread as free-threaded")
 
     def test_the_packaging_and_the_runtime_agree(self):
-        """ONE rule, two layers.
+        """ONE rule, two layers -- on THIS host AND simulated.
 
         The packaging asks the runtime's answer rather than keeping a
         second copy of it, so there is nothing to disagree about. This
         asserts the wiring, so a future refactor that reintroduces a
         second copy fails here.
+
+        The simulated comparison matters as much as the real one: a
+        local flavour check in setup.py could make the two disagree
+        under free-threaded conditions while agreeing here.
         """
         self.assertIs(
             _SETUP["_freethreaded_interpreter"](),
             _RUNTIME.freethreaded_interpreter(),
             "the packaging and the runtime disagree about whether this "
             "interpreter is free-threaded")
+        for suffix in (self._gil_suffix(), self._free_threaded_suffix()):
+            self.assertIs(
+                _SETUP["_freethreaded_interpreter"](suffix=suffix),
+                _RUNTIME.freethreaded_interpreter(suffix=suffix),
+                "the packaging and the runtime disagree about the "
+                "flavour of %r" % (suffix,))
+
+    def test_the_runtime_refuses_a_helper_under_free_threading(self):
+        """The RUNTIME lookup path, with a candidate helper IN it.
+
+        The reviewer's point: the packaging test can decline a
+        free-threaded candidate on its own, without the runtime's
+        lookup ever being consulted. This puts a candidate helper where
+        the runtime LOOKS for one and asserts the lookup refuses it --
+        so the refusal is proven at the boundary that matters, not only
+        in the packaging.
+
+        The package directory is redirected by patching the module's
+        __file__, so nothing is written into the real package.
+        """
+        mod = _RUNTIME
+        old_file = mod.__file__
+        old_cfg = sysconfig.get_config_var
+        minor = "%d%d" % sys.version_info[:2]
+
+        # Two flavours, each with a candidate helper NAMED for it, so
+        # the lookup can actually find the thing it is refusing.
+        for flavour, suffix in (("gil", self._gil_suffix()),
+                                ("free-threaded",
+                                 self._free_threaded_suffix())):
+            with self.subTest(flavour=flavour):
+                d = tempfile.mkdtemp()
+                self.addCleanup(shutil.rmtree, d, True)
+                open(os.path.join(d, "_fr_udf" + suffix), "wb").close()
+                mod.__file__ = os.path.join(d, "_udf.py")
+                is_ft = ("cpython-%st-" % minor) in suffix
+
+                def fake(name, _s=suffix, _ft=is_ft, _old=old_cfg):
+                    if name == "Py_GIL_DISABLED":
+                        return 1 if _ft else 0
+                    if name == "EXT_SUFFIX":
+                        return _s
+                    return _old(name)
+
+                try:
+                    sysconfig.get_config_var = fake
+                    found = mod.helper_path()
+                finally:
+                    sysconfig.get_config_var = old_cfg
+                    mod.__file__ = old_file
+
+                if flavour == "gil":
+                    self.assertIsNotNone(
+                        found,
+                        "the control failed: a GIL interpreter did not "
+                        "find the candidate helper, so the refusal below "
+                        "would prove nothing")
+                else:
+                    self.assertIsNone(
+                        found,
+                        "a free-threaded interpreter was handed a helper: "
+                        "the runtime must refuse it before the launcher "
+                        "is invoked")
 
     def test_no_helper_means_no_helper(self):
         self.assertIsNone(self._detect(),
