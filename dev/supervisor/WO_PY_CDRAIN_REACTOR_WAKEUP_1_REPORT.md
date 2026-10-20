@@ -273,6 +273,28 @@ the wakeup, not a resize.
 
 **Existing `test_c_drain` (29 tests) still passes.**
 
+**A THIRD BUG, AND IT WAS IN THE PRODUCTION CODE, NOT IN A TEST.** The
+first full-suite run after the fix HUNG. The cause: the new pump reads
+until EAGAIN, so it requires a nonblocking read end; `_fork_drain()` sets
+that flag for the production path, but `test_stage1_reassembly.py` drives
+`_make_results_pump()` directly over its OWN pipe, and that pipe is
+blocking. The old pump did a zero-timeout `select()` before reading, so
+it never blocked; the new one did, and the test hung in `read()`.
+
+The fix is to make the pump enforce the contract itself
+(`os.set_blocking(results_r, False)`) rather than leaving "the read end
+must be nonblocking" as an unenforced caller obligation. The pump is the
+sole reader of that descriptor, so changing its flags is safe. A
+regression test asserts the flag **before** the functional read, so a
+future regression fails cleanly instead of hanging the suite.
+
+**This is the strongest argument in this report for running the FULL
+suite rather than the focused one.** The focused module
+(`test_c_drain_reactor_wakeup`, 20 tests) passed throughout, and every
+module I ran individually passed. The hang only appeared in the full
+suite, in a module I had not touched, exercising a contract my change
+had silently changed.
+
 **Two bugs in my own new tests were found and fixed** (both are the kind
 this repository has been bitten by before, so they are recorded here):
 

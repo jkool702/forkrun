@@ -251,6 +251,36 @@ class TestPumpReadsEverythingAvailable(unittest.TestCase):
             "bounded by the pending budget, so the parent would queue the "
             "run's whole output" % (total - left, total))
 
+    def test_pump_makes_its_read_end_nonblocking(self):
+        """The pump reads until EAGAIN, so it must not read from a
+        BLOCKING descriptor.
+
+        _fork_drain() sets the flag for the production path, but the
+        pump is also driven directly over a caller-owned pipe -- and a
+        blocking read end there would stall the supervision path
+        forever on an empty pipe. The contract is therefore enforced by
+        the pump, not left as a caller obligation.
+
+        The flag is asserted BEFORE the functional read, so a regression
+        fails this test cleanly instead of hanging it.
+        """
+        r, w = os.pipe()   # BLOCKING, default capacity
+        self.addCleanup(lambda: os.close(r))
+        self.addCleanup(lambda: os.close(w))
+        self.assertTrue(os.get_blocking(r),
+                        "the fixture must start with a BLOCKING read end")
+        pump = _R._make_results_pump(r)
+        self.assertFalse(
+            os.get_blocking(r),
+            "the pump must make its read end nonblocking: it reads until "
+            "EAGAIN, and a blocking descriptor there would stall the "
+            "supervision path on an empty pipe")
+        # Safe to reach only because the flag is now known to be set.
+        os.write(w, _frame(0, b"x" * 10))
+        blob = pump(True)
+        self.assertIsNotNone(blob, "the pump produced nothing")
+        self.assertEqual(len(blob), 10)
+
     def test_watch_is_disarmed_at_eof(self):
         # A pipe at EOF is permanently readable. Leaving it in the
         # reactor's watch set would spin the reactor.

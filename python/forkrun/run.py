@@ -5870,6 +5870,18 @@ def _make_results_pump(results_r, order="none", stats=None, watch=None):
     EOF — same head-of-line contract as _drain_records). stats
     receives {"reassembly_max": high-water} when ordering.
     """
+    # The read end MUST be nonblocking: the pump reads until EAGAIN, so
+    # a blocking fd would stall the supervision path on an empty pipe.
+    # _fork_drain() sets this for the production path, but the pump is
+    # also constructed directly (tests, and anything else that wants to
+    # drive it over its own pipe), so the contract is enforced HERE
+    # rather than left as a caller obligation. The pump is the sole
+    # reader of this descriptor, so changing its flags is safe.
+    try:
+        os.set_blocking(results_r, False)
+    except OSError:
+        pass
+
     st = {"tail": b"", "eof": False, "pending": _deque(),
           # Bytes already parsed but not yet handed to the consumer.
           # This is the parent's read-AHEAD, and it is what the pump
