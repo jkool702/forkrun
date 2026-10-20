@@ -259,7 +259,21 @@ neither is a code problem.
 
 ## 8. Gates
 
-See §9 for the exact results.
+On the final commit (`c40fa29f`):
+
+| gate | result |
+|---|---|
+| `python3 -m unittest discover -s python/tests` | **1437 tests, OK (2 skipped)** |
+| `python3 python/release_check.py gate` | **ALL CHECKS PASSED — ready to tag v3.6.1** (23 PASS / 0 FAIL / 1 SKIP: the tag check, which needs `FORKRUN_RELEASE_CHECK_TAGS=1`) |
+| focused UDF modules (§3.3) | **100 tests, OK (1 skipped)** |
+| `python3 tools/capability_matrix.py --check` | **OK: 40320 cells, matrix is current** |
+| `python3 tools/gen_docs_all.py --check` | **DOCS_ALL.md is current (17 documents)** |
+| `bash tools/matrix_c05.sh` | **EXIT 0 — green on six minors** |
+| frozen files | empty diff; their last-touching commit is not HEAD |
+
+The gate's own `UDF helper: no test-only version override in the
+shipped artifact` check is the one that would have caught a helper
+built with a test-only version stamp; it passes.
 
 ## 9. Commits, changed files, and the final state
 
