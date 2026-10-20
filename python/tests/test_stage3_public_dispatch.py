@@ -36,12 +36,28 @@ class TestSpawnPublicDispatch(unittest.TestCase):
         self.src = os.path.join(self._tmp.name, "in.txt")
         with open(self.src, "w") as fh:
             fh.writelines("line%06d\n" % i for i in range(LINES))
-        self._old = {}
+        self._old = os.environ.get("FORKRUN_CLEANROOM")
         os.environ["FORKRUN_CLEANROOM"] = "1"
         self.addCleanup(self._restore)
 
     def _restore(self):
-        os.environ.pop("FORKRUN_CLEANROOM", None)
+        # RESTORE the previous value, do not DELETE the variable.
+        #
+        # This used to `os.environ.pop("FORKRUN_CLEANROOM", None)`
+        # unconditionally, which UNSET it for every test that ran
+        # afterwards -- and every later test that gates on the variable
+        # then SKIPPED instead of running. The whole cleanroom-gated UDF
+        # suite (test_udf_mode's end-to-end class and
+        # test_udf_extension_import) was therefore dead in the gate,
+        # including the pass that runs with FORKRUN_CLEANROOM=1.
+        #
+        # The `self._old = {}` above was the intended save and was
+        # never populated; the house pattern (test_cleanroom.py) saves
+        # the old value and puts it back.
+        if self._old is None:
+            os.environ.pop("FORKRUN_CLEANROOM", None)
+        else:
+            os.environ["FORKRUN_CLEANROOM"] = self._old
 
     def _joined(self, out):
         return b"".join(bytes(x) for x in out if x is not None)

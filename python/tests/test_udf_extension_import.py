@@ -90,25 +90,27 @@ def _helper_built():
     return helper_path() is not None
 
 
-def _cleanroom_on():
-    return os.environ.get("FORKRUN_CLEANROOM") == "1"
-
-
 class TestUDFExtensionImport(unittest.TestCase):
-    """Skipped in setUpClass, not by a module-level decorator.
+    """The route under test is the CLEANROOM's, so this class OWNS its
+    precondition: it sets ``FORKRUN_CLEANROOM=1`` itself and puts the
+    previous value back.
 
-    FORKRUN_CLEANROOM is process-global and other test modules mutate
-    it; a decorator evaluated at IMPORT time can be True while the value
-    is False by the time the test RUNS.
+    Gating on the AMBIENT value instead is what made the pre-existing
+    end-to-end UDF suite dead: ``FORKRUN_CLEANROOM`` is process-global,
+    another test module changed it, and every later test that checked
+    it SKIPPED rather than failing loudly -- in the pass that runs with
+    the flag set, too. A test that silently does not run is worse than
+    no test, so the value this test needs is set explicitly, and the
+    house pattern (test_cleanroom.py) is followed.
     """
 
     @classmethod
     def setUpClass(cls):
-        if not _cleanroom_on():
-            raise unittest.SkipTest(
-                "cleanroom is opt-in via FORKRUN_CLEANROOM=1")
         if not _helper_built():
             raise unittest.SkipTest("UDF helper not built")
+        cls._old_env = os.environ.get("FORKRUN_CLEANROOM")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        cls.addClassCleanup(cls._restore_env)
         cls._tmp = tempfile.TemporaryDirectory()
         cls.root = cls._tmp.name
         with open(os.path.join(cls.root, "forkrun_ext_fixture.py"), "w") as fh:
@@ -125,6 +127,14 @@ class TestUDFExtensionImport(unittest.TestCase):
         cls.src = src
         import forkrun
         cls.forkrun = forkrun
+
+    @staticmethod
+    def _restore_env():
+        if TestUDFExtensionImport._old_env is None:
+            os.environ.pop("FORKRUN_CLEANROOM", None)
+        else:
+            os.environ["FORKRUN_CLEANROOM"] = \
+                TestUDFExtensionImport._old_env
 
     def _map(self, attr, **kw):
         return self.forkrun.map(
