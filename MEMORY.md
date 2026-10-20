@@ -1092,3 +1092,40 @@ written and committed).
 is not a test of the contract.** The ladder-entry assertion proved the
 MECHANISM; only an outcome assertion proves what the user gets. Ask
 what the CALLER can observe, not only what the implementation did.
+
+**THE C DRAIN'S 100ms PARK, AND THE BOUND THAT IS PART OF THE FIX
+(WO-PY-CDRAIN-REACTOR-WAKEUP-1).** The reactor now SELECTS on the C
+drain's results pipe -- an `ExtraWatch` holder it wakes on but NEVER
+reads (the pump keeps sole ownership of the read side, and the holder is
+DISARMED at EOF so a readable-EOF pipe cannot spin the reactor) -- and the
+pump consumes everything already available instead of one 64 KiB chunk
+per call. The cliff is gone: **16-19x -> 1.00-1.05x** at scale, and the
+`select()` wait collapsed from **9.72s of a 10.43s run (93%)** to
+**0.003s over 6 calls**.
+
+**THE PART THAT IS EASY TO GET WRONG: Step A UNBOUNDED THROWS AWAY THE
+WHOLE POINT OF THE C DRAIN.** Read-until-EAGAIN, as the work order's
+first implementation suggests, queues the run's whole output in the
+parent's `pending` deque: the C drain's peak retention went from a flat
+**3.5MB to ~18MB** -- and the wall time did NOT improve (5.60s vs
+5.62s), because the WAKEUP had already removed the park. So the
+implementing the two steps literally would have shipped a 5x regression
+in the only property that makes the C drain worth using.
+
+**The bound that fixes it: the pump tracks the bytes it has PARSED BUT
+NOT YET HANDED TO THE CONSUMER, and stops reading when that exceeds a
+budget (256KB).** So the read-ahead is bounded by the CONSUMER'S PACE,
+not by the pipe. The pipe's capacity is no longer the bound -- which is
+the point: the C drain's advantage was never "the pipe is small", it is
+"the producer cannot get ahead of the consumer", and a PIPE cannot
+express that. A BUDGET CAN.
+
+**Two more things the measurements corrected, both against my own
+first guess:** the residual ~100ms in the fast-consumer cells was NOT a
+termination-path sleep (`term_sleeps=0` in every cell) and NOT a select
+park -- it is noise on 0.02-0.19s runs, far below this repo's own "~2s
+per measurement" rule, and it did not reproduce under instrumentation.
+And the `order="index"` rows are a CORRECTNESS arm, not a performance
+one: the C drain is not used with the orderer at all
+(`use_drain = ... and not use_orderer`), so both arms measure the same
+path there.

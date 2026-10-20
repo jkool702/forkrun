@@ -376,6 +376,14 @@ notification-pipe sizing may become unnecessary there.** Decide
 afterwards whether to keep the 4 KiB default or revisit it. Do not
 couple the two changes.
 
+**And do NOT assume that fixing this makes the 4 KiB notification pipe
+redundant.** The two stages constrain different parts of the pipeline:
+the results pipe is the DOWNSTREAM transport (drain -> consumer), and
+the notification pipe still bounds how far the workers get ahead while
+the drain is blocked. A fixed C drain may well remove the need for the
+small notification pipe on some route -- but that has to be decided
+from a fresh measurement, not from expectation.
+
 ---
 
 ## 9. Reproduction

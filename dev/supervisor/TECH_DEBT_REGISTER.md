@@ -977,26 +977,54 @@ linearly to 138 MB:
 | 124.4 MB | 138.3 MB | **3.6 MB** |
 
 The C drain is therefore the right mechanism for the default path — and
-it is currently 16-19x SLOWER than the legacy drain there, for a reason
-that has nothing to do with memory: its pump reads 65536 bytes per call
-and returns `None` whenever that does not complete a blob, which ends
-the reactor's `DRAIN_BURST`, which leaves `drained_last` False, which
-makes the reactor's next `select()` wait the full `poll_timeout` (0.1s).
+it WAS 16-19x SLOWER than the legacy drain there, for a reason that has
+nothing to do with memory: its pump read 65536 bytes per call and
+returned `None` whenever that did not complete a blob, which ended the
+reactor's `DRAIN_BURST`, which left `drained_last` False, which made the
+reactor's next `select()` wait the full `poll_timeout` (0.1s).
 Instrumented at 250k lines: 162 select calls, **9.72s of a 10.43s run
 spent waiting**, 97 calls over 50ms — against 5 select calls and 0.01s
 waited for the legacy drain. The reactor's own comment names the cap:
 *"otherwise throughput caps at ~10 blobs/s (one yield per 100ms idle
-select)"*. Below ~64 blobs (the `DRAIN_BURST` size) the C drain matches
+select)"*. Below ~64 blobs (the `DRAIN_BURST` size) the C drain matched
 the legacy drain (1.01-1.21x) — which is very likely where the
 "0.7-1.0x" figure in `run.py`'s `_validate_c_drain` came from.
 
-**Recommended next step (separate work order, and it is probably the
-better one):** fix the C drain's stream-path pump — drain the results
-pipe fully per call, and/or put `results_r` in the reactor's watch set
-so the wakeup is event-based — then re-evaluate whether the notification
-pipe needs shrinking at all on the default path. Fixing the park is
-worth doing on its own merits: it is a 16-19x throughput defect on an
-opt-in path whose whole purpose is to bound memory.
+**[FIXED — WO-PY-CDRAIN-REACTOR-WAKEUP-1.]** The park is gone. The
+reactor now SELECTS on the results pipe (an `ExtraWatch` holder the
+reactor wakes on but never reads — the pump keeps sole ownership of the
+read side, and the holder is disarmed at EOF so a readable-EOF pipe
+cannot spin the reactor), and the pump consumes everything already
+available instead of one chunk per call.
+
+| | before | after |
+|---|---|---|
+| C/legacy wall at 250k lines | 15.96x | **1.02x** |
+| C/legacy wall at 2M lines | 19.19x | **1.02x** |
+| select() calls / time waited (250k) | 162 calls / 9.72s | **6 calls / 0.003s** |
+| C drain peak retention, 124MB output | 3.6 MB (flat) | **4.4 MB (flat)** |
+
+Correctness: 14/14 configurations byte-identical to the legacy drain.
+First-result latency and death-detection latency unchanged or better.
+The results-pipe and notification-pipe capacities were NOT changed, and
+the frozen files are untouched.
+
+**The bound is part of the fix, not an optimisation of it.** Implementing
+the two steps literally — read until EAGAIN, unbounded — queued the run's
+whole output in the parent's `pending` deque and took the C drain's peak
+retention from a flat 3.5MB to ~18MB, for NO wall-time gain (the wakeup
+had already removed the park). The pump therefore bounds its read-ahead
+by the bytes it has parsed but not yet handed to the consumer
+(`pending_bytes` against a 256KB budget), so the read-ahead is bounded by
+the consumer's pace rather than by the pipe.
+
+**What this does NOT do:** it does not make the C drain the default, and
+it does not establish a constant-byte bound for any streaming path. The
+C drain's retention is flat because its results pipe bounds the
+read-ahead, and that bound is 1MB of *queued output*, not a byte budget
+for a single record. `order="index"` is not served by the C drain at all
+(`use_drain = ... and not use_orderer`), so its retention is the legacy
+path's and is unaffected. See `dev/supervisor/WO_PY_CDRAIN_REACTOR_WAKEUP_1_REPORT.md`.
 
 **Reproduce (committed probes, no scratch):**
 

@@ -381,6 +381,22 @@ def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
             os.close(results_w)
         except OSError:
             pass
+        # WO-PY-CDRAIN-REACTOR-WAKEUP-1: the parent owns the READ end
+        # and is its only reader. It must be nonblocking, because the
+        # pump reads until EAGAIN so that ONE pump call consumes
+        # everything already available; a blocking read there would
+        # stall the supervision path on an empty pipe.
+        #
+        # The DRAIN CHILD's write end stays BLOCKING. That is the
+        # backpressure mechanism: a slow consumer lets the results pipe
+        # fill, the drain's write blocks, the drain stops reading the
+        # workers' notifications, and the workers block. Making the
+        # write end nonblocking would silently remove the backpressure
+        # this whole route exists to provide.
+        try:
+            os.set_blocking(results_r, False)
+        except OSError:
+            pass
         return pid, results_r
     return pid, results_fd
 
@@ -5807,7 +5823,7 @@ def _raise_on_disposition_conflicts(reassembly, where):
         conflicts=conflicts)
 
 
-def _make_results_pump(results_r, order="none", stats=None):
+def _make_results_pump(results_r, order="none", stats=None, watch=None):
     """Build a C-drain results-pipe pump for streaming (W-PY21-A).
 
     The drain child moves framed records verbatim into the results
@@ -5818,6 +5834,17 @@ def _make_results_pump(results_r, order="none", stats=None):
     raises StopIteration when producers are gone AND the pipe hit
     EOF AND no buffered records remain (same EOF-anchored rule as
     _drain_records; a truncated tail is dropped, like _parse_records).
+
+    WO-PY-CDRAIN-REACTOR-WAKEUP-1: the pump now consumes EVERYTHING
+    already available in one call, instead of one 64 KiB chunk. The
+    read end is nonblocking (see _fork_drain), so the loop ends on
+    EAGAIN -- which means the pipe's own capacity bounds the read
+    ahead, and the supervisor is not left waiting on a pipe that
+    already has data in it.
+
+    ``watch`` is an optional ExtraWatch holder for the results fd. The
+    pump DISARMS it at EOF: a pipe at EOF is permanently readable, and
+    leaving it in the reactor's watch set would spin the reactor.
 
     On what a truncated tail means, the wording corrected (round-8
     review). It previously read "a worker that died mid-record, never
@@ -5843,9 +5870,12 @@ def _make_results_pump(results_r, order="none", stats=None):
     EOF — same head-of-line contract as _drain_records). stats
     receives {"reassembly_max": high-water} when ordering.
     """
-    import select as _select
-
     st = {"tail": b"", "eof": False, "pending": _deque(),
+          # Bytes already parsed but not yet handed to the consumer.
+          # This is the parent's read-AHEAD, and it is what the pump
+          # must not let grow: it is the difference between a bounded
+          # window and the run's whole output in memory.
+          "pending_bytes": 0,
           "reassembly": (ReassemblyBuffer() if order == "index"
                          else None)}
 
@@ -5880,6 +5910,7 @@ def _make_results_pump(results_r, order="none", stats=None):
             records, tail = _split_records(st["tail"] + chunk)
             st["tail"] = tail
             st["pending"].extend(blob for _, blob in records)
+            st["pending_bytes"] += sum(len(blob) for _, blob in records)
             return
         records, tail = _split_records_terminal(st["tail"] + chunk)
         st["tail"] = tail
@@ -5891,24 +5922,77 @@ def _make_results_pump(results_r, order="none", stats=None):
         _check_conflicts()
         for _, ordered in st["reassembly"].drain():
             st["pending"].append(ordered)
+            st["pending_bytes"] += len(ordered)
+
+    def _read_available(limit):
+        """Consume what is ALREADY in the results pipe.
+
+        The read end is nonblocking, so this loop can never block --
+        the pump runs inside the supervision path, and a blocking read
+        there would stall death detection.
+
+        The distinctions that matter:
+
+          * EAGAIN/EWOULDBLOCK -> the pipe is momentarily EMPTY. Not
+            EOF. The drain child may write again a moment later, and
+            the reactor's readiness watch will wake us for it.
+          * b"" -> EOF: every writer is gone.
+          * any other OSError -> a genuine I/O failure. The previous
+            code turned EVERY OSError into EOF, so a broken pipe
+            looked exactly like a clean end of stream -- a FALSE CLEAN
+            COMPLETION, with the output silently short. It is raised
+            instead, so the run fails loudly.
+
+        `limit` bounds the loop so a continuously replenished pipe
+        cannot hold the supervision path indefinitely. The pipe's own
+        capacity already bounds it (the drain child blocks once the
+        pipe is full), so the limit is a backstop, not the mechanism.
+        """
+        total = 0
+        while total < limit:
+            # The read-ahead is bounded by what the parent ALREADY holds
+            # and has not yet handed to the consumer. Reading past that
+            # point trades the C drain's flat memory profile for
+            # nothing: the extra bytes just queue up in `pending`.
+            #
+            # This is the bound that makes the read-until-drained loop
+            # safe. The loop is what removes the arbitrary "one 64 KiB
+            # chunk per call" limit (and with it the syscall storm);
+            # the pending budget is what stops it from turning the
+            # parent's memory into the run's whole output.
+            if st["pending_bytes"] >= _RESULTS_PENDING_BUDGET:
+                break
+            try:
+                chunk = os.read(results_r, 65536)
+            except BlockingIOError:
+                # EAGAIN/EWOULDBLOCK: momentarily drained, not EOF.
+                break
+            except InterruptedError:
+                # EINTR: interrupted before transferring anything.
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                    "forkrun: read failed on the C-drain results pipe "
+                    "(fd %r): %s" % (results_r, exc)) from exc
+            if not chunk:
+                st["eof"] = True
+                if watch is not None:
+                    # A pipe at EOF is permanently readable. Leaving it
+                    # in the reactor's watch set would spin the reactor
+                    # on a descriptor that can never produce more.
+                    watch.disarm()
+                break
+            _ingest(chunk)
+            total += len(chunk)
+        return total
 
     def pump(alive):
         if not st["eof"]:
-            try:
-                ready, _, _ = _select.select([results_r], [], [], 0)
-            except (OSError, ValueError):
-                ready = []
-            if ready:
-                try:
-                    chunk = os.read(results_r, 65536)
-                except OSError:
-                    chunk = b""
-                if chunk == b"":
-                    st["eof"] = True
-                else:
-                    _ingest(chunk)
+            _read_available(_RESULTS_READ_BUDGET)
         if st["pending"]:
-            return st["pending"].popleft()
+            blob = st["pending"].popleft()
+            st["pending_bytes"] -= len(blob)
+            return blob
         if not alive and st["eof"]:
             if st["reassembly"] is not None:
                 for _, ordered in st["reassembly"].final_drain():
@@ -5942,6 +6026,33 @@ _HELPER_JOIN_TIMEOUT = 10.0
 # to _CHUNK so one read() yields one spill write. Clamped to
 # fs.pipe-max-size by the kernel; EPERM/EINVAL falls back silently.
 _INGEST_PIPE_SZ = 1 << 20
+
+# WO-PY-CDRAIN-REACTOR-WAKEUP-1: how many result bytes ONE pump call may
+# consume from the C drain's results pipe.
+#
+# The pipe's own capacity already bounds this: the drain child blocks
+# once the pipe is full, so a read-until-EAGAIN loop cannot run away
+# with the data. This is a backstop that keeps the loop inside the
+# supervision path's time budget even if the pipe capacity is ever
+# raised. 4 MiB is 4x the 1 MiB results pipe, so in practice the loop
+# ends on EAGAIN long before the budget -- and the read-ahead the
+# parent holds is then bounded by the pipe, not by this number.
+_RESULTS_READ_BUDGET = 4 << 20
+
+# WO-PY-CDRAIN-REACTOR-WAKEUP-1: how many bytes of PARSED-but-unyielded
+# output the parent will hold while the C drain's results pipe is being
+# read.
+#
+# This is the memory half of the fix. The C drain's whole advantage is
+# that its retention is FLAT (~3.5MB) while the legacy drain's grows
+# with the output; a read-until-drained loop that ignored the consumer
+# would queue the run's whole output in `pending` and throw that
+# advantage away. Measured: with the read unbounded, the 2M-line run's
+# parent retention went from 3.5MB to ~18MB.
+#
+# 256KB is roughly ONE amplified batch at the measured shape, which is
+# what the pre-fix pump effectively held (one 64KB chunk per call).
+_RESULTS_PENDING_BUDGET = 256 << 10
 
 
 
@@ -8922,8 +9033,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     strays).
     """
     from ._bindings import v1_available as _v1a
-    from ._reactor import (ORDER_PIPE_SIZE, ReactorState, reactor_loop,
-                           spawn_orderer)
+    from ._reactor import (ORDER_PIPE_SIZE, ExtraWatch, ReactorState,
+                           reactor_loop, spawn_orderer)
     import fcntl as _fcntl
     import select as _select
 
@@ -9061,12 +9172,20 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         # The spare write end stays open for future respawns.
         drain_st = {"alive": True, "status": None}
         results_pump = None
+        results_watch = None
         if use_drain:
             drain_pid, results_r = _fork_drain(
                 signal_r, out_fds, workers, mode="pipe")
             signal_r = None
+            # WO-PY-CDRAIN-REACTOR-WAKEUP-1: the reactor must WAKE when
+            # the results pipe has data. Without this the reactor parks
+            # the full poll_timeout every time the pipe is momentarily
+            # empty, which is what put the C drain 16-19x behind the
+            # legacy drain at scale. The PUMP still owns the read side
+            # (framing, reassembly, EOF); the reactor only selects.
+            results_watch = ExtraWatch(results_r)
             results_pump = _make_results_pump(
-                results_r, order=order, stats=stats)
+                results_r, order=order, stats=stats, watch=results_watch)
 
         def _pump_drain_c():
             # W-PY21-A results-pipe consumer: spare management +
@@ -9337,7 +9456,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 yield from reactor_loop(
                     state,
                     drain_gen=_pump_drain_c if use_drain else _pump_drain,
-                    service=_watch_scanner)
+                    service=_watch_scanner,
+                    extra_watch=[results_watch] if results_watch else None)
             finally:
                 pass
         except BaseException as _exc:
@@ -10041,7 +10161,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     the parent reads incrementally (never signals/memfds itself).
     """
     from ._bindings import v1_available as _v1a
-    from ._reactor import (ORDER_PIPE_SIZE, ReactorState,
+    from ._reactor import (ORDER_PIPE_SIZE, ExtraWatch, ReactorState,
                            check_scanner_death,
                            fork_scanner_with_death_pipe,
                            reactor_loop, spawn_orderer)
@@ -10180,6 +10300,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         # at first worker fork like the simple ingest path — the
         # legacy `drain` dict below stays for c_drain=False).
         cdrain = {"pid": None, "results_r": None, "pump": None,
+                  "watch": None,
                   "status": None, "alive": True}
 
         def _fork_cdrain_if_needed():
@@ -10188,8 +10309,13 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 return
             cdrain["pid"], cdrain["results_r"] = _fork_drain(
                 signal_r, out_fds, workers, mode="pipe")
+            # WO-PY-CDRAIN-REACTOR-WAKEUP-1: reactor wakeup source for
+            # the C drain's results pipe (see the streaming-reactor
+            # site for the rationale). The PUMP owns the read side.
+            cdrain["watch"] = ExtraWatch(cdrain["results_r"])
             cdrain["pump"] = _make_results_pump(
-                cdrain["results_r"], order=order, stats=stats)
+                cdrain["results_r"], order=order, stats=stats,
+                watch=cdrain["watch"])
             signal_r = None
             cdrain_pid = cdrain["pid"]
             cresults_r = cdrain["results_r"]
@@ -10446,7 +10572,9 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             return None
 
         try:
-            yield from reactor_loop(state, drain_gen=_pump_drain)
+            yield from reactor_loop(
+                state, drain_gen=_pump_drain,
+                extra_watch=[cdrain["watch"]] if cdrain["watch"] else None)
         except BaseException as _exc:
             # W-PY22 abort choreography on abnormal generator exit
             # (consumer abandon/GeneratorExit, worker-crash
@@ -11880,7 +12008,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
     """
     from ._bindings import v1_available as _v1a
     from ._numa import wid_to_node
-    from ._reactor import (ORDER_PIPE_SIZE, ReactorState,
+    from ._reactor import (ORDER_PIPE_SIZE, ExtraWatch, ReactorState,
                            check_scanner_death, reactor_loop,
                            spawn_orderer)
     import fcntl as _fcntl
@@ -12042,6 +12170,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         # once some node forked — signals queue until the drain
         # starts; empty inputs never need one).
         cdrain_n = {"pid": None, "results_r": None, "pump": None,
+                    "watch": None,
                     "status": None, "alive": True}
 
         def _pump_drain_c_numa():
@@ -12053,8 +12182,14 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             if forked and cdrain_n["pid"] is None:
                 cdrain_n["pid"], cdrain_n["results_r"] = _fork_drain(
                     signal_r, out_fds, workers, mode="pipe")
+                # WO-PY-CDRAIN-REACTOR-WAKEUP-1: reactor wakeup source
+                # for the C drain's results pipe (see the
+                # streaming-reactor site for the rationale). The PUMP
+                # owns the read side.
+                cdrain_n["watch"] = ExtraWatch(cdrain_n["results_r"])
                 cdrain_n["pump"] = _make_results_pump(
-                    cdrain_n["results_r"], order=order, stats=stats)
+                    cdrain_n["results_r"], order=order, stats=stats,
+                    watch=cdrain_n["watch"])
                 signal_r = None
                 drain_pid = cdrain_n["pid"]
                 results_r = cdrain_n["results_r"]
@@ -12219,7 +12354,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             return None
 
         try:
-            yield from reactor_loop(state, drain_gen=_pump_drain)
+            yield from reactor_loop(
+                state, drain_gen=_pump_drain,
+                extra_watch=[cdrain_n["watch"]] if cdrain_n["watch"] else None)
         finally:
             pass
 

@@ -1093,7 +1093,8 @@ def handle_spawn_bytes(state, data):
                 break
 
 
-def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
+def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None,
+                 extra_watch=None):
     """Supervise workers to completion (bash ring_poll equivalent).
 
     Death pipes + spawn pipe + trap-ACK pipe are select()ed each
@@ -1108,6 +1109,12 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
     callable run once per round after event handling (NUMA helper
     watches — pipeline deaths raise promptly instead of waiting
     for worker completion).
+
+    extra_watch (optional) is a list of ExtraWatch holders: descriptors
+    the loop WAKE on but never read. The C drain's results pipe is one
+    (WO-PY-CDRAIN-REACTOR-WAKEUP-1). Without it, an empty results pipe
+    costs a full poll_timeout before the next result is noticed, which
+    is what put the C drain 16-19x behind the legacy drain at scale.
 
     Yields result blobs (streaming) and returns
     {"statuses": [(pid, status)], "poisoned": [...]}.
@@ -1136,18 +1143,16 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
         # bounds the hang instead of select() waiting forever).
         state.check_startup_timeouts()
 
-        # 2. Death-pipe + spawn + trap-ACK events.
-        watch = []
+        # 2. Death-pipe + spawn + trap-ACK events, plus any EXTRA
+        # wakeup descriptors (the C drain's results pipe). The watch set
+        # comes from reactor_watch_fds -- the SAME builder reactor_poll_once
+        # uses -- so the two cannot drift (there used to be two copies
+        # of this list, which is exactly the drift the work order
+        # warns about).
         death_of = {}
-        for slot in state.workers.values():
-            if slot.alive and slot.death_r is not None \
-                    and slot.death_r >= 0:
-                watch.append(slot.death_r)
-                death_of[slot.death_r] = slot.wid
-        if state.spawn_r is not None and state.spawn_r >= 0:
-            watch.append(state.spawn_r)
-        if state.trap_ack_r is not None and state.trap_ack_r >= 0:
-            watch.append(state.trap_ack_r)
+        extra_fds = _extra_fds(extra_watch)
+        watch = reactor_watch_fds(state, extra=extra_fds, death_of=death_of)
+        extra_set = set(extra_fds)
 
         if watch:
             try:
@@ -1162,6 +1167,12 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
             except (OSError, ValueError):
                 readable = []
             for fd in readable:
+                if fd in extra_set:
+                    # A WAKEUP event only. The PUMP owns the read side
+                    # (framing, reassembly, EOF); reading here would
+                    # steal bytes from it and corrupt the framing.
+                    # The drain burst below services the pump.
+                    continue
                 if fd == state.spawn_r:
                     chunk = _drain_pipe_nonblock(fd, "_spawn_buf")
                     if chunk is None:
@@ -1314,7 +1325,48 @@ def reactor_run(state, poll_timeout=0.1, service=None):
             "poisoned": list(state.poisoned_batches)}
 
 
-def reactor_watch_fds(state, spawn=True):
+class ExtraWatch:
+    """A descriptor the reactor SELECTS on but never reads.
+
+    The C drain's results pipe is one. The PUMP owns the read side
+    (framing, reassembly, EOF); the reactor only needs to know that DATA
+    IS AVAILABLE, so that an empty interval does not cost the full poll
+    timeout before the next result is noticed.
+
+    The holder is mutable so the OWNER can disarm it: a pipe at EOF is
+    permanently readable, and leaving it in the watch set would spin the
+    reactor. The pump disarms it when it observes EOF.
+
+    Lifetime: the holder belongs to the executor that created the
+    pipe, and must outlive every reactor round that selects on it.
+    """
+
+    __slots__ = ("fd",)
+
+    def __init__(self, fd):
+        self.fd = fd
+
+    def disarm(self):
+        """Stop watching this descriptor (EOF reached, or torn down)."""
+        self.fd = -1
+
+    def active(self) -> bool:
+        return self.fd is not None and self.fd >= 0
+
+
+def _extra_fds(extra_watch):
+    """The live fds of a list of ExtraWatch holders (disarmed ones drop out)."""
+    if not extra_watch:
+        return ()
+    out = []
+    for holder in extra_watch:
+        fd = getattr(holder, "fd", holder)
+        if fd is not None and fd >= 0:
+            out.append(fd)
+    return out
+
+
+def reactor_watch_fds(state, spawn=True, extra=(), death_of=None):
     """Descriptors reactor_poll_once() selects on.
 
     Factored out so a caller that is waiting on something ELSE -- the
@@ -1324,19 +1376,35 @@ def reactor_watch_fds(state, spawn=True):
     (W-PYINGESTWAIT). Single source of truth: the list here and the
     dispatch inside reactor_poll_once must agree, and two copies of it
     would drift exactly the way duplicated flag lists do.
+
+    ``extra`` adds descriptors the reactor must WAKE on but must NOT
+    read -- the C drain's results pipe (WO-PY-CDRAIN-REACTOR-WAKEUP-1).
+    They are appended last, de-duplicated, and None/negative sentinels
+    are ignored. ``death_of``, if given, is filled in with the
+    death-pipe -> wid map so a caller can classify a readable death pipe
+    without rebuilding it.
+
+    reactor_loop() uses this too, so the two watch sets cannot drift.
     """
     watch = []
     for slot in state.workers.values():
         if slot.alive and slot.death_r is not None and slot.death_r >= 0:
             watch.append(slot.death_r)
+            if death_of is not None:
+                death_of[slot.death_r] = slot.wid
     if spawn and state.spawn_r is not None and state.spawn_r >= 0:
         watch.append(state.spawn_r)
     if state.trap_ack_r is not None and state.trap_ack_r >= 0:
         watch.append(state.trap_ack_r)
+    for fd in extra:
+        if fd is None or fd < 0:
+            continue
+        if fd not in watch:
+            watch.append(fd)
     return watch
 
 
-def reactor_poll_once(state, poll_timeout=0.0, spawn=True):
+def reactor_poll_once(state, poll_timeout=0.0, spawn=True, extra_watch=None):
     """Service one nonblocking event round (spill-loop interleaving).
 
     Runs a single select round over death/spawn/trap-ACK pipes plus
@@ -1358,21 +1426,28 @@ def reactor_poll_once(state, poll_timeout=0.0, spawn=True):
     batches". Suppressing the watch entry (rather than blanking
     state.spawn_r around the gate) keeps the descriptor parked on state
     for teardown, so it cannot leak on any early-error path.
+
+    ``extra_watch`` is a list of ExtraWatch holders: descriptors this
+    round WAKE on but never read (the C drain's results pipe).
     """
     state.check_trap_timeouts()
     # W-REL6-3.1: startup deadline also bounds spill-loop supervision
     # (a hung child would otherwise stall the spill, not just the run).
     state.check_startup_timeouts()
-    watch = reactor_watch_fds(state, spawn=spawn)
-    death_of = {slot.death_r: slot.wid for slot in state.workers.values()
-                if slot.alive and slot.death_r is not None
-                and slot.death_r >= 0}
+    death_of = {}
+    extra_fds = _extra_fds(extra_watch)
+    watch = reactor_watch_fds(state, spawn=spawn, extra=extra_fds,
+                              death_of=death_of)
+    extra_set = set(extra_fds)
     if watch:
         try:
             readable, _, _ = _select.select(watch, [], [], poll_timeout)
         except (OSError, ValueError):
             readable = []
         for fd in readable:
+            if fd in extra_set:
+                # A WAKEUP event only -- the PUMP owns the read side.
+                continue
             if fd == state.spawn_r:
                 try:
                     chunk = os.read(fd, 4096)
