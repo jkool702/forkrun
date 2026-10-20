@@ -981,6 +981,64 @@ def handle_trap_ack_bytes(state, data):
                 state.trap_ack_deadlines.pop(wid, None)
 
 
+def drain_trap_ack(state) -> int:
+    """Read every byte currently buffered on the trap-ACK pipe.
+
+    Returns the number of bytes consumed (0 when there was nothing).
+
+    The trap-ACK pipe carries two kinds of line, and they are NOT
+    equally protected:
+
+      * ``"<wid>"`` -- the worker's graceful-failure confirmation. A
+        death without an ACK arms a trap-ACK grace DEADLINE, and the
+        deadline keeps the supervision loop alive to poll for it. That
+        deadline is what makes this line hard to lose.
+
+      * ``"P:<idx>:<kills>"`` -- the poison notification. It arms NO
+        deadline, so nothing else keeps the run alive on its behalf.
+
+    So on the path where the last worker exits, the poison notification
+    is the one line that can still be sitting in the pipe unread.
+
+    The window is real and it is narrow. The death pipe is the reactor's
+    primary death detector, but ``reap_clean_exits()`` is an out-of-band
+    WNOHANG backstop that can observe a worker's exit in a round whose
+    select() snapshot PREDATES that worker's write. The parent then
+    learns of the death through waitpid while the notification arrives
+    through the pipe, and the loop can reach its termination branch in
+    between -- leaving the line buffered.
+
+    The symptom is two incompatible stories about one run: a non-zero
+    ``poisoned`` count (the engine's scalar) beside an EMPTY
+    ``poisoned_batches`` list (the reactor's), because the scalar is
+    read from the engine and the list only from this pipe.
+
+    Draining here costs one select() with a zero timeout plus one read
+    per buffered chunk. It never blocks: the pipe is a BLOCKING pipe,
+    so readability is checked first and a read is issued only when
+    select() says there is something to take.
+    """
+    fd = getattr(state, "trap_ack_r", -1)
+    if fd is None or fd < 0:
+        return 0
+    total = 0
+    while True:
+        try:
+            _r, _, _ = _select.select([fd], [], [], 0)
+        except (OSError, ValueError):
+            return total
+        if not _r:
+            return total
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            return total
+        if not chunk:
+            return total
+        total += len(chunk)
+        handle_trap_ack_bytes(state, chunk)
+
+
 def handle_spawn_bytes(state, data):
     """Consume raw scanner spawn-pipe bytes; fork workers per line.
 
@@ -1223,6 +1281,19 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
                 else:
                     _time.sleep(poll_timeout)
                 continue
+            # W-PYPOISONDRAIN: the pipe can still hold a poison
+            # notification, and NOTHING else keeps this run alive for
+            # it -- the notification arms no trap-ACK deadline, so the
+            # deadline branch above cannot cover it. Leaving here with
+            # the line buffered yields a non-zero `poisoned` count
+            # beside an EMPTY `poisoned_batches` list: the engine's
+            # scalar and the reactor's list disagreeing about one run.
+            #
+            # The loss window is the gap between the round's select()
+            # (which may predate the worker's write) and the
+            # out-of-band reap sweep that observes the worker's exit.
+            # Draining before leaving closes it.
+            drain_trap_ack(state)
             break
 
     return {"statuses": list(state.statuses),
@@ -1480,6 +1551,7 @@ def check_scanner_death(scan_pid, death_r):
 __all__ = ["WorkerSlot", "ReactorState", "reactor_loop", "reactor_run",
            "reactor_poll_once",
            "handle_trap_ack_bytes", "handle_spawn_bytes",
+           "drain_trap_ack",
            "report_poisoned", "spawn_orderer",
            "fork_scanner_with_death_pipe", "check_scanner_death",
            "TRAP_ACK_GRACE_S", "ORDER_PIPE_SIZE", "DRAIN_BURST"]

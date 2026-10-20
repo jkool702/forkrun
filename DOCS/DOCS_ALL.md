@@ -231,6 +231,44 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## Unreleased — the reactor no longer loses a poison notification on its way out
+
+**Correctness fix, no API change.** `poisoned` and `poisoned_batches` are
+read from two different places: the scalar from the engine, the index list
+from the trap-ACK pipe the worker writes its `P:<idx>:<kills>` notification
+to. When the supervision loop ended with that notification still buffered,
+the run reported a non-zero `poisoned` count beside an **empty**
+`poisoned_batches` list — two incompatible stories about one run, which is
+exactly what the index list exists to prevent.
+
+**The window.** The death pipe is the reactor's primary death detector, but
+`reap_clean_exits()` is an out-of-band `waitpid(WNOHANG)` backstop that can
+observe a worker's exit in a round whose `select()` snapshot *predates* that
+worker's write. The parent then learns of the death through `waitpid` while
+the notification arrives through the pipe, and the loop reaches its
+termination branch in between. The notification arms no trap-ACK grace
+deadline, so unlike the `<wid>` graceful-failure ACK nothing else kept the
+run alive on its behalf.
+
+The window is microseconds wide in normal operation, so this presented as a
+rare flake rather than a constant failure — one occurrence was caught by
+`test_fault.test_map_return_stats` inside a full-suite run and reproduced on
+demand only by delaying the backstop sweep. Measured with the delay in place
+and the fix absent, the notification was lost on 47–58 runs in 60 across the
+worker and line-batch combinations tried; with the fix in place it was lost
+on none of them.
+
+**The fix.** The supervision loop now drains the trap-ACK pipe before it
+leaves, so a notification that arrives in the gap between the round's
+`select()` and the out-of-band exit sweep is still accounted for. The drain
+is non-blocking by construction: readability is checked with a zero-timeout
+`select()` first, and a read is issued only when there is something to take.
+
+**Coverage.** `test_poison_accounting.TestPoisonNotificationSurvivesTeardown`
+widens the window deliberately and asserts the count and the list describe
+the same run. A companion test asserts the widener is actually in force, so
+the regression cannot go vacuously green if the sweep stops being called.
+
 ## Unreleased — F6 Stage 4: `posix_spawn` is the default cleanroom launcher
 
 **Behaviour change, no API change.** The cleanroom routes now start the

@@ -105,6 +105,21 @@ on a bigger corpus before believing it.
 
 ## Traps hit (do not repeat)
 
+- **A supervision loop must drain its notification pipe before it
+  leaves.** The reactor's `poisoned` scalar comes from the engine and the
+  `poisoned_batches` list comes from the trap-ACK pipe, so a notification
+  still buffered when the loop ends gives one run two descriptions: a
+  non-zero count beside an empty list. The trap-ACK *grace deadline* is
+  what keeps the loop alive for the `<wid>` ACK; the poison notification
+  arms no deadline, so nothing kept the run alive for it. The window is
+  the gap between a round's `select()` and `reap_clean_exits()` — the
+  out-of-band `waitpid(WNOHANG)` backstop can observe a worker's exit in
+  a round whose `select()` snapshot PREDATES that worker's write, so the
+  death arrives via `waitpid` and the notification via the pipe, and the
+  loop can terminate in between. It presented as a rare flake (one
+  occurrence in a full-suite run; 0/200 standalone). Widening the window
+  by delaying the backstop sweep reproduced it on 47-58 runs in 60;
+  draining the pipe before the break took it to 0 in 150.
 - **`fr_py_data_ready_node` is consume-once.** It walks `write_idx`
   forward from a private hwm. A caller that polls it and then decides
   "below floor" has already destroyed the evidence — the floor becomes

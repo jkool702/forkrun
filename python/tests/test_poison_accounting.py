@@ -105,6 +105,13 @@ int selective_v1(int argc, char **argv, const struct forkrun_ctx *ctx) {
 
 HAVE_GCC = shutil.which("gcc") is not None
 
+# How long the out-of-band exit sweep is delayed to widen the race window
+# in TestPoisonNotificationSurvivesTeardown. Two milliseconds is enough
+# to make the loss near-certain without the drain and never occurs with
+# it; it is not a timing threshold, only a way of making a microsecond
+# window observable.
+_RACE_WINDOW_S = 0.002
+
 
 def _write_corpus(path, n, boom=frozenset()):
     with open(path, "w") as fh:
@@ -631,6 +638,158 @@ class TestStatsSurfaces(_PoisonBase):
                         stats[key], last[key],
                         "return_stats and last_run_stats must agree on %r "
                         "for the most recent completed call" % key)
+
+
+# --------------------------------------------------------------------------
+# C7 -- the poison notification must survive the last worker's exit
+# --------------------------------------------------------------------------
+class TestPoisonNotificationSurvivesTeardown(unittest.TestCase):
+    """The reactor must not lose a poison notification on its way out.
+
+    The poison index list is filled from the "P:<idx>:<kills>" line the
+    WORKER writes to the trap-ACK pipe; the `poisoned` scalar is read
+    from the engine. The two are therefore read from two different
+    places, and a notification still sitting in the pipe when the
+    supervision loop ends produces a non-zero count beside an EMPTY
+    list -- two incompatible stories about one run.
+
+    The notification arms NO trap-ACK grace deadline, so nothing else
+    keeps the run alive on its behalf. The deadline branch in the
+    reactor's termination path protects the "<wid>" graceful-failure
+    ACK; it cannot protect this line.
+
+    The loss window is the gap between a round's select() and the
+    out-of-band exit sweep. The death pipe is the reactor's primary
+    death detector, but `reap_clean_exits()` is a WNOHANG backstop that
+    can observe a worker's exit in a round whose select() snapshot
+    PREDATES that worker's write. The parent then learns of the death
+    through waitpid while the notification arrives through the pipe,
+    and the loop can reach its termination branch in between.
+
+    The window is microseconds wide in normal operation, which is why
+    this presented as a rare flake rather than a constant failure. To
+    test it rather than hope for it, the test DELAYS the backstop
+    sweep, which widens exactly that gap and nothing else.
+
+    MODE MATTERS, and the choice here is measured rather than guessed.
+    An earlier draft of this test used the plugin fixture (mode
+    "plugin") and the mutant SURVIVED it: the C plugin loop's write and
+    exit are far enough apart that the widened window still does not
+    straddle them. The in-process payload loop (mode "python") writes
+    the notification and reaches its exit immediately afterwards, which
+    is the shape that puts the write next to the exit. Measured with
+    the delay in place and the drain removed, the notification is lost
+    on 47-58 runs in 60 across the worker/line combinations tried, and
+    on none of them with the drain in place.
+
+    The fixture poisons the LAST record, so the poisoned batch is the
+    last thing the worker does.
+    """
+
+    def setUp(self):
+        for name in ("FORKRUN_CLEANROOM", "FORKRUN_RETRY_LIMIT",
+                     "FRK_POISON_FD"):
+            self.addCleanup(self._restore, name, os.environ.get(name))
+            os.environ.pop(name, None)
+        # In-process routes only; see GATE in the module docstring.
+        os.environ["FORKRUN_CLEANROOM"] = "0"
+        # 1 == poisoned on the first failure: deterministic.
+        os.environ["FORKRUN_RETRY_LIMIT"] = "1"
+        self.tmp = tempfile.mkdtemp(prefix="poison-drain-")
+
+    @staticmethod
+    def _restore(name, value):
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+    def tearDown(self):
+        self.assertNotIn(
+            "FRK_POISON_FD", os.environ,
+            "FRK_POISON_FD leaked out of a run; a stale fd number would "
+            "make a later run relay into whatever now occupies it")
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _widen_the_window(self):
+        """Delay the out-of-band exit sweep, widening the race window."""
+        import time as _time
+        import forkrun._reactor as _reactor
+        orig = _reactor.ReactorState.reap_clean_exits
+        delay = _RACE_WINDOW_S
+
+        def _slow(self, force=False):
+            if any(s.alive for s in self.workers.values()):
+                _time.sleep(delay)
+            return orig(self, force=force)
+
+        _reactor.ReactorState.reap_clean_exits = _slow
+        self.addCleanup(setattr, _reactor.ReactorState,
+                        "reap_clean_exits", orig)
+
+    def _corpus(self, n):
+        p = os.path.join(self.tmp, "c%d.txt" % n)
+        with open(p, "w") as fh:
+            for i in range(n):
+                fh.write("line %d\n" % i)
+        return p
+
+    def test_notification_is_not_lost_when_the_last_worker_exits(self):
+        """The count and the list must describe the same run."""
+        n = 8
+        src = self._corpus(n)
+        target = n - 1
+
+        def poison_last(batch):
+            if batch.batch_index == target:
+                raise ValueError("poison")
+            return bytes(batch.data)
+
+        self._widen_the_window()
+        out, stats = forkrun.map(poison_last, src, workers=1, lines=1,
+                                 nodes=1, return_stats=True)
+        self.assertGreater(
+            stats["poisoned"], 0,
+            "fixture must actually poison, or this proves nothing")
+        self.assertEqual(
+            stats["poisoned_batches"], [target],
+            "the poison notification was lost: the engine counted %d "
+            "poisoned batch(es) but the reactor's index list is %r. The "
+            "scalar comes from the engine and the list from the trap-ACK "
+            "pipe, so an empty list beside a non-zero count means the "
+            "notification was still buffered when the reactor stopped "
+            "reading the pipe."
+            % (stats["poisoned"], stats["poisoned_batches"]))
+        self.assertFalse(stats["poisoned_batches_truncated"])
+        self.assertEqual(last_run_stats()["poisoned_batches"],
+                         stats["poisoned_batches"])
+
+    def test_the_window_widener_actually_widens_the_window(self):
+        """Guard the guard: the delay must be in force during the run.
+
+        Without this, a refactor that stopped calling reap_clean_exits
+        (or moved it off the path) would make the test above vacuously
+        green -- it would be asserting a property of a run in which the
+        race could not occur at all.
+        """
+        import forkrun._reactor as _reactor
+        seen = []
+        orig = _reactor.ReactorState.reap_clean_exits
+
+        def _counting(self, force=False):
+            seen.append(1)
+            return orig(self, force=force)
+
+        _reactor.ReactorState.reap_clean_exits = _counting
+        self.addCleanup(setattr, _reactor.ReactorState,
+                        "reap_clean_exits", orig)
+        src = self._corpus(4)
+        forkrun.map(lambda b: bytes(b.data), src, workers=1, lines=1,
+                    nodes=1)
+        self.assertTrue(
+            seen,
+            "the out-of-band exit sweep did not run, so the race window "
+            "this test depends on was never opened")
 
 
 if __name__ == "__main__":

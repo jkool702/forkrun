@@ -55,6 +55,7 @@ thinking they are untracked:
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
 | TD-13 | streaming **peak** retention ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN, re-diagnosed**: peak is a backpressure-free in-flight window, **NOT a Python-object leak** (post-drain `tracemalloc` 23.0 KB against a 43.1 MB peak; census corroborates but is GC-tracked-objects-only). Real fix is engine-scope (frozen files). Reproducible via committed `python/tests/_streaming_memory_probe.py`. |
 | TD-14 | `test_spawn_ordered` compared map/stream element-wise | low | **RECLASSIFIED — invalid test expectation, not a product defect** (WO-PY-REL-1 follow-up) |
+| TD-15 | Reactor lost the poison notification when the last worker exited | high | **verified — FIXED** (W-PYPOISONDRAIN): the index list could come back empty beside a non-zero `poisoned` count; root-caused to the gap between a round's `select()` and the out-of-band `waitpid(WNOHANG)` exit sweep, reproduced on demand by delaying that sweep (47–58 losses in 60 runs), mutation-proven |
 
 ---
 
@@ -906,3 +907,67 @@ wanted it is a deliberate API decision, not a bug fix.
 
 **Does not establish:** anything about spawn correctness beyond the byte
 equality this test now checks.
+
+---
+
+### TD-15 — The reactor lost the poison notification when the last worker exited (high) — FIXED
+
+**Symptom.** A reactor-path run reported a non-zero `poisoned` count beside
+an **empty** `poisoned_batches` list. The two fields are read from
+different places — the scalar from the engine, the index list from the
+trap-ACK pipe the worker writes its `P:<idx>:<kills>` notification to — so
+an empty list beside a non-zero count means one run was being described
+two ways at once. That is the exact shape TD-09 was about, on a different
+path and by a different mechanism, and it is why
+`test_poison_accounting.assertContractHolds` treats a complete list as
+having one index per poisoned batch.
+
+**How it was found.** One occurrence, in `test_fault.test_map_return_stats`
+inside a full-suite run. It did not reproduce standalone (0/200 runs), did
+not reproduce in a 570-test prefix of the suite, and did not reproduce in a
+second full-suite run. The lesson from the repo's own history applies: an
+order-dependent, load-sensitive failure is a defect to root-cause, not to
+call flaky.
+
+**Root cause.** The reactor's termination branch breaks out when no worker
+is alive and no trap-ACK grace deadline is outstanding. The grace deadline
+is what keeps the loop alive to poll for the `<wid>` graceful-failure ACK;
+the poison notification arms **no** deadline, so nothing kept the run alive
+on its behalf.
+
+The window in which it could be lost is the gap between a round's
+`select()` and the out-of-band exit sweep. The death pipe is the primary
+death detector, but `reap_clean_exits()` is a `waitpid(WNOHANG)` backstop
+that can observe a worker's exit in a round whose `select()` snapshot
+*predates* that worker's write. The parent then learns of the death
+through `waitpid` while the notification arrives through the pipe, and the
+loop reaches its termination branch in between.
+
+**Proof, not inference.** Delaying the backstop sweep by 2 ms widens
+exactly that gap and nothing else. With the fix absent the notification was
+lost on **47–58 runs in 60** across the worker and line-batch combinations
+tried; with the fix in place, **0 in 150**.
+
+**Fix (W-PYPOISONDRAIN).** The supervision loop drains the trap-ACK pipe
+before it leaves. The drain cannot block: readability is checked with a
+zero-timeout `select()` first, and a read is issued only when there is
+something to take.
+
+**Coverage.** `test_poison_accounting.TestPoisonNotificationSurvivesTeardown`
+widens the window deliberately and asserts the count and the list describe
+the same run; a companion test asserts the widener is actually in force, so
+the regression cannot go vacuously green if the sweep stops being called.
+
+**A detail worth recording, because it cost a test rewrite.** The first
+version of the regression test used the module's plugin fixture and the
+mutant **survived** it: the C plugin loop's notification write and its exit
+are far enough apart that the widened window still does not straddle them.
+The in-process payload loop (`mode="python"`) writes the notification and
+reaches its exit immediately afterwards, which is the shape that puts the
+write next to the exit. The fixture is now chosen on that measurement, not
+on convenience.
+
+**Does not establish:** anything about the plugin path being immune — it was
+simply not observed to lose under this delay. The two mechanisms share the
+pipe and the termination path, so the fix covers both; the plugin path's
+wider window is a statement about this fixture, not a guarantee.
