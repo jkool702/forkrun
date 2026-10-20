@@ -59,7 +59,7 @@ not found. That is what makes a mismatched build safe: **it cannot
 produce a wheel that claims the wrong minor.**
 
 - helper for this interpreter present → it ships, and the wheel is
-  tagged `cp3XX`;
+  tagged `cp3XX-cp3XX` (version AND ABI — see §2.1a);
 - otherwise → no helper ships and the tag stays `py3-none-<platform>`,
   so the substrate wheel remains interpreter-agnostic.
 
@@ -70,6 +70,59 @@ is present. A plain `_fr_udf.so` (no suffix) is deliberately **not**
 shipped: its minor cannot be established from its name. The runtime
 fallback in `_udf.py` still finds it in a source checkout, so the
 development path keeps working; only the wheel declines to vouch for it.
+
+### 2.1a The ABI tag: `cp314` does not mean what it looks like
+
+A follow-up review found a real gap in the packaging above, and it is
+worth recording because the gap was in the part the first change got
+*most* right.
+
+The python tag `cp314` names a **version**; the **ABI** tag names the
+ABI. A free-threaded CPython 3.14 links `libpython3.14t.so.1.0` where a
+GIL one links `libpython3.14.so.1.0` — different sonames, so the helper
+built for one cannot be loaded by the other. And the free-threaded
+extension suffix is `cpython-314t-...`, which **contains** the GIL
+suffix's `cpython-314` — so a substring check on the minor alone
+accepts a free-threaded helper.
+
+Meanwhile the loose ABI tag `none` means "no ABI constraint", and
+`packaging`'s own tag generator (not a filename convention) gives a
+free-threaded 3.14 this set:
+
+```
+cp314-cp314t, cp314-abi3t, cp314-none, cp313-abi3t, ... cp39-abi3t
+```
+
+So `cp314-none` is accepted by a free-threaded 3.14 **and** by a GIL 3.14:
+a GIL-built helper in a `none`-ABI wheel advertises compatibility with an
+interpreter that cannot load it. The first change shipped exactly that
+(`cp314-none-...`).
+
+**The decision: free-threaded CPython is NOT supported for this helper
+route**, and the packaging declines to claim it. The reasons are
+structural rather than caution: the helper links a different
+`libpython` soname; the C0.5 matrix fetches GIL interpreters only; and
+the launcher has never been exercised against a free-threaded build.
+Shipping it would be shipping an UNMEASURED configuration.
+
+**The fix:**
+
+- the detector refuses a free-threaded helper (two independent
+  signals: `Py_GIL_DISABLED` in the build config, and the `t` in the
+  extension suffix), so such a build ships no helper and keeps the
+  generic `py3-none` tag;
+- the wheel carries the **real** ABI tag — `cp314-cp314` for the GIL
+  build — so its compatibility set is exactly the interpreters that can
+  load the helper. `cp314-cp314` is accepted by a GIL 3.14 and
+  **rejected** by a free-threaded 3.14; the old `cp314-none` was
+  accepted by both;
+- the build check refuses a helper-carrying wheel whose ABI tag is
+  `none`, and refuses a python/ABI tag disagreement.
+
+If free-threaded is supported later, the tag becomes `cp314-cp314t` —
+accepted by the free-threaded interpreter and not by the GIL one. The
+two directions are distinguishable, so the current position is a
+**policy**, not a limitation of the tagging.
 
 ### 2.2 The wheel builder rejected a per-minor tag
 
@@ -140,8 +193,13 @@ configurations of EVERY minor", reproduced on this host.
 
 ```
 $ python3 setup.py bdist_wheel -d /tmp/wheeltest
-forkrun-0.17.0-cp314-none-manylinux_2_39_x86_64.whl
+forkrun-0.17.0-cp314-cp314-manylinux_2_39_x86_64.whl
   helper inside : forkrun/_fr_udf.cpython-314-x86_64-linux-gnu.so
+
+  the tag, against packaging's REAL compatible sets:
+    cp314-cp314  accepted by a GIL 3.14       : True
+    cp314-cp314  accepted by a free-threaded  : False
+    cp314-none   accepted by a free-threaded  : True   <- the old tag
 
 $ pip install --no-deps --target /tmp/instest <wheel>
 $ PYTHONPATH=/tmp/instest python3 -c "from forkrun._bindings import v1_available; print(v1_available()['udf'])"
@@ -178,6 +236,29 @@ coupling — without needing a second interpreter or building a wheel.
 | "run the supported interpreter matrix" | the matrix harness could not build a driver | fixed: a missing `-I"$ROOT"`, and a stale-artifact path that let the gate report October's numbers as fresh. |
 
 ---
+
+### 4a. The packaging tests, and the ABI half of the contract
+
+`python/tests/test_udf_packaging.py` now has **10 tests**, and they
+exercise the values `setup.py` ACTUALLY computes — the loader executes
+setup.py's real module-level code with `setup()` stubbed out, so the
+tag under test is the real one rather than a re-implementation of the
+rule.
+
+The ABI assertions are made against **real `packaging.tags` compatible
+sets**, not against filename strings, because the filename is only how
+the tag is WRITTEN — pip consults the tag set:
+
+- the shipped tag is in THIS interpreter's compatible set (otherwise pip
+  would refuse the wheel it just built);
+- the shipped tag is **not** in a free-threaded interpreter's set;
+- a free-threaded helper is refused by the detector;
+- `cp314-cp314t` and `cp314-cp314` are mutually exclusive across the two
+  interpreters, so the current "not supported yet" position is a policy
+  and not a limitation of the tagging.
+
+**Mutation check:** reverting the ABI tag to `none` — the exact bug the
+review found — fails **2** of the 10 tests. The tests are not vacuous.
 
 ## 5. What was NOT done, and why
 

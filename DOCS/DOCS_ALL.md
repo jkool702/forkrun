@@ -270,6 +270,31 @@ two wheels, and requires the python tag and the shipped helper to agree:
 a `cp3XX` wheel with a mismatched helper, or a `py3` wheel carrying
 one, is a lying tag and fails the build.
 
+**The ABI tag, which is not the same thing as the version tag.** `cp314`
+names a python VERSION; the ABI tag names the ABI. A free-threaded
+CPython 3.14 links `libpython3.14t.so.1.0` where a GIL one links
+`libpython3.14.so.1.0` — different sonames, so a helper built for one
+cannot be loaded by the other — and the free-threaded extension suffix
+(`cpython-314t-...`) *contains* the GIL one, so a substring check on
+the minor alone accepts it. Meanwhile the loose ABI tag `none` means "no
+ABI constraint", and `packaging`'s own tag generator gives a
+free-threaded 3.14 a set that includes `cp314-none-<platform>` exactly
+as a GIL 3.14's does — so a GIL-built helper in a `none`-ABI wheel
+advertises compatibility with an interpreter that cannot load it.
+
+**Free-threaded CPython is NOT supported for this helper route**, and the
+packaging now declines to claim it: such a build ships no helper and
+keeps the generic `py3-none` tag. The reasons are structural, not
+caution — the helper links a different `libpython` soname, the
+interpreter matrix fetches GIL builds only, and the launcher has never
+been exercised against a free-threaded build. A wheel that DOES ship the
+helper now carries the **real** ABI tag (`cp314-cp314`), so its
+compatibility set is exactly the interpreters that can load it: accepted
+by a GIL 3.14, **rejected** by a free-threaded 3.14, where the old
+`cp314-none` was accepted by both. If free-threaded is supported later
+the tag becomes `cp314-cp314t`; the two directions are distinguishable,
+so today's position is a policy and not a limitation of the tagging.
+
 **Also fixed: the C0.5 interpreter matrix could not build a single
 per-minor driver.** `tools/matrix_c05.sh`'s manual gcc line was missing
 `-I"$ROOT"`, and `forkrun_udf_version.h` (the build stamp the launcher

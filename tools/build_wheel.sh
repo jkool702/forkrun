@@ -231,6 +231,7 @@ wheel = sys.argv[1]
 parts = os.path.basename(wheel)[:-len(".whl")].split("-")
 # name-version[-build]-pytag-abitag-plattag
 pytag = parts[-3]
+abitag = parts[-2]
 
 with zipfile.ZipFile(wheel) as zf:
     helpers = [n for n in zf.namelist() if "_fr_udf" in n]
@@ -244,14 +245,29 @@ if pytag.startswith("cp3"):
     if bad:
         sys.exit("wheel is tagged %s but its helper is for a different "
                  "minor: %r" % (pytag, helpers))
-    print("OK         : tag %s matches the shipped helper %s"
-          % (pytag, helpers[0].rsplit("/", 1)[-1]))
+    # The ABI tag must be the REAL one, not "none".
+    #
+    # "none" means "no ABI constraint", and a free-threaded CPython 3.14
+    # accepts "cp314-none-<platform>" exactly as a GIL 3.14 does. So a
+    # GIL-built helper in a "none"-ABI wheel advertises compatibility
+    # with a free-threaded interpreter that cannot load it (the helper
+    # links libpython3.14.so.1.0; the free-threaded build links
+    # libpython3.14t.so.1.0 -- different sonames).
+    if abitag == "none":
+        sys.exit("wheel ships a CPython-linked helper but its ABI tag is "
+                 "'none': it would be offered to a free-threaded %s that "
+                 "cannot load it. The ABI tag must be the real one "
+                 "(%s)." % (minor, pytag))
+    if abitag != pytag:
+        sys.exit("wheel python tag %s and ABI tag %s disagree" % (pytag, abitag))
+    print("OK         : tag %s-%s matches the shipped helper %s"
+          % (pytag, abitag, helpers[0].rsplit("/", 1)[-1]))
 else:
     if helpers:
         sys.exit("wheel is tagged %s but ships a CPython-linked helper "
                  "(%r): a generic ABI-independent wheel must not "
                  "advertise one" % (pytag, helpers))
-    print("OK         : tag %s ships no helper" % pytag)
+    print("OK         : tag %s-%s ships no helper" % (pytag, abitag))
 PYWHEEL
 
 [ "$KEEP_RAW" -eq 1 ] || rm -rf "$OUT_DIR/raw"

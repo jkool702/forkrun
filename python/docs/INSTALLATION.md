@@ -44,11 +44,30 @@ first `python3-config` on `PATH` is not proof of a matching
 interpreter, so pass the one you mean.
 
 **Wheel tags follow the helper, not your shell.** A wheel that ships
-the helper is tagged `cp3XX` — it is valid only for the minor it was
-built against. A wheel with no helper is tagged `py3-none-<platform>`
+the helper is tagged `cp3XX-cp3XX` — it is valid only for the minor it
+was built against. A wheel with no helper is tagged `py3-none-<platform>`
 and stays interpreter-agnostic. The tag is derived from the helper's
 extension suffix, which encodes its minor, so a mismatched build
 cannot produce a wheel that claims the wrong minor.
+
+**The ABI tag is not the same thing as the version tag, and it matters.**
+`cp314` names a python *version*; the abi tag names the *ABI*. A
+free-threaded CPython 3.14 links `libpython3.14t.so.1.0` where a GIL
+one links `libpython3.14.so.1.0` — different sonames, so a helper
+built for one cannot be loaded by the other. The loose ABI tag `none`
+means "no ABI constraint", and a free-threaded 3.14 accepts
+`cp314-none-<platform>` exactly as a GIL 3.14 does — so a GIL-built
+helper in a `none`-ABI wheel would be offered to an interpreter that
+cannot load it. The wheel therefore carries the **real** ABI tag.
+
+**Free-threaded CPython is NOT supported for this helper route**, and the
+packaging declines to claim it: such a build ships no helper at all, and
+the wheel stays the generic `py3-none` one. The reasons are structural,
+not caution — the helper links a different `libpython` soname, the
+interpreter matrix fetches GIL builds only, and the cleanroom launcher
+has never been exercised against a free-threaded interpreter. Supporting
+it is a separate piece of work: distinguish `cp3XXt` in the helper
+detection and tag the wheel `cp3XX-cp3XXt`.
 
 **A caveat on the source-only path.** A helper built locally into a
 source checkout is found by the runtime fallback
