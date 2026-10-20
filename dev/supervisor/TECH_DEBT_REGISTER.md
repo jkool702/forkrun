@@ -1018,6 +1018,36 @@ by the bytes it has parsed but not yet handed to the consumer
 (`pending_bytes` against a 256KB budget), so the read-ahead is bounded by
 the consumer's pace rather than by the pipe.
 
+**The upstream half of the chain, measured separately** (the parent's
+flat RSS is a PARENT-side fact: the per-worker output memfds are
+page-cache backed and appear in neither the parent's nor the workers'
+RSS, so a flat parent RSS cannot distinguish "bounded" from "parked in
+the memfds"). The probe now also reports the bytes the workers have
+written into those memfds. A memfd is never truncated, so the figure is
+the TOTAL OUTPUT PRODUCED SO FAR and the SIGNAL is its SHAPE: it
+PLATEAUS while the workers are blocked.
+
+2M lines (489 batches, 121.5MB), reactor supervision, slow consumer:
+
+  * **C drain + 4KiB notification pipe (the PRODUCTION combination):**
+    the figure plateaus at **60.7MB for ~250 consumer samples** and then
+    resumes -- so the workers BLOCKED. The plateau is at ~244 batches
+    and the notification pipe holds **256 slots**: the bound IS the
+    notification pipe's capacity, almost exactly.
+  * C drain + 1MiB: climbs straight to 114MB by sample 14 -- never
+    blocked.
+  * legacy drain, either capacity: the full 121.5MB at the FIRST
+    sample -- the reactor drains notifications eagerly, so the pipe never
+    fills and the workers produce everything.
+
+**So the chain closes ONLY on the C-drain path, and only with the
+production 4KiB notification capacity.** That is the same fact the
+notification-pipe work order found from the other side (the reactor path
+is where 4KB has no effect), and it is why the C drain is the mechanism
+that makes the chain close on the default path. It is still NOT a byte
+bound independent of the record size: 256 outstanding batches is 256 x
+the batch's output.
+
 **What this does NOT do:** it does not make the C drain the default, and
 it does not establish a constant-byte bound for any streaming path. The
 C drain's retention is flat because its results pipe bounds the

@@ -246,7 +246,61 @@ The out-of-band `reap_clean_exits()` sweep count is small in both arms
 readiness watch creates do not translate into measurable supervision
 overhead.
 
-### 6.6 The results-pipe capacity was NOT touched
+### 6.6 The upstream half of the chain: is the output actually bounded?
+
+**Parent RSS is not total pipeline memory, and this section measures the
+upstream half separately.** The parent's flat 4.3 MB is real, but the
+per-worker output memfds are NOT in it: their pages are page-cache
+backed, and the parent preads them into a buffer rather than mapping
+them. So a flat parent RSS cannot distinguish "the pipeline is
+bounded" from "the output is parked in the memfds".
+
+The probe now also reports the bytes the workers have written into the
+per-worker output memfds. A memfd is never truncated, so that figure is
+the TOTAL OUTPUT PRODUCED SO FAR — and the SIGNAL is its SHAPE: while
+the workers are blocked by the notification pipe it PLATEAUS (they stop
+producing), and it resumes climbing only as the consumer drains and
+frees them.
+
+2 M lines (489 batches, 121.5 MB of output), reactor supervision, slow
+consumer, the PRODUCTION notification capacity:
+
+| drain | notification pipe | produced output per consumer sample (KB) | reading |
+|---|---|---|---|
+| **C drain** | **4 KiB (production)** | 1265, 2145, 3512, 3906, 4566, 6702, 7858, 10498, 14942, 19757, 21779, 23711, 25139, 27085, … **plateaus at 62 180** for ~250 samples, then resumes to the full 121 539 | **the workers BLOCKED** |
+| C drain | 1 MiB | 2673, 5601, 6278, 7138, 7751, 8098, 9058, **32100**, 45452, 55141, 66341, 89750, 100629, **114095** | never blocked |
+| legacy drain | 4 KiB | 121539, 121539, 121539, … | produced everything before the first sample; never blocked |
+| legacy drain | 1 MiB | 121539, 121539, 121539, … | never blocked |
+
+**The plateau is at 60 710 KB ≈ 244 batches, and the notification pipe
+holds 256 slots.** The bound is the notification pipe's capacity, almost
+exactly.
+
+**So the combined chain does close — but only on the C-drain path, and
+only with the production 4 KiB notification capacity:**
+
+```
+slow consumer -> results pipe fills -> the drain child blocks
+  -> the drain stops reading the workers' notifications
+  -> the notification pipe fills (256 slots)
+  -> the workers block -> the workers stop claiming batches
+```
+
+**The legacy drain never closes the chain**, at either notification
+capacity: the reactor drains notifications eagerly, so the pipe never
+fills and the workers produce the whole output before the consumer has
+seen any of it. That is the same fact the notification-pipe work order
+found from the other direction — the reactor path is where the 4 KiB
+pipe has no effect — and it is why the C drain is the mechanism that
+makes the chain close on the default path.
+
+**What this does and does not establish.** It establishes that with the
+C drain and the production notification capacity, the workers' output is
+BOUNDED (not merely the parent's view of it). It does **not** establish
+a byte bound independent of the record size: 256 outstanding batches is
+256 × the batch's output, which grows with the batch size.
+
+### 6.7 The results-pipe capacity was NOT touched
 
 Every measurement above ran with the notification pipe pinned at 1 MiB
 (`FORKRUN_STREAM_NOTIFY_PIPE_SIZE=1048576`) and the results pipe at its
@@ -342,6 +396,13 @@ untouched. The results-pipe capacity untouched.
   rows in the table are a correctness arm, not a performance one.
 - **The fast-consumer rows are below this repository's own ~2 s
   measurement floor** and their ratios are not a result (§6.1).
+- **The C drain's flat peak retention is a PARENT-side fact.** It says
+  the parent does not accumulate a Python-record backlog; it does not, by
+  itself, say the output was not produced upstream. §6.6 measures the
+  upstream half separately, and the answer is that the chain closes ONLY
+  on the C-drain path with the production 4 KiB notification capacity —
+  the legacy drain never blocks the workers at all. Neither path
+  establishes a bound independent of the record size.
 - **The C drain's plain-supervision path busy-spins.** It has no
   `select()` at all, so it has no park — but it burns a core. Not
   touched by this work.

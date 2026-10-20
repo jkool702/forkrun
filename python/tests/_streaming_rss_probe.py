@@ -64,6 +64,73 @@ def current_rss_kb():
     return resident_pages * (os.sysconf("SC_PAGE_SIZE") // 1024)
 
 
+def produced_output_bytes():
+    """Bytes the workers have written into the per-worker OUTPUT memfds.
+
+    The parent holds every worker's output memfd open (they are created
+    pre-fork so the parent can pread them), and they are named
+    "forkrun_out<N>".
+
+    NOTE WHAT THIS IS NOT: a memfd is never truncated, so this is the
+    TOTAL OUTPUT PRODUCED SO FAR, not the part still unconsumed. The
+    SIGNAL is therefore the SHAPE, not the value: while the workers are
+    blocked by the notification pipe the figure PLATEAUS (they stop
+    producing), and it resumes climbing only as the consumer drains and
+    frees them. A figure that climbs straight to the total means the
+    workers were never blocked.
+
+    Parent RSS cannot answer this at all: the memfd pages are
+    page-cache backed, and the parent preads them into a buffer rather
+    than mapping them, so they are in neither the parent's nor the
+    workers' RSS. Measuring only the parent's RSS therefore cannot
+    distinguish "the pipeline is bounded" from "the output is parked in
+    the memfds" -- which is the distinction that decides whether the
+    notification pipe actually reached the workers.
+    """
+    total = 0
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        return None
+    for name in names:
+        try:
+            target = os.readlink("/proc/self/fd/" + name)
+        except OSError:
+            continue
+        # The link is "/memfd:forkrun_out<N> (deleted)".
+        if "memfd:forkrun_out" not in target:
+            continue
+        try:
+            total += os.fstat(int(name)).st_size
+        except (OSError, ValueError):
+            pass
+    return total
+
+
+def child_rss_kb():
+    """Summed RSS of this process's live children (the workers).
+
+    The same caveat as above: a worker's RSS is its own heap, not the
+    output it has already handed to the memfd. The two numbers together
+    are what the pipeline costs.
+    """
+    import glob
+    page = os.sysconf("SC_PAGE_SIZE") // 1024
+    total = 0
+    for d in glob.glob("/proc/self/task/*/children"):
+        try:
+            kids = [int(x) for x in open(d).read().split()]
+        except (OSError, ValueError):
+            continue
+        for kid in kids:
+            try:
+                with open("/proc/%s/statm" % kid) as fh:
+                    total += int(fh.read().split()[1]) * page
+            except (OSError, ValueError, IndexError):
+                pass
+    return total
+
+
 def write_corpus(path, n):
     """Same fixture shape the original test used (_helpers.write_lines)."""
     with open(path, "w") as fh:
@@ -122,6 +189,8 @@ def main(argv=None):
     kept = []
     samples = []
     first_result_s = None
+    peak_unread_output = 0
+    peak_child_rss = 0
     t0 = time.monotonic()
     for blob in forkrun.stream(amplify, path, workers=args.workers,
                                nodes=1, orchestrator=orchestrator,
@@ -135,6 +204,12 @@ def main(argv=None):
             samples.append(r)
             if r > peak:
                 peak = r
+        unread = produced_output_bytes()
+        if unread is not None and unread > peak_unread_output:
+            peak_unread_output = unread
+        kids = child_rss_kb()
+        if kids is not None and kids > peak_child_rss:
+            peak_child_rss = kids
         if args.collect:
             kept.append(blob)
         else:
@@ -160,6 +235,10 @@ def main(argv=None):
         "final_kb": final,
         "growth_kb": None if base is None else peak - base,
         "samples": len(samples),
+        # The UPSTREAM half of the backpressure chain: output produced
+        # into the per-worker memfds but not yet consumed by the parent.
+        "peak_produced_output_bytes": peak_unread_output,
+        "peak_child_rss_kb": peak_child_rss,
         # The ACTUAL capacity the kernel granted the notification pipe
         # this run created (F_GETPIPE_SZ), not the size that was
         # requested. A best-effort F_SETPIPE_SZ the kernel refuses must
