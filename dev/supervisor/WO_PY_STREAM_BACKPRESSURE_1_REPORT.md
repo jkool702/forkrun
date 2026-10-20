@@ -346,9 +346,47 @@ unnecessary on the default path.
 
 ## 8. Commits, gates, and reproduction
 
-See the final section of this document after the gates have run.
+**Commits** (both pushed to `origin/NEW/REFACTOR4.4`):
 
-**Reproduction commands** (committed probes, no scratch):
+| SHA | Subject |
+|---|---|
+| `e0cb5ea5` | Bound the stream read-ahead with a small completion-notification pipe — the code, the tests, and the first write-up |
+| `7fae2c35` | Document the backpressure CHAIN, and that bash's ack pipe is 4096 — docs only, no code change |
+
+**Start:** `8a86ef8f` (the work order named `8c016b68`; the branch had
+moved two commits — `f50abcdf` and `8a86ef8f` — and both were
+pre-existing user work, preserved).
+
+### Gates
+
+| gate | result |
+|---|---|
+| `python3 -m unittest discover -s python/tests` | **1409 tests, OK (2 skipped)** |
+| `python3 -m unittest test_streaming_backpressure` | **25 tests, OK** |
+| `python3 python/release_check.py gate` | **ALL CHECKS PASSED — ready to tag v3.6.1** (23 PASS, 0 FAIL, 1 SKIP: the tag check, which is skipped unless `FORKRUN_RELEASE_CHECK_TAGS=1`) |
+| frozen files | `git diff --stat forkrun_ring.c forkrun_substrate.h substratestubs.c` — **empty**, and their last-touching commit is not HEAD |
+
+The gate's `Tests: full suite passes` check runs the suite again
+nested, with `FORKRUN_UNDER_RELEASE_CHECK=1` as the anti-recursion
+guard.
+
+### Two earlier suite runs failed, and both were my own doing
+
+Recorded because the failures were real and the causes were not code
+defects:
+
+1. **52 errors + 5 failures** — the root session's litter in `/tmp`.
+   `test_cleanroom_lowfd_matrix_exhaustive` and
+   `test_cleanroom_stdio_descriptor_safety` write to fixed names under
+   `/tmp` and then `os.unlink` them; the sticky bit on `/tmp` stops
+   `anthony` from unlinking root-owned files, so the unlink raised
+   `EPERM`. Fixed by the owner chowning 36 files. **Not a code defect.**
+2. **1 failure (`test_release_check_passes`)** — the release gate's own
+   dirty-tree guard, triggered because I was editing docs while the
+   suite ran. It is the gate refusing to run on an uncommitted tree,
+   which is the gate working. Re-run on a clean tree: green.
+
+### Reproduction commands (committed probes, no scratch)
 
 ```bash
 # capacity A/B, actual capacity recorded per run
@@ -365,3 +403,12 @@ python3 python/tests/_streaming_rss_probe.py --lines 250000 --amp 5 \
 # focused tests
 cd python/tests && python3 -m unittest test_streaming_backpressure
 ```
+
+### Follow-up work this produced
+
+`dev/supervisor/C_DRAIN_PARK_DEFECT.md` — a self-contained brief for the
+C drain's 16–19× stream-path slowness, written to be handed to a
+supervisor agent that will turn it into a work order. It states the
+defect, the measured evidence, the source-level mechanism, the three
+candidate fixes (with the risks), the acceptance shape, and the scope
+boundaries.
