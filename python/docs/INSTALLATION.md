@@ -1,5 +1,6 @@
 # forkrun Installation
 
+
 ## Requirements
 
 | Requirement | Notes |
@@ -8,6 +9,54 @@
 | Python 3.10+ | Pure-Python frontend + ctypes (no Cython, no extensions to compile yourself) |
 | `gcc` + `make` | Builds the C substrate at install time |
 | bash headers | Fedora/RHEL: `dnf install -y gcc make bash-devel python3-devel`. Debian/Ubuntu do **not** package bash headers — use the Fedora container (same rule as the substrate Makefile) |
+
+## The optional Python-UDF helper (`_fr_udf`)
+
+The cleanroom can run **Python UDFs** — `mode="udf"` with a
+`"module:attribute"` reference — using a **separate, optional helper
+shared object** that embeds CPython. The helper is NOT part of the
+substrate: `libforkrun_python.so` stays interpreter-independent and
+free of any `libpython` dependency, which is what lets one substrate
+serve 3.10-3.15.
+
+**It is optional, and its absence is not a failure.** A wheel built
+without the helper installs and works; the UDF route then degrades to
+the in-process path, which is slower and correct. The capability
+predicate reports this honestly:
+
+```python
+from forkrun._bindings import v1_available
+v1_available()["udf"]        # False -> no usable helper for this caller
+```
+
+`FORKRUN_NO_UDF=1` masks **only** that capability. It is deliberately
+not a mirror of `FORKRUN_NO_V1`, which forces every v1 fast path off.
+
+**Building it yourself (the development path).**
+
+```bash
+make -f Makefile.substrate udf-lib PYTHON=/path/to/python3.12
+```
+
+Resolve the interpreter **explicitly**: the helper links `libpython3.X`,
+and the `X` is decided by which headers were on the command line. The
+first `python3-config` on `PATH` is not proof of a matching
+interpreter, so pass the one you mean.
+
+**Wheel tags follow the helper, not your shell.** A wheel that ships
+the helper is tagged `cp3XX` — it is valid only for the minor it was
+built against. A wheel with no helper is tagged `py3-none-<platform>`
+and stays interpreter-agnostic. The tag is derived from the helper's
+extension suffix, which encodes its minor, so a mismatched build
+cannot produce a wheel that claims the wrong minor.
+
+**A caveat on the source-only path.** A helper built locally into a
+source checkout is found by the runtime fallback
+(`forkrun/_udf.py` looks for `_fr_udf.so` as well as the suffixed
+name), so the development path works. A *wheel* refuses to ship the
+plain-named helper: its minor cannot be established from its name, and
+the wheel must not claim a minor it cannot prove.
+
 
 ## From PyPI
 

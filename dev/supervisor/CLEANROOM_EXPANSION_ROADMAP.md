@@ -1674,10 +1674,20 @@ is idiomatic here.
 > CPython runtime of its own. Recording the helper's *build* minor is only half
 > the check — it says what the helper is, not who is calling.
 
-So the Python wrapper passes its own minor explicitly — `--caller-minor=3.12` on
-the launcher argv, alongside the existing `--so`/`--plugin` arguments — and the
-launcher validates it against the helper's recorded build minor **before any
-source bytes are consumed**.
+So the Python wrapper passes its own minor explicitly — `--caller-version=3.12`
+on the launcher argv, alongside the existing `--so`/`--plugin` arguments — and
+the launcher validates it against the helper's recorded build minor **before
+any source bytes are consumed**.
+
+> **[V] The argument's NAME is `--caller-version`, not `--caller-minor`.**
+> An earlier draft of this section wrote `--caller-minor=3.X`. The
+> implemented and REVIEWED name is `--caller-version=MAJOR.MINOR`:
+> `REVIEW_REQUEST_ROUND12.md` records it as a new REQUIRED launcher
+> argument and `ROUND13.md` records that the requirement was added as a
+> condition of approval. The implementation under review is authoritative
+> over this prose, so the prose was corrected rather than the code. The
+> value carried is the same either way: the minor, declared explicitly,
+> validated pre-consumption.
 
 **[V] Do not shell out to `python3-config` at runtime.** It identifies a *build
 tool* on `PATH`, not necessarily the interpreter that initiated the call; with

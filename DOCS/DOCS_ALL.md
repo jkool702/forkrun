@@ -231,6 +231,69 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## Unreleased — the Python-UDF helper ships in a per-minor wheel
+
+**Packaging, no API change.** The cleanroom's optional Python-UDF helper
+(`_fr_udf`, a separate CPython-linked shared object) was built by the
+Makefile but **listed nowhere** in `setup.py`'s `package_data`, and the
+wheel was tagged `py3-none-<platform>`. So a wheel install silently had
+**no UDF accelerator** — the same class of bug as CR-FIX1-I, where the
+cleanroom launcher was "listed NOWHERE" and a wheel install silently had
+no cleanroom at all. And `DECISION-01` §6.2.1's warning applied
+verbatim: *"a wheel built from an sdist on one machine and tagged
+`py3-none` would carry a different minor than its tag claims, with
+nothing in the artifact to prove it."*
+
+**The wheel's python tag now follows the HELPER, not the running
+interpreter.** The helper's extension suffix *encodes* the minor it was
+compiled against (`_fr_udf.cpython-314-x86_64-linux-gnu.so` -> 3.14), so
+a helper built for a different minor has a different NAME and is simply
+not found. That is what makes a mismatched build safe: it cannot
+produce a wheel that claims the wrong minor.
+
+- helper for this interpreter present -> it ships, and the wheel is
+  tagged `cp3XX`;
+- otherwise -> no helper ships, and the tag stays `py3-none-<platform>`,
+  so the substrate wheel remains interpreter-agnostic.
+
+This satisfies "keep the source-only development path honest: do not
+advertise a locally built helper as present in a generic ABI-independent
+wheel" **by construction**: the tag is never `py3-none` while a helper
+is present. A plain `_fr_udf.so` (no suffix) is deliberately NOT
+shipped — its minor cannot be established from its name — while the
+runtime fallback still finds it in a source checkout, so the development
+path keeps working.
+
+`tools/build_wheel.sh` now accepts a `cp3XX` tag (the old glob
+`forkrun-*-none-*.whl` rejected one outright), refuses to choose between
+two wheels, and requires the python tag and the shipped helper to agree:
+a `cp3XX` wheel with a mismatched helper, or a `py3` wheel carrying
+one, is a lying tag and fails the build.
+
+**Also fixed: the C0.5 interpreter matrix could not build a single
+per-minor driver.** `tools/matrix_c05.sh`'s manual gcc line was missing
+`-I"$ROOT"`, and `forkrun_udf_version.h` (the build stamp the launcher
+and the helper must agree on) lives at the REPO ROOT. Every per-minor
+build had been failing on it — and the failure was **invisible**,
+because the lifecycle sweep then measured the STALE driver left over
+from a previous run. The harness now removes the old driver before
+building, and the sweep refuses to measure a driver this run did not
+produce.
+
+With that fixed, the matrix is **green on all six minors** (3.10-3.15):
+the verdict probe passes, the control probe is DIRTY as required (so the
+probe is not vacuous), and the respawn probe is CLEAN (a respawned
+generation inherits no interpreter state). The lifecycle curves are now
+measured on fresh drivers: pre-fork faster on **48/48 configurations on
+each** of the five fetched minors, medians 2.84x-3.59x.
+
+**One naming correction.** The roadmap's prose named the launcher's
+version argument `--caller-minor=3.X`; the implemented and REVIEWED name
+is `--caller-version=MAJOR.MINOR` (`REVIEW_REQUEST_ROUND12/13` record
+it as a new required argument, added as a condition of approval). The
+implementation under review is authoritative, so the PROSE was corrected,
+not the code.
+
 ## Unreleased — the stream notification pipe is a window, not a queue
 
 **Performance/memory, no API change.** The worker-completion notification
