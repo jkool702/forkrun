@@ -83,10 +83,17 @@ def main(argv=None):
                     help="consumer delay; this is the SLOW consumer")
     ap.add_argument("--collect", action="store_true",
                     help="retain every blob (the accumulate regression)")
+    ap.add_argument("--c-drain", dest="c_drain", action="store_true",
+                    help="use the C drain (c_drain=True) instead of the "
+                         "legacy Python drain. The C drain has its own "
+                         "results pipe, which is a SEPARATE backpressure "
+                         "stage from the notification pipe this probe "
+                         "measures.")
     args = ap.parse_args(argv)
 
     import forkrun
     from _helpers import write_lines
+    from forkrun import _pipes
 
     tmp = tempfile.mkdtemp(prefix="rssprobe-")
     path = os.path.join(tmp, "in.txt")
@@ -105,14 +112,22 @@ def main(argv=None):
     # inside the peak -- which is part of why its number was unstable.
     base = current_rss_kb()
 
+    # Reset the diagnostic so the capacity reported below is the one THIS
+    # run created, not a leftover from an earlier call in this process.
+    _pipes._last_stream_notify_capacity = None
+
     peak = base
     blobs = 0
     out_bytes = 0
     kept = []
     samples = []
+    first_result_s = None
+    t0 = time.monotonic()
     for blob in forkrun.stream(amplify, path, workers=args.workers,
                                nodes=1, orchestrator=orchestrator,
-                               order=args.order):
+                               order=args.order, c_drain=args.c_drain):
+        if first_result_s is None:
+            first_result_s = time.monotonic() - t0
         blobs += 1
         out_bytes += len(blob)
         r = current_rss_kb()
@@ -125,6 +140,7 @@ def main(argv=None):
         else:
             del blob
         time.sleep(args.delay)
+    wall_s = time.monotonic() - t0
 
     final = current_rss_kb()
     result = {
@@ -134,6 +150,8 @@ def main(argv=None):
         "workers": args.workers,
         "order": args.order,
         "orchestrator": orchestrator,
+        "c_drain": bool(args.c_drain),
+        "delay": args.delay,
         "input_bytes": os.path.getsize(path),
         "blobs": blobs,
         "out_bytes": out_bytes,
@@ -142,6 +160,16 @@ def main(argv=None):
         "final_kb": final,
         "growth_kb": None if base is None else peak - base,
         "samples": len(samples),
+        # The ACTUAL capacity the kernel granted the notification pipe
+        # this run created (F_GETPIPE_SZ), not the size that was
+        # requested. A best-effort F_SETPIPE_SZ the kernel refuses must
+        # never be reported as the size that was asked for.
+        "notify_pipe_capacity": _pipes.last_stream_notify_capacity(),
+        "notify_pipe_capacity_requested": _pipes.stream_notify_pipe_size(),
+        "wall_s": wall_s,
+        "first_result_s": first_result_s,
+        "records_per_s": (blobs / wall_s) if wall_s > 0 else None,
+        "out_bytes_per_s": (out_bytes / wall_s) if wall_s > 0 else None,
         # Kept live so the interpreter does not free it early and flatter
         # the final reading; the consumer is supposed to be retaining it.
         "retained_bytes": sum(len(b) for b in kept),

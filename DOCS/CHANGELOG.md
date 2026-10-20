@@ -1,5 +1,54 @@
 # forkrun Changelog
 
+## Unreleased — the stream notification pipe is a window, not a queue
+
+**Performance/memory, no API change.** The worker-completion notification
+pipe on the public `stream()` paths now asks for **4 KB** instead of 1 MB.
+The capacity of that pipe is not a tuning knob — it *is* the producer's
+run-ahead window.
+
+**The mechanism.** A worker that finishes a batch writes one 16-byte
+notification; the parent reads them. The pipe holds N notifications, so N
+is how many completions may be outstanding before a worker blocks writing
+its notification — and a blocked worker cannot claim its next batch. The
+per-worker output memfds have no backpressure of their own (a memfd does
+not push back), so this pipe is the **only** thing bounding how far a
+worker may run ahead of the consumer. At 1 MB that bound was 65536
+completions: wide enough that the bound was not a bound. At 4 KB it is
+256 — the same order of window the bash frontend's ack pipe uses
+(`ORDER_PIPE_SIZE=4096`, the H3 backpressure invariant), which is the
+conceptual reference for this change.
+
+**What changed, exactly.** `forkrun/_pipes.py` gains a named
+`STREAM_NOTIFY_PIPE_SIZE` (4096) and `make_stream_notify_pipe()`. The five
+`stream()`-reachable executors use it: `_execute_streaming`,
+`_execute_ingest_stream`, `_execute_streaming_reactor`,
+`_execute_ingest_stream_reactor`, `_execute_numa_stream`.
+
+**What did not change.** The `map()`/`run()` executors still ask for 1 MB:
+they collect every result, so there is no slow consumer to run ahead of.
+The C-drain results pipe keeps its own capacity — it is a *separate*
+backpressure stage, and shrinking it too would confound the experiment.
+Order pipes, trap-ACK pipes, fallow, spawn, death and escrow pipes are
+untouched, as is `make_pipe()`'s general default. The bash frontend is
+untouched.
+
+**Correctness fix in the same change.** `fr_py_notify_committed()` returns
+`FR_PY_ERR_NOTIFY` (-4) to mean *committed but not notified* — explicitly
+not an ordinary retryable payload error, and explicitly "NEVER a plain
+retry". The Python worker loop special-cased `-2` and `-3` but let `-4`
+fall through to the generic output-error path, which reaches the
+`on_error` ladder's **retry** branch. That branch re-arms the batch for a
+same-process re-claim: it retries work whose commit already happened.
+The shipped C worker loop treats *any* nonzero `fr_py_complete` rc as
+fatal for exactly this reason; the Python loop now does too.
+
+**Not claimed.** This is **not** a hard byte bound on a stream, and it does
+not close TD-13. A single batch can still generate large output, and
+`order="index"` can still buffer behind a poisoned or skipped head. The
+measured effect is a reduction in peak retention for a slow consumer; the
+exact figures and the residual limitations are recorded in TD-13.
+
 ## Unreleased — the reactor no longer loses a poison notification on its way out
 
 **Correctness fix, no API change.** `poisoned` and `poisoned_batches` are

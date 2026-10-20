@@ -53,7 +53,7 @@ thinking they are untracked:
 | TD-11 | `FORKRUN_NO_UDF` kill switch specified but unimplemented | high | **verified — FIXED** |
 | TD-09b | plain **streaming** path left scalar `poisoned` at 0 | high | **verified — FIXED** (two per-executor defects, both mutation-proven; found by WO-PY-REL-1, re-confirmed in the parity audit) |
 | TD-12 | poison-index relay truncates u64 `batch_idx` to u32 | medium | **verified — OPEN** (pre-existing, affects cleanroom too) |
-| TD-13 | streaming **peak** retention ~0.5x OUTPUT bytes, not a bounded window | high | **measured — OPEN, re-diagnosed**: peak is a backpressure-free in-flight window, **NOT a Python-object leak** (post-drain `tracemalloc` 23.0 KB against a 43.1 MB peak; census corroborates but is GC-tracked-objects-only). Real fix is engine-scope (frozen files). Reproducible via committed `python/tests/_streaming_memory_probe.py`. |
+| TD-13 | streaming **peak** retention ~0.5x OUTPUT bytes, not a bounded window | high | **PARTIALLY MITIGATED (WO-PY-STREAM-BACKPRESSURE-1), still OPEN**: the worker-completion notification pipe's capacity IS the producer's read-ahead window, and 4KB (256 completions) instead of 1MB (65536) cuts peak retention 24-65% on the **plain** supervision path with no throughput cost — but only where the capacity is below the run's outstanding-notification count (a 16KB pipe measuring identically to 1MB on a 977-batch run), and it does **nothing** on the default reactor path, whose retention is the parent's own parsed-record queue. **Still NOT a byte bound**: one batch can be large, `order="index"` still buffers behind a poisoned head, and the bound is on completions not bytes. The better answer for the default path is the C drain's results pipe (retention FLAT at ~3.5 MB vs the legacy drain's 138 MB) once its 16-19x park defect is fixed |
 | TD-14 | `test_spawn_ordered` compared map/stream element-wise | low | **RECLASSIFIED — invalid test expectation, not a product defect** (WO-PY-REL-1 follow-up) |
 | TD-15 | Reactor lost the poison notification when the last worker exited | high | **verified — FIXED** (W-PYPOISONDRAIN): the index list could come back empty beside a non-zero `poisoned` count; root-caused to the gap between a round's `select()` and the out-of-band `waitpid(WNOHANG)` exit sweep, reproduced on demand by delaying that sweep (47–58 losses in 60 runs), mutation-proven |
 
@@ -858,6 +858,117 @@ reproducible from the repository; that is fixed.**
 **Does not establish:** anything about the cleanroom launcher path (the
 probe exercises the in-process generator executors only); and whether the
 0.50 ratio is stable across machines or allocator versions.
+
+#### TD-13 follow-up — WO-PY-STREAM-BACKPRESSURE-1: a partial read-ahead bound, NOT a byte bound
+
+**Status: PARTIALLY MITIGATED, still OPEN.** The entry above says the
+only real fix is backpressure between workers and the parent and that it
+is an engine change in frozen files. A **parent-side** lever exists after
+all: the worker-completion notification pipe's capacity *is* the
+producer's read-ahead window, and it does not need the engine.
+
+**The mechanism.** A worker that finishes a batch writes one 16-byte
+notification; the parent reads them. The pipe holds N notifications, so N
+is how many completions may be outstanding before a worker blocks writing
+its notification — and a blocked worker cannot claim its next batch. The
+per-worker output memfds have no backpressure of their own, so this pipe
+is the only thing bounding how far a worker runs ahead of the drain. At
+1 MB that bound was 65536 completions — wide enough that it was not a
+bound. The public `stream()` paths now ask for 4 KB
+(`STREAM_NOTIFY_PIPE_SIZE`, `forkrun/_pipes.py`): 256 completions, the
+same order as the bash frontend's ack pipe (`ORDER_PIPE_SIZE=4096`).
+
+**Measured (4M lines, amp 5, 4 reps, medians, 4M-line corpus = 977
+batches; probe `_streaming_rss_probe.py`):**
+
+| path | 1 MiB | 64 KiB | 16 KiB | **4 KiB** |
+|---|---|---|---|---|
+| plain supervision, peak retention (KB) | 240898 | 239626 | 243936 | **83936** |
+| plain supervision, throughput (rec/s) | 3376 | 3445 | 3154 | **4596** |
+| reactor supervision, peak retention (KB) | 251266 | 250754 | 250794 | 250332 |
+| reactor supervision, throughput (rec/s) | 2080 | 2760 | 2814 | 2784 |
+
+**The threshold is a cliff, and it is arithmetic, not tuning.** A pipe of
+S bytes holds S/16 notifications, and it only binds if that is fewer
+than the number of outstanding completions. This run produces 977
+batches, so 16 KiB (1024 slots) can hold *every* notification of the run
+and never blocks — which is why 1 MiB, 64 KiB and 16 KiB measure
+identically. Only 4 KiB (256 slots) is below the read-ahead and
+actually applies backpressure. **A capacity that is not smaller than the
+run's outstanding-notification count does nothing**, so this is a
+corpus-sensitive lever, not a universal one.
+
+**What it fixes, and where it does not.** The benefit is entirely
+path-dependent:
+
+- **Plain supervision (`orchestrator=False`): real.** Peak retention
+  falls 24-65%, throughput is equal or better (4 KiB is the FASTEST arm
+  in the table above), and first-result latency is unchanged. Here the
+  drain is the bottleneck, so bounding the workers' read-ahead bounds
+  the parent's in-flight window.
+- **Reactor supervision (the default): nothing.** Retention is unchanged
+  (-0.4% to +3.7%) and throughput and first-result latency are equal or
+  better. The reactor drains the notification pipe eagerly (up to
+  `DRAIN_BURST` completions per round), so it never falls behind at the
+  NOTIFICATION level; its retention is dominated by the parent's own
+  parsed-record queue and, for `order="index"`, by the reassembly
+  buffer. The workers' read-ahead is bounded by something else there.
+
+**This is NOT a hard byte bound, and the caveats above still stand.**
+- A single batch can still generate large output: the legacy drain's
+  quantum reads one read's worth of output into a Python list, and that
+  list stays alive for the whole yield loop.
+- `order="index"` can still buffer behind a poisoned or skipped head, by
+  design; a smaller notification pipe does not change that (and the
+  reassembly buffer is downstream of the notification pipe entirely).
+- The bound is on COMPLETIONS, not bytes: 256 completions of a 4 MB
+  batch is still 1 GB of in-flight output.
+
+**A better answer for the default path exists and is NOT this.** The
+C drain's results pipe is a real backpressure stage, and its retention is
+**flat at ~3.5 MB regardless of scale** where the legacy drain's grows
+linearly to 138 MB:
+
+| output | legacy drain retention | C drain retention |
+|---|---|---|
+| 5.4 MB | 8.3 MB | 3.0 MB |
+| 29.4 MB | 37.5 MB | 3.5 MB |
+| 124.4 MB | 138.3 MB | **3.6 MB** |
+
+The C drain is therefore the right mechanism for the default path — and
+it is currently 16-19x SLOWER than the legacy drain there, for a reason
+that has nothing to do with memory: its pump reads 65536 bytes per call
+and returns `None` whenever that does not complete a blob, which ends
+the reactor's `DRAIN_BURST`, which leaves `drained_last` False, which
+makes the reactor's next `select()` wait the full `poll_timeout` (0.1s).
+Instrumented at 250k lines: 162 select calls, **9.72s of a 10.43s run
+spent waiting**, 97 calls over 50ms — against 5 select calls and 0.01s
+waited for the legacy drain. The reactor's own comment names the cap:
+*"otherwise throughput caps at ~10 blobs/s (one yield per 100ms idle
+select)"*. Below ~64 blobs (the `DRAIN_BURST` size) the C drain matches
+the legacy drain (1.01-1.21x) — which is very likely where the
+"0.7-1.0x" figure in `run.py`'s `_validate_c_drain` came from.
+
+**Recommended next step (separate work order, and it is probably the
+better one):** fix the C drain's stream-path pump — drain the results
+pipe fully per call, and/or put `results_r` in the reactor's watch set
+so the wakeup is event-based — then re-evaluate whether the notification
+pipe needs shrinking at all on the default path. Fixing the park is
+worth doing on its own merits: it is a 16-19x throughput defect on an
+opt-in path whose whole purpose is to bound memory.
+
+**Reproduce (committed probes, no scratch):**
+
+```
+# capacity A/B, actual capacity recorded per run:
+FORKRUN_STREAM_NOTIFY_PIPE_SIZE=1048576 python3 python/tests/_streaming_rss_probe.py \
+    --lines 4000000 --amp 5 --delay 0.01 --order none --orchestrator 0
+python3 python/tests/_streaming_rss_probe.py \
+    --lines 4000000 --amp 5 --delay 0.01 --order none --orchestrator 0
+# C drain vs legacy, across scale:
+python3 python/tests/_streaming_rss_probe.py --lines 250000 --amp 5 \
+    --delay 0.01 --orchestrator 1 --c-drain
+```
 
 ---
 

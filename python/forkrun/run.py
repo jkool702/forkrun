@@ -74,7 +74,7 @@ import sys
 from ._api import Mode, Nodes, OnError, Order, _validate
 from ._bindings import RC_OK, get, load
 from ._fd_scrub import scrub_fds, snapshot_fds
-from ._pipes import make_pipe
+from ._pipes import make_pipe, make_stream_notify_pipe
 from ._plugin import make_plugin_payload
 from ._reassembly import ReassemblyBuffer
 from ._executor_core import ExecutorSpec
@@ -6212,10 +6212,24 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         _flush_stdio()
 
         out_fds, out_hold = _new_output_memfds(workers)
-        # W-PY15: 1MB signal pipe (65536 outstanding 16B signals vs 4096
-        # at default) — workers run further ahead of a slow consumer.
-        # Best-effort: falls back to 64KB where F_SETPIPE_SZ is capped.
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of the 1MB (65536
+        # notifications) this path used to ask for, so a slow consumer
+        # stops the run-ahead from growing without bound.
+        #
+        # This REPLACES the W-PY15 rationale for a 1MB signal pipe on
+        # the streaming path ("workers run further ahead of a slow
+        # consumer"). Running further ahead was the defect, not the
+        # feature: the output memfds have no backpressure of their own,
+        # so the notification pipe was the only thing bounding the
+        # run-ahead, and a 1MB window bounded it at 65536 completions.
+        # The map/run paths still ask for 1MB -- they collect every
+        # result, so there is no slow consumer to run ahead of.
+        #
+        # Best-effort: the capacity is whatever the kernel grants.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
         # W-DEDUP: single fork dispatch (generator shape closes the
         # parent's signal-read end in the child for exact EOF).
         from ._executor_core import fork_workers as _core_fork
@@ -6547,7 +6561,14 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         except OSError:
             pass
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of 1MB (65536), so a
+        # slow consumer stops the run-ahead from growing without
+        # bound. Best-effort: the capacity is whatever the kernel
+        # grants, and the map/run paths keep the 1MB default.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
         fallow_r, fallow_w = os.pipe()
 
         _flush_stdio()
@@ -8978,7 +8999,14 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         _flush_stdio()
 
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of 1MB (65536), so a
+        # slow consumer stops the run-ahead from growing without
+        # bound. Best-effort: the capacity is whatever the kernel
+        # grants, and the map/run paths keep the 1MB default.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
 
         use_orderer = (order == "index" and not splice
                        and _v1a(lib).get("orderer"))
@@ -10086,7 +10114,14 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         except OSError:
             pass
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of 1MB (65536), so a
+        # slow consumer stops the run-ahead from growing without
+        # bound. Best-effort: the capacity is whatever the kernel
+        # grants, and the map/run paths keep the 1MB default.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
         fallow_r, fallow_w = os.pipe()
 
         use_orderer = (order == "index" and not splice
@@ -11897,7 +11932,14 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         except OSError:
             pass
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of 1MB (65536), so a
+        # slow consumer stops the run-ahead from growing without
+        # bound. Best-effort: the capacity is whatever the kernel
+        # grants, and the map/run paths keep the 1MB default.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
 
         use_orderer = (order == "index" and not splice
                        and _v1a(lib).get("orderer"))

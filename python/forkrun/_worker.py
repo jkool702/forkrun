@@ -844,10 +844,33 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     # -2/-3 are fatal infrastructure (v0 parity with
                     # _success False); -1 rides the escrow failure
                     # path like a Python write error.
+                    #
+                    # -4 (FR_PY_ERR_NOTIFY) is NEITHER of those, and it
+                    # must not fall through to the escrow path below.
+                    # The commit already HAPPENED: fr_py_complete calls
+                    # fr_py_ack_direct, which stores TXN_IDLE, and only
+                    # THEN publishes. So -4 means "committed, but the
+                    # drain was never told" — the C contract says so
+                    # outright ("NEVER a plain retry"), and the C worker
+                    # loop honours it by treating ANY nonzero rc as
+                    # fatal.
+                    #
+                    # The escrow path would RE-ARM this batch for a
+                    # same-process re-claim, which RE-EXECUTES a batch
+                    # that is already committed. That is a
+                    # duplicate-execution bug, not a retry — and it is
+                    # exactly what the distinct error code exists to
+                    # prevent.
+                    #
+                    # Exiting is the contract's "aborting the run
+                    # without claiming success": the parent's
+                    # fr_py_recover_worker classifies the death as
+                    # TXN_IDLE (committed, nothing in flight) and
+                    # respawns the worker WITHOUT re-running the batch.
                     comp_rc = _commit(batch.batch_index, blob)
                     if comp_rc == 0:
                         continue
-                    if comp_rc == -2 or comp_rc == -3:
+                    if comp_rc == -2 or comp_rc == -3 or comp_rc == -4:
                         return 1
                     error = OSError(
                         "forkrun: output write failed on batch %d"

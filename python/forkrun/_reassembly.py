@@ -13,8 +13,13 @@ Correctness notes:
 - No hard size cap is enforced: a poisoned head-of-line legitimately
   buffers everything after it until EOF, so any cap would risk dropping
   data. max_size is a diagnostic; in the common case the buffer holds
-  only the out-of-order depth (workers x in-flight), and the 16-byte
-  signal pipe itself caps outstanding un-drained completions at 4096.
+  only the out-of-order depth (workers x in-flight), and the
+  worker-completion notification pipe bounds how far the workers may run
+  ahead of the drain. That bound is 256 outstanding completions on the
+  public stream() paths (`STREAM_NOTIFY_PIPE_SIZE`, 4KB / 16-byte
+  notifications) and 65536 on the map/run paths -- but it bounds the
+  WORKERS' read-ahead, NOT this buffer. A poisoned head still buffers
+  the whole tail regardless of the pipe size.
 - W-REL6-3.2: high-water warning. Buffered bytes past the limit warn
   ONCE on stderr (actionable: names the head batch, the buffered
   total, and the knob). The limit is reassembly_limit (bytes) when

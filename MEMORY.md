@@ -914,3 +914,103 @@ Two findings from this round worth more than the fixes:
 - Comparing invocation counts ACROSS the two execution models measures
   batch shape, not semantics (27 vs 50 was batching). At-least-once
   had to be measured within one path.
+
+### W-PY-STREAM-BACKPRESSURE-1: the notification pipe is a window, and a cliff
+
+**The mechanism, which was not obvious from the name.** The
+worker-completion notification pipe's capacity IS the producer's
+read-ahead window. A worker that finishes a batch writes one 16-byte
+notification; the parent reads them. The pipe holds N notifications, so
+N is how many completions may be outstanding before a worker blocks
+writing its notification — and a blocked worker cannot claim its next
+batch. The per-worker output memfds have no backpressure of their own
+(a memfd does not push back), so this pipe was the ONLY thing bounding
+how far a worker ran ahead of the drain. At 1MB that bound was 65536
+completions: wide enough that it was not a bound.
+
+**The cliff is arithmetic, and it will bite anyone who tunes this.** A
+pipe of S bytes holds S/16 notifications, and it only binds if that is
+fewer than the outstanding completions. On a 977-batch run, 16KB (1024
+slots) can hold EVERY notification of the run and never blocks — so
+1MB, 64KB and 16KB measured IDENTICALLY, and only 4KB (256 slots)
+applied any backpressure. **A capacity not below the run's
+outstanding-notification count does nothing at all.** Before measuring
+this, I calibrated with a 400k-line corpus: 98 batches — fewer than the
+256 slots of a 4KB pipe — so the experiment would have shown nothing
+however the code was written. **Size the corpus so the mechanism can
+fire before running the A/B.**
+
+**Path dependence, measured (4M lines, amp 5, 4 reps, medians).**
+Plain supervision (`orchestrator=False`): peak retention -24% to -65%,
+throughput equal or better, first-result latency unchanged. Reactor
+supervision (the DEFAULT): retention -0.4% to +3.7%, throughput and
+latency equal or better. The reactor drains the notification pipe
+eagerly (up to `DRAIN_BURST` completions per round), so it never falls
+behind at the NOTIFICATION level; its retention is the parent's own
+parsed-record queue, and the workers' read-ahead is bounded by
+something else there. **So the lever helps the path where the drain is
+the bottleneck and does nothing on the default path.**
+
+**A near-miss I have to record, because it nearly produced a wrong
+conclusion.** An early 5-rep A/B showed the small pipe *reducing*
+throughput 33% in one cell, and I reported it as a fast-consumer
+regression. With 4 reps and four capacity arms it reversed: 1MB is the
+SLOWEST arm (2080 rec/s vs 2784 for 4KB), and the cell's first-result
+latency is BIMODAL in every arm (0.014s or 0.15-0.40s — the reactor's
+poll quanta). Medians over 5 reps landed on different sides of that
+bimodality in the two arms. **A 33% "regression" that reverses with
+more reps and more arms was a bimodality artifact, and reporting it
+would have been a wrong conclusion.** The repo's own rule — interleave,
+alternate the A/B order, take medians — is what caught it.
+
+**The `-4` contract, and the test that is not vacuous.**
+`fr_py_notify_committed()` returns `FR_PY_ERR_NOTIFY` (-4) for
+"committed but not notified" — explicitly not a retryable payload
+error. The Python worker special-cased `-2`/`-3` but let `-4` fall into
+the generic output-error path, which reaches the `on_error` ladder's
+**retry** branch: that branch re-arms the batch for a same-process
+re-claim, i.e. it retries work whose commit already happened. The
+shipped C worker treats ANY nonzero `fr_py_complete` rc as fatal for
+exactly this reason.
+
+**THE MUTATION CHECK EARNED ITS KEEP.** The obvious assertion — "no
+duplicate batch execution" — is VACUOUS: with the fix reverted there is
+still no duplicate, because the engine does not re-offer an
+already-committed batch. A test that cannot fail is worse than no test.
+The discriminating observable is WHICH function deposited the escrow:
+`_deposit_or_loud_skip` (the failure ladder — the bug) versus
+`_escrow_deposit_exit_loud` (the exit path — correct). The caller's
+frame name separates them exactly, and the worker is a forked child, so
+a spy installed in the parent is inherited. Reverting the fix fails
+exactly that test.
+
+**And the consequence, stated rather than hidden:** a worker that exits
+on -4 makes the parent respawn it, and the per-process fault hook fires
+again in the new process, so the run can reach the respawn cap and fail
+CLOSED. That is the correct behaviour for a genuinely lost notification
+(the parent is gone), but it means an injected fault ends the run
+instead of completing it. Measured, not assumed.
+
+**C DRAIN IS 16-19x SLOWER ON THE STREAM PATH, AND IT IS NOT MY
+CHANGE.** Pre-existing (98.5s at 1MB vs 98.3s at 4KB). It has a sharp
+cliff at ~64 blobs — the reactor's `DRAIN_BURST` size — below which it
+matches the legacy drain (1.01-1.21x, which is very likely where the
+"0.7-1.0x" figure in `_validate_c_drain` came from). Above it, 16-19x.
+Instrumented: 162 select calls, **9.72s of a 10.43s run spent WAITING
+in `select()`** (93%), 97 calls over 50ms, against 5 calls and 0.01s
+for the legacy drain. The mechanism: the C drain's pump reads 65536
+bytes per call and returns None whenever that does not complete a blob,
+which ends the `DRAIN_BURST`, which leaves `drained_last` False, which
+makes the reactor's next `select()` wait the FULL `poll_timeout` (0.1s).
+The legacy drain does not park because its data source is the worker's
+memfd, which is ALWAYS pollable — it preads unconditionally and yields
+whatever is there. The reactor's own comment names the cap: *"otherwise
+throughput caps at ~10 blobs/s (one yield per 100ms idle select)"*.
+
+**Why that matters more than the slowness: the C drain's peak
+retention is FLAT at ~3.5 MB regardless of scale, where the legacy
+drain's grows linearly to 138 MB.** So the C drain is the RIGHT
+mechanism for the default path's memory problem, and it is broken by a
+100ms park. Fixing the park (drain the results pipe fully per call;
+and/or put `results_r` in the reactor's watch set for an event-based
+wakeup) is worth more than shrinking the notification pipe.
