@@ -1014,3 +1014,46 @@ mechanism for the default path's memory problem, and it is broken by a
 100ms park. Fixing the park (drain the results pipe fully per call;
 and/or put `results_r` in the reactor's watch set for an event-based
 wakeup) is worth more than shrinking the notification pipe.
+
+**The backpressure CHAIN, which is the thing to remember.** Bash's
+backpressure is three links and the ack pipe is the LAST: a slow
+consumer fills the **stdout pipe**, so `ring_order` blocks writing
+stdout, so `ring_order` stops clearing the **ack pipe**, so the ack
+pipe fills, so workers block on the ack. The ack pipe is small (4096,
+one page, `frun.bash:1730` — *"Size order ack pipe to 4096 (1 page) for
+closed hydraulic backpressure"*) because it only has to LATCH a
+backpressure the stdout pipe has already started.
+
+The 4KB notification pipe IS that ack pipe, so it can only engage if
+the chain upstream of it is closed — and it is closed on exactly ONE of
+the two Python paths:
+
+- **Plain supervision: closed.** Its drain YIELDS INSIDE the collection
+  loop (`run.py:5698`), so it is CONSUMER-PACED: the next notification
+  is not read until the consumer asks for the next record. The
+  consumer's slowness stops the drain, the pipe fills, the workers
+  block. Retention -24% to -65%.
+- **Reactor supervision (the default): BROKEN AT THE FIRST LINK.** Its
+  drain collects into a `_pending` list and pops one at a time
+  (`run.py:9207`), and the reactor pulls up to `DRAIN_BURST` (64)
+  records per round regardless of the consumer. The consumer's slowness
+  is absorbed by a PYTHON LIST, not by a pipe, so the notification pipe
+  never fills and the ack-pipe analogue never engages. Retention
+  unchanged.
+
+**So the missing piece on the default path is bash's STDOUT-PIPE
+analogue** — a bounded transport between the drain and the consumer that
+blocks the producer. Making the reactor's drain consumer-paced is NOT
+the answer: `DRAIN_BURST` exists to bound death-detection latency, and a
+consumer-paced drain would starve the supervisor. **The C drain's
+results pipe IS that transport** (which is why its retention is flat at
+3.5 MB while the legacy drain's grows to 138 MB) and it is the 100ms
+park that makes it unusable at speed.
+
+**Lesson worth keeping: a backpressure mechanism is a CHAIN, and you can
+shrink any one link to no effect.** The first measurement of this work
+("4KB did nothing on the default path") looked like a failed
+experiment. It was not: it was the chain telling us which link was
+missing, and it pointed at a 100ms park in the reactor's poll loop that
+nobody was looking for. **When a backpressure lever does nothing, find
+the missing link before tuning the one you can see.**

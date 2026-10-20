@@ -29,6 +29,82 @@ path, and no measurable cost on either.**
 - It is **not** a byte bound, and it does **not** close TD-13.
 - The `-4` mismatch is fixed and the fix is proven by a mutation check.
 
+### 1.1 Why the benefit is path-dependent: the backpressure CHAIN
+
+The result is not "the change works sometimes". It is one missing link,
+and it is visible in the source.
+
+**Bash's chain is three links, and the ack pipe is the LAST one:**
+
+```
+slow consumer
+  -> the stdout pipe fills and freezes
+  -> ring_order blocks writing to stdout
+  -> ring_order is not clearing the ack pipe
+  -> the ack pipe fills
+  -> workers block on writing the ack
+```
+
+The ack pipe is small (4096, one page — `frun.bash:1730-1731`) because
+it only has to *latch* a backpressure that the stdout pipe has already
+started. **The 4 KiB notification pipe is that ack pipe.** This work
+order's premise is exactly bash's mechanism, and the target size is
+bash's own number, not a guess.
+
+**Python plain path — the chain is closed.** Its drain is a *generator
+that yields inside the collection loop* (`run.py:5698`): the next
+notification is not read until the consumer asks for the next record.
+So the consumer's slowness stops the drain, the notification pipe fills,
+and the workers block on the notification write. Every link is present,
+and the 4 KiB pipe is the one that latches it. **This is where the
+24–65 % comes from.**
+
+**Python reactor path — the chain is BROKEN AT THE FIRST LINK.** Its
+drain does not yield inside the collection loop; it collects into a
+`_pending` list and pops one record at a time (`run.py:9207`), and the
+reactor pulls up to `DRAIN_BURST` (64) records per round regardless of
+the consumer. The consumer's slowness is therefore absorbed by a
+**Python list**, not by a pipe: the notification pipe never fills, the
+ack-pipe analogue never engages, and the workers never block. The
+parent's own memory grows instead — which is the measured −0.4 % to
++3.7 % (no change).
+
+**The C drain's results pipe is bash's stdout-pipe analogue** — a real
+pipe between the drain and the consumer that blocks the producer — and
+that is exactly why its retention is flat at ~3.5 MB where the legacy
+drain's grows to 138 MB (§6.4). The reactor path's `_pending` list is
+not that.
+
+**Consequence for the follow-up.** The missing piece on the default path
+is a *stdout-pipe analogue*: a bounded transport between the drain and
+the consumer that blocks the producer when the consumer falls behind.
+Making the reactor's drain consumer-paced like the plain path's is NOT
+an option — `DRAIN_BURST` exists to bound death-detection latency, and a
+fully consumer-paced drain would starve the supervisor. The C drain
+already provides the transport; it is the 100 ms park (§6.4) that makes
+it unusable at speed.
+
+### 1.2 The target is bash's own number, and the wakeup fix is bash's own mechanism
+
+- **`frun.bash:1730-1731`** — `ring_pipe fd_order_r fd_order_w 4096`,
+  with the comment *"B2: Size order ack pipe to 4096 (1 page) for closed
+  hydraulic backpressure"*. Bash sizes the orchestrator's feedback
+  channel to **one page** for exactly the reason this work order gives
+  for shrinking the notification pipe. Every other bash pipe
+  (`fd_spawn`, `fd_fallow`, `fd_trap_ack`, the death pipes, the per-worker
+  pipes) is created with `ring_pipe` and **no size argument**, i.e. the
+  engine default `RING_PIPE_CAPACITY:=65536`. Bash has exactly one
+  deliberately-small channel, and it is the feedback one.
+- **`frun.bash:2233`** — `while _fr_build_poll_lists; ring_poll "$fd_spawn_arg" ... ; do`
+  Bash's orchestrator is a **single `ring_poll` over a pre-built fd
+  list**, and the engine's poll reports liveness. The Python reactor's
+  100 ms park is the divergence from that, and the C-drain fix (below) is
+  the port.
+
+So both the capacity and the proposed wakeup change are "the way the
+bash front end does it", which is the rule this repository works by.
+
+
 ---
 
 ## 2. Changed files
@@ -250,7 +326,11 @@ unnecessary on the default path.
 - **`order="index"` can still buffer behind a poisoned or skipped head**,
   by design; the reassembly buffer is downstream of the notification
   pipe and is unaffected by its size.
-- **No benefit on the default reactor path** (§1, §6.1).
+- **No benefit on the default reactor path** (§1.1): the backpressure
+  chain is broken at its first link there, so the ack-pipe analogue
+  never engages. This change cannot fix that — it needs a bounded
+  transport between the drain and the consumer, i.e. bash's stdout-pipe
+  analogue (§1.1, §6.4).
 - **The lever is corpus-sensitive** (§6.2): a capacity not below the
   run's outstanding-notification count does nothing.
 - **No physical NUMA validation.** The NUMA row in §3 is a logical-`@N`
@@ -260,6 +340,7 @@ unnecessary on the default path.
   in-process parent has no synthetic recovery wakeup (the C cleanroom
   launcher has one); delivery after a lost notification depends on a
   later notification carrying a frontier that covers the committed bytes.
+
 
 ---
 

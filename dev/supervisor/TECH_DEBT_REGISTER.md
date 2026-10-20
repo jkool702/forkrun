@@ -875,8 +875,16 @@ per-worker output memfds have no backpressure of their own, so this pipe
 is the only thing bounding how far a worker runs ahead of the drain. At
 1 MB that bound was 65536 completions — wide enough that it was not a
 bound. The public `stream()` paths now ask for 4 KB
-(`STREAM_NOTIFY_PIPE_SIZE`, `forkrun/_pipes.py`): 256 completions, the
-same order as the bash frontend's ack pipe (`ORDER_PIPE_SIZE=4096`).
+(`STREAM_NOTIFY_PIPE_SIZE`, `forkrun/_pipes.py`): 256 completions.
+
+**The 4 KB number is bash's, not a guess.** `frun.bash:1730-1731`:
+`ring_pipe fd_order_r fd_order_w 4096`, commented *"B2: Size order ack
+pipe to 4096 (1 page) for closed hydraulic backpressure"*. Bash sizes the
+orchestrator's feedback channel to one page for exactly this reason.
+Every other bash pipe (`fd_spawn`, `fd_fallow`, `fd_trap_ack`, the death
+pipes, the per-worker pipes) is `ring_pipe` with no size argument — the
+engine default `RING_PIPE_CAPACITY:=65536`. Bash has exactly one
+deliberately-small channel and it is the feedback one.
 
 **Measured (4M lines, amp 5, 4 reps, medians, 4M-line corpus = 977
 batches; probe `_streaming_rss_probe.py`):**
@@ -898,21 +906,51 @@ actually applies backpressure. **A capacity that is not smaller than the
 run's outstanding-notification count does nothing**, so this is a
 corpus-sensitive lever, not a universal one.
 
-**What it fixes, and where it does not.** The benefit is entirely
-path-dependent:
+**What it fixes, and where it does not — and WHY, which is the useful
+part.** Bash's backpressure is a CHAIN of three links and the ack pipe is
+the LAST one: a slow consumer fills the **stdout pipe**, so `ring_order`
+blocks writing stdout, so `ring_order` stops clearing the **ack pipe**,
+so the ack pipe fills, so workers block on the ack. The ack pipe is
+small (4096, one page) because it only has to *latch* a backpressure the
+stdout pipe has already started.
 
-- **Plain supervision (`orchestrator=False`): real.** Peak retention
-  falls 24-65%, throughput is equal or better (4 KiB is the FASTEST arm
-  in the table above), and first-result latency is unchanged. Here the
-  drain is the bottleneck, so bounding the workers' read-ahead bounds
-  the parent's in-flight window.
-- **Reactor supervision (the default): nothing.** Retention is unchanged
-  (-0.4% to +3.7%) and throughput and first-result latency are equal or
-  better. The reactor drains the notification pipe eagerly (up to
-  `DRAIN_BURST` completions per round), so it never falls behind at the
-  NOTIFICATION level; its retention is dominated by the parent's own
-  parsed-record queue and, for `order="index"`, by the reassembly
-  buffer. The workers' read-ahead is bounded by something else there.
+The 4 KiB notification pipe IS that ack pipe. So it can only engage if
+the chain upstream of it is closed — and it is closed on exactly one of
+the two Python paths:
+
+- **Plain supervision: the chain is closed.** Its drain is a generator
+  that YIELDS INSIDE the collection loop (`run.py:5698`), so the next
+  notification is not read until the consumer asks for the next record.
+  The consumer's slowness stops the drain, the notification pipe fills,
+  and the workers block. Measured: peak retention **-24% to -65%**,
+  throughput equal or better, first-result latency unchanged.
+- **Reactor supervision (the default): the chain is BROKEN AT ITS FIRST
+  LINK.** Its drain collects into a `_pending` list and pops one record
+  at a time (`run.py:9207`), and the reactor pulls up to `DRAIN_BURST`
+  (64) records per round regardless of the consumer. The consumer's
+  slowness is absorbed by a **Python list**, not by a pipe: the
+  notification pipe never fills, the ack-pipe analogue never engages,
+  and the parent's own memory grows instead. Measured: **no change**
+  (-0.4% to +3.7%), throughput equal or better.
+
+**The missing piece on the default path is bash's stdout-pipe
+analogue** — a bounded transport between the drain and the consumer that
+blocks the producer when the consumer falls behind. Making the reactor's
+drain consumer-paced like the plain path's is NOT an option:
+`DRAIN_BURST` exists to bound death-detection latency, and a fully
+consumer-paced drain would starve the supervisor. The C drain's results
+pipe already IS that transport (see below), and it is the reason its
+retention is flat.
+
+**The threshold is a cliff, and it is arithmetic, not tuning.** A pipe of
+S bytes holds S/16 notifications, and it only binds if that is fewer
+than the number of outstanding completions. This run produces 977
+batches, so 16 KiB (1024 slots) can hold *every* notification of the run
+and never blocks — which is why 1 MiB, 64 KiB and 16 KiB measure
+identically. Only 4 KiB (256 slots) is below the read-ahead and
+actually applies backpressure. **A capacity that is not smaller than the
+run's outstanding-notification count does nothing**, so this is a
+corpus-sensitive lever, not a universal one.
 
 **This is NOT a hard byte bound, and the caveats above still stand.**
 - A single batch can still generate large output: the legacy drain's
