@@ -43,15 +43,27 @@ RSS is 16.4GB against the cleanroom's 1.1GB. The route is now strictly
 better than the path it would replace — the same speed, less memory,
 and a UDF that keeps its extensions.
 
-**Why the suite never saw it.** Its UDF fixture is **pure Python**
-(`b.upper()`, `import sys`) and imports no extension at all, so a
-hundred green UDF tests were compatible with the route being unable to
-import `math`. `python/tests/test_udf_extension_import.py` closes that
-hole: a fixture importing `math` and `re` **at module level**, plus a
-deterministic witness that the C accelerator is loaded
-(`json.decoder.scanstring.__module__ == "_json"`, not a timing), plus a
-byte-for-byte comparison of the two arms. Reverting the loader flag
-makes all five fail.
+**Why the suite never saw it.** Two reasons, and the second is the
+worse one. Its UDF fixture is **pure Python** (`b.upper()`,
+`import sys`) and imports no extension at all, so a hundred green UDF
+tests were compatible with the route being unable to import `math`. And
+those hundred tests were **not running**: a test module restored the
+ambient `FORKRUN_CLEANROOM` by *deleting* it, so every later test that
+gated on it **skipped** — including the whole end-to-end UDF suite, in
+the gate pass that runs with the flag set. A green gate was not
+evidence.
+
+Both are closed. `python/tests/test_udf_extension_import.py` adds a
+fixture importing `math` and `re` **at module level**, a deterministic
+witness that the C accelerator is loaded
+(`json.decoder.scanstring.__module__ == "_json"`, not a timing), a
+byte-for-byte comparison of the two arms, and an explicit
+no-poisoned-batches assertion; it **owns its precondition** rather than
+gating on ambient state. The restoring test module now restores the
+saved value instead of deleting the variable. The gate counts show the
+revival: 1446 -> 1451 tests with the flag off, 1446 -> 1458 with it on,
+both passes OK. Reverting the loader flag makes all five new tests
+fail.
 
 **The loader policy is recorded, not incidental.** The helper's exported
 dynamic symbols were inspected: 15 of them, all prefixed `fr_udf_*`.

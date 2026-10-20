@@ -338,6 +338,51 @@ The fixture imports the extensions **at module level** on purpose: that
 is how a real UDF is written, and it is the strictest form — a
 module-level import failure takes down every function in the module.
 
+### 9.1a The test would have been dead too — and so was the UDF suite
+
+The first version of this test **gated on the ambient
+`FORKRUN_CLEANROOM`**, following `test_udf_mode.py`. It was skipped in
+BOTH gate passes — including the one that runs with the flag set — so
+it would have guarded nothing.
+
+The cause: `test_stage3_public_dispatch.py`'s `_restore` did
+`os.environ.pop("FORKRUN_CLEANROOM", None)` unconditionally, **deleting**
+the variable for every test that ran afterwards. Every later test that
+gates on it then SKIPPED rather than running.
+
+Watched at every test boundary through a real discover run:
+
+```
+VALUE '1'       before test_abort_reason...
+VALUE '0'       before test_numa_ordering_identity...
+VALUE '1'       before test_numa_recovery...
+VALUE '<unset>' before test_stage3_public_dispatch...    <-- the leak
+```
+
+**So the pre-existing end-to-end UDF suite — `test_udf_mode`'s
+`TestUDFModeEndToEnd`, 14 tests including the DECISION-02 `None`/`b""`
+contract tests — was also dead.** That is the deeper reason this defect
+survived a green gate: the UDF route's end-to-end coverage was not
+executing at all.
+
+Fixed in two places:
+
+- `_restore` now restores the saved value (the `self._old = {}` that was
+  meant to hold it was never populated; the house pattern in
+  `test_cleanroom.py` saves and puts back).
+- The new test **owns its precondition**: it sets `FORKRUN_CLEANROOM=1`
+  itself and restores the previous value, rather than gating on
+  ambient state — the way `test_cleanroom.py` does.
+
+The gate counts show the revival:
+
+| pass | before | after |
+|---|---|---|
+| g1 (cleanroom off) | 1446 tests, 2 skipped | **1451 tests, 2 skipped** |
+| g1on (cleanroom on) | 1446 tests, 2 skipped | **1458 tests, 1 skipped** |
+
+Both passes OK.
+
 ### 9.2 The mutation check
 
 Reverting the launcher to `RTLD_LOCAL`, rebuilding, and re-running the
