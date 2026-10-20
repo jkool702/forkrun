@@ -2,6 +2,7 @@
 
 **Branch:** `NEW/REFACTOR4.4`
 **Start commit:** `d25203c3` (the tree this work order started on)
+**Final commit:** `01b95f37`
 **Final commit:** see §9
 **Primary scope:** `setup.py`, `tools/build_wheel.sh`, `tools/matrix_c05.sh`,
 focused tests, documentation.
@@ -344,9 +345,9 @@ On the final commit (`c40fa29f`):
 
 | gate | result |
 |---|---|
-| `python3 -m unittest discover -s python/tests` | **1437 tests, OK (2 skipped)** |
+| `python3 -m unittest discover -s python/tests` | **1441 tests, OK (2 skipped)** |
 | `python3 python/release_check.py gate` | **ALL CHECKS PASSED — ready to tag v3.6.1** (23 PASS / 0 FAIL / 1 SKIP: the tag check, which needs `FORKRUN_RELEASE_CHECK_TAGS=1`) |
-| focused UDF modules (§3.3) | **100 tests, OK (1 skipped)** |
+| focused UDF modules (§3.3) | **93 tests, OK (1 skipped)** in the final run; **100 tests** with the exactly-once and stream-liveness modules included |
 | `python3 tools/capability_matrix.py --check` | **OK: 40320 cells, matrix is current** |
 | `python3 tools/gen_docs_all.py --check` | **DOCS_ALL.md is current (17 documents)** |
 | `bash tools/matrix_c05.sh` | **EXIT 0 — green on six minors** |
