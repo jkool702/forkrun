@@ -1075,8 +1075,53 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
         }
     }
 
-    /* (2) Load for real. */
-    hu = dlopen(helper_path, RTLD_NOW | RTLD_LOCAL);
+    /* (2) Load for real.
+     *
+     * RTLD_GLOBAL, deliberately, and this is a LOADER POLICY rather than
+     * an accident:
+     *
+     * The helper is a CPython-linked shared object, so it DEPENDS on
+     * libpython. Since CPython 3.8 on Unix, extension modules no longer
+     * link libpython directly -- they resolve libpython's symbols
+     * (PyFloat_Type and friends) out of the global namespace at load
+     * time. CPython's own embedding guidance is explicit: when Python
+     * is embedded, libpython must be loaded with RTLD_GLOBAL, not
+     * RTLD_LOCAL.
+     *
+     * With RTLD_LOCAL here, libpython's symbols stayed out of the
+     * global namespace, so the interpreter this launcher initialises
+     * could not load ANY extension module:
+     *
+     *     ImportError: .../lib-dynload/math...so:
+     *                  undefined symbol: PyFloat_Type
+     *
+     * Two consequences, and the second is the more dangerous one
+     * because it is SILENT:
+     *
+     *   1. A UDF that imports math / re / numpy returned ZERO records
+     *      and NO exception -- every batch poisoned, with nothing
+     *      naming the cause in the caller's visible output.
+     *   2. json still imported, but WITHOUT its C accelerator, so
+     *      json.loads ran 13.19us instead of 2.88us -- 4.6x slower,
+     *      with no diagnostic at all.
+     *
+     * Loading the helper with RTLD_GLOBAL puts libpython (its
+     * dependency) into the global namespace, which is what the
+     * extension modules need.
+     *
+     * SCOPE. The wider symbol scope is confined to this launcher's own
+     * address space. The launcher is a separate, exec'd process; the
+     * caller's Python process is untouched. The helper's exported
+     * symbols are all prefixed fr_udf_* (15 of them, verified with
+     * `nm -D --defined-only`), so the added collision surface is
+     * negligible -- and symbol visibility is NOT treated as a security
+     * boundary here: the boundary is the separate process, the
+     * interpreter's isolated config, and the explicit root allowlist.
+     *
+     * The DISPOSABLE PROBE at the dlopen above keeps RTLD_LOCAL: it is
+     * a throwaway child whose only job is to prove the artifact loads.
+     */
+    hu = dlopen(helper_path, RTLD_NOW | RTLD_GLOBAL);
     if (!hu) {
         fprintf(stderr, "forkrun-cleanroom: dlopen UDF helper: %s\n",
                 dlerror());

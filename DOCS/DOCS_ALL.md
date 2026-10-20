@@ -231,6 +231,80 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## Unreleased — the cleanroom's UDF route can import a C extension again
+
+**Correctness and performance, no API change.** The cleanroom's
+`mode="udf"` route could not import **any** CPython extension module.
+The launcher loaded the per-minor helper with `RTLD_LOCAL`, so
+libpython's symbols never entered the global namespace — and since
+CPython 3.8 on Unix, extension modules resolve libpython's symbols
+(`PyFloat_Type` and friends) out of the **global** namespace at load
+time. CPython's own embedding guidance is explicit: libpython must be
+loaded with `RTLD_GLOBAL` when Python is embedded, precisely because C
+extensions no longer link libpython directly.
+
+**The mechanism.** `forkrun_cleanroom.c` now loads the real helper with
+`RTLD_GLOBAL`. The **disposable probe** load is unchanged
+(`RTLD_LOCAL` — it is a throwaway child whose only job is to prove the
+artifact loads), as are the plugin probe and the substrate load;
+neither is CPython-linked. The wider symbol scope is confined to the
+launcher's own address space: the launcher is a separate, `exec`'d
+process, so the caller's Python process is untouched.
+
+**What it broke, and how quietly.** Two consequences, and the second is
+the more dangerous one because it is **silent**:
+
+- A UDF importing `math`, `re` or `numpy` returned **ZERO records and
+  NO exception** — every batch poisoned, with nothing naming the cause
+  in the caller's visible output.
+- `json` still imported, but **without its C accelerator**, so
+  `json.loads` ran 13.19us instead of 2.88us — **4.6x slower**, with no
+  diagnostic of any kind.
+
+That second effect was the *entire* throughput gap of the route: on a
+json-per-record payload the cleanroom's `map-udf` route measured
+3.65x–4.6x slower than the in-process path, and only 1.5x slower on a
+payload that does no json at all. The route's own overhead is ~30ms of
+start-up plus a per-batch cost *smaller* than the in-process path's.
+
+**After the fix**, with the A/B arms alternating per rep, the route is
+at **parity** (0.975x–1.038x across 1–28 workers) and keeps its memory
+advantage: with a 599MB parent at 28 workers the in-process path's tree
+RSS is 16.4GB against the cleanroom's 1.1GB. The route is now strictly
+better than the path it would replace — the same speed, less memory,
+and a UDF that keeps its extensions.
+
+**Why the suite never saw it.** Its UDF fixture is **pure Python**
+(`b.upper()`, `import sys`) and imports no extension at all, so a
+hundred green UDF tests were compatible with the route being unable to
+import `math`. `python/tests/test_udf_extension_import.py` closes that
+hole: a fixture importing `math` and `re` **at module level**, plus a
+deterministic witness that the C accelerator is loaded
+(`json.decoder.scanstring.__module__ == "_json"`, not a timing), plus a
+byte-for-byte comparison of the two arms. Reverting the loader flag
+makes all five fail.
+
+**The loader policy is recorded, not incidental.** The helper's exported
+dynamic symbols were inspected: 15 of them, all prefixed `fr_udf_*`.
+Symbol visibility is **not** treated as a security boundary here — the
+boundary is the separate process, the interpreter's isolated config,
+and the explicit root allowlist.
+
+**This was a Python-frontend drift from the bash reference.** The bash
+side's helper runner `fr_udf_fork` is *linked* against libpython, so
+its symbols were global from the start and extension imports always
+worked there; the bash frontend does not use `_forkrun_cleanroom` at
+all. The fix restores parity with the frozen reference rather than
+inventing a policy.
+
+**Not claimed.** The `mode="udf"` **fallback** defect is separate and
+still open: with a helper built, `mode="udf"` raises
+`NotImplementedError` unless the route is explicitly selected, rather
+than taking the documented in-process fallback. The route stays
+**opt-in**, and the default-on decision stays uncommitted.
+`dev/supervisor/UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` has the full
+analysis.
+
 ## Unreleased — the Python-UDF helper ships in a per-minor wheel
 
 **Packaging, no API change.** The cleanroom's optional Python-UDF helper

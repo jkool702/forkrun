@@ -1,11 +1,23 @@
 # The cleanroom's `map-udf` route cannot import C extension modules
 
-**Status:** OPEN — a defect, found 2026-10-20 while preparing the
-RSS-instrumented A/B that the UDF default-on decision needs.
-**Severity:** the route is unusable for realistic UDFs, and it fails
-**silently**.
+**Status:** the extension-import half is **FIXED** (see §9) — the loader
+policy changed to `RTLD_GLOBAL` at the real helper load, with a
+mutation-checked regression test. **The `mode="udf"` fallback defect in
+§6 is still OPEN** and is deliberately a separate work order.
+**Severity (as found):** the route was unusable for realistic UDFs, and
+it failed **silently**.
 **Blocks:** any default-on decision for `map-udf`. The route is
-currently opt-in and must stay that way until this is fixed.
+currently opt-in and must stay that way until §6 is fixed and the
+release gates are cleared.
+
+> **Summary of the fix.** The launcher loaded the per-minor helper with
+> `RTLD_LOCAL`, so libpython's symbols never entered the global
+> namespace and **no CPython extension module could be imported** in the
+> isolated interpreter. The route is now at **parity with the in-process
+> path** (0.975x–1.038x, was 3.65x–4.59x slower) and keeps its memory
+> advantage. `math`, `re`, `numpy` and the `json` C accelerator all work
+> in the cleanroom now.
+
 
 ---
 
@@ -85,6 +97,22 @@ so libpython's symbols are global from the start, and the probe
 imports `math`, `re` and `numpy` fine. The launcher is **not** linked
 to libpython (`ldd _forkrun_cleanroom` shows no libpython), and that is
 the only difference between the two paths.
+
+### 2.1 This was a PYTHON-frontend drift from the bash reference
+
+The project's rule is that the **bash frontend is the frozen
+reference**. On this point the bash side was right and the Python
+frontend had drifted:
+
+- `fr_udf_fork` — the bash side's helper runner — is **linked against
+  libpython** (`ldd fr_udf_fork` shows `libpython3.14.so.1.0`), so its
+  symbols are global from the start and extension imports work.
+- The bash frontend does not use `_forkrun_cleanroom` at all, so the
+  defect was **Python-frontend-only**.
+
+The fix restores parity with the reference rather than inventing a new
+policy: the Python launcher now gets libpython into the global
+namespace the same way the bash runner already had it.
 
 ### The worker's `sys.path` is fine — it is the symbol scope that is not
 
@@ -191,33 +219,51 @@ imports a C extension (`math`, or better `re` — stdlib, always
 present) and asserts the UDF's records come back. Reverting the fix
 must make it fail.
 
-## 5. The proposed fix (NOT applied — it needs a review)
+## 5. The fix
 
-Two candidates, in the launcher (`forkrun_cleanroom.c`):
+Two candidates were considered. **Option (b) was chosen** — load the
+real helper with `RTLD_GLOBAL` — after external review:
 
-**(a) Promote libpython to the global scope, and only libpython.**
-After the helper is loaded, find libpython's path from a symbol it
-exports (`dladdr` on a libpython symbol, or read the helper's
-`DT_NEEDED`) and `dlopen(that_path, RTLD_NOW | RTLD_GLOBAL)`. The
-helper's own symbols stay local.
+> *"The decisive point is that the problem isn't merely that the
+> helper's symbols are local. The embedded interpreter needs its
+> `libpython` symbols visible to subsequently loaded extension modules."*
+> *"CPython's 3.8 release notes say that on Unix, when Python is
+> embedded, `libpython` must not be loaded with `RTLD_LOCAL`; it must be
+> loaded with `RTLD_GLOBAL`... because C extensions no longer generally
+> link directly against `libpython` on Unix."*
 
-**(b) `dlopen(helper_path, RTLD_NOW | RTLD_GLOBAL)`.**
-One word. In glibc this also promotes the helper's dependencies
-(libpython) into the global scope. Simplest, but it widens the global
-symbol scope to the helper's symbols too.
+Option (a) (promote only libpython, discovering its path at runtime) is
+retained as the **fallback design**, to be used only if the one-flag
+approach turns out to be unsafe in some supported environment.
 
-**Note on the security posture.** Today the accidental `RTLD_LOCAL`
-behaviour *is* a hardening property — no extension module can load at
-all. **That is not a defensible hardening**: it makes the route unable
-to run real UDFs, and it is an accident of the dlopen flag rather than
-a decision. Whatever is chosen should be recorded as a deliberate
-decision, with the trade stated: extension modules become loadable in
-the isolated interpreter. The isolation boundary itself (a separate
-interpreter, an explicit root allowlist, `isolated=1`, `safe_path=1`)
-is unaffected.
+### 5.1 The change
 
-The **disposable probe** dlopen at `forkrun_cleanroom.c:993` should
-stay `RTLD_LOCAL` — it is a throwaway.
+`forkrun_cleanroom.c`, the real helper load (was line 1079):
+
+```c
+-    hu = dlopen(helper_path, RTLD_NOW | RTLD_LOCAL);
++    hu = dlopen(helper_path, RTLD_NOW | RTLD_GLOBAL);
+```
+
+**The disposable probe load keeps `RTLD_LOCAL`** — it is a throwaway
+child whose only job is to prove the artifact loads. The plugin probe
+and the substrate load are also unchanged (neither is CPython-linked).
+
+### 5.2 The loader policy, recorded
+
+The wider symbol scope is confined to **this launcher's own address
+space**: the launcher is a separate, `exec`'d process, so the caller's
+Python process is untouched.
+
+The helper's exported dynamic symbols were inspected: **15 of them, all
+prefixed `fr_udf_*`** (`nm -D --defined-only`), so the added collision
+surface is negligible. **Symbol visibility is not treated as a security
+boundary here** — the boundary is the separate process, the
+interpreter's isolated config, and the explicit root allowlist. The
+review was explicit that "the claim of no real security downside is too
+absolute", and that is why the trade is recorded here rather than left
+implicit in a flag.
+
 
 ## 6. A second, smaller defect found alongside it
 
@@ -253,28 +299,103 @@ A fix would make `_coerce_payload`'s helper-present branch conditional
 on the `map-udf` route actually being selected, so the in-process
 fallback is taken when it is not.
 
-## 7. Proposed work order
+## 7. Work orders
 
 **WO-PY-UDF-EXTENSION-IMPORT-1 — the cleanroom's `map-udf` route must
-be able to import a C extension module.**
+be able to import a C extension module.** — **DONE** (§9).
 
-- Fix the symbol scope (option (a) or (b) in §5), with the security
-  trade recorded.
-- Add a mutation-checked regression test: a UDF fixture that imports
-  `math` (or `re`) and asserts the records come back. **Reverting the
-  fix must fail it.**
-- The existing fixture's purity is the reason this was invisible; say so
-  in the test's docstring, so the next person does not assume "the
-  suite is green" means "imports work".
+- Fix the symbol scope: **option (b)**, `RTLD_GLOBAL` at the real
+  helper load, the disposable probe left alone.
+- Mutation-checked regression test: `python/tests/test_udf_extension_import.py`.
 - Rebuild the launcher and re-run the full gate.
 
 **WO-PY-UDF-FALLBACK-1 — `mode="udf"` must fall back to the in-process
 path when the `map-udf` route is not selected** (§6), with a
-mutation-checked test.
+mutation-checked test covering BOTH the helper-present-but-disabled and
+the helper-absent cases. — **OPEN**, deliberately a separate fix and a
+separate commit.
 
-Both are prerequisites for reviewing `map-udf` for default-on. Neither
+Both were prerequisites for reviewing `map-udf` for default-on. Neither
 is a code problem in the *product's* design; both are defects in the
 plumbing around it.
+
+## 9. The fix, the test, and the re-measurement
+
+### 9.1 The regression test
+
+`python/tests/test_udf_extension_import.py` — 5 tests. The assertions
+are **deterministic, not wall-clock thresholds**:
+
+| test | what it pins |
+|---|---|
+| `test_a_udf_can_import_a_c_extension` | a fixture importing `math` and `re` **at module level** returns every record, with the values `math.sqrt` computed **in the worker** |
+| `test_no_batch_is_poisoned` | `last_run_stats()` shows zero poisoned batches and completed == total — the silent-empty failure mode |
+| `test_the_json_c_accelerator_is_loaded` | `json.decoder.scanstring.__module__ == "_json"` — the C scanner, not the pure-Python fallback. An exact witness, not a timing |
+| `test_json_still_works` | json still functions |
+| `test_the_cleanroom_and_in_process_results_are_byte_identical` | the two arms agree byte for byte, so the route does not change what the UDF computes |
+
+The fixture imports the extensions **at module level** on purpose: that
+is how a real UDF is written, and it is the strictest form — a
+module-level import failure takes down every function in the module.
+
+### 9.2 The mutation check
+
+Reverting the launcher to `RTLD_LOCAL`, rebuilding, and re-running the
+file: **5 of 5 tests FAIL**. Restoring `RTLD_GLOBAL` and rebuilding:
+**5 of 5 pass.** The test is not vacuous.
+
+### 9.3 The reviewer's acceptance conditions, and how each was met
+
+| condition | how it was established |
+|---|---|
+| Fix the correct load site; keep the probe's `RTLD_LOCAL` | `forkrun_cleanroom.c`: the real load is now `RTLD_GLOBAL`; the disposable probe (993), the plugin probe (2703) and the substrate (2790) are unchanged |
+| Prove native extensions work | a cleanroom UDF importing `math`, `re` **and `numpy` (2.4.6)** now returns all expected records, 0 poisoned |
+| Catch the original failure | the mutation check in §9.2: reverting the flag fails all 5 tests |
+| Prove JSON acceleration works | `json.decoder.scanstring.__module__ == "_json"` from inside the UDF; `json.loads` 13.19us -> **2.39us** |
+| Preserve output semantics | the two arms are byte-identical over the whole corpus; 0 poisoned batches |
+| Validate the claimed performance benefit | re-measured with the arms **alternating** — see §9.4 |
+
+### 9.4 The re-measurement
+
+Same payload, same corpus, same arms, **arms alternating per rep**, 5
+reps, no sampler running:
+
+| workers | in-process | cleanroom | ratio (before fix) | ratio (after fix) |
+|---|---|---|---|---|
+| 1 | 3.361 s | 3.276 s | 4.59x | **0.975x** |
+| 2 | 1.762 s | 1.772 s | 4.35x | **1.006x** |
+| 3 | 1.191 s | 1.218 s | 4.36x | **1.023x** |
+| 4 | 0.917 s | 0.911 s | 4.31x | **0.993x** |
+| 8 | 0.487 s | 0.499 s | 4.18x | **1.026x** |
+| 14 | 0.329 s | 0.329 s | 3.89x | **0.998x** |
+| 28 | 0.323 s | 0.336 s | 3.65x | **1.038x** |
+
+**The route is at parity with the in-process path, within ±4%.** The
+missing C accelerator was the entire gap.
+
+**No 4.6x promise is made**: the reviewer was right that the
+microbenchmark only implicates the accelerator. What is measured is the
+end-to-end result on this workload, and it is parity.
+
+Memory is **unchanged** by the fix (it is structural — the route never
+inherits the caller's heap):
+
+| inflated parent, 28 workers | tree RSS | tree PSS |
+|---|---|---|
+| in-process | 16,403 MB | 647 MB |
+| cleanroom | **1,133 MB** | **428 MB** |
+
+(Before the fix the same cells read 16,392 / 1,169 MB and 698 / 440 MB —
+the same picture within run-to-run variation.)
+
+### 9.5 What this leaves
+
+The route is now **strictly better than the in-process path**: the same
+speed, less memory, and a UDF that keeps its extensions. The two
+remaining obstacles to a default-on decision are the **fallback defect
+(§6)**, the **per-minor release wheel build**, and the **`auditwheel`
+verdict** — and the route stays **opt-in** until those are done.
+
 
 ## 8. Reproduction
 

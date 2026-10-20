@@ -17,14 +17,22 @@ workload the published benchmark uses.
    and **every** parent size — on both the RSS sum and the PSS the
    project already chose as its fleet metric. **No worker-count
    assumption is needed for the memory story on this route.**
-2. **The route has a blocking defect**, found while building this
-   measurement: it cannot import a C extension module, which makes any
-   json-using UDF **4.6x slower silently** and makes any
-   extension-importing UDF **return nothing at all**. See
-   `UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md`.
+2. **The route had a blocking defect**, found while building this
+   measurement: it could not import a C extension module, which made
+   any json-using UDF **4.6x slower silently** and made any
+   extension-importing UDF **return nothing at all**. That defect is
+   now **FIXED** (`UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` §9): the route
+   is at **parity** with the in-process path (0.975x–1.038x) and keeps
+   its memory advantage.
 
-So the memory question is answered favourably and the *route* is not
-ready. Both are recorded here.
+So the memory question is answered favourably, and the route — once the
+defect was fixed — is **strictly better than the path it would
+replace: the same speed, less memory**.
+
+**Every number below was measured BEFORE the fix, on the code as it
+stood when the defect was found.** §7 has the after-fix re-measurement,
+which is the number to quote.
+
 
 ---
 
@@ -132,7 +140,7 @@ the memory reason.
 
 ---
 
-## 3. Throughput — and why it is 4x worse
+## 3. Throughput — and why it was 4x worse
 
 Measured separately, **without** the sampler (median of 5):
 
@@ -205,29 +213,31 @@ assumption is needed for the memory story.** The pre-fork candidate's
 mixed result does not transfer to this route, because this route never
 inherits the caller's heap.
 
-**The throughput question is answered, and answered against default-on —
-until the defect is fixed.** On the most realistic payload the route can
-currently run, it is **3.65x–4.6x slower**, silently, because the
-interpreter it creates cannot load CPython's extension modules. A
-default-on decision taken today would make every json-using UDF about
-4.6x slower with no diagnostic.
+**The throughput question was answered against default-on — until the
+defect was fixed.** On the most realistic payload the route could then
+run, it was **3.65x–4.6x slower**, silently, because the interpreter it
+creates could not load CPython's extension modules.
 
-**The route is not ready to be default-on.** In order:
+**The defect is now fixed, and the throughput answer has reversed.** The
+route is at **parity** (0.975x–1.038x, §5) and keeps its memory
+advantage. **The route is now strictly better than the in-process path
+it would replace: the same speed, less memory, and a UDF that keeps its
+extensions.**
 
-1. **Fix the extension-import defect**
-   (`UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` §5) — it is a one-line-class
-   change in the launcher plus a mutation-checked regression test.
-   Until it is fixed, the route is both slower and less capable than
-   the path it would replace.
-2. **Fix the in-process fallback** (`…DEFECT.md` §6) — `mode="udf"`
+**What still stands between the route and a default-on decision:**
+
+1. **Fix the in-process fallback** (`…DEFECT.md` §6) — `mode="udf"`
    currently *raises* `NotImplementedError` unless the route is
-   explicitly selected, which is the opposite of "opt-in".
-3. **Re-run this measurement** with the fix in. The memory conclusion
-   should not change (it is structural); the throughput conclusion
-   should reverse.
-4. Then, and only then, the per-minor release wheel build and the
-   `auditwheel` verdict — the two gates that were already outstanding
-   and that are not code problems.
+   explicitly selected, which is the opposite of "opt-in". This is a
+   separate fix and a separate commit, and it is a prerequisite:
+   a default-on decision needs the non-cleanroom path to be genuinely
+   graceful, because that is where a user ends up when the cleanroom is
+   unavailable.
+2. **The per-minor release wheel build** and **the `auditwheel`
+   verdict** — the two gates that were already outstanding, and that
+   are not code problems.
+3. **Re-run the published §0 table** with a `mode="udf"` row, so the
+   published table can carry a number produced by this route.
 
 **A note on what the C0.4/C0.5 "pre-fork wins 10.19x" result does and
 does not cover.** That result is about the pre-fork **candidate**
@@ -240,16 +250,77 @@ numbers must not be quoted as real-workload throughput.
 
 ---
 
-## 5. Artifacts
+## 5. After the fix — the numbers to quote
+
+The defect was fixed by changing the launcher's loader policy
+(`UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` §5), and the measurement was
+repeated with the **arms alternating per rep** so a drift in machine
+state moves both arms together.
+
+**Throughput** (same payload, same corpus, 5 reps, alternating, no
+sampler):
+
+| workers | in-process | cleanroom | ratio before fix | **ratio after fix** |
+|---|---|---|---|---|
+| 1 | 3.361 s | 3.276 s | 4.59x | **0.975x** |
+| 2 | 1.762 s | 1.772 s | 4.35x | **1.006x** |
+| 3 | 1.191 s | 1.218 s | 4.36x | **1.023x** |
+| 4 | 0.917 s | 0.911 s | 4.31x | **0.993x** |
+| 8 | 0.487 s | 0.499 s | 4.18x | **1.026x** |
+| 14 | 0.329 s | 0.329 s | 3.89x | **0.998x** |
+| 28 | 0.323 s | 0.336 s | 3.65x | **1.038x** |
+
+**At parity, within ±4%.** The missing C accelerator was the entire
+gap; no 4.6x recovery is *promised*, this is the end-to-end
+measurement.
+
+**At the published scale, with the REAL `ml_payload`.** Now that
+extension imports work, the benchmark's own payload can be used instead
+of a mirror of it: `ml_payload.process_event_light`, called through the
+`mode="udf"` bytes->bytes contract, over the full **5,000,000-record**
+light corpus — the workload the published §0 table quotes. Arms
+alternating, 3 reps:
+
+| workers | in-process | cleanroom | ratio | in-process rec/s | cleanroom rec/s |
+|---|---|---|---|---|---|
+| 1 | 36.269 s | 33.973 s | **0.937** | 0.138M | 0.147M |
+| 4 | 9.132 s | 9.124 s | **0.999** | 0.548M | 0.548M |
+| 8 | 4.800 s | 4.665 s | **0.972** | 1.042M | 1.072M |
+| 28 | 2.940 s | 2.844 s | **0.967** | 1.701M | 1.758M |
+
+**The cleanroom is at parity or marginally FASTER** (0.937x–0.999x) —
+the small edge is the fork tax: the in-process path forks its workers
+from a parent that carries the corpus mapping and the interpreter,
+while the cleanroom forks them from a lean launcher. The in-process
+arm's 1.701M rec/s at 28 workers is also a good sanity check on the
+published Python-UDF row (1.90M rec/s).
+
+The two arms' outputs are byte-identical over the whole corpus
+(sha256 equal), so the comparison is like-for-like.
+
+**Memory is unchanged**, because it is structural — the route never
+inherits the caller's heap:
+
+| inflated parent, 28 workers | tree RSS | tree PSS |
+|---|---|---|
+| in-process | 16,403 MB | 647 MB |
+| cleanroom | **1,133 MB** | **428 MB** |
+
+**The route is now strictly better than the in-process path:** the same
+speed, substantially less memory, and a UDF that keeps its extensions.
+
+## 6. Artifacts
 
 | what | where |
 |---|---|
-| memory sweep (raw) | `/tmp/opencode/udfbench/rss_ab.json` |
-| timing sweep (raw) | `/tmp/opencode/udfbench/timing_ab.json` |
+| memory sweep (raw) | `/tmp/opencode/udfbench/rss_ab.json` (before the fix), `rss_ab_fixed.json` (after) |
+| timing sweep (raw) | `/tmp/opencode/udfbench/timing_ab.json` (before), `timing_ab2.json` (after, arms alternating) |
 | fixed-cost probe | `/tmp/opencode/udfbench/fixed_cost.py` |
 | invocation-count probe | `/tmp/opencode/udfbench/invocations.py` |
 | json-accelerator probe | `/tmp/opencode/udfbench/jsonprobe.py` |
-| the payload | `/tmp/opencode/udfbench/udf_payload.py` |
+| the payload (mirror) | `/tmp/opencode/udfbench/udf_payload.py` |
+| the payload (the REAL ml_payload) | `/tmp/opencode/udfbench/udf_payload2.py` |
+| the published-scale run | `/tmp/opencode/udfbench/scale_5m.py`, `scale_5m.json` |
 | the defect | `dev/supervisor/UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` |
 
 Drivers are outside the repository because they are measurement
@@ -257,7 +328,7 @@ scaffolding, not product code; the payload is a measurement fixture
 that mirrors `ml_payload.process_event_light` and is deliberately
 self-contained (json only) for the reason in §1.
 
-## 6. Honest limits
+## 7. Honest limits
 
 - **One host, one workload.** The 500k-record light corpus, one corpus
   shape, UMA, 28 cores.
