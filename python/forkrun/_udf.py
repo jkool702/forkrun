@@ -158,6 +158,52 @@ class UDFError(Exception):
     """UDF mode is unavailable or misconfigured."""
 
 
+def freethreaded_interpreter(suffix=None, gil_disabled=None) -> bool:
+    """Is THIS interpreter a free-threaded (no-GIL) CPython build?
+
+    Two independent signals, because either alone could be absent on
+    some build: `Py_GIL_DISABLED` in the build config (3.13+), and the
+    `t` in the extension suffix (`cpython-314t-...`).
+
+    `suffix` and `gil_disabled` are injectable so the RULE can be
+    tested for a free-threaded configuration on a GIL host, which is
+    the only free-threaded interpreter this repository has.
+
+    WHY THE HELPER ROUTE DECLINES FREE-THREADED CPYTHON.
+
+    A free-threaded CPython links `libpython3.Xt.so.1.0`; a GIL one
+    links `libpython3.X.so.1.0`. Different sonames, so a helper built
+    for one cannot be LOADED by the other -- the version barrier
+    compares only major.minor (the build stamp carries no
+    free-threading bit), so the two flavours of the SAME minor are
+    indistinguishable to it.
+
+    Declining the flavour here is what makes "not supported" TRUE
+    rather than only a packaging policy: the capability reports False,
+    the launcher is never handed a helper to load, and the route
+    degrades to the in-process path -- which is slower and correct.
+
+    The reasons are structural, not caution. The helper links a
+    different `libpython` soname; the C0.5 interpreter matrix fetches
+    GIL interpreters only, so there is no measured evidence for the
+    free-threaded path; and the cleanroom launcher has never been
+    exercised against a free-threaded build. Shipping it would be
+    shipping an UNMEASURED configuration.
+
+    The packaging asks the SAME question and must get the SAME answer,
+    so setup.py loads this module by path rather than keeping a second
+    copy of the rule. A test asserts the two agree.
+    """
+    if gil_disabled is None:
+        gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+    if gil_disabled:
+        return True
+    if suffix is None:
+        suffix = sysconfig.get_config_var("EXT_SUFFIX") or ""
+    minor = "%d%d" % sys.version_info[:2]
+    return ("cpython-%st-" % minor) in suffix
+
+
 def candidate_helper_path():
     """The helper that WOULD be used, ignoring the incompatibility cache.
 
@@ -195,6 +241,16 @@ def helper_path():
     # means here: absence is already a reported, handled condition that
     # falls back to the in-process path.
     if os.environ.get("FORKRUN_NO_UDF"):
+        return None
+
+    # Free-threaded CPython is DECLINED for this route (see
+    # freethreaded_interpreter()). The version barrier cannot tell the
+    # two flavours of a minor apart -- the build stamp carries only
+    # major.minor -- so the decision has to be made HERE, where the
+    # running interpreter is known. Declining here is what makes the
+    # capability honest and keeps the launcher from ever being handed a
+    # helper it cannot load.
+    if freethreaded_interpreter():
         return None
 
     here = os.path.dirname(os.path.abspath(__file__))

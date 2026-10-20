@@ -240,7 +240,26 @@ coupling — without needing a second interpreter or building a wheel.
 
 ### 4a. The packaging tests, and the ABI half of the contract
 
-`python/tests/test_udf_packaging.py` now has **10 tests**, and they
+**A follow-up review found one more inconsistency, and it was in the
+policy rather than the code.** The packaging declined a free-threaded
+helper, but the RUNTIME would still have discovered and used one: the
+version barrier compares only `major.minor` (the build stamp carries no
+free-threading bit), so the two flavours of the same minor are
+indistinguishable to it. "Not supported" was therefore a packaging
+statement, not a fact.
+
+It is now a fact, and the policy lives in ONE place:
+`forkrun/_udf.py` gained `freethreaded_interpreter()`, and the runtime
+refuses a free-threaded interpreter's helper. `setup.py` asks the
+runtime's answer by loading that module by path (it has no relative
+imports, so no package import is needed), rather than keeping a second
+copy of the rule. A test asserts the two layers AGREE.
+
+The consequence is that on a free-threaded interpreter the capability
+reports False, the launcher is never handed a helper to load, and the
+route degrades to the in-process path.
+
+`python/tests/test_udf_packaging.py` now has **14 tests**, and they
 exercise the values `setup.py` ACTUALLY computes — the loader executes
 setup.py's real module-level code with `setup()` stubbed out, so the
 tag under test is the real one rather than a re-implementation of the
@@ -256,7 +275,13 @@ the tag is WRITTEN — pip consults the tag set:
 - a free-threaded helper is refused by the detector;
 - `cp314-cp314t` and `cp314-cp314` are mutually exclusive across the two
   interpreters, so the current "not supported yet" position is a policy
-  and not a limitation of the tagging.
+  and not a limitation of the tagging;
+- the packaging's behaviour on a **simulated free-threaded build** (the
+  build config and the extension suffix are both rewritten, so the
+  detection sees what it would see on a real one): no helper, no
+  per-minor tag, no ABI tag;
+- the runtime declines a free-threaded interpreter, and the packaging and
+  the runtime agree about it.
 
 **Mutation check:** reverting the ABI tag to `none` — the exact bug the
 review found — fails **2** of the 10 tests. The tests are not vacuous.

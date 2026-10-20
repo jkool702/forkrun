@@ -60,22 +60,19 @@ CR_NAME = "_forkrun_cleanroom"
 def _freethreaded_interpreter():
     """Is THIS interpreter a free-threaded (no-GIL) CPython build?
 
-    Two independent signals, because either alone could be absent:
-    `Py_GIL_DISABLED` in the build config (3.13+), and the `t` in the
-    extension suffix (`cpython-314t-...`).
-
-    WHY THIS MATTERS. A free-threaded CPython links
-    `libpython3.14t.so.1.0`; a GIL one links `libpython3.14.so.1.0`.
-    Different sonames, so the helper built for one cannot be loaded by
-    the other -- and a wheel tagged `cp314` (which does not distinguish
-    them) would be offered to both.
+    Delegates to the RUNTIME's answer rather than keeping a second copy
+    of the rule: the packaging and the runtime must agree about which
+    configurations are supported, and two copies of that rule is how
+    they drift. `forkrun/_udf.py` has no relative imports, so it can be
+    loaded by path without importing the package (whose __init__ is
+    Linux-only and would fail on a non-Linux builder).
     """
-    import sysconfig
-    if sysconfig.get_config_var("Py_GIL_DISABLED"):
-        return True
-    suffix = sysconfig.get_config_var("EXT_SUFFIX") or ""
-    minor = "%d%d" % sys.version_info[:2]
-    return ("cpython-%st-" % minor) in suffix
+    import importlib.util
+    path = os.path.join(REPO_ROOT, "python", "forkrun", "_udf.py")
+    spec = importlib.util.spec_from_file_location("forkrun._udf_abi", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.freethreaded_interpreter()
 
 
 def _udf_helper_for_this_interpreter(pkg_dir=None, suffix=None):
@@ -107,7 +104,7 @@ def _udf_helper_for_this_interpreter(pkg_dir=None, suffix=None):
     minor = "%d%d" % sys.version_info[:2]
     if ("cpython-%st-" % minor) in suffix:
         return None
-    if sysconfig.get_config_var("Py_GIL_DISABLED"):
+    if _freethreaded_interpreter():
         return None
     name = "_fr_udf" + suffix
     if not os.path.exists(os.path.join(pkg_dir, name)):

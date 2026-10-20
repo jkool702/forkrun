@@ -62,7 +62,7 @@ sys.path.insert(0, _HERE)
 REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
 
 
-def _load_setup_module():
+def _load_setup_module(freethreaded=False):
     """setup.py's REAL module-level state, with setup() stubbed out.
 
     The point is to test the values setup.py ACTUALLY computes -- the
@@ -70,8 +70,12 @@ def _load_setup_module():
     re-implementation of the rule, which would be a test of the test.
 
     setup.py calls setup() at import, so setuptools.setup is stubbed
-    before the source is executed. The extraction is AST-based: a regex
-    over a docstring-heavy file is a trap (and was one).
+    before the source is executed.
+
+    `freethreaded=True` makes the interpreter LOOK free-threaded (the
+    build config and the extension suffix are both rewritten), so the
+    free-threaded policy can be verified on a GIL host -- which is the
+    only kind of interpreter this repository has.
     """
     import setuptools
     path = os.path.join(REPO_ROOT, "setup.py")
@@ -79,11 +83,24 @@ def _load_setup_module():
         src = fh.read()
     real_setup = setuptools.setup
     setuptools.setup = lambda *a, **k: None
+    real_cfg = sysconfig.get_config_var
+    if freethreaded:
+        minor = "%d%d" % sys.version_info[:2]
+
+        def fake_get_config_var(name):
+            if name == "Py_GIL_DISABLED":
+                return 1
+            if name == "EXT_SUFFIX":
+                return (real_cfg(name) or "").replace(
+                    "cpython-%s" % minor, "cpython-%st" % minor)
+            return real_cfg(name)
+        sysconfig.get_config_var = fake_get_config_var
     try:
         ns = {"__file__": path, "__name__": "setup_under_test"}
         exec(compile(src, path, "exec"), ns)
     finally:
         setuptools.setup = real_setup
+        sysconfig.get_config_var = real_cfg
     for key in ("_udf_helper_for_this_interpreter", "UDF_HELPER",
                 "WHEEL_PYTHON_TAG", "WHEEL_ABI_TAG"):
         assert key in ns, "%s not found in setup.py" % key
@@ -91,6 +108,20 @@ def _load_setup_module():
 
 
 _SETUP = _load_setup_module()
+
+
+def _load_runtime_module():
+    """forkrun/_udf.py, loaded by path (it has no relative imports)."""
+    import importlib.util
+    path = os.path.join(REPO_ROOT, "python", "forkrun", "_udf.py")
+    spec = importlib.util.spec_from_file_location("forkrun._udf_under_test",
+                                                  path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_RUNTIME = _load_runtime_module()
 
 #: A platform tag to build the compatibility tags against. The exact
 #: platform does not matter for the question being asked (does an
@@ -128,12 +159,114 @@ class TestUdfWheelTagRule(unittest.TestCase):
     def _detect(self):
         return _SETUP["_udf_helper_for_this_interpreter"](self.d)
 
-    def test_the_helper_for_this_interpreter_is_detected(self):
-        name = "_fr_udf" + self.suffix
+    def _gil_suffix(self):
+        """The GIL extension suffix for this interpreter's MINOR.
+
+        Deliberately NOT the host's own suffix: the rule under test is
+        "a GIL helper for this minor is detected", and that must hold
+        whether the suite is running on a GIL or a free-threaded
+        interpreter. Using the host's suffix would make the test
+        assert the OPPOSITE of the policy on a free-threaded host --
+        the detector correctly declines a free-threaded helper there,
+        so the test would fail for doing the right thing.
+        """
+        suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+        return suffix.replace(
+            "cpython-%d%dt" % sys.version_info[:2],
+            "cpython-%d%d" % sys.version_info[:2])
+
+    def test_a_gil_helper_for_this_minor_is_detected(self):
+        # The GIL flavour of this minor IS eligible, on any host.
+        suffix = self._gil_suffix()
+        name = "_fr_udf" + suffix
         open(os.path.join(self.d, name), "wb").close()
-        self.assertEqual(self._detect(), name,
-                         "a helper built for THIS interpreter was not "
-                         "detected, so the wheel would not ship it")
+        self.assertEqual(
+            _SETUP["_udf_helper_for_this_interpreter"](self.d, suffix),
+            name,
+            "a GIL helper built for THIS minor was not detected, so the "
+            "wheel would not ship it")
+
+    def test_this_host_s_own_policy_matches_the_packaging_rule(self):
+        """What the packaging does on THIS host, asserted directly.
+
+        On a GIL host the helper is eligible; on a free-threaded host
+        it is declined and the packaging falls back to the generic
+        (helper-free) wheel. The test states the policy rather than
+        assuming it, so the suite is green -- and meaningful -- on
+        either kind of interpreter.
+        """
+        suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+        name = "_fr_udf" + suffix
+        open(os.path.join(self.d, name), "wb").close()
+        detected = _SETUP["_udf_helper_for_this_interpreter"](self.d, suffix)
+        if _RUNTIME.freethreaded_interpreter():
+            self.assertIsNone(
+                detected,
+                "this is a FREE-THREADED interpreter, so the helper "
+                "must be declined and the wheel must be the generic one")
+            self.assertIsNone(
+                _SETUP["WHEEL_PYTHON_TAG"],
+                "a free-threaded build must not produce a per-minor tag")
+        else:
+            self.assertEqual(detected, name,
+                             "a GIL helper for this minor must be "
+                             "detected on a GIL interpreter")
+            self.assertIsNotNone(
+                _SETUP["WHEEL_PYTHON_TAG"],
+                "a helper-carrying build must produce a per-minor tag")
+
+    def test_the_packaging_declines_a_free_threaded_build(self):
+        """Simulated free-threaded build: no helper, no per-minor tag.
+
+        This is the packaging's half of the policy, exercised on a GIL
+        host by making the interpreter LOOK free-threaded -- the build
+        config and the extension suffix are both rewritten, so the
+        detection sees exactly what it would see on a real one.
+        """
+        setup = _load_setup_module(freethreaded=True)
+        self.assertIsNone(
+            setup["UDF_HELPER"],
+            "a free-threaded build was about to ship a helper")
+        self.assertIsNone(
+            setup["WHEEL_PYTHON_TAG"],
+            "a free-threaded build produced a per-minor python tag")
+        self.assertIsNone(
+            setup["WHEEL_ABI_TAG"],
+            "a free-threaded build produced an ABI tag")
+
+    def test_the_runtime_declines_a_free_threaded_interpreter(self):
+        """The policy is RUNTIME, not only packaging.
+
+        The version barrier compares only major.minor -- the build
+        stamp carries no free-threading bit -- so the two flavours of
+        the same minor are indistinguishable to it. Declining here is
+        what makes "free-threaded is not supported" true end to end:
+        the capability reports False, the launcher is never handed a
+        helper to load, and the route degrades to the in-process path.
+        """
+        minor = "%d%d" % sys.version_info[:2]
+        ft_suffix = ".cpython-%st-x86_64-linux-gnu.so" % minor
+        self.assertTrue(
+            _RUNTIME.freethreaded_interpreter(suffix=ft_suffix),
+            "a free-threaded suffix was not recognised as free-threaded")
+        self.assertFalse(
+            _RUNTIME.freethreaded_interpreter(
+                suffix=".cpython-%s-x86_64-linux-gnu.so" % minor),
+            "a GIL suffix was misread as free-threaded")
+
+    def test_the_packaging_and_the_runtime_agree(self):
+        """ONE rule, two layers.
+
+        The packaging asks the runtime's answer rather than keeping a
+        second copy of it, so there is nothing to disagree about. This
+        asserts the wiring, so a future refactor that reintroduces a
+        second copy fails here.
+        """
+        self.assertIs(
+            _SETUP["_freethreaded_interpreter"](),
+            _RUNTIME.freethreaded_interpreter(),
+            "the packaging and the runtime disagree about whether this "
+            "interpreter is free-threaded")
 
     def test_no_helper_means_no_helper(self):
         self.assertIsNone(self._detect(),
