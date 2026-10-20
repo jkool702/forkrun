@@ -60,14 +60,23 @@ means "no ABI constraint", and a free-threaded 3.14 accepts
 helper in a `none`-ABI wheel would be offered to an interpreter that
 cannot load it. The wheel therefore carries the **real** ABI tag.
 
-**Free-threaded CPython is NOT supported for this helper route**, and the
-packaging declines to claim it: such a build ships no helper at all, and
-the wheel stays the generic `py3-none` one. The reasons are structural,
-not caution — the helper links a different `libpython` soname, the
-interpreter matrix fetches GIL builds only, and the cleanroom launcher
-has never been exercised against a free-threaded interpreter. Supporting
-it is a separate piece of work: distinguish `cp3XXt` in the helper
-detection and tag the wheel `cp3XX-cp3XXt`.
+**Free-threaded CPython is NOT supported for this helper route**, and
+**both layers decline it**:
+
+- the **runtime** refuses a free-threaded interpreter's helper, so the
+  capability reports False, the launcher is never handed a helper to
+  load, and the route degrades to the in-process path;
+- the **packaging** ships no helper for such a build, and the wheel
+  stays the generic `py3-none` one.
+
+The runtime has to be the one that decides, because the version barrier
+compares only `major.minor` — the build stamp carries no free-threading
+bit — and cannot tell the two flavours of a minor apart. The reasons
+for declining are structural, not caution: the helper links a different
+`libpython` soname, the interpreter matrix fetches GIL builds only, and
+the cleanroom launcher has never been exercised against a free-threaded
+interpreter. Supporting it is a separate piece of work: distinguish
+`cp3XXt` in the helper detection and tag the wheel `cp3XX-cp3XXt`.
 
 **A caveat on the source-only path.** A helper built locally into a
 source checkout is found by the runtime fallback

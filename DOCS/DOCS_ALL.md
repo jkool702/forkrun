@@ -282,9 +282,17 @@ free-threaded 3.14 a set that includes `cp314-none-<platform>` exactly
 as a GIL 3.14's does — so a GIL-built helper in a `none`-ABI wheel
 advertises compatibility with an interpreter that cannot load it.
 
-**Free-threaded CPython is NOT supported for this helper route**, and the
-packaging now declines to claim it: such a build ships no helper and
-keeps the generic `py3-none` tag. The reasons are structural, not
+**Free-threaded CPython is NOT supported for this helper route**, and
+**both layers now decline it**. The packaging ships no helper for such a
+build and keeps the generic `py3-none` tag — and so does the RUNTIME,
+which refuses a free-threaded interpreter's helper outright. The runtime
+has to be the one that decides: the version barrier compares only
+`major.minor` (the build stamp carries no free-threading bit), so the
+two flavours of a minor are indistinguishable to it, and a packaging-only
+refusal would have left a free-threaded source checkout using an
+unmeasured configuration. The policy now lives in ONE place —
+`forkrun/_udf.py` — and `setup.py` asks its answer rather than keeping
+a second copy of the rule; a test asserts the two agree. The reasons are structural, not
 caution — the helper links a different `libpython` soname, the
 interpreter matrix fetches GIL builds only, and the launcher has never
 been exercised against a free-threaded build. A wheel that DOES ship the
