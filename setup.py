@@ -30,6 +30,67 @@ SO_NAME = "libforkrun_python.so"
 # exactly this directory, and nothing used to ship it.
 CR_NAME = "_forkrun_cleanroom"
 
+# W-EXP-1 (DECISION-01 5.4 / 6.2.1): the UDF helper is a SEPARATE,
+# CPython-LINKED artifact. Two rules follow, and they are one rule:
+#
+#   * A wheel that SHIPS the helper must not claim a generic `py3` tag.
+#     The helper links libpython3.X, so the wheel is valid only for the
+#     minor it was built against. DECISION-01 6.2.1: "a wheel built from
+#     an sdist on one machine and tagged py3-none would carry a
+#     different minor than its tag claims, with nothing in the artifact
+#     to prove it."
+#   * A wheel with NO helper stays `py3-none-<platform>`, and the
+#     substrate remains interpreter-agnostic. "Keep the source-only
+#     development path honest: do not advertise a locally built helper
+#     as present in a generic ABI-independent wheel."
+#
+# The tag follows the HELPER, not the running interpreter. The helper's
+# extension suffix ENCODES the minor it was compiled against
+# (_fr_udf.cpython-314-x86_64-linux-gnu.so -> 3.14), so a helper built
+# for a different minor has a different NAME and is simply not found
+# here -- which is the property that makes this safe: a mismatched build
+# cannot produce a wheel that claims the wrong minor.
+#
+# A plain `_fr_udf.so` (no suffix) is deliberately NOT shipped: its
+# minor cannot be established from its name. The runtime fallback in
+# forkrun/_udf.py still finds it in a SOURCE CHECKOUT, so the
+# development path keeps working -- it is only the WHEEL that declines
+# to vouch for it.
+def _udf_helper_for_this_interpreter(pkg_dir=None):
+    """The UDF helper built for THIS interpreter, or None.
+
+    None means: ship no helper, and keep the generic `py3-none` tag.
+
+    `pkg_dir` is the package directory to look in; it defaults to the
+    real one. It is a parameter so the RULE can be tested directly
+    (which minor a helper was built for, and what may ship) without
+    needing a second interpreter on the box.
+    """
+    import sys
+    import sysconfig
+    if pkg_dir is None:
+        pkg_dir = PKG_DIR
+    suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+    name = "_fr_udf" + suffix
+    if not os.path.exists(os.path.join(pkg_dir, name)):
+        return None
+    # The suffix must carry THIS interpreter's minor. It normally does
+    # (cpython-314 for 3.14), and if it does not, the helper was built
+    # for something else and must not ship under this interpreter's tag.
+    tag = "cpython-%d%d" % sys.version_info[:2]
+    if tag not in suffix:
+        return None
+    return name
+
+
+UDF_HELPER = _udf_helper_for_this_interpreter()
+# cp3XX when the helper ships; None (so setuptools keeps py3) when it
+# does not. Never `py3` with a CPython-linked helper inside.
+WHEEL_PYTHON_TAG = None
+if UDF_HELPER:
+    import sys as _sys
+    WHEEL_PYTHON_TAG = "cp%d%d" % _sys.version_info[:2]
+
 # W-PY23/REL: PEP 600 manylinux policy floors, oldest first. A wheel
 # built against glibc G may claim the highest policy floor <= G:
 # claiming a floor ABOVE the symbols the binary actually needs is
@@ -222,14 +283,22 @@ setup(
     # quietly different from a source checkout, which is exactly the
     # kind of divergence the substrate .so being explicitly listed was
     # meant to prevent.
-    package_data={"forkrun": [SO_NAME, CR_NAME, "py.typed"]},
+    # CR-FIX1-I again: an artifact that is not LISTED does not ship, and
+    # a wheel install is then quietly different from a source checkout.
+    # The UDF helper is the same class of artifact as the launcher.
+    package_data={"forkrun": ([SO_NAME, CR_NAME, "py.typed"]
+                               + ([UDF_HELPER] if UDF_HELPER else []))},
     cmdclass={"build_py": BuildSubstratePy},
     # The wheel carries a compiled .so: tag it for this platform so
     # pip refuses it elsewhere (never py3-none-any). The tag is a
     # PEP 600 manylinux floor derived from the BUILD HOST's glibc —
     # see get_platform_tag(). Build inside the manylinux container to
     # get a floor below your distro's glibc (tools/build_wheel.sh).
-    options={"bdist_wheel": {"plat_name": PLATFORM_TAG}},
+    options={"bdist_wheel": dict(
+        {"plat_name": PLATFORM_TAG},
+        # cp3XX when the CPython-linked helper ships; absent otherwise,
+        # so the generic substrate wheel keeps its py3-none tag.
+        **({"python_tag": WHEEL_PYTHON_TAG} if WHEEL_PYTHON_TAG else {}))},
     python_requires=">=3.10",
     install_requires=[],
     classifiers=[

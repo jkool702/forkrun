@@ -90,7 +90,18 @@ build() {    # build <minor>  -> /tmp/pymin/root/usr/bin/udf_fork_<minor>
              'import sysconfig;print(sysconfig.get_paths()["include"])' 2>/dev/null)"
     [ -f "$inc/Python.h" ] || { echo "  $v: no headers"; return 1; }
     lib="$PREFIX/usr/lib64"
-    gcc -O2 $SAN -I"$inc" -I"$ROOT/python/forkrun" \
+    # -I"$ROOT" is REQUIRED, not cosmetic: forkrun_udf_version.h (the
+    # build stamp the launcher and the helper must agree on) lives at the
+    # REPO ROOT, and the Makefile's equivalent line has always said -I.
+    # Without it EVERY per-minor build failed on the missing header --
+    # and the failure was invisible, because the lifecycle sweep below
+    # then used the STALE driver from a previous run.
+    #
+    # Remove the old driver FIRST: a failed build must not be able to
+    # leave a previous run's binary in place to be measured as if it
+    # were fresh.
+    rm -f "$PREFIX/usr/bin/udf_fork_$v"
+    gcc -O2 $SAN -I"$inc" -I"$ROOT" -I"$ROOT/python/forkrun" \
         -o "$PREFIX/usr/bin/udf_fork_$v" \
         "$ROOT/python/forkrun/fr_udf_fork.c" "$ROOT/python/forkrun/fr_udf.c" \
         -L"$lib" "-lpython$v" -ldl -lm 2>"$WORK/build_$v.log" \
@@ -159,7 +170,9 @@ fi
 echo
 echo "Lifecyle curves per minor (needs /tmp/udfroot/myudf.py with up/touch/is_touched):"
 for v in $MINORS; do
+    # Only a driver THIS RUN produced may be measured.
     [ -x "$PREFIX/usr/bin/udf_fork_$v" ] || continue
+    [ "$PREFIX/usr/bin/udf_fork_$v" -nt "$WORK/build_$v.log" ] || continue
     if [ -n "$SAN" ]; then
         echo "  $v: lifecycle sweep skipped under sanitizers (3 trials x 2 arms x 6 minors does not fit a gate)"
         continue

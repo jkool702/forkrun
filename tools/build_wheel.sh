@@ -140,7 +140,12 @@ $RUNTIME run --rm \
 # silently shipped a wheel with a floor higher than it needs.
 step "verifying output"
 shopt -s nullglob
-WHEELS=("$OUT_DIR"/forkrun-*-none-*.whl)
+# A per-minor wheel is tagged cp3XX, because the UDF helper it carries is
+# CPython-LINKED (DECISION-01 5.4). The generic substrate wheel -- built
+# without the helper -- stays py3-none. Accept EITHER, and refuse to pick
+# between two: a build that produced both is ambiguous, and silently
+# choosing one is how the wrong artifact ships.
+WHEELS=("$OUT_DIR"/forkrun-*-py3-*.whl "$OUT_DIR"/forkrun-*-cp3??-*.whl)
 SDISTS=("$OUT_DIR"/forkrun-*.tar.gz)
 [ "${#WHEELS[@]}" -eq 1 ] || die "expected exactly 1 wheel, got ${#WHEELS[@]}"
 [ "${#SDISTS[@]}" -eq 1 ] || die "expected exactly 1 sdist, got ${#SDISTS[@]}"
@@ -209,6 +214,45 @@ if need < claimed:
 else:
     print("OK         : tag matches the binary exactly")
 PY
+
+# The wheel's PYTHON tag must agree with the helper it carries.
+#
+#   cp3XX  -> the wheel ships the UDF helper, built for THAT minor.
+#   py3    -> the wheel ships NO helper. "Keep the source-only development
+#             path honest: do not advertise a locally built helper as
+#             present in a generic ABI-independent wheel" (DECISION-01 5.4).
+#
+# A cp3XX wheel whose helper is for a different minor is a LYING tag, and
+# pip would install it on the wrong interpreter.
+python3 - "$WHEEL" <<'PYWHEEL' || exit 1
+import os, sys, zipfile
+
+wheel = sys.argv[1]
+parts = os.path.basename(wheel)[:-len(".whl")].split("-")
+# name-version[-build]-pytag-abitag-plattag
+pytag = parts[-3]
+
+with zipfile.ZipFile(wheel) as zf:
+    helpers = [n for n in zf.namelist() if "_fr_udf" in n]
+
+if pytag.startswith("cp3"):
+    minor = pytag[2:]
+    if not helpers:
+        sys.exit("wheel is tagged %s but ships no UDF helper: the tag "
+                 "promises a CPython-linked helper for %s" % (pytag, minor))
+    bad = [h for h in helpers if ("cpython-%s" % minor) not in h]
+    if bad:
+        sys.exit("wheel is tagged %s but its helper is for a different "
+                 "minor: %r" % (pytag, helpers))
+    print("OK         : tag %s matches the shipped helper %s"
+          % (pytag, helpers[0].rsplit("/", 1)[-1]))
+else:
+    if helpers:
+        sys.exit("wheel is tagged %s but ships a CPython-linked helper "
+                 "(%r): a generic ABI-independent wheel must not "
+                 "advertise one" % (pytag, helpers))
+    print("OK         : tag %s ships no helper" % pytag)
+PYWHEEL
 
 [ "$KEEP_RAW" -eq 1 ] || rm -rf "$OUT_DIR/raw"
 
