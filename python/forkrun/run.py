@@ -1469,8 +1469,9 @@ def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
             inproc_kwargs = dict(kwargs, mode=new_mode)
             yield from _guarded_gen(
                 _signal_guard(inproc_kwargs.get("signal_policy", "default")),
-                _ingest_stream_reactor_gen(new_payload, source,
-                                           **inproc_kwargs))
+                _stream_reactor_gen(new_payload, source,
+                                    _execute_ingest_stream_reactor,
+                                    **inproc_kwargs))
             return
         yield first
         yield from cleanroom
@@ -5452,19 +5453,24 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                     "stream() call (%s) \u2014 using the in-process path."
                     % (_why,), UserWarning, stacklevel=3)
         if orchestrator:
-            return _guarded_gen(
-                _signal_guard(kwargs.get("signal_policy", "default")),
-                _ingest_stream_reactor_gen(payload, source, **kwargs))
-        return _guarded_gen(
-            _signal_guard(kwargs.get("signal_policy", "default")),
-            _ingest_stream_gen(payload, source, **kwargs))
-    if orchestrator:
-        return _guarded_gen(
-            _signal_guard(kwargs.get("signal_policy", "default")),
-            _stream_reactor_gen(payload, source, **kwargs))
+            gen_fn = _stream_reactor_gen
+            executor = _execute_ingest_stream_reactor
+        else:
+            gen_fn = _stream_gen
+            executor = _execute_ingest_stream
+    else:
+        if orchestrator:
+            gen_fn = _stream_reactor_gen
+            executor = _execute_streaming_reactor
+        else:
+            gen_fn = _stream_gen
+            executor = _execute_streaming
+    # ONE return for the four combinations: the four helpers differed
+    # only in which executor they ran, and the four call sites
+    # repeated the same arguments four times over.
     return _guarded_gen(
         _signal_guard(kwargs.get("signal_policy", "default")),
-        _stream_gen(payload, source, **kwargs))
+        gen_fn(payload, source, executor, **kwargs))
 
 
 def _guarded_gen(guard, gen):
@@ -5498,11 +5504,26 @@ def _guarded_gen(guard, gen):
             _sg.check()
 
 
-def _stream_gen(payload, source, **kwargs):
-    # v1 true streaming: yields blobs in worker-completion order WHILE
-    # workers run (not after collection). map() stays on the v0.5
-    # post-completion path; run() (discard/worker-sink) needs no drain.
-    yield from _execute_streaming(
+def _stream_gen(payload, source, executor, **kwargs):
+    """stream() -- ONE implementation for the plain (non-reactor) path.
+
+    THE SINGLE SOURCE OF TRUTH for the plain stream. There were two
+    helpers, one per ingest shape -- _execute_streaming (materialized
+    ingest) and _execute_ingest_stream (streaming ingest) -- and their
+    bodies were IDENTICAL apart from which executor they ran.
+
+    The OTHER frontend solves the same problem the same way: it builds
+    its worker from ONE template, with the per-flag differences
+    injected as small fragments, and assembles the result once. This
+    module cannot eval a template, and should not; one body with the
+    configuration injected is the equivalent shape, and `executor` is
+    that configuration.
+
+    v1 true streaming: yields blobs in worker-completion order WHILE
+    workers run (not after collection). map() stays on the v0.5
+    post-completion path; run() (discard/worker-sink) needs no drain.
+    """
+    yield from executor(
         payload, source,
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
         workers=_resolve_workers_numa(kwargs.get("workers")),
@@ -5511,6 +5532,39 @@ def _stream_gen(payload, source, **kwargs):
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
         c_drain=kwargs.get("c_drain", True))
+
+
+def _stream_reactor_gen(payload, source, executor, **kwargs):
+    """stream() -- ONE implementation for the reactor path.
+
+    THE SINGLE SOURCE OF TRUTH for the reactor stream. There were two
+    helpers, one per ingest shape -- _execute_streaming_reactor
+    (materialized ingest) and _execute_ingest_stream_reactor (streaming
+    ingest) -- and their bodies were IDENTICAL apart from which
+    executor they ran AND apart from one line: the materialized one
+    passed `splice=` explicitly and the ingest one relied on the
+    default. The two are equivalent here (this path is only reached
+    when mode is not "splice", so both are False), but two copies of
+    one rule is exactly how they drift. One now.
+
+    W-PY19 stream() under reactor supervision (materialized input,
+    live drain): identical ordering contract to _stream_gen, plus
+    death pipes, bounded respawn, and trap-ACK confirmation. For a
+    streaming source the live drain interleaves with the spill (pump
+    hook), the scanner death pipe, and spawn-pipe dynamic scaling.
+    """
+    yield from executor(
+        payload, source,
+        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
+        workers=_resolve_workers_numa(kwargs.get("workers")),
+        on_error=kwargs.get("on_error", "retry"),
+        strict_poison=kwargs.get("strict_poison", False),
+        mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
+        order=kwargs.get("order", "none"),
+        splice=kwargs.get("mode") == "splice",
+        c_drain=kwargs.get("c_drain", True),
+        resume=kwargs.get("resume"),
+        checkpoint_file=kwargs.get("checkpoint_file"))
 
 
 def _splice_stream_gen(source, *, bytes_, workers, on_error, nodes,
@@ -5554,41 +5608,6 @@ def _splice_stream_gen(source, *, bytes_, workers, on_error, nodes,
         on_error=on_error, strict_poison=strict_poison,
         mode="splice", nodes=nodes, order=order,
         splice=True, c_drain=c_drain)
-
-
-def _stream_reactor_gen(payload, source, **kwargs):
-    # W-PY19 stream() under reactor supervision (materialized input,
-    # live drain): identical ordering contract to _stream_gen, plus
-    # death pipes, bounded respawn, and trap-ACK confirmation.
-    yield from _execute_streaming_reactor(
-        payload, source,
-        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers_numa(kwargs.get("workers")),
-        on_error=kwargs.get("on_error", "retry"),
-        strict_poison=kwargs.get("strict_poison", False),
-        mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
-        order=kwargs.get("order", "none"),
-        splice=kwargs.get("mode") == "splice",
-        c_drain=kwargs.get("c_drain", True),
-        resume=kwargs.get("resume"),
-        checkpoint_file=kwargs.get("checkpoint_file"))
-
-
-def _ingest_stream_reactor_gen(payload, source, **kwargs):
-    # W-PY19 stream() over a streaming source under the reactor:
-    # live drain interleaved with the spill (pump hook), scanner
-    # death pipe, spawn-pipe dynamic scaling.
-    yield from _execute_ingest_stream_reactor(
-        payload, source,
-        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers_numa(kwargs.get("workers")),
-        on_error=kwargs.get("on_error", "retry"),
-        strict_poison=kwargs.get("strict_poison", False),
-        mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
-        order=kwargs.get("order", "none"),
-        c_drain=kwargs.get("c_drain", True),
-        resume=kwargs.get("resume"),
-        checkpoint_file=kwargs.get("checkpoint_file"))
 
 
 def _drain_worker_memfd(fd, state, terminal=False) -> list:
@@ -7070,20 +7089,6 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                          src_fd, must_close,
                          extra_pids=[p for p in (fallow_pid, scan_pid)
                                      if p is not None])
-
-
-def _ingest_stream_gen(payload, source, **kwargs):
-    # stream() over a streaming source: live drain interleaved with the
-    # spill (pump hook), same ordering contract as _stream_gen.
-    yield from _execute_ingest_stream(
-        payload, source,
-        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers_numa(kwargs.get("workers")),
-        on_error=kwargs.get("on_error", "retry"),
-        strict_poison=kwargs.get("strict_poison", False),
-        mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
-        order=kwargs.get("order", "none"),
-        c_drain=kwargs.get("c_drain", True))
 
 
 def _new_ingress_memfd():

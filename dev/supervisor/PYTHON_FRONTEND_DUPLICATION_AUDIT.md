@@ -176,7 +176,7 @@ is gated.
 | 3 | `_drain_worker_memfd(fd, state, terminal=)` | 2 → 1 | low | **done** |
 | 4 | `_resolve_c_loop(flag, mode, ...)` | 2 → 1 | low-med | **done** |
 | 5 | `_splice_stream_gen(..., executor=)` + one call site | 4 → 1 | med | **done** |
-| 6 | the stream-generator family, one executor parameter | 4 → 2 | med | pending |
+| 6 | the stream-generator family, one executor parameter | 4 → 2 | med | **done** |
 | 7 | `_watch_scanner` | 2 → 1 | med | pending |
 | 8 | `_maybe_fork_workers` | 3 → 1 | med-high | pending |
 
@@ -222,7 +222,53 @@ executor they reached before, and the twelve arguments are unchanged.
 No test referenced the four helper names, so nothing external moves.
 
 
-### 3.2 What steps 1-4 did and did not change
+### 3.2 What step 6 did
+
+`_stream_gen` / `_ingest_stream_gen` / `_stream_reactor_gen` /
+`_ingest_stream_reactor_gen` are the same rule written four times. The
+fold is **four -> two**, not four -> one, because the plain executors
+do not accept `resume`/`checkpoint_file` — so the plain pair and the
+reactor pair genuinely differ in their call shape. Each pair becomes
+one helper that takes the executor:
+
+```python
+    if _detect_streaming(source, kwargs.get("streaming")):
+        if orchestrator:
+            gen_fn = _stream_reactor_gen
+            executor = _execute_ingest_stream_reactor
+        else:
+            gen_fn = _stream_gen
+            executor = _execute_ingest_stream
+    else:
+        if orchestrator:
+            gen_fn = _stream_reactor_gen
+            executor = _execute_streaming_reactor
+        else:
+            gen_fn = _stream_gen
+            executor = _execute_streaming
+    return _guarded_gen(
+        _signal_guard(kwargs.get("signal_policy", "default")),
+        gen_fn(payload, source, executor, **kwargs))
+```
+
+**One thing the fold changed, deliberately.** The materialized copy
+passed `splice=` explicitly and the ingest copy relied on the default.
+They are equivalent — this path is only reached when `mode` is not
+`"splice"`, so both are `False` — but two copies of one rule is how
+they drift. The shared helper now says it once.
+
+**A bug this step introduced, and the gate caught it.** The first
+attempt hoisted the single `return` into the `if _detect_streaming(...)`
+block, so the **materialized** path fell through and `stream()`
+returned `None` — 37 errors in the targeted run. The dispatch has to
+keep the envelope's if/else and hoist only the return. The corrected
+version is what shipped; the lesson is recorded here because it is the
+same trap as the earlier "editing source while the suite runs"
+corruption: a structural change to a dispatch chain, and the only
+thing that catches it is running the thing.
+
+
+### 3.3 What steps 1-4 did and did not change
 
 - **The error messages are byte-identical.** Verified by rendering the
   old and new messages side by side: the mode message, the nodes
