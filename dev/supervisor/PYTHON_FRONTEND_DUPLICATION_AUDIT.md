@@ -525,7 +525,80 @@ and the one fix that WAS made was made in two.
   which is a different mechanism for the same rule. They are noted, not
   merged.
 
-## 8. A constraint the de-duplication work ran into
+## 8. The harness defect that looked like a production regression
+
+After the folds landed, the gate's cleanroom-**on** pass began failing
+intermittently -- and the failures were alarming:
+
+| run | failure |
+|---|---|
+| 1 | `test_yyjson_plugin` -- "reaped unexpected child -- zombie leak" |
+| 2 | `test_resume` -- the same assertion, a different test |
+| 3 | **169 failures**, cascading from `test_resume_sigint` ("SIGINT abort must checkpoint") |
+
+The moving blame and the cascade are what make this worth writing
+down. The root cause is in the test harness, not the product:
+
+```python
+def assert_no_zombies(testcase):
+    try:
+        pid = os.waitpid(-1, os.WNOHANG)
+    except ChildProcessError:
+        return
+    testcase.fail("reaped unexpected child %r -- zombie leak" % (pid,))
+```
+
+`waitpid` has three outcomes, and this conflated two of them:
+
+| result | meaning |
+|---|---|
+| `ChildProcessError` | there are no children to wait for |
+| `(0, 0)` | a child exists and has **NOT terminated** -- it is still RUNNING |
+| `(pid, status)`, pid > 0 | a terminated child was found and reaped |
+
+So a child that was still **running** was reported as a "zombie leak" --
+and because the child stayed alive, the check kept failing **every later
+test in the run**. That is the 169-failure cascade, and it is why the
+blame moved between runs: it was always the child that outlived its
+owner.
+
+`waitpid(-1, ...)` compounds it: it reaps ANY child of the test
+process, including one an **earlier** test left behind. That both
+misattributes the failure to whichever test runs next, and destroys the
+evidence that the earlier test left the child.
+
+**The fix** (`python/tests/_helpers.py`): take a `/proc` census of this
+process's direct children -- every THREAD's children -- and distinguish
+the three outcomes. A terminated child is reaped here, by pid, and
+reported as an unreaped (terminated) child. A child that is still
+running is reported as a **lifecycle leak** and is **not** reaped (it is
+still running; reaping it would be wrong). The assertion is not
+weakened: both faults were failures before and both are failures now.
+What changed is that the report names the child (pid, state, cmdline),
+and that a leftover is reported **once**, by the test that left it --
+so the real culprit is the one that fails.
+
+**And the production regression that was suspected? There wasn't one.**
+The reviewer's caution was to keep the two hypotheses independent rather
+than assume one explained the other, so the checkpoint path was isolated
+and compared directly: `test_resume_sigint`, in a **fresh process** per
+round, same substrate and environment, against the pre-change
+implementation and the changed one -- **30 rounds each, zero failures on
+both**. The SIGINT path was never broken; it was the harness reporting
+a leftover child, and blaming whichever test ran next.
+
+`python/tests/test_child_lifecycle_helper.py` pins the helper's
+behaviour on a deliberately live child, an exited-but-unreaped child, a
+fully-reaped process, and the reported-once property, so the assertion
+cannot be quietly weakened or the misattribution re-introduced.
+
+**The lesson, and it is the SSoT policy's lesson again:** a green gate
+is evidence only to the extent the gate can *see* a fault. A harness
+that misreports what it found, and blames the wrong test, does not just
+waste time -- it actively manufactures the appearance of a regression,
+in a different place each run.
+
+## 9. A constraint the de-duplication work ran into
 
 **The Python front end may not name the bash front end.** The purity
 tests (`test_reactor.TestReactorPurity.test_no_banned_tokens` and
@@ -549,7 +622,7 @@ code says only what the code needs to say:
 > not; one body with the configuration injected is the equivalent
 > shape."*
 
-## 9. What is deliberately NOT changed
+## 10. What is deliberately NOT changed
 
 - **The bash frontend.** It is the frozen reference and its
   template-plus-fragments shape is the target, not the thing to fix.

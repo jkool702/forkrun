@@ -231,6 +231,46 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## Unreleased — the child-lifecycle helper stopped blaming the wrong test
+
+**Test infrastructure, no product change.** `assert_no_zombies()` did a
+single `waitpid(-1, WNOHANG)` and reported the result as a "zombie
+leak". That conflates three outcomes, and the conflation had
+consequences beyond the wording:
+
+- `waitpid` returning `(0, 0)` means "a child exists and has **not
+  terminated**". A child that is still RUNNING is not a zombie. Worse:
+  because the child stayed alive, the check kept failing **every later
+  test in the run**. One test's leftover child failed **169 unrelated
+  tests**, and the failure MOVED between runs -- so it looked like a
+  production regression in a different place each time.
+- `waitpid(-1, ...)` reaps ANY child of the test process, including
+  one an **earlier** test left behind: that misattributes the failure
+  to whichever test runs next, and destroys the evidence that the
+  earlier test left the child.
+
+The helper now takes a `/proc` census of this process's direct
+children -- every THREAD's children -- and distinguishes the three
+outcomes: no children (pass), a child that has EXITED (reaped here, by
+pid, and reported as an unreaped terminated child), and a child still
+RUNNING (reported as a lifecycle leak, and NOT reaped -- it is still
+running). The assertion is **not** weakened: both faults were failures
+before and both are failures now. What changed is that the report
+names the child (pid, state, cmdline), and that a leftover is reported
+**once**, by the test that left it, so the real culprit is the one that
+fails.
+
+`python/tests/test_child_lifecycle_helper.py` pins the behaviour on a
+deliberately live child, an exited-but-unreaped child, a fully-reaped
+process, and the reported-once property.
+
+**The suspected production regression was not one.** The SIGINT
+checkpoint path was isolated and compared directly -- `test_resume_sigint`
+in a fresh process per round, same substrate and environment, against
+the pre-change implementation and the changed one, 30 rounds each -- and
+**both were green**. The failures were the harness reporting a leftover
+child and blaming whichever test ran next.
+
 ## Unreleased — the duplicated DECISIONS are now single points of truth
 
 **Architecture, no behaviour change intended.** A function-level scan

@@ -53,13 +53,41 @@ class TestChildLifecycleHelper(unittest.TestCase):
 
     def setUp(self):
         self._kids = []
+        self._keep = []
 
     def tearDown(self):
+        for fd in self._keep:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         for pid in self._kids:
             try:
                 os.waitpid(pid, 0)
             except (ChildProcessError, OSError):
                 pass
+
+    def _live_child(self):
+        """A child that stays ALIVE until the test releases it.
+
+        The child blocks reading a pipe the parent holds open, so its
+        lifetime is controlled rather than a race: `os.pause()` would
+        depend on a signal arriving, and the cleanup's blocking waitpid
+        would then be at the mercy of that race.
+        """
+        r, w = os.pipe()
+        self._keep.append(w)
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(w)
+                os.read(r, 1)          # returns when the parent closes w
+            except BaseException:
+                pass
+            os._exit(0)
+        os.close(r)
+        self._kids.append(pid)
+        return pid
 
     def _failing_helper(self):
         """Run the helper and return the failure message, or None."""
@@ -77,15 +105,7 @@ class TestChildLifecycleHelper(unittest.TestCase):
     def test_a_live_child_is_reported_as_running_not_as_a_zombie(self):
         """A child that has NOT terminated is a lifecycle leak, and it is
         reported as such -- not as a zombie, and not reaped."""
-        pid = os.fork()
-        if pid == 0:
-            # A child that lives until the test cleans it up.
-            try:
-                os.pause()
-            except BaseException:
-                pass
-            os._exit(0)
-        self._kids.append(pid)
+        pid = self._live_child()
         msg = self._failing_helper()
         self.assertIsNotNone(msg,
                             "a child that is still running must be "
@@ -128,14 +148,7 @@ class TestChildLifecycleHelper(unittest.TestCase):
         the test that left it, and the LATER tests are not failed by
         it. This is what stops one test's leftover from failing the
         rest of the run."""
-        pid = os.fork()
-        if pid == 0:
-            try:
-                os.pause()
-            except BaseException:
-                pass
-            os._exit(0)
-        self._kids.append(pid)
+        pid = self._live_child()
         first = self._failing_helper()
         self.assertIsNotNone(first,
                             "the test that leaves a child must fail")
