@@ -603,7 +603,46 @@ that misreports what it found, and blames the wrong test, does not just
 waste time -- it actively manufactures the appearance of a regression,
 in a different place each run.
 
-## 9. A constraint the de-duplication work ran into
+## 9. Two pre-existing failures the cleanroom-on pass still shows
+
+With the cascade gone, the cleanroom-**on** pass is down to two
+failures, and BOTH are pre-existing -- they were present in the
+cleanroom-on run *before* the harness work, with the same two names.
+They are recorded here because the improved harness makes them
+diagnosable, and because they are the next work, not this one's.
+
+**`test_claim_streaming_memory` -- a load-sensitive measurement.** The
+claim is "Streaming memory: slow consumer retains materially less than
+collect-all", and the covering test asserts the separation is under
+0.80x. Measured directly, unloaded, on this box:
+
+| run | streaming growth | collect-all growth | ratio |
+|---|---|---|---|
+| 1 | 26024 KB | 59128 KB | **0.440** |
+| 2 | 23564 KB | 60324 KB | **0.391** |
+| 3 | 24880 KB | 58304 KB | **0.427** |
+
+So the claim is accurate and the margin is wide -- but under the gate's
+load the same measurement came out at 0.82x, just over the threshold,
+and the test failed. It is a threshold that assumes an unloaded machine.
+The covering test's own comment says "the measured separation is
+0.50x", which matches what I measure; the failure mode is the LOAD, not
+a behaviour change.
+
+**`test_resume_sigint` -- a child left by the abort path.** The SIGINT
+test aborts a run mid-pipeline; the run's children are killed by the
+signal, and on that path one of them can be left terminated-but-unreaped.
+It does not reproduce in isolation: the test passes 10/10 in fresh
+processes, and driving the same flow by hand (abort, resume, expect)
+leaves no child at all. It needs the suite's timing.
+
+**What this pass did about them: made them legible.** Before, the
+cascade meant these were lost among 169 failures, each blamed on
+whichever test ran next. Now each is reported once, with the child's
+pid, state and command line, and attributed to the test that created
+it.
+
+## 10. A constraint the de-duplication work ran into
 
 **The Python front end may not name the bash front end.** The purity
 tests (`test_reactor.TestReactorPurity.test_no_banned_tokens` and
@@ -627,7 +666,7 @@ code says only what the code needs to say:
 > not; one body with the configuration injected is the equivalent
 > shape."*
 
-## 10. What is deliberately NOT changed
+## 11. What is deliberately NOT changed
 
 - **The bash frontend.** It is the frozen reference and its
   template-plus-fragments shape is the target, not the thing to fix.
