@@ -451,7 +451,65 @@ obsolete for that pair** — the nonlocal rebinding is handled by a
 helper that RETURNS the new state, which is how `_watch_numa_pipeline`
 already worked. The manifest's note is updated to match.
 
-## 7. A constraint the de-duplication work ran into
+## 7. The block-level pass: duplicated DECISIONS, not duplicated code
+
+The first audit compared whole FUNCTIONS. That is the easy case, and it
+missed the expensive one: a decision duplicated **inline**, at the point
+where the rule is applied. `tools/ssot_scan.py` (added with this pass)
+compares BLOCKS -- a function body and the body of every
+if/for/while/try/with/except -- after canonicalisation.
+
+It found the pattern in its purest form:
+
+| decision | copies | consulted the shared rule? |
+|---|---|---|
+| a helper child's death is fatal | 28 sites | **2** |
+| the C drain child's exit is a failure | 10 sites | **0** |
+| the C orderer's teardown | 6 sites | 5 |
+| the C orderer's setup | 6 sites | n/a |
+| the fallow (reaper) child's reap | 4 sites | n/a |
+| the fallow child's exit handling | 4 sites | n/a |
+| the checkpoint-on-abort handler | 2 sites | n/a |
+
+D-PORT2/D6 taught the abort-aware rule and wired it into **2 of the 28**
+places that apply it. The C drain's rule -- also a helper child's death
+-- was consulted in **none** of its 10 places. This is not a stylistic
+problem: it means a fix to either rule has to be made in a dozen places,
+and the one fix that WAS made was made in two.
+
+### 7.1 What this pass folded
+
+- **One decision point for every helper-child death**
+  (`_helper_death_excused`), now consulted by **all 24** helper-death
+  raise sites -- including the ten C-drain sites that consulted it
+  nowhere, and the two ingest-scanner sites that consulted it in five of
+  seven copies.
+- **`_raise_for_drain(status, lib)`** -- the C drain's "is this a
+  failure?" decision, ten copies -> one, with the excuse inside it.
+- **`_teardown_orderer(order_w, orderer_pid, lib)`** -- the orderer's
+  teardown, six copies -> one. The NUMA copy did not consult the
+  excuse; the helper does, so all six get it.
+- **`_spawn_c_orderer(engine_fds, out_fds)`** -- the orderer's setup,
+  six copies -> one.
+- **`_reap_fallow(fallow_pid)`** -- the reaper's reap and its
+  abnormal-exit warning, four copies -> one.
+
+### 7.2 What it did NOT fold, and why
+
+- **The fallow child's exit handling** (4 copies) -- one of them calls
+  `fr_py_fallow_phys` where the others call `fr_py_fallow_loop`. That is
+  a genuine semantic difference (the physical-NUMA variant), not drift,
+  so it stays separate until the difference is understood.
+- **The checkpoint-on-abort handler** (2 copies) -- the two sites differ
+  in their surrounding state, and the block is a 9-argument call; a
+  helper with 11 parameters would be the "big helper" the costume rule
+  warns about. It is recorded here rather than forced.
+- **The ingest-helper and helper-death watchers** -- the NUMA paths
+  already record an excused death in a per-node set rather than raising,
+  which is a different mechanism for the same rule. They are noted, not
+  merged.
+
+## 8. A constraint the de-duplication work ran into
 
 **The Python front end may not name the bash front end.** The purity
 tests (`test_reactor.TestReactorPurity.test_no_banned_tokens` and
@@ -475,7 +533,7 @@ code says only what the code needs to say:
 > not; one body with the configuration injected is the equivalent
 > shape."*
 
-## 8. What is deliberately NOT changed
+## 9. What is deliberately NOT changed
 
 - **The bash frontend.** It is the frozen reference and its
   template-plus-fragments shape is the target, not the thing to fix.

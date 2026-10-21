@@ -231,6 +231,41 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## Unreleased — the duplicated DECISIONS are now single points of truth
+
+**Architecture, no behaviour change intended.** A function-level scan
+finds duplicated code; the expensive duplication is a decision written
+out INLINE, at the point where the rule is applied, which such a scan
+does not see. `tools/ssot_scan.py` (new) compares BLOCKS -- a function
+body and the body of every if/for/while/try/with/except -- after
+canonicalisation, and it found:
+
+- the rule "a helper child's death is fatal unless an abort already
+  explained it" was consulted in **2 of 28** places that apply it;
+- the C drain's "is this a failure?" decision -- also a helper child's
+  death -- was consulted in **none** of its **10** places.
+
+Both are now single points of truth:
+
+- `_helper_death_excused()` -- consulted by **all 24** helper-death
+  raise sites, including the ten C-drain sites that consulted it
+  nowhere and the two ingest-scanner sites that consulted it in five of
+  seven copies;
+- `_raise_for_drain(status, lib)` -- the C drain's failure decision,
+  ten copies -> one, with the excuse inside it;
+- `_teardown_orderer()` -- the C orderer's teardown, six copies -> one
+  (the NUMA copy did not consult the excuse; the helper does, so all
+  six get it);
+- `_spawn_c_orderer()` -- the C orderer's setup, six copies -> one;
+- `_reap_fallow()` -- the reaper's reap and its abnormal-exit warning,
+  four copies -> one.
+
+Not folded, deliberately: the fallow child's exit handling (one copy
+calls `fr_py_fallow_phys` where the others call `fr_py_fallow_loop` --
+a genuine semantic difference, not drift), and the checkpoint-on-abort
+handler (the two sites differ in their surrounding state, and the block
+is a 9-argument call).
+
 ## Unreleased — a helper child's death is now decided in ONE place
 
 **Correctness, no API change.** The front end turns a helper child's

@@ -6673,12 +6673,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             # above); on a clean worker set a nonzero drain rc is a
             # real infrastructure error. Abandoned runs skip this
             # (teardown EPIPEs the drain → rc 5 by design).
-            if drain_status != 0 and not (
-                    os.WIFEXITED(drain_status) and
-                    os.WEXITSTATUS(drain_status) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)"
-                        % (drain_status,))
+            _raise_for_drain(drain_status, lib)
 
         try:
             npois = lib.fr_py_poisoned_count()
@@ -7091,12 +7086,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         if use_drain and exhausted and drain_status is not None:
             # Secondary to worker failures (above); abandoned runs
             # skip this (teardown EPIPEs the drain → rc 5 by design).
-            if drain_status != 0 and not (
-                    os.WIFEXITED(drain_status) and
-                    os.WEXITSTATUS(drain_status) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)"
-                        % (drain_status,))
+            _raise_for_drain(drain_status, lib)
 
         # Scanner join: strict when observed, proof-based when already
         # reaped by teardown after healthy workers + complete drain
@@ -7120,16 +7110,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                             % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
-            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
-            if fallow_st is not None and not (
-                    os.WIFEXITED(fallow_st) and
-                    os.WEXITSTATUS(fallow_st) == 0):
-                try:
-                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
-                             b"abnormally; ingress may not be fully "
-                             b"reclaimed.\n")
-                except OSError:
-                    pass
+            _reap_fallow(fallow_pid)
 
         # W-REL6-5: WARN + raise funnel through the core twin
         # (identical text; _raise_for_poisoned stash preserved).
@@ -7516,10 +7497,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 _dst = 0
             drain_status = _dst
             drain_pid = None
-            if not failed and _dst != 0 and not (
-                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)" % (_dst,))
+            if not failed:
+                _raise_for_drain(_dst, lib)
 
         if failed:
             _raise_worker_failure(failed, len(pids), on_error)
@@ -7549,16 +7528,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                             % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
-            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
-            if fallow_st is not None and not (
-                    os.WIFEXITED(fallow_st) and
-                    os.WEXITSTATUS(fallow_st) == 0):
-                try:
-                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
-                             b"abnormally; ingress may not be fully "
-                             b"reclaimed.\n")
-                except OSError:
-                    pass
+            _reap_fallow(fallow_pid)
 
         # WO-PY-REL-1/TD-09: collect indices BEFORE the poison summary,
         # because report_poison raises under strict_poison and the
@@ -7893,10 +7863,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             if _dst is None:
                 _dst = 0
             drain_pid = None
-            if not failed and _dst != 0 and not (
-                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)" % (_dst,))
+            if not failed:
+                _raise_for_drain(_dst, lib)
 
         if failed:
             _raise_worker_failure(failed, len(pids), on_error)
@@ -8129,6 +8097,98 @@ def _abort_reason_now(lib):
         return int(fn())
     except Exception:
         return None
+
+
+def _spawn_c_orderer(engine_fds, out_fds):
+    """Start the C orderer: the order pipe, the collection memfd, the child.
+
+    ONE implementation. This block was written out four times, once per
+    executor that serves an ordered stream.
+    """
+    # Imported INSIDE the function, not at module level: _reactor
+    # resolves run.py symbols lazily, so a module-level import would
+    # close the cycle.
+    from ._reactor import ORDER_PIPE_SIZE, spawn_orderer
+    order_r, order_w = os.pipe()
+    try:
+        _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ, ORDER_PIPE_SIZE)
+    except OSError:
+        pass
+    # W-REL5-E7: no tempfile fallback (floor 3.10).
+    coll_fd = os.memfd_create("forkrun_ordered")
+    orderer_pid = spawn_orderer(order_r, coll_fd, engine_fds=engine_fds,
+                                out_fds=out_fds)
+    return order_r, order_w, coll_fd, orderer_pid
+
+
+def _reap_fallow(fallow_pid):
+    """Join the fallow (reaper) child and warn on an abnormal exit.
+
+    ONE implementation. This block was written out four times.
+    """
+    st = _join_helper_bounded(fallow_pid, "fallow")
+    if st is not None and not (os.WIFEXITED(st) and
+                               os.WEXITSTATUS(st) == 0):
+        try:
+            os.write(2, b"forkrun [WARN]: ingest reaper exited "
+                     b"abnormally; ingress may not be fully "
+                     b"reclaimed.\n")
+        except OSError:
+            pass
+
+
+def _raise_for_drain(status, lib):
+    """Fail loudly on a C-drain child's bad exit -- unless an abort explains it.
+
+    ONE implementation. The C drain is a forked child, so its exit is a
+    helper death, and the decision "is this a failure?" was written out
+    TEN times, in ten executors. NOT ONE of them consulted the
+    abort-aware excuse, so the rule D-PORT2/D6 established for helper
+    deaths was never applied here at all -- and a change to it would
+    have had to be made ten times.
+
+    `status` is the child's wait status. None (not observed) and 0
+    (reaped elsewhere, which the callers' leniency already treats as
+    clean) both mean "no failure".
+    """
+    if status is None or status == 0:
+        return
+    if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
+        return
+    if not _helper_death_excused("error", False, lib):
+        raise RuntimeError("forkrun: C drain failed (status %r)" % (status,))
+
+
+def _teardown_orderer(order_w, orderer_pid, lib):
+    """Close the order pipe and join the C orderer child.
+
+    ONE implementation. This block -- close the parent's spare order
+    write end, join the orderer with a bounded wait, and fail loudly on
+    a bad exit -- was written out SIX times, in six executors. Five of
+    them consulted the abort-aware excuse before raising; the NUMA one
+    did not, so a change to the rule would have landed in five of six.
+
+    The excuse is IN this helper, so every caller gets it.
+
+    Returns the caller's new `order_w` (None once the spare is closed).
+    """
+    if order_w is not None:
+        try:
+            os.close(order_w)
+        except OSError:
+            pass
+    if orderer_pid is None:
+        return None
+    # W-REL5-B4: bounded (None => reaped elsewhere, same leniency as
+    # the old ChildProcessError branch).
+    st = _join_helper_bounded(orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
+    if st is None:
+        st = 0
+    if st != 0 and not (os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0):
+        if not _helper_death_excused("error", False, lib):
+            raise RuntimeError(
+                "forkrun: C orderer failed (status %r)" % (st,))
+    return None
 
 
 def _helper_death_excused(kind, eof_ok, lib):
@@ -8592,17 +8652,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         if use_drain:
             # Workers signal the drain; the parent keeps the spare
@@ -8719,38 +8769,12 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                     _dst = 0
                 drain_status = _dst
                 drain_pid = None
-                if _dst != 0 and not (
-                        os.WIFEXITED(_dst) and
-                        os.WEXITSTATUS(_dst) == 0):
-                    raise RuntimeError(
-                            "forkrun: C drain failed (status %r)"
-                            % (_dst,))
+                _raise_for_drain(_dst, lib)
 
         # Orderer EOF: every worker write end is closed (all workers
         # reaped) — drop the parent's spare so the orderer finishes.
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-                state.ctx["order_w"] = -1
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    if not _helper_death_excused("error", False, lib):
-                        raise RuntimeError(
-                                "forkrun: C orderer failed (status %r)"
-                                % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
 
         _reactor_poison_summary(lib, state, strict_poison)
 
@@ -9240,17 +9264,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         trap_r, trap_w = os.pipe()
 
@@ -9623,35 +9637,10 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     drain_st["alive"] = False
                     drain_st["status"] = _dst
             drain_status = drain_st["status"]
-            if drain_status is not None and drain_status != 0 and not (
-                    os.WIFEXITED(drain_status) and
-                    os.WEXITSTATUS(drain_status) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)"
-                        % (drain_status,))
+            _raise_for_drain(drain_status, lib)
 
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    if not _helper_death_excused("error", False, lib):
-                        raise RuntimeError(
-                                "forkrun: C orderer failed (status %r)"
-                                % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
         if stats is not None and reassembly is not None \
                 and not use_drain:
             stats["reassembly_max"] = reassembly.max_size
@@ -9776,17 +9765,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         trap_r, trap_w = os.pipe()
 
@@ -10107,36 +10086,15 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             if _dst is None:
                 _dst = 0
             drain_pid = None
-            if _dst != 0 and not (
-                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)" % (_dst,))
+            _raise_for_drain(_dst, lib)
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                            "forkrun: C orderer failed (status %r)"
-                            % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
 
         if helpers["scan_kind"] == "error":
-            raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (helpers["scan_code"],))
+            if not _helper_death_excused("error", False, lib):
+                raise RuntimeError(
+                        "forkrun: ingest scanner failed (status %r)"
+                        % (helpers["scan_code"],))
         if helpers["scan_kind"] is None:
             # Never observed via the death pipe (already reaped by
             # teardown after healthy workers, or still alive):
@@ -10145,21 +10103,13 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                        "forkrun: ingest scanner failed (status %r)"
-                        % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
-            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
-            if fallow_st is not None and not (
-                    os.WIFEXITED(fallow_st) and
-                    os.WEXITSTATUS(fallow_st) == 0):
-                try:
-                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
-                             b"abnormally; ingress may not be fully "
-                             b"reclaimed.\n")
-                except OSError:
-                    pass
+            _reap_fallow(fallow_pid)
 
         _reactor_poison_summary(lib, state, strict_poison)
 
@@ -10339,17 +10289,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         trap_r, trap_w = os.pipe()
 
@@ -10696,12 +10636,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     cdrain["alive"] = False
                     cdrain["status"] = _dst
             cdrain_status = cdrain["status"]
-            if cdrain_status is not None and cdrain_status != 0 and not (
-                    os.WIFEXITED(cdrain_status) and
-                    os.WEXITSTATUS(cdrain_status) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)"
-                        % (cdrain_status,))
+            _raise_for_drain(cdrain_status, lib)
 
         # Reaper EOF (same rule as the locked ingest path): drop the
         # parent's spare fallow write end now that no respawn can
@@ -10714,27 +10649,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             fallow_w = None
             state.ctx["fallow_w"] = -1
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    if not _helper_death_excused("error", False, lib):
-                        raise RuntimeError(
-                                "forkrun: C orderer failed (status %r)"
-                                % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
         if helpers["scan_kind"] == "error":
             if not _helper_death_excused("error", False, lib):
                 raise RuntimeError(
@@ -10752,16 +10667,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                             % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
-            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
-            if fallow_st is not None and not (
-                    os.WIFEXITED(fallow_st) and
-                    os.WEXITSTATUS(fallow_st) == 0):
-                try:
-                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
-                             b"abnormally; ingress may not be fully "
-                             b"reclaimed.\n")
-                except OSError:
-                    pass
+            _reap_fallow(fallow_pid)
         if stats is not None and drain["reassembly"] is not None \
                 and not use_drain:
             stats["reassembly_max"] = drain["reassembly"].max_size
@@ -11598,18 +11504,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        unordered=False, numa=True,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         if use_drain:
             # Workers signal the drain; the parent keeps the spare
@@ -11879,30 +11774,9 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             if _dst is None:
                 _dst = 0
             drain_pid = None
-            if _dst != 0 and not (
-                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)" % (_dst,))
+            _raise_for_drain(_dst, lib)
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded.
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    if not _helper_death_excused("error", False, lib):
-                        raise RuntimeError(
-                                "forkrun: C orderer failed (status %r)"
-                                % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
 
         # Helper joins: ingest strict-clean; indexers/scanners
         # strict unless already observed (proof-based leniency only
@@ -12158,18 +12032,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        unordered=False, numa=True,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         trap_r, trap_w = os.pipe()
 
@@ -12456,13 +12319,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 if _dst is not None:
                     cdrain_n["alive"] = False
                     cdrain_n["status"] = _dst
-            if cdrain_n["status"] is not None and cdrain_n["status"] != 0 \
-                    and not (
-                        os.WIFEXITED(cdrain_n["status"]) and
-                        os.WEXITSTATUS(cdrain_n["status"]) == 0):
-                raise RuntimeError(
-                        "forkrun: C drain failed (status %r)"
-                        % (cdrain_n["status"],))
+            _raise_for_drain(cdrain_n['status'], lib)
 
         if fallow_w is not None:
             try:
@@ -12472,27 +12329,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             fallow_w = None
             state.ctx["fallow_w"] = -1
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    if not _helper_death_excused("error", False, lib):
-                        raise RuntimeError(
-                                "forkrun: C orderer failed (status %r)"
-                                % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
         if helpers["ingest_kind"] == "error":
             raise RuntimeError(
                     "forkrun: NUMA ingest failed (status %r)"
