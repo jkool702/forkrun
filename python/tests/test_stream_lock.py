@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -64,7 +64,7 @@ def _expected_bytes(path, fmt="line %d\n", n=2000):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestStreamThreadSerialization(unittest.TestCase):
+class TestStreamThreadSerialization(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -155,7 +155,7 @@ class TestStreamThreadSerialization(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestNestedStreamMap(unittest.TestCase):
+class TestNestedStreamMap(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 

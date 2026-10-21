@@ -311,9 +311,13 @@ orderer fold initially dropped the two NUMA callers' `numa=True` --
 `numa` is not decoration: it reaches the C orderer as the "numa"
 argument of `ring_order`, selecting the orderer's NUMA mode. The NUMA
 ordered paths were therefore running the default orderer mode, and no
-test noticed, because the suite runs on a UMA host where `nodes="@2"`
-falls back to a single node. `_spawn_c_orderer()` now takes the
-configuration that varies and forwards it, and
+test noticed: `nodes="@2"` forces two LOGICAL nodes (cycling over the
+online physicals), so the NUMA executors do run on a single-node host,
+but the orderer's NUMA MODE is not observable in the output with one
+physical node -- the ordering comes out the same either way. The
+configuration was therefore checkable but its EFFECT was not, which is
+exactly why the regression survived a green gate. `_spawn_c_orderer()`
+now takes the configuration that varies and forwards it, and
 `python/tests/test_orderer_config.py` asserts that the NUMA executors
 ask for the NUMA orderer mode and the UMA ones do not.
 

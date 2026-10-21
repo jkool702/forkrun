@@ -9,7 +9,7 @@ outcomes, and the conflation had consequences beyond the wrong wording:
     because the child stayed alive, the check kept failing EVERY later
     test in the run -- one test's leftover child failed 169 unrelated
     tests, and the failure moved between runs, so it looked like a
-    production regression.
+    production regression in a different place each time.
 
   * `waitpid(-1, ...)` reaps ANY child of this process, including one
     an EARLIER test left behind. That misattributes the failure to
@@ -19,9 +19,16 @@ outcomes, and the conflation had consequences beyond the wrong wording:
   * A live child and an unreaped (terminated) child are DIFFERENT
     faults with different owners, and the report should say which.
 
-This file pins the helper's behaviour on all three, so a future change
-to it cannot quietly weaken the assertion or re-introduce the
-misattribution.
+And a fix that merely SUPPRESSES the repeat report is not a fix: making
+a failure appear only once is not the same as making the resource leak
+occur only once. The helper must RESOLVE the condition it reports --
+the child terminated, waited for and reaped -- and it must attribute
+the child to the test that CREATED it, not to whichever test noticed
+it first.
+
+This file pins all of that, so a future change cannot quietly weaken
+the assertion, re-introduce the misattribution, or reintroduce the
+"remember to ignore it" behaviour.
 """
 
 import os
@@ -30,8 +37,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _helpers import (assert_no_zombies, child_census,  # noqa: E402
-                       _REPORTED)
+from _helpers import (ChildLifecycleMixin, assert_no_zombies,  # noqa: E402
+                       child_census)
 
 
 class _FailureSink:
@@ -46,6 +53,13 @@ class _FailureSink:
 
     def fail(self, msg):
         self.message = msg
+
+
+def _run_helper(before=None):
+    """Run the helper; return its failure message, or None."""
+    sink = _FailureSink()
+    assert_no_zombies(sink, before=before)
+    return sink.message
 
 
 class TestChildLifecycleHelper(unittest.TestCase):
@@ -68,11 +82,11 @@ class TestChildLifecycleHelper(unittest.TestCase):
                 pass
 
     def _live_child(self):
-        """A child that stays ALIVE until the test releases it.
+        """A child that stays ALIVE until released.
 
         The child blocks reading a pipe the parent holds open, so its
         lifetime is controlled rather than a race: `os.pause()` would
-        depend on a signal arriving, and the cleanup's blocking waitpid
+        depend on a signal arriving, and the cleanup's blocking wait
         would then be at the mercy of that race.
         """
         r, w = os.pipe()
@@ -89,42 +103,12 @@ class TestChildLifecycleHelper(unittest.TestCase):
         self._kids.append(pid)
         return pid
 
-    def _failing_helper(self):
-        """Run the helper and return the failure message, or None."""
-        sink = _FailureSink()
-        assert_no_zombies(sink)
-        return sink.message
-
-    def test_no_children_passes(self):
-        """A process whose children have all been reaped passes."""
-        self.assertEqual({}, child_census(),
-                         "this test process should have no children")
-        self.assertIsNone(self._failing_helper(),
-                          "the helper must pass when there are no children")
-
-    def test_a_live_child_is_reported_as_running_not_as_a_zombie(self):
-        """A child that has NOT terminated is a lifecycle leak, and it is
-        reported as such -- not as a zombie, and not reaped."""
-        pid = self._live_child()
-        msg = self._failing_helper()
-        self.assertIsNotNone(msg,
-                            "a child that is still running must be "
-                            "reported, not ignored")
-        self.assertIn("RUNNING", msg)
-        self.assertNotIn("zombie", msg.lower(),
-                         "a running child is not a zombie")
-        # It must NOT have been reaped: it is still running.
-        self.assertIn(pid, child_census(),
-                      "the helper must not reap a running child")
-
-    def test_an_unreaped_terminated_child_is_reported_and_reaped(self):
-        """A child that EXITED and was not reaped is the real zombie
-        case: reported, and reaped here so it does not accumulate."""
+    def _exited_child(self):
+        """A child that has EXITED and was NOT reaped: a real zombie."""
         pid = os.fork()
         if pid == 0:
             os._exit(3)
         self._kids.append(pid)
-        # wait for it to exit, WITHOUT reaping it
         deadline = 0
         while deadline < 1000:
             try:
@@ -135,28 +119,144 @@ class TestChildLifecycleHelper(unittest.TestCase):
             except OSError:
                 break
             deadline += 1
-        msg = self._failing_helper()
+        return pid
+
+    # -- the three outcomes --------------------------------------------
+
+    def test_no_children_passes(self):
+        """A process whose children have all been reaped passes."""
+        self.assertEqual({}, child_census(),
+                         "this test process should have no children")
+        self.assertIsNone(_run_helper(),
+                          "the helper must pass when there are no children")
+
+    def test_a_live_child_is_reported_as_running_not_as_a_zombie(self):
+        """A child that has NOT terminated is a lifecycle leak, and it
+        is reported as such -- not as a zombie."""
+        pid = self._live_child()
+        msg = _run_helper()
+        self.assertIsNotNone(msg,
+                            "a child that is still running must be "
+                            "reported, not ignored")
+        self.assertIn("RUNNING", msg)
+        self.assertNotIn("zombie", msg.lower(),
+                         "a running child is not a zombie")
+
+    def test_an_unreaped_terminated_child_is_reported_and_reaped(self):
+        """A child that EXITED and was not reaped is the real zombie
+        case: reported, and reaped here so it does not accumulate."""
+        pid = self._exited_child()
+        msg = _run_helper()
         self.assertIsNotNone(msg,
                             "an unreaped terminated child must be reported")
         self.assertIn("unreaped", msg)
-        # The helper reaped it, so it is gone from the census.
         self.assertNotIn(pid, child_census(),
                          "the helper must reap the child it reports")
 
-    def test_a_leftover_child_is_reported_once_not_by_every_later_test(self):
-        """The attribution property: a child left behind is blamed on
-        the test that left it, and the LATER tests are not failed by
-        it. This is what stops one test's leftover from failing the
-        rest of the run."""
+    # -- the leak must be RESOLVED, not just reported once -------------
+
+    def test_a_reported_live_child_is_resolved_not_left_running(self):
+        """A reported child must not be left behind.
+
+        Reporting a leak and leaving the child alive is how one test's
+        leftover failed every later test in the run. The helper must
+        terminate it, wait for it and reap it, so the process is clean
+        and the NEXT test inherits nothing.
+        """
         pid = self._live_child()
-        first = self._failing_helper()
-        self.assertIsNotNone(first,
-                            "the test that leaves a child must fail")
-        second = self._failing_helper()
-        self.assertIsNone(second,
-                          "a child already reported must not fail the "
-                          "NEXT test as well -- that is how one leftover "
-                          "failed 169 unrelated tests")
+        self.assertIsNotNone(_run_helper(),
+                            "the live child must be reported")
+        self.assertNotIn(pid, child_census(),
+                         "a reported child must be RESOLVED, not left "
+                         "behind -- that is what made one leftover fail "
+                         "169 unrelated tests")
+        for p, state in child_census().items():
+            self.assertNotEqual("Z", state,
+                                "a reported child must not be left as a "
+                                "zombie: pid %s" % (p,))
+
+    def test_a_later_check_does_not_inherit_the_leak(self):
+        """After the helper has resolved the leak, a later check passes
+        because the child is GONE -- not because the helper remembers
+        to skip it.
+
+        This is the distinction the review asked for: making a failure
+        appear only once is not the same as making the leak occur only
+        once. If the helper were merely skipping a reported pid, the
+        child would still be there.
+        """
+        pid = self._live_child()
+        self.assertIsNotNone(_run_helper())
+        self.assertNotIn(pid, child_census(),
+                         "the child must be gone, not merely skipped")
+        self.assertIsNone(_run_helper(),
+                          "a later check must pass because the leak was "
+                          "resolved")
+
+    def test_a_child_that_exits_after_being_reported_is_not_lost(self):
+        """The state transition: observed alive, then exits.
+
+        The old implementation recorded the pid as 'already reported'
+        and SKIPPED it afterwards -- so a child that exited later became
+        an unreaped zombie that nothing would ever reap. The helper
+        must not lose track of it: it resolves the child when it
+        reports it, so it never gets the chance to become a zombie, and
+        nothing is left unreaped.
+        """
+        pid = self._live_child()
+        self.assertIsNotNone(_run_helper(),
+                            "the live child must be reported")
+        self.assertIsNone(_run_helper(),
+                          "the resolved child must not reappear")
+        for p, state in child_census().items():
+            self.assertNotEqual("Z", state,
+                                "a child that exited after being reported "
+                                "must not be left unreaped: pid %s" % (p,))
+
+    # -- ownership ------------------------------------------------------
+
+    def test_a_child_that_predates_the_test_is_not_this_tests_business(self):
+        """A child that existed BEFORE the test ran is not the test's to
+        report -- and not the test's to kill."""
+        pid = self._live_child()
+        baseline = child_census()
+        self.assertIsNone(_run_helper(before=baseline),
+                          "a child from before the baseline is not this "
+                          "test's to report")
+        self.assertIn(pid, child_census(),
+                      "a child that predates the test must NOT be killed "
+                      "by the test's check -- it belongs to another owner")
+
+
+class TestChildLifecycleMixin(unittest.TestCase):
+    """The mixin must take the baseline BEFORE the class's own setup."""
+
+    def test_the_baseline_precedes_the_class_setup(self):
+        import _helpers
+
+        seen = {}
+
+        class Probe(_helpers.ChildLifecycleMixin, unittest.TestCase):
+            def setUp(self):
+                seen["baseline_at_setup"] = getattr(
+                    self, "_child_baseline", None)
+                seen["census_at_setup"] = _helpers.child_census()
+                super().setUp()
+
+            def test_nothing(self):
+                pass
+
+        case = Probe("test_nothing")
+        case.setUp()
+        try:
+            self.assertIsNotNone(seen["baseline_at_setup"],
+                                 "the mixin must record a baseline")
+            self.assertEqual(seen["baseline_at_setup"],
+                             seen["census_at_setup"],
+                             "the baseline must be the census as it was "
+                             "BEFORE the class's own setup ran")
+        finally:
+            case.doCleanups()
 
 
 if __name__ == "__main__":

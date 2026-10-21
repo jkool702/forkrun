@@ -39,6 +39,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -121,7 +122,7 @@ def _run_stream(spec, path, **kwargs):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestStreamingRecovery(unittest.TestCase):
+class TestStreamingRecovery(ChildLifecycleMixin, unittest.TestCase):
     """Streaming Tier-3: WorkerTxn recovery during active stream()."""
 
     def tearDown(self):

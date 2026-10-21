@@ -53,7 +53,7 @@ from forkrun._bindings import find_substrate  # noqa: E402
 import importlib  # noqa: E402
 _R = importlib.import_module("forkrun.run")
 
-from _helpers import assert_no_zombies, joined_bytes, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, joined_bytes, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -352,7 +352,7 @@ class TestReactorWatchMechanism(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCDrainFunctional(unittest.TestCase):
+class TestCDrainFunctional(ChildLifecycleMixin, unittest.TestCase):
     """The C drain must still deliver the same bytes."""
 
     def setUp(self):

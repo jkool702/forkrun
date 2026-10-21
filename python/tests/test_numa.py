@@ -22,7 +22,7 @@ from forkrun._numa import (build_numa_map, detect_numa_nodes,  # noqa: E402
                            distribute_workers, get_node_cpus,
                            pin_to_node)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -178,7 +178,7 @@ class TestNumaSymbols(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestNumaExecution(unittest.TestCase):
+class TestNumaExecution(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 

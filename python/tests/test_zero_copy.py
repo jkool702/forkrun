@@ -21,7 +21,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get  # noqa: E402
 from forkrun.run import _spill_to_memfd  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -108,7 +108,7 @@ class TestCopyRange(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSpillPaths(unittest.TestCase):
+class TestSpillPaths(ChildLifecycleMixin, unittest.TestCase):
     def test_spill_file_exact(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:

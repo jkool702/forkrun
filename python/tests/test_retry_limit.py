@@ -19,7 +19,7 @@ import forkrun  # noqa: E402
 from forkrun._api import _resolve_retry_limit  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -60,7 +60,7 @@ class TestResolveRetryLimit(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestRetryLimitEndToEnd(unittest.TestCase):
+class TestRetryLimitEndToEnd(ChildLifecycleMixin, unittest.TestCase):
     def _run_counted_failures(self, limit):
         """Fail every batch; return payload execution count.
 

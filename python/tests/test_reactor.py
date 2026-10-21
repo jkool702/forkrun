@@ -32,6 +32,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -111,7 +112,7 @@ class TestOrchestratorValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestReactorBasic(unittest.TestCase):
+class TestReactorBasic(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -209,7 +210,7 @@ class TestReactorBasic(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerRespawn(unittest.TestCase):
+class TestWorkerRespawn(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -417,7 +418,7 @@ class TestWorkerRespawn(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestTrapACK(unittest.TestCase):
+class TestTrapACK(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -526,7 +527,7 @@ class TestTrapACK(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCOrderer(unittest.TestCase):
+class TestCOrderer(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -692,7 +693,7 @@ class TestReactorPurity(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerStartupDeadline(unittest.TestCase):
+class TestWorkerStartupDeadline(ChildLifecycleMixin, unittest.TestCase):
     """W-REL6-3.1: fork-in-threaded-host hang is bounded.
 
     String payloads resolve in the parent (no post-fork import);

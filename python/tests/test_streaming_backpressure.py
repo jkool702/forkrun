@@ -55,7 +55,7 @@ import forkrun  # noqa: E402
 from forkrun import _pipes  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, joined_bytes, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, joined_bytes, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -215,7 +215,7 @@ class TestStreamNotifyPipeCapacity(_PipeCapacityBase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestStreamOutputCorrectness(_PipeCapacityBase):
+class TestStreamOutputCorrectness(ChildLifecycleMixin, _PipeCapacityBase):
     """A smaller window must not change a single output byte."""
 
     def _expect_exact(self, src, **kw):
@@ -358,7 +358,7 @@ class TestStreamOutputCorrectness(_PipeCapacityBase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestAbandonmentAndTeardown(_PipeCapacityBase):
+class TestAbandonmentAndTeardown(ChildLifecycleMixin, _PipeCapacityBase):
     """A consumer that walks away must not leave a blocked writer hanging."""
 
     def test_generator_abandonment_tears_down(self):
@@ -404,7 +404,7 @@ class TestAbandonmentAndTeardown(_PipeCapacityBase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestNotifyFailureContract(_PipeCapacityBase):
+class TestNotifyFailureContract(ChildLifecycleMixin, _PipeCapacityBase):
     """FR_PY_ERR_NOTIFY (-4): committed but not notified.
 
     The contract: "committed but not notified ... NEVER a plain retry".

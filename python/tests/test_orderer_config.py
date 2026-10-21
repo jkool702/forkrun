@@ -5,17 +5,25 @@ the orderer setup. The fold briefly DROPPED the two NUMA callers'
 `numa=True` -- and `numa` is not decoration: it reaches the C orderer as
 the "numa" argument of `ring_order`, selecting the orderer's NUMA mode.
 The NUMA ordered paths were therefore running the default orderer mode,
-with no test noticing, because the suite runs on a UMA host where
-`nodes="@2"` falls back to a single node.
+with no test noticing -- `nodes="@2"` forces two LOGICAL nodes
+(cycling over the online physicals), so the NUMA executors DO run on
+this single-node host, but the orderer's NUMA *mode* is not observable
+in the output with one physical node: the ordering comes out the same
+either way. The configuration was checkable; its EFFECT was not.
 
 That is the failure mode this file exists to prevent: centralising a
 decision correctly while accidentally losing a SEPARATE configuration
 dimension. The authoritative implementation has to represent every
 meaningful variation, and each caller's variation has to be asserted.
 
-These are static checks on the call sites, deliberately: the NUMA
-orderer mode cannot be exercised on a single-node host, so a behavioural
-test would pass on a box that cannot run the code path at all.
+These are static checks on the call sites, deliberately. The NUMA order
+path IS reachable here -- `nodes="@2"` forces two LOGICAL nodes, cycling
+over the online physicals, so the NUMA executors do run on this
+single-node host -- but the orderer's NUMA MODE is not observable in the
+output on one physical node: the ordering comes out the same either
+way. The configuration is therefore checkable but its EFFECT is not,
+and a behavioural test would pass whether the mode was right or wrong.
+That is why the regression survived a green gate.
 """
 
 import ast

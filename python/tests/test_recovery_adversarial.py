@@ -38,6 +38,7 @@ from forkrun._bindings import (FrPyBatch, RC_OK, find_substrate,  # noqa: E402
 from forkrun._worker import _HDR  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -119,7 +120,7 @@ def _up(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestClaimPublishRace(unittest.TestCase):
+class TestClaimPublishRace(ChildLifecycleMixin, unittest.TestCase):
     """Death between begin_claim and publish reads TXN_CLAIMING → 4."""
 
     def tearDown(self):
@@ -187,7 +188,7 @@ class TestClaimPublishRace(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestAckClearRace(unittest.TestCase):
+class TestAckClearRace(ChildLifecycleMixin, unittest.TestCase):
     """Death between order-packet write and clear reads COMMITTING → 4."""
 
     def tearDown(self):
@@ -256,7 +257,7 @@ class TestAckClearRace(unittest.TestCase):
 
 
 @unittest.skipUnless(_has_symbols(), "recovery symbols absent")
-class TestPythonOutputRollback(unittest.TestCase):
+class TestPythonOutputRollback(ChildLifecycleMixin, unittest.TestCase):
     """SIGKILL mid-payload rolls back to the cursor, both orders."""
 
     def tearDown(self):
@@ -369,7 +370,7 @@ class TestPythonOutputRollback(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestPublishPayloadBoundary(unittest.TestCase):
+class TestPublishPayloadBoundary(ChildLifecycleMixin, unittest.TestCase):
     """Kill after CLAIMED but before any payload work: the fundamental
     normal-catastrophic path — truncate (no-op), escrow, retry wins."""
 
@@ -399,7 +400,7 @@ class TestPublishPayloadBoundary(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestMultipleDeaths(unittest.TestCase):
+class TestMultipleDeaths(ChildLifecycleMixin, unittest.TestCase):
     """Each dead worker's transaction is recovered exactly once;
     the final output is complete regardless of death interleaving."""
 

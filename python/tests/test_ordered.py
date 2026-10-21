@@ -23,6 +23,7 @@ from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._reassembly import ReassemblyBuffer  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -72,7 +73,7 @@ class TestReassemblyBuffer(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestOrderedStreaming(unittest.TestCase):
+class TestOrderedStreaming(ChildLifecycleMixin, unittest.TestCase):
     def test_ordered_yields_in_sequence(self):
         def marked(batch):
             return b"%08d:" % batch.batch_index + bytes(batch.data)

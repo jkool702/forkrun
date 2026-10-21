@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies  # noqa: E402
 
 # The real benchmark UDF: deliberately the slowest faithful input —
 # only genuine per-line cost parks the scanner past the deadline.
@@ -57,7 +57,7 @@ MEDIUM_5M = "/mnt/ramdisk/numa1/ml/medium_5M.jsonl"
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 @unittest.skipUnless(os.path.exists(MEDIUM_5M),
                      "seeded medium-5M corpus absent")
-class TestLegacySlowUdfCompletes(unittest.TestCase):
+class TestLegacySlowUdfCompletes(ChildLifecycleMixin, unittest.TestCase):
     """Legacy fail-fast must survive a parked scanner (~40s wall)."""
 
     def test_legacy_python_medium_2w(self):

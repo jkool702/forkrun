@@ -23,6 +23,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -57,7 +58,7 @@ def _pipe_with_lines(n, fmt="line %d\n", delay=0.0):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestStreamingIngest(unittest.TestCase):
+class TestStreamingIngest(ChildLifecycleMixin, unittest.TestCase):
     def test_streaming_matches_materialized(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:

@@ -27,6 +27,7 @@ from forkrun.run import _parse_records_c, _spill_to_memfd  # noqa: E402
 from forkrun.run import _split_records  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -92,7 +93,7 @@ class _LegacyPath:
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCompleteSymbols(unittest.TestCase):
+class TestCompleteSymbols(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -123,7 +124,7 @@ class TestCompleteSymbols(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCompleteReturnCodes(unittest.TestCase):
+class TestCompleteReturnCodes(ChildLifecycleMixin, unittest.TestCase):
     """fr_py_complete codes without engine state (returns before ack)."""
 
     def tearDown(self):
@@ -190,7 +191,7 @@ class TestCompleteReturnCodes(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestDescriptorParsing(unittest.TestCase):
+class TestDescriptorParsing(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -260,7 +261,7 @@ class TestDescriptorParsing(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSequentialSpill(unittest.TestCase):
+class TestSequentialSpill(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -312,7 +313,7 @@ class TestSequentialSpill(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCompleteParity(unittest.TestCase):
+class TestCompleteParity(ChildLifecycleMixin, unittest.TestCase):
     """Same workload, legacy vs commit path: byte-identical results."""
 
     def tearDown(self):

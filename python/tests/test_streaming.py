@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -32,7 +32,7 @@ def _identity(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestStreaming(unittest.TestCase):
+class TestStreaming(ChildLifecycleMixin, unittest.TestCase):
     def test_stream_yields_incrementally(self):
         # Forced small batches + slow payload: first yield must arrive
         # long before completion (post-collection would deliver all at

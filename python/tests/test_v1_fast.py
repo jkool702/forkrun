@@ -24,7 +24,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get, v1_available  # noqa: E402
 from forkrun._plugin import make_plugin_payload  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -97,7 +97,7 @@ class TestV1Detection(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSpawnV1(unittest.TestCase):
+class TestSpawnV1(ChildLifecycleMixin, unittest.TestCase):
     def test_spawn_v1_cat_byte_exact(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
@@ -254,7 +254,7 @@ class TestSpawnV1(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestPluginV1(unittest.TestCase):
+class TestPluginV1(ChildLifecycleMixin, unittest.TestCase):
     def test_plugin_v1_frozen_abi_layout(self):
         # The .so must export dialect 2 + FLAG_RAW (2 | 1<<8 == 258);
         # the layout pin itself lives in C (_Static_assert == 128).

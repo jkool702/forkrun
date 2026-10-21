@@ -18,7 +18,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._spawn import SpawnError, make_spawn_payload  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -57,7 +57,7 @@ class TestSpawnValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSpawnMode(unittest.TestCase):
+class TestSpawnMode(ChildLifecycleMixin, unittest.TestCase):
     def test_basic_spawn(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:

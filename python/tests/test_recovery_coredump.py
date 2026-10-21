@@ -27,7 +27,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import (FrPyBatch, RC_OK, find_substrate,  # noqa: E402
                                get)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -170,7 +170,7 @@ class TestCoredumpDefaults(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestCoredumpLifecycleIntegration(unittest.TestCase):
+class TestCoredumpLifecycleIntegration(ChildLifecycleMixin, unittest.TestCase):
     """Fail-twice-then-succeed through a real worker: only the final
     attempt (3rd invocation) observes an enabled soft limit; every
     later batch observes 0 (disarm-after-success). No dump is fired."""

@@ -32,7 +32,7 @@ import sys as _sys  # noqa: E402
 _run_mod = _sys.modules["forkrun.run"]  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -150,7 +150,7 @@ class _LockSpy:
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestExecutorRouting(unittest.TestCase):
+class TestExecutorRouting(ChildLifecycleMixin, unittest.TestCase):
     """Every manifest executor is reachable via its routing."""
 
     def test_all_ten_executors_hit(self):
@@ -207,7 +207,7 @@ class TestExecutorRouting(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestExecutorLocking(unittest.TestCase):
+class TestExecutorLocking(ChildLifecycleMixin, unittest.TestCase):
     """I2: _RUN_LOCK acquired/released per executor, exhaust+abandon."""
 
     def _check(self, routes, verb):
@@ -286,7 +286,7 @@ class TestExecutorLocking(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestExecutorFdHygiene(unittest.TestCase):
+class TestExecutorFdHygiene(ChildLifecycleMixin, unittest.TestCase):
     """I3+I8: fd table returns to baseline per executor (ok + fail)."""
 
     def _baseline(self, routes, fail):
@@ -427,7 +427,7 @@ class TestExecutorGuards(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestExecutorDepositLoud(unittest.TestCase):
+class TestExecutorDepositLoud(ChildLifecycleMixin, unittest.TestCase):
     """I4: one injected-failure instance on the default executor
     (exhaustive ×10 lives in test_escrow_refused.py)."""
 

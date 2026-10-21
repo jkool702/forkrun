@@ -44,7 +44,7 @@ from forkrun.run import (_abort_reason_now,  # noqa: E402
                          _helper_death_disposition,
                          _helper_death_excused)
 
-from _helpers import assert_no_zombies  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies  # noqa: E402
 
 try:
     find_substrate()
@@ -432,7 +432,7 @@ class TestNoHelperDeathSiteDecidesForItself(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestTheMaterializedPathsAgree(unittest.TestCase):
+class TestTheMaterializedPathsAgree(ChildLifecycleMixin, unittest.TestCase):
     """The two supervision shapes of the SAME path must not disagree.
 
     Before the fix the materialized PLAIN path raised "materialized

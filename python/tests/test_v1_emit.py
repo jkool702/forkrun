@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get, v1_available  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -258,7 +258,7 @@ class TestFrPyEmit(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerEmitIntegration(unittest.TestCase):
+class TestWorkerEmitIntegration(ChildLifecycleMixin, unittest.TestCase):
     """End-to-end: the worker's emit path is byte-exact."""
 
     def test_emit_available(self):

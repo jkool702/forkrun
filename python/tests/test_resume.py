@@ -33,7 +33,7 @@ from forkrun._checkpoint import (CheckpointState,  # noqa: E402
                                  serialize_checkpoint,
                                  snapshot_from_engine, write_checkpoint)
 
-from _helpers import assert_no_zombies  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies  # noqa: E402
 
 try:
     find_substrate()
@@ -300,7 +300,7 @@ class TestCheckpointCodec(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSnapshotAPI(unittest.TestCase):
+class TestSnapshotAPI(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -342,7 +342,7 @@ class TestSnapshotAPI(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestResumePathValidation(unittest.TestCase):
+class TestResumePathValidation(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -449,7 +449,7 @@ class TestResumePathValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestResumeExecution(unittest.TestCase):
+class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
     """Abort -> checkpoint -> resume cycles (byte-coordinate proofs).
 
     Abort mechanism: a file-append counter shared by forked workers
@@ -713,7 +713,7 @@ class TestResumeExecution(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestResumeStream(unittest.TestCase):
+class TestResumeStream(ChildLifecycleMixin, unittest.TestCase):
     """stream() resume: consumer-owns-yielded contract.
 
     The consumer persists everything yielded live. After abandon +

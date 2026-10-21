@@ -495,10 +495,15 @@ and the one fix that WAS made was made in two.
   version of this fold dropped the two NUMA callers' `numa=True`, and
   `numa` reaches the C orderer as the "numa" argument of `ring_order`
   -- it selects the orderer's NUMA mode. The NUMA ordered paths were
-  running the default orderer mode, and **no test noticed**, because
-  the suite runs on a UMA host where `nodes="@2"` falls back to a
-  single node. `python/tests/test_orderer_config.py` now asserts that
-  the NUMA executors ask for the NUMA mode and the UMA ones do not.
+  running the default orderer mode, and **no test noticed**:
+  `nodes="@2"` forces two LOGICAL nodes (cycling over the online
+  physicals), so the NUMA executors DO run on a single-node host --
+  but the orderer's NUMA *mode* is not observable in the output with one
+  physical node, because the ordering comes out the same either way.
+  The configuration was checkable; its EFFECT was not. That is
+  precisely why a green gate did not catch it.
+  `python/tests/test_orderer_config.py` now asserts that the NUMA
+  executors ask for the NUMA mode and the UMA ones do not.
 
   That is the sharpest lesson in this pass, and it is the SSoT policy's
   own step 4 made concrete: **a centralisation that loses a

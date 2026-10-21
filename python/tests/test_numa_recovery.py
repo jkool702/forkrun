@@ -43,7 +43,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import FrPyBatch, RC_OK, find_substrate, get  # noqa: E402
 from forkrun._numa import detect_numa_nodes  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -223,7 +223,7 @@ def _assert_deaths_occurred(testcase, plugin_dir, name, expect, where):
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
 @unittest.skipUnless(_multi_node(), "multi-node NUMA bookkeeping")
-class TestNumaRecovery(unittest.TestCase):
+class TestNumaRecovery(ChildLifecycleMixin, unittest.TestCase):
     """NUMA Tier-3: WorkerTxn recovery across NUMA nodes."""
 
     def test_report_topology_kind(self):
@@ -430,7 +430,7 @@ class TestNumaRecovery(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
 @unittest.skipUnless(_multi_node(), "multi-node NUMA bookkeeping")
-class TestStreamingNumaRecovery(unittest.TestCase):
+class TestStreamingNumaRecovery(ChildLifecycleMixin, unittest.TestCase):
     """Streaming + NUMA + crash recovery (all three together)."""
 
     def tearDown(self):
