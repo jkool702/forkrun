@@ -72,19 +72,36 @@ def _child_state(pid):
 
 
 def _child_cmdline(pid):
+    """What a child was, for the report.
+
+    A ZOMBIE has an empty cmdline (the kernel clears it), so fall back
+    to `comm` -- the executable name -- which survives. That is what
+    distinguishes, say, a forked worker from an exec'd launcher.
+    """
     try:
         with open("/proc/%d/cmdline" % pid, "rb") as fh:
             raw = fh.read()
     except OSError:
-        return ""
+        raw = b""
     parts = [p for p in raw.split(b"\0") if p]
-    if not parts:
-        return ""
+    if parts:
+        try:
+            return " ".join(p.decode("utf-8", "replace") for p in parts)
+        except Exception:
+            return repr(parts)
+    return _child_comm(pid)
+
+
+def _child_comm(pid):
+    """The executable name of a child, or ''."""
     try:
-        exe = parts[0].decode("utf-8", "replace")
-    except Exception:
-        exe = repr(parts[0])
-    return " ".join([exe] + [p.decode("utf-8", "replace") for p in parts[1:]])
+        with open("/proc/%d/stat" % pid) as fh:
+            data = fh.read()
+        # comm is the parenthesised field; the state follows it
+        i = data.rfind(")")
+        return data[data.find("(") + 1:i]
+    except (OSError, IndexError):
+        return ""
 
 
 # PIDs this process has already reported are NOT tracked here on
@@ -102,20 +119,39 @@ def _child_cmdline(pid):
 # next test inherits nothing.
 
 
-def _reap(pid):
-    """Reap one terminated child. Best effort."""
-    try:
-        os.waitpid(pid, 0)
-    except (ChildProcessError, OSError):
-        pass
+def _reap(pid, grace=1.0):
+    """Reap one terminated child, with a BOUNDED wait.
+
+    The wait is bounded because a process in uninterruptible sleep does
+    not die on SIGKILL, and a blocking wait here would hang the whole
+    test run -- the cleanup is supposed to be bounded, and a cleanup
+    that can block is not a cleanup.
+
+    Returns True if the child was reaped, False if it could not be.
+    """
+    import time
+    deadline = time.monotonic() + grace
+    while True:
+        try:
+            wpid, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return True          # already gone
+        except OSError:
+            return False
+        if wpid == pid:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
 
 
 def _stop_child(pid, grace=1.0):
-    """Terminate a live child and reap it. Bounded.
+    """Terminate a live child and reap it. Bounded throughout.
 
-    SIGTERM, then SIGKILL, then reap. Returns the state it was in when
-    found, so the report can name it -- the cleanup must not erase the
-    evidence.
+    SIGTERM, then SIGKILL, then a BOUNDED reap. Returns True when the
+    child is gone, False when it could not be reaped -- a child stuck
+    in uninterruptible sleep does not die on SIGKILL, and the caller
+    must be able to say so rather than claim the child was resolved.
     """
     import signal
     import time
@@ -128,20 +164,18 @@ def _stop_child(pid, grace=1.0):
         try:
             wpid, _status = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
-            return
+            return True
         except OSError:
-            return
+            return False
         if wpid == pid:
-            return
+            return True
         time.sleep(0.01)
     try:
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         pass
-    try:
-        os.waitpid(pid, 0)
-    except (ChildProcessError, OSError):
-        pass
+    # Bounded after SIGKILL too: SIGKILL is not a guarantee.
+    return _reap(pid, grace)
 
 
 def assert_no_zombies(testcase, before=None):
@@ -150,9 +184,15 @@ def assert_no_zombies(testcase, before=None):
     OWNERSHIP. `before` is the census of the children that existed
     BEFORE the test ran; only children not in it are this test's to
     answer for. A caller that does not supply one falls back to the
-    test case's own baseline (ChildLifecycleMixin records it in setUp),
-    and if there is no baseline at all, ownership is NOT established --
-    which the report says, rather than pretending.
+    test case's own baseline (ChildLifecycleMixin records it in setUp).
+
+    WITH NO BASELINE AT ALL, THE HELPER FAILS CLOSED: it reports that
+    ownership could not be established, and it does NOT terminate or
+    reap anything. Reporting that it does not know who owns a child
+    does not make it safe to kill one -- these children may belong to
+    another test, and killing another test's child would destroy that
+    test's evidence. Every class that uses this helper has the mixin, so
+    a missing baseline means a caller that has not opted in.
 
     THREE OUTCOMES, distinguished:
 
@@ -182,8 +222,22 @@ def assert_no_zombies(testcase, before=None):
     if before is None:
         before = getattr(testcase, "_child_baseline", None)
     census = child_census()
-    mine = {p: s for p, s in census.items()
-            if before is None or p not in before}
+
+    if before is None:
+        # NO OWNERSHIP. Report it and touch nothing: the children
+        # visible here may belong to another test, and killing or
+        # reaping one of those would destroy that test's evidence.
+        if not census:
+            return
+        listed = ", ".join("%s(state %s)[%s]" % (p, s, _child_cmdline(p))
+                           for p, s in sorted(census.items()))
+        testcase.fail(
+            "child lifecycle leak -- ownership could NOT be established "
+            "(no per-test baseline), so nothing was terminated or reaped; "
+            "visible child pid(s): %s" % (listed,))
+        return          # the sink may not raise; touch nothing either way
+
+    mine = {p: s for p, s in census.items() if p not in before}
     if not mine:
         return
 
@@ -193,15 +247,19 @@ def assert_no_zombies(testcase, before=None):
         if state == "Z":
             # A terminated child nobody reaped. Reap it HERE so the
             # process does not accumulate them, and report it.
-            _reap(pid)
+            if not _reap(pid):
+                zombies.append((pid, cmd + " (could NOT be reaped)",))
+                continue
             zombies.append((pid, cmd))
         else:
             live.append((pid, state, cmd))
 
     # Resolve the live children. Their identity is already recorded, so
     # the cleanup cannot erase the diagnosis.
-    for pid, _state, _cmd in live:
-        _stop_child(pid)
+    unresolved = []
+    for pid, _state, cmd in live:
+        if not _stop_child(pid):
+            unresolved.append((pid, cmd))
 
     parts = []
     if zombies:
@@ -211,9 +269,9 @@ def assert_no_zombies(testcase, before=None):
         parts.append("child still RUNNING after the test: %s"
                      % (", ".join("%s(state %s)[%s]" % (p, s, c)
                                   for p, s, c in live),))
-    if before is None:
-        parts.append("ownership NOT established (no per-test baseline), "
-                     "so this may be another test's child")
+    if unresolved:
+        parts.append("child could NOT be terminated/reaped: %s"
+                     % (", ".join("%s[%s]" % (p, c) for p, c in unresolved),))
     testcase.fail("child lifecycle leak -- %s" % "; ".join(parts))
 
 

@@ -26,6 +26,10 @@ the child terminated, waited for and reaped -- and it must attribute
 the child to the test that CREATED it, not to whichever test noticed
 it first.
 
+These tests supply an EXPLICIT baseline, because that is the contract:
+the helper must not terminate or reap a child whose owner it cannot
+establish.
+
 This file pins all of that, so a future change cannot quietly weaken
 the assertion, re-introduce the misattribution, or reintroduce the
 "remember to ignore it" behaviour.
@@ -68,6 +72,10 @@ class TestChildLifecycleHelper(unittest.TestCase):
     def setUp(self):
         self._kids = []
         self._keep = []
+        # The baseline: the children that existed BEFORE this test
+        # created anything. The helper must treat only what is NOT in
+        # here as this test's to answer for.
+        self.baseline = child_census()
 
     def tearDown(self):
         for fd in self._keep:
@@ -127,14 +135,14 @@ class TestChildLifecycleHelper(unittest.TestCase):
         """A process whose children have all been reaped passes."""
         self.assertEqual({}, child_census(),
                          "this test process should have no children")
-        self.assertIsNone(_run_helper(),
+        self.assertIsNone(_run_helper(before=self.baseline),
                           "the helper must pass when there are no children")
 
     def test_a_live_child_is_reported_as_running_not_as_a_zombie(self):
         """A child that has NOT terminated is a lifecycle leak, and it
         is reported as such -- not as a zombie."""
-        pid = self._live_child()
-        msg = _run_helper()
+        self._live_child()
+        msg = _run_helper(before=self.baseline)
         self.assertIsNotNone(msg,
                             "a child that is still running must be "
                             "reported, not ignored")
@@ -146,7 +154,7 @@ class TestChildLifecycleHelper(unittest.TestCase):
         """A child that EXITED and was not reaped is the real zombie
         case: reported, and reaped here so it does not accumulate."""
         pid = self._exited_child()
-        msg = _run_helper()
+        msg = _run_helper(before=self.baseline)
         self.assertIsNotNone(msg,
                             "an unreaped terminated child must be reported")
         self.assertIn("unreaped", msg)
@@ -164,7 +172,7 @@ class TestChildLifecycleHelper(unittest.TestCase):
         and the NEXT test inherits nothing.
         """
         pid = self._live_child()
-        self.assertIsNotNone(_run_helper(),
+        self.assertIsNotNone(_run_helper(before=self.baseline),
                             "the live child must be reported")
         self.assertNotIn(pid, child_census(),
                          "a reported child must be RESOLVED, not left "
@@ -186,10 +194,10 @@ class TestChildLifecycleHelper(unittest.TestCase):
         child would still be there.
         """
         pid = self._live_child()
-        self.assertIsNotNone(_run_helper())
+        self.assertIsNotNone(_run_helper(before=self.baseline))
         self.assertNotIn(pid, child_census(),
                          "the child must be gone, not merely skipped")
-        self.assertIsNone(_run_helper(),
+        self.assertIsNone(_run_helper(before=self.baseline),
                           "a later check must pass because the leak was "
                           "resolved")
 
@@ -203,10 +211,10 @@ class TestChildLifecycleHelper(unittest.TestCase):
         reports it, so it never gets the chance to become a zombie, and
         nothing is left unreaped.
         """
-        pid = self._live_child()
-        self.assertIsNotNone(_run_helper(),
+        self._live_child()
+        self.assertIsNotNone(_run_helper(before=self.baseline),
                             "the live child must be reported")
-        self.assertIsNone(_run_helper(),
+        self.assertIsNone(_run_helper(before=self.baseline),
                           "the resolved child must not reappear")
         for p, state in child_census().items():
             self.assertNotEqual("Z", state,
@@ -226,6 +234,25 @@ class TestChildLifecycleHelper(unittest.TestCase):
         self.assertIn(pid, child_census(),
                       "a child that predates the test must NOT be killed "
                       "by the test's check -- it belongs to another owner")
+
+    def test_without_a_baseline_the_helper_fails_closed(self):
+        """No baseline means no ownership, and the helper must then touch
+        NOTHING.
+
+        Reporting that it does not know who owns a child does not make it
+        safe to terminate one: the child may belong to another test, and
+        killing it would destroy that test's evidence. So the helper
+        reports the uncertainty and leaves every child alone.
+        """
+        pid = self._live_child()
+        msg = _run_helper()          # no baseline at all
+        self.assertIsNotNone(msg,
+                            "without a baseline the helper must still "
+                            "report, not pass silently")
+        self.assertIn("ownership could NOT be established", msg)
+        self.assertIn(pid, child_census(),
+                      "without a baseline the helper must NOT terminate a "
+                      "child whose owner it cannot establish")
 
 
 class TestChildLifecycleMixin(unittest.TestCase):
