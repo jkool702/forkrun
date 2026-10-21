@@ -38,6 +38,11 @@ class Canon(ast.NodeTransformer):
     Every visitor MUST return the node: NodeTransformer.generic_visit
     deletes the field when a visitor returns None, which silently
     strips the node's children.
+
+    A NESTED definition is not descended into: a closure's code must
+    not become part of the canonical form of the function that
+    contains it, or every closure would look like a clone of every
+    other closure's parent.
     """
 
     def visit_Name(self, node):
@@ -65,6 +70,15 @@ class Canon(ast.NodeTransformer):
         node.names = ["_"]
         return node
 
+    def visit_FunctionDef(self, node):
+        return node
+
+    def visit_AsyncFunctionDef(self, node):
+        return node
+
+    def visit_ClassDef(self, node):
+        return node
+
 
 def canon(stmts):
     """Canonical form of a statement list."""
@@ -81,38 +95,67 @@ def canon(stmts):
                     annotate_fields=False, include_attributes=False)
 
 
-BLOCK_OWNERS = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With,
-                 ast.AsyncWith, ast.Try, ast.ExceptHandler)
+def _blocks_in(statements, owner, out):
+    """Every block reachable from these statements, WITHOUT descending
+    into a nested definition (that definition is a scope of its own)."""
+    out.append((list(statements), owner))
+    for st in statements:
+        for child in ast.iter_child_nodes(st):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                _blocks_in(child.body, "def %s" % child.name, out)
+            elif isinstance(child, ast.ClassDef):
+                _blocks_in(child.body, "class %s" % child.name, out)
+            elif isinstance(child, ast.If):
+                _blocks_in(child.body, "If", out)
+                _blocks_in(child.orelse, "else", out)
+            elif isinstance(child, (ast.For, ast.AsyncFor, ast.While,
+                                    ast.With, ast.AsyncWith)):
+                _blocks_in(child.body, type(child).__name__, out)
+            elif isinstance(child, ast.Try):
+                _blocks_in(child.body, "Try", out)
+                for h in child.handlers:
+                    _blocks_in(h.body, "ExceptHandler", out)
+                _blocks_in(child.finalbody, "finalbody", out)
 
 
 def blocks_of(node):
-    """Every statement block inside this scope, with its owner."""
+    """Every statement block in this scope, with its owner."""
     out = []
-    for child in ast.walk(node):
-        if isinstance(child, ast.Module):
-            out.append((child.body, "module"))
-        elif isinstance(child, BLOCK_OWNERS):
-            out.append((child.body, type(child).__name__))
-            if isinstance(child, ast.Try):
-                for h in child.handlers:
-                    out.append((h.body, "ExceptHandler"))
-                out.append((child.finalbody, "finalbody"))
-        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out.append((child.body, "def %s" % child.name))
+    _blocks_in(node.body, "module", out)
     return out
+
+
+def _default_roots():
+    """The front end, resolved relative to THIS SCRIPT.
+
+    Not an absolute path: a fresh clone elsewhere must scan the same
+    tree, and a root that does not exist must be an ERROR, not a
+    silent empty scan that reads as "no duplication found".
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.dirname(here)
+    return [os.path.join(repo, "python", "forkrun")]
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("roots", nargs="*",
-                    default=["/mnt/ramdisk/forkrun/python/forkrun"])
+    ap.add_argument("roots", nargs="*", default=None)
     ap.add_argument("--min-copies", type=int, default=2)
     ap.add_argument("--min-chars", type=int, default=400)
     args = ap.parse_args()
 
+    roots = args.roots or _default_roots()
+    missing = [r for r in roots if not os.path.isdir(r)]
+    if missing:
+        sys.stderr.write(
+            "ssot_scan: no such directory: %s\n"
+            "Pass a root explicitly, or run this script from the "
+            "repository.\n" % ("\n                   ".join(missing),))
+        return 2
+
     groups = defaultdict(list)
     total = 0
-    for root in args.roots:
+    for root in roots:
         for dirpath, _d, files in os.walk(root):
             for fn in sorted(files):
                 if not fn.endswith(".py"):

@@ -266,6 +266,17 @@ a genuine semantic difference, not drift), and the checkpoint-on-abort
 handler (the two sites differ in their surrounding state, and the block
 is a 9-argument call).
 
+**A configuration dimension the first fold lost, and now keeps.** The
+orderer fold initially dropped the two NUMA callers' `numa=True` --
+`numa` is not decoration: it reaches the C orderer as the "numa"
+argument of `ring_order`, selecting the orderer's NUMA mode. The NUMA
+ordered paths were therefore running the default orderer mode, and no
+test noticed, because the suite runs on a UMA host where `nodes="@2"`
+falls back to a single node. `_spawn_c_orderer()` now takes the
+configuration that varies and forwards it, and
+`python/tests/test_orderer_config.py` asserts that the NUMA executors
+ask for the NUMA orderer mode and the UMA ones do not.
+
 ## Unreleased — a helper child's death is now decided in ONE place
 
 **Correctness, no API change.** The front end turns a helper child's

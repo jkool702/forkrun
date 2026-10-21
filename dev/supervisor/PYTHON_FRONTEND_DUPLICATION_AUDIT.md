@@ -489,8 +489,24 @@ and the one fix that WAS made was made in two.
 - **`_teardown_orderer(order_w, orderer_pid, lib)`** -- the orderer's
   teardown, six copies -> one. The NUMA copy did not consult the
   excuse; the helper does, so all six get it.
-- **`_spawn_c_orderer(engine_fds, out_fds)`** -- the orderer's setup,
-  six copies -> one.
+- **`_spawn_c_orderer(engine_fds, out_fds, unordered=False,
+  numa=False)`** -- the orderer's setup, six copies -> one. **The
+  configuration that varies is FORWARDED, not discarded**: the first
+  version of this fold dropped the two NUMA callers' `numa=True`, and
+  `numa` reaches the C orderer as the "numa" argument of `ring_order`
+  -- it selects the orderer's NUMA mode. The NUMA ordered paths were
+  running the default orderer mode, and **no test noticed**, because
+  the suite runs on a UMA host where `nodes="@2"` falls back to a
+  single node. `python/tests/test_orderer_config.py` now asserts that
+  the NUMA executors ask for the NUMA mode and the UMA ones do not.
+
+  That is the sharpest lesson in this pass, and it is the SSoT policy's
+  own step 4 made concrete: **a centralisation that loses a
+  configuration dimension is not a centralisation.** The rule moved into
+  one place, and a DIFFERENT rule -- which mode the orderer runs in --
+  was lost in the move. The fix is not to give up on the fold; it is
+  for the authoritative implementation to represent every meaningful
+  variation, and for each caller's variation to be asserted.
 - **`_reap_fallow(fallow_pid)`** -- the reaper's reap and its
   abnormal-exit warning, four copies -> one.
 

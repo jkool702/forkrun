@@ -8099,11 +8099,19 @@ def _abort_reason_now(lib):
         return None
 
 
-def _spawn_c_orderer(engine_fds, out_fds):
+def _spawn_c_orderer(engine_fds, out_fds, unordered=False, numa=False):
     """Start the C orderer: the order pipe, the collection memfd, the child.
 
-    ONE implementation. This block was written out four times, once per
+    ONE implementation. This block was written out six times, once per
     executor that serves an ordered stream.
+
+    The configuration that genuinely varies between callers is FORWARDED,
+    not discarded. `numa` is not decoration: it reaches the C orderer as
+    the "numa" argument of `ring_order`, and selects the orderer's NUMA
+    mode. The NUMA executors need it; the UMA ones do not. A shared
+    helper that silently dropped it would change what the orderer does
+    on one of the paths -- which is exactly the failure this helper
+    exists to prevent, moved from the copies into the shared code.
     """
     # Imported INSIDE the function, not at module level: _reactor
     # resolves run.py symbols lazily, so a module-level import would
@@ -8116,7 +8124,8 @@ def _spawn_c_orderer(engine_fds, out_fds):
         pass
     # W-REL5-E7: no tempfile fallback (floor 3.10).
     coll_fd = os.memfd_create("forkrun_ordered")
-    orderer_pid = spawn_orderer(order_r, coll_fd, engine_fds=engine_fds,
+    orderer_pid = spawn_orderer(order_r, coll_fd, unordered=unordered,
+                                numa=numa, engine_fds=engine_fds,
                                 out_fds=out_fds)
     return order_r, order_w, coll_fd, orderer_pid
 
@@ -11504,7 +11513,9 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(
+                engine_fds, out_fds,
+                unordered=False, numa=True)
 
         if use_drain:
             # Workers signal the drain; the parent keeps the spare
@@ -12032,7 +12043,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(
+                engine_fds, out_fds,
+                unordered=False, numa=True)
 
         trap_r, trap_w = os.pipe()
 
