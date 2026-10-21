@@ -622,19 +622,59 @@ collect-all", and the covering test asserts the separation is under
 | 2 | 23564 KB | 60324 KB | **0.391** |
 | 3 | 24880 KB | 58304 KB | **0.427** |
 
-So the claim is accurate and the margin is wide -- but under the gate's
-load the same measurement came out at 0.82x, just over the threshold,
-and the test failed. It is a threshold that assumes an unloaded machine.
-The covering test's own comment says "the measured separation is
-0.50x", which matches what I measure; the failure mode is the LOAD, not
-a behaviour change.
+So the claim is accurate and the margin is wide. The separation is
+also stable in every controlled condition I could construct -- an
+ALTERNATING order of the two arms (6 paired rounds: 0.392-0.473, so no
+order effect), 16 CPU burners (0.436-0.443), and 20 GB of memory
+pressure (0.436-0.500) -- with identical output bytes and sample
+counts in both arms, so the two arms do identical work.
+
+Under the gate the same measurement came out at 0.82x, just over the
+0.80 threshold. Since the ratio is invariant to order, CPU load and
+memory pressure, the most likely mechanism is producer/consumer
+IMBALANCE: the workers produce ahead of the probe's fixed-rate consumer,
+so the streaming parent accumulates the results and its retention
+approaches collect-all's.
+
+**So the claim is TRUE BUT LOAD-CONDITIONAL, and the threshold assumes
+the idle regime.** That is a statement about the product's behaviour,
+not only about the test: the streaming path's memory advantage depends
+on the consumer keeping up. The threshold is NOT being silently
+relaxed -- the next work order has to decide whether the claim should
+be stated with its condition, or the measurement made fair by giving
+the collect-all arm a comparable producer/consumer imbalance.
 
 **`test_resume_sigint` -- a child left by the abort path.** The SIGINT
 test aborts a run mid-pipeline; the run's children are killed by the
 signal, and on that path one of them can be left terminated-but-unreaped.
-It does not reproduce in isolation: the test passes 10/10 in fresh
-processes, and driving the same flow by hand (abort, resume, expect)
-leaves no child at all. It needs the suite's timing.
+
+**The child is now IDENTIFIED** (the improved helper names it, because
+a zombie's cmdline is empty and the helper falls back to `comm`):
+
+    child lifecycle leak -- unreaped (terminated) child pid(s) 3671343[python3]
+
+`comm=python3` means it is a FORKED child of the test process -- a
+worker -- and not an exec'd helper (those would show the launcher's
+name). The run's teardown does reap its workers: a WNOHANG pass over
+`pids + extra_pids + [drain_pid]`, then a bounded
+`_join_helper_bounded` for each. So the reap that did not happen is the
+one the teardown could not reach.
+
+The best-evidence mechanism: the KeyboardInterrupt is raised by
+Python's default SIGINT handler at whatever bytecode boundary it lands
+on, and it can land INSIDE the teardown -- which is a `finally` -- so
+the teardown is interrupted part-way and the workers it had not yet
+reaped are left unreaped. That fits every observation: it is
+intermittent (wherever the interrupt lands), it does not reproduce in
+isolation (it lands elsewhere), and it moves between the two
+configurations.
+
+This stays OPEN as a production lifecycle question, not a test one: the
+fix is to make the teardown uninterruptible (defer a second signal
+across it), and to add a regression test for the underlying invariant
+("a run that is interrupted leaves no unreaped child"). Adding another
+cleanup to the test would hide it, which is what the review warned
+against.
 
 **What this pass did about them: made them legible.** Before, the
 cascade meant these were lost among 169 failures, each blamed on
