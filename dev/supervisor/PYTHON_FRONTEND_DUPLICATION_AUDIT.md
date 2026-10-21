@@ -143,12 +143,39 @@ logic. They have already **drifted**: the success path assigns
 `scan_rc` and `scan_pid` in a different order in the two copies. That
 is what duplication does.
 
-### 2.8 The fork-timing rule — 3 closures
+**And there is a THIRD copy of the same rule, inline** (not a closure,
+so a function-level scan does not see it), which has drifted further
+still:
 
-`_maybe_fork_workers` at 6773, 7301 and 10356 implement the same
-fork-timing rule (first data publish, or the stall timeout pre-gate),
-capturing different state (`state`/`gate` dicts in two, plain locals in
-one) and calling differently-named fork functions.
+| | the two closures | the inline copy |
+|---|---|---|
+| return value | `None` | `True` / `False` |
+| on `ChildProcessError` | returns, leaving `scan_pid` set | clears `scan_pid`, returns `True` |
+| D-PORT2/D6 "excuse" check | present | **absent** |
+
+The third difference is a **behavioural** one: the inline copy aborts
+and raises even when an abort is already in flight, which is exactly
+the "spurious fatal over an in-flight abort" that D-PORT2/D6 was
+written to prevent. Folding it would change behaviour, so it is
+**reported, not changed** — that is a decision, not a refactor.
+
+This is also the clearest evidence for the duplication thesis: the same
+rule, written four times, ended up with three different answers to
+"what should this function return" and two different answers to "what
+should happen when the child is already gone".
+
+### 2.8 The fork-timing rule — 4 copies
+
+`_maybe_fork_workers` exists **four** times, over two state shapes (a
+dict and plain locals) and two fork function names, with the
+explanatory comment present in two and absent in the other two. The
+rule is the same in all four.
+
+The rule has THREE outcomes, not two: the workers may already exist
+(do not fork again), DATA may have published (fork now), or the stall
+timeout may have elapsed pre-gate (fork, and set the stall flag). That
+third case is the one a naive "should fork" boolean loses.
+
 
 ### 2.9 Not findings
 
@@ -177,8 +204,8 @@ is gated.
 | 4 | `_resolve_c_loop(flag, mode, ...)` | 2 → 1 | low-med | **done** |
 | 5 | `_splice_stream_gen(..., executor=)` + one call site | 4 → 1 | med | **done** |
 | 6 | the stream-generator family, one executor parameter | 4 → 2 | med | **done** |
-| 7 | `_watch_scanner` | 2 → 1 | med | pending |
-| 8 | `_maybe_fork_workers` | 3 → 1 | med-high | pending |
+| 7 | `_watch_scanner` | 2 → 1 | med | **done** |
+| 8 | `_maybe_fork_workers` | 4 → 1 | med-high | **done** |
 
 **Steps 1–4 are pure mechanical folds**: one implementation, the
 variation becomes a parameter, and every call site keeps its current
@@ -286,7 +313,96 @@ thing that catches it is running the thing.
   *name*.
 
 
-## 4. A constraint the de-duplication work ran into
+## 4. What steps 7 and 8 did, and the two bugs this work introduced
+
+### 4.1 Step 7 — the scanner watcher
+
+The waitpid half moved to a module-level helper that RETURNS the new
+state; the closure keeps the abort/raise half, which was already
+identical in both. The two closures are now **byte-identical**.
+
+This follows the boundary the previous dedup pass set: *"Split by KIND,
+not by lifecycle: what a child death MEANS is a mechanic and lives in
+the helper; what the executor does next stays with the caller."* The
+waitpid is the mechanic; the abort and the raise are what the executor
+does next.
+
+### 4.2 Step 8 — the fork-timing rule
+
+The rule moved to `_fork_timing(workers_present, gate_issued, t_start,
+lib)`, which answers with **one of three actions** — `_FORK_HAVE` (the
+workers already exist; do NOT fork again), `_FORK_NOW`, `_FORK_WAIT` —
+plus a `stalled` flag that is true only in the stall-timeout case. Each
+closure keeps what is genuinely its own: which state container it
+reads and writes, and which fork function it calls.
+
+### 4.3 Two bugs this work introduced, and what caught them
+
+**Step 6 hoisted the single `return` into the wrong block.** The
+dispatch has to keep the envelope's `if _detect_streaming(...)` and
+hoist only the return; the first version put the return inside the
+block, so the **materialized** path fell through and `stream()`
+returned `None` — 37 errors in the targeted run.
+
+**Step 8 lost one of the rule's three outcomes.** The first version
+answered with a boolean, and "the workers already exist" became
+"should fork" — so the closure **re-forked an existing set**, and the
+streaming-ingest cells lost records (873 of 1500). The rule has three
+outcomes, not two, and a boolean cannot carry them.
+
+Both were caught by running the thing, not by reading it. That is the
+lesson worth keeping: in a dispatch chain, a structural change is only
+provable by executing it.
+
+## 5. The metrics, and what this pass is worth
+
+| | before | after |
+|---|---|---|
+| structural clone groups (canonical form) | 7 | **3** |
+| canonical characters duplicated | ~1719 | **~558** |
+| 30-line clone groups (verbatim lines) | 0 | 3 |
+| `run.py` lines | 12527 | 12508 |
+
+**67% less structurally duplicated code.** The three groups that remain
+are the ones that should remain:
+
+- `_maybe_fork_workers` ×2 — the two remaining copies differ in their
+  state shape, and folding them is a shape change, not a rule change.
+- `_watch_scanner` ×2 — the two closures are now thin, and the house
+  boundary says the "what the executor does next" half stays with the
+  caller.
+- `_stream_gen` / `_stream_reactor_gen` at 0.89 — a **genuine**
+  difference: the plain executors do not accept
+  `resume`/`checkpoint_file`.
+
+**The "duplicate def names" metric does not move** (15 before and
+after), and that is the right result rather than a disappointing one:
+the named wrappers were **kept on purpose**, so the duplication removed
+is the duplicated *rule*, not the duplicated *name*. A metric that
+counts names would have rewarded deleting the names; the point was to
+delete the bodies.
+
+## 6. The prior dedup work, and where this fits
+
+This is not the first pass. The tree already carries:
+
+- `DEDUP_DESIGN.md` / `DEDUP_REPORT.md` (2026-09-28) — the W-DEDUP
+  consolidation of the executor mechanics into `_executor_core.py`.
+- `d7178c77` — "single-source the duplicated NUMA and signal-retirement
+  mechanics" (the second SSoT pass), which folded `_watch_numa_pipeline`,
+  `_fork_workers_for_node` and `_retire_parent_signal`, and which
+  established the boundary this pass follows.
+- `0d1fcb2e` — "merge `_watch_helpers` copies (**fixes a real
+  divergence**)" — the same shape as this pass, and the same lesson.
+
+`EXECUTOR_MANIFEST.md` classified the remaining duplicates as
+"shape-bound" and named `_watch_scanner x2` among them, with the
+reason "per-executor nonlocal rebinding". **That classification is now
+obsolete for that pair** — the nonlocal rebinding is handled by a
+helper that RETURNS the new state, which is how `_watch_numa_pipeline`
+already worked. The manifest's note is updated to match.
+
+## 7. A constraint the de-duplication work ran into
 
 **The Python front end may not name the bash front end.** The purity
 tests (`test_reactor.TestReactorPurity.test_no_banned_tokens` and
@@ -310,7 +426,7 @@ code says only what the code needs to say:
 > not; one body with the configuration injected is the equivalent
 > shape."*
 
-## 5. What is deliberately NOT changed
+## 8. What is deliberately NOT changed
 
 - **The bash frontend.** It is the frozen reference and its
   template-plus-fragments shape is the target, not the thing to fix.

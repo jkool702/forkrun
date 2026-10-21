@@ -5610,6 +5610,74 @@ def _splice_stream_gen(source, *, bytes_, workers, on_error, nodes,
         splice=True, c_drain=c_drain)
 
 
+# The fork-timing rule answers with one of three actions, not a
+# boolean: the workers may ALREADY exist, in which case the rule
+# reports that and the caller must NOT fork again. Collapsing that
+# case into "should fork" re-forks an existing set -- the first
+# version of this fold did exactly that, and the streaming ingest
+# cells lost records because the workers were forked twice.
+_FORK_HAVE = 0     # the workers already exist; do NOT fork again
+_FORK_NOW = 1      # fork now
+_FORK_WAIT = 2     # not yet
+
+
+def _fork_timing(workers_present, gate_issued, t_start, lib):
+    """The fork-timing rule -- ONE implementation.
+
+    Returns (action, stalled): action is _FORK_HAVE / _FORK_NOW /
+    _FORK_WAIT, and `stalled` is True only when the fork is because
+    the stall timeout elapsed -- the only case that sets the stall
+    flag.
+
+    The rule: if the workers ALREADY EXIST, do not fork again; else
+    fork when DATA has published, or when the stall timeout has
+    elapsed and the gate has NOT been issued (slow-source
+    pipelining). Post-gate waits for publish (CASE A).
+
+    FOUR copies of this rule existed, over two state shapes (a dict and
+    plain locals) and two fork function names, with the explanatory
+    comment present in two and absent in the other two. The rule was
+    the same in all four; only the plumbing around it differed.
+    """
+    if workers_present:
+        return _FORK_HAVE, False
+    try:
+        ready = lib.fr_py_data_ready()
+    except Exception:
+        ready = 0
+    if ready > 0:
+        return _FORK_NOW, False
+    if not gate_issued and (
+            _time.monotonic() - t_start) >= STALL_FORK_AFTER:
+        return _FORK_NOW, True
+    return _FORK_WAIT, False
+
+
+def _scanner_watch(scan_pid, scan_rc, lib):
+    """Poll the forked materialized scanner once.
+
+    Returns (scan_pid, scan_rc, failed): the updated state, and the
+    wait status when the scanner exited non-zero (None otherwise).
+
+    ONE implementation. The two copies of this rule had already
+    DRIFTED -- one set scan_pid=None after scan_rc, the other hoisted
+    it above the success check. They are equivalent today (nothing
+    reads the other between the two assignments), but that is exactly
+    how two copies of one rule stop agreeing.
+    """
+    if scan_pid is None or scan_rc is not None:
+        return scan_pid, scan_rc, None
+    try:
+        wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        return scan_pid, scan_rc, None
+    if wpid != scan_pid:
+        return scan_pid, scan_rc, None
+    if os.WIFEXITED(scan_st) and os.WEXITSTATUS(scan_st) == 0:
+        return None, 0, None
+    return None, scan_st, scan_st
+
+
 def _drain_worker_memfd(fd, state, terminal=False) -> list:
     """Incrementally pread new bytes from one worker memfd.
 
@@ -6806,22 +6874,16 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             # Fork-timing rule (see module constants): first DATA
             # publish, or stall timeout pre-gate (slow-source
             # pipelining). Post-gate waits for publish (CASE A).
-            if state["workers"]:
+            action, stalled = _fork_timing(
+                state["workers"], gate["issued"], state["t_start"], lib)
+            if action == _FORK_HAVE:
                 return True
-            try:
-                ready = lib.fr_py_data_ready()
-            except Exception:
-                ready = 0
-            if ready > 0:
-                _fork_workers()
-                return True
-            if not gate["issued"] and (
-                    _time.monotonic() - state["t_start"]
-                    ) >= STALL_FORK_AFTER:
+            if action == _FORK_WAIT:
+                return False
+            if stalled:
                 state["stall"] = True
-                _fork_workers()
-                return True
-            return False
+            _fork_workers()
+            return True
 
         # Nonblocking source for the interleave (dup user fds — never
         # mutate flags on a descriptor we don't own).
@@ -7317,21 +7379,16 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             # source → CASE-B pipelining). Returns True when workers
             # exist (or the empty-input skip was taken by the caller).
             nonlocal stall_forked
-            if workers_forked:
+            action, stalled = _fork_timing(
+                workers_forked, gate_issued, t_start, lib)
+            if action == _FORK_HAVE:
                 return True
-            try:
-                ready = lib.fr_py_data_ready()
-            except Exception:
-                ready = 0
-            if ready > 0:
-                _fork_workers()
-                return True
-            if not gate_issued and (
-                    _time.monotonic() - t_start) >= STALL_FORK_AFTER:
+            if action == _FORK_WAIT:
+                return False
+            if stalled:
                 stall_forked = True
-                _fork_workers()
-                return True
-            return False
+            _fork_workers()
+            return True
 
         try:
             while True:
@@ -8534,23 +8591,10 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # without the scanner no EOF can arrive, so waiting
             # workers would hang — fail loud instead.
             nonlocal scan_pid, scan_rc
-            if scan_pid is None or scan_rc is not None:
+            scan_pid, scan_rc, failed = _scanner_watch(
+                scan_pid, scan_rc, lib)
+            if failed is None:
                 return
-            try:
-                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
-            except ChildProcessError:
-                return
-            except OSError:
-                return
-            if wpid != scan_pid:
-                return
-            if os.WIFEXITED(scan_st) and \
-                    os.WEXITSTATUS(scan_st) == 0:
-                scan_rc = 0
-                scan_pid = None
-                return
-            scan_rc = scan_st
-            scan_pid = None
             # D-PORT2/D6: query the abort reason BEFORE our own
             # abort — an abort already in flight makes this an
             # expected emergency exit. Retire it as observed (the
@@ -8567,7 +8611,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 pass
             raise RuntimeError(
                 "forkrun: materialized scanner failed (status %r)"
-                % (scan_st,))
+                % (failed,))
 
         try:
             reactor_run(state, service=_watch_scanner)
@@ -9427,22 +9471,10 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             # without the scanner no EOF can arrive, so waiting
             # workers would hang — fail loud instead.
             nonlocal scan_pid, scan_rc
-            if scan_pid is None or scan_rc is not None:
+            scan_pid, scan_rc, failed = _scanner_watch(
+                scan_pid, scan_rc, lib)
+            if failed is None:
                 return
-            try:
-                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
-            except ChildProcessError:
-                return
-            except OSError:
-                return
-            if wpid != scan_pid:
-                return
-            scan_pid = None
-            if os.WIFEXITED(scan_st) and \
-                    os.WEXITSTATUS(scan_st) == 0:
-                scan_rc = 0
-                return
-            scan_rc = scan_st
             # D-PORT2/D6: query the abort reason BEFORE our own
             # abort — an abort already in flight makes this an
             # expected emergency exit. Retire it as observed (the
@@ -9459,7 +9491,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 pass
             raise RuntimeError(
                 "forkrun: materialized scanner failed (status %r)"
-                % (scan_st,))
+                % (failed,))
 
         try:
             try:
@@ -9784,21 +9816,16 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
 
         def _maybe_fork_workers():
             nonlocal stall_forked
-            if workers_forked:
+            action, stalled = _fork_timing(
+                workers_forked, gate_issued, t_start, lib)
+            if action == _FORK_HAVE:
                 return True
-            try:
-                ready = lib.fr_py_data_ready()
-            except Exception:
-                ready = 0
-            if ready > 0:
-                _fork_workers_now()
-                return True
-            if not gate_issued and (
-                    _time.monotonic() - t_start) >= STALL_FORK_AFTER:
+            if action == _FORK_WAIT:
+                return False
+            if stalled:
                 stall_forked = True
-                _fork_workers_now()
-                return True
-            return False
+            _fork_workers_now()
+            return True
 
         # W-PYINGESTCHILD: the spill runs in a FORKED CHILD, so the
         # parent does nothing but run the reactor.
@@ -10342,22 +10369,16 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 gate_issued=gate["issued"])
 
         def _maybe_fork_workers():
-            if fstate["workers"]:
+            action, stalled = _fork_timing(
+                fstate["workers"], gate["issued"], fstate["t_start"], lib)
+            if action == _FORK_HAVE:
                 return True
-            try:
-                ready = lib.fr_py_data_ready()
-            except Exception:
-                ready = 0
-            if ready > 0:
-                _fork_workers_now()
-                return True
-            if not gate["issued"] and (
-                    _time.monotonic() - fstate["t_start"]
-                    ) >= STALL_FORK_AFTER:
+            if action == _FORK_WAIT:
+                return False
+            if stalled:
                 fstate["stall"] = True
-                _fork_workers_now()
-                return True
-            return False
+            _fork_workers_now()
+            return True
 
         src_fd, must_close = _prepare_ingest_source(src_fd, must_close)
         try:
