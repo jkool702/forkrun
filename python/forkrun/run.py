@@ -220,9 +220,9 @@ def _require_numa_symbol():
 
     if not _v1a()["numa"]:
         raise RuntimeError(
-            "nodes=@N/multi-node needs the NUMA substrate "
-            "(fr_py_init_numa et al.) — rebuild it ('make -f "
-            "Makefile.substrate python-substrate')")
+                "nodes=@N/multi-node needs the NUMA substrate "
+                "(fr_py_init_numa et al.) — rebuild it ('make -f "
+                "Makefile.substrate python-substrate')")
 
 
 def _resolve_numa(nodes):
@@ -245,9 +245,9 @@ def _require_drain_symbol():
 
     if not _v1a().get("drain"):
         raise RuntimeError(
-            "c_drain=True needs fr_py_drain_loop — rebuild "
-            "the substrate ('make -f Makefile.substrate "
-            "python-substrate')")
+                "c_drain=True needs fr_py_drain_loop — rebuild "
+                "the substrate ('make -f Makefile.substrate "
+                "python-substrate')")
 
 
 def _resolve_output(output) -> bool:
@@ -510,9 +510,9 @@ def _require_plugin_loop_symbol():
 
     if not _v1a().get("plugin_loop"):
         raise RuntimeError(
-            "c_worker_loop=True needs fr_py_worker_plugin_loop — rebuild "
-            "the substrate ('make -f Makefile.substrate "
-            "python-substrate')")
+                "c_worker_loop=True needs fr_py_worker_plugin_loop — rebuild "
+                "the substrate ('make -f Makefile.substrate "
+                "python-substrate')")
 
 
 def _cleanroom_route_for(entry, raw_mode):
@@ -1914,11 +1914,11 @@ def _cleanroom_c07_record(expected, observed, *, poisoned=0, reason=None):
     # itself and is also refused rather than silently accepted.
     _CLEANROOM_C07["verdict"] = "incomplete"
     raise RuntimeError(
-        "forkrun: cleanroom output is INCOMPLETE -- the launcher reported "
-        "%d committed DATA frame(s) but the caller received %d (poisoned "
-        "batches: %d). A clean exit status is not evidence of complete "
-        "output: packets can be lost after the engine committed them."
-        % (expected, int(observed), int(poisoned)))
+            "forkrun: cleanroom output is INCOMPLETE -- the launcher reported "
+            "%d committed DATA frame(s) but the caller received %d (poisoned "
+            "batches: %d). A clean exit status is not evidence of complete "
+            "output: packets can be lost after the engine committed them."
+            % (expected, int(observed), int(poisoned)))
 
 
 @_route_fd_cleanup
@@ -2207,12 +2207,12 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             UserWarning, stacklevel=3)
         if forbidden:
             raise RuntimeError(
-                "forkrun: cleanroom launcher failed (%s). Retrying "
-                "in-process would load the same plugin in this process "
-                "and reproduce the failure here, so the call is refused "
-                "rather than retried. Load the plugin explicitly once to "
-                "confirm it is safe before using it with forkrun."
-                % (_describe_launcher_failure(status),))
+                    "forkrun: cleanroom launcher failed (%s). Retrying "
+                    "in-process would load the same plugin in this process "
+                    "and reproduce the failure here, so the call is refused "
+                    "rather than retried. Load the plugin explicitly once to "
+                    "confirm it is safe before using it with forkrun."
+                    % (_describe_launcher_failure(status),))
         if may_fallback:
             return None
         # CR-FIX1-C: the launcher may have consumed bytes out of the
@@ -2228,13 +2228,13 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
         # side effects that had already been committed. See
         # _cleanroom_may_fallback.
         raise RuntimeError(
-            "forkrun: cleanroom launcher failed (%s) after the input may "
-            "have been consumed, and the supplied source is a descriptor "
-            "whose read position the launcher shares. Retrying in-process "
-            "would resume mid-input and silently return truncated output, "
-            "so this call is refused rather than completed incorrectly. "
-            "Pass a path (or seek the descriptor back to 0 yourself) if "
-            "you want a retry." % (_describe_launcher_failure(status),))
+                "forkrun: cleanroom launcher failed (%s) after the input may "
+                "have been consumed, and the supplied source is a descriptor "
+                "whose read position the launcher shares. Retrying in-process "
+                "would resume mid-input and silently return truncated output, "
+                "so this call is refused rather than completed incorrectly. "
+                "Pass a path (or seek the descriptor back to 0 yourself) if "
+                "you want a retry." % (_describe_launcher_failure(status),))
     else:
         # FD-LEAK-1 (success half): the launcher exited cleanly, so
         # nothing reads errfd -- the stderr tail is consulted only on
@@ -3102,10 +3102,10 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                     "cleanroom launcher declined before ingestion "
                     "(%s)" % (_describe_launcher_failure(lstatus),))
             raise RuntimeError(
-                "forkrun: cleanroom launcher failed (%s); the "
-                "stream is TRUNCATED and the records already yielded "
-                "are incomplete"
-                % (_describe_launcher_failure(lstatus),))
+                    "forkrun: cleanroom launcher failed (%s); the "
+                    "stream is TRUNCATED and the records already yielded "
+                    "are incomplete"
+                    % (_describe_launcher_failure(lstatus),))
         # DECISION-02: consume the poison count ONLY now, and ONLY
         # after a confirmed-clean exit.
         #
@@ -3132,8 +3132,8 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
             npois = 0
         if npois and strict_poison:
             raise RuntimeError(
-                "forkrun: %d poisoned batch(es) skipped in a "
-                "streaming run and strict_poison=True" % (npois,))
+                    "forkrun: %d poisoned batch(es) skipped in a "
+                    "streaming run and strict_poison=True" % (npois,))
         finished = True
     finally:
         # Descriptor ownership: the decorator's close_all() runs when this
@@ -3180,8 +3180,8 @@ def _resolve_c_loop(flag, raw_mode, num_nodes, *, flag_name, mode,
             % (flag_name, mode, mode_reason, raw_mode))
     if num_nodes != 1:
         raise RuntimeError(
-            "%s=True is UMA-only in %s (multi-node is future work) — "
-            "use %s=False" % (flag_name, work_order, flag_name))
+                "%s=True is UMA-only in %s (multi-node is future work) — "
+                "use %s=False" % (flag_name, work_order, flag_name))
     require_symbol()
     return True
 
@@ -3224,9 +3224,9 @@ def _require_spawn_loop_symbol():
 
     if not _v1a().get("spawn_loop"):
         raise RuntimeError(
-            "c_spawn_loop=True needs fr_py_worker_spawn_loop — rebuild "
-            "the substrate ('make -f Makefile.substrate "
-            "python-substrate')")
+                "c_spawn_loop=True needs fr_py_worker_spawn_loop — rebuild "
+                "the substrate ('make -f Makefile.substrate "
+                "python-substrate')")
 
 
 def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
@@ -3399,22 +3399,22 @@ class _RunLock:
             # engine we are trying to protect.
             if getattr(self._local, "inherited_from_parent", False):
                 raise RuntimeError(
-                    "forkrun: refusing to start a nested run inside a "
-                    "forkrun worker process. A worker inherits the "
-                    "engine session of the run that created it, and is "
-                    "mid-batch on that state, so a nested session would "
-                    "replace the mapping its own completion path depends "
-                    "on. Start the nested run from the parent instead -- "
-                    "pass it as data, or use a separate process.")
+                        "forkrun: refusing to start a nested run inside a "
+                        "forkrun worker process. A worker inherits the "
+                        "engine session of the run that created it, and is "
+                        "mid-batch on that state, so a nested session would "
+                        "replace the mapping its own completion path depends "
+                        "on. Start the nested run from the parent instead -- "
+                        "pass it as data, or use a separate process.")
             raise RuntimeError(
-                "forkrun: refusing to start a nested run while another "
-                "forkrun execution is live in this thread. The engine's "
-                "state is process-global, so a nested session would "
-                "replace the live one's state and leave the parent "
-                "unable to supervise or recover its workers. Finish or "
-                "close the active stream() before starting another run; "
-                "runs in SEPARATE threads are still supported and are "
-                "serialised.")
+                    "forkrun: refusing to start a nested run while another "
+                    "forkrun execution is live in this thread. The engine's "
+                    "state is process-global, so a nested session would "
+                    "replace the live one's state and leave the parent "
+                    "unable to supervise or recover its workers. Finish or "
+                    "close the active stream() before starting another run; "
+                    "runs in SEPARATE threads are still supported and are "
+                    "serialised.")
         self._lock.acquire()
         try:
             _warn_threaded_fork()
@@ -3598,7 +3598,7 @@ def _spill_to_memfd(src_fd) -> tuple[int, int]:
                     n = os.write(memfd, view)
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed writing ingress: %s" % (exc,))
+                            "failed writing ingress: %s" % (exc,))
                 size += n
                 view = view[n:]
         return memfd, size
@@ -3619,7 +3619,7 @@ def _spill_to_memfd(src_fd) -> tuple[int, int]:
                 n = os.pwrite(memfd, view, off)
             except OSError as exc:
                 raise RuntimeError(
-                    "failed writing ingress: %s" % (exc,))
+                        "failed writing ingress: %s" % (exc,))
             view = view[n:]
             off += n
             size += n
@@ -3714,9 +3714,10 @@ def _watch_ingest_helpers(lib, *, fallow_pid, scan_pid, helpers,
         helpers["fallow_rc"] = st
         ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
         if not ok:
-            lib.fr_py_abort()
-            raise RuntimeError(
-                "forkrun: ingest reaper failed (status %r)" % (st,))
+            if not _helper_death_excused("error", False, lib):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: ingest reaper failed (status %r)" % (st,))
     if scan_death_r is not None and helpers["scan_kind"] is None:
         kind, code = check_scanner_death(scan_pid, scan_death_r)
         if kind != "running":
@@ -3729,9 +3730,10 @@ def _watch_ingest_helpers(lib, *, fallow_pid, scan_pid, helpers,
             # never be closed after reuse (W-REL2/R11).
             state.scan_death_r = -1
             if kind == "error" or not gate_issued:
-                lib.fr_py_abort()
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)" % (code,))
+                if not _helper_death_excused("error", False, lib):
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: ingest scanner failed (status %r)" % (code,))
     return scan_death_r
 
 
@@ -3779,10 +3781,11 @@ def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
         helpers["fallow_rc"] = st
         ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
         if not ok:
-            lib.fr_py_abort()
-            raise RuntimeError(
-                "forkrun: NUMA reaper failed (status %r)"
-                % (st,))
+            if not _helper_death_excused("error", False, lib):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: NUMA reaper failed (status %r)"
+                    % (st,))
     _poll_ingest_once(lib, helpers, pipe)
     try:
         eof_posted = lib.fr_py_ingest_eof_posted()
@@ -3815,10 +3818,11 @@ def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
                     helpers.setdefault(
                         "excused", set()).add((key, node))
                 continue
-            lib.fr_py_abort()
-            raise RuntimeError(
-                "forkrun: NUMA %s %d failed "
-                "(status %r)" % (key, node, code))
+            if not _helper_death_excused("error", False, lib):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: NUMA %s %d failed "
+                    "(status %r)" % (key, node, code))
 
 
 def _fork_workers_for_node(state, assignments, node, forked):
@@ -4649,9 +4653,9 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
               strict_poison=strict_poison, signal_policy=signal_policy)
     if resume is not None or checkpoint_file is not None:
         raise RuntimeError(
-            "run(): resume=/checkpoint_file= require a C-orderer-backed "
-            "path (map()/stream() with orchestrator=True, "
-            "order='index'); run() has no C orderer")
+                "run(): resume=/checkpoint_file= require a C-orderer-backed "
+                "path (map()/stream() with orchestrator=True, "
+                "order='index'); run() has no C orderer")
     orchestrator = _validate_orchestrator(orchestrator)
     if orchestrator is None:
         # W-REL1/R1 (ratified Option A): recovery is the default.
@@ -4660,8 +4664,8 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
     c_drain = _validate_c_drain(c_drain)
     if _validate_c_worker_loop(c_worker_loop):
         raise RuntimeError(
-            "run(): c_worker_loop=True needs collection (the C loop "
-            "always frames output records); use map()/stream()")
+                "run(): c_worker_loop=True needs collection (the C loop "
+                "always frames output records); use map()/stream()")
     if mode not in ("python", "spawn", "plugin", "splice"):
         raise NotImplementedError(
             "unknown mode %r" % (mode,))
@@ -5164,14 +5168,14 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     if _detect_streaming(source, kwargs.get("streaming")):
         if c_worker_loop:
             raise RuntimeError(
-                "c_worker_loop=True is materialized-only in W-PY26 "
-                "(streaming ingest is future work) — use "
-                "c_worker_loop=False")
+                    "c_worker_loop=True is materialized-only in W-PY26 "
+                    "(streaming ingest is future work) — use "
+                    "c_worker_loop=False")
         if c_spawn_loop:
             raise RuntimeError(
-                "c_spawn_loop=True is materialized-only in W-PY33 "
-                "(streaming ingest is future work) — use "
-                "c_spawn_loop=False")
+                    "c_spawn_loop=True is materialized-only in W-PY33 "
+                    "(streaming ingest is future work) — use "
+                    "c_spawn_loop=False")
         if orchestrator:
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
                 with _RUN_LOCK:
@@ -5200,9 +5204,9 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         plugin_spec = _c_plugin_spec(payload)
         if plugin_spec is None:
             raise RuntimeError(
-                "c_worker_loop=True needs a dialect-1/2 frozen-ABI "
-                "plugin (forkrun_use_ctx opting into 1 or 2) — this "
-                "payload negotiates no ctx; use c_worker_loop=False")
+                    "c_worker_loop=True needs a dialect-1/2 frozen-ABI "
+                    "plugin (forkrun_use_ctx opting into 1 or 2) — this "
+                    "payload negotiates no ctx; use c_worker_loop=False")
     # NOTE: named c_spawn_argv, not spawn_argv. A bare spawn_argv here
     # shadowed _execute_cleanroom's parameter of the same name for the
     # whole module scope of that call, so every cleanroom invocation
@@ -5215,8 +5219,8 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         c_spawn_argv = _c_spawn_spec(payload)
         if c_spawn_argv is None:
             raise RuntimeError(
-                "c_spawn_loop=True needs a spawn argv payload "
-                "(mode='spawn') — use c_spawn_loop=False")
+                    "c_spawn_loop=True needs a spawn argv payload "
+                    "(mode='spawn') — use c_spawn_loop=False")
 
     # W-CR1: cleanroom (exec-based) launcher. Placed after every other
     # gate, so it only sees calls already known to be materialized, UMA
@@ -5335,12 +5339,12 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
     output = _resolve_output(kwargs.get("output"))
     if _validate_c_worker_loop(kwargs.get("c_worker_loop")):
         raise RuntimeError(
-            "stream(): c_worker_loop=True is map()-only in W-PY26 "
-            "(streaming executors are future work)")
+                "stream(): c_worker_loop=True is map()-only in W-PY26 "
+                "(streaming executors are future work)")
     if _validate_c_spawn_loop(kwargs.get("c_spawn_loop")):
         raise RuntimeError(
-            "stream(): c_spawn_loop=True is map()-only in W-PY33 "
-            "(streaming executors are future work)")
+                "stream(): c_spawn_loop=True is map()-only in W-PY33 "
+                "(streaming executors are future work)")
     kwargs = dict(kwargs, c_drain=c_drain)
     numa_map_str, num_nodes, node_cpus = _resolve_numa(
         kwargs.get("nodes", "auto"))
@@ -6096,8 +6100,8 @@ def _make_results_pump(results_r, order="none", stats=None, watch=None):
                 continue
             except OSError as exc:
                 raise RuntimeError(
-                    "forkrun: read failed on the C-drain results pipe "
-                    "(fd %r): %s" % (results_r, exc)) from exc
+                        "forkrun: read failed on the C-drain results pipe "
+                        "(fd %r): %s" % (results_r, exc)) from exc
             if not chunk:
                 st["eof"] = True
                 if watch is not None:
@@ -6294,9 +6298,9 @@ def _require_splice_symbol():
 
     if not _v1a()["splice"]:
         raise RuntimeError(
-            "mode='splice' needs fr_py_worker_splice_loop — rebuild "
-            "the substrate ('make -f Makefile.substrate "
-            "python-substrate')")
+                "mode='splice' needs fr_py_worker_splice_loop — rebuild "
+                "the substrate ('make -f Makefile.substrate "
+                "python-substrate')")
 
 
 def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
@@ -6429,13 +6433,20 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                 scan_rc = 0
                 return True
             scan_rc = scan_st
+            # D-PORT2/D6, through the ONE decision point: an abort
+            # already in flight makes this scanner's death its EXPECTED
+            # consequence, and re-aborting would print a spurious
+            # FATAL and clobber the abort's own outcome. The scanner
+            # IS done either way, so the pump still reports "done".
+            if _helper_death_excused("error", False, lib):
+                return True
             try:
                 lib.fr_py_abort()
             except Exception:
                 pass
             raise RuntimeError(
-                "forkrun: materialized scanner failed (status %r)"
-                % (scan_st,))
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (scan_st,))
 
         _flush_stdio()
 
@@ -6535,14 +6546,15 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                                         os.WEXITSTATUS(scan_st)
                                         == 0):
                                     scan_rc = scan_st
-                                    try:
-                                        lib.fr_py_abort()
-                                    except Exception:
-                                        pass
-                                    raise RuntimeError(
-                                        "forkrun: materialized "
-                                        "scanner failed (status %r)"
-                                        % (scan_st,))
+                                    if not _helper_death_excused("error", False, lib):
+                                        try:
+                                            lib.fr_py_abort()
+                                        except Exception:
+                                            pass
+                                        raise RuntimeError(
+                                                "forkrun: materialized "
+                                                "scanner failed (status %r)"
+                                                % (scan_st,))
                                 scan_rc = 0
                     if drain_alive:
                         try:
@@ -6588,9 +6600,10 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                     if scan_st is not None and not (
                             os.WIFEXITED(scan_st) and
                             os.WEXITSTATUS(scan_st) == 0):
-                        raise RuntimeError(
-                            "forkrun: materialized scanner failed "
-                            "(status %r)" % (scan_st,))
+                        if not _helper_death_excused("error", False, lib):
+                            raise RuntimeError(
+                                    "forkrun: materialized scanner failed "
+                                    "(status %r)" % (scan_st,))
                 else:
                     scan_pid = None
             finally:
@@ -6643,9 +6656,10 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: materialized scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: materialized scanner failed (status %r)"
+                            % (scan_st,))
         else:
             scan_pid = None
 
@@ -6663,8 +6677,8 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                     os.WIFEXITED(drain_status) and
                     os.WEXITSTATUS(drain_status) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (drain_status,))
+                        "forkrun: C drain failed (status %r)"
+                        % (drain_status,))
 
         try:
             npois = lib.fr_py_poisoned_count()
@@ -6922,8 +6936,8 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                             _drop_parent_copies()
                             return True
                         raise RuntimeError(
-                            "forkrun: ingest scanner published no "
-                            "data for %d spilled bytes" % spill["off"])
+                                "forkrun: ingest scanner published no "
+                                "data for %d spilled bytes" % spill["off"])
                     else:
                         return False
                 else:
@@ -6937,7 +6951,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                     return False
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
+                            "failed reading source: %s" % (exc,))
                 if not chunk:
                     # Source EOF: gate now, unless a stall-triggered
                     # fork is younger than the grace (withhold until
@@ -6968,7 +6982,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                         n = os.pwrite(memfd, view, spill["off"])
                     except OSError as exc:
                         raise RuntimeError(
-                            "failed writing ingress: %s" % (exc,))
+                                "failed writing ingress: %s" % (exc,))
                     view = view[n:]
                     spill["off"] += n
                 _maybe_fork_workers()
@@ -7081,8 +7095,8 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                     os.WIFEXITED(drain_status) and
                     os.WEXITSTATUS(drain_status) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (drain_status,))
+                        "forkrun: C drain failed (status %r)"
+                        % (drain_status,))
 
         # Scanner join: strict when observed, proof-based when already
         # reaped by teardown after healthy workers + complete drain
@@ -7100,9 +7114,10 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
             fallow_st = _join_helper_bounded(fallow_pid, "fallow")
@@ -7343,7 +7358,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 # run() rejects splice) but preserved for exactness:
                 # splice needs an out fd per worker.
                 raise RuntimeError(
-                    "splice without collect has no output transport")
+                        "splice without collect has no output transport")
             # W-DEDUP: single fork dispatch (splice fail-loud / python
             # with fallow acks). Pids return in worker-index order.
             # WO-PY-REL-1/TD-09: poison-index relay receiving end.
@@ -7396,7 +7411,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     chunk = os.read(src_fd, _CHUNK)
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
+                            "failed reading source: %s" % (exc,))
                 if not chunk:
                     break
                 # pwrite at explicit offsets (W-PY16): the scanner seeds
@@ -7411,7 +7426,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                         n = os.pwrite(memfd, view, total_written)
                     except OSError as exc:
                         raise RuntimeError(
-                            "failed writing ingress: %s" % (exc,))
+                                "failed writing ingress: %s" % (exc,))
                     view = view[n:]
                     total_written += n
                 _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued)
@@ -7470,8 +7485,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                             signal_w = signal_r = None
                         break
                     raise RuntimeError(
-                        "forkrun: ingest scanner published no data "
-                        "for %d spilled bytes" % total_written)
+                            "forkrun: ingest scanner published no data "
+                            "for %d spilled bytes" % total_written)
                 _time.sleep(0.05)
 
         failed = []
@@ -7504,7 +7519,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             if not failed and _dst != 0 and not (
                     os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)" % (_dst,))
+                        "forkrun: C drain failed (status %r)" % (_dst,))
 
         if failed:
             _raise_worker_failure(failed, len(pids), on_error)
@@ -7528,9 +7543,10 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
             fallow_st = _join_helper_bounded(fallow_pid, "fallow")
@@ -7680,14 +7696,14 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
     if c_worker_loop:
         if not collect or plugin_spec is None:
             raise RuntimeError(
-                "c_worker_loop=True needs collection with a "
-                "dialect-1/2 plugin spec")
+                    "c_worker_loop=True needs collection with a "
+                    "dialect-1/2 plugin spec")
         _require_plugin_loop_symbol()
     if c_spawn_loop:
         if not collect or spawn_argv is None:
             raise RuntimeError(
-                "c_spawn_loop=True needs collection with a "
-                "spawn argv payload")
+                    "c_spawn_loop=True needs collection with a "
+                    "spawn argv payload")
         _require_spawn_loop_symbol()
     # W-REL6-5: lattice position (executor #1: UMA, materialized,
     # plain, blocking) + this call's behavior flags, threaded through
@@ -7807,6 +7823,18 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                             scan_pid = None
                             if not (os.WIFEXITED(scan_st) and
                                     os.WEXITSTATUS(scan_st) == 0):
+                                # D-PORT2/D6: the consult comes BEFORE
+                                # our own abort -- the order IS the fix.
+                                # The abort publishes the reason the
+                                # consult reads, so a consult after it
+                                # would always see "excused" and swallow
+                                # a genuine scan failure. The abort
+                                # itself stays unconditional: the
+                                # engine's reason word is published by a
+                                # CAS, so a second abort cannot
+                                # overwrite the first reason.
+                                excused = _helper_death_excused(
+                                    "error", False, lib)
                                 try:
                                     lib.fr_py_abort()
                                 except Exception:
@@ -7816,9 +7844,10 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                                     _join_helper_bounded(
                                         pid, "worker",
                                         WORKER_REAP_TIMEOUT)
-                                raise RuntimeError(
-                                    "forkrun: scan failed (status %r)"
-                                    % (scan_st,))
+                                if not excused:
+                                    raise RuntimeError(
+                                            "forkrun: scan failed (status %r)"
+                                            % (scan_st,))
                 if alive:
                     _time.sleep(0.005)
         except KeyboardInterrupt as _ki:
@@ -7844,12 +7873,13 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             scan_pid = None
             if not (os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                try:
-                    lib.fr_py_abort()
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    "forkrun: scan failed (status %r)" % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    try:
+                        lib.fr_py_abort()
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                            "forkrun: scan failed (status %r)" % (scan_st,))
 
         if use_drain and drain_pid is not None:
             # Workers are gone so the signal pipe hit EOF; the drain
@@ -7866,7 +7896,7 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             if not failed and _dst != 0 and not (
                     os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)" % (_dst,))
+                        "forkrun: C drain failed (status %r)" % (_dst,))
 
         if failed:
             _raise_worker_failure(failed, len(pids), on_error)
@@ -8099,6 +8129,32 @@ def _abort_reason_now(lib):
         return int(fn())
     except Exception:
         return None
+
+
+def _helper_death_excused(kind, eof_ok, lib):
+    """Has an abort already explained this helper child's death?
+
+    ONE decision point for every helper-death site in the front end.
+
+    D-PORT2/D6 introduced the abort-aware classification -- "an abort
+    already in flight makes helper deaths expected (emergency path),
+    not fatal" -- and wired it into 2 of the 17 places the front end
+    turns a helper child's non-zero exit into a fatal error. The other
+    15 had the same rule written out, or omitted it, which is how a
+    fix lands in the copies its author happened to find and then lives
+    on in the execution paths nobody looked at.
+
+    Every site now asks THIS function, so the next change to the rule
+    lands everywhere by construction.
+
+    Returns True when the death is EXCUSED: an abort is already in
+    flight, so this child's non-zero exit is that abort's expected
+    consequence. The caller must then retire the child and carry on
+    WITHOUT aborting again and WITHOUT raising -- re-aborting would
+    print a spurious FATAL and clobber the abort's own outcome.
+    """
+    return (_helper_death_disposition(kind, eof_ok,
+                                      _abort_reason_now(lib)) == "excuse")
 
 
 def _helper_death_disposition(kind, eof_ok, reason):
@@ -8425,24 +8481,24 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         # never reaches here with the flag (map() gates raw modes).
         if not collect or plugin_spec is None:
             raise RuntimeError(
-                "c_worker_loop=True needs collection with a "
-                "dialect-1/2 plugin spec")
+                    "c_worker_loop=True needs collection with a "
+                    "dialect-1/2 plugin spec")
         if sink is not None:
             raise RuntimeError(
-                "c_worker_loop=True takes no sink (no per-batch "
-                "Python hook in the C loop)")
+                    "c_worker_loop=True takes no sink (no per-batch "
+                    "Python hook in the C loop)")
         _require_plugin_loop_symbol()
     if c_spawn_loop:
         # W-PY33: reactor + C spawn loop needs collection, a spawn
         # argv payload, and no sink (the C loop has no sink hook).
         if not collect or spawn_argv is None:
             raise RuntimeError(
-                "c_spawn_loop=True needs collection with a "
-                "spawn argv payload")
+                    "c_spawn_loop=True needs collection with a "
+                    "spawn argv payload")
         if sink is not None:
             raise RuntimeError(
-                "c_spawn_loop=True takes no sink (no per-batch "
-                "Python hook in the C loop)")
+                    "c_spawn_loop=True takes no sink (no per-batch "
+                    "Python hook in the C loop)")
         _require_spawn_loop_symbol()
     # W-REL6-5: lattice position (executor #5: UMA, materialized,
     # reactor, blocking) + this call's behavior flags.
@@ -8601,17 +8657,15 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # code stays honest in scan_rc; the abort's own outcome
             # governs the run) instead of raising a spurious fatal
             # over it.
-            if _helper_death_disposition(
-                    "error", False,
-                    _abort_reason_now(lib)) == "excuse":
+            if _helper_death_excused("error", False, lib):
                 return
             try:
                 lib.fr_py_abort()
             except Exception:
                 pass
             raise RuntimeError(
-                "forkrun: materialized scanner failed (status %r)"
-                % (failed,))
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (failed,))
 
         try:
             reactor_run(state, service=_watch_scanner)
@@ -8638,9 +8692,10 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: materialized scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: materialized scanner failed (status %r)"
+                            % (scan_st,))
 
         if use_drain:
             # Every worker write end is closed (all reaped) — drop
@@ -8668,8 +8723,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                         os.WIFEXITED(_dst) and
                         os.WEXITSTATUS(_dst) == 0):
                     raise RuntimeError(
-                        "forkrun: C drain failed (status %r)"
-                        % (_dst,))
+                            "forkrun: C drain failed (status %r)"
+                            % (_dst,))
 
         # Orderer EOF: every worker write end is closed (all workers
         # reaped) — drop the parent's spare so the orderer finishes.
@@ -8692,9 +8747,10 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
                         os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+                    if not _helper_death_excused("error", False, lib):
+                        raise RuntimeError(
+                                "forkrun: C orderer failed (status %r)"
+                                % (_ost,))
 
         _reactor_poison_summary(lib, state, strict_poison)
 
@@ -8914,17 +8970,19 @@ def _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued):
         if name == "scanner":
             helpers["scan_rc"] = st
             if not ok or not gate_issued:
-                lib.fr_py_abort()
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed "
-                    "(status %r)" % (st,))
+                if not _helper_death_excused("error", False, lib):
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: ingest scanner failed "
+                        "(status %r)" % (st,))
         else:
             helpers["fallow_rc"] = st
             if not ok:
-                lib.fr_py_abort()
-                raise RuntimeError(
-                    "forkrun: ingest reaper failed "
-                    "(status %r)" % (st,))
+                if not _helper_death_excused("error", False, lib):
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: ingest reaper failed "
+                        "(status %r)" % (st,))
 
 
 def _parse_drain_quantum(drain, coll_fd, use_orderer, out_fds, per_worker,
@@ -9054,10 +9112,11 @@ def _poll_ingest_once(lib, helpers, pipe):
         helpers["ingest_code"] = code
         pipe["ingest_death"] = None
         if kind == "error":
-            lib.fr_py_abort()
-            raise RuntimeError(
-                "forkrun: NUMA ingest failed (status %r)"
-                % (code,))
+            if not _helper_death_excused("error", False, lib):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: NUMA ingest failed (status %r)"
+                    % (code,))
 
 
 def _pipeline_quiescent(helpers, num_nodes):
@@ -9481,17 +9540,15 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             # code stays honest in scan_rc; the abort's own outcome
             # governs the run) instead of raising a spurious fatal
             # over it.
-            if _helper_death_disposition(
-                    "error", False,
-                    _abort_reason_now(lib)) == "excuse":
+            if _helper_death_excused("error", False, lib):
                 return
             try:
                 lib.fr_py_abort()
             except Exception:
                 pass
             raise RuntimeError(
-                "forkrun: materialized scanner failed (status %r)"
-                % (failed,))
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (failed,))
 
         try:
             try:
@@ -9546,9 +9603,10 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: materialized scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: materialized scanner failed (status %r)"
+                            % (scan_st,))
         else:
             scan_pid = None
 
@@ -9569,8 +9627,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     os.WIFEXITED(drain_status) and
                     os.WEXITSTATUS(drain_status) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (drain_status,))
+                        "forkrun: C drain failed (status %r)"
+                        % (drain_status,))
 
         if use_orderer:
             if order_w is not None:
@@ -9590,9 +9648,10 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
                         os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+                    if not _helper_death_excused("error", False, lib):
+                        raise RuntimeError(
+                                "forkrun: C orderer failed (status %r)"
+                                % (_ost,))
         if stats is not None and reassembly is not None \
                 and not use_drain:
             stats["reassembly_max"] = reassembly.max_size
@@ -9910,9 +9969,10 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             ingest_death_r = -1
             if _st is not None and not (os.WIFEXITED(_st)
                                         and os.WEXITSTATUS(_st) == 0):
-                lib.fr_py_abort()
-                raise RuntimeError(
-                    "forkrun: ingest child failed (status %r)" % (_st,))
+                if not _helper_death_excused("error", False, lib):
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: ingest child failed (status %r)" % (_st,))
             # Recovered from the memfd rather than accumulated in the
             # parent: with the copy in a child, the parent no longer
             # sees every write.
@@ -9979,13 +10039,14 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                             signal_w = signal_r = None
                         break
                     raise RuntimeError(
-                        "forkrun: ingest scanner published no data "
-                        "for %d spilled bytes" % total_written)
+                            "forkrun: ingest scanner published no data "
+                            "for %d spilled bytes" % total_written)
                 if helpers["scan_kind"] == "error":
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: ingest scanner failed (status %r)"
-                        % (helpers["scan_code"],))
+                    if not _helper_death_excused("error", False, lib):
+                        lib.fr_py_abort()
+                        raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (helpers["scan_code"],))
                 _time.sleep(0.05)
 
         if use_drain and workers_forked and drain_pid is None:
@@ -10049,7 +10110,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             if _dst != 0 and not (
                     os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)" % (_dst,))
+                        "forkrun: C drain failed (status %r)" % (_dst,))
         if use_orderer:
             if order_w is not None:
                 try:
@@ -10069,13 +10130,13 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                         os.WIFEXITED(_ost) and
                         os.WEXITSTATUS(_ost) == 0):
                     raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+                            "forkrun: C orderer failed (status %r)"
+                            % (_ost,))
 
         if helpers["scan_kind"] == "error":
             raise RuntimeError(
-                "forkrun: ingest scanner failed (status %r)"
-                % (helpers["scan_code"],))
+                    "forkrun: ingest scanner failed (status %r)"
+                    % (helpers["scan_code"],))
         if helpers["scan_kind"] is None:
             # Never observed via the death pipe (already reaped by
             # teardown after healthy workers, or still alive):
@@ -10085,8 +10146,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
                 raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (scan_st,))
+                        "forkrun: ingest scanner failed (status %r)"
+                        % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
             fallow_st = _join_helper_bounded(fallow_pid, "fallow")
@@ -10415,8 +10476,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                             fstate["pump_done"] = True
                             return True
                         raise RuntimeError(
-                            "forkrun: ingest scanner published no "
-                            "data for %d spilled bytes" % spill["off"])
+                                "forkrun: ingest scanner published no "
+                                "data for %d spilled bytes" % spill["off"])
                     else:
                         return False
                 else:
@@ -10432,7 +10493,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     return False
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
+                            "failed reading source: %s" % (exc,))
                 if not chunk:
                     if fstate["stall"] and (
                             _time.monotonic() - fstate["fork_at"]
@@ -10455,7 +10516,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                         n = os.pwrite(memfd, view, spill["off"])
                     except OSError as exc:
                         raise RuntimeError(
-                            "failed writing ingress: %s" % (exc,))
+                                "failed writing ingress: %s" % (exc,))
                     view = view[n:]
                     spill["off"] += n
                 _maybe_fork_workers()
@@ -10639,8 +10700,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     os.WIFEXITED(cdrain_status) and
                     os.WEXITSTATUS(cdrain_status) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (cdrain_status,))
+                        "forkrun: C drain failed (status %r)"
+                        % (cdrain_status,))
 
         # Reaper EOF (same rule as the locked ingest path): drop the
         # parent's spare fallow write end now that no respawn can
@@ -10670,22 +10731,25 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
                         os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+                    if not _helper_death_excused("error", False, lib):
+                        raise RuntimeError(
+                                "forkrun: C orderer failed (status %r)"
+                                % (_ost,))
         if helpers["scan_kind"] == "error":
-            raise RuntimeError(
-                "forkrun: ingest scanner failed (status %r)"
-                % (helpers["scan_code"],))
+            if not _helper_death_excused("error", False, lib):
+                raise RuntimeError(
+                        "forkrun: ingest scanner failed (status %r)"
+                        % (helpers["scan_code"],))
         if helpers["scan_kind"] is None:
             # W-REL5-B4: bounded (None keeps the leniency below).
             scan_st = _join_helper_bounded(scan_pid, "scanner")
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
             fallow_st = _join_helper_bounded(fallow_pid, "fallow")
@@ -10833,8 +10897,8 @@ def _execute_sweep_standalone(payload, combinations, workers, on_error,
                 combo_idx = int(bytes(batch.data).strip())
             except ValueError:
                 raise RuntimeError(
-                    "forkrun: sweep index batch unparseable: %r"
-                    % (bytes(batch.data)[:32],))
+                        "forkrun: sweep index batch unparseable: %r"
+                        % (bytes(batch.data)[:32],))
             batch.metadata = combinations[combo_idx]
             return payload(batch)
 
@@ -10887,7 +10951,7 @@ def _execute_sweep_with_source(payload, source, combinations,
                     chunk = os.read(src_fd, _CHUNK)
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
+                            "failed reading source: %s" % (exc,))
                 if not chunk:
                     break
                 chunks.append(chunk)
@@ -11235,10 +11299,10 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
             pass
         return expected_total
     raise RuntimeError(
-        "forkrun: NUMA drain incomplete (%s): %d/%d node(s) "
-        "hold unclaimed published batches (%s) — refusing silent "
-        "partial completion" % (label, len(bad), num_nodes,
-                                detail))
+            "forkrun: NUMA drain incomplete (%s): %d/%d node(s) "
+            "hold unclaimed published batches (%s) — refusing silent "
+            "partial completion" % (label, len(bad), num_nodes,
+                                    detail))
 
 
 def _c07_envelope(lib, mode, *, use_complete, has_emit,
@@ -11444,8 +11508,8 @@ def _ordered_completeness_certificate(expected, actual, *, label,
             pass
         return
     raise RuntimeError(
-        "forkrun: %s (%s): %s — refusing silent partial completion"
-        % (where, label, detail))
+            "forkrun: %s (%s): %s — refusing silent partial completion"
+            % (where, label, detail))
 
 
 def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
@@ -11750,8 +11814,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 landed = 0
             if landed != 0:
                 raise RuntimeError(
-                    "forkrun: NUMA ingest landed %d bytes with no "
-                    "published batches" % landed)
+                        "forkrun: NUMA ingest landed %d bytes with no "
+                        "published batches" % landed)
             for _fd in (fallow_w, order_w):
                 if _fd is not None:
                     try:
@@ -11818,7 +11882,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             if _dst != 0 and not (
                     os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)" % (_dst,))
+                        "forkrun: C drain failed (status %r)" % (_dst,))
         if use_orderer:
             if order_w is not None:
                 try:
@@ -11835,9 +11899,10 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
                         os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+                    if not _helper_death_excused("error", False, lib):
+                        raise RuntimeError(
+                                "forkrun: C orderer failed (status %r)"
+                                % (_ost,))
 
         # Helper joins: ingest strict-clean; indexers/scanners
         # strict unless already observed (proof-based leniency only
@@ -11845,15 +11910,15 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         # All bounded (W-REL5-B4); None keeps the leniency below.
         if helpers["ingest_kind"] == "error":
             raise RuntimeError(
-                "forkrun: NUMA ingest failed (status %r)"
-                % (helpers["ingest_code"],))
+                    "forkrun: NUMA ingest failed (status %r)"
+                    % (helpers["ingest_code"],))
         if helpers["ingest_kind"] is None:
             _st = _join_helper_bounded(pipe["ingest_pid"],
                                        "numa-ingest")
             if _st is not None and not (
                     os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
                 raise RuntimeError(
-                    "forkrun: NUMA ingest failed (status %r)" % (_st,))
+                        "forkrun: NUMA ingest failed (status %r)" % (_st,))
         for key, pids in (("index", pipe["indexer_pids"]),
                           ("scan", pipe["scanner_pids"])):
             for node in range(num_nodes):
@@ -11867,8 +11932,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     kind, code = helpers[key][node]
                     if kind == "error":
                         raise RuntimeError(
-                            "forkrun: NUMA %s %d failed (status %r)"
-                            % (key, node, code))
+                                "forkrun: NUMA %s %d failed (status %r)"
+                                % (key, node, code))
                     continue
                 _st = _join_helper_bounded(
                     pids[node], "numa-%s-%d" % (key, node))
@@ -11885,8 +11950,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                             "excused", set()).add((key, node))
                         continue
                     raise RuntimeError(
-                        "forkrun: NUMA %s %d failed (status %r)"
-                        % (key, node, _st))
+                            "forkrun: NUMA %s %d failed (status %r)"
+                            % (key, node, _st))
         if helpers["fallow_rc"] is None:
             _fst = _join_helper_bounded(pipe["fallow_pid"],
                                         "numa-fallow")
@@ -12332,8 +12397,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                     landed = 0
                 if landed != 0:
                     raise RuntimeError(
-                        "forkrun: NUMA ingest landed %d bytes with no "
-                        "published batches" % landed)
+                            "forkrun: NUMA ingest landed %d bytes with no "
+                            "published batches" % landed)
                 pump_state["done"] = True
             elif helpers["ingest_kind"] == "clean" and (
                     forked or _pipeline_quiescent(helpers, num_nodes)):
@@ -12396,8 +12461,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                         os.WIFEXITED(cdrain_n["status"]) and
                         os.WEXITSTATUS(cdrain_n["status"]) == 0):
                 raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (cdrain_n["status"],))
+                        "forkrun: C drain failed (status %r)"
+                        % (cdrain_n["status"],))
 
         if fallow_w is not None:
             try:
@@ -12424,13 +12489,14 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
                         os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+                    if not _helper_death_excused("error", False, lib):
+                        raise RuntimeError(
+                                "forkrun: C orderer failed (status %r)"
+                                % (_ost,))
         if helpers["ingest_kind"] == "error":
             raise RuntimeError(
-                "forkrun: NUMA ingest failed (status %r)"
-                % (helpers["ingest_code"],))
+                    "forkrun: NUMA ingest failed (status %r)"
+                    % (helpers["ingest_code"],))
         if helpers["ingest_kind"] is None:
             # W-REL5-B4: bounded (None keeps the leniency below).
             _st = _join_helper_bounded(pipe["ingest_pid"],
@@ -12438,7 +12504,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             if _st is not None and not (
                     os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
                 raise RuntimeError(
-                    "forkrun: NUMA ingest failed (status %r)" % (_st,))
+                        "forkrun: NUMA ingest failed (status %r)" % (_st,))
         for key, pids in (("index", pipe["indexer_pids"]),
                           ("scan", pipe["scanner_pids"])):
             for node in range(num_nodes):
@@ -12452,8 +12518,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                     kind, code = helpers[key][node]
                     if kind == "error":
                         raise RuntimeError(
-                            "forkrun: NUMA %s %d failed (status %r)"
-                            % (key, node, code))
+                                "forkrun: NUMA %s %d failed (status %r)"
+                                % (key, node, code))
                     continue
                 # W-REL5-B4: bounded (None keeps the leniency
                 # below).
@@ -12472,8 +12538,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                             "excused", set()).add((key, node))
                         continue
                     raise RuntimeError(
-                        "forkrun: NUMA %s %d failed (status %r)"
-                        % (key, node, _st))
+                            "forkrun: NUMA %s %d failed (status %r)"
+                            % (key, node, _st))
         if helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
             _fst = _join_helper_bounded(pipe["fallow_pid"],

@@ -231,6 +231,37 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## Unreleased — a helper child's death is now decided in ONE place
+
+**Correctness, no API change.** The front end turns a helper child's
+non-zero exit into a fatal error in **28** places. D-PORT2/D6 taught
+that such a death is *expected* when an abort is already in flight --
+the child died as the abort's consequence, and re-aborting would print a
+spurious FATAL and clobber the abort's own outcome -- and it wired that
+rule into **2** of the 28. The other 26 had the same rule written out,
+or omitted it entirely, including the materialized plain path's inline
+scanner watch.
+
+**That is the failure mode the de-duplication exists to remove**: a fix
+lands in the copies its author happened to find, and lives on in the
+execution paths nobody looked at. The D-PORT2 commit's own wording --
+"both UMA scanner watches" -- shows the author believed there were two.
+
+**One decision point now.** `_helper_death_excused()` holds the rule,
+and every one of the 28 sites asks it, so the next change to the rule
+lands everywhere by construction. The sites keep their own shape: what
+the executor does next (abort, raise) stays with the caller.
+
+**The order is part of the rule, and is now checked.** A consult placed
+AFTER the abort always sees "excuse" -- the reason the abort just
+published -- and so swallows a *genuine* helper failure silently.
+D-PORT2 says so: "query the abort reason BEFORE the handler's own
+abort -- the order is the fix". `python/tests/test_helper_death_excuse.py`
+asserts that every helper-death site asks the shared decision AND that
+the consult precedes the abort in its block. Both are mutation-checked:
+unwiring one site fails the first, moving one consult after its abort
+fails the second.
+
 ## Unreleased — the cleanroom's UDF route can import a C extension again
 
 **Correctness and performance, no API change.** The cleanroom's

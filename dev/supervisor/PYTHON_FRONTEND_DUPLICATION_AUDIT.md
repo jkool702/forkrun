@@ -387,6 +387,52 @@ delete the bodies.
 
 ## 6. The prior dedup work, and where this fits
 
+### 6.1 The pattern this pass found is the DEEPER one
+
+The eight groups in section 2 are duplicated *code*. The group that
+mattered most is duplicated *decisions*, and it was nearly missed by
+this audit's own method: **the audit scanned FUNCTIONS, and most of the
+copies are INLINE.**
+
+D-PORT2/D6 introduced the abort-aware classification -- "an abort
+already in flight makes helper deaths expected (emergency path), not
+fatal" -- and wired it into **2 of the 28** places the front end turns a
+helper child's non-zero exit into a fatal error. The other 26 had the
+same rule written out, or omitted it, including the materialized PLAIN
+path's inline `_scan_pump`.
+
+That is precisely the failure the de-duplication exists to remove: a fix
+lands in the copies its author happened to find, and lives on in the
+execution paths nobody looked at. The same commit's own words -- "both
+UMA scanner watches" -- show the author believed there were two.
+
+**The fix is therefore not "patch twenty-six sites" but ONE decision
+point** every site asks:
+
+```python
+def _helper_death_excused(kind, eof_ok, lib):
+    """Has an abort already explained this helper child's death?"""
+    return (_helper_death_disposition(kind, eof_ok,
+                                      _abort_reason_now(lib)) == "excuse")
+```
+
+All 28 sites now go through it, so the next change to the rule lands
+everywhere by construction.
+
+### 6.2 The order is part of the rule
+
+A consult placed AFTER the abort always sees "excuse" -- the reason the
+abort just published -- and so silently swallows a genuine helper
+failure. D-PORT2 says so explicitly: *"query the abort reason BEFORE the
+handler's own abort -- the order is the fix"*. It is easy to get wrong
+when the rule is copied, so the invariant is now checked:
+`python/tests/test_helper_death_excuse.py` asserts that every
+helper-death site asks the shared decision AND that the consult precedes
+the abort in its block. Both are mutation-checked: unwiring one site
+fails the first, moving one consult after its abort fails the second.
+
+### 6.3 Where this sits in the project's own history
+
 This is not the first pass. The tree already carries:
 
 - `DEDUP_DESIGN.md` / `DEDUP_REPORT.md` (2026-09-28) — the W-DEDUP
