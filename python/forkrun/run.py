@@ -277,6 +277,58 @@ def _resolve_output(output) -> bool:
         "individually if you need one or the other." % (output,))
 
 
+def _require_v0_mode(mode):
+    """Refuse a mode this version does not support.
+
+    THE SINGLE SOURCE OF TRUTH for the mode half of the v0 envelope.
+    This check was copied verbatim into TEN entry points, so the set of
+    supported modes was written down ten times; a change to the
+    envelope meant finding ten places, and two of the copies had
+    already drifted from the other eight.
+
+    The wording is load-bearing: it is what a user reads when they ask
+    for something this version cannot do.
+    """
+    if mode not in ("python", "splice"):
+        raise NotImplementedError(
+            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+
+
+def _require_v0_envelope(mode, nodes):
+    """Refuse a mode/nodes pair this version does not support.
+
+    The nodes half of the v0 envelope, layered on the mode half. Eight
+    entry points carried both checks, byte-identical; they now call
+    this one helper. The NUMA executors legitimately check mode only
+    (their `nodes` argument means something else), so they call
+    _require_v0_mode directly.
+    """
+    _require_v0_mode(mode)
+    if not (nodes == "auto" or nodes == 1):
+        raise NotImplementedError(
+            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+
+
+def _validate_c_flag(value, name):
+    """Normalize a C-path opt-in flag: None -> False, bool -> itself.
+
+    THE SINGLE SOURCE OF TRUTH for the three C-path opt-in flags
+    (c_drain, c_worker_loop, c_spawn_loop). The rule was written down
+    three times -- once per flag -- and the three copies differed only
+    in the flag's name, which is the one part the caller needs to see
+    because it is in the error message.
+
+    Each flag keeps its own named wrapper below, so the call sites read
+    the same and each flag's measured rationale stays where it belongs.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    raise TypeError(
+        "%s must be None, True, or False, got %r" % (name, value))
+
+
 def _validate_c_drain(c_drain):
     """Normalize the W-PY21-A drain flag (None → False default).
 
@@ -297,12 +349,7 @@ def _validate_c_drain(c_drain):
     raises via _require_drain_symbol (asking for the drain while
     masking its symbol is a contradiction).
     """
-    if c_drain is None:
-        return False
-    if isinstance(c_drain, bool):
-        return c_drain
-    raise TypeError(
-        "c_drain must be None, True, or False, got %r" % (c_drain,))
+    return _validate_c_flag(c_drain, "c_drain")
 
 
 def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
@@ -452,13 +499,7 @@ def _validate_c_worker_loop(c_worker_loop):
     W-PY18 splice loop. Opt-in (default False): the Python worker loop
     stays the default so no user changes behavior without asking.
     """
-    if c_worker_loop is None:
-        return False
-    if isinstance(c_worker_loop, bool):
-        return c_worker_loop
-    raise TypeError(
-        "c_worker_loop must be None, True, or False, got %r"
-        % (c_worker_loop,))
+    return _validate_c_flag(c_worker_loop, "c_worker_loop")
 
 
 def _require_plugin_loop_symbol():
@@ -3119,6 +3160,31 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                 pass
 
 
+def _resolve_c_loop(flag, raw_mode, num_nodes, *, flag_name, mode,
+                    mode_reason, work_order, require_symbol):
+    """Gate a C worker loop to its supported envelope.
+
+    THE SINGLE SOURCE OF TRUTH for the two C-loop gates (the W-PY26
+    plugin loop and the W-PY33 spawn loop). The rule was the same in
+    both and was written twice: honoured only for one mode, UMA only,
+    and only when the substrate carries that loop's symbol. They
+    differed only in which mode, which flag and which symbol -- and
+    the two messages are byte-identical to the originals.
+    """
+    if not flag:
+        return False
+    if raw_mode != mode:
+        raise ValueError(
+            "%s=True needs mode=%r (%s), got mode=%r"
+            % (flag_name, mode, mode_reason, raw_mode))
+    if num_nodes != 1:
+        raise RuntimeError(
+            "%s=True is UMA-only in %s (multi-node is future work) — "
+            "use %s=False" % (flag_name, work_order, flag_name))
+    require_symbol()
+    return True
+
+
 def _resolve_c_plugin_loop(c_worker_loop, raw_mode, num_nodes):
     """Gate the W-PY26 C worker loop to its supported envelope.
 
@@ -3129,18 +3195,12 @@ def _resolve_c_plugin_loop(c_worker_loop, raw_mode, num_nodes):
     know when they are not getting it). Splice/streaming/NUMA/run/
     stream executors are future work.
     """
-    if not c_worker_loop:
-        return False
-    if raw_mode != "plugin":
-        raise ValueError(
-            "c_worker_loop=True needs mode='plugin' (the C loop speaks "
-            "only the frozen plugin ABI), got mode=%r" % (raw_mode,))
-    if num_nodes != 1:
-        raise RuntimeError(
-            "c_worker_loop=True is UMA-only in W-PY26 (multi-node is "
-            "future work) — use c_worker_loop=False")
-    _require_plugin_loop_symbol()
-    return True
+    return _resolve_c_loop(
+        c_worker_loop, raw_mode, num_nodes,
+        flag_name="c_worker_loop", mode="plugin",
+        mode_reason="the C loop speaks only the frozen plugin ABI",
+        work_order="W-PY26",
+        require_symbol=_require_plugin_loop_symbol)
 
 
 def _validate_c_spawn_loop(c_spawn_loop):
@@ -3152,13 +3212,7 @@ def _validate_c_spawn_loop(c_spawn_loop):
     loop stays the default so no user changes behavior without
     asking.
     """
-    if c_spawn_loop is None:
-        return False
-    if isinstance(c_spawn_loop, bool):
-        return c_spawn_loop
-    raise TypeError(
-        "c_spawn_loop must be None, True, or False, got %r"
-        % (c_spawn_loop,))
+    return _validate_c_flag(c_spawn_loop, "c_spawn_loop")
 
 
 def _require_spawn_loop_symbol():
@@ -3182,18 +3236,12 @@ def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
     a user asking for the C loop must know when they are not getting
     it). Splice/streaming/NUMA/run/stream executors are future work.
     """
-    if not c_spawn_loop:
-        return False
-    if raw_mode != "spawn":
-        raise ValueError(
-            "c_spawn_loop=True needs mode='spawn' (the C loop replays "
-            "a spawn argv per batch), got mode=%r" % (raw_mode,))
-    if num_nodes != 1:
-        raise RuntimeError(
-            "c_spawn_loop=True is UMA-only in W-PY33 (multi-node is "
-            "future work) — use c_spawn_loop=False")
-    _require_spawn_loop_symbol()
-    return True
+    return _resolve_c_loop(
+        c_spawn_loop, raw_mode, num_nodes,
+        flag_name="c_spawn_loop", mode="spawn",
+        mode_reason="the C loop replays a spawn argv per batch",
+        work_order="W-PY33",
+        require_symbol=_require_spawn_loop_symbol)
 
 
 # Process-wide run serialization (W-PY4.b G/Q-series). The engine's
@@ -5569,12 +5617,24 @@ def _splice_ingest_stream_reactor_gen(source, *, bytes_, workers,
         splice=True, c_drain=c_drain)
 
 
-def _drain_worker_memfd(fd, state) -> list:
+def _drain_worker_memfd(fd, state, terminal=False) -> list:
     """Incrementally pread new bytes from one worker memfd.
 
     state is [read_offset, tail]; pread (never read/lseek -- the fd's open
     description is SHARED with the writing child). Returns complete
     [(batch_idx, payload)] records; the incomplete tail stays buffered.
+
+    terminal=True parses with _split_records_terminal instead, so
+    control records survive and the result is
+    [(batch_idx, disposition, payload)]. That is what lets a SKIPPED /
+    POISONED / NO_RESULT batch advance an ordered consumer's prefix
+    instead of masquerading as a hole until final_drain(); the
+    DATA-only default stays for callers that must not see control
+    records at all.
+
+    ONE implementation: the data-only and terminal-aware helpers were
+    byte-identical apart from the one splitting call, and
+    _drain_worker_memfd_terminal is now a one-line sibling of this.
 
     W-PYKEEPFSTAT: the fstat-then-pread-the-delta form was measured
     against two cheaper-looking alternatives and WON both, so it stays:
@@ -5608,7 +5668,13 @@ def _drain_worker_memfd(fd, state) -> list:
     if not chunk:
         return []
     state[0] += len(chunk)
-    records, tail = _split_records(state[1] + chunk)
+    # terminal=True parses with _split_records_terminal so control
+    # records survive, returning [(batch_idx, disposition, payload)];
+    # the default parses with _split_records and returns
+    # [(batch_idx, payload)]. ONE implementation, because the two were
+    # byte-identical apart from this one call.
+    split = _split_records_terminal if terminal else _split_records
+    records, tail = split(state[1] + chunk)
     state[1] = tail
     return records
 
@@ -5625,22 +5691,7 @@ def _drain_worker_memfd_terminal(fd, state) -> list:
     final_drain(). The DATA-only helper stays for callers that must not
     see control records at all.
     """
-    try:
-        want = os.fstat(fd).st_size
-    except OSError:
-        return []
-    if want <= state[0]:
-        return []
-    try:
-        chunk = os.pread(fd, want - state[0], state[0])
-    except OSError:
-        return []
-    if not chunk:
-        return []
-    state[0] += len(chunk)
-    records, tail = _split_records_terminal(state[1] + chunk)
-    state[1] = tail
-    return records
+    return _drain_worker_memfd(fd, state, terminal=True)
 
 
 def _drain_records(lib, signal_r, out_fds, pids, statuses,
@@ -6245,12 +6296,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
       pread into a forked C loop feeding a results pipe the parent
       reads incrementally; False keeps the Python _drain_records path.
     """
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -6624,12 +6670,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
       lazily at first worker fork — workers fork dynamically here);
       False keeps the Python _drain_records path.
     """
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -7088,12 +7129,7 @@ def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
                     on_error, strict_poison=False, collect, order, mode="python", nodes="auto",
                     splice=False, c_drain=True, views=True):
     """Streaming-ingest entry for map/run (blocking, like _execute)."""
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     with _RUN_LOCK:
         return _execute_ingest_locked(
             payload, source, sink=sink, lines=lines, bytes_=bytes_,
@@ -7582,12 +7618,7 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
                collect, order, mode="python", nodes="auto", splice=False,
                c_drain=True, c_worker_loop=False, plugin_spec=None,
                c_spawn_loop=False, spawn_argv=None, views=True):
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     with _RUN_LOCK:
         return _execute_locked(payload, source, sink=sink, lines=lines,
                                bytes_=bytes_, workers=workers,
@@ -8352,12 +8383,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                            spawn_orderer)
     import fcntl as _fcntl
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if c_worker_loop:
         # W-PY26: reactor + C loop needs collection, a dialect-gated
         # W-PY26: reactor + C loop needs collection, a dialect-gated
@@ -9050,12 +9076,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     import fcntl as _fcntl
     import select as _select
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -9613,12 +9634,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                            spawn_orderer)
     import fcntl as _fcntl
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     # W-REL6-5: lattice position (executor #7: UMA, streaming,
     # reactor, blocking) + this call's behavior flags.
     _spec = ExecutorSpec(topology="uma", ingest="streaming",
@@ -10180,12 +10196,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     import fcntl as _fcntl
     import select as _select
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -11463,9 +11474,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                            reactor_run, spawn_orderer)
     import fcntl as _fcntl
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    _require_v0_mode(mode)
     # W-REL6-5: lattice position (executor #9: NUMA, reactor-implied,
     # blocking) + this call's behavior flags.
     _spec = ExecutorSpec(topology="numa", ingest="materialized",
@@ -12026,9 +12035,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
     import fcntl as _fcntl
     import select as _select
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    _require_v0_mode(mode)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
