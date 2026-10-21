@@ -359,18 +359,21 @@ provable by executing it.
 | | before | after |
 |---|---|---|
 | structural clone groups (canonical form) | 7 | **3** |
-| canonical characters duplicated | ~1719 | **~558** |
-| 30-line clone groups (verbatim lines) | 0 | 3 |
+| canonical characters duplicated | ~1719 | **~454** |
 | `run.py` lines | 12527 | 12508 |
 
-**67% less structurally duplicated code.** The three groups that remain
+**74% less structurally duplicated code.** The three groups that remain
 are the ones that should remain:
 
 - `_maybe_fork_workers` ×2 — the two remaining copies differ in their
-  state shape, and folding them is a shape change, not a rule change.
-- `_watch_scanner` ×2 — the two closures are now thin, and the house
-  boundary says the "what the executor does next" half stays with the
-  caller.
+  state shape (a dict and plain locals), and folding them is a shape
+  change, not a rule change. The RULE is already in one place
+  (`_fork_timing`); what remains duplicated is the four-line call into
+  it.
+- `_watch_scanner` ×2 — the two closures are now thin and
+  byte-identical, and the house boundary says the "what the executor
+  does next" half stays with the caller.
+
 - `_stream_gen` / `_stream_reactor_gen` at 0.89 — a **genuine**
   difference: the plain executors do not accept
   `resume`/`checkpoint_file`.
