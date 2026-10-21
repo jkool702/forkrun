@@ -5083,11 +5083,29 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
 ### LIMITS & TOPOLOGY
 
 - `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed. (In byte mode `-b`, `-n` specifies the exact byte limit).
-- `--nodes`, `--numa <map>`   : Control NUMA topology mapping. Nodes that do not exist will be skipped (excluding for `@N`).
+- `--nodes`, `--numa <map>`   : Control NUMA topology mapping.
   - `auto` (default): Autodetect all physical online nodes.
-  - `@N` : Oversubscribe / force `N` logical nodes (N ≤ 512; larger values are rejected to preserve internal ring bounds).
+  - `@N` : Oversubscribe / force `N` logical nodes, cycling the online
+    physicals (N ≤ 512; larger values are rejected to preserve internal
+    ring bounds). `@N` is how you exercise a multi-node path on a
+    single-node host: `@2` on a UMA box is two LOGICAL nodes, both on
+    physical 0.
   - `0,1`: Explicitly bind to physical NUMA nodes 0 and 1.
   - `0:3`: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
+  - **A physical count that exceeds the machine is a DELIBERATE
+    divergence between the two frontends.** The bash frontend *skips*
+    nodes that do not exist; the Python frontend **raises** instead:
+
+    ```
+    ValueError: nodes=2 requested but only 1 NUMA node(s) online ([0])
+                — use '@2' to force logical nodes for testing
+    ```
+
+    The Python behaviour is intentional: silently running UMA after
+    `nodes=4` was requested would benchmark a different configuration
+    than the caller asked for, and the number would be a lie. Use
+    `@N` when you mean "force N logical nodes". Pinned by
+    `python/tests/test_numa.py::TestNodesSpecification`.
 - `-N`, `--dry-run`           : Dry run. Print the generated command strings instead of executing them.
 - `-v`, `--verbose`           : Increase verbosity (prints the worker-spawn summary, plugin-compile notes, and NUMA stats to `stderr`). Implies --stats.
 - `+v`, `--no-verbose`        : Decrease verbosity. Disables --stats.

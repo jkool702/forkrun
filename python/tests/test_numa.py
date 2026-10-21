@@ -465,5 +465,50 @@ class TestNumaPurity(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
+
+class TestNodesSpecification(unittest.TestCase):
+    """The `nodes` spec: what a physical count does when it cannot be had.
+
+    A DELIBERATE divergence from the bash frontend, which SKIPS nodes
+    that do not exist. The Python frontend RAISES instead: silently
+    running UMA after `nodes=4` was requested would benchmark a
+    different configuration than the caller asked for, and the number
+    would be a lie. `@N` is the way to ask for logical nodes.
+    """
+
+    def test_at_n_forces_logical_nodes_cycling_the_physicals(self):
+        """`@2` on a one-physical machine is TWO logical nodes."""
+        _spec, num_nodes, cpus = build_numa_map("@2")
+        self.assertEqual(2, num_nodes,
+                         "@N must produce N LOGICAL nodes, not fall back "
+                         "to the physical count")
+        self.assertEqual(2, len(cpus))
+
+    def test_a_physical_count_beyond_the_machine_raises(self):
+        """`nodes=N` with fewer physicals online is an error, not a
+        silent fallback."""
+        online = detect_numa_nodes()
+        if len(online) >= 2:
+            self.skipTest("this host has %d physical nodes online"
+                           % (len(online),))
+        with self.assertRaises(ValueError) as cm:
+            build_numa_map(len(online) + 1)
+        msg = str(cm.exception)
+        self.assertIn("only %d NUMA node(s) online" % (len(online),), msg)
+        self.assertIn("@", msg,
+                      "the error must point at the @N form")
+
+    def test_the_divergence_is_documented(self):
+        """The divergence is a decision, so it is written down."""
+        here = os.path.join(os.path.dirname(__file__), "..", "..", "DOCS",
+                            "FLAGS.md")
+        with open(here, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("deliberate", text.lower(),
+                      "the Python-vs-bash nodes divergence must be "
+                      "documented as deliberate")
+        self.assertIn("@N", text)
+
+
 if __name__ == "__main__":
     unittest.main()
