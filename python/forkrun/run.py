@@ -5378,39 +5378,16 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
     if engine_mode == "splice":
         _require_splice_symbol()
         b = kwargs.get("bytes") or _SPLICE_DEFAULT_BYTES
+        # ONE dispatch for the (ingest|materialized) x (reactor|plain)
+        # matrix: the four helpers differed only in which executor they
+        # ran, and the four call sites repeated the same twelve
+        # arguments four times over.
         if _detect_streaming(source, kwargs.get("streaming")):
-            if orchestrator:
-                return _guarded_gen(
-                    _signal_guard(kwargs.get("signal_policy", "default")),
-                    _splice_ingest_stream_reactor_gen(
-                    source, bytes_=b,
-                    workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                    on_error=kwargs.get("on_error", "retry"),
-                    strict_poison=kwargs.get("strict_poison", False),
-                    nodes=kwargs.get("nodes", "auto"),
-                    order=kwargs.get("order", "none"),
-                    c_drain=kwargs.get("c_drain", True)))
-            return _guarded_gen(
-                _signal_guard(kwargs.get("signal_policy", "default")),
-                _splice_ingest_stream_gen(
-                source, bytes_=b,
-                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                on_error=kwargs.get("on_error", "retry"),
-                strict_poison=kwargs.get("strict_poison", False),
-                nodes=kwargs.get("nodes", "auto"),
-                order=kwargs.get("order", "none"),
-                c_drain=kwargs.get("c_drain", True)))
-        if orchestrator:
-            return _guarded_gen(
-                _signal_guard(kwargs.get("signal_policy", "default")),
-                _splice_stream_reactor_gen(
-                source, bytes_=b,
-                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                on_error=kwargs.get("on_error", "retry"),
-                strict_poison=kwargs.get("strict_poison", False),
-                nodes=kwargs.get("nodes", "auto"),
-                order=kwargs.get("order", "none"),
-                c_drain=kwargs.get("c_drain", True)))
+            executor = (_execute_ingest_stream_reactor if orchestrator
+                        else _execute_ingest_stream)
+        else:
+            executor = (_execute_streaming_reactor if orchestrator
+                        else _execute_streaming)
         return _guarded_gen(
             _signal_guard(kwargs.get("signal_policy", "default")),
             _splice_stream_gen(
@@ -5420,7 +5397,8 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
             strict_poison=kwargs.get("strict_poison", False),
             nodes=kwargs.get("nodes", "auto"),
             order=kwargs.get("order", "none"),
-            c_drain=kwargs.get("c_drain", True)))
+            c_drain=kwargs.get("c_drain", True),
+            executor=executor))
     if _detect_streaming(source, kwargs.get("streaming")):
         # W-CR3: cleanroom streaming, gated by the SAME predicate map()
         # uses. This used to be a second hand-written condition here, and
@@ -5536,22 +5514,42 @@ def _stream_gen(payload, source, **kwargs):
 
 
 def _splice_stream_gen(source, *, bytes_, workers, on_error, nodes,
-                       order, c_drain=True, strict_poison=False):
-    # W-PY18 stream() over the C passthrough loop (materialized
-    # ingest, live results): yields raw byte-windows as they arrive.
-    yield from _execute_streaming(
-        None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, strict_poison=strict_poison,
-        mode="splice", nodes=nodes, order=order,
-        splice=True, c_drain=c_drain)
+                       order, c_drain=True, strict_poison=False,
+                       executor=None):
+    """stream() over the C passthrough loop -- ONE implementation.
 
+    THE SINGLE SOURCE OF TRUTH for the splice stream. There were four
+    helpers, one per (materialized|streaming ingest) x (plain|reactor)
+    combination; their bodies were IDENTICAL apart from which executor
+    they ran, and their four call sites repeated the same twelve
+    arguments four times over.
 
-def _splice_ingest_stream_gen(source, *, bytes_, workers, on_error,
-                              nodes, order, c_drain=True,
-                              strict_poison=False):
-    # W-PY18 stream() over passthrough + streaming ingest (unbounded
-    # in, live out — the bash -s shape): spill and drain interleave.
-    yield from _execute_ingest_stream(
+    The OTHER frontend solves the same problem the same way: it builds
+    its worker from ONE template, with the per-flag differences
+    injected as small fragments, and assembles the result once -- so
+    the worker loop body exists once. This module cannot eval a
+    template, and should not; one body with the configuration injected
+    is the equivalent shape, and `executor` is that configuration.
+
+    The four combinations, and what each one is:
+
+    - _execute_streaming -- W-PY18 stream() over the C passthrough loop
+      (materialized ingest, live results): yields raw byte-windows as
+      they arrive.
+    - _execute_ingest_stream -- W-PY18 stream() over passthrough +
+      streaming ingest (unbounded in, live out -- the bash -s shape):
+      spill and drain interleave.
+    - _execute_streaming_reactor -- W-PY19 stream() over splice +
+      reactor (materialized ingest, live results, respawn on death).
+      Python reassembly only (the C orderer needs OrderPackets the splice
+      loop never sends).
+    - _execute_ingest_stream_reactor -- W-PY19 stream() over splice +
+      streaming ingest + reactor.
+
+    mode="splice" carries NO Python payload: the payload is None and
+    the C passthrough loop does the work.
+    """
+    yield from executor(
         None, source, lines=None, bytes_=bytes_, workers=workers,
         on_error=on_error, strict_poison=strict_poison,
         mode="splice", nodes=nodes, order=order,
@@ -5576,19 +5574,6 @@ def _stream_reactor_gen(payload, source, **kwargs):
         checkpoint_file=kwargs.get("checkpoint_file"))
 
 
-def _splice_stream_reactor_gen(source, *, bytes_, workers, on_error,
-                               nodes, order, c_drain=True,
-                               strict_poison=False):
-    # W-PY19 stream() over splice + reactor (materialized ingest,
-    # live results, respawn on death). Python reassembly only (the C
-    # orderer needs OrderPackets the splice loop never sends).
-    yield from _execute_streaming_reactor(
-        None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, strict_poison=strict_poison,
-        mode="splice", nodes=nodes, order=order,
-        splice=True, c_drain=c_drain)
-
-
 def _ingest_stream_reactor_gen(payload, source, **kwargs):
     # W-PY19 stream() over a streaming source under the reactor:
     # live drain interleaved with the spill (pump hook), scanner
@@ -5604,17 +5589,6 @@ def _ingest_stream_reactor_gen(payload, source, **kwargs):
         c_drain=kwargs.get("c_drain", True),
         resume=kwargs.get("resume"),
         checkpoint_file=kwargs.get("checkpoint_file"))
-
-
-def _splice_ingest_stream_reactor_gen(source, *, bytes_, workers,
-                                      on_error, nodes, order,
-                                      c_drain=True, strict_poison=False):
-    # W-PY19 stream() over splice + streaming ingest + reactor.
-    yield from _execute_ingest_stream_reactor(
-        None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, strict_poison=strict_poison,
-        mode="splice", nodes=nodes, order=order,
-        splice=True, c_drain=c_drain)
 
 
 def _drain_worker_memfd(fd, state, terminal=False) -> list:
@@ -6116,8 +6090,6 @@ _RESULTS_READ_BUDGET = 4 << 20
 # 256KB is roughly ONE amplified batch at the measured shape, which is
 # what the pre-fix pump effectively held (one 64KB chunk per call).
 _RESULTS_PENDING_BUDGET = 256 << 10
-
-
 
 
 def _join_helper_bounded(pid, name, timeout=_HELPER_JOIN_TIMEOUT):

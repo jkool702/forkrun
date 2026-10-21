@@ -175,7 +175,7 @@ is gated.
 | 2 | `_validate_c_flag(value, name)` | 3 → 1 | low | **done** |
 | 3 | `_drain_worker_memfd(fd, state, terminal=)` | 2 → 1 | low | **done** |
 | 4 | `_resolve_c_loop(flag, mode, ...)` | 2 → 1 | low-med | **done** |
-| 5 | `_splice_stream_gen(..., executor=)` + one call site | 4 → 1 | med | pending |
+| 5 | `_splice_stream_gen(..., executor=)` + one call site | 4 → 1 | med | **done** |
 | 6 | the stream-generator family, one executor parameter | 4 → 2 | med | pending |
 | 7 | `_watch_scanner` | 2 → 1 | med | pending |
 | 8 | `_maybe_fork_workers` | 3 → 1 | med-high | pending |
@@ -191,7 +191,38 @@ where the duplication is *load-bearing* (the fork-timing rule and the
 scanner watcher are per-executor closures over per-executor state), so
 they go last and one at a time.
 
-### 3.1 What steps 1–4 did and did not change
+### 3.1 What step 5 did
+
+The four splice helpers are **one** helper whose body is the rule, and
+the four-way call site is **one** call site that selects the executor:
+
+```python
+        if _detect_streaming(source, kwargs.get("streaming")):
+            executor = (_execute_ingest_stream_reactor if orchestrator
+                        else _execute_ingest_stream)
+        else:
+            executor = (_execute_streaming_reactor if orchestrator
+                        else _execute_streaming)
+        return _guarded_gen(
+            _signal_guard(kwargs.get("signal_policy", "default")),
+            _splice_stream_gen(
+            source, bytes_=b,
+            workers=..., on_error=..., strict_poison=...,
+            nodes=..., order=..., c_drain=...,
+            executor=executor))
+```
+
+The four rationales (what each combination *is*) move into the shared
+docstring — which is the point: the four combinations were described in
+four places and are now described in one. `run.py` lost 28 lines.
+
+**The mapping was checked branch by branch** — all four
+(ingest|materialized) × (reactor|plain) combinations reach the same
+executor they reached before, and the twelve arguments are unchanged.
+No test referenced the four helper names, so nothing external moves.
+
+
+### 3.2 What steps 1-4 did and did not change
 
 - **The error messages are byte-identical.** Verified by rendering the
   old and new messages side by side: the mode message, the nodes
@@ -209,7 +240,31 @@ they go last and one at a time.
   *name*.
 
 
-## 4. What is deliberately NOT changed
+## 4. A constraint the de-duplication work ran into
+
+**The Python front end may not name the bash front end.** The purity
+tests (`test_reactor.TestReactorPurity.test_no_banned_tokens` and
+`test_v0.TestPurity.test_no_bash_subprocess_or_pickle`) scan `run.py`,
+`_reactor.py`, `_worker.py` and `_bindings.py` for a token list that
+includes `frun.bash` and `source ./frun`.
+
+The first version of the step-5 docstring cited the other frontend's
+template-and-fragments shape **by name**, and the gate caught it — two
+purity failures in both passes. That is the rule working as intended:
+the two front ends are independent, and the Python side must not
+depend on, or even name, the bash side.
+
+So the cross-frontend reasoning lives **here**, in the audit, and the
+code says only what the code needs to say:
+
+> *"The OTHER frontend solves the same problem the same way: it builds
+> its worker from ONE template, with the per-flag differences injected
+> as small fragments, and assembles the result once -- so the worker
+> loop body exists once. This module cannot eval a template, and should
+> not; one body with the configuration injected is the equivalent
+> shape."*
+
+## 5. What is deliberately NOT changed
 
 - **The bash frontend.** It is the frozen reference and its
   template-plus-fragments shape is the target, not the thing to fix.
