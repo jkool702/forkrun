@@ -1,5 +1,24 @@
 # forkrun — Python frontend performance work
 
+> **Read before changing the Python front end.**
+> `dev/supervisor/SSoT.md` is the mandatory **Single Source of Truth**
+> policy: one correctness-critical decision, one authoritative
+> implementation, any number of consumers. It governs the decisions a
+> change introduces, modifies or relies on — it is not a licence to
+> audit the tree.
+>
+> Its worked example (section 11) is the case that motivated it: the
+> abort-aware helper-death rule was wired into **2 of the 28** places
+> that apply it, because the other 26 copies were *inline* and a
+> function-level duplicate scan cannot see them. Two tools make the
+> policy actionable:
+>
+> - `tools/ssot_scan.py` — finds the duplication. It compares statement
+>   **blocks**, not function bodies.
+> - `python/tests/test_helper_death_excuse.py` — the architecture test
+>   that keeps the invariant: every helper-death site routes through
+>   the shared decision, and the consult precedes the abort it guards.
+
 ## Status (2026-10-02)
 
 Branch `NEW/REFACTOR3.2`, built on `NEW/REFACTOR3.0` + `3.1`:
@@ -490,6 +509,15 @@ the list; "both pay it" does not.
 
 ## Reporting rules for this repo
 
+- **Python front end changes must follow `dev/supervisor/SSoT.md`** (the
+  Single Source of Truth policy). Before writing decision logic, search
+  for an existing authoritative implementation — with
+  `tools/ssot_scan.py`, which compares statement BLOCKS, because
+  inline duplication is invisible to a function-level scan. Where
+  copies have drifted, the divergence is the defect: resolve it, say
+  which behaviour won, and test it. The report must name the
+  authoritative implementation, its consumers, and the tests actually
+  run.
 - `forkrun_ring.c` is UNMODIFIED by the shim by design (`_shim.c`
   `#include`s it). Prefer shim-side additions.
 - ABI surface is locked in `python/tests/test_shim_abi.py`

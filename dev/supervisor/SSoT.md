@@ -1,5 +1,17 @@
 # Mandatory Engineering Policy: Single Source of Truth (SSoT)
 
+> **Scope.** This policy governs the decisions a change **introduces,
+> modifies, or relies on**. It is not a licence to audit the tree: a
+> change that introduces no correctness-critical decision needs no SSoT
+> work at all, and a change that touches one decision is in scope for
+> *that* decision and not for the rest of the file. Where a change
+> touches an existing decision, that decision is in scope -- and so
+> are the other places that apply it, because a fix that lands in some
+> of them and not others is the failure this policy exists to prevent.
+>
+> The policy is also not a licence to refactor unrelated code. The
+> tests it asks for are about *this* change's decisions.
+
 ## 1. Core invariant
 
 **Every specific correctness-critical decision MUST have exactly one authoritative implementation. All code that needs that decision MUST reuse or delegate to that implementation rather than independently reimplementing the decision.**
@@ -31,6 +43,23 @@ A decision can be duplicated without any duplicated function names or identical 
 
 Therefore, **searching for duplicate function bodies alone is insufficient**. Review semantic decisions, not just textual similarity.
 
+### 2.1 Is this decision correctness-critical?
+
+The test is not how important the decision sounds. It is: **does a fix to
+this rule have to land in more than one place?**
+
+- If the places are allowed to diverge, the rule is a convention. It may
+  be shared for clarity, but nothing breaks when a fix reaches only
+  some of them.
+- If a fix **must** land in several places -- and a fix landing in
+  some of them and not others is a defect waiting to happen -- then the
+  rule is correctness-critical, and it has exactly one authoritative
+  implementation.
+
+This is the discriminator that keeps the policy from either
+over-applying (turning every change into a tree-wide refactor) or
+under-applying (sharing a rule that was allowed to drift all along).
+
 ## 3. Mandatory workflow before implementing a change
 
 ### Step 1: Identify the decision
@@ -61,6 +90,22 @@ Inspect:
 - Relevant tests, including tests for previously fixed bugs.
 
 Use both symbol searches and semantic inspection. An existing implementation may not have an obvious name, and equivalent logic may have drifted across several functions.
+
+**Use the block-level scanner, and know why it is the one that matters.**
+`tools/ssot_scan.py` compares statement **blocks** -- a function body,
+and the body of every if/for/while/try/with/except -- after
+canonicalisation. A decision duplicated **inline**, at the point where
+the rule is applied, is invisible to a function-level scan by
+construction.
+
+That is not a theoretical gap. The abort-aware helper-death rule
+(section 11) was applied in **28** places, and a function-level scan
+found almost none of them: 26 of the 28 copies were inline. A search
+that only compares function bodies reports that this rule has two
+implementations, when it has twenty-eight.
+
+The scanner is a **finding tool**, not a gate: it tells you where
+duplication is, and section 6 is what makes the finding stick.
 
 Do not assume that an existing helper is irrelevant merely because it does not exactly match the new call site's interface. Determine whether it can be extended, parameterized, or wrapped without duplicating the underlying decision.
 
@@ -95,6 +140,23 @@ If two paths genuinely make different decisions, document what makes them differ
 
 Do not preserve duplication simply because it already exists. Equally, do not force two genuinely different policies into one misleading abstraction.
 
+**Divergence is a defect, not a difference to preserve.** When copies
+of one rule have drifted -- one consults a check the others do not, one
+orders two operations differently, one returns a value the others do
+not -- the drift **is** the defect, and centralising it will
+legitimately **change behaviour** on the paths that had drifted.
+
+So: resolve it in favour of one implementation, **say which** and why
+in the change report, and test it. Do not preserve a divergent copy
+"to be safe". A copy that behaves differently from its siblings is the
+failure this policy exists to prevent, and preserving it preserves the
+failure.
+
+This applies to the order of operations too (section 4.1): if one copy
+consults a check *before* an operation and its siblings consult it
+*after*, the one that consults after is the broken one, not the odd one
+out.
+
 ## 4. Separate decisions from actions
 
 **Centralize the decision; do not unnecessarily centralize the entire operation.**
@@ -114,6 +176,29 @@ The following are different responsibilities:
 Centralize each shared correctness-critical decision at the appropriate boundary. Keep context-specific mechanics separate unless those mechanics also embody duplicated policy.
 
 A helper that centralizes the ordinary case but leaves each caller to independently implement exceptional cases does not fully satisfy this policy. The entire shared decision, including its relevant edge cases, must have one authoritative implementation.
+
+### 4.1 The ORDER of operations is part of the decision
+
+A centralised decision includes not only **what** it concludes but the
+**order** in which it observes state. A check placed *after* the
+operation it is meant to precede can read a state that operation itself
+created, and then conclude the opposite every time.
+
+The abort-aware rule is the worked example: it asks whether an abort is
+already in flight, and the abort's own call **publishes the reason the
+check reads**. A check placed after the abort therefore always sees
+"an abort was in flight", and every genuine failure is excused --
+silently, because the decision now looks like it works.
+
+So when a decision is centralised, the order is part of what is being
+centralised:
+
+- A check that reads state another step **produces** must come first.
+- A check that reads state another step **consumes** may come after.
+- When the order is load-bearing, it is worth a comment at the
+  authoritative implementation, and worth an assertion in the test:
+  the test should fail if the order is inverted, not only if the
+  outcome is wrong.
 
 ## 5. Repeated checks are permitted; repeated rules are not
 
@@ -147,6 +232,27 @@ Prefer tests that make future divergence observable: for example, tests that exe
 
 Tests should validate the real implementation and its integration. Do not add artificial test-only duplication or merely assert that the source contains a desired helper name.
 
+**Read that last sentence as forbidding the brittle form, not the
+architectural one.** These are different tests:
+
+- *"the source mentions `_validate_c_flag`"* -- brittle, and it says
+  nothing: a file can mention the helper once and still implement the
+  rule locally nine other times. Forbidden.
+- *"every site that applies this decision routes through
+  `_validate_c_flag`, and the check precedes the operation it guards"*
+  -- this is the **architecture test** this policy needs. It is what
+  makes the invariant hold as the code changes, and it fails the
+  moment a twenty-ninth local implementation appears.
+
+Where the policy's invariant is "there is exactly one authoritative
+implementation", the test must be able to observe that. Asserting the
+architecture is not asserting a name; it is asserting the property
+the policy is about. `python/tests/test_helper_death_excuse.py` is the
+worked example: it asserts that every helper-death site asks the
+shared decision, and that the consult precedes the abort in its block.
+Both assertions are mutation-checked -- unwiring one site fails the
+first, moving one consult after its abort fails the second.
+
 ## 7. Mandatory self-review before declaring a change complete
 
 After implementing a change, perform a focused SSoT audit of the diff and the affected code.
@@ -159,9 +265,10 @@ Answer these questions:
 4. Are any affected callers still making the same decision locally rather than delegating to the authoritative implementation?
 5. Do apparent differences between execution paths represent genuinely different semantics, or merely historical drift?
 6. Are the exceptional cases centralized, or did I centralize only the happy path?
-7. Do tests demonstrate both correct decision-making and use of the authoritative implementation by affected callers?
-8. Did the change inadvertently preserve obsolete implementations or create a new source of truth?
-9. Have I searched the relevant execution modes and call sites for equivalent logic, rather than relying solely on the files I edited?
+7. For each centralized decision, is the **order** of operations inside it also correct -- does a check that reads state another step produces come *before* that step (section 4.1)?
+8. Do tests demonstrate both correct decision-making and use of the authoritative implementation by affected callers?
+9. Did the change inadvertently preserve obsolete implementations or create a new source of truth?
+10. Have I searched the relevant execution modes and call sites for equivalent logic, rather than relying solely on the files I edited?
 
 Use repository searches, diff inspection, and relevant tests to answer these questions. Do not treat the absence of identical text as proof that no semantic duplication exists.
 
@@ -194,6 +301,8 @@ For any substantial correctness-sensitive change, include a concise SSoT summary
 - **Consumers:** Which callers or execution paths use it?
 - **Duplication eliminated or avoided:** Which competing implementations were removed, reused, or not introduced?
 - **Intentional differences:** What similar logic remains separate, and why is it semantically distinct?
+- **Divergence resolved:** Where copies had drifted, which behaviour won, and where is it tested?
+- **Order:** For a decision whose correctness depends on the order of operations, what enforces it?
 - **Verification:** Which targeted and integration tests were run, and what did they establish?
 - **Residual concerns:** What relevant paths, tests, or existing duplications remain unverified or unresolved?
 
@@ -207,8 +316,90 @@ A change satisfies this policy only when each correctness-critical decision it i
 
 Single Source of Truth is an architectural correctness property. It must be established during initial implementation, preserved during subsequent changes, and verified during review—not deferred to a cleanup pass.
 
-## 11. Brief Version
+## 11. A worked example: a rule wired into 2 of 28
 
-**Non-negotiable SSoT rule:** Every specific correctness-critical decision must have exactly one authoritative implementation. Before writing new decision logic, search the repository for existing equivalent logic and reuse or extend its authoritative implementation. Never create a parallel implementation merely because it is locally convenient, belongs to another module, or serves another execution mode. Centralize the shared decision—including relevant edge cases—while leaving caller-specific actions separate. Repeated invocations of one shared rule are acceptable; independently implemented copies of that rule are not. Preserve separate implementations only when their semantics are genuinely different, and document and test that distinction. Before declaring a change complete, inspect the diff and relevant call sites for semantic duplication, verify that affected callers use the authoritative implementation, and run tests covering the decision and its integration. Do not defer known duplication to a later cleanup pass. Report the authoritative implementation, affected callers, intentional differences, tests actually run, and unresolved concerns.
+This is the case that motivated the policy, in this repository's own
+history, because the numbers are what make the rule concrete.
+
+**The rule.** A helper child -- a scanner, a drain, an orderer, a
+reaper -- dying is *expected* when an abort is already in flight: the
+child died as the abort's consequence, and re-aborting would print a
+spurious FATAL and clobber the abort's own outcome. D-PORT2/D6
+introduced that classification -- "an abort already in flight makes
+helper deaths expected (emergency path), not fatal" -- and wired it
+into the helper watchers.
+
+**What actually happened.** The front end applies that rule in **28**
+places: every site that turns a helper child's non-zero exit into a
+fatal error. The fix was wired into **2** of them.
+
+The other 26 were not overlooked by a careless author. They are the
+same rule written out **inline**, in the body of each executor, and a
+function-level duplicate scan found almost none of them -- inline
+duplication is invisible to a function-level scan by construction. The
+commit's own wording -- "both UMA scanner watches" -- shows the author
+believed there were two.
+
+**The consequence.** Any change to that rule had to be made in 28
+places, and the one change that was made reached two. Meanwhile a
+second rule of the same kind -- the C drain child's exit, also a helper
+child's death -- was consulted in **none** of its 10 places.
+
+**What the fix looks like now.** One decision point:
+
+```python
+def _helper_death_excused(kind, eof_ok, lib):
+    """Has an abort already explained this helper child's death?"""
+    return (_helper_death_disposition(kind, eof_ok,
+                                      _abort_reason_now(lib)) == "excuse")
+```
+
+and every one of the 24 helper-death raise sites asks it. The
+consolidation also **changed behaviour** on the paths that had drifted
+-- the NUMA orderer copy, and the ten C-drain copies, now consult the
+rule they never consulted. That is the divergence rule (section 3,
+step 4) doing its job, not a regression, and it is reported as such.
+
+**And the order matters.** The rule asks whether an abort is in flight,
+and the abort's own call publishes the reason the rule reads. A consult
+placed *after* the abort therefore always sees "excused" and swallows
+every genuine failure. One site had it that way; the test now fails if
+the order is inverted, not only if the outcome is wrong.
+
+**The lesson, in one line:** the fix was correct, and it still reached
+two places out of twenty-eight -- because the other twenty-six were not
+functions.
+
+## 12. Brief Version
+
+**Non-negotiable SSoT rule:** Every specific correctness-critical
+decision must have exactly one authoritative implementation. Before
+writing new decision logic, search the repository for existing
+equivalent logic and reuse or extend its authoritative implementation.
+Never create a parallel implementation merely because it is locally
+convenient, belongs to another module, or serves another execution mode.
+Centralize the shared decision — including relevant edge cases — while
+leaving caller-specific actions separate. Repeated invocations of one
+shared rule are acceptable; independently implemented copies of that
+rule are not.
+
+**When copies have drifted, the divergence is the defect.** Resolve it
+in favour of one implementation, say which behaviour won, and test it.
+Do not preserve a divergent copy "to be safe". The order of operations
+inside a centralized decision is part of the decision.
+
+**Before declaring a change complete:** inspect the diff and the
+relevant call sites for semantic duplication, verify that the affected
+callers use the authoritative implementation, and run tests covering
+both the decision and its integration. Do not defer known duplication to
+a later cleanup pass. Report the authoritative implementation, the
+affected callers, the intentional differences, the resolved divergence,
+the tests actually run, and the unresolved concerns.
+
+**Scope:** this governs the decisions a change introduces, modifies, or relies on — it is not a licence to audit the tree, and a change that adds no correctness-critical decision needs no SSoT work.
+
+**How to search:** `tools/ssot_scan.py` compares statement **blocks**, not function bodies. A decision duplicated inline is invisible to a function-level scan — the abort-aware helper-death rule was applied in 28 places, and a function-level scan found almost none of them.
+
+**How to enforce:** an architecture test that asserts every site routes through the authoritative implementation is required; asserting that the source merely *mentions* a helper name is not.
 
 See dev/supervisor/SSoT.md for the full version.
