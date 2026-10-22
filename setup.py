@@ -409,6 +409,14 @@ setup(
         # W-REL5-F (F2): 3.13 joins the CI version matrix (python-check
         # version-matrix job); the floor stays 3.10 (python_requires).
         "Programming Language :: Python :: 3.13",
+        # The declared support target is 3.10-3.15 (DECISION-01 Option A:
+        # "one helper per supported CPython minor ... cp310, cp311, ...
+        # cp315"), and the C0.5 interpreter matrix carries the same set.
+        # The classifiers said 3.10-3.13 while the decision and the
+        # matrix said 3.10-3.15: a release-metadata inconsistency, not
+        # a support change. They now agree.
+        "Programming Language :: Python :: 3.14",
+        "Programming Language :: Python :: 3.15",
         "Topic :: System :: Distributed Computing",
         "Topic :: System",
         "Topic :: Scientific/Engineering",

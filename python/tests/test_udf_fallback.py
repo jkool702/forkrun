@@ -313,5 +313,82 @@ class TestEveryInProcessPathFallsBack(_UDFFallbackFixture):
         self.assertTrue(got, "stream() on the NUMA path did not fall back")
 
 
+class TestResolvingASpecDoesNotReplaceAModuleObject(unittest.TestCase):
+    """Resolving a payload spec must not replace a module OBJECT.
+
+    The freshness rule drops the leaf module from sys.modules and
+    re-imports it, so a module rewritten between calls is not
+    resolved stale. Dropping and re-importing produces a NEW MODULE
+    OBJECT, though -- and every module that imported it earlier keeps
+    a reference to the OLD one.
+
+    For a user module that is harmless. For a BUILT-IN, FROZEN or
+    EXTENSION module it is not: `os` is frozen, so re-importing it
+    hands the process a different `os` while every module imported
+    earlier still holds the old one. Two consequences, both real:
+
+      * a patch applied to the current `os` -- a test's
+        `mock.patch("os.stat", ...)`, or any instrumentation -- is
+        applied to the NEW object and is INVISIBLE to the code under
+        test, which silently sees the real function;
+      * the process ends up with two `os` objects and no single
+        source of truth.
+
+    This is what the mode="udf" fallback exposed: resolving
+    "os:getcwd" in the parent (which the fallback must do) replaced
+    the `os` module object, and two unrelated tests that patch `os`
+    then failed for reasons that had nothing to do with their own
+    code.
+    """
+
+    def test_a_frozen_module_is_not_dropped_and_reimported(self):
+        from forkrun import _worker
+
+        before = sys.modules.get("os")
+        self.assertIsNotNone(before, "os is not imported")
+        _worker.resolve_payload_parent("os:getcwd")
+        after = sys.modules.get("os")
+        self.assertIs(
+            before, after,
+            "resolving a spec replaced the `os` module object: every "
+            "module that imported it earlier now holds a stale "
+            "reference, and a patch applied to the current one is "
+            "invisible to them")
+
+    def test_a_user_module_is_still_dropped_and_reimported(self):
+        """The freshness rule itself must keep working: a user module
+        rewritten between calls is not resolved stale."""
+        import tempfile as _tf
+        from forkrun import _worker
+
+        with _tf.TemporaryDirectory() as d:
+            path = os.path.join(d, "forkrun_freshness_probe.py")
+            with open(path, "w") as fh:
+                fh.write("def get():\n    return 1\n")
+            sys.path.insert(0, d)
+            try:
+                fn = _worker.resolve_payload_parent(
+                    "forkrun_freshness_probe:get")
+                self.assertEqual(1, fn())
+                # rewrite it, as a REPL iteration would. The mtime is
+                # bumped explicitly: a rewrite within the same second
+                # leaves the BYTECODE CACHE valid, and the stale value
+                # would come from the .pyc rather than from the rule
+                # under test.
+                with open(path, "w") as fh:
+                    fh.write("def get():\n    return 2\n")
+                st = os.stat(path)
+                os.utime(path, (st.st_atime + 10, st.st_mtime + 10))
+                fn2 = _worker.resolve_payload_parent(
+                    "forkrun_freshness_probe:get")
+                self.assertEqual(
+                    2, fn2(),
+                    "the freshness rule stopped working: a rewritten user "
+                    "module resolved stale")
+            finally:
+                sys.path.remove(d)
+                sys.modules.pop("forkrun_freshness_probe", None)
+
+
 if __name__ == "__main__":
     unittest.main()

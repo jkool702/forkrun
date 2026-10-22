@@ -201,9 +201,10 @@ reproduced first, then fixed; 8 mutation tests added)
 
 ---
 
-## G2. OPEN: two suite-order failures, localised but NOT root-caused
+## G2. RESOLVED: the suite-order failures were a real production bug
 
-**Status: OPEN** — the mechanism is not established; the evidence is.
+**Status: RESOLVED** — root-caused, fixed, and covered by a
+mutation-checked regression test.
 
 Both failures are in tests that patch a MODULE ATTRIBUTE
 (`os.stat` in `test_checkpoint_gate.py`, `os.write` in
@@ -219,15 +220,33 @@ after the patch has been applied, so the test sees the REAL function.
 | The previous commit's full suite passes | `git checkout 8ac54de1` → 1489 tests OK, in the same tree with the same built artifacts |
 | The product is NOT implicated | the checkpoint gate's own unit test passes; `forkrun/_checkpoint.py` is untouched by this session's changes |
 
-**Not yet established**: how the UDF change in `run.py` interacts with
-`tools/capability_dispatch.py`'s probe (which patches
-`forkrun.run`'s module attributes and restores them) to leave a
-module-attribute patch inert. The next step is a bisect of the
-probe's restore path against `os.stat`/`os.write`.
+**ROOT CAUSE** (established): `forkrun/_worker.py::resolve_payload_parent`
+implements the freshness rule by dropping the leaf module from
+`sys.modules` and re-importing it -- which produces a NEW MODULE
+OBJECT. For a user module that is the point. For a BUILT-IN, FROZEN
+or EXTENSION module it is a defect: `os` is FROZEN, so re-importing
+it hands the process a different `os` while every module imported
+earlier (including `forkrun._checkpoint`) still holds the old one.
+A patch applied to the current `os` is then invisible to the code
+under test.
 
-**The impact is confined to the test suite**: the checkpoint gate and
-the ENOSPC fault injection both work in isolation, and no production
-code changed in either path.
+**What exposed it:** the `mode="udf"` fallback resolves the spec in
+the PARENT (that is the documented fallback), and the capability
+matrix's UDF cell uses the spec `"os:getcwd"` -- so the fallback
+started dropping and re-importing `os`. Two unrelated tests that
+patch `os.stat` / `os.write` then failed, for reasons that had
+nothing to do with their own code.
+
+**The fix:** the drop is now limited to SOURCE modules
+(`_is_source_module`). A built-in is never "rewritten between calls",
+so the freshness rule has nothing to do there -- and replacing a
+frozen module object was never intended. The process no longer ends
+up with two `os` objects.
+
+**The regression test** (in `test_udf_fallback.py`) asserts that
+resolving a spec does not replace the `os` module object, and that
+the freshness rule still works for a user module. Mutation-checked:
+removing the source-module guard makes the first fail.
 
 ## H. Priority 7 — final release-readiness sweep
 

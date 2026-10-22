@@ -25,6 +25,7 @@ the caller's UB, same as Layer 3 numpy UB).
 
 from __future__ import annotations
 
+import importlib.machinery
 import mmap
 import inspect
 import os
@@ -216,12 +217,62 @@ def resolve_payload_parent(spec):
     fixtures, REPL/notebook iteration) would resolve stale in the
     parent. Only the leaf is dropped ("pkg" stays cached; the
     re-import rebinds it).
+
+    THE DROP IS LIMITED TO SOURCE MODULES, and that limit is load
+    bearing. Dropping a module and re-importing it produces a NEW
+    MODULE OBJECT: every module that imported it earlier keeps a
+    reference to the OLD one. For a user module that is harmless --
+    the old object is about to be replaced anyway, and the freshness
+    rule wants exactly that. For a BUILT-IN, FROZEN or EXTENSION
+    module it is not: `os` is frozen, so re-importing it hands the
+    process a different `os` object while `forkrun._checkpoint` (and
+    every other module imported earlier) still holds the old one.
+    Two consequences, both observed:
+
+      * a patch applied to the current `os` (a test's
+        `mock.patch("os.stat", ...)`, or any instrumentation) is
+        applied to the NEW object and is invisible to every module
+        holding the OLD one -- so the code under test silently sees
+        the real function;
+      * the reverse holds too: a module that holds the old object
+        keeps using it, so the process ends up with two `os` objects
+        and no single source of truth.
+
+    A built-in is never "rewritten between calls", so the freshness
+    rule has nothing to do there. `_is_source_module` is the one
+    implementation of that distinction.
     """
     if isinstance(spec, str):
         mod_name, _, func_name = spec.partition(":")
-        if mod_name and func_name:
+        if mod_name and func_name and _is_source_module(mod_name):
             sys.modules.pop(mod_name, None)
     return _resolve_payload(spec)
+
+
+def _is_source_module(name):
+    """May the freshness rule drop and re-import this module?
+
+    True for a module that came from source (or a source-less
+    extension): those are the ones a user can rewrite between calls,
+    which is what the freshness rule exists for. False for a builtin,
+    a FROZEN module (`os` is frozen) or an extension module: dropping
+    and re-importing one replaces the module OBJECT, and every module
+    that imported it earlier keeps a stale reference.
+
+    A module that is not imported yet is droppable: there is nothing
+    to keep a reference to.
+    """
+    mod = sys.modules.get(name)
+    if mod is None:
+        return True
+    spec = getattr(mod, "__spec__", None)
+    if spec is None:
+        return False                     # no spec: a builtin
+    loader = getattr(spec, "loader", None)
+    if loader is None:
+        return False                     # no loader: a builtin
+    return isinstance(loader, (importlib.machinery.SourceFileLoader,
+                               importlib.machinery.SourcelessFileLoader))
 
 
 def _coerce_result(ret):
