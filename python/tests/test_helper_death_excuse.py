@@ -944,80 +944,10 @@ class TestNoHelperDeathSiteDecidesForItself(unittest.TestCase):
         cls.lines = cls.src.split("\n")
         cls.parents = _parents(cls.tree)
 
-    def _under_a_consult(self, node):
-        """Is this raise inside the BODY of an `if` whose test consults
-        the shared decision?
-
-        The second structural signature of a helper-death site: the
-        decision is consulted and the raise follows it. EITHER
-        polarity counts -- the point of the signature is to find the
-        site, not to judge it, and a polarity flip (the mutation this
-        checker must reject) leaves the consult in place.
-
-        A raise in the ELSE branch does not count: that branch runs
-        when the condition is false.
-        """
-        cur = node
-        while cur is not None:
-            par = self.parents.get(id(cur))
-            if par is None:
-                return False
-            if isinstance(par, ast.If):
-                if cur in getattr(par, "orelse", []):
-                    return False
-                if _consult_call(par) is not None or \
-                        any(isinstance(n, ast.Call)
-                            and getattr(n.func, "id", None)
-                            == "_helper_death_excused"
-                            for n in ast.walk(par.test)):
-                    return True
-            cur = par
-        return False
-
-    def _aborts_before(self, node):
-        """Is this a helper-death RUNTIMEERROR preceded by an ENGINE
-        ABORT in its own block?
-
-        The helper-death choreography is: consult the shared decision,
-        abort the engine, then raise. The abort call is the STRUCTURAL
-        signature of a helper-death site, and -- unlike the message --
-        it does not change when the message is reworded.
-
-        The exception TYPE is part of the signature, and it is what
-        keeps the classification narrow. The abort-then-raise shape is
-        also how the INTERRUPT path reports itself
-        (`raise ForkrunInterrupted(...)` after `fr_py_abort()`), and
-        that is not a helper death: it is the operator's Ctrl-C.
-        Classifying it as one would be the overbroad classification
-        this signature exists to avoid.
-        """
-        if not self._is_runtime_error(node):
-            return False
-        par = self.parents.get(id(node))
-        body = getattr(par, "body", None)
-        if not isinstance(body, list):
-            return False
-        for i, st in enumerate(body):
-            if st is node:
-                return any(
-                    isinstance(n, ast.Call)
-                    and isinstance(n.func, ast.Attribute)
-                    and n.func.attr == "fr_py_abort"
-                    for j in range(i)
-                    for n in ast.walk(body[j]))
-        return False
-
     def _helper_death_sites(self):
         """The helper-death raise sites (see the module-level census)."""
         return _helper_death_sites(self.tree, self.parents, self.lines)
 
-    def _is_runtime_error(self, node):
-        """Does this raise a plain RuntimeError?"""
-        exc = node.exc
-        if isinstance(exc, ast.Call) and \
-                getattr(exc.func, "id", None) == "RuntimeError":
-            return True
-        return False
 
     def test_there_are_enough_sites_for_the_check_to_mean_something(self):
         sites = self._helper_death_sites()
