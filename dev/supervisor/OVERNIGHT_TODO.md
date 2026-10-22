@@ -166,18 +166,18 @@ session; this is the independent audit)
 
 - [x] Every production fork site routes through `forkrun._childreg.fork_child(owner)` — the package's ONLY `os.fork()` is inside the primitive
 - [x] Search for direct `os.fork()`, ALIASES (`from os import fork`), wrappers, alternate process-creation paths — DONE, and now ENFORCED by a test over the AST (`test_teardown_interrupt.py::TestEveryForkIsProtected`): no alias of fork exists, and the only alternate path is `os.posix_spawn` for the launcher (which does not fork)
-- [ ] Adoption is inside the protected region; no interruption window
-- [ ] SIGINT deferral restored correctly in parent AND child
-- [ ] An in-flight exception is not replaced by a deferred interrupt
-- [ ] A deferred interrupt is not swallowed
-- [ ] Cleanup bounded; all owned children reconciled
-- [ ] No inappropriate shared registry/lock state between parent and child
-- [ ] Failure paths do not leave the logging fork lock or engine session lock held
-- [ ] Behaviour in the actual threaded contexts
+- [x] Adoption is inside the protected region; no interruption window
+- [x] SIGINT deferral restored correctly in parent AND child
+- [x] An in-flight exception is not replaced by a deferred interrupt
+- [x] A deferred interrupt is not swallowed
+- [x] Cleanup bounded; all owned children reconciled
+- [x] No inappropriate shared registry/lock state between parent and child
+- [x] Failure paths do not leave the logging fork lock or engine session lock held
+- [x] Behaviour in the actual threaded contexts
 - [x] Review `test_teardown_interrupt.py`, the lifecycle-helper tests, the resume/SIGINT tests
 - [x] Run the targeted tests in FRESH subprocesses, repeatedly (timing-sensitive)
-- [ ] Full-suite verification (cleanroom off/on), each run recorded independently
-- [ ] If a gate hangs: capture a live traceback BEFORE killing, identify the blocking operation, preserve the evidence
+- [x] Full-suite verification (cleanroom off/on), each run recorded independently
+- [x] If a gate hangs: capture a live traceback BEFORE killing, identify the blocking operation, preserve the evidence
 
 ---
 
@@ -213,8 +213,15 @@ session; this is the independent audit)
 - [x] The median is over the intended paired observations
 - [x] The 0.8× margin is applied to the MEDIAN, not per observation
 - [x] Failure output has enough context to diagnose a near-threshold ratio
-- [ ] Run under ordinary conditions; one controlled loaded run if the host allows
-- [ ] Measurement-validity assessment; narrowly scoped fix only if a concrete defect is found
+- [x] Run under ordinary conditions — the paired measurement was run under
+  ordinary conditions, under an ALTERNATING order (6 paired rounds), under
+  16 CPU burners and under 20 GB of memory pressure, so the "one
+  controlled loaded run" is covered several times over
+- [x] Measurement-validity assessment — recorded in the audit: the ratio is
+  0.39-0.50 in every controlled condition, with identical output bytes and
+  sample counts in both arms; the producer-run-ahead explanation for the
+  one 0.82 reading remains a HYPOTHESIS and is kept separate from the
+  claim. No fix was needed, and none was made
 
 ---
 
@@ -300,14 +307,16 @@ the final HEAD:
 `git diff --check` clean; the tree clean; nothing running afterwards.
 
 
-- [ ] Focused tests for both implementation tasks
-- [ ] Packaging + release checks
-- [ ] Full Python suite (cleanroom off and on)
-- [ ] `git diff --check`
-- [ ] Final diff inspected: generated files, test-only bypasses, weakened assertions, debug instrumentation, stale comments
-- [ ] Working tree + commit history verified
-- [ ] Docs and release metadata agree with actual behaviour
-- [ ] No version bump, tag or publish without explicit authorisation
+- [x] Focused tests for both implementation tasks
+- [x] Packaging + release checks
+- [x] Full Python suite (cleanroom off and on)
+- [x] `git diff --check`
+- [x] Final diff inspected: generated files, test-only bypasses, weakened assertions, debug instrumentation, stale comments
+- [x] Working tree + commit history verified
+- [x] Docs and release metadata agree with actual behaviour
+- [x] No version bump, tag or publish without explicit authorisation
+- [x] The gate is GREEN in both configurations on the final HEAD (see the
+  table above)
 
 ---
 
@@ -337,11 +346,12 @@ the final HEAD:
 
 ## I. Running log
 
-**Commit count (housekeeping).** The morning report said nine commits
-from `8ac54de1`; the truth is **eight** —
-`git rev-list --count 8ac54de1..HEAD` → 8. (The reviewer's GitHub
-comparison said seven.) The morning report's list also named seven
-SHAs, which is where the discrepancy came from.
+**Commit count (housekeeping).** The count moved as the session added
+its fix commits, and the reports disagreed with each other (nine in the
+morning report, seven in the reviewer's GitHub comparison, eight in the
+first tracker revision). The authoritative figure is
+`git rev-list --count 8ac54de1..HEAD`, and the tracker now states the
+count that command returns at the time of reading it.
 
 | when | what | result |
 |---|---|---|

@@ -252,27 +252,81 @@ def resolve_payload_parent(spec):
 def _is_source_module(name):
     """May the freshness rule drop and re-import this module?
 
-    True for a module that came from source (or a source-less
-    extension): those are the ones a user can rewrite between calls,
-    which is what the freshness rule exists for. False for a builtin,
-    a FROZEN module (`os` is frozen) or an extension module: dropping
-    and re-importing one replaces the module OBJECT, and every module
-    that imported it earlier keeps a stale reference.
+    ONLY a module the USER owns: one that came from a source file
+    OUTSIDE the interpreter's own directories.
 
-    A module that is not imported yet is droppable: there is nothing
-    to keep a reference to.
+    The rule exists so a module REWRITTEN between calls (a test
+    fixture, a REPL/notebook iteration) is not resolved stale. A
+    standard library module is not rewritten that way -- and dropping
+    one replaces the module OBJECT, so every module that imported it
+    earlier keeps a stale reference. That is not a hypothetical: it is
+    exactly what happened with the FROZEN `os`.
+
+    So the predicate is about OWNERSHIP, not about the loader class.
+    `base64` is loaded from ordinary Python source, and it is still
+    not the user's to replace: dropping and re-importing it would
+    hand the process two `base64` objects, and `b64encode` resolved
+    from the new one would not be the function the old one holds.
+
+    FAIL CLOSED: if the origin cannot be established, the module is
+    not droppable. A module that is not imported yet IS droppable:
+    there is nothing to keep a reference to.
     """
     mod = sys.modules.get(name)
     if mod is None:
         return True
-    spec = getattr(mod, "__spec__", None)
-    if spec is None:
-        return False                     # no spec: a builtin
-    loader = getattr(spec, "loader", None)
-    if loader is None:
-        return False                     # no loader: a builtin
-    return isinstance(loader, (importlib.machinery.SourceFileLoader,
-                               importlib.machinery.SourcelessFileLoader))
+    path = getattr(mod, "__file__", None)
+    if not path:
+        return False                     # no file: a builtin, or a
+                                         # namespace package
+    if not _is_source_path(path):
+        return False                     # not loaded from source
+    return _is_outside_interpreter_dirs(path)
+
+
+def _is_source_path(path):
+    """Was this file loaded from Python source (or a source-less
+    extension)?"""
+    import importlib.machinery
+    suffix = os.path.splitext(path)[1]
+    if suffix in (".pyc", ".pyo"):
+        return True
+    if suffix == ".py":
+        return True
+    # a source-less extension (.so): the loader says so
+    name = os.path.basename(path)
+    for suffix_candidate in importlib.machinery.EXTENSION_SUFFIXES:
+        if name.endswith(suffix_candidate):
+            return True
+    return False
+
+
+def _is_outside_interpreter_dirs(path):
+    """Is this file outside the interpreter's own directories?
+
+    The standard library, the interpreter's extension directory and
+    the site directories belong to the interpreter, not to the user:
+    a module from one of them is not something a user rewrote between
+    calls, and replacing its OBJECT is never what the freshness rule
+    wanted.
+    """
+    import sysconfig
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return False
+    roots = []
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
+        try:
+            root = sysconfig.get_path(key)
+        except (KeyError, OSError):
+            root = None
+        if root:
+            roots.append(os.path.realpath(root))
+    for root in roots:
+        if real == root or real.startswith(root + os.sep):
+            return False
+    return True
 
 
 def _coerce_result(ret):

@@ -355,6 +355,33 @@ class TestResolvingASpecDoesNotReplaceAModuleObject(unittest.TestCase):
             "reference, and a patch applied to the current one is "
             "invisible to them")
 
+    def test_a_source_loaded_standard_library_module_is_not_replaced(self):
+        """`base64` is loaded from ordinary Python source, and it is
+        still not the user's to replace.
+
+        The predicate that decides this is about OWNERSHIP, not about
+        the loader class. A source-loaded standard library module
+        dropped and re-imported would leave the process with two
+        `base64` objects: the function resolved from the new one would
+        not be the one every earlier importer holds.
+
+        This is the third category the frozen-`os` test did not cover:
+        `os` is frozen, the probe module here is user-owned, and
+        `base64` is source-loaded but belongs to the interpreter.
+        """
+        import base64
+        from forkrun import _worker
+
+        before = sys.modules.get("base64")
+        self.assertIsNotNone(before, "base64 is not imported")
+        fn = _worker.resolve_payload_parent("base64:b64encode")
+        self.assertTrue(callable(fn), "the payload did not resolve")
+        self.assertIs(
+            before, sys.modules.get("base64"),
+            "resolving a spec replaced a SOURCE-LOADED STANDARD LIBRARY "
+            "module object: every module that imported it earlier now "
+            "holds a stale reference")
+
     def test_a_user_module_is_still_dropped_and_reimported(self):
         """The freshness rule itself must keep working: a user module
         rewritten between calls is not resolved stale."""
