@@ -399,8 +399,7 @@ def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
         results_fd = results_w
 
     arr = (_ctypes.c_int * len(out_fds))(*out_fds)
-    pid = _childreg.fork_child()
-    _childreg.adopt(pid, 'drain')
+    pid = _childreg.fork_child('drain')
     if pid == 0:
         try:
             keep = {signal_r, results_fd} | set(out_fds)
@@ -1848,8 +1847,7 @@ def _spawn_or_fork(launcher, argv, file_actions):
     the shipped failure contract would be bypassed.
     """
     if _CLEANROOM_LAUNCH_BACKEND != "posix_spawn":
-        pid = _childreg.fork_child()
-        _childreg.adopt(pid, 'launcher')
+        pid = _childreg.fork_child('launcher')
         if pid == 0:
             try:
                 for act in (file_actions or ()):
@@ -6323,8 +6321,7 @@ def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
     out_fd must be a parent-created output memfd (never None: splice
     always frames records for the parent to parse).
     """
-    pid = _childreg.fork_child()
-    _childreg.adopt(pid, 'splice-worker')
+    pid = _childreg.fork_child('splice-worker')
     if pid == 0:
         try:
             keep = set(engine_fds) | {memfd, out_fd}
@@ -7200,8 +7197,7 @@ def _fork_materialized_scanner(lib, memfd, engine_fds):
     (The ingest paths keep their first-publish gate instead —
     their input is still arriving while the scanner runs.)
     """
-    pid = _childreg.fork_child()
-    _childreg.adopt(pid, 'scanner')
+    pid = _childreg.fork_child('scanner')
     if pid == 0:
         try:
             scrub_fds(engine_fds | {memfd})
@@ -7224,8 +7220,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
     The caller forks workers after; the parent closes its fallow copies
     once every child exists (reaper EOF = workers' write ends only).
     """
-    fallow_pid = _childreg.fork_child()
-    _childreg.adopt(fallow_pid, 'fallow')
+    fallow_pid = _childreg.fork_child('fallow')
     if fallow_pid == 0:
         try:
             scrub_fds(engine_fds | {fallow_r, memfd})
@@ -7233,8 +7228,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
         except BaseException:
             rc = 1
         os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
-    scan_pid = _childreg.fork_child()
-    _childreg.adopt(scan_pid, 'scanner')
+    scan_pid = _childreg.fork_child('scanner')
     if scan_pid == 0:
         try:
             scrub_fds(engine_fds | {memfd})
@@ -9808,8 +9802,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         # Pre-fork default: the finally block reaps ingest_pid even when
         # the run aborts before the ingest child is forked.
         ingest_pid = None
-        fallow_pid = _childreg.fork_child()
-        _childreg.adopt(fallow_pid, 'fallow')
+        fallow_pid = _childreg.fork_child('fallow')
         if fallow_pid == 0:
             try:
                 scrub_fds(engine_fds | {fallow_r, memfd})
@@ -9920,8 +9913,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         # any more.
         src_fd, must_close = _prepare_ingest_source(src_fd, must_close)
         ingest_death_r, ingest_death_w = os.pipe()
-        ingest_pid = _childreg.fork_child()
-        _childreg.adopt(ingest_pid, 'ingest')
+        ingest_pid = _childreg.fork_child('ingest')
         if ingest_pid == 0:
             # Child — never returns.
             rc = 0
@@ -10325,8 +10317,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         _flush_stdio()
 
-        fallow_pid = _childreg.fork_child()
-        _childreg.adopt(fallow_pid, 'fallow')
+        fallow_pid = _childreg.fork_child('fallow')
         if fallow_pid == 0:
             try:
                 scrub_fds(engine_fds | {fallow_r, memfd})
@@ -11002,8 +10993,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     _flush_stdio()
 
     fallow_r, fallow_w = os.pipe()
-    fallow_pid = _childreg.fork_child()
-    _childreg.adopt(fallow_pid, 'fallow')
+    fallow_pid = _childreg.fork_child('fallow')
     if fallow_pid == 0:
         try:
             scrub_fds(engine_fds | {fallow_r, memfd})
@@ -11020,8 +11010,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     indexer_deaths = []
     for node in range(num_nodes):
         death_r, death_w = os.pipe()
-        pid = _childreg.fork_child()
-        _childreg.adopt(pid, 'worker')
+        pid = _childreg.fork_child('worker')
         if pid == 0:
             try:
                 os.close(death_r)
@@ -11065,8 +11054,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     scanner_deaths = []
     for node in range(num_nodes):
         death_r, death_w = os.pipe()
-        pid = _childreg.fork_child()
-        _childreg.adopt(pid, 'worker')
+        pid = _childreg.fork_child('worker')
         if pid == 0:
             try:
                 os.close(death_r)
@@ -11088,8 +11076,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
         scanner_deaths.append(death_r)
 
     ingest_death_r, ingest_death_w = os.pipe()
-    ingest_pid = _childreg.fork_child()
-    _childreg.adopt(ingest_pid, 'ingest')
+    ingest_pid = _childreg.fork_child('ingest')
     if ingest_pid == 0:
         try:
             os.close(ingest_death_r)

@@ -353,8 +353,7 @@ class ReactorState:
         from ._executor_core import warn_fork_cost_once as _warn_fork
         _t0 = _time.perf_counter()
 
-        pid = _childreg.fork_child()
-        _childreg.adopt(pid, 'worker')
+        pid = _childreg.fork_child('worker')
         if pid == 0:
             # Child — never returns.
             try:
@@ -1519,8 +1518,7 @@ def spawn_orderer(order_r, output_fd=1, unordered=False, numa=False,
     """
     from ._bindings import get as _get
     lib = _get()
-    pid = _childreg.fork_child()
-    _childreg.adopt(pid, 'orderer')
+    pid = _childreg.fork_child('orderer')
     if pid == 0:
         try:
             from ._fd_scrub import scrub_fds
@@ -1551,8 +1549,7 @@ def fork_scanner_with_death_pipe(lib, memfd, spawn_w=-1,
     scaling); -1 runs the plain scan.
     """
     death_r, death_w = os.pipe()
-    pid = _childreg.fork_child()
-    _childreg.adopt(pid, 'scanner')
+    pid = _childreg.fork_child('scanner')
     if pid == 0:
         try:
             os.close(death_r)

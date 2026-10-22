@@ -44,35 +44,45 @@ from . import _signals
 _OWNED = {}
 
 
-def fork_child():
-    """os.fork(), with SIGINT deferred across it.
+def fork_child(owner):
+    """Fork a child and TAKE OWNERSHIP of it, atomically.
 
-    WHY THIS EXISTS
-    ---------------
-    CPython's ``os.fork()`` calls ``logging._prepareFork()`` in the
-    PARENT before the syscall and ``logging._afterFork()`` after it:
-    the logging module's lock is held across the fork so a child
-    cannot inherit it half-configured.
+    Two things happen here, and they happen together on purpose.
 
-    An ASYNCHRONOUS EXCEPTION between the two -- a SIGINT arriving
-    mid-fork -- leaves that lock HELD FOREVER, and every later fork
-    in the process then blocks inside ``_prepareFork``. In a threaded
-    caller that is a DEADLOCK: the forking thread holds the engine
-    session lock while it waits for a fork that will never return, so
-    the whole suite wedges. Measured: the process stuck in
-    ``logging._prepareFork`` while the main thread waited for the
-    engine lock the forking thread held.
+    1. THE ADOPTION IS INSIDE THE PROTECTED WINDOW. A child that is
+       forked but not yet recorded is INVISIBLE: the teardown cannot
+       kill it, cannot reap it, and when it exits it is a zombie. So
+       the adoption is not "the next statement after the fork" -- it
+       is part of the same primitive, with no gap between the two.
+       (A registry that only records children AFTER the fork does not
+       close the window; it only records the ones that made it.)
 
-    So the fork is a critical section: SIGINT is deferred across it
-    (never swallowed -- it is delivered as soon as the fork returns)
-    and the child restores the mask as it leaves the deferred region,
-    so it behaves exactly as it would have without the deferral.
+    2. SIGINT IS DEFERRED ACROSS THE FORK. CPython's ``os.fork()``
+       calls ``logging._prepareFork()`` in the PARENT before the
+       syscall and ``logging._afterFork()`` after it: the logging
+       module's lock is held across the fork so a child cannot
+       inherit it half-configured. An ASYNCHRONOUS EXCEPTION between
+       the two -- a SIGINT arriving mid-fork -- leaves that lock HELD
+       FOREVER, and every later fork in the process then blocks
+       inside ``_prepareFork``. In a threaded caller that is a
+       DEADLOCK: the forking thread holds the engine session lock
+       while it waits for a fork that will never return, so the whole
+       suite wedges. Measured: a process stuck in
+       ``logging._prepareFork`` while the main thread waited for the
+       engine lock the forking thread held.
+
+    The interrupt is NOT swallowed: it is delivered as soon as the
+    fork returns. The child restores the mask as it leaves the
+    deferred region, so it behaves exactly as it would have without
+    the deferral.
 
     This is the ONE fork primitive in the package: every fork site
-    calls it, so the rule is implemented once.
+    calls it, so both rules are implemented once.
     """
     with _signals.defer_interrupts():
         pid = os.fork()
+        if pid > 0:
+            adopt(pid, owner)
     return pid
 
 

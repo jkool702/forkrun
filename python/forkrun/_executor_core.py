@@ -263,7 +263,7 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
                 signal_w, fallow_w, engine_fds, on_error,
                 extra_keep_fds=extra_keep_fds))
             continue
-        pid = _childreg.fork_child()
+        pid = _childreg.fork_child('worker')
         if pid == 0:
             try:
                 if signal_r_to_close is not None:

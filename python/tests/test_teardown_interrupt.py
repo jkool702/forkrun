@@ -493,7 +493,7 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
 
         pid = None
         with _Patch(os, "fork", _probe):
-            pid = _childreg.fork_child()
+            pid = _childreg.fork_child("test")
         try:
             if pid == 0:
                 os._exit(0)
@@ -510,6 +510,62 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
                 except (ChildProcessError, OSError):
                     pass
 
+    def test_a_sigint_in_the_fork_window_still_adopts_the_child(self):
+        """The adoption is INSIDE the protected fork window.
+
+        A child that is forked but not yet recorded is INVISIBLE: the
+        teardown cannot kill it, cannot reap it, and when it exits it
+        is a zombie. So the adoption is not "the next statement after
+        the fork" -- it is part of the same critical section, and the
+        deferral is what keeps the interrupt out of the gap.
+
+        Measured: with the adoption outside the window, a SIGINT
+        arriving there left an unreaped `python3` child behind --
+        exactly the leak the improved helper reported.
+        """
+        from forkrun import _childreg
+
+        real_fork = os.fork
+        holder = {}
+
+        def _fork_then_sigint():
+            pid = real_fork()
+            holder["pid"] = pid
+            if pid > 0:
+                # A REAL SIGINT, delivered in the fork's window.
+                os.kill(os.getpid(), signal.SIGINT)
+            return pid
+
+        _childreg.reset()
+        try:
+            with _DefaultSigint(), _Patch(os, "fork", _fork_then_sigint):
+                try:
+                    _childreg.fork_child("test")
+                except KeyboardInterrupt:
+                    # The deferred interrupt is delivered as the fork
+                    # returns. That is the point: it is deferred, not
+                    # swallowed.
+                    pass
+            pid = holder.get("pid")
+            if pid == 0:
+                os._exit(0)       # the child
+            try:
+                self.assertIn(
+                    pid, _childreg.pending(),
+                    "the child was forked but NOT adopted: an interrupt "
+                    "in the fork window must not orphan it")
+            finally:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    os.waitpid(pid, 0)
+                except (ChildProcessError, OSError):
+                    pass
+        finally:
+            _childreg.reset()
+
     def test_the_child_does_not_inherit_the_block(self):
         """The child must behave as if the deferral had not happened.
 
@@ -519,7 +575,7 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
         from forkrun import _childreg
 
         r, w = os.pipe()
-        pid = _childreg.fork_child()
+        pid = _childreg.fork_child("test")
         if pid == 0:
             try:
                 os.close(r)
