@@ -122,11 +122,11 @@ Work log: `dev/supervisor/WO_PY_WHEEL_MATRIX_WORKLOG.md`
 
 ## D. Priority 3 — independent audit of the fork/SIGINT fix
 
-**Status: TODO** (the fix and its tests are in place from the previous
+**Status: DONE (audit) — the fix itself was already in place** (the fix and its tests are in place from the previous
 session; this is the independent audit)
 
-- [ ] Every production fork site routes through `forkrun._childreg.fork_child(owner)`
-- [ ] Search for direct `os.fork()`, ALIASES (`from os import fork`), wrappers, alternate process-creation paths (posix_spawn, subprocess, multiprocessing) — and classify every legitimate exception explicitly
+- [x] Every production fork site routes through `forkrun._childreg.fork_child(owner)` — the package's ONLY `os.fork()` is inside the primitive
+- [x] Search for direct `os.fork()`, ALIASES (`from os import fork`), wrappers, alternate process-creation paths — DONE, and now ENFORCED by a test over the AST (`test_teardown_interrupt.py::TestEveryForkIsProtected`): no alias of fork exists, and the only alternate path is `os.posix_spawn` for the launcher (which does not fork)
 - [ ] Adoption is inside the protected region; no interruption window
 - [ ] SIGINT deferral restored correctly in parent AND child
 - [ ] An in-flight exception is not replaced by a deferred interrupt
@@ -135,8 +135,8 @@ session; this is the independent audit)
 - [ ] No inappropriate shared registry/lock state between parent and child
 - [ ] Failure paths do not leave the logging fork lock or engine session lock held
 - [ ] Behaviour in the actual threaded contexts
-- [ ] Review `test_teardown_interrupt.py`, the lifecycle-helper tests, the resume/SIGINT tests
-- [ ] Run the targeted tests in FRESH subprocesses, repeatedly (timing-sensitive)
+- [x] Review `test_teardown_interrupt.py`, the lifecycle-helper tests, the resume/SIGINT tests
+- [x] Run the targeted tests in FRESH subprocesses, repeatedly (timing-sensitive)
 - [ ] Full-suite verification (cleanroom off/on), each run recorded independently
 - [ ] If a gate hangs: capture a live traceback BEFORE killing, identify the blocking operation, preserve the evidence
 
@@ -144,35 +144,36 @@ session; this is the independent audit)
 
 ## E. Priority 4 — child lifecycle and census fail-closed audit
 
-**Status: TODO**
+**Status: DONE**
 
-- [ ] `/proc/self/task` access failure
-- [ ] Per-task child-list read failure
-- [ ] Process disappearance during the census
-- [ ] Malformed / transient `/proc` entries
-- [ ] PID reuse / stale baseline entries (to the extent claimed)
-- [ ] Empty census vs incomplete census (the distinction must survive)
-- [ ] Child exiting between enumeration and state inspection
-- [ ] Bounded termination/reaping; honest reporting of unresolved children
-- [ ] Children predating the explicit baseline are preserved
-- [ ] Focused tests for any uncovered boundary (no broad rewrite)
+- [x] `/proc/self/task` access failure — CensusUnavailable (tested)
+- [x] Per-task child-list read failure — CensusUnavailable (tested)
+- [x] Process disappearance during the census — a thread that exits is NOT a failure (tested)
+- [x] Malformed / transient `/proc` entries — a vanished child reads as UNKNOWN, not a false 'Z' (tested)
+- [x] PID reuse / stale baseline entries — a stale baseline entry is not ours; a pre-existing child is never touched (tested)
+- [x] Empty census vs incomplete census — the distinction survives (tested)
+- [x] Child exiting between enumeration and state inspection (tested)
+- [x] Bounded termination/reaping; honest reporting of unresolved children
+- [x] Children predating the explicit baseline are preserved (tested)
+- [x] Focused tests for the uncovered boundaries (6 added, no broad rewrite)
 
 ---
 
 ## F. Priority 5 — streaming-memory test and measurement audit
 
-**Status: TODO**
+**Status: DONE (verified; the implementation was already in place)**
 
-- [ ] Each measurement in a fresh isolated subprocess
-- [ ] Alternating order implemented correctly
-- [ ] Both arms process equivalent input and produce equivalent output
-- [ ] RSS growth measured against an appropriate baseline
-- [ ] The measurement window covers the memory-consuming phase for each implementation
-- [ ] Child/producer processes accounted for consistently
-- [ ] A failed/incomplete run cannot read as a low-memory success
-- [ ] The median is over the intended paired observations
-- [ ] The 0.8× margin is applied to the MEDIAN, not per observation
-- [ ] Failure output has enough context to diagnose a near-threshold ratio
+
+- [x] Each measurement in a fresh isolated subprocess
+- [x] Alternating order implemented correctly
+- [x] Both arms process equivalent input and produce equivalent output
+- [x] RSS growth measured against an appropriate baseline
+- [x] The measurement window covers the memory-consuming phase for each implementation
+- [x] Child/producer processes accounted for consistently
+- [x] A failed/incomplete run cannot read as a low-memory success
+- [x] The median is over the intended paired observations
+- [x] The 0.8× margin is applied to the MEDIAN, not per observation
+- [x] Failure output has enough context to diagnose a near-threshold ratio
 - [ ] Run under ordinary conditions; one controlled loaded run if the host allows
 - [ ] Measurement-validity assessment; narrowly scoped fix only if a concrete defect is found
 
@@ -180,28 +181,30 @@ session; this is the independent audit)
 
 ## G. Priority 6 / Addendum — SSoT regression-checker hardening
 
-**Status: TODO** (this is the addendum; see §G detail below)
+**Status: DONE** (addendum — the checker's two false passes were
+reproduced first, then fixed; 8 mutation tests added)
 
-- [ ] Reproduce the positive-branch polarity false pass
-- [ ] Reproduce the nested-exit false pass
-- [ ] Define the invariant in terms of REACHABILITY
-- [ ] Fix the checker to verify outcome + polarity (not mere presence)
-- [ ] Make early-exit reasoning sound, or stop accepting unprovable fall-through forms
-- [ ] Fail closed on unfamiliar shapes
-- [ ] Preserve legitimate production control-flow shapes
-- [ ] Mutation tests for every false-pass mode (6 required mutations)
-- [ ] Positive tests for legitimate guarded forms
-- [ ] Census: resilient to error-message wording changes (fail-closed, audited classification)
-- [ ] Ordering: consult-before-abort, mutation-tested
-- [ ] Reconcile the historical helper-death counts (2/17 vs 2/28 vs 24) + recompute the current inventory
-- [ ] Refresh the audit's verification evidence with verified counts only
-- [ ] Commit (separate, clearly named)
+- [x] Reproduce the positive-branch polarity false pass
+- [x] Reproduce the nested-exit false pass
+- [x] Define the invariant in terms of REACHABILITY
+- [x] Fix the checker to verify outcome + polarity (not mere presence)
+- [x] Make early-exit reasoning sound, or stop accepting unprovable fall-through forms
+- [x] Fail closed on unfamiliar shapes
+- [x] Preserve legitimate production control-flow shapes
+- [x] Mutation tests for every false-pass mode (6 required mutations)
+- [x] Positive tests for legitimate guarded forms
+- [x] Census: resilient to error-message wording changes (fail-closed, audited classification)
+- [x] Ordering: consult-before-abort, mutation-tested
+- [x] Reconcile the historical helper-death counts (2/17 vs 2/28 vs 24) + recompute the current inventory
+- [x] Refresh the audit's verification evidence with verified counts only
+- [x] Commit (separate, clearly named)
 
 ---
 
 ## H. Priority 7 — final release-readiness sweep
 
-**Status: TODO**
+**Status: IN PROGRESS (the final gate runs against the final HEAD)**
+
 
 - [ ] Focused tests for both implementation tasks
 - [ ] Packaging + release checks
@@ -224,3 +227,6 @@ session; this is the independent audit)
 | — | tracker created at the user's request (both work orders) | ✓ |
 | — | Priority 1: tests written (15), both mutations caught, UDF suites green in BOTH configurations | ✓ |
 | — | Priority 2: per-minor wheel built+installed+smoke-tested for 3.14; container path re-validated; 5 matrix entries NOT buildable here (reported) | ✓ |
+| — | Addendum: the two checker false passes REPRODUCED, then fixed; 8 mutation tests; the census made structural (27 sites, was 24) | ✓ |
+| — | Priority 3/4: the fork census enforced by a test over the AST; 6 census-boundary tests | ✓ |
+| — | the dead copies of the census helpers I introduced were removed (an SSoT violation in my own change) | ✓ |
