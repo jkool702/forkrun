@@ -77,13 +77,22 @@ callable to `mode="udf"` raises `ValueError` rather than being coerced.
 ### Requirements and limits
 
 - **A version-matched helper `.so` is required for the isolated path.**
-  Without it, `mode="udf"` still works, but it degrades: the spec is
-  resolved in your process and the callable runs in-process through the
-  `mode="python"` worker, wrapped by an adapter that restores the
-  bytes-in / bytes-or-None-out contract. The adapter exists because a
-  bare fallback would silently hand a `Batch` to a function written for
-  `bytes` — every batch would raise, retry and poison, and the caller
-  would see an empty result with no error naming the cause.
+  Whenever the isolated path is not selected for the call — the helper
+  is not built for this minor, **or** the cleanroom is off (the
+  default), **or** the call is not one the launcher serves — `mode="udf"`
+  still works, but it degrades: the spec is resolved in your process and
+  the callable runs in-process through the `mode="python"` worker,
+  wrapped by an adapter that restores the bytes-in /
+  bytes-or-None-out contract. The adapter exists because a bare fallback
+  would silently hand a `Batch` to a function written for `bytes` —
+  every batch would raise, retry and poison, and the caller would see
+  an empty result with no error naming the cause.
+
+  The helper's existence is not what decides this. The **route
+  selection** does: a helper built for this minor says the isolated
+  path is *possible*, not that it was *chosen*. When the two were
+  conflated, `mode="udf"` raised `NotImplementedError` in the default
+  configuration — a fallback that raises is not a fallback.
 - **Routes**: served wherever `mode="plugin"` is served — the same
   launcher and the same envelopes. Selectable as the `map-udf` and
   `stream-udf` routes. `stream(spawn)`-style unavailability does not
@@ -91,7 +100,8 @@ callable to `mode="udf"` raises `ValueError` rather than being coerced.
   requires `order="none"`, and `stream(udf, order="index")` declines and
   falls back in-process.
 - **Not served** in the plain non-cleanroom worker loop as a distinct
-  mode; there it is the in-process degradation above.
+  mode; there it is the in-process degradation above — which is a
+  working call, not an error.
 
 Implementation: `python/forkrun/_udf.py`, `fr_udf.c`,
 `fr_udf_helper.c`, `fr_udf_fork.c`. Tests: `test_udf_mode.py`,

@@ -207,6 +207,33 @@ than taking the documented in-process fallback. The route stays
 `dev/supervisor/UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` has the full
 analysis.
 
+## Unreleased — `mode="udf"` falls back when the route is not selected
+
+**The fallback now exists in every case it is documented for.** The
+`map-udf` route is served by the cleanroom launcher; the in-process
+executors accept only `mode="python"` and `"splice"`. When the route
+is not selected for a call — the helper is not built for this minor,
+**or** the cleanroom is off (the default), **or** the call is not one
+the launcher serves — `mode="udf"` now degrades to the documented
+in-process path instead of raising:
+
+    NotImplementedError: v0 supports mode='python' only
+
+The helper's existence is not what decides this: a helper built for
+this minor says the isolated path is *possible*, not that it was
+*chosen*. Confusing the two is what made the default configuration
+raise. The decision now has one authoritative implementation
+(`_coerce_payload_inprocess`), used by every in-process call site, so a
+future caller cannot forget it.
+
+`stream()` resolves the spec only AFTER the cleanroom has had its
+chance, so the user's module is still imported in the isolated helper
+whenever the launcher serves the call — resolving it in the parent
+would put the user's state into the process that forks every worker.
+
+Tests: `python/tests/test_udf_fallback.py` (15 tests, mutation-checked).
+Work log: `dev/supervisor/WO_PY_UDF_FALLBACK_1_WORKLOG.md`.
+
 ## Unreleased — the Python-UDF helper ships in a per-minor wheel
 
 **Packaging, no API change.** The cleanroom's optional Python-UDF helper

@@ -4478,6 +4478,30 @@ def _udf_as_inprocess(fn):
     return _wrapped
 
 
+def _coerce_payload_inprocess(payload, mode):
+    """Coerce a payload for the IN-PROCESS executor path.
+
+    THE DECISION: the map-udf route is served by the cleanroom
+    launcher, not by the in-process executors -- the reactor accepts
+    only "python" and "splice". So on this path a mode="udf" payload
+    MUST be resolved in THIS interpreter: the documented in-process
+    fallback.
+
+    The helper file's existence says the helper was BUILT for this
+    minor; it says NOTHING about whether the route was SELECTED for
+    this call. Conflating the two is what made mode="udf" raise
+
+        NotImplementedError: v0 supports mode='python' only
+
+    in the default configuration (the cleanroom is opt-in, so the
+    route is not selected) -- and a fallback that raises is not a
+    fallback. The UDF route selection lives in the cleanroom dispatch;
+    this is the other half of that decision, and it has one
+    implementation so a future in-process call site cannot forget it.
+    """
+    return _coerce_payload(payload, mode, force_inprocess_udf=True)
+
+
 def _coerce_payload(payload, mode, force_inprocess_udf=False):
     """Normalize the payload + mode for the engine path (W-PY8, eager).
 
@@ -4937,7 +4961,11 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     UserWarning, stacklevel=3)
         _warn_cleanroom_multinode(num_nodes)
         _require_numa_symbol()
-        payload, mode = _coerce_payload(payload, mode)
+        # The in-process executors run the UDF; the map-udf route does
+        # not (NUMA is not a launcher-served envelope), so a mode="udf"
+        # payload is resolved HERE rather than handed to workers that
+        # cannot execute it.
+        payload, mode = _coerce_payload_inprocess(payload, mode)
         order = kwargs.get("order", "none")
         if mode == "splice":
             _require_splice_symbol()
@@ -5126,7 +5154,11 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 "order in ('none', 'index')." % (_why,),
                 UserWarning, stacklevel=3)
 
-    payload, mode = _coerce_payload(payload, mode)
+    # Reaching here means the map-udf route did NOT serve this call:
+    # either it was not eligible, or the launcher declined the helper
+    # (in which case the payload is already coerced). Either way the
+    # in-process path owns the UDF now.
+    payload, mode = _coerce_payload_inprocess(payload, mode)
 
     base["order"] = order
     base["mode"] = mode
@@ -5361,8 +5393,10 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
     if num_nodes > 1:
         _warn_cleanroom_multinode(num_nodes)
         _require_numa_symbol()
-        payload, engine_mode = _coerce_payload(payload, kwargs.get(
-            "mode", "python"))
+        # NUMA is not a launcher-served envelope, so the map-udf route
+        # never serves this call: the UDF runs in-process.
+        payload, engine_mode = _coerce_payload_inprocess(
+            payload, kwargs.get("mode", "python"))
         if engine_mode == "splice":
             _require_splice_symbol()
         return _guarded_gen(
@@ -5406,6 +5440,18 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
             order=kwargs.get("order", "none"),
             c_drain=kwargs.get("c_drain", True),
             executor=executor))
+    # The cleanroom has had its chance. If it did not serve this call,
+    # the in-process executors own the UDF -- and the spec is resolved
+    # NOW, in the parent, because resolving it imports the user's module
+    # here (the parent that forks every worker). Above, the coercion
+    # deliberately did NOT resolve it: the launcher imports the module in
+    # the ISOLATED helper, and resolving it in the parent would defeat
+    # that. Both the materialized and the streaming branch need this, so
+    # it sits before the split.
+    if engine_mode == "udf":
+        payload, engine_mode = _coerce_payload_inprocess(
+            raw_payload, raw_mode)
+        kwargs = dict(kwargs, mode=engine_mode)
     if _detect_streaming(source, kwargs.get("streaming")):
         # W-CR3: cleanroom streaming, gated by the SAME predicate map()
         # uses. This used to be a second hand-written condition here, and
