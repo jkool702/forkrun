@@ -68,6 +68,17 @@ output at about half the rate. See TD-13 in
     python3 python/tests/_streaming_rss_probe.py --amp 20
     python3 python/tests/_streaming_rss_probe.py --amp 20 --collect
 
+The gate's assertion of this claim is **paired and alternating**: the two
+arms are measured several times with their order alternated between
+pairs, the strict relation (streaming retains less than collect-all) is
+required for *every* pair, and the 0.8× margin is asserted on the
+*median* ratio. A single pair cannot tell a property of the workload
+from a property of the moment — one cleanroom-on gate run measured
+0.82× on a single pair while the same workload measured 0.39–0.50×
+under every controlled condition tried (alternating order, CPU load,
+20 GB of memory pressure). The median is what makes the margin a
+property of the workload.
+
 Consequences worth knowing:
 
 - A consumer that never drains will stall workers

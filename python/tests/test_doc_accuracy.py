@@ -118,8 +118,10 @@ DOC_CLAIMS = [
             "test_streaming.TestStreaming."
             "test_slow_consumer_holds_less_than_collect_all",
         ],
-        "assertion_summary": "streaming parent growth is under 0.8x a "
-                             "collect-all control run, measured as "
+        "assertion_summary": "streaming parent growth is less than a "
+                             "collect-all control run in every one of "
+                             "3 alternating paired measurements, and the "
+                             "median ratio is under 0.8x; measured as "
                              "current RSS during consumption in an "
                              "isolated process",
     },

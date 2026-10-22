@@ -31,6 +31,11 @@ def _identity(batch):
     return bytes(batch.data)
 
 
+# The number of ALTERNATING paired measurements behind the streaming-memory margin.
+# Odd, so the median is a measured pair rather than an average of two.
+_PAIRS = 3
+
+
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 class TestStreaming(ChildLifecycleMixin, unittest.TestCase):
     def test_stream_yields_incrementally(self):
@@ -178,48 +183,86 @@ class TestStreaming(ChildLifecycleMixin, unittest.TestCase):
                           "stderr: %s" % (proc.stdout[-1000:],
                                           proc.stderr[-1000:]))
 
-        streaming = run([])
-        collecting = run(["--collect"])
+        # PAIRED, ALTERNATING measurements.
+        #
+        # A single pair made the gate depend on one sample: a
+        # cleanroom-on gate run once measured 0.82x (just over the
+        # 0.80 margin) while the same workload measured 0.39-0.50x
+        # in every controlled condition (alternating order, CPU load,
+        # memory pressure). A one-shot assertion cannot tell a
+        # property of the workload from a property of the moment.
+        #
+        # So: PAIRS, with the arm order ALTERNATED between pairs (so
+        # neither arm systematically benefits from going first), and
+        # the margin asserted on the MEDIAN ratio. The median is
+        # robust to a single anomalous pair, and a genuine regression
+        # to collect-all behaviour moves every pair to ~1.0x.
+        #
+        # The strict relation -- streaming retains LESS than
+        # collect-all -- is asserted for EVERY pair, not for the
+        # aggregate: that is the property, and it has no tolerance.
+        pairs = []
+        for i in range(_PAIRS):
+            if i % 2 == 0:
+                streaming = run([])
+                collecting = run(["--collect"])
+            else:
+                collecting = run(["--collect"])
+                streaming = run([])
+            pairs.append((streaming, collecting))
 
-        for got, label in ((streaming, "streaming"),
-                           (collecting, "collect-all")):
+        for streaming, collecting in pairs:
+            for got, label in ((streaming, "streaming"),
+                               (collecting, "collect-all")):
+                self.assertGreater(
+                    got["blobs"], 10,
+                    "%s: the workload produced too few batches to say "
+                    "anything" % label)
+                self.assertGreater(
+                    got["samples"], 10,
+                    "%s: RSS was sampled %d times; a single sample measures "
+                    "the wrong thing" % (label, got["samples"]))
+
+        ratios = []
+        for streaming, collecting in pairs:
+            s_growth = streaming["growth_kb"]
+            c_growth = collecting["growth_kb"]
+            self.assertIsNotNone(s_growth)
+            self.assertIsNotNone(c_growth)
             self.assertGreater(
-                got["blobs"], 10,
-                "%s: the workload produced too few batches to say anything"
-                % label)
-            self.assertGreater(
-                got["samples"], 10,
-                "%s: RSS was sampled %d times; a single sample measures "
-                "the wrong thing" % (label, got["samples"]))
+                s_growth, 0,
+                "streaming growth measured as %r; a zero baseline makes the "
+                "comparison meaningless" % (s_growth,))
 
-        s_growth = streaming["growth_kb"]
-        c_growth = collecting["growth_kb"]
-        self.assertIsNotNone(s_growth)
-        self.assertIsNotNone(c_growth)
-        self.assertGreater(
-            s_growth, 0,
-            "streaming growth measured as %r; a zero baseline makes the "
-            "comparison meaningless" % (s_growth,))
+            # The regression this exists to catch: a parent that ends
+            # up retaining everything, i.e. what naive collection
+            # costs. Asserted for EVERY pair -- no tolerance.
+            self.assertLess(
+                s_growth, c_growth,
+                "streaming parent retained %d KB but collect-all retained "
+                "%d KB -- streaming is not holding less than naive "
+                "collection (output=%d bytes).\nstreaming: %r\ncollect: %r"
+                % (s_growth, c_growth, streaming["out_bytes"],
+                   streaming, collecting))
+            ratios.append(s_growth / float(c_growth))
 
-        # The regression this exists to catch: a parent that ends up
-        # retaining everything, i.e. what naive collection costs.
+        # The margin, on the MEDIAN of the paired ratios. The measured
+        # separation is ~0.39-0.50x vs ~1.0-1.2x; 0.80 leaves room for
+        # ordinary variation and still fails a collect-all regression
+        # outright (that would sit at ~1.0x).
+        ordered = sorted(ratios)
+        median = ordered[len(ordered) // 2]
         self.assertLess(
-            s_growth, c_growth,
-            "streaming parent retained %d KB but collect-all retained "
-            "%d KB -- streaming is not holding less than naive "
-            "collection (output=%d bytes).\nstreaming: %r\ncollect: %r"
-            % (s_growth, c_growth, streaming["out_bytes"],
-               streaming, collecting))
-
-        # Margin, so ordinary run-to-run variation cannot flip it. The
-        # measured separation is 0.50x vs ~1.0-1.2x; 0.8 leaves room for
-        # both and still fails a collect-all regression outright.
-        self.assertLess(
-            s_growth, 0.8 * c_growth,
-            "streaming retained %d KB, which is %.0f%% of the collect-all "
-            "figure (%d KB); the measured separation is ~50%% vs ~100%%, "
-            "so this is a real change in behaviour, not noise"
-            % (s_growth, 100.0 * s_growth / c_growth, c_growth))
+            median, 0.80,
+            "the median streaming/collect-all ratio is %.3f over %d "
+            "alternating pairs (ratios: %s; raw growths: %s) -- the "
+            "measured separation is ~0.40-0.50x vs ~1.0-1.2x, so this is "
+            "a real change in behaviour, not noise"
+            % (median, len(ratios),
+               ", ".join("%.3f" % r for r in ratios),
+               "; ".join("s=%d KB c=%d KB" % (st["growth_kb"],
+                                             co["growth_kb"])
+                         for st, co in pairs)))
 
         assert_no_zombies(self)
 
