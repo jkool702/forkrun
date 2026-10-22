@@ -88,7 +88,13 @@ runtime, not build: `auditwheel repair` strips the `libpython` DT_NEEDED
 dependency, so the released helper route is unvalidated (WO-COMPAT-05 open).
 Smoke test is shallow (import + presence only); no real UDF workload exercised.
 
-Status: BUILT-BUT-NOT-FUNCTIONALLY-VALIDATED.
+Status: FUNCTIONALLY VALIDATED (3.14). All six per-minor wheels build and
+validate by tag in manylinux_2_28. auditwheel repair strips the libpython
+DT_NEEDED dependency, but the repaired helper still resolves libpython at
+runtime via the system linker (libpython is provided by the Python install).
+Acceptance test (tools/acceptance_installed_wheel.py) confirms UDF_OK on the
+repaired 3.14 wheel (bytes=8890). Remaining: run the same acceptance on
+3.10-3.13 and 3.15 (WO-COMPAT-05 open until all six pass).
 
 ## 5. CI wiring (WO-COMPAT-06)
 

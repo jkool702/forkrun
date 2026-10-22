@@ -14,6 +14,8 @@ on:
       - "tools/build_wheel.sh"
       - "tools/wheel_matrix.py"
       - "tools/check_glibc_versions.py"
+      - "tools/gen_python_matrix.py"
+      - "tools/wheel_matrix.py"
       - ".github/workflows/python-check.yml"
   pull_request:
     branches: [ "main" ]
@@ -29,6 +31,8 @@ on:
       - "tools/build_wheel.sh"
       - "tools/wheel_matrix.py"
       - "tools/check_glibc_versions.py"
+      - "tools/gen_python_matrix.py"
+      - "tools/wheel_matrix.py"
       - ".github/workflows/python-check.yml"
 
   workflow_dispatch:
@@ -105,7 +109,18 @@ jobs:
           name: forkrun-wheel
           path: wheelhouse/*.whl
 
+  generate-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v3
+      - id: gen
+        run: echo "matrix=$(python3 tools/gen_python_matrix.py)" >> "$GITHUB_OUTPUT"
+
   version-matrix:
+    needs: [build-wheel, generate-matrix]
     # W-REL5-F (F2): interpreter compatibility over the settled floor
     # (3.10; E2 verified, not re-litigated). Ubuntu cells (mainstream
     # coverage): 3.10 system on 22.04, 3.11 via deadsnakes, 3.12
@@ -123,26 +138,7 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - py: "3.10"
-            image: ubuntu:22.04
-            setup: system
-          - py: "3.11"
-            image: ubuntu:22.04
-            setup: deadsnakes
-          - py: "3.12"
-            image: ubuntu:24.04
-            setup: system
-          - py: "3.13"
-            image: ubuntu:24.04
-            setup: deadsnakes
-          - py: "3.14"
-            image: ubuntu:24.04
-            setup: deadsnakes
-          - py: "3.15"
-            image: ubuntu:24.04
-            setup: deadsnakes
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v3
       - name: Download wheel
