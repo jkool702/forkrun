@@ -228,6 +228,22 @@ So ownership of a resource is a decision with two halves:
   not a cleanup: the resources it had not reached are left behind.
   The interruption is DEFERRED across the section, not swallowed.
 
+**The fork is itself a critical section, and it is easy to forget
+that.** CPython's `os.fork()` calls `logging._prepareFork()` in the
+PARENT before the syscall and `logging._afterFork()` after it: the
+logging module's lock is held across the fork. An asynchronous
+exception in that window -- a SIGINT arriving mid-fork -- leaves that
+lock held FOREVER, and every later fork in the process then blocks
+inside `_prepareFork`. In a threaded caller that is a deadlock: the
+forking thread holds the engine session lock while it waits for a
+fork that will never return, so the whole suite wedges. Measured: a
+process stuck in `logging._prepareFork` while the main thread waited
+for the session lock the forking thread held.
+
+So the deferral covers the fork as well as the cleanup, through ONE
+primitive, and there is ONE fork helper. A site that calls `os.fork()`
+directly has reintroduced the defect this section exists to prevent.
+
 And the release has an ORDER relative to exceptions: a deferred
 interruption must not replace an exception that is already
 propagating. That exception is the reason for stopping; losing it

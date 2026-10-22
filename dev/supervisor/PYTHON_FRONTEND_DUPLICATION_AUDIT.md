@@ -739,7 +739,43 @@ whichever test ran next. Now each is reported once, with the child's
 pid, state and command line, and attributed to the test that created
 it.
 
-## 10. A constraint the de-duplication work ran into
+## 10. The hang, diagnosed with a live traceback
+
+The gate wedged in the suite's own release check. The stuck process
+was not waiting for a forkrun child -- it was stuck INSIDE
+`os.fork()`:
+
+    File "/usr/lib64/python3.14/logging/__init__.py", line 240 in _prepareFork
+    File ".../forkrun/run.py", line 7203 in _fork_materialized_scanner
+    ...
+    File ".../forkrun/run.py", line 3422 in __enter__     <- the main thread,
+                                                           waiting for the
+                                                           engine session lock
+                                                           the forking thread held
+
+CPython's `os.fork()` calls `logging._prepareFork()` in the PARENT
+before the syscall and `logging._afterFork()` after it: the logging
+module's lock is held across the fork so a child cannot inherit it
+half-configured. An **asynchronous exception** between the two -- a
+SIGINT arriving mid-fork -- leaves that lock HELD FOREVER, and every
+later fork in the process then blocks inside `_prepareFork`. In a
+threaded caller that is a **deadlock**: the forking thread holds the
+engine session lock while it waits for a fork that will never return.
+
+**This is not new.** The gate hung on earlier commits too -- in
+`test_stage3_spawn_launcher`, a different victim of the same
+deadlock. It is exactly the failure the review asked to be traced
+rather than assumed, and the trace is what found it.
+
+**Fixed by making the fork a critical section too**, through the SAME
+primitive that protects the cleanup: `forkrun._childreg.fork_child()`
+is now the one fork primitive in the package (22 sites), and it
+defers SIGINT across `os.fork()`. The interrupt is not swallowed, and
+the child restores the mask as it leaves the deferred region -- a
+child that inherited a blocked SIGINT would ignore the operator's
+interrupt for the rest of its life.
+
+## 11. A constraint the de-duplication work ran into
 
 **The Python front end may not name the bash front end.** The purity
 tests (`test_reactor.TestReactorPurity.test_no_banned_tokens` and
@@ -763,7 +799,7 @@ code says only what the code needs to say:
 > not; one body with the configuration injected is the equivalent
 > shape."*
 
-## 11. What is deliberately NOT changed
+## 12. What is deliberately NOT changed
 
 - **The bash frontend.** It is the frozen reference and its
   template-plus-fragments shape is the target, not the thing to fix.
