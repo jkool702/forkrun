@@ -116,3 +116,18 @@ No change required; recorded for completeness.
 - Confirmed manylinux_2_28 image has all six CPython minors 3.10–3.15 (static libpython).
 - Confirmed gh CLI authenticated with workflow scope; remote reachable.
 - Branched to NEW/REFACTOR4.5.
+- Rebuilt six Bash-loadable arches (x86-64 v2/v3/v4, aarch64, ppc64le, s390x) in
+  manylinux_2_28 (max GLIBC_2.28); regenerated frun.bash base64; verified
+  byte-equality of embedded blobs; end-to-end round-trip passed on glibc 2.28
+  (bash 4.4) and glibc 2.43 (bash 5.3).
+- Rebuilt Python substrate in manylinux_2_28 (max GLIBC_2.28).
+- Built shared CPython 3.10-3.15 in manylinux_2_28; all six per-minor wheels
+  built and validated by tag. auditwheel repair strips libpython (documented blocker).
+- Added tools/check_glibc_versions.py (per-arch floors). Both canary + glibc gates green.
+- Python suite: 1541 tests, 1 pre-existing dirty-tree failure (now resolved by commit),
+  2 skipped. wheel_matrix tests 18/18.
+- Bash basic suite: 96/96 locally on new blob.
+- Opened PR #585. CI: build-wheel, shim-check, idl-check, CodeQL pass.
+  bash-basic failed on a timing-sensitive min-heap test that passes locally (flake).
+  twin-check fails pre-existingly on baseline too (comprehensive.sh vs .txt differ).
+  sanitizer-asan-ubsan advisory, failed (pre-existing advisory).
