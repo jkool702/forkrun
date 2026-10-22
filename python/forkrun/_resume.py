@@ -209,6 +209,39 @@ def _set_engine_state(lib, state):
             "failed to set resume state (rc=%d)" % (rc,))
 
 
+_UNREAPED = object()
+
+
+def _waitpid_until(pid, timeout):
+    """Wait for a child to exit, up to `timeout` seconds.
+
+    Returns its wait status, or None when the child was already
+    reaped elsewhere, or _UNREAPED when it did not exit in time.
+    Never raises. ONE implementation of the bounded wait, because the
+    rule it encodes ("give up at the deadline and say so") is the
+    same rule in both places it is used.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            wpid, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return None       # already reaped elsewhere
+        except OSError:
+            return _UNREAPED
+        if wpid == pid:
+            return status
+        if time.monotonic() >= deadline:
+            return _UNREAPED
+        # W-REL5-B4/coord-fix: 2ms quantum (was 20ms). The old 20ms
+        # overshot every still-running helper join by up to a full
+        # quantum — on 15ms-scale completion paths (scanner + drain
+        # joins) that added up to +40ms systematic, tripping
+        # test_c_drain_not_slower deterministically (0.05→0.14s).
+        # Deadline + SIGKILL + named-alarm semantics unchanged.
+        time.sleep(0.002)
+
+
 def _waitpid_bounded(pid, timeout):
     """Blocking reap with a deadline; SIGKILL on expiry, then reap.
 
@@ -223,44 +256,18 @@ def _waitpid_bounded(pid, timeout):
     """
     if pid is None or pid <= 0:
         return False, None
-    deadline = time.monotonic() + max(0.0, timeout)
-    while True:
-        try:
-            wpid, status = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            return True, None
-        except OSError:
-            return False, None
-        if wpid == pid:
-            return True, status
-        if time.monotonic() >= deadline:
-            break
-        # W-REL5-B4/coord-fix: 2ms quantum (was 20ms). The old 20ms
-        # overshot every still-running helper join by up to a full
-        # quantum — on 15ms-scale completion paths (scanner + drain
-        # joins) that added up to +40ms systematic, tripping
-        # test_c_drain_not_slower deterministically (0.05→0.14s).
-        # Deadline + SIGKILL + named-alarm semantics unchanged.
-        time.sleep(0.002)
+    status = _waitpid_until(pid, timeout)
+    if status is not _UNREAPED:
+        return True, status
     try:
         os.kill(pid, 9)
     except OSError:
         pass
     # Bounded after SIGKILL as well: SIGKILL is not a guarantee.
-    deadline = time.monotonic() + max(0.0, timeout)
-    while True:
-        try:
-            wpid, status = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            return True, None
-        except OSError:
-            return False, None
-        if wpid == pid:
-            return True, status
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(0.002)
-    return False, None
+    status = _waitpid_until(pid, timeout)
+    if status is _UNREAPED:
+        return False, None
+    return True, status
 
 
 def _read_fd_all(fd):
