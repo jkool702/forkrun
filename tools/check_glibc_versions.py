@@ -5,10 +5,14 @@ Independent of tools/check_canary_versions.py (which checks Bash symbol/export
 floors). This checks the glibc floor: the highest GLIBC_* version required
 by an artifact's undefined symbols must not exceed the declared floor.
 
+FAIL-CLOSED: every expected artifact must be present; unknown architectures
+and artifacts with no versioned GLIBC undefined symbols are failures unless an
+explicit, reviewed exception is recorded in PER_ARCH_EXCEPTIONS.
+
 Usage:
-    python3 tools/check_glibc_versions.py [--floor 2.38] [artifact ...]
-    (default artifacts: ring_loadables/forkrun-libs/*.so plus the local
-    python substrate .so when present)
+    python3 tools/check_glibc_versions.py [--floor 2.28] [artifact ...]
+    (default: check the expected shipped artifact set, which is a hard-coded
+    manifest; missing entries fail)
 
 Exit 0 on success, 1 on any failure.
 """
@@ -22,6 +26,23 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Hard-coded manifest of expected shipped artifacts. A missing entry is a
+# failure, not a skip. (Architecture -> declared floor.)
+EXPECTED_ARTIFACTS = {
+    "ring_loadables/forkrun-libs/forkrun_ring.x86-64-v2.so": (2, 28),
+    "ring_loadables/forkrun-libs/forkrun_ring.x86-64-v3.so": (2, 28),
+    "ring_loadables/forkrun-libs/forkrun_ring.x86-64-v4.so": (2, 28),
+    "ring_loadables/forkrun-libs/forkrun_ring.aarch64.so": (2, 28),
+    "ring_loadables/forkrun-libs/forkrun_ring.ppc64le.so": (2, 28),
+    "ring_loadables/forkrun-libs/forkrun_ring.s390x.so": (2, 28),
+    "ring_loadables/forkrun-libs/forkrun_ring.riscv64.so": (2, 38),
+}
+
+# Explicit, reviewed exceptions: artifact -> (reason). Artifacts listed here
+# may have no versioned GLIBC undefined symbols without failing. Currently
+# empty: every shipped artifact must carry GLIBC versioned symbols.
+EXPLICIT_NO_SYMBOL_EXCEPTIONS = set()
+
 
 def _parse_floor(s):
     m = re.match(r"(\d+)\.(\d+)", s)
@@ -31,7 +52,6 @@ def _parse_floor(s):
 
 
 def _undefined_glibc_versions(artifact):
-    """Return (set of (major, minor) GLIBC versions, has_gnu2_tls)."""
     out = subprocess.run(
         ["objdump", "-T", artifact], capture_output=True, text=True)
     if out.returncode != 0:
@@ -53,7 +73,7 @@ def _arch_of(artifact):
     txt = out.stdout
     if "aarch64" in txt:
         return "aarch64"
-    if "80386" in txt or "x86-64" in txt:
+    if "x86-64" in txt:
         return "x86-64"
     if "PowerPC" in txt or "ppc64" in txt:
         return "ppc64le"
@@ -61,53 +81,74 @@ def _arch_of(artifact):
         return "s390x"
     if "RISC-V" in txt:
         return "riscv64"
-    return "unknown"
+    return None  # unknown -> fail
 
 
 def default_artifacts():
+    # Fail-closed: every expected artifact must be present.
     arts = []
-    libs = os.path.join(REPO_ROOT, "ring_loadables", "forkrun-libs")
-    if os.path.isdir(libs):
-        for fn in sorted(os.listdir(libs)):
-            if fn.endswith(".so"):
-                arts.append(os.path.join(libs, fn))
-    local = os.path.join(REPO_ROOT, "python", "forkrun", "libforkrun_python.so")
-    if os.path.exists(local):
-        arts.append(local)
+    for rel in EXPECTED_ARTIFACTS:
+        p = os.path.join(REPO_ROOT, rel)
+        if not os.path.exists(p):
+            arts.append(("MISSING", rel, p))
+        else:
+            arts.append(("OK", rel, p))
     return arts
 
 
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--floor", type=_parse_floor, default=None,
-                    help="declared glibc floor, e.g. 2.28 (default: per-arch "
-                         "map: riscv64=2.38, everything else=2.28)")
+                    help="override floor for ALL artifacts (default: per-arch manifest)")
     ap.add_argument("artifacts", nargs="*", help="ELF artifacts to check")
     args = ap.parse_args(argv)
 
-    arts = args.artifacts or default_artifacts()
-    if not arts:
-        print("GLIBC-VERSIONS FAIL: no artifacts to check", file=sys.stderr)
-        return 1
-
-    PER_ARCH_FLOOR = {"riscv64": (2, 38)}
-    DEFAULT_FLOOR = (2, 28)
     failures = []
-    for art in arts:
+
+    # Build the work list.
+    if args.artifacts:
+        work = [(None, a) for a in args.artifacts]  # (expected_floor or None, path)
+    else:
+        # Manifest mode: every expected artifact must exist.
+        work = []
+        for rel, floor in EXPECTED_ARTIFACTS.items():
+            p = os.path.join(REPO_ROOT, rel)
+            if not os.path.exists(p):
+                failures.append("MISSING expected artifact: %s" % rel)
+                print("FAIL %s: MISSING" % rel)
+            else:
+                work.append((floor, p))
+
+    for floor, art in work:
+        if floor is None:
+            floor = args.floor if args.floor is not None else None
         if not os.path.exists(art):
             failures.append("missing artifact: %s" % art)
             print("FAIL %s: missing" % art)
             continue
+        arch = _arch_of(art)
+        if arch is None:
+            failures.append("%s: unrecognized architecture" % os.path.basename(art))
+            print("FAIL %s: unrecognized architecture" % os.path.basename(art))
+            continue
+        if floor is None:
+            # No manifest entry and no --floor: unknown arch floor policy.
+            failures.append("%s: no declared floor (pass --floor or use manifest)"
+                            % os.path.basename(art))
+            print("FAIL %s: no declared floor" % os.path.basename(art))
+            continue
         vers, gnu2 = _undefined_glibc_versions(art)
         if not vers:
-            print("WARN %s: no GLIBC versioned undefined symbols" % art)
+            if os.path.relpath(art, REPO_ROOT) in EXPLICIT_NO_SYMBOL_EXCEPTIONS:
+                print("NOTE %s: no GLIBC versioned symbols (explicit exception)"
+                      % os.path.basename(art))
+                continue
+            failures.append("%s: no versioned GLIBC undefined symbols (not a "
+                            "valid ELF gate result)" % os.path.basename(art))
+            print("FAIL %s: no versioned GLIBC undefined symbols"
+                  % os.path.basename(art))
             continue
         need = max(vers)
-        arch = _arch_of(art)
-        if args.floor is not None:
-            floor = args.floor
-        else:
-            floor = PER_ARCH_FLOOR.get(arch, DEFAULT_FLOOR)
         status = "OK"
         if gnu2:
             status = "FAIL (GLIBC_ABI_GNU2_TLS present)"
@@ -128,10 +169,10 @@ def main(argv):
         for f in failures:
             print("  - %s" % f, file=sys.stderr)
         return 1
-    print("GLIBC-VERSIONS green: per-arch floors (riscv64=2.38, others=2.28) "
-          "over %d artifact(s)" % len(arts))
+    print("GLIBC-VERSIONS green: %d artifact(s) checked" % len(work))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
+PY

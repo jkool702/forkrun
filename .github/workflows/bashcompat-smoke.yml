@@ -51,6 +51,14 @@ jobs:
       - name: Stub annotations vs shipped undefined symbols
         run: python3 tools/check_canary_versions.py
 
+  glibc-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
+      - name: Shipped ELF artifacts vs glibc floor
+        run: python3 tools/check_glibc_versions.py
+
   # W-REL5-D D-LEGS: compat legs that test USE, not LOAD. Three waves
   # of green "load" gates passed while the product segfaulted on <=5.1
   # (D-SEGFIX: engine walked bash ARRAY structs, head 24->16 in
@@ -115,7 +123,8 @@ jobs:
               set -euo pipefail
               case "${{ matrix.kind }}" in
                 source-4.4|source-5.0|source-5.1)
-                  ver="${{ matrix.kind#source- }}"
+                  kind="${{ matrix.kind }}"
+                  ver="${kind#source-}"
                   (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gcc make gzip coreutils curl)) || true
                   curl -fsSL "https://ftp.gnu.org/gnu/bash/bash-${ver}.tar.gz" | tar xz
                   (cd "bash-${ver}" && ./configure -q && (make -j2 || make -j2 CFLAGS="-g -O2 -std=gnu17 -Wno-error"))

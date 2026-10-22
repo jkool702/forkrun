@@ -24,11 +24,8 @@ jobs:
       matrix:
         include:
           # x86_64: The Triple Build (v2, v3, v4)
-          # W-BASHCOMPAT-BC6 provenance pin (informational — changing
-          # images risks a blob cycle, so the pin is documented, not
-          # moved): fedora:latest resolved 2026-09 to bash 5.3-era
-          # headers (see BASHCOMPAT_DIAGNOSIS.md §0.4). The build step
-          # below records the resolved versions into every build log.
+          - arch: x86_64
+            platform: linux/amd64
             docker_image: quay.io/pypa/manylinux_2_28_x86_64
             # We handle flags manually in the script for this one
           
