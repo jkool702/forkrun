@@ -289,7 +289,15 @@ removing the source-module guard makes the first fail.
 
 ## H. Priority 7 — final release-readiness sweep
 
-**Status: IN PROGRESS (the final gate runs against the final HEAD)**
+**Status: DONE** — the final gate is GREEN in BOTH configurations, on
+the final HEAD:
+
+| configuration | tests | result |
+|---|---|---|
+| cleanroom off | 1540 | **OK** (2 skipped) |
+| cleanroom on | 1547 | **OK** (1 skipped) |
+
+`git diff --check` clean; the tree clean; nothing running afterwards.
 
 
 - [ ] Focused tests for both implementation tasks
@@ -302,6 +310,30 @@ removing the source-module guard makes the first fail.
 - [ ] No version bump, tag or publish without explicit authorisation
 
 ---
+
+## I0. Residual concerns (final)
+
+1. **The per-minor release wheels for 3.10-3.13 and 3.15 are BLOCKED
+   on a missing build input** — a CPython with a shared libpython
+   inside the manylinux image (§C specifies the step). The
+   orchestration is done and verified; the artifacts are not.
+2. **The host-built wheel is not a valid manylinux_2_39 artifact**:
+   auditwheel refused to repair it ("too-recent versioned symbols"),
+   i.e. the binary needs a newer glibc than the tag claims. That is
+   why the release path must be the container — and why the remaining
+   work above has to build the interpreter there too, rather than
+   reusing the host's.
+3. **The streaming producer-run-ahead explanation remains a
+   hypothesis.** The measurements are solid (0.39-0.50 across
+   alternating order, CPU load and memory pressure); the mechanism for
+   the one 0.82 reading is not established. The documentation keeps
+   the claim and the theory separate.
+4. **The addendum's "a consult in an unrelated sibling branch cannot
+   justify an abort in another branch" case is enforced for the
+   RAISE; the abort half rests on the same-block rule.**
+5. The `setup.py` classifiers now say 3.10-3.15 (they stopped at
+   3.13) — they describe the SOURCE install's support target; the
+   per-minor WHEELS for five of those minors do not exist yet (1).
 
 ## I. Running log
 
@@ -323,3 +355,4 @@ SHAs, which is where the discrepancy came from.
 | — | Priority 3/4: the fork census enforced by a test over the AST; 6 census-boundary tests | ✓ |
 | — | the dead copies of the census helpers I introduced were removed (an SSoT violation in my own change) | ✓ |
 | — | the two suite-order failures were ROOT-CAUSED: a FROZEN module object was being replaced by the freshness rule | ✓ |
+| — | FINAL GATE on the final HEAD: 1540 OK cleanroom-off, 1547 OK cleanroom-on | ✓ |
