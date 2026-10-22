@@ -56,6 +56,28 @@ def _up(batch):
     return bytes(batch.data).upper()
 
 
+class _DefaultSigint:
+    """Pin SIGINT's disposition to the default handler for a block.
+
+    A background launcher (nohup/setsid, a CI supervisor without job
+    control) starts its children with SIGINT IGNORED, and Python
+    inherits that disposition instead of installing
+    ``default_int_handler``. A delivered SIGINT would then do
+    nothing at all -- so the test would fail (or, worse, pass for the
+    wrong reason) for a reason that has nothing to do with the code
+    under test. Pinned explicitly, and restored afterwards.
+    """
+
+    def __enter__(self):
+        self._old = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        return self
+
+    def __exit__(self, *exc):
+        signal.signal(signal.SIGINT, self._old)
+        return False
+
+
 class _Patch:
     """Restore a module attribute on exit."""
 
@@ -221,7 +243,7 @@ class TestTeardownInterruptSafety(ChildLifecycleMixin, unittest.TestCase):
         sequence completes.
         """
         state, patches = self._fire_sigint_during_the_teardown()
-        with patches[0], patches[1], patches[2]:
+        with _DefaultSigint(), patches[0], patches[1], patches[2]:
             with self.assertRaises(KeyboardInterrupt):
                 forkrun.map(_up, self.path, workers=2, orchestrator=True,
                             order="index", nodes=1)
@@ -247,7 +269,7 @@ class TestTeardownInterruptSafety(ChildLifecycleMixin, unittest.TestCase):
             raise RuntimeError("synthetic worker failure")
 
         state, patches = self._fire_sigint_during_the_teardown()
-        with patches[0], patches[1], patches[2]:
+        with _DefaultSigint(), patches[0], patches[1], patches[2]:
             with self.assertRaises(RuntimeError) as cm:
                 forkrun.map(_boom, self.path, workers=2, orchestrator=True,
                             order="index", on_error="fail-fast", nodes=1)
@@ -292,7 +314,7 @@ class TestTeardownInterruptSafety(ChildLifecycleMixin, unittest.TestCase):
             return bytes(batch.data).upper()
 
         state, patches = self._fire_sigint_during_the_teardown()
-        with patches[0], patches[1], patches[2]:
+        with _DefaultSigint(), patches[0], patches[1], patches[2]:
             with self.assertRaises(RuntimeError) as cm:
                 forkrun.map(_aborting, self.path, workers=2,
                             orchestrator=True, order="index",
