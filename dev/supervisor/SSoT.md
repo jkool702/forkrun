@@ -404,6 +404,15 @@ into the helper watchers.
 places: every site that turns a helper child's non-zero exit into a
 fatal error. The fix was wired into **2** of them.
 
+*(The 28 is the inventory this audit found, on the tree state it
+found it. It is not the same set as the sites the CURRENT checker
+governs: that census is now STRUCTURAL -- a helper-death site is
+recognised by its choreography, not by its message -- and it measures
+27 on the 2026-10-22 tree. The four numbers in play -- 17, 28, 24,
+27 -- count different sets at different times, and
+`dev/supervisor/PYTHON_FRONTEND_DUPLICATION_AUDIT.md` §9a says which
+is which. The historical claims are left as they were.)*
+
 The other 26 were not overlooked by a careless author. They are the
 same rule written out **inline**, in the body of each executor, and a
 function-level duplicate scan found almost none of them -- inline

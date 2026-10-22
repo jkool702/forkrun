@@ -753,6 +753,40 @@ whichever test ran next. Now each is reported once, with the child's
 pid, state and command line, and attributed to the test that created
 it.
 
+## 9a. The helper-death site counts, reconciled
+
+Four numbers appear in this repository's history, and they count
+DIFFERENT SETS. They are not interchangeable, and the historical
+claims are not rewritten to make them match.
+
+| number | where | what it counted |
+|---|---|---|
+| **17** | `_helper_death_excused()`'s docstring (`run.py`) | the helper-death sites **at the time of D-PORT2/D6** -- the change that introduced the abort-aware classification. The docstring says "2 of the 17 places": the fix reached two, the other 15 had the rule written out inline or omitted it. |
+| **28** | `dev/supervisor/SSoT.md` §11 | the inventory the de-duplication audit found **later**, on a different tree state: "every site that turns a helper child's non-zero exit into a fatal error", a broader definition that also covers the C drain's own sites. The policy's example says the change had to be made in 28 places and reached 2. |
+| **24** | the OLD census in `test_helper_death_excuse.py` | the sites the MESSAGE-TEXT match found: `scanner failed\|helper failed\|orderer failed\|reaper failed\|index/scan failed\|scan failed\|drain failed`. |
+| **27** | the CURRENT census | the sites found **structurally**: a `RuntimeError` preceded by an engine abort in its own block, or a raise inside the body of an `if` whose test consults the shared decision. **Measured on this tree, 2026-10-22.** |
+
+**Why the old census was a liability.** It matched the MESSAGE, so a
+site could leave the check by being reworded -- and the check would
+still pass. The census is structural now: a site is found by its
+choreography, and the message family is only a third net. The
+structural census finds **27** sites where the message census found
+**24**; the three extra ones are real helper-death sites whose
+messages simply do not match the family regex.
+
+**The interrupt path is deliberately NOT in the census.** It has the
+same abort-then-raise shape, but it raises `ForkrunInterrupted` --
+the operator's Ctrl-C, not a helper death. Classifying it as one would
+be the overbroad classification the structural signature exists to
+avoid.
+
+**The 28 and the 27 are not the same set, and do not have to be.** The
+28 is a historical inventory on a different tree state, with a
+broader definition; the 27 is a measurement of the sites the CURRENT
+checker governs. The de-duplication work folded sites in between, and
+the census definition changed from "the message says so" to "the
+structure says so".
+
 ## 10. The hang, diagnosed with a live traceback
 
 The gate wedged in the suite's own release check. The stuck process

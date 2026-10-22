@@ -74,6 +74,128 @@ def _parents(tree):
     return out
 
 
+def _body_exits(body):
+    """Does this BLOCK of statements leave the enclosing block?
+
+    A block leaves as soon as ONE of its statements leaves: the rest
+    are unreachable. An empty block does not leave.
+    """
+    if not body:
+        return False
+    return any(_exits_unconditionally(st) for st in body)
+
+
+def _message_literal(raise_node):
+    """The string literal of a raise's message, or None.
+
+    Handles both a plain literal and the `"... %s" % (...)` form, which
+    is how every helper-death message is written.
+    """
+    exc = getattr(raise_node, "exc", None)
+    if not isinstance(exc, ast.Call) or not exc.args:
+        return None
+    a0 = exc.args[0]
+    if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
+        return a0.value
+    if isinstance(a0, ast.BinOp) and isinstance(a0.left, ast.Constant) \
+            and isinstance(a0.left.value, str):
+        return a0.left.value
+    return None
+
+
+def _helper_death_sites(tree, parents, lines):
+    """The helper-death raise sites, found STRUCTURALLY.
+
+    A helper death is reported by one of two choreographies, and BOTH
+    are structural -- neither depends on the error MESSAGE:
+
+      * the abort-then-raise shape: a RuntimeError preceded by an
+        engine abort in its own block (`lib.fr_py_abort()` then
+        `raise RuntimeError(...)`);
+      * the decision-then-raise shape: a raise inside the BODY of an
+        `if` whose test consults the shared decision.
+
+    The old census matched the message text, which made it fragile in
+    a way that mattered: rewording a message could make a site
+    DISAPPEAR from the check, and the check would still pass. The
+    message family is kept as a THIRD net, for a site that reports a
+    helper death with neither choreography -- but a site is found by
+    its structure first.
+
+    Deliberately NOT included: the interrupt path's
+    `raise ForkrunInterrupted(...)` after an abort. That is the
+    operator's Ctrl-C, not a helper death, and classifying it as one
+    would be the overbroad classification this signature exists to
+    avoid.
+    """
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise):
+            continue
+        seg = "\n".join(lines[node.lineno - 1:node.end_lineno])
+        if (HELPER_DEATH.search(seg)
+                or _aborts_before(node, parents)
+                or _under_a_consult(node, parents)):
+            out.append(node)
+    return out
+
+
+def _aborts_before(node, parents):
+    """Is this a helper-death RUNTIMEERROR preceded by an ENGINE ABORT
+    in its own block?"""
+    if not _is_runtime_error(node):
+        return False
+    par = parents.get(id(node))
+    body = getattr(par, "body", None)
+    if not isinstance(body, list):
+        return False
+    for i, st in enumerate(body):
+        if st is node:
+            return any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "fr_py_abort"
+                for j in range(i)
+                for n in ast.walk(body[j]))
+    return False
+
+
+def _under_a_consult(node, parents):
+    """Is this raise inside the BODY of an `if` whose test consults the
+    shared decision?
+
+    EITHER polarity counts -- the point of the signature is to FIND
+    the site, not to judge it, and a polarity flip (the mutation the
+    checker must reject) leaves the consult in place.
+
+    A raise in the ELSE branch does not count: that branch runs when
+    the condition is false.
+    """
+    cur = node
+    while cur is not None:
+        par = parents.get(id(cur))
+        if par is None:
+            return False
+        if isinstance(par, ast.If):
+            if cur in getattr(par, "orelse", []):
+                return False
+            if any(isinstance(n, ast.Call)
+                   and getattr(n.func, "id", None) == "_helper_death_excused"
+                   for n in ast.walk(par.test)):
+                return True
+        cur = par
+    return False
+
+
+def _is_runtime_error(node):
+    """Does this raise a plain RuntimeError?"""
+    exc = getattr(node, "exc", None)
+    if isinstance(exc, ast.Call) and \
+            getattr(exc.func, "id", None) == "RuntimeError":
+        return True
+    return False
+
+
 def _consult_call(node):
     """A consult DIRECTLY in this statement.
 
@@ -95,20 +217,78 @@ def _consult_call(node):
     return None
 
 
-def _exits(stmt):
-    """Does this statement leave the enclosing block?"""
-    for n in ast.walk(stmt):
-        if isinstance(n, (ast.Return, ast.Continue, ast.Break, ast.Raise)):
-            return True
+def _negated_consult(node):
+    """The consult call, if `node` is `not <consult>`.
+
+    POLARITY MATTERS. `_helper_death_excused(...)` is TRUE when the
+    death is EXCUSED. So a fatal raise may only execute when the
+    decision said NOT excused -- which means the raise belongs in the
+    NEGATED branch. A raise in the POSITIVE branch executes exactly
+    when the death was excused: that is the shape that swallows a
+    genuine helper failure, and it must be rejected.
+    """
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        inner = node.operand
+        if isinstance(inner, ast.Call) and \
+                getattr(inner.func, "id", None) == "_helper_death_excused":
+            return inner
+    return None
+
+
+def _positive_consult(node):
+    """The consult call, if `node` IS the consult (not negated)."""
+    if isinstance(node, ast.Call) and \
+            getattr(node.func, "id", None) == "_helper_death_excused":
+        return node
+    return None
+
+
+def _exits_unconditionally(stmt):
+    """Does this statement leave the enclosing block on EVERY path?
+
+    The old `_exits` asked "is there a return/raise/break/continue
+    ANYWHERE below this statement". That is not the question. An exit
+    nested inside a conditional does not establish that every path
+    through the outer statement exits:
+
+        if _helper_death_excused(...):
+            if some_other_condition:
+                return
+        raise RuntimeError("helper failed")
+
+    The raise is still reachable when the decision said EXCUSED, so
+    the branch does not establish the fall-through. This asks the
+    question soundly, and answers False for anything it cannot
+    establish: loops, try/finally, with, a bare expression, and an
+    `if` with no `else` (which may fall through).
+    """
+    if isinstance(stmt, list):
+        # A BLOCK of statements leaves when ONE of them leaves.
+        return _body_exits(stmt)
+    if isinstance(stmt, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+        return True
+    if isinstance(stmt, ast.If):
+        # BOTH branches must exit. An `if` with no else may fall
+        # through, and an `except` handler that returns is not an exit
+        # of the enclosing block.
+        if stmt.orelse:
+            return (_exits_unconditionally(stmt.body)
+                    and _exits_unconditionally(stmt.orelse))
+        return False
     return False
 
 
 def _consult_names_upwards(node, parents):
-    """Names assigned from the consult, in the enclosing block chain.
+    """Names assigned from the consult that DOMINATE `node`.
 
     The assignment is often nested several blocks deep relative to the
     function, so the search walks UP from the use rather than looking
     only at the function's top-level statements.
+
+    DOMINANCE, not proximity: only the statements BEFORE the current
+    node in a block count. An assignment AFTER the use has not run
+    yet, and an assignment in a SIBLING branch may never have run --
+    neither makes the name hold the decision's value at the use.
     """
     names = set()
     cur = node
@@ -119,6 +299,8 @@ def _consult_names_upwards(node, parents):
         body = getattr(par, "body", None)
         if isinstance(body, list):
             for st in body:
+                if st is cur:
+                    break
                 if isinstance(st, ast.Assign) and \
                         _consult_call(st) is not None:
                     for t in st.targets:
@@ -145,34 +327,63 @@ def governed_by_the_decision(tree, raise_node, parents=None):
     that is satisfiable by a helper call in an unrelated branch, which
     is precisely the shape this test exists to catch.
 
-    A raise is governed when one of these holds:
+    THE INVARIANT, IN REACHABILITY TERMS
+    ------------------------------------
+    The raise may not execute on any control-flow path on which
+    `_helper_death_excused(...)` is TRUE. So the question is not
+    "does the enclosing block mention the consult" but "does the
+    decision's TRUE outcome PROVABLY prevent this raise from
+    executing".
 
-      * it sits inside an `if` whose TEST is the consult (the
-        `if not _helper_death_excused(...): raise` shape);
-      * it sits inside an `if not <name>:` where <name> was assigned
-        from the consult in an enclosing block (the
-        `excused = ...; if not excused: raise` shape);
-      * it is in a block that is only REACHED when a preceding
-        `if _helper_death_excused(...): <exit>` did not exit -- so
-        falling through means the decision said "not excused".
+    SUPPORTED SHAPES -- a small, auditable set. Anything else is
+    UNGOVERNED, and the check fails closed:
 
-    Anything else is UNGOVERNED, and the check fails closed.
+      1. The raise is inside the BODY of `if not <consult>:`. The
+         body runs only when the decision said NOT excused.
+      2. The raise is inside the BODY of `if not <name>:`, where
+         <name> was assigned from the consult by a statement that
+         DOMINATES the `if`.
+      3. The raise FOLLOWS `if <consult>: <unconditional exit>` in
+         the same block. The exit leaves on every path, so the raise
+         is reached only when the decision said NOT excused.
+
+    Two shapes are therefore REJECTED that a name-matching check
+    would accept:
+
+      * the raise in the POSITIVE branch (`if _helper_death_excused(
+        ...): raise`) -- it executes exactly when the death was
+        excused;
+      * the raise after `if _helper_death_excused(...): <exit>` where
+        the exit is CONDITIONAL -- the fall-through may still reach
+        the raise.
     """
     if parents is None:
         parents = _parents(tree)
     node = raise_node
+    in_orelse = False
     while node is not None:
         par = parents.get(id(node))
         if par is None:
             return False
 
-        if isinstance(par, ast.If):
-            test = ast.unparse(par.test)
-            if "_helper_death_excused" in test:
+        # Is the child we came from in the parent's ELSE branch? That
+        # has to be known BEFORE the shapes are considered: the else
+        # branch of a negated consult runs exactly when the death WAS
+        # excused.
+        if isinstance(par, ast.If) and node in getattr(par, "orelse", []):
+            in_orelse = True
+
+        if isinstance(par, ast.If) and not in_orelse:
+            # SHAPE 1: the NEGATED branch of the consult.
+            if _negated_consult(par.test) is not None:
                 return True
-            if test.startswith("not "):
-                name = test[4:].strip()
-                if name in _consult_names_upwards(par, parents):
+            # SHAPE 2: `if not <name>:` with <name> assigned from the
+            # consult by a dominating statement.
+            test = par.test
+            if isinstance(test, ast.UnaryOp) and \
+                    isinstance(test.op, ast.Not) and \
+                    isinstance(test.operand, ast.Name):
+                if test.operand.id in _consult_names_upwards(par, parents):
                     return True
 
         body = getattr(par, "body", None)
@@ -180,10 +391,13 @@ def governed_by_the_decision(tree, raise_node, parents=None):
             for st in body:
                 if st is node:
                     break
+                # SHAPE 3: a preceding `if <consult>: <exit>` in the
+                # same block, where the exit is UNCONDITIONAL.
                 if isinstance(st, ast.If) and \
-                        _consult_call(st) is not None:
-                    if st.body and all(_exits(b) for b in st.body):
-                        return True
+                        _positive_consult(st.test) is not None and \
+                        _body_exits(st.body):
+                    return True
+
         node = par
     return False
 
@@ -308,6 +522,377 @@ def f(lib, st):
             "would miss" % (target.name,))
 
 
+class TestTheCheckerRejectsTheKnownMutations(unittest.TestCase):
+    """The checker must FAIL on the shapes that would reintroduce the
+    defect. A checker that has never been shown to fail is not a
+    guard.
+
+    Every mutation below is one the review named. Each is applied to a
+    REAL site in the REAL tree (in memory -- the file on disk is never
+    touched) or to a synthetic snippet, and the checker must then
+    report the site as UNGOVERNED.
+
+    A mutation test that passes because the snippet failed to PARSE,
+    or because the target site was not FOUND, proves nothing. So
+    every case below asserts that the site was found and that the
+    checker reached a verdict on it.
+    """
+
+    def _tree(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "forkrun",
+                            "run.py")
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        return ast.parse(src), src
+
+    def _negated_consult_ifs(self, tree):
+        """The `if not _helper_death_excused(...)` statements in the tree."""
+        out = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and \
+                    _negated_consult(node.test) is not None:
+                out.append(node)
+        return out
+
+    def _raises_in(self, node):
+        return [n for n in ast.walk(node) if isinstance(n, ast.Raise)]
+
+    def _verdict(self, src):
+        """(governed, found) for the raises in a snippet."""
+        tree = ast.parse(src)
+        parents = _parents(tree)
+        raises = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
+        if not raises:
+            return None, 0
+        verdicts = [governed_by_the_decision(tree, r, parents)
+                    for r in raises]
+        return verdicts, len(raises)
+
+    # -- 1. the polarity flipped ---------------------------------------
+
+    def test_the_polarity_flip_is_rejected(self):
+        """`if not consult:` becomes `if consult:` -- the raise then
+        executes exactly when the death was EXCUSED."""
+        tree, src = self._tree()
+        mutated = src.replace("if not _helper_death_excused(",
+                               "if _helper_death_excused(", 1)
+        self.assertNotEqual(src, mutated, "the mutation did not apply")
+        verdicts, n = self._verdict(mutated)
+        self.assertGreater(n, 0, "the mutated tree has no raise")
+        # The flipped site is the one that must now be UNGOVERNED. Find
+        # it: it is the first negated-consult-shaped `if` in the
+        # ORIGINAL tree, whose raise the mutation just un-governed.
+        # The mutated statement is the FIRST textual occurrence, so
+        # find its line that way -- ast.walk is not source-ordered,
+        # and the test must exercise the site it actually mutated.
+        idx = src.index("if not _helper_death_excused(")
+        first_line = src[:idx].count("\n") + 1
+        mtree = ast.parse(mutated)
+        mparents = _parents(mtree)
+        mif = None
+        for node in ast.walk(mtree):
+            if isinstance(node, ast.If) and node.lineno == first_line:
+                mif = node
+                break
+        self.assertIsNotNone(mif,
+                             "the mutated statement was not found -- the "
+                             "test would pass without reaching the checker")
+        target = None
+        for node in ast.walk(mif):
+            if isinstance(node, ast.Raise):
+                target = node
+                break
+        self.assertIsNotNone(target,
+                             "the mutated site has no raise -- the test "
+                             "would pass without reaching the checker")
+        self.assertIsNotNone(target,
+                             "the mutated site was not found -- the test "
+                             "would pass without reaching the checker")
+        self.assertFalse(
+            governed_by_the_decision(mtree, target, mparents),
+            "the checker accepted a raise whose polarity was flipped: it "
+            "now executes exactly when the death was excused")
+
+    # -- 2. the raise moved to the excused branch ----------------------
+
+    def test_the_raise_moved_to_the_excused_branch_is_rejected(self):
+        """`if not consult: <body>` becomes `if not consult: <body> else:
+        <raise>` -- the raise now runs when the death was excused."""
+        tree, _ = self._tree()
+        checked = 0
+        for stmt in self._negated_consult_ifs(tree):
+            raises = self._raises_in(stmt)
+            if not raises:
+                continue
+            # Move the body into the else branch and the raise into the
+            # positive branch: the raise now executes when the decision
+            # said EXCUSED.
+            stmt.body, stmt.orelse = stmt.orelse, stmt.body
+            ast.fix_missing_locations(stmt)
+            parents = _parents(tree)
+            for r in self._raises_in(stmt):
+                self.assertFalse(
+                    governed_by_the_decision(tree, r, parents),
+                    "the checker accepted a raise moved into the EXCUSED "
+                    "branch (line %d)" % (r.lineno,))
+            checked += 1
+            break
+        self.assertGreater(checked, 0,
+                           "no site with a raise under a negated consult "
+                           "was found -- the mutation never reached the "
+                           "checker")
+
+    # -- 3. a conditionally reached return -----------------------------
+
+    def test_a_conditionally_reached_return_does_not_govern(self):
+        """A `return` nested inside a conditional does not establish
+        that the branch exits."""
+        src = ('def f(lib, st):\n'
+               '    if _helper_death_excused("error", False, lib):\n'
+               '        if some_other_condition:\n'
+               '            return\n'
+               '    raise RuntimeError("forkrun: scanner failed (status %r)"'
+               ' % (st,))\n')
+        verdicts, n = self._verdict(src)
+        self.assertEqual(1, n, "the snippet must contain exactly one raise")
+        self.assertFalse(
+            verdicts[0],
+            "the checker accepted a raise guarded only by a "
+            "CONDITIONALLY reached return")
+
+    # -- 4. a raise after a nested conditional exit --------------------
+
+    def test_a_nested_conditional_exit_does_not_dominate(self):
+        """The fall-through is not established by a nested exit."""
+        src = ('def f(lib, st):\n'
+               '    if _helper_death_excused("error", False, lib):\n'
+               '        if a:\n'
+               '            return 1\n'
+               '        else:\n'
+               '            return 2\n'
+               '    raise RuntimeError("forkrun: scanner failed (status %r)"'
+               ' % (st,))\n')
+        verdicts, n = self._verdict(src)
+        self.assertEqual(1, n)
+        self.assertTrue(
+            verdicts[0],
+            "the checker rejected a raise guarded by an UNCONDITIONAL "
+            "exit (both branches leave)")
+
+    # -- 5. a sibling branch -------------------------------------------
+
+    def test_a_sibling_branch_does_not_govern(self):
+        """A valid consult in one branch cannot govern a raise in a
+        sibling branch."""
+        src = ('def f(lib, st):\n'
+               '    if _helper_death_excused("error", False, lib):\n'
+               '        log_it()\n'
+               '    if something_else:\n'
+               '        raise RuntimeError("forkrun: scanner failed'
+               ' (status %r)" % (st,))\n')
+        verdicts, n = self._verdict(src)
+        self.assertEqual(1, n)
+        self.assertFalse(
+            verdicts[0],
+            "the checker accepted a raise in a SIBLING branch of a valid "
+            "consult")
+
+    # -- 6. an unguarded raise in an executor that consults correctly --
+
+    def test_an_unguarded_raise_in_a_real_executor_is_rejected(self):
+        """The reviewer's case, on the REAL tree, through the CENSUS.
+
+        The injected raise must be FOUND by the census (which is
+        structural now) and then REJECTED by the checker. A mutation
+        that the census cannot see would pass this test vacuously.
+        """
+        tree, _ = self._tree()
+        parents = _parents(tree)
+        target = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if any(_consult_call(st) is not None
+                   for st in node.body
+                   if isinstance(st, (ast.If, ast.Assign))):
+                target = node
+                break
+        self.assertIsNotNone(target,
+                             "no executor consults the shared decision")
+        injected = ast.parse(
+            "def _probe():\n"
+            "    if True:\n"
+            "        lib.fr_py_abort()\n"
+            "        raise RuntimeError(\"forkrun: scanner failed"
+            " (status %r)\" % (1,))\n")
+        stmt = injected.body[0].body[0]
+        raise_node = stmt.body[1]
+        target.body.insert(0, injected.body[0])
+        ast.fix_missing_locations(target)
+        parents = _parents(tree)
+        self.assertFalse(
+            governed_by_the_decision(tree, raise_node, parents),
+            "the checker accepted an UNGOVERNED helper-death raise "
+            "injected into %s, which already contains a valid consult"
+            % (target.name,))
+
+    # -- the census must survive a reworded message --------------------
+
+    def test_a_reworded_message_stays_covered(self):
+        """Rewording a helper-death message must not remove the site
+        from the census.
+
+        The old census matched the message text, so a reworded message
+        made a site DISAPPEAR from the check -- and the check still
+        passed. The census is structural now, so the site is still
+        found, and the checker still has a verdict on it.
+        """
+        tree, src = self._tree()
+        parents = _parents(tree)
+        # a real, governed site
+        sites = self._negated_consult_ifs(tree)
+        self.assertTrue(sites, "no negated-consult site in the tree")
+        stmt = None
+        raise_node = None
+        for cand in sites:
+            for r in self._raises_in(cand):
+                if _message_literal(r) is not None:
+                    stmt = cand
+                    raise_node = r
+                    break
+            if raise_node is not None:
+                break
+        self.assertIsNotNone(raise_node,
+                             "no site with a literal message was found")
+        self.assertTrue(governed_by_the_decision(tree, raise_node, parents),
+                        "the site is not governed to begin with")
+
+        # reword its message: the census must still find it, by
+        # STRUCTURE, and the checker must still reach a verdict. The
+        # message is taken from the site itself, so the test does not
+        # depend on a particular wording existing.
+        msg = _message_literal(raise_node)
+        self.assertIsNotNone(msg,
+                            "the site's message is not a string literal")
+        new_msg = msg.replace("failed", "went away", 1)
+        self.assertNotEqual(msg, new_msg,
+                            "the message has no 'failed' to reword")
+        reworded = src.replace(msg, new_msg, 1)
+        self.assertNotEqual(src, reworded, "the rewording did not apply")
+        self.assertNotIn(msg, reworded,
+                         "the rewording did not change the message")
+        mtree = ast.parse(reworded)
+        mparents = _parents(mtree)
+        found = [n for n in ast.walk(mtree)
+                 if isinstance(n, ast.Raise)
+                 and n.lineno == raise_node.lineno]
+        self.assertTrue(found,
+                        "the reworded site vanished from the tree")
+        # the census finds it by structure -- the REAL census, not a
+        # re-implementation of it
+        census = [n.lineno for n in
+                  _helper_death_sites(mtree, mparents,
+                                      reworded.split("\n"))]
+        self.assertIn(
+            raise_node.lineno, census,
+            "a reworded helper-death site dropped out of the census: the "
+            "census still depends on the message text")
+        # and the checker still governs it
+        self.assertTrue(
+            governed_by_the_decision(mtree, found[0], mparents),
+            "the reworded site is no longer governed")
+
+    def _structural_census(self, tree, parents, src):
+        """The line numbers the census finds, with the message family
+        REMOVED -- i.e. the sites found by STRUCTURE alone."""
+        lines = src.split("\n")
+        out = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Raise):
+                continue
+            par = parents.get(id(node))
+            body = getattr(par, "body", None)
+            if not isinstance(body, list):
+                continue
+            for i, st in enumerate(body):
+                if st is node:
+                    if any(
+                            isinstance(n, ast.Call)
+                            and isinstance(n.func, ast.Attribute)
+                            and n.func.attr == "fr_py_abort"
+                            for j in range(i)
+                            for n in ast.walk(body[j])):
+                        out.append(node.lineno)
+                    break
+        return out
+
+    # -- 7. the abort must come AFTER the consult ---------------------
+
+    def test_an_abort_before_the_consult_is_rejected(self):
+        """A consult placed AFTER the abort always sees "excuse".
+
+        The abort publishes the reason the consult reads, so a consult
+        after it swallows a genuine helper failure. The ordering check
+        is about the ORDER on the path, not about a consult and an
+        abort merely co-existing in a function.
+        """
+        tree, _ = self._tree()
+        parents = _parents(tree)
+        # a real site: `if not consult: <abort>; <raise>`
+        target = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            if _negated_consult(node.test) is None:
+                continue
+            aborts = [st for st in node.body
+                      if any(isinstance(n, ast.Call)
+                             and isinstance(n.func, ast.Attribute)
+                             and n.func.attr == "fr_py_abort"
+                             for n in ast.walk(st))]
+            if aborts:
+                target = (node, aborts[0])
+                break
+        self.assertIsNotNone(target,
+                             "no real site with an abort under a consult "
+                             "was found -- the mutation never reached the "
+                             "checker")
+        stmt, abort_stmt = target
+        par = parents.get(id(stmt))
+        block = getattr(par, "body", None)
+        self.assertIsNotNone(block, "the site's block is not a list")
+        # Move the abort OUT of the consult's body and BEFORE it: the
+        # abort now publishes the reason the consult is about to read.
+        stmt.body.remove(abort_stmt)
+        idx = block.index(stmt)
+        block.insert(idx, abort_stmt)
+        ast.fix_missing_locations(par)
+
+        # The ordering check, run over the mutated tree.
+        offenders = []
+        for parent in ast.walk(tree):
+            body = getattr(parent, "body", None)
+            if not isinstance(body, list):
+                continue
+            for i, st in enumerate(body):
+                if _consult_call(st) is None:
+                    continue
+                for j in range(i):
+                    aborted = any(
+                        isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Attribute)
+                        and n.func.attr == "fr_py_abort"
+                        for n in ast.walk(body[j]))
+                    if aborted:
+                        offenders.append(st.lineno)
+                        break
+        self.assertTrue(
+            offenders,
+            "the checker accepted an abort that runs BEFORE the consult "
+            "in the same block: the consult would then always read "
+            "'excuse' and swallow a genuine helper failure")
+
+
 class TestTheSharedDecision(unittest.TestCase):
     """The decision itself -- the rule, in one place."""
 
@@ -359,16 +944,80 @@ class TestNoHelperDeathSiteDecidesForItself(unittest.TestCase):
         cls.lines = cls.src.split("\n")
         cls.parents = _parents(cls.tree)
 
+    def _under_a_consult(self, node):
+        """Is this raise inside the BODY of an `if` whose test consults
+        the shared decision?
+
+        The second structural signature of a helper-death site: the
+        decision is consulted and the raise follows it. EITHER
+        polarity counts -- the point of the signature is to find the
+        site, not to judge it, and a polarity flip (the mutation this
+        checker must reject) leaves the consult in place.
+
+        A raise in the ELSE branch does not count: that branch runs
+        when the condition is false.
+        """
+        cur = node
+        while cur is not None:
+            par = self.parents.get(id(cur))
+            if par is None:
+                return False
+            if isinstance(par, ast.If):
+                if cur in getattr(par, "orelse", []):
+                    return False
+                if _consult_call(par) is not None or \
+                        any(isinstance(n, ast.Call)
+                            and getattr(n.func, "id", None)
+                            == "_helper_death_excused"
+                            for n in ast.walk(par.test)):
+                    return True
+            cur = par
+        return False
+
+    def _aborts_before(self, node):
+        """Is this a helper-death RUNTIMEERROR preceded by an ENGINE
+        ABORT in its own block?
+
+        The helper-death choreography is: consult the shared decision,
+        abort the engine, then raise. The abort call is the STRUCTURAL
+        signature of a helper-death site, and -- unlike the message --
+        it does not change when the message is reworded.
+
+        The exception TYPE is part of the signature, and it is what
+        keeps the classification narrow. The abort-then-raise shape is
+        also how the INTERRUPT path reports itself
+        (`raise ForkrunInterrupted(...)` after `fr_py_abort()`), and
+        that is not a helper death: it is the operator's Ctrl-C.
+        Classifying it as one would be the overbroad classification
+        this signature exists to avoid.
+        """
+        if not self._is_runtime_error(node):
+            return False
+        par = self.parents.get(id(node))
+        body = getattr(par, "body", None)
+        if not isinstance(body, list):
+            return False
+        for i, st in enumerate(body):
+            if st is node:
+                return any(
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "fr_py_abort"
+                    for j in range(i)
+                    for n in ast.walk(body[j]))
+        return False
+
     def _helper_death_sites(self):
-        out = []
-        for node in ast.walk(self.tree):
-            if not isinstance(node, ast.Raise):
-                continue
-            seg = "\n".join(self.lines[node.lineno - 1:node.end_lineno])
-            if not HELPER_DEATH.search(seg):
-                continue
-            out.append(node)
-        return out
+        """The helper-death raise sites (see the module-level census)."""
+        return _helper_death_sites(self.tree, self.parents, self.lines)
+
+    def _is_runtime_error(self, node):
+        """Does this raise a plain RuntimeError?"""
+        exc = node.exc
+        if isinstance(exc, ast.Call) and \
+                getattr(exc.func, "id", None) == "RuntimeError":
+            return True
+        return False
 
     def test_there_are_enough_sites_for_the_check_to_mean_something(self):
         sites = self._helper_death_sites()
