@@ -223,6 +223,15 @@ So ownership of a resource is a decision with two halves:
   cannot be made atomic, there must be ONE authoritative registry
   that records every acquisition and reconciles it at release time --
   not a per-site convention that each site may forget.
+
+  **A registry does not close the window; only the ordering does.**
+  A registry finds children that were recorded and then lost -- but
+  a child forked and not YET recorded is invisible to it, and to
+  everything else. Recording it one statement later is not "atomic
+  enough": the gap between "the child exists" and "the child is
+  owned" is exactly where the interrupt lands. Measured: with the
+  adoption outside the protected region, the registry was complete
+  and correct, and the leak was still there.
 - **RELEASE must survive the interruption that would otherwise
   abandon it.** A cleanup sequence that can be interrupted half-way is
   not a cleanup: the resources it had not reached are left behind.

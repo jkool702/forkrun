@@ -712,10 +712,10 @@ zombie -- the identical signature, including the empty cmdline.
 `python/forkrun/_resume.py`; see SSoT.md 4.2):
 
 1. `forkrun/_childreg.py` -- the authoritative registry of the
-   children this process forked. Every fork site adopts its child
-   IMMEDIATELY after `os.fork()`; the teardown reconciles the
-   registry against what it owns and resolves (and REPORTS) anything
-   still registered and still our child.
+   children this process forked, and the ONE fork primitive
+   (`fork_child(owner)`) every fork site calls. The teardown
+   reconciles the registry against what it owns and resolves (and
+   REPORTS) anything still registered and still our child.
 2. `forkrun/_signals.py::defer_interrupts` -- the one primitive that
    defers an interrupt. The teardown's cleanup sequence runs with
    SIGINT deferred (a cleanup that can be interrupted half-way is not
@@ -725,6 +725,20 @@ zombie -- the identical signature, including the empty cmdline.
    was an UNBOUNDED blocking wait, so a helper that could not die
    hung the whole run with no report. It is bounded now, and a child
    that cannot be reaped is reported as unresolved.
+
+**And the first version of that fix was not enough.** The registry
+found children that were recorded and then lost, but a child forked
+and NOT YET recorded is invisible to it -- and to the teardown. The
+cleanroom-on gate showed the same leak again (an unreaped `python3`
+child, the identical signature) with the registry in place. The
+adoption had to move INSIDE the protected fork window, so that there
+is no gap between "the child exists" and "the child is owned", and
+the deferral is what keeps the interrupt out of that gap. Three fork
+sites had never been adopted at all -- the two C-loop workers in
+`_worker.py` and the worker in `_executor_core.py` -- so their
+children were invisible to the registry until now.
+
+**A registry does not close the window; only the ordering does.**
 
 **Tested deterministically** (`python/tests/test_teardown_interrupt.py`,
 9 tests): each fault is injected at a controlled point and the
