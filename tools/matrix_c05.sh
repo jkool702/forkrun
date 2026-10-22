@@ -21,7 +21,18 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK=/tmp/pymin
 PREFIX="$WORK/root"
-MINORS="3.10 3.11 3.12 3.13 3.15"
+# THE supported minors, from the ONE definition (tools/wheel_matrix.py
+# -- DECISION-01 Option A: one wheel per supported minor). This script
+# used to carry its own copy of the list, which is exactly how two
+# lists drift; it now reads the canonical one and drops the HOST's own
+# minor, which is already present.
+MINORS="$(python3 "$ROOT/tools/wheel_matrix.py" --list | tr '\n' ' ')"
+MINORS="$(python3 - "$MINORS" <<'PYEOF'
+import sys
+host = "%d.%d" % sys.version_info[:2]
+print(" ".join(m for m in sys.argv[1].split() if m != host))
+PYEOF
+)"
 QUICK="--quick"
 SAN=""
 

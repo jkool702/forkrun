@@ -105,17 +105,18 @@ evidence supports them.
 
 ## C. Priority 2 — per-minor release wheel build
 
-**Status: TODO**
+**Status: DONE (partial matrix — reported, not simulated)**
+Work log: `dev/supervisor/WO_PY_WHEEL_MATRIX_WORKLOG.md`
 
-- [ ] Discover the packaging scripts, supported versions, release-check expectations
-- [ ] Establish the compatibility matrix (minors, ABI variants incl. free-threaded, platforms)
-- [ ] Inspect the extension-suffix / interpreter-detection logic (preserve the GIL vs free-threaded distinction)
-- [ ] Implement/finish the build workflow (explicit interpreter selection, deterministic tags, fail closed)
-- [ ] Validate: build → inspect filename/metadata/tags/contents → install in isolation → import → smoke test
-- [ ] Cross-contamination checks (stale build dirs, wrong-tag wheels)
-- [ ] Release-check failure-case tests
-- [ ] Run the existing release-check suite
-- [ ] Commit (separate from Priority 1)
+- [x] Discover the packaging scripts, supported versions, release-check expectations
+- [x] Establish the compatibility matrix (minors, ABI variants incl. free-threaded, platforms)
+- [x] Inspect the extension-suffix / interpreter-detection logic (preserve the GIL vs free-threaded distinction)
+- [x] Implement/finish the build workflow (explicit interpreter selection, deterministic tags, fail closed)
+- [x] Validate: build → inspect filename/metadata/tags/contents → install in isolation → import → smoke test
+- [x] Cross-contamination checks (stale build dirs, wrong-tag wheels)
+- [x] Release-check failure-case tests
+- [x] Run the existing release-check suite
+- [x] Commit (separate from Priority 1)
 
 ---
 
@@ -222,3 +223,4 @@ session; this is the independent audit)
 | — | reviewer's operating-rule amendments folded into this tracker | ✓ |
 | — | tracker created at the user's request (both work orders) | ✓ |
 | — | Priority 1: tests written (15), both mutations caught, UDF suites green in BOTH configurations | ✓ |
+| — | Priority 2: per-minor wheel built+installed+smoke-tested for 3.14; container path re-validated; 5 matrix entries NOT buildable here (reported) | ✓ |
