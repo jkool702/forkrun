@@ -301,8 +301,10 @@ the final HEAD:
 
 | configuration | tests | result |
 |---|---|---|
-| cleanroom off | 1540 | **OK** (2 skipped) |
-| cleanroom on | 1547 | **OK** (1 skipped) |
+| cleanroom off | 1541 | **OK** (2 skipped) |
+| cleanroom on | 1548 | **OK** (1 skipped) |
+
+(Run on the final HEAD, after the module-freshness follow-up.)
 
 `git diff --check` clean; the tree clean; nothing running afterwards.
 
@@ -365,4 +367,5 @@ count that command returns at the time of reading it.
 | — | Priority 3/4: the fork census enforced by a test over the AST; 6 census-boundary tests | ✓ |
 | — | the dead copies of the census helpers I introduced were removed (an SSoT violation in my own change) | ✓ |
 | — | the two suite-order failures were ROOT-CAUSED: a FROZEN module object was being replaced by the freshness rule | ✓ |
-| — | FINAL GATE on the final HEAD: 1540 OK cleanroom-off, 1547 OK cleanroom-on | ✓ |
+| — | FINAL GATE on the final HEAD: 1541 OK cleanroom-off, 1548 OK cleanroom-on | ✓ |
+| — | the module-freshness follow-up: the rule may only replace a USER-OWNED module (`base64` is not) | ✓ |
