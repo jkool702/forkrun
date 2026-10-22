@@ -200,6 +200,52 @@ centralised:
   the test should fail if the order is inverted, not only if the
   outcome is wrong.
 
+### 4.2 A CRITICAL SECTION is a decision: who owns what, across an interruption
+
+A rule enforced in one place, but which can be INTERRUPTED in
+another, is not centralised -- it is centralised only on the happy
+path.
+
+The canonical case is a forked child. The rule "a child this process
+forked is this process's to reap" is implemented in the teardown. But
+the teardown can only reap the children it KNOWS about, and that
+knowledge is recorded *after* the fork. An exception in the window
+between the fork and the record orphans the child: the rule is
+centralised, and it still does not hold. Measured: the window was
+~100µs against a ~500ms run, and over a gate run (~3000 runs) that
+is a ~45% chance of the run leaving a zombie behind.
+
+So ownership of a resource is a decision with two halves:
+
+- **ACQUISITION must be atomic with the acquisition of the resource.**
+  A child is adopted at the fork, not at the point where the
+  bookkeeping happens to get around to it. Where the acquisition
+  cannot be made atomic, there must be ONE authoritative registry
+  that records every acquisition and reconciles it at release time --
+  not a per-site convention that each site may forget.
+- **RELEASE must survive the interruption that would otherwise
+  abandon it.** A cleanup sequence that can be interrupted half-way is
+  not a cleanup: the resources it had not reached are left behind.
+  The interruption is DEFERRED across the section, not swallowed.
+
+And the release has an ORDER relative to exceptions: a deferred
+interruption must not replace an exception that is already
+propagating. That exception is the reason for stopping; losing it
+loses the diagnosis. (A context manager cannot see an exception
+propagating *through* it -- a teardown runs in a `finally` -- so the
+wrapper has to say whether the caller was unwinding.)
+
+The same rule governs every operation that can raise between
+acquiring a resource and recording the acquisition. The fix is always
+the same shape: acquire atomically, or make the window safe.
+
+**One implementation, one contract.** The registry that records
+acquisitions and the primitive that defers interruptions are each
+singletons. Every fork site adopts its child; every teardown
+reconciles the registry; every cleanup sequence runs under the same
+deferral. A site that grows its own local guard has reintroduced the
+duplication this policy exists to prevent.
+
 ## 5. Repeated checks are permitted; repeated rules are not
 
 The invariant concerns the number of authoritative implementations, not the number of times a rule may be evaluated.
@@ -387,6 +433,14 @@ rule are not.
 in favour of one implementation, say which behaviour won, and test it.
 Do not preserve a divergent copy "to be safe". The order of operations
 inside a centralized decision is part of the decision.
+
+**A critical section is a decision too.** Whoever acquires a resource
+must acquire it atomically with the resource, and the release must
+survive an interruption that would otherwise abandon it: defer the
+interruption across the section (do not swallow it), and do not let it
+replace an exception that is already propagating. One authoritative
+registry for acquisitions; one authoritative primitive for deferring
+interruptions.
 
 **Before declaring a change complete:** inspect the diff and the
 relevant call sites for semantic duplication, verify that the affected

@@ -644,37 +644,72 @@ relaxed -- the next work order has to decide whether the claim should
 be stated with its condition, or the measurement made fair by giving
 the collect-all arm a comparable producer/consumer imbalance.
 
-**`test_resume_sigint` -- a child left by the abort path.** The SIGINT
-test aborts a run mid-pipeline; the run's children are killed by the
-signal, and on that path one of them can be left terminated-but-unreaped.
+**`test_resume_sigint` -- a child left by the abort path.** RESOLVED --
+and the cause was NOT the one I first proposed. The review was right
+that my explanation did not reconcile with the evidence, and following
+that thread found a different, real defect.
 
-**The child is now IDENTIFIED** (the improved helper names it, because
-a zombie's cmdline is empty and the helper falls back to `comm`):
+**The child was IDENTIFIED** (the improved helper names it, because a
+zombie's cmdline is empty and the helper falls back to `comm`):
 
     child lifecycle leak -- unreaped (terminated) child pid(s) 3671343[python3]
 
 `comm=python3` means it is a FORKED child of the test process -- a
 worker -- and not an exec'd helper (those would show the launcher's
 name). The run's teardown does reap its workers: a WNOHANG pass over
-`pids + extra_pids + [drain_pid]`, then a bounded
-`_join_helper_bounded` for each. So the reap that did not happen is the
-one the teardown could not reach.
+the slots, then a bounded `_join_helper_bounded` for each. So the reap
+that did not happen is the one the teardown could not reach -- because
+the teardown did not KNOW about that child.
 
-The best-evidence mechanism: the KeyboardInterrupt is raised by
-Python's default SIGINT handler at whatever bytecode boundary it lands
-on, and it can land INSIDE the teardown -- which is a `finally` -- so
-the teardown is interrupted part-way and the workers it had not yet
-reaped are left unreaped. That fits every observation: it is
-intermittent (wherever the interrupt lands), it does not reproduce in
-isolation (it lands elsewhere), and it moves between the two
-configurations.
+**The timeline rules out the explanation I gave.** The payload sends a
+SINGLE SIGINT (an `O_EXCL` marker makes the send single-shot). The
+control flow is: the reactor catches `KeyboardInterrupt` and raises
+`ForkrunInterrupted`; the outer `except BaseException` calls
+`checkpoint_on_abort()`; the `finally` calls the teardown. So the
+signal is consumed in the MAIN path, the checkpoint IS written before
+the teardown runs, and the teardown runs afterwards. A signal arriving
+inside the teardown would skip the checkpoint -- and the checkpoint
+assertion passed. My "the interrupt landed inside the teardown" story
+was therefore wrong.
 
-This stays OPEN as a production lifecycle question, not a test one: the
-fix is to make the teardown uninterruptible (defer a second signal
-across it), and to add a regression test for the underlying invariant
-("a run that is interrupted leaves no unreaped child"). Adding another
-cleanup to the test would hide it, which is what the review warned
-against.
+**The real cause is a FORK WINDOW.** Between `os.fork()` and the
+bookkeeping that owns the child (the reactor's
+`self.workers[wid] = slot`) an exception orphans the child: the
+teardown cannot kill it, cannot reap it, and when it exits it is a
+zombie. The window is the `os.close()` plus the `/proc` read of the
+fork-cost warning -- ~100us against a ~500ms run. Over a gate run
+(~3000 forkrun runs) that is a ~45% chance per gate run, which is
+exactly why it looked intermittent and moved between configurations.
+
+**Reproduced on demand.** Injecting a `KeyboardInterrupt` in that
+window leaves the forked worker alive, unowned and (once it exits) a
+zombie -- the identical signature, including the empty cmdline.
+
+**Fixed, in three parts, each with one authoritative implementation**
+(`python/forkrun/_childreg.py`, `python/forkrun/_signals.py`,
+`python/forkrun/_resume.py`; see SSoT.md 4.2):
+
+1. `forkrun/_childreg.py` -- the authoritative registry of the
+   children this process forked. Every fork site adopts its child
+   IMMEDIATELY after `os.fork()`; the teardown reconciles the
+   registry against what it owns and resolves (and REPORTS) anything
+   still registered and still our child.
+2. `forkrun/_signals.py::defer_interrupts` -- the one primitive that
+   defers an interrupt. The teardown's cleanup sequence runs with
+   SIGINT deferred (a cleanup that can be interrupted half-way is not
+   a cleanup), and the deferred signal does not replace an exception
+   that is already propagating.
+3. `forkrun/_resume.py::_waitpid_bounded` -- the post-SIGKILL reap
+   was an UNBOUNDED blocking wait, so a helper that could not die
+   hung the whole run with no report. It is bounded now, and a child
+   that cannot be reaped is reported as unresolved.
+
+**Tested deterministically** (`python/tests/test_teardown_interrupt.py`,
+9 tests): each fault is injected at a controlled point and the
+outcome asserted, so a regression is a deterministic failure rather
+than an intermittent one that only shows up in a full gate run. Every
+case was mutation-checked -- reverting the adoption, the
+reconciliation, the deferral or the bounded reap makes them fail.
 
 **What this pass did about them: made them legible.** Before, the
 cascade meant these were lost among 169 failures, each blamed on
