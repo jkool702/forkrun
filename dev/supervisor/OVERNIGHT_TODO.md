@@ -105,7 +105,46 @@ evidence supports them.
 
 ## C. Priority 2 — per-minor release wheel build
 
-**Status: DONE (partial matrix — reported, not simulated)**
+**Status: PARTIAL** — the ORCHESTRATION is complete and verified; the
+per-minor RELEASE ARTIFACTS for 5 of the 6 minors are not.
+
+The reviewer is right to keep these apart. The deliverables, and where
+each stands:
+
+| deliverable | state |
+|---|---|
+| canonical matrix + interpreter-selection logic | **done** — one list (`tools/wheel_matrix.py`), one interpreter lookup, free-threaded refused |
+| honest detection of a missing interpreter/artifact | **done** — reported `not-built` with the reason; `--strict` fails the build |
+| end-to-end wheel for CPython 3.14 | **done** — built, installed in isolation, imported, smoke-tested (substrate + launcher + the 3.14 helper) |
+| end-to-end per-minor release wheels for 3.10-3.13, 3.15 | **NOT done** — no interpreter with an embeddable libpython is available here |
+| shared-libpython build compatible with the manylinux floor | **NOT done** — this is the remaining work, specified below |
+| free-threaded wheels | out of scope by the current decision (setup.py declines a free-threaded helper; the matrix refuses that interpreter) — explicitly not claimed |
+
+### THE REMAINING BUILD WORK, SPECIFIED
+
+The per-minor release wheel needs a CPython that (a) has a
+**shared** libpython to embed, and (b) is built against the manylinux
+image's glibc, so the wheel's floor is honest. The image's
+`/opt/python/cp3XX-cp3XX` interpreters are built with a STATIC
+libpython and the static archives are stripped, so neither (a) nor the
+reuse path exists.
+
+The remaining step, in the container:
+
+1. build CPython with `--enable-shared` inside the manylinux image
+   (the image's own build deps: libffi-devel, openssl-devel,
+   zlib-devel, and a compiler), installed under a distinct prefix so
+   it cannot be confused with the static interpreters;
+2. point `wheel_matrix.interpreter_for_minor` at that prefix (a
+   parameter, not a second hard-coded list);
+3. the helper then links that interpreter's libpython, and the wheel
+   is genuinely `manylinux_2_28` — auditwheel will confirm the floor
+   rather than the build script asserting it.
+
+Until that exists, the per-minor wheels for those minors are
+**BLOCKED on a missing build input**, not merely untested, and this
+tracker says so.
+
 Work log: `dev/supervisor/WO_PY_WHEEL_MATRIX_WORKLOG.md`
 
 - [x] Discover the packaging scripts, supported versions, release-check expectations
@@ -266,6 +305,12 @@ removing the source-module guard makes the first fail.
 
 ## I. Running log
 
+**Commit count (housekeeping).** The morning report said nine commits
+from `8ac54de1`; the truth is **eight** —
+`git rev-list --count 8ac54de1..HEAD` → 8. (The reviewer's GitHub
+comparison said seven.) The morning report's list also named seven
+SHAs, which is where the discrepancy came from.
+
 | when | what | result |
 |---|---|---|
 | start | state verification | clean tree at `8ac54de1` ✓ |
@@ -277,3 +322,4 @@ removing the source-module guard makes the first fail.
 | — | Addendum: the two checker false passes REPRODUCED, then fixed; 8 mutation tests; the census made structural (27 sites, was 24) | ✓ |
 | — | Priority 3/4: the fork census enforced by a test over the AST; 6 census-boundary tests | ✓ |
 | — | the dead copies of the census helpers I introduced were removed (an SSoT violation in my own change) | ✓ |
+| — | the two suite-order failures were ROOT-CAUSED: a FROZEN module object was being replaced by the freshness rule | ✓ |
