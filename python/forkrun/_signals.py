@@ -215,6 +215,115 @@ class SignalGuard:
             signo=signo)
 
 
+class _DeferredInterrupt:
+    """Defer SIGINT across a critical section.
+
+    Only SIGINT is deferred, and only because it is the one signal
+    forkrun does NOT capture: it stays Python's ``KeyboardInterrupt``
+    (``default_int_handler``), which is raised at an arbitrary
+    bytecode boundary. A cleanup sequence that can be interrupted
+    half-way is not a cleanup -- the children it had not reached are
+    left behind -- so the teardown runs its sequence with SIGINT
+    deferred.
+
+    The signal is NOT swallowed. It is delivered as soon as the mask
+    is restored, i.e. as the critical section's work completes. When
+    an exception is already propagating, that exception is the run's
+    reason for stopping and it must survive: the deferred SIGINT is
+    redundant then, so it is drained (never delivered) and the
+    original is preserved.
+
+    SIGHUP/SIGTERM are NOT deferred: under the checkpoint policy
+    forkrun's own handler records them without raising, so they
+    cannot abandon a cleanup. Under the default policy they keep
+    their default disposition, which terminates the process -- there
+    is no cleanup left to protect.
+    """
+
+    def __init__(self, unwinding=False):
+        self._old = None
+        # The caller was already unwinding when this section was
+        # entered. The context manager cannot see that by itself: an
+        # exception propagating THROUGH the section (the teardown
+        # runs in a finally) is not raised inside the `with` block,
+        # so __exit__ sees no exception at all. The caller has to say
+        # so, or the deferred interrupt would replace the run's own
+        # error.
+        self._unwinding = unwinding
+
+    def __enter__(self):
+        try:
+            self._old = _signal.pthread_sigmask(
+                _signal.SIG_BLOCK, {_signal.SIGINT})
+        except (OSError, ValueError):
+            # Not the main thread (pthread_sigmask is main-thread
+            # only) or the platform lacks it: nothing to defer.
+            self._old = None
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        old = self._old
+        self._old = None
+        if old is None:
+            return False
+        if exc_type is not None or self._unwinding:
+            # An exception is already propagating: preserve it. The
+            # deferred SIGINT is redundant -- the run is already
+            # stopping -- so it is drained BEFORE the mask is
+            # restored, which means it is never delivered and cannot
+            # replace the original.
+            try:
+                if _signal.SIGINT in _signal.sigpending():
+                    _signal.sigwait({_signal.SIGINT})
+            except (OSError, ValueError):
+                pass
+        try:
+            _signal.pthread_sigmask(_signal.SIG_SETMASK, old)
+        except (OSError, ValueError):
+            pass
+        # No exception in flight: the deferred SIGINT (if any) is
+        # delivered at the next bytecode -- i.e. right here -- and
+        # propagates, which is the point: the interrupt is deferred,
+        # not lost.
+        return False
+
+
+def defer_interrupts(unwinding=False):
+    """Defer SIGINT for the duration of the block.
+
+    The ONE place that defers an interrupt, so every critical section
+    (the teardown's cleanup sequence) has the same semantics.
+
+    `unwinding` says the CALLER was already propagating an exception
+    when the section was entered; see _DeferredInterrupt.
+    """
+    return _DeferredInterrupt(unwinding=unwinding)
+
+
+def interrupt_safe(fn):
+    """Run `fn` with SIGINT deferred.
+
+    A cleanup sequence that can be interrupted half-way is not a
+    cleanup: the children it had not reached are left behind. This is
+    the ONE wrapper that provides that property, so every teardown
+    gets it instead of each growing its own local guard.
+    """
+    import functools  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        # Was the CALLER unwinding? A teardown runs in a finally, and
+        # an exception propagating through it is not raised INSIDE the
+        # `with` block -- so the context manager cannot see it, and
+        # the wrapper has to say so.
+        unwinding = _sys.exc_info()[0] is not None
+        with defer_interrupts(unwinding=unwinding):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def guard(policy, abort_fn=None):
     """Build a SignalGuard (no-op unless policy == "checkpoint")."""
     return SignalGuard(policy, abort_fn=abort_fn)

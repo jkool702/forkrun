@@ -58,6 +58,8 @@ import signal as _signal
 import time as _time
 from collections import defaultdict
 
+from . import _childreg
+
 # Trap-ACK grace: bash protocol constant (3s). Matches
 # FR_TRAP_ACK_GRACE_MS_DEFAULT in forkrun_substrate.h.
 #
@@ -352,6 +354,7 @@ class ReactorState:
         _t0 = _time.perf_counter()
 
         pid = os.fork()
+        _childreg.adopt(pid, 'worker')
         if pid == 0:
             # Child — never returns.
             try:
@@ -1517,6 +1520,7 @@ def spawn_orderer(order_r, output_fd=1, unordered=False, numa=False,
     from ._bindings import get as _get
     lib = _get()
     pid = os.fork()
+    _childreg.adopt(pid, 'orderer')
     if pid == 0:
         try:
             from ._fd_scrub import scrub_fds
@@ -1548,6 +1552,7 @@ def fork_scanner_with_death_pipe(lib, memfd, spawn_w=-1,
     """
     death_r, death_w = os.pipe()
     pid = os.fork()
+    _childreg.adopt(pid, 'scanner')
     if pid == 0:
         try:
             os.close(death_r)

@@ -30,6 +30,17 @@ def write_lines(path, n, fmt="line %d\n"):
             fh.write(fmt % i)
 
 
+class CensusUnavailable(RuntimeError):
+    """The child census could not be taken COMPLETELY.
+
+    An empty census and an UNAVAILABLE census are different states.
+    The first means "this process has no children"; the second means
+    "we do not know". Reporting the second as the first turns an
+    unknown into a clean pass -- which is exactly the failure mode
+    this helper exists to prevent.
+    """
+
+
 def child_census():
     """Direct children of this process, with their states.
 
@@ -37,18 +48,30 @@ def child_census():
     /proc/self/task/<tid>/children is where the kernel reports them.
     The state is the third field of /proc/<pid>/stat -- 'Z' for a
     zombie, 'R'/'S'/'D'/'T' for a child that is still running.
+
+    Raises CensusUnavailable if the census could not be taken
+    COMPLETELY. A thread that EXITED between the listing and the read
+    is not an unavailable census: its children were re-parented, so
+    they are not ours to answer for.
     """
     out = {}
     try:
         tids = os.listdir("/proc/self/task")
-    except OSError:
-        return out
+    except OSError as exc:
+        raise CensusUnavailable(
+            "cannot list /proc/self/task: %s" % (exc,)) from exc
     for tid in tids:
         try:
             with open("/proc/self/task/%s/children" % tid) as fh:
                 kids = fh.read().split()
-        except OSError:
+        except FileNotFoundError:
+            # The thread exited between the listing and the read: its
+            # children were re-parented, so they are not ours.
             continue
+        except OSError as exc:
+            raise CensusUnavailable(
+                "cannot read /proc/self/task/%s/children: %s"
+                % (tid, exc)) from exc
         for kid in kids:
             try:
                 pid = int(kid)
@@ -221,7 +244,17 @@ def assert_no_zombies(testcase, before=None):
     """
     if before is None:
         before = getattr(testcase, "_child_baseline", None)
-    census = child_census()
+    try:
+        census = child_census()
+    except CensusUnavailable as exc:
+        # We do not know what this process's children are. "We do not
+        # know" must not read as "there are none": the check fails
+        # closed, because a census that could not be taken is not a
+        # clean result.
+        testcase.fail("child lifecycle check -- the census could NOT be "
+                      "taken, so the result is UNKNOWN, not clean: %s"
+                      % (exc,))
+        return
 
     if before is None:
         # NO OWNERSHIP. Report it and touch nothing: the children

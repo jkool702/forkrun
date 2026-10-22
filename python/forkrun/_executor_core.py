@@ -31,6 +31,7 @@ import os
 import sys
 import time as _time
 
+from . import _childreg
 from ._bindings import RC_OK, get as _get_lib
 from ._fd_scrub import scrub_fds
 

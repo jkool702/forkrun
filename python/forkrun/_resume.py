@@ -213,6 +213,13 @@ def _waitpid_bounded(pid, timeout):
     """Blocking reap with a deadline; SIGKILL on expiry, then reap.
 
     Returns (reaped, status-or-None). Never raises.
+
+    The post-SIGKILL reap is BOUNDED too. SIGKILL is not a guarantee:
+    a process in uninterruptible sleep does not die on it, and the
+    old `os.waitpid(pid, 0)` here was an UNBOUNDED blocking wait --
+    so a helper that could not die hung the entire run, with no
+    report. A bounded wait that gives up and says so is the honest
+    shape: the caller reports the child as unresolved.
     """
     if pid is None or pid <= 0:
         return False, None
@@ -239,11 +246,21 @@ def _waitpid_bounded(pid, timeout):
         os.kill(pid, 9)
     except OSError:
         pass
-    try:
-        _, status = os.waitpid(pid, 0)
-        return True, status
-    except (ChildProcessError, OSError):
-        return False, None
+    # Bounded after SIGKILL as well: SIGKILL is not a guarantee.
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            wpid, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return True, None
+        except OSError:
+            return False, None
+        if wpid == pid:
+            return True, status
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.002)
+    return False, None
 
 
 def _read_fd_all(fd):

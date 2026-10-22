@@ -71,6 +71,7 @@ import weakref
 from collections import deque as _deque
 import sys
 
+from . import _childreg
 from ._api import Mode, Nodes, OnError, Order, _validate
 from ._bindings import RC_OK, get, load
 from ._fd_scrub import scrub_fds, snapshot_fds
@@ -85,6 +86,7 @@ from ._resume import (ORDERER_REAP_TIMEOUT, WORKER_REAP_TIMEOUT,
                        consume_sidecar, require_resume_path,
                        resume_begin)
 from ._signals import guard as _signal_guard
+from ._signals import interrupt_safe as _interrupt_safe
 from ._spawn import make_spawn_payload
 from ._udf import (roots_spec as _udf_roots_spec,
                    udf_payload as _make_udf_payload)
@@ -398,6 +400,7 @@ def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
 
     arr = (_ctypes.c_int * len(out_fds))(*out_fds)
     pid = os.fork()
+    _childreg.adopt(pid, 'drain')
     if pid == 0:
         try:
             keep = {signal_r, results_fd} | set(out_fds)
@@ -1846,6 +1849,7 @@ def _spawn_or_fork(launcher, argv, file_actions):
     """
     if _CLEANROOM_LAUNCH_BACKEND != "posix_spawn":
         pid = os.fork()
+        _childreg.adopt(pid, 'launcher')
         if pid == 0:
             try:
                 for act in (file_actions or ()):
@@ -6211,6 +6215,7 @@ def _join_helper_bounded(pid, name, timeout=_HELPER_JOIN_TIMEOUT):
     return status
 
 
+@_interrupt_safe
 def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                      src_fd, must_close, extra_pids=(), fallow_w=None,
                      drain_pid=None, results_fd=None):
@@ -6287,6 +6292,8 @@ def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
         lib.fr_py_destroy()
     except Exception:
         pass
+    # LAST: reconcile the child registry -- see _teardown_reactor.
+    _childreg.reconcile()
 
 
 def _require_splice_symbol():
@@ -6317,6 +6324,7 @@ def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
     always frames records for the parent to parse).
     """
     pid = os.fork()
+    _childreg.adopt(pid, 'splice-worker')
     if pid == 0:
         try:
             keep = set(engine_fds) | {memfd, out_fd}
@@ -7193,6 +7201,7 @@ def _fork_materialized_scanner(lib, memfd, engine_fds):
     their input is still arriving while the scanner runs.)
     """
     pid = os.fork()
+    _childreg.adopt(pid, 'scanner')
     if pid == 0:
         try:
             scrub_fds(engine_fds | {memfd})
@@ -7216,6 +7225,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
     once every child exists (reaper EOF = workers' write ends only).
     """
     fallow_pid = os.fork()
+    _childreg.adopt(fallow_pid, 'fallow')
     if fallow_pid == 0:
         try:
             scrub_fds(engine_fds | {fallow_r, memfd})
@@ -7224,6 +7234,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
             rc = 1
         os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
     scan_pid = os.fork()
+    _childreg.adopt(scan_pid, 'scanner')
     if scan_pid == 0:
         try:
             scrub_fds(engine_fds | {memfd})
@@ -8349,6 +8360,7 @@ def _raise_worker_failure(failed, total, on_error, statuses=None):
             statuses if statuses is not None else failed))
 
 
+@_interrupt_safe
 def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
                       out_hold=None, memfd=None, mem_hold=None,
                       src_fd=None, must_close=False, extra_pids=(),
@@ -8515,6 +8527,13 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
         lib.fr_py_destroy()
     except Exception:
         pass
+    # LAST: every child this process forked is registered in
+    # _childreg. The structures above reaped the ones they owned, so
+    # anything still registered AND still our child is an ORPHAN --
+    # one whose bookkeeping was interrupted between the fork and the
+    # record that owns it. Resolve it here, loudly: an orphan that
+    # outlives the run becomes a zombie the next test inherits.
+    _childreg.reconcile()
 
 
 def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
@@ -9790,6 +9809,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         # the run aborts before the ingest child is forked.
         ingest_pid = None
         fallow_pid = os.fork()
+        _childreg.adopt(fallow_pid, 'fallow')
         if fallow_pid == 0:
             try:
                 scrub_fds(engine_fds | {fallow_r, memfd})
@@ -9901,6 +9921,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         src_fd, must_close = _prepare_ingest_source(src_fd, must_close)
         ingest_death_r, ingest_death_w = os.pipe()
         ingest_pid = os.fork()
+        _childreg.adopt(ingest_pid, 'ingest')
         if ingest_pid == 0:
             # Child — never returns.
             rc = 0
@@ -10305,6 +10326,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         _flush_stdio()
 
         fallow_pid = os.fork()
+        _childreg.adopt(fallow_pid, 'fallow')
         if fallow_pid == 0:
             try:
                 scrub_fds(engine_fds | {fallow_r, memfd})
@@ -10981,6 +11003,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
 
     fallow_r, fallow_w = os.pipe()
     fallow_pid = os.fork()
+    _childreg.adopt(fallow_pid, 'fallow')
     if fallow_pid == 0:
         try:
             scrub_fds(engine_fds | {fallow_r, memfd})
@@ -10998,6 +11021,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     for node in range(num_nodes):
         death_r, death_w = os.pipe()
         pid = os.fork()
+        _childreg.adopt(pid, 'worker')
         if pid == 0:
             try:
                 os.close(death_r)
@@ -11042,6 +11066,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     for node in range(num_nodes):
         death_r, death_w = os.pipe()
         pid = os.fork()
+        _childreg.adopt(pid, 'worker')
         if pid == 0:
             try:
                 os.close(death_r)
@@ -11064,6 +11089,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
 
     ingest_death_r, ingest_death_w = os.pipe()
     ingest_pid = os.fork()
+    _childreg.adopt(ingest_pid, 'ingest')
     if ingest_pid == 0:
         try:
             os.close(ingest_death_r)

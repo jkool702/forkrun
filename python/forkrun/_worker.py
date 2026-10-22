@@ -32,6 +32,7 @@ import struct
 import sys
 import traceback
 
+from . import _childreg
 from ._bindings import RC_EOF, RC_FAIL, RC_OK, FrPyBatch, get, v1_available
 from ._batch import Batch
 from ._plugin import PluginError
