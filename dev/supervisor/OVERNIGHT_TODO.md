@@ -201,6 +201,34 @@ reproduced first, then fixed; 8 mutation tests added)
 
 ---
 
+## G2. OPEN: two suite-order failures, localised but NOT root-caused
+
+**Status: OPEN** — the mechanism is not established; the evidence is.
+
+Both failures are in tests that patch a MODULE ATTRIBUTE
+(`os.stat` in `test_checkpoint_gate.py`, `os.write` in
+`test_fault.py`). In both, the patch silently does not take effect
+after the patch has been applied, so the test sees the REAL function.
+
+| fact | evidence |
+|---|---|
+| Both pass in isolation | `python3 -m unittest tests.test_checkpoint_gate.TestCheckpointGate.test_foreign_uid_refused_without_trust` → OK |
+| Both fail as a pair with `test_capability_dispatch` | 28 tests, 0.27s → FAIL (a fast, deterministic reproduction) |
+| The pair PASSES with the previous commit's `run.py` | reverting `python/forkrun/run.py` → OK; restoring it → FAIL |
+| The patch is not applied | instrumenting the gate: `os.stat` inside the `with mock.patch("os.stat", ...)` block is `<built-in function stat>`, and the `os` module is the SAME object (`id()` equal) the gate uses |
+| The previous commit's full suite passes | `git checkout 8ac54de1` → 1489 tests OK, in the same tree with the same built artifacts |
+| The product is NOT implicated | the checkpoint gate's own unit test passes; `forkrun/_checkpoint.py` is untouched by this session's changes |
+
+**Not yet established**: how the UDF change in `run.py` interacts with
+`tools/capability_dispatch.py`'s probe (which patches
+`forkrun.run`'s module attributes and restores them) to leave a
+module-attribute patch inert. The next step is a bisect of the
+probe's restore path against `os.stat`/`os.write`.
+
+**The impact is confined to the test suite**: the checkpoint gate and
+the ENOSPC fault injection both work in isolation, and no production
+code changed in either path.
+
 ## H. Priority 7 — final release-readiness sweep
 
 **Status: IN PROGRESS (the final gate runs against the final HEAD)**
