@@ -35,7 +35,9 @@ the assertion, re-introduce the misattribution, or reintroduce the
 "remember to ignore it" behaviour.
 """
 
+import io
 import os
+import signal
 import sys
 import unittest
 
@@ -284,6 +286,161 @@ class TestChildLifecycleMixin(unittest.TestCase):
                              "BEFORE the class's own setup ran")
         finally:
             case.doCleanups()
+
+
+class _Patch:
+    """Set an attribute for the duration of a block."""
+
+    def __init__(self, obj, name, value):
+        self.obj = obj
+        self.name = name
+        self.value = value
+        self.old = None
+
+    def __enter__(self):
+        self.old = getattr(self.obj, self.name)
+        setattr(self.obj, self.name, self.value)
+        return self
+
+    def __exit__(self, *exc):
+        setattr(self.obj, self.name, self.old)
+        return False
+
+
+class TestCensusBoundaries(ChildLifecycleMixin, unittest.TestCase):
+    """The census must distinguish "no children" from "do not know".
+
+    An empty census and an UNAVAILABLE census are different states.
+    The first means "this process has no children"; the second means
+    "we could not find out". Reporting the second as the first turns
+    an unknown into a clean result -- which is the failure mode this
+    helper exists to prevent.
+
+    These are the boundaries where the census can go wrong, and each
+    one is pinned here.
+    """
+
+    def test_an_unreadable_task_list_is_not_an_empty_census(self):
+        """If /proc/self/task cannot be listed, the census is
+        UNAVAILABLE, not empty."""
+        import _helpers
+        real = os.listdir
+
+        def _boom(path):
+            if path == "/proc/self/task":
+                raise OSError(13, "Permission denied")
+            return real(path)
+
+        with _Patch(os, "listdir", _boom):
+            with self.assertRaises(_helpers.CensusUnavailable):
+                _helpers.child_census()
+
+    def test_an_unreadable_child_list_is_not_an_empty_census(self):
+        """A per-task child list that cannot be read is the same
+        failure: part of the census is missing."""
+        import _helpers
+        import builtins
+        real_open = builtins.open
+
+        def _boom(path, *args, **kwargs):
+            if "/children" in str(path):
+                raise OSError(5, "I/O error")
+            return real_open(path, *args, **kwargs)
+
+        with _Patch(builtins, "open", _boom):
+            with self.assertRaises(_helpers.CensusUnavailable):
+                _helpers.child_census()
+
+    def test_a_thread_that_exits_mid_census_is_not_a_failure(self):
+        """A thread that exits between the listing and the read is NOT
+        an incomplete census: its children were re-parented, so they
+        are not ours to answer for."""
+        import _helpers
+        import builtins
+        real_open = builtins.open
+
+        def _boom(path, *args, **kwargs):
+            if "/children" in str(path):
+                raise FileNotFoundError(2, "No such file or directory")
+            return real_open(path, *args, **kwargs)
+
+        with _Patch(builtins, "open", _boom):
+            census = _helpers.child_census()
+        self.assertIsInstance(census, dict)
+
+    def test_a_child_that_exits_during_the_census_reads_as_unknown(self):
+        """A child that exits between the enumeration and the state
+        read has an unknown state -- not a false 'Z' and not a false
+        'R'."""
+        import _helpers
+        import builtins
+        real_open = builtins.open
+
+        def _boom(path, *args, **kwargs):
+            if "/children" in str(path):
+                return io.StringIO("999999\n")
+            if "/stat" in str(path):
+                raise FileNotFoundError(2, "No such file or directory")
+            return real_open(path, *args, **kwargs)
+
+        with _Patch(builtins, "open", _boom):
+            census = _helpers.child_census()
+        self.assertIn(999999, census)
+        self.assertEqual("?", census[999999],
+                         "a child that vanished must read as UNKNOWN, not "
+                         "as a zombie and not as running")
+
+    def test_the_lifecycle_check_fails_closed_on_an_unknown_census(self):
+        """An unavailable census must FAIL the check, not pass it."""
+        import _helpers
+
+        def _boom():
+            raise _helpers.CensusUnavailable("no /proc here")
+
+        with _Patch(_helpers, "child_census", _boom):
+            sink = _FailureSink()
+            _helpers.assert_no_zombies(sink, before={})
+        self.assertIsNotNone(sink.message,
+                            "an unavailable census was reported as a clean "
+                            "result")
+        self.assertIn("UNKNOWN", sink.message)
+
+    def test_a_pre_existing_child_is_never_touched(self):
+        """A child that predates the baseline belongs to another owner:
+        it is neither reported nor killed."""
+        import _helpers
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(w)
+                os.read(r, 1)
+            except BaseException:
+                pass
+            os._exit(0)
+        os.close(r)
+        try:
+            baseline = _helpers.child_census()
+            self.assertIn(pid, baseline)
+            sink = _FailureSink()
+            _helpers.assert_no_zombies(sink, before=baseline)
+            self.assertIsNone(sink.message,
+                              "a pre-existing child was reported as a leak")
+            self.assertIn(pid, _helpers.child_census(),
+                          "a pre-existing child was killed")
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except (ChildProcessError, OSError):
+                pass
+            try:
+                os.close(w)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ outcome, so a regression is a deterministic failure rather than an
 intermittent one that only shows up in a full gate run.
 """
 
+import ast
 import os
 import signal
 import sys
@@ -631,6 +632,109 @@ class TestChildRegistry(unittest.TestCase):
                              "the child branch must not register a pid")
         finally:
             _childreg.reset()
+
+
+class TestEveryForkIsProtected(unittest.TestCase):
+    """Every production fork must go through the canonical primitive.
+
+    The invariant is not "the package calls fork_child somewhere" --
+    it is that NO fork bypasses it. A bypass is a child that is
+    neither adopted nor protected from an interrupt landing in the
+    fork window, which is exactly the defect this work order found.
+
+    The census is over the AST, not a grep: it looks for
+    `os.fork()`, an ALIAS of it (`from os import fork`, `import os as
+    _os` then `_os.fork()`), and the alternate process-creation paths
+    (posix_spawn, subprocess, multiprocessing) -- and it classifies
+    each one rather than assuming.
+    """
+
+    PKG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "forkrun")
+    ALIASES = ("fork",)
+
+    def _package_files(self):
+        out = []
+        for name in sorted(os.listdir(self.PKG)):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(self.PKG, name)
+            with open(path, encoding="utf-8") as fh:
+                out.append((name, fh.read()))
+        return out
+
+    def test_no_module_forks_outside_the_primitive(self):
+        """The only os.fork() in the package is inside fork_child()."""
+        offenders = []
+        for name, src in self._package_files():
+            tree = ast.parse(src)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_fork = False
+                if isinstance(func, ast.Attribute) and func.attr == "fork":
+                    is_fork = True
+                elif isinstance(func, ast.Name) and func.id in self.ALIASES:
+                    # `fork(...)` -- only a bypass if it is NOT
+                    # os.fork reached through an alias import.
+                    is_fork = self._is_os_alias(src, func.id)
+                if not is_fork:
+                    continue
+                if name == "_childreg.py":
+                    continue        # the primitive itself
+                offenders.append("%s:%d: a direct fork() bypasses "
+                                 "forkrun._childreg.fork_child()" % (
+                                     name, node.lineno))
+        self.assertEqual([], offenders,
+                         "these forks bypass the canonical primitive:\n  %s"
+                         % "\n  ".join(offenders))
+
+    def _is_os_alias(self, src, name):
+        """Is `name` an alias of os.fork (not a local function)?"""
+        for line in src.split("\n"):
+            if line.startswith("from os import") and name in line:
+                return True
+            if line.startswith("import os as %s" % name):
+                return True
+        return False
+
+    def test_no_module_uses_an_alternate_process_creation_path(self):
+        """posix_spawn does not fork, so it is a legitimate exception --
+        but only if it is the documented one.
+
+        The cleanroom launcher uses os.posix_spawn (no fork, no child
+        to adopt). Any OTHER use of an alternate creation path would
+        create a child this package does not own.
+        """
+        # The documented exceptions, each with its reason:
+        #   _childreg.py / fork  -- the primitive itself
+        #   run.py / posix_spawn -- the cleanroom launcher: posix_spawn
+        #                           does not fork, so there is no child
+        #                           to adopt and no fork window to
+        #                           protect
+        allowed = {("run.py", "posix_spawn"), ("_childreg.py", "fork")}
+        offenders = []
+        for name, src in self._package_files():
+            tree = ast.parse(src)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if not isinstance(func, ast.Attribute):
+                    continue
+                if func.attr not in ("posix_spawn", "Popen", "fork",
+                                     "vfork", "clone"):
+                    continue
+                if (name, func.attr) in allowed:
+                    continue
+                offenders.append("%s:%d: %s() creates a process this "
+                                 "package does not own" % (
+                                     name, node.lineno, func.attr))
+        self.assertEqual([], offenders,
+                         "alternate process creation outside the "
+                         "documented exception:\n  %s"
+                         % "\n  ".join(offenders))
 
 
 if __name__ == "__main__":
