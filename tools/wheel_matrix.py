@@ -199,9 +199,17 @@ def build_wheel(minor, interpreter, out_dir, repo_root=None, dry_run=False):
     if repo_root is None:
         repo_root = REPO_ROOT
     if dry_run:
-        return True, "%s -m build --wheel (outdir=%s)" % (interpreter,
-                                                          out_dir)
-    cmd = [interpreter, "-m", "build", "--wheel", "--outdir", out_dir, "."]
+        return True, "%s setup.py bdist_wheel (outdir=%s)" % (interpreter,
+                                                              out_dir)
+    # Build the wheel directly with bdist_wheel rather than via
+    # `python -m build`. The latter creates an sdist from the source tree
+    # and the sdist's recursive-include (python/forkrun *.py *.c *.h) does
+    # NOT cover *.so -- but a stale sdist / build cache on the host can
+    # still drag every helper into the wheel, so a 3.10 wheel ends up
+    # shipping 3.14's helper and fails validate_wheel. bdist_wheel packages
+    # exactly what is in the tree right now, which is what build_minor's
+    # remove_helpers + build_helper just produced.
+    cmd = [interpreter, "setup.py", "bdist_wheel", "--dist-dir", out_dir]
     proc = subprocess.run(cmd, cwd=repo_root, capture_output=True,
                           text=True)
     return proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
@@ -429,10 +437,19 @@ def build_minor(minor, out_dir, repo_root=None, roots=("/opt/python",),
         return result
     result["interpreter"] = interp
     # Clean slate: a helper left by a previous minor must not be able
-    # to ship inside this wheel.
+    # to ship inside this wheel. Removing from the source tree is not
+    # enough -- build/ caches a copy from the previous minor and
+    # build_py copies additively, so stale helpers would otherwise
+    # accumulate in every subsequent wheel.
     removed = remove_helpers(PKG_DIR)
     if removed:
         result["removed_helpers"] = removed
+    build_dir = os.path.join(repo_root, "build")
+    if os.path.isdir(build_dir):
+        shutil.rmtree(build_dir, ignore_errors=True)
+    egg_info = os.path.join(repo_root, "python", "forkrun.egg-info")
+    if os.path.isdir(egg_info):
+        shutil.rmtree(egg_info, ignore_errors=True)
     ok, detail = build_helper(minor, interp, repo_root=repo_root,
                               dry_run=dry_run)
     if not ok:

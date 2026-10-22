@@ -29,33 +29,31 @@ jobs:
           # moved): fedora:latest resolved 2026-09 to bash 5.3-era
           # headers (see BASHCOMPAT_DIAGNOSIS.md §0.4). The build step
           # below records the resolved versions into every build log.
-          - arch: x86_64
-            platform: linux/amd64
-            docker_image: fedora:latest
+            docker_image: quay.io/pypa/manylinux_2_28_x86_64
             # We handle flags manually in the script for this one
           
           # AArch64
           - arch: aarch64
             platform: linux/arm64
-            docker_image: fedora:latest
+            docker_image: quay.io/pypa/manylinux_2_28_aarch64
             extra_flags: "-march=armv8-a+crc"
           
           # PPC64LE
           - arch: ppc64le
             platform: linux/ppc64le
-            docker_image: fedora:latest
+            docker_image: quay.io/pypa/manylinux_2_28_ppc64le
             extra_flags: ""
             
           # S390X
           - arch: s390x
             platform: linux/s390x
-            docker_image: fedora:latest
+            docker_image: quay.io/pypa/manylinux_2_28_s390x
             extra_flags: ""
             
-          # RISC-V 64
+          # RISC-V 64 (no manylinux_2_28 image; stays on fedorariscv base, advisory)
           - arch: riscv64
             platform: linux/riscv64
-            docker_image: fedorariscv/base:latest
+            docker_image: docker.io/fedorariscv/base:latest
             extra_flags: ""
             continue-on-error: true
 
@@ -89,8 +87,8 @@ jobs:
                                   # verify step ships the stale blob
                                   # the updater retained (F31 class).
               # 1. Install Dependencies (Fedora/RHEL style)
-              dnf install -y @development-tools gcc make bash-devel git grep sed binutils || \
-              (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils)
+              dnf install -y gcc make bash-devel git grep sed binutils file || \
+              (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils file)
               # W-BASHCOMPAT-BC6: record the resolved toolchain into the
               # log (provenance visibility for the blob-build container;
               # informational only — never gate on it here).

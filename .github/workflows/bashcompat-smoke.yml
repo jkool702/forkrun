@@ -8,7 +8,14 @@ on:
       - "ring_loadables/update_frun_base64.bash"
       - "ring_loadables/remove_frun_base64.bash"
       - "ring_loadables/local_compile/**"
+      - "ring_loadables/forkrun-libs/**"
       - "forkrun_ring.c"
+      - "forkrun_substrate.h"
+      - "substratestubs.c"
+      - "ring_loadables/forkrun_plugin.h"
+      - "tools/check_canary_versions.py"
+      - "tools/gen_shim.py"
+      - "Makefile.substrate"
       - ".github/workflows/bashcompat-smoke.yml"
   pull_request:
     branches: [ "main" ]
@@ -18,7 +25,14 @@ on:
       - "ring_loadables/update_frun_base64.bash"
       - "ring_loadables/remove_frun_base64.bash"
       - "ring_loadables/local_compile/**"
+      - "ring_loadables/forkrun-libs/**"
       - "forkrun_ring.c"
+      - "forkrun_substrate.h"
+      - "substratestubs.c"
+      - "ring_loadables/forkrun_plugin.h"
+      - "tools/check_canary_versions.py"
+      - "tools/gen_shim.py"
+      - "Makefile.substrate"
       - ".github/workflows/bashcompat-smoke.yml"
 
   workflow_dispatch:
@@ -77,22 +91,18 @@ jobs:
             image: ubuntu:24.04
             kind: distro
             allow-fail: false
-          - bash: "5.0"
-            image: ubuntu:20.04
-            kind: distro
-            allow-fail: true
-          - bash: "4.4"
-            image: ubuntu:18.04
-            kind: distro
-            allow-fail: true
-          - bash: "4.4-ubi8"
-            image: registry.access.redhat.com/ubi8/ubi:latest
-            kind: distro
-            allow-fail: true
-          - bash: "5.1-source"
+          - bash: "5.1"
             image: ubuntu:22.04
             kind: source-5.1
-            allow-fail: true
+            allow-fail: false
+          - bash: "5.0"
+            image: ubuntu:22.04
+            kind: source-5.0
+            allow-fail: false
+          - bash: "4.4"
+            image: ubuntu:22.04
+            kind: source-4.4
+            allow-fail: false
     steps:
       - uses: actions/checkout@v3
       - name: Round-trip x10 on ${{ matrix.bash }} (${{ matrix.image }})
@@ -103,22 +113,23 @@ jobs:
             ${{ matrix.image }} \
             bash -c '
               set -euo pipefail
-              if [ "${{ matrix.kind }}" = "source-5.1" ]; then
-                (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gcc make gzip coreutils curl)) || true
-                curl -fsSL https://ftp.gnu.org/gnu/bash/bash-5.1.tar.gz | tar xz
-                # W-MAPAPI kit: the C23-strict host compiler needs the
-                # gnu17 retry for 5.1 sources; older compilers take the
-                # plain build. Either way the binary below is 5.1.
-                (cd bash-5.1 && ./configure -q && (make -j2 || make -j2 CFLAGS="-g -O2 -std=gnu17 -Wno-error"))
-                BASH_UNDER_TEST="$PWD/bash-5.1/bash"
-                "$BASH_UNDER_TEST" --version | head -1 | grep -q "version 5\.1" || { echo "source-5.1 build did not yield bash 5.1" >&2; exit 3; }
-              else
-                BASH_UNDER_TEST="bash"
-                echo "runner bash: $($BASH_UNDER_TEST --version | head -1)"
-                (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gzip coreutils)) || true
-                (command -v dnf >/dev/null && dnf install -y gzip coreutils diffutils) || true
-                (command -v microdnf >/dev/null && microdnf install -y gzip coreutils diffutils) || true
-              fi
+              case "${{ matrix.kind }}" in
+                source-4.4|source-5.0|source-5.1)
+                  ver="${{ matrix.kind#source- }}"
+                  (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gcc make gzip coreutils curl)) || true
+                  curl -fsSL "https://ftp.gnu.org/gnu/bash/bash-${ver}.tar.gz" | tar xz
+                  (cd "bash-${ver}" && ./configure -q && (make -j2 || make -j2 CFLAGS="-g -O2 -std=gnu17 -Wno-error"))
+                  BASH_UNDER_TEST="$PWD/bash-${ver}/bash"
+                  "$BASH_UNDER_TEST" --version | head -1 | grep -q "version ${ver}" || { echo "source build did not yield bash ${ver}" >&2; exit 3; }
+                  ;;
+                *)
+                  BASH_UNDER_TEST="bash"
+                  echo "runner bash: $($BASH_UNDER_TEST --version | head -1)"
+                  (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gzip coreutils)) || true
+                  (command -v dnf >/dev/null && dnf install -y gzip coreutils diffutils) || true
+                  (command -v microdnf >/dev/null && microdnf install -y gzip coreutils diffutils) || true
+                  ;;
+              esac
               # 4.4 floor: mapfile -d must exist (README floor claim).
               $BASH_UNDER_TEST -c "type mapfile" >/dev/null
               # Loud tool assertion (EOL images can lack gzip): silent

@@ -11,6 +11,9 @@ on:
       - "Makefile.substrate"
       - "pyproject.toml"
       - "setup.py"
+      - "tools/build_wheel.sh"
+      - "tools/wheel_matrix.py"
+      - "tools/check_glibc_versions.py"
       - ".github/workflows/python-check.yml"
   pull_request:
     branches: [ "main" ]
@@ -23,6 +26,9 @@ on:
       - "Makefile.substrate"
       - "pyproject.toml"
       - "setup.py"
+      - "tools/build_wheel.sh"
+      - "tools/wheel_matrix.py"
+      - "tools/check_glibc_versions.py"
       - ".github/workflows/python-check.yml"
 
   workflow_dispatch:
@@ -76,7 +82,7 @@ jobs:
             bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file diffutils python3 libasan libubsan && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print \$NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
 
   build-wheel:
-    # W-REL5-F (F2): single Fedora wheel build feeding the version
+    # W-REL5-F (F2): single manylinux_2_28 wheel build feeding the version
     # cells below. bash-devel exists only on Fedora (same rule as the
     # canary step); the wheel carries a py3-none platform .so
     # (ctypes-loaded, version-agnostic by construction), so one wheel
@@ -86,13 +92,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v3
-      - name: Build substrate + wheel in Fedora
+      - name: Build substrate + wheel in manylinux_2_28
         run: |
           docker run --rm \
             -v $PWD:/src \
             -w /src \
-            fedora:latest \
-            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && mkdir -p /src/wheelhouse && python3 -m pip wheel . --no-deps -w /tmp/wheelhouse && ls /tmp/wheelhouse/*.whl && cp /tmp/wheelhouse/*.whl /src/wheelhouse/'
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file && make -f Makefile.substrate python-substrate && PY=/opt/python/cp314-cp314/bin/python3.14 && $PY -m pip install --quiet build && mkdir -p /src/wheelhouse && $PY -m build --wheel --outdir /tmp/wheelhouse . && ls /tmp/wheelhouse/*.whl && cp /tmp/wheelhouse/*.whl /src/wheelhouse/'
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
@@ -129,6 +135,12 @@ jobs:
             image: ubuntu:24.04
             setup: system
           - py: "3.13"
+            image: ubuntu:24.04
+            setup: deadsnakes
+          - py: "3.14"
+            image: ubuntu:24.04
+            setup: deadsnakes
+          - py: "3.15"
             image: ubuntu:24.04
             setup: deadsnakes
     steps:
