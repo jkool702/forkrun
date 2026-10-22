@@ -456,6 +456,93 @@ class TestBoundedReap(unittest.TestCase):
                       "the report must NAME the helper it could not reap")
 
 
+class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
+    """The fork itself must not be interruptible.
+
+    CPython's os.fork() calls logging._prepareFork() in the PARENT
+    before the syscall and logging._afterFork() after it: the
+    logging module's lock is held across the fork. An ASYNCHRONOUS
+    EXCEPTION in that window -- a SIGINT arriving mid-fork -- leaves
+    that lock held FOREVER, and every later fork in the process then
+    blocks inside _prepareFork.
+
+    That is not theoretical. It is the hang this work order was
+    pointed at: a process stuck in logging._prepareFork while the
+    main thread waited for the engine session lock the forking
+    thread held -- a deadlock that wedges the whole suite, in the
+    suite's own release check.
+
+    So the fork is a critical section, and the deferral that protects
+    the cleanup protects the fork too.
+    """
+
+    def test_the_fork_runs_with_sigint_deferred(self):
+        """SIGINT is blocked for the duration of the fork."""
+        from forkrun import _childreg
+
+        real_fork = os.fork
+        seen = {}
+
+        def _probe():
+            # pthread_sigmask returns the OLD mask, so this says
+            # whether SIGINT was already blocked when the fork ran.
+            old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+            seen["blocked"] = signal.SIGINT in old
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
+            return real_fork()
+
+        pid = None
+        with _Patch(os, "fork", _probe):
+            pid = _childreg.fork_child()
+        try:
+            if pid == 0:
+                os._exit(0)
+            self.assertTrue(seen.get("blocked"),
+                            "the fork ran with SIGINT NOT deferred: an "
+                            "async exception in the fork's window leaves "
+                            "the interpreter's logging lock held forever, "
+                            "and every later fork in the process blocks "
+                            "inside logging._prepareFork")
+        finally:
+            if pid:
+                try:
+                    os.waitpid(pid, 0)
+                except (ChildProcessError, OSError):
+                    pass
+
+    def test_the_child_does_not_inherit_the_block(self):
+        """The child must behave as if the deferral had not happened.
+
+        A child that inherited a blocked SIGINT would ignore the
+        operator's interrupt for the rest of its life.
+        """
+        from forkrun import _childreg
+
+        r, w = os.pipe()
+        pid = _childreg.fork_child()
+        if pid == 0:
+            try:
+                os.close(r)
+                old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                blocked = signal.SIGINT in old
+                signal.pthread_sigmask(signal.SIG_SETMASK, old)
+                os.write(w, b"1" if blocked else b"0")
+            except BaseException:
+                pass
+            os._exit(0)
+        os.close(w)
+        try:
+            data = os.read(r, 1)
+        finally:
+            os.close(r)
+            try:
+                os.waitpid(pid, 0)
+            except (ChildProcessError, OSError):
+                pass
+        self.assertEqual(b"0", data,
+                         "the child inherited a blocked SIGINT")
+
+
 class TestChildRegistry(unittest.TestCase):
     """The registry itself: it must never report a bystander."""
 

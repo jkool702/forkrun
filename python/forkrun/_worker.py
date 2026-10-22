@@ -1040,7 +1040,7 @@ def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
     fail-fast); v0 72B plugins must never reach here (gate on
     _c_plugin_spec first).
     """
-    pid = os.fork()
+    pid = _childreg.fork_child()
     if pid == 0:
         try:
             keep = set(engine_fds) | {memfd_fd, out_fd}
@@ -1112,7 +1112,7 @@ def _fork_c_spawn_worker(lib, wid, spawn_argv, memfd_fd,
     _argv_b = [(a.encode("utf-8") if isinstance(a, str) else bytes(a))
                for a in spawn_argv]
     argv_c = (_ctypes.c_char_p * (len(_argv_b) + 1))(*_argv_b, None)
-    pid = os.fork()
+    pid = _childreg.fork_child()
     if pid == 0:
         try:
             keep = set(engine_fds) | {memfd_fd, out_fd}
