@@ -518,6 +518,16 @@ the list; "both pay it" does not.
   which behaviour won, and test it. The report must name the
   authoritative implementation, its consumers, and the tests actually
   run.
+- **A critical section is a decision too** (SSoT.md 4.2). Whoever
+  acquires a resource must acquire it ATOMICALLY with the resource,
+  and the release must survive the interruption that would abandon it:
+  defer the interruption across the section (never swallow it), and do
+  not let it replace an exception that is already propagating. One
+  authoritative registry for acquisitions
+  (`python/forkrun/_childreg.py`), one authoritative primitive for
+  deferring interrupts (`python/forkrun/_signals.py::defer_interrupts`).
+  A forked child that is not adopted at the fork is invisible to the
+  teardown — it is never reaped, and it becomes a zombie.
 - `forkrun_ring.c` is UNMODIFIED by the shim by design (`_shim.c`
   `#include`s it). Prefer shim-side additions.
 - ABI surface is locked in `python/tests/test_shim_abi.py`

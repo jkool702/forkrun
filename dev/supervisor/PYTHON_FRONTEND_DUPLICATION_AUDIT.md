@@ -603,13 +603,23 @@ that misreports what it found, and blames the wrong test, does not just
 waste time -- it actively manufactures the appearance of a regression,
 in a different place each run.
 
-## 9. Two pre-existing failures the cleanroom-on pass still shows
+## 9. The two failures the cleanroom-on pass showed -- both now resolved
 
-With the cascade gone, the cleanroom-**on** pass is down to two
-failures, and BOTH are pre-existing -- they were present in the
+With the cascade gone, the cleanroom-**on** pass was down to two
+failures, and BOTH were pre-existing -- they were present in the
 cleanroom-on run *before* the harness work, with the same two names.
 They are recorded here because the improved harness makes them
-diagnosable, and because they are the next work, not this one's.
+diagnosable, and because they were the next work.
+
+**Both are now closed, and the gate is green in BOTH configurations:**
+1486 tests OK with cleanroom off, 1493 tests OK with cleanroom on.
+
+Neither was what it looked like. The streaming-memory failure was not
+a threshold to be relaxed -- it was a single-pair assertion that could
+not tell a property of the workload from a property of the moment.
+The SIGINT failure was not "pre-existing" -- the review was right that
+a same-named failure never established the same cause, and the cause
+turned out to be a real production defect (below).
 
 **`test_claim_streaming_memory` -- a load-sensitive measurement.** The
 claim is "Streaming memory: slow consumer retains materially less than
@@ -636,13 +646,25 @@ IMBALANCE: the workers produce ahead of the probe's fixed-rate consumer,
 so the streaming parent accumulates the results and its retention
 approaches collect-all's.
 
-**So the claim is TRUE BUT LOAD-CONDITIONAL, and the threshold assumes
-the idle regime.** That is a statement about the product's behaviour,
-not only about the test: the streaming path's memory advantage depends
-on the consumer keeping up. The threshold is NOT being silently
-relaxed -- the next work order has to decide whether the claim should
-be stated with its condition, or the measurement made fair by giving
-the collect-all arm a comparable producer/consumer imbalance.
+**So the claim is TRUE BUT LOAD-CONDITIONAL, and the single-pair
+threshold assumed the idle regime.** The threshold was NOT silently
+relaxed. The gate now asserts an explicit, repeatable statistical
+contract instead:
+
+* the arms are measured in **PAIRS**, with their order **ALTERNATED**
+  between pairs, so neither arm systematically benefits from going
+  first;
+* the strict relation -- streaming retains **less** than collect-all --
+  is required for **every** pair, with no tolerance: that is the
+  property, and it is what a collect-all regression breaks;
+* the 0.80x margin is asserted on the **MEDIAN** of the paired ratios,
+  which is robust to a single anomalous pair but still fails a
+  collect-all regression outright (that sits at ~1.0x).
+
+The failure message carries the raw growths, the ratios and the pair
+count, so a failure says which measurement moved. Mutation-checked:
+making the streaming arm collect everything fails the per-pair check
+with the raw numbers in the message.
 
 **`test_resume_sigint` -- a child left by the abort path.** RESOLVED --
 and the cause was NOT the one I first proposed. The review was right
@@ -751,3 +773,42 @@ code says only what the code needs to say:
   locked targets; their shared prologue is folded in step 1.
 - **The `unlock`/lock structure.** 15 `with _RUN_LOCK:` sites are the
   concurrency contract, not duplication.
+
+## 12. Where this ended up
+
+**The gate is green in BOTH configurations**: 1486 tests OK with
+cleanroom off, 1493 tests OK with cleanroom on.
+
+Two production defects were found on the way, both by the improved
+harness and neither by the duplication work itself:
+
+1. **A forked child could be orphaned.** An exception between
+   `os.fork()` and the bookkeeping that owns the child left it
+   invisible to the teardown: not killed, not reaped, a zombie when it
+   exited. Reproduced on demand by injecting an interrupt in that
+   window. Fixed with an authoritative child registry
+   (`forkrun/_childreg.py`) that every fork site adopts into and every
+   teardown reconciles -- and the orphan is REPORTED, not silently
+   resolved.
+2. **The cleanup could be abandoned.** The teardown's cleanup sequence
+   ran with SIGINT unblocked, so an interrupt arriving mid-sequence
+   skipped the remaining reaps. Fixed with one authoritative
+   deferral primitive (`forkrun/_signals.py::defer_interrupts`) that
+   the teardown runs under. Related: the post-SIGKILL reap in
+   `_resume._waitpid_bounded` was an unbounded blocking wait, so a
+   helper that could not die hung the whole run with no report; it is
+   bounded now, and an unreapable child is named.
+
+Both are covered by deterministic, mutation-checked tests
+(`python/tests/test_teardown_interrupt.py`) that inject the fault at a
+controlled point -- so a regression is a deterministic failure rather
+than an intermittent one that only shows up in a full gate run.
+
+And the duplication work itself: the duplicated decisions are folded
+(7 clone groups / 1719 characters -> 3 / 454), the harness now
+attributes a child leak to the test that CREATED it (and resolves it
+rather than suppressing the report), the scanner compares statement
+BLOCKS so a decision copied inline is visible, and the SSoT policy
+gained a section on the shape this exposed: **a critical section is a
+decision** -- acquisition must be atomic with the resource, and the
+release must survive the interruption that would abandon it.
