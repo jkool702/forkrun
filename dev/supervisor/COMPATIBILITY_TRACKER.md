@@ -18,7 +18,7 @@ Status legend: **ENFORCED** (blocking CI + artifact/runtime test),
 | Axis | Promise | Authoritative source |
 |---|---|---|
 | Bash (frontend) | ≥ 4.4 | `README.md` §Requirements; `tools/check_canary_versions.py::FLOOR` |
-| glibc (Bash loadables) | ≥ 2.38 (current shipped); 2.28 feasible (see §3) | `README.md`; ELF symbol versions of shipped artifacts |
+| glibc (Bash loadables) | 2.28 on x86-64/aarch64/ppc64le/s390x; 2.38 on riscv64 | `README.md`; `tools/check_glibc_versions.py` |
 | glibc (Python wheel) | ≥ 2.28 (manylinux_2_28) | `tools/build_wheel.sh`; `setup.py::get_platform_tag` |
 | CPython | 3.10–3.15 (GIL only) | `tools/wheel_matrix.py::SUPPORTED_MINORS` (single source) |
 | Free-threaded CPython | explicitly unsupported | `setup.py::_freethreaded_interpreter`; `forkrun/_udf.py` |
@@ -41,8 +41,9 @@ Status legend: **ENFORCED** (blocking CI + artifact/runtime test),
 Gaps:
 - Embedded-blob vs freshly-built distinction: release workflow freshness gate
   (decode-and-cmp) proves correspondence; smoke tests the embedded blob only.
-- Min-heap ordering test failed once in CI (run 39849193302); passes locally.
-  Classified as a separate item, not a regression from this change.
+- Min-heap ordering test failed in CI twice (runs 39849193302, 39862126718);
+  passes locally. Classified as a separate item (passes locally, not yet
+  diagnosed). Twin-check red on baseline and current (run 39862126671).
 
 ## 2. glibc floor (WO-COMPAT-03)
 
@@ -66,10 +67,12 @@ Gaps:
 - Version-matrix now covers 3.10–3.15, but the generic-substrate wheel lane
   runs helper-dependent tests against a helper-less wheel; needs a separate
   helper lane (WO-COMPAT-04 open).
-- Python CI run 39849193206 red: `test_helper_is_present_for_this_interpreter`,
-  capability-dispatch, NUMA/helper-death, release-check/benchmark tests, and a
-  `KeyboardInterrupt` in `_signals.py`. Not all are compatibility regressions;
-  need diagnosis.
+- Python CI run 39862126756 red: matrix cells 3.10, 3.12-3.15 fail;
+  3.11 in progress; python-v0 failed. Failures include
+  `test_helper_is_present_for_this_interpreter`, capability-dispatch,
+  NUMA/helper-death, release-check/benchmark, and a `KeyboardInterrupt`
+  in `_signals.py` during `test_teardown_interrupt.py`. Not all are
+  compatibility regressions; needs diagnosis.
 - Free-threaded explicitly refused (correct, keep).
 
 ## 4. Release wheels (WO-COMPAT-05)
@@ -78,24 +81,29 @@ Generic substrate wheel: builds in manylinux_2_28 (glibc 2.28), tagged
 `manylinux_2_28_x86_64`, py3-none. Validated locally (dist/).
 
 Per-minor UDF wheels: `tools/wheel_matrix.py` orchestration exists with
-fail-closed rules (no substitution, no reuse, strict mode). Blocked by
-missing shared libpython in manylinux_2_28 image (static builds only).
-Needs CPython built with `--enable-shared` inside the container.
+fail-closed rules (no substitution, no reuse, strict mode). Shared CPython
+3.10-3.15 built with `--enable-shared` in manylinux_2_28; all six per-minor
+wheels build and validate by tag (in-container). The remaining blocker is
+runtime, not build: `auditwheel repair` strips the `libpython` DT_NEEDED
+dependency, so the released helper route is unvalidated (WO-COMPAT-05 open).
+Smoke test is shallow (import + presence only); no real UDF workload exercised.
 
-Status: BUILT-BUT-NOT-FUNCTIONALLY-VALIDATED. All six per-minor wheels build
-and validate by tag in manylinux_2_28 (run in-container). auditwheel repair
-strips the libpython DT_NEEDED dependency, so the released helper route is
-unresolved (WO-COMPAT-05 open). Smoke test is shallow (import + presence only).
+Status: BUILT-BUT-NOT-FUNCTIONALLY-VALIDATED.
 
 ## 5. CI wiring (WO-COMPAT-06)
 
 Workflows present: bashcompat-smoke, bash-suite, forkrun_release, python-check,
 sanitizer-freshness, sh-format, shim-check, static-analysis, idl-check.
 Triggers: push/PR to `main` only. Feature branches (NEW/REFACTOR*) do not
-trigger. Need PR to main to observe checks.
+trigger. PR #585 opened to observe checks.
 
-Gaps: path filters (see §1); advisory status of supported Bash versions;
-python-check wheel build env mismatch; no scheduled newest-stable check.
+Status (run 39862126642+): bashcompat-smoke green (7 jobs incl. canary-versions
+and glibc-floor); shim-check, idl-check, static-analysis green; build-wheel green.
+bash-suite red: min-heap ordering test (run 39862126718) — recurring, classified
+as separate item (passes locally). sh-format red: twin-file mismatch (run
+39862126671) — pre-existing on baseline. python-check red: matrix cells 3.10,
+3.12-3.15 fail (run 39862126756); 3.11 in progress; helper-dependent tests
+mismatch + KeyboardInterrupt in _signals.py. sanitizer-asan-ubsan advisory, red.
 
 ## 6. Linux kernel / GNU utilities (WO-COMPAT-01 audit)
 
@@ -111,8 +119,9 @@ No change required; recorded for completeness.
 - Verified shipped embedded blobs decode byte-identical to ring_loadables artifacts (all 7).
 - Verified fresh rebuild (x86-64 v2/v3/v4) is byte-identical to shipped artifacts
   using host GCC 16.2.1 (same as CI). Proves embedded blob == current source.
-- Measured glibc requirements: all 7 shipped artifacts top out at GLIBC_2.38;
-  zero GLIBC_ABI_GNU2_TLS.
+- Measured glibc requirements (pre-rebuild): all 7 shipped artifacts top out at
+  GLIBC_2.38; zero GLIBC_ABI_GNU2_TLS. Post-rebuild: six arches at GLIBC_2.28,
+  riscv64 at GLIBC_2.38.
 - Proved 2.28 build feasibility in manylinux_2_28 (x86-64 v2).
 - Confirmed manylinux_2_28 image has all six CPython minors 3.10–3.15 (static libpython).
 - Confirmed gh CLI authenticated with workflow scope; remote reachable.
@@ -128,7 +137,9 @@ No change required; recorded for completeness.
 - Python suite: 1541 tests, 1 pre-existing dirty-tree failure (now resolved by commit),
   2 skipped. wheel_matrix tests 18/18.
 - Bash basic suite: 96/96 locally on new blob.
-- Opened PR #585. CI: build-wheel, shim-check, idl-check, CodeQL pass.
-  bash-basic failed on a timing-sensitive min-heap test that passes locally (flake).
-  twin-check fails pre-existingly on baseline too (comprehensive.sh vs .txt differ).
-  sanitizer-asan-ubsan advisory, failed (pre-existing advisory).
+- Opened PR #585. CI (run 39862126642+): bashcompat-smoke green (7 jobs);
+  shim-check, idl-check, static-analysis green; build-wheel green.
+  bash-suite red: min-heap ordering (run 39862126718, recurring).
+  sh-format red: twin-file mismatch (run 39862126671, pre-existing).
+  python-check red: matrix cells 3.10, 3.12-3.15 (run 39862126756).
+  sanitizer-asan-ubsan advisory, red.
