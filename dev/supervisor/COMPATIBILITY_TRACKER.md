@@ -31,36 +31,30 @@ Status legend: **ENFORCED** (blocking CI + artifact/runtime test),
 
 | Bash | Evidence | Status |
 |---|---|---|
-| 4.4 | D-SEGFIX round-trips byte-exact on extracted binary (historical); shipped blob built from source commit `e6b9e785` which contains D-SEGFIX (verified: `git merge-base --is-ancestor 98fce81 e6b9e785` → true). Embedded blob byte-identical to a fresh build (verified for v2/v3/v4). | MEASURED (not yet blocking in CI for ≤5.1) |
-| 5.0 | same as 4.4 | MEASURED |
-| 5.1 | same; source-built 5.1.0 byte-exact | MEASURED |
+| 4.4 | D-SEGFIX round-trips byte-exact on extracted binary (historical); shipped blob built from source commit `e6b9e785` which contains D-SEGFIX. Embedded blob byte-identical to a fresh build (verified for v2/v3/v4). CI: source-build leg `allow-fail: false`, passed (run 39849193265). | ENFORCED (bashcompat-smoke, 2026-10-22) |
+| 5.0 | same as 4.4 | ENFORCED (bashcompat-smoke, 2026-10-22) |
+| 5.1 | same; source-built 5.1.0 byte-exact | ENFORCED (bashcompat-smoke, 2026-10-22) |
 | 5.2 | full suites green (92+264) | ENFORCED (bash-suite basic) |
-| 5.3 | full suites green | ENFORCED |
+| 5.3 | full suites green | ENFORCED (bash-suite basic) |
 | newest stable | fedora:latest (asserted, not assumed) | ADVISORY (scheduled check TBD) |
 
 Gaps:
-- `bashcompat-smoke.yml` legs for 4.4/5.0/5.1/4.4-ubi8 are `allow-fail: true`.
-- Path filters omit `substratestubs.c`, `tools/check_canary_versions.py`,
-  `tools/gen_shim.py`, `Makefile.substrate`, `forkrun_substrate.h`.
-- No source-build leg for 4.4/5.0 (only 5.1).
 - Embedded-blob vs freshly-built distinction: release workflow freshness gate
   (decode-and-cmp) proves correspondence; smoke tests the embedded blob only.
+- Min-heap ordering test failed once in CI (run 39849193302); passes locally.
+  Classified as a separate item, not a regression from this change.
 
 ## 2. glibc floor (WO-COMPAT-03)
 
-Shipped artifacts (all 7) require max `GLIBC_2.38` (measured via `objdump -T`):
-aarch64, ppc64le, riscv64, s390x, x86-64-v2/v3/v4 → top GLIBC_2.38.
-No `GLIBC_ABI_GNU2_TLS` references (D-TLS).
+Shipped artifacts (current state after the blob cycle):
+- x86-64-v2/v3/v4, aarch64, ppc64le, s390x: max `GLIBC_2.28`
+  (rebuilt in manylinux_2_28, verified by `tools/check_glibc_versions.py`,
+  end-to-end round-trip passed on glibc 2.28).
+- riscv64: max `GLIBC_2.38` (no manylinux_2_28 image; advisory arch).
 
-Feasibility of 2.28: **proven on x86-64** — built in `manylinux_2_28_x86_64`
-(glibc 2.28, GCC 14) with the release flags; result max `GLIBC_2.28`,
-loads on bash 4.4 (glibc 2.28) and round-trips byte-exact on bash 5.3 (glibc 2.43).
-Same applies to aarch64/ppc64le/s390x (manylinux_2_28 images available).
-riscv64 has no manylinux_2_28 image (fedorariscv base is glibc 2.39.9000).
-
-Decision: keep shipped floor at 2.38 for now (no blob cycle yet); provide
-the 2.28 build recipe and an opt-in CI job. Lowering to 2.28 requires
-rebuilding all arches + blob cycle + docs; tracked as follow-up.
+No `GLIBC_ABI_GNU2_TLS` references (D-TLS). Gate: `glibc-floor` job in
+`bashcompat-smoke.yml`, green (run 39849193265). Release workflow now builds
+in manylinux_2_28 (run 39849185555 green).
 
 ## 3. CPython runtime (WO-COMPAT-04)
 
@@ -69,9 +63,13 @@ Supported minors: 3.10, 3.11, 3.12, 3.13, 3.14, 3.15 (GIL only).
 Historical: all six minors measured (3.15 was rc2; now stable 3.15.1 available).
 
 Gaps:
-- `python-check.yml` version-matrix only covers 3.10–3.13.
-- Wheel-tag/environment mismatch: builds in `fedora:latest` (glibc 2.39+)
-  then installs into Ubuntu 22.04 (glibc 2.35). Must build in manylinux_2_28.
+- Version-matrix now covers 3.10–3.15, but the generic-substrate wheel lane
+  runs helper-dependent tests against a helper-less wheel; needs a separate
+  helper lane (WO-COMPAT-04 open).
+- Python CI run 39849193206 red: `test_helper_is_present_for_this_interpreter`,
+  capability-dispatch, NUMA/helper-death, release-check/benchmark tests, and a
+  `KeyboardInterrupt` in `_signals.py`. Not all are compatibility regressions;
+  need diagnosis.
 - Free-threaded explicitly refused (correct, keep).
 
 ## 4. Release wheels (WO-COMPAT-05)
@@ -84,7 +82,10 @@ fail-closed rules (no substitution, no reuse, strict mode). Blocked by
 missing shared libpython in manylinux_2_28 image (static builds only).
 Needs CPython built with `--enable-shared` inside the container.
 
-Status: INCOMPLETE (only 3.14 built locally, as cp314 wheel in dist/).
+Status: BUILT-BUT-NOT-FUNCTIONALLY-VALIDATED. All six per-minor wheels build
+and validate by tag in manylinux_2_28 (run in-container). auditwheel repair
+strips the libpython DT_NEEDED dependency, so the released helper route is
+unresolved (WO-COMPAT-05 open). Smoke test is shallow (import + presence only).
 
 ## 5. CI wiring (WO-COMPAT-06)
 
