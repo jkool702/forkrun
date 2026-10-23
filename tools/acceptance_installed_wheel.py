@@ -147,20 +147,24 @@ def main(argv=None):
                                    % (h, env_real))
                 print(json.dumps(report, indent=2))
                 return 1
-        # suffix check
-        import sys as _sys
-        expected_suffix = ".cpython-%d%d" % (_sys.version_info.major,
-                                             _sys.version_info.minor) if False else None
-        # Use the venv interpreter's suffix, not this script's.
+        # suffix check: helper must match the venv interpreter's EXT_SUFFIX
         r2 = _run([py, "-c",
-                   "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX') or '.so')"])
+                   "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX') or '.so')"],
+                  env=clean_env)
         venv_suffix = r2.stdout.strip()
+        if not venv_suffix or r2.returncode != 0:
+            report["error"] = "could not determine venv EXT_SUFFIX"
+            print(json.dumps(report, indent=2))
+            return 1
         for h in helpers:
-            if venv_suffix.split('.')[1] not in os.path.basename(h):
-                # loose check: the helper's cpython-XX must match venv
-                pass
+            if not os.path.basename(h).endswith(venv_suffix):
+                report["error"] = ("helper suffix mismatch: %s does not end with %s"
+                                   % (os.path.basename(h), venv_suffix))
+                print(json.dumps(report, indent=2))
+                return 1
         report["venv_ext_suffix"] = venv_suffix
-        report["helper_check"] = "ok (helper inside venv: %r)" % helpers
+        report["helper_check"] = "ok (helper suffix %s inside venv: %r)"
+        report["helper_check"] = report["helper_check"] % (venv_suffix, helpers)
     report["provenance"] = ("ok (forkrun=%s, lib=%s)"
                             % (info.get("FILE"), info.get("LIB")))
 
@@ -200,7 +204,12 @@ def main(argv=None):
                 "assert joined == expected, 'mismatch %%d vs %%d' %% (len(joined), len(expected))\n"
                 "print('GENERIC_OK bytes=' + str(len(joined)))\n"
                 % (inp, inp))
-        r = _run([py, driver], cwd=workdir, env=clean_env)
+        generic_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", workdir),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+        }
+        r = _run([py, driver], cwd=workdir, env=generic_env)
         if r.returncode != 0 or "GENERIC_OK" not in r.stdout:
             report["error"] = "generic workload failed: " + (r.stderr or r.stdout)[-500:]
             print(json.dumps(report, indent=2))
@@ -253,11 +262,23 @@ def main(argv=None):
                 "assert udf_version == '%s', 'UDF ran under wrong Python (%%s vs %s)' %% udf_version\n"
                 "print('UDF_OK bytes=' + str(len(joined)) + ' helper_pid=' + str(helper_pid) + ' parent_pid=' + str(parent_pid) + ' isolated=' + isolated + ' version=' + udf_version)\n"
                 % (workdir, args.udf_func, inp, inp + ".expected", marker, isolated_marker, version_marker, actual_minor, actual_minor))
-        env = dict(os.environ)
-        env["PYTHONPATH"] = workdir + (":" + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
-        env["FORKRUN_CLEANROOM"] = "map-udf"
-        env.pop("FORKRUN_LIB", None)
-        env.pop("FORKRUN_NO_UDF", None)
+        # Controlled environment: only the workdir on PYTHONPATH, no
+        # inherited PYTHONPATH/LD_* overrides.
+        # The helper needs libpython at runtime (provided by the Python
+        # install). In a normal consumer environment libpython is on the
+        # default linker path; in the manylinux test container it lives
+        # beside the interpreter, so add that directory explicitly rather
+        # than inheriting an ambient LD_LIBRARY_PATH.
+        interp_lib = os.path.join(os.path.dirname(os.path.dirname(interp)),
+                                  "lib")
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", workdir),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "PYTHONPATH": workdir,
+            "FORKRUN_CLEANROOM": "map-udf",
+            "LD_LIBRARY_PATH": interp_lib,
+        }
         r = _run([py, driver], cwd=workdir, env=env)
         if r.returncode != 0 or "UDF_OK" not in r.stdout:
             report["error"] = "UDF workload failed: " + (r.stderr or r.stdout)[-1000:]

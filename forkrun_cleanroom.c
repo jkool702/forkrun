@@ -1144,26 +1144,8 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
      * The DISPOSABLE PROBE at the dlopen above keeps RTLD_LOCAL: it is
      * a throwaway child whose only job is to prove the artifact loads.
      */
-    /* auditwheel strips the helper's libpython DT_NEEDED (manylinux policy),
-     * so the repaired wheel's helper no longer pulls libpython in itself.
-     * Pre-load libpython with RTLD_GLOBAL so the helper's undefined Python
-     * symbols resolve at dlopen time. Without this, dlopen of the repaired
-     * helper fails and the UDF route silently falls back to in-process
-     * Python, which the acceptance harness must not accept. */
-    char _libpy[128];
-    snprintf(_libpy, sizeof(_libpy), "libpython%d.%d.so.1.0",
-             caller_maj, caller_min);
-    void *_lph = dlopen(_libpy, RTLD_NOW | RTLD_GLOBAL);
-    if (!_lph) {
-        snprintf(_libpy, sizeof(_libpy), "libpython%d.%d.so",
-                 caller_maj, caller_min);
-        _lph = dlopen(_libpy, RTLD_NOW | RTLD_GLOBAL);
-    }
-    if (!_lph) {
-        fprintf(stderr, "forkrun-cleanroom: dlopen libpython (%s): %s\n",
-                _libpy, dlerror());
-        return UDF_SETUP_GENERIC;
-    }
+    /* libpython already pre-loaded above (RTLD_GLOBAL) before the probe,
+     * so it is available in the global namespace for this dlopen. */
     hu = dlopen(helper_path, RTLD_NOW | RTLD_GLOBAL);
     if (!hu) {
         fprintf(stderr, "forkrun-cleanroom: dlopen UDF helper: %s\n",
