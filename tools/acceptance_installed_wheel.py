@@ -64,10 +64,11 @@ _MINOR_RE = re.compile(r"^\d+\.\d+$")
 
 # Variables an ambient shell (or a previous test) must never be able to
 # use to redirect the acceptance run. Prefix rules cover the whole
-# FORKRUN_* and PYTHON* namespaces; the two LD_* entries are the ones
-# that can substitute code or an audit library.
+# FORKRUN_* and PYTHON* namespaces; the LD_* entries can substitute code
+# or an audit library, and FR_UDF_HOME relocates the embedded
+# interpreter's stdlib.
 _DROP_PREFIXES = ("FORKRUN_", "PYTHON")
-_DROP_EXACT = ("LD_PRELOAD", "LD_AUDIT")
+_DROP_EXACT = ("LD_PRELOAD", "LD_AUDIT", "FR_UDF_HOME")
 
 
 def _sha256_bytes(data):
@@ -135,8 +136,14 @@ def build_child_env(parent_env, lib_dir, extra=None):
     FORKRUN_* namespace is the load-bearing part: FORKRUN_LIB,
     FORKRUN_CLEANROOM, FORKRUN_NO_UDF and FORKRUN_CLEANROOM_NUMA can
     each make an acceptance run measure something other than the
-    installed wheel. The returned audit lists what was removed so the
-    report can show it.
+    installed wheel. FR_UDF_HOME is dropped for the same reason: it
+    overrides the embedded interpreter's `home`, i.e. which stdlib the
+    helper initializes against, so an inherited value could make a
+    relocated interpreter pass where the installed one would not.
+    FR_UDF_TRACEBACK is deliberately KEPT: it changes only how much of
+    an error is printed, never what the run decides, and dropping it
+    would hide diagnostics from a caller who asked for them. The
+    returned audit lists what was removed so the report can show it.
     """
     env = {}
     removed = []

@@ -20,6 +20,9 @@ cd "$REPO"
 
 LIST_PYTHON=${LIST_PYTHON:-python3}
 PREFIX_ROOT=${PREFIX_ROOT:-/opt/pyshared}
+# The caller's loader path is preserved per interpreter prefix, never
+# accumulated across minors: build_cpython owns the export.
+BASE_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
 
 die() {
   echo "ci_udf_acceptance: $*" >&2
@@ -71,11 +74,18 @@ install_build_deps() {
 # shared -- a stale/different interpreter is a hard failure, never a
 # silent substitution.
 build_cpython() {
-  local minor="$1" patch prefix py tarball
+  local minor="$1" patch py tarball
   patch=$(patch_for_minor "$minor") \
     || die "no CPython patch pinned for supported minor $minor"
   PREFIX="$PREFIX_ROOT/cp${minor/./}-cp${minor/./}"
   py="$PREFIX/bin/python$minor"
+  # A --enable-shared install has no rpath to its own prefix, and this
+  # script never runs ldconfig. The loader path must therefore be set by
+  # the SAME function that establishes the interpreter, BEFORE the first
+  # execution: validating "$py" without it fails with
+  # "libpython3.X.so.1.0: cannot open shared object file". Setting it
+  # later in run_one was too late for exactly that check.
+  export LD_LIBRARY_PATH="$PREFIX/lib${BASE_LD_LIBRARY_PATH:+:$BASE_LD_LIBRARY_PATH}"
   if [ ! -x "$py" ]; then
     install_build_deps
     cd /tmp
@@ -103,6 +113,7 @@ build_cpython() {
   [ -x "$py" ] || die "interpreter was not installed: $py"
   "$py" - "$minor" "$patch" <<'PY' \
     || die "interpreter at $py is not the pinned shared CPython"
+import os
 import sys
 import sysconfig
 
@@ -118,6 +129,30 @@ if "%d.%d" % got[:2] != minor:
 if not sysconfig.get_config_var("Py_ENABLE_SHARED"):
     raise SystemExit("interpreter is static; the UDF helper needs a "
                      "shared libpython")
+# Py_ENABLE_SHARED is a COMPILED-IN fact; it is not proof that this
+# process loaded the libpython just built. A same-soname library
+# elsewhere in the loader search path can satisfy the NEEDED entry, so
+# the process starts on a different build. Read the actual mapping and
+# require it to be the prefix's own file.
+libdir = sysconfig.get_config_var("LIBDIR") or ""
+ldlibrary = sysconfig.get_config_var("LDLIBRARY") or ""
+want_lib = (os.path.realpath(os.path.join(libdir, ldlibrary))
+            if libdir and ldlibrary else "")
+loaded = set()
+with open("/proc/self/maps", encoding="utf-8", errors="replace") as maps:
+    for line in maps:
+        fields = line.split(None, 5)
+        if len(fields) < 6:
+            continue
+        path = fields[5].strip()
+        if "libpython" in os.path.basename(path):
+            loaded.add(os.path.realpath(path))
+if not loaded:
+    raise SystemExit("no libpython is mapped; this is not a shared "
+                     "interpreter")
+if want_lib not in loaded:
+    raise SystemExit("loaded libpython %s is not the built one %s"
+                     % (sorted(loaded), want_lib))
 PY
   PY="$py"
 }
@@ -128,7 +163,6 @@ run_one() {
 
   echo "=== UDF acceptance: Python $minor ==="
   build_cpython "$minor"
-  export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
   suffix=$("$PY" -c \
     'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or "")')

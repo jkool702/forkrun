@@ -262,21 +262,27 @@ class EnvironmentTests(unittest.TestCase):
             "FORKRUN_CLEANROOM": "0",
             "FORKRUN_NO_UDF": "1",
             "FORKRUN_CLEANROOM_NUMA": "1",
+            "FR_UDF_HOME": "/tmp/evil-stdlib",
+            "FR_UDF_TRACEBACK": "1",
         }
         env, removed = harness.build_child_env(parent, "/real/lib",
                                                {"FORKRUN_CLEANROOM":
                                                 "map-udf"})
         for key in ("LD_PRELOAD", "LD_AUDIT", "PYTHONPATH", "PYTHONHOME",
                     "FORKRUN_LIB", "FORKRUN_NO_UDF",
-                    "FORKRUN_CLEANROOM_NUMA"):
+                    "FORKRUN_CLEANROOM_NUMA", "FR_UDF_HOME"):
             self.assertNotIn(key, env)
+        # Diagnostics-only, so it may pass through: unlike FR_UDF_HOME it
+        # cannot redirect the interpreter's stdlib.
+        self.assertEqual("1", env["FR_UDF_TRACEBACK"])
         self.assertEqual("/real/lib", env["LD_LIBRARY_PATH"])
         self.assertEqual("map-udf", env["FORKRUN_CLEANROOM"])
         self.assertEqual("/usr/bin:/bin", env["PATH"])
         self.assertEqual("/home/tester", env["HOME"])
         self.assertEqual("1", env["PYTHONNOUSERSITE"])
         for key in ("LD_PRELOAD", "PYTHONPATH", "FORKRUN_LIB",
-                    "FORKRUN_NO_UDF", "FORKRUN_CLEANROOM_NUMA"):
+                    "FORKRUN_NO_UDF", "FORKRUN_CLEANROOM_NUMA",
+                    "FR_UDF_HOME"):
             self.assertIn(key, removed)
 
 
@@ -451,6 +457,7 @@ class CliBoundaryTests(unittest.TestCase):
             "FORKRUN_CLEANROOM": "0",
             "PYTHONPATH": "/tmp/bogus-python",
             "LD_PRELOAD": "/tmp/bogus-preload.so",
+            "FR_UDF_HOME": "/tmp/bogus-home",
         })
         r = self._run("--wheel", os.path.join(self.tmp, "absent.whl"),
                       "--interpreter", sys.executable,
@@ -460,7 +467,8 @@ class CliBoundaryTests(unittest.TestCase):
         report = json.loads(r.stdout)
         removed = set(report["env_audit"]["removed"])
         self.assertTrue({"FORKRUN_LIB", "FORKRUN_CLEANROOM",
-                         "PYTHONPATH", "LD_PRELOAD"} <= removed, removed)
+                         "PYTHONPATH", "LD_PRELOAD", "FR_UDF_HOME"} <= removed,
+                        removed)
         self.assertTrue(any("does not exist" in p
                             for p in report["problems"]),
                         report["problems"])
