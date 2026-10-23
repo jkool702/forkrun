@@ -5,6 +5,7 @@ on:
     paths:
       - "python/**"
       - "forkrun_ring.c"
+      - "forkrun_cleanroom.c"
       - "forkrun_substrate.h"
       - "substratestubs.c"
       - "ring_loadables/forkrun_plugin.h"
@@ -22,6 +23,7 @@ on:
     paths:
       - "python/**"
       - "forkrun_ring.c"
+      - "forkrun_cleanroom.c"
       - "forkrun_substrate.h"
       - "substratestubs.c"
       - "ring_loadables/forkrun_plugin.h"
@@ -59,6 +61,56 @@ jobs:
             -w /src \
             fedora:latest \
             bash -c 'dnf install -y git bash-devel gcc make file diffutils python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
+
+  generic-acceptance:
+    needs: [build-wheel, generate-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: forkrun-wheel
+          path: wheelhouse
+      - name: Acceptance on Python ${{ matrix.py }}
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -c '
+              set -euo pipefail
+              WHL=$(ls /src/wheelhouse/*.whl | head -1)
+              # manylinux interpreter for this minor
+              PY=/opt/python/cp${{ matrix.py }}-cp${{ matrix.py }}/bin/python${{ matrix.py }}
+              if [ ! -x "$PY" ]; then
+                echo "no interpreter for ${{ matrix.py }}" >&2; exit 1
+              fi
+              $PY /src/tools/acceptance_installed_wheel.py \
+                --wheel "$WHL" --interpreter "$PY" --mode generic
+            '
+
+  udf-acceptance:
+    needs: [generate-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Per-minor UDF acceptance on Python ${{ matrix.py }}
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -v /tmp/blobcheck 2>/dev/null || true
+            -w /src \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash /src/tools/ci_udf_acceptance.sh ${{ matrix.py }}
 
   sanitizer-asan-ubsan:    # W-REL1/R6: ASan+UBSan legs — ADVISORY for v3.6.0
     # (continue-on-error: red here never blocks the tag) flipping to
