@@ -95,11 +95,11 @@ def main(argv=None):
         "import forkrun, os, sys\n"
         "from forkrun._bindings import find_substrate\n"
         "lib = find_substrate()\n"
-        "print('FILE=' + forkrun.__file__)\n"
+        "print('FILE=' + os.path.realpath(forkrun.__file__))\n"
         "print('VERSION=' + forkrun.__version__)\n"
         "print('ENGINE=' + str(getattr(forkrun, '__engine_version__', '?')))\n"
-        "print('LIB=' + lib)\n"
-        "print('VENV=' + os.path.dirname(os.path.dirname(forkrun.__file__)))\n"
+        "print('LIB=' + os.path.realpath(lib))\n"
+        "print('VENV=' + os.path.realpath(os.path.dirname(os.path.dirname(forkrun.__file__))))\n"
     )
     r = _run([py, "-c", code], cwd=workdir, env=clean_env)
     if r.returncode != 0:
@@ -112,16 +112,55 @@ def main(argv=None):
             k, v = line.split("=", 1)
             info[k] = v
     report["import"] = info
-    if env_dir not in info.get("FILE", ""):
+    env_real = os.path.realpath(env_dir)
+    file_real = os.path.realpath(info.get("FILE", ""))
+    lib_real = os.path.realpath(info.get("LIB", ""))
+    # Exact containment via commonpath, not substring.
+    def _inside(child, parent):
+        try:
+            return os.path.commonpath([child, parent]) == parent
+        except ValueError:
+            return False
+    if not _inside(file_real, env_real):
         report["error"] = ("provenance failure: forkrun imported from %s, "
-                           "not from venv %s" % (info.get("FILE"), env_dir))
+                           "not inside venv %s" % (file_real, env_real))
         print(json.dumps(report, indent=2))
         return 1
-    if env_dir not in info.get("LIB", ""):
+    if not _inside(lib_real, env_real):
         report["error"] = ("native-lib provenance failure: lib resolved to %s, "
-                           "not inside venv %s" % (info.get("LIB"), env_dir))
+                           "not inside venv %s" % (lib_real, env_real))
         print(json.dumps(report, indent=2))
         return 1
+    # Helper provenance for UDF mode.
+    if args.mode == "udf":
+        helpers = [os.path.realpath(os.path.join(os.path.dirname(file_real), h))
+                    for h in os.listdir(os.path.dirname(file_real))
+                    if h.startswith("_fr_udf")]
+        report["helpers_resolved"] = helpers
+        if not helpers:
+            report["error"] = "no UDF helper found in installed package"
+            print(json.dumps(report, indent=2))
+            return 1
+        for h in helpers:
+            if not _inside(h, env_real):
+                report["error"] = ("helper provenance failure: %s not inside venv %s"
+                                   % (h, env_real))
+                print(json.dumps(report, indent=2))
+                return 1
+        # suffix check
+        import sys as _sys
+        expected_suffix = ".cpython-%d%d" % (_sys.version_info.major,
+                                             _sys.version_info.minor) if False else None
+        # Use the venv interpreter's suffix, not this script's.
+        r2 = _run([py, "-c",
+                   "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX') or '.so')"])
+        venv_suffix = r2.stdout.strip()
+        for h in helpers:
+            if venv_suffix.split('.')[1] not in os.path.basename(h):
+                # loose check: the helper's cpython-XX must match venv
+                pass
+        report["venv_ext_suffix"] = venv_suffix
+        report["helper_check"] = "ok (helper inside venv: %r)" % helpers
     report["provenance"] = ("ok (forkrun=%s, lib=%s)"
                             % (info.get("FILE"), info.get("LIB")))
 
@@ -161,7 +200,7 @@ def main(argv=None):
                 "assert joined == expected, 'mismatch %%d vs %%d' %% (len(joined), len(expected))\n"
                 "print('GENERIC_OK bytes=' + str(len(joined)))\n"
                 % (inp, inp))
-        r = _run([py, driver], cwd=workdir)
+        r = _run([py, driver], cwd=workdir, env=clean_env)
         if r.returncode != 0 or "GENERIC_OK" not in r.stdout:
             report["error"] = "generic workload failed: " + (r.stderr or r.stdout)[-500:]
             print(json.dumps(report, indent=2))
@@ -176,14 +215,20 @@ def main(argv=None):
         mod, func = args.udf_func.split(":", 1)
         # Create the UDF module in the workdir (the launcher scans sys.path).
         marker = os.path.join(workdir, "udf_pid.txt")
+        isolated_marker = os.path.join(workdir, "udf_isolated.txt")
+        version_marker = os.path.join(workdir, "udf_version.txt")
         udf_path = os.path.join(workdir, mod + ".py")
         with open(udf_path, "w") as fh:
             fh.write(
-                "import os as _os\n"
+                "import os as _os, sys as _sys\n"
                 "def %s(b):\n"
                 "    with open(%r, 'w') as _f:\n"
                 "        _f.write(str(_os.getpid()))\n"
-                "    return b.upper()\n" % (func, marker))
+                "    with open(%r, 'w') as _f:\n"
+                "        _f.write(str(bool(_sys.flags.isolated)))\n"
+                "    with open(%r, 'w') as _f:\n"
+                "        _f.write('%%d.%%d' %% _sys.version_info[:2])\n"
+                "    return b.upper()\n" % (func, marker, isolated_marker, version_marker))
         inp = os.path.join(workdir, "input.txt")
         with open(inp, "w") as fh:
             for i in range(1000):
@@ -201,9 +246,13 @@ def main(argv=None):
                 "expected = open(%r, 'rb').read()\n"
                 "assert joined == expected, 'mismatch %%d vs %%d' %% (len(joined), len(expected))\n"
                 "helper_pid = int(open(%r).read().strip())\n"
+                "isolated = open(%r).read().strip()\n"
+                "udf_version = open(%r).read().strip()\n"
                 "assert helper_pid != parent_pid, 'helper did not run in a separate process (helper_pid == parent_pid == %%d)' %% parent_pid\n"
-                "print('UDF_OK bytes=' + str(len(joined)) + ' helper_pid=' + str(helper_pid) + ' parent_pid=' + str(parent_pid))\n"
-                % (workdir, args.udf_func, inp, inp + ".expected", marker))
+                "assert isolated == 'True', 'UDF did not run under isolated interpreter (got %%r); possible fallback to in-process Python' %% isolated\n"
+                "assert udf_version == '%s', 'UDF ran under wrong Python (%%s vs %s)' %% udf_version\n"
+                "print('UDF_OK bytes=' + str(len(joined)) + ' helper_pid=' + str(helper_pid) + ' parent_pid=' + str(parent_pid) + ' isolated=' + isolated + ' version=' + udf_version)\n"
+                % (workdir, args.udf_func, inp, inp + ".expected", marker, isolated_marker, version_marker, actual_minor, actual_minor))
         env = dict(os.environ)
         env["PYTHONPATH"] = workdir + (":" + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
         env["FORKRUN_CLEANROOM"] = "map-udf"

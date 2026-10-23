@@ -955,6 +955,29 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
         return UDF_SETUP_INVALID;
     }
 
+    /* auditwheel strips the helper's libpython DT_NEEDED (manylinux policy),
+     * so pre-load libpython with RTLD_GLOBAL before ANY dlopen of the helper
+     * (including the disposable probe, which uses RTLD_LOCAL and needs the
+     * global symbols to resolve). Without this, the probe fails and the UDF
+     * route falls back to in-process Python, which the acceptance harness
+     * must not accept. */
+    {
+        char _lp[128];
+        snprintf(_lp, sizeof(_lp), "libpython%d.%d.so.1.0",
+                 caller_maj, caller_min);
+        void *_lh = dlopen(_lp, RTLD_NOW | RTLD_GLOBAL);
+        if (!_lh) {
+            snprintf(_lp, sizeof(_lp), "libpython%d.%d.so",
+                     caller_maj, caller_min);
+            _lh = dlopen(_lp, RTLD_NOW | RTLD_GLOBAL);
+        }
+        if (!_lh) {
+            fprintf(stderr, "forkrun-cleanroom: dlopen libpython (%s): %s\n",
+                    _lp, dlerror());
+            return UDF_SETUP_GENERIC;
+        }
+    }
+
     /* (1) Disposable probe first, mirroring the plugin path: dlopen
      * runs ELF constructors, and a constructor that crashes or hangs
      * must not take the launcher with it.
@@ -1121,6 +1144,26 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
      * The DISPOSABLE PROBE at the dlopen above keeps RTLD_LOCAL: it is
      * a throwaway child whose only job is to prove the artifact loads.
      */
+    /* auditwheel strips the helper's libpython DT_NEEDED (manylinux policy),
+     * so the repaired wheel's helper no longer pulls libpython in itself.
+     * Pre-load libpython with RTLD_GLOBAL so the helper's undefined Python
+     * symbols resolve at dlopen time. Without this, dlopen of the repaired
+     * helper fails and the UDF route silently falls back to in-process
+     * Python, which the acceptance harness must not accept. */
+    char _libpy[128];
+    snprintf(_libpy, sizeof(_libpy), "libpython%d.%d.so.1.0",
+             caller_maj, caller_min);
+    void *_lph = dlopen(_libpy, RTLD_NOW | RTLD_GLOBAL);
+    if (!_lph) {
+        snprintf(_libpy, sizeof(_libpy), "libpython%d.%d.so",
+                 caller_maj, caller_min);
+        _lph = dlopen(_libpy, RTLD_NOW | RTLD_GLOBAL);
+    }
+    if (!_lph) {
+        fprintf(stderr, "forkrun-cleanroom: dlopen libpython (%s): %s\n",
+                _libpy, dlerror());
+        return UDF_SETUP_GENERIC;
+    }
     hu = dlopen(helper_path, RTLD_NOW | RTLD_GLOBAL);
     if (!hu) {
         fprintf(stderr, "forkrun-cleanroom: dlopen UDF helper: %s\n",
