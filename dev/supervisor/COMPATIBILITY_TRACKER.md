@@ -64,52 +64,103 @@ Supported minors: 3.10, 3.11, 3.12, 3.13, 3.14, 3.15 (GIL only).
 Historical: all six minors measured (3.15 was rc2; now stable 3.15.1 available).
 
 Gaps:
-- Version-matrix now covers 3.10–3.15, but the generic-substrate wheel lane
-  runs helper-dependent tests against a helper-less wheel; needs a separate
-  helper lane (WO-COMPAT-04 open).
-- Python CI run 39862126756 red: matrix cells 3.10, 3.12-3.15 fail;
-  3.11 in progress; python-v0 failed. Failures include
-  `test_helper_is_present_for_this_interpreter`, capability-dispatch,
-  NUMA/helper-death, release-check/benchmark, and a `KeyboardInterrupt`
-  in `_signals.py` during `test_teardown_interrupt.py`. Not all are
-  compatibility regressions; needs diagnosis.
+- Version-matrix (run 39898594446) remains red for 3.10 and 3.12-3.15;
+  3.11 was still in progress when this entry was written. Documented
+  cause: that lane installs the GENERIC wheel, which carries no per-minor
+  helper, so helper-dependent tests fail there. The per-minor helper lane
+  now exists as the UDF acceptance lane (§4); version-matrix still
+  installs the generic wheel only. Tracked separately, NOT part of the
+  acceptance claim.
+- `python-v0` in the same run is red as well: that job builds the
+  substrate but not the per-minor UDF helper, so the source-tree suite
+  reports helper-dependent (and some environment-sensitive cleanroom/bench)
+  failures, then the known pre-existing `KeyboardInterrupt` inside
+  `_signals.py` during `test_teardown_interrupt.py` aborts the run
+  (exit 130). The same suite passes locally from `python/` with the
+  helper built (1587 tests, OK, 2 skipped); not caused by the acceptance
+  changes.
 - Free-threaded explicitly refused (correct, keep).
 
 ## 4. Release wheels (WO-COMPAT-05)
 
 Generic substrate wheel: builds in manylinux_2_28 (glibc 2.28), tagged
-`manylinux_2_28_x86_64`, py3-none. Validated locally (dist/).
+`manylinux_2_28_x86_64`, py3-none. Installed and exercised on all six
+minors by the generic-acceptance lane below.
 
 Per-minor UDF wheels: `tools/wheel_matrix.py` orchestration exists with
-fail-closed rules (no substitution, no reuse, strict mode). Shared CPython
-3.10-3.15 built with `--enable-shared` in manylinux_2_28; all six per-minor
-wheels build and validate by tag (in-container). The remaining blocker is
-runtime, not build: `auditwheel repair` strips the `libpython` DT_NEEDED
-dependency, so the released helper route is unvalidated (WO-COMPAT-05 open).
-Smoke test is shallow (import + presence only); no real UDF workload exercised.
+fail-closed rules (no substitution, no reuse, strict mode). Each UDF cell
+source-builds the pinned shared CPython, builds the per-minor helper and
+the launcher, builds an intermediate `linux_x86_64` wheel, and lets
+`auditwheel repair` set the manylinux floor. `auditwheel` strips the
+helper's libpython DT_NEEDED; the launcher loads the caller's libpython
+and the helper resolves its symbols through it.
 
-Status: FUNCTIONALLY VALIDATED (3.14). All six per-minor wheels build and
-validate by tag in manylinux_2_28. auditwheel repair strips the libpython
-DT_NEEDED dependency, but the repaired helper still resolves libpython at
-runtime via the system linker (libpython is provided by the Python install).
-Acceptance test (tools/acceptance_installed_wheel.py) confirms UDF_OK on the
-repaired 3.14 wheel (bytes=8890). Remaining: run the same acceptance on
-3.10-3.13 and 3.15 (WO-COMPAT-05 open until all six pass).
+Status: **ENFORCED** (2026-10-23, CI run
+[39898594446](https://github.com/jkool702/forkrun/actions/runs/39898594446),
+PR #585, SHA `2b5f62f0`). Both lanes pass on every supported minor:
+
+| lane | 3.10 | 3.11 | 3.12 | 3.13 | 3.14 | 3.15 |
+|---|---|---|---|---|---|---|
+| generic wheel, installed, real `map()` | PASS | PASS | PASS | PASS | PASS | PASS |
+| per-minor UDF wheel, installed, real UDF | PASS | PASS | PASS | PASS | PASS | PASS |
+
+Per-cell UDF evidence (from each job's JSON report):
+- Pinned shared CPython actually run: 3.10.22, 3.11.17, 3.12.15,
+  3.13.17, 3.14.9, 3.15.1.
+- Repaired wheel: `forkrun-0.17.0-cpXXX-cpXXX-manylinux_2_28_x86_64.whl`;
+  `wheel_matrix --validate-wheel` agrees with the tag for all six.
+- Every cell: `isolated=True`, two helper PIDs distinct from the
+  driver's PID, 40 UDF invocations, byte-exact 38,890-byte output.
+- Provenance: every required installed file is SHA-256-identical to its
+  wheel member, and the installed helper suffix equals the interpreter's
+  `EXT_SUFFIX`.
+
+Loader-path note: `tools/ci_udf_acceptance.sh::build_cpython` exports
+`$PREFIX/lib` BEFORE the first execution of the freshly built shared
+interpreter. The pre-fix run (39896998145) failed 5/6 cells with
+`libpython3.X.so.1.0: cannot open shared object file` because validation
+ran before `run_one` set the path. Validation also reads
+`/proc/self/maps` and requires the mapped libpython to be the prefix's
+own file, so a same-soname library elsewhere cannot produce a pass.
+
+Negative coverage (65 tests, all passing locally):
+`python/tests/test_acceptance_harness.py` (42),
+`test_cleanroom_libpython.py` (4), `test_udf_version_barrier.py` (19)
+cover missing `--udf-func`, wrong minor/interpreter, malformed/missing
+wheel, wrong wheel contents (helper absent, wrong suffix, wrong ABI,
+path escape), provenance mismatch, hostile env (`FR_UDF_HOME`,
+`FORKRUN_*`, `PYTHON*`, `LD_PRELOAD`, `LD_AUDIT`), unresolved libpython,
+and a false UDF-route success (same PID, non-isolated, stale nonce,
+missing marker, self-reported PID).
+
+Local evidence (no Docker; host Python 3.14.7):
+- Fresh shared CPython 3.14.9 at a non-system prefix: interpreter
+  validation, helper, substrate/launcher and raw wheel built; stopped
+  only at `auditwheel repair` because the host glibc is newer than any
+  manylinux tag (CI performs this step in manylinux_2_28).
+- With the prefix loader path validation passes; without it the same
+  interpreter starts on `/usr/lib64/libpython3.14.so.1.0` (3.14.7) and
+  the maps assertion rejects it.
+- Hostile `FR_UDF_HOME=/nonexistent`: removed in `env_audit`, UDF run
+  still isolated and byte-exact.
+- Full suite: 1587 tests, OK, 2 skipped.
 
 ## 5. CI wiring (WO-COMPAT-06)
 
 Workflows present: bashcompat-smoke, bash-suite, forkrun_release, python-check,
 sanitizer-freshness, sh-format, shim-check, static-analysis, idl-check.
-Triggers: push/PR to `main` only. Feature branches (NEW/REFACTOR*) do not
-trigger. PR #585 opened to observe checks.
+Triggers: `python-check.yml` runs on pushes to `main` and on pull requests
+whose BASE is `main`, filtered by paths (the acceptance-critical tools are
+listed in both filters); `workflow_dispatch` is also present. Feature-branch
+pushes alone do not match the `push` filter, but PR #585 (base `main`) runs
+the workflow on every branch update.
 
-Status (run 39862126642+): bashcompat-smoke green (7 jobs incl. canary-versions
-and glibc-floor); shim-check, idl-check, static-analysis green; build-wheel green.
-bash-suite red: min-heap ordering test (run 39862126718) — recurring, classified
-as separate item (passes locally). sh-format red: twin-file mismatch (run
-39862126671) — pre-existing on baseline. python-check red: matrix cells 3.10,
-3.12-3.15 fail (run 39862126756); 3.11 in progress; helper-dependent tests
-mismatch + KeyboardInterrupt in _signals.py. sanitizer-asan-ubsan advisory, red.
+Status (run 39898594446, SHA `2b5f62f0`): build-wheel, six
+generic-acceptance and six udf-acceptance cells green; see §4.
+`python-v0` red: helper-less source-tree suite failures plus the known
+`KeyboardInterrupt` in `_signals.py` during `test_teardown_interrupt.py`
+(exit 130). version-matrix 3.10 and 3.12-3.15 red; 3.11 still in
+progress (§3). sanitizer-asan-ubsan advisory, red (pre-existing).
 
 ## 6. Linux kernel / GNU utilities (WO-COMPAT-01 audit)
 
@@ -138,7 +189,8 @@ No change required; recorded for completeness.
   (bash 4.4) and glibc 2.43 (bash 5.3).
 - Rebuilt Python substrate in manylinux_2_28 (max GLIBC_2.28).
 - Built shared CPython 3.10-3.15 in manylinux_2_28; all six per-minor wheels
-  built and validated by tag. auditwheel repair strips libpython (documented blocker).
+  built and validated by tag. `auditwheel` strips the helper's DT_NEEDED
+  libpython; the launcher supplies it at runtime (now exercised by the UDF lane).
 - Added tools/check_glibc_versions.py (per-arch floors). Both canary + glibc gates green.
 - Python suite: 1541 tests, 1 pre-existing dirty-tree failure (now resolved by commit),
   2 skipped. wheel_matrix tests 18/18.
@@ -149,3 +201,15 @@ No change required; recorded for completeness.
   sh-format red: twin-file mismatch (run 39862126671, pre-existing).
   python-check red: matrix cells 3.10, 3.12-3.15 (run 39862126756).
   sanitizer-asan-ubsan advisory, red.
+- Acceptance work (commits ab244841..2b5f62f0): rewrote
+  `tools/acceptance_installed_wheel.py` with `--expect-minor`, wheel
+  tag/member/METADATA inspection, SHA-256 provenance, a sanitized child
+  environment, and nonce/PID/version markers; rewrote its 42 negative
+  tests; added the libpython-refusal tests (4) and the launcher version
+  barrier tests (19).
+- Fixed the UDF lane's loader-path ordering and added the
+  `/proc/self/maps` proof; dropped `FR_UDF_HOME` from the acceptance
+  child env (commit `2b5f62f0`).
+- Evidence (run 39898594446): six generic + six UDF cells green, with
+  pinned patches and per-cell facts in §4. Local full suite: 1587 tests,
+  OK, 2 skipped.
