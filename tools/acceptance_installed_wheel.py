@@ -54,7 +54,12 @@ def main(argv=None):
     if os.path.exists(env_dir):
         import shutil
         shutil.rmtree(env_dir)
-    r = _run([interp, "-m", "venv", env_dir])
+    interp_lib = os.path.join(os.path.dirname(os.path.dirname(interp)), "lib")
+    venv_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", workdir),
+                "LANG": os.environ.get("LANG", "C.UTF-8"),
+                "LD_LIBRARY_PATH": interp_lib}
+    r = _run([interp, "-m", "venv", env_dir], env=venv_env)
     if r.returncode != 0:
         report["error"] = "venv creation failed: " + r.stderr[-500:]
         print(json.dumps(report, indent=2))
@@ -88,9 +93,18 @@ def main(argv=None):
 
     # 3. Prove import provenance: forkrun.__file__ must be inside the venv.
     # Clear FORKRUN_LIB so the resolver must use the installed library.
-    clean_env = dict(os.environ)
-    clean_env.pop("FORKRUN_LIB", None)
-    clean_env.pop("FORKRUN_CLEANROOM", None)
+    # The target interpreter may need its lib directory on the loader path
+    # (e.g. a shared CPython in a non-standard prefix). Derive it from the
+    # interpreter executable explicitly rather than inheriting an ambient
+    # LD_LIBRARY_PATH.
+    interp_lib = os.path.join(os.path.dirname(os.path.dirname(interp)),
+                              "lib")
+    clean_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", workdir),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LD_LIBRARY_PATH": interp_lib,
+    }
     code = (
         "import forkrun, os, sys\n"
         "from forkrun._bindings import find_substrate\n"
@@ -204,10 +218,13 @@ def main(argv=None):
                 "assert joined == expected, 'mismatch %%d vs %%d' %% (len(joined), len(expected))\n"
                 "print('GENERIC_OK bytes=' + str(len(joined)))\n"
                 % (inp, inp))
+        interp_lib = os.path.join(os.path.dirname(os.path.dirname(interp)),
+                                  "lib")
         generic_env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": os.environ.get("HOME", workdir),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "LD_LIBRARY_PATH": interp_lib,
         }
         r = _run([py, driver], cwd=workdir, env=generic_env)
         if r.returncode != 0 or "GENERIC_OK" not in r.stdout:
@@ -264,11 +281,11 @@ def main(argv=None):
                 % (workdir, args.udf_func, inp, inp + ".expected", marker, isolated_marker, version_marker, actual_minor, actual_minor))
         # Controlled environment: only the workdir on PYTHONPATH, no
         # inherited PYTHONPATH/LD_* overrides.
-        # The helper needs libpython at runtime (provided by the Python
-        # install). In a normal consumer environment libpython is on the
-        # default linker path; in the manylinux test container it lives
-        # beside the interpreter, so add that directory explicitly rather
-        # than inheriting an ambient LD_LIBRARY_PATH.
+        # The venv's Python (and the cleanroom launcher) need libpython
+        # from the interpreter's own lib directory. In a normal consumer
+        # environment libpython is on the default linker path; here it is
+        # derived explicitly from the requested interpreter rather than
+        # inherited from the runner.
         interp_lib = os.path.join(os.path.dirname(os.path.dirname(interp)),
                                   "lib")
         env = {

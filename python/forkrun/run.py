@@ -1514,6 +1514,20 @@ def _caller_version_argv():
         return []
 
 
+def _caller_libpython_argv():
+    """``["--libpython=PATH"]`` resolving THIS interpreter's libpython.
+
+    Resolves via sysconfig so the launcher loads the exact library the
+    interpreter is built against, rather than searching by name (which
+    can pick up a wrong or absent library). Returns [] if unresolved.
+    """
+    try:
+        from ._udf import caller_libpython_arg
+        r = caller_libpython_arg()
+        return r if r else []
+    except Exception:
+        return []
+
 def _record_compat_refusal(code, detail, helper_fp=None):
     """Remember a CONCLUSIVE incompatibility against the helper artifact.
 
@@ -2077,6 +2091,7 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                  "--udf", udf_module,
                  "--udf-attr", udf_attr]
         argv += _caller_version_argv()
+        argv += _caller_libpython_argv()
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
     elif plugin_path is None and plugin_func is None:
@@ -2990,6 +3005,7 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                  "--udf", udf_module,
                  "--udf-attr", udf_attr]
         argv += _caller_version_argv()
+        argv += _caller_libpython_argv()
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
     else:

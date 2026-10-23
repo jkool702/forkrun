@@ -79,6 +79,29 @@ def caller_version_arg():
     return "--caller-version=%d.%d" % _UDF_VERSION
 
 
+def caller_libpython_arg():
+    """``--libpython=PATH`` resolving THIS interpreter's libpython.
+
+    Resolves via sysconfig so the launcher loads the exact library the
+    interpreter is built against, rather than searching by name (which
+    can pick up a wrong or absent library). Returns [] if unresolved.
+    """
+    try:
+        import sysconfig
+        libdir = sysconfig.get_config_var("LIBDIR")
+        ldl = sysconfig.get_config_var("LDLIBRARY") or sysconfig.get_config_var("LIBRARY")
+        if libdir and ldl:
+            cand = os.path.join(libdir, ldl)
+            if os.path.exists(cand):
+                return ["--libpython=%s" % cand]
+        # Fallback: LIBRARY may be just "libpython3.10.so.1.0" without dir.
+        if ldl and os.path.isabs(ldl) and os.path.exists(ldl):
+            return ["--libpython=%s" % ldl]
+    except Exception:
+        pass
+    return []
+
+
 def helper_fingerprint(path):
     """Metadata fingerprint of a helper artifact, or None if unavailable.
 

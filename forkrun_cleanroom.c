@@ -207,6 +207,7 @@ struct opts {
      * launcher cannot know which interpreter started it. Required for
      * UDF mode; see setup_udf_helper's version gate. */
     const char *caller_version;
+    const char *libpython_path;
     int workers;
     int lines;
     int bytes;
@@ -921,7 +922,8 @@ static void *sym_owned_by(void *handle, const char *name,
 }
 
 static int setup_udf_helper(const char *helper_path, const char *roots_spec,
-                            const char *caller_version, int source_fd)
+                            const char *caller_version, int source_fd,
+                            const char *libpython_path)
 {
     void *hu;
     fn_udf_init init_fn;
@@ -962,19 +964,31 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
      * route falls back to in-process Python, which the acceptance harness
      * must not accept. */
     {
-        char _lp[128];
-        snprintf(_lp, sizeof(_lp), "libpython%d.%d.so.1.0",
-                 caller_maj, caller_min);
-        void *_lh = dlopen(_lp, RTLD_NOW | RTLD_GLOBAL);
-        if (!_lh) {
-            snprintf(_lp, sizeof(_lp), "libpython%d.%d.so",
+        /* Prefer an explicitly provided libpython path (from the Python
+         * frontend's sysconfig), falling back to name-based resolution. */
+        void *_lh = NULL;
+        char _lp[512];
+        if (libpython_path && libpython_path[0]) {
+            _lh = dlopen(libpython_path, RTLD_NOW | RTLD_GLOBAL);
+            if (!_lh) {
+                fprintf(stderr, "forkrun-cleanroom: dlopen libpython (%s): %s\n",
+                        libpython_path, dlerror());
+                return UDF_SETUP_GENERIC;
+            }
+        } else {
+            snprintf(_lp, sizeof(_lp), "libpython%d.%d.so.1.0",
                      caller_maj, caller_min);
             _lh = dlopen(_lp, RTLD_NOW | RTLD_GLOBAL);
-        }
-        if (!_lh) {
-            fprintf(stderr, "forkrun-cleanroom: dlopen libpython (%s): %s\n",
-                    _lp, dlerror());
-            return UDF_SETUP_GENERIC;
+            if (!_lh) {
+                snprintf(_lp, sizeof(_lp), "libpython%d.%d.so",
+                         caller_maj, caller_min);
+                _lh = dlopen(_lp, RTLD_NOW | RTLD_GLOBAL);
+            }
+            if (!_lh) {
+                fprintf(stderr, "forkrun-cleanroom: dlopen libpython (%s): %s\n",
+                        _lp, dlerror());
+                return UDF_SETUP_GENERIC;
+            }
         }
     }
 
@@ -2472,6 +2486,10 @@ int main(int argc, char **argv) {
             o.caller_version = argv[i] + 17;
         else if (!strcmp(argv[i], "--caller-version") && i + 1 < argc)
             o.caller_version = argv[++i];
+        else if (!strcmp(argv[i], "--libpython") && i + 1 < argc)
+            o.libpython_path = argv[++i];
+        else if (!strncmp(argv[i], "--libpython=", 12))
+            o.libpython_path = argv[i] + 12;
         else if (!strcmp(argv[i], "--workers") && i + 1 < argc) o.workers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lines") && i + 1 < argc)  o.lines = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bytes") && i + 1 < argc)  o.bytes = atoi(argv[++i]);
@@ -2901,7 +2919,8 @@ int main(int argc, char **argv) {
         }
         {
             int urc = setup_udf_helper(o.udf_helper, o.udf_roots,
-                                       o.caller_version, o.source_fd);
+                                       o.caller_version, o.source_fd,
+                                       o.libpython_path);
             if (urc == UDF_SETUP_VERIFY)      return 80;
             if (urc == UDF_SETUP_INVALID)     return 82;
             if (urc == UDF_SETUP_PROBE_HANG)  return 81;
