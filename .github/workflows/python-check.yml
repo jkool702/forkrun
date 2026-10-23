@@ -17,6 +17,7 @@ on:
       - "tools/check_glibc_versions.py"
       - "tools/gen_python_matrix.py"
       - "tools/acceptance_installed_wheel.py"
+      - "tools/ci_udf_acceptance.sh"
       - ".github/workflows/python-check.yml"
   pull_request:
     branches: [ "main" ]
@@ -35,6 +36,7 @@ on:
       - "tools/check_glibc_versions.py"
       - "tools/gen_python_matrix.py"
       - "tools/acceptance_installed_wheel.py"
+      - "tools/ci_udf_acceptance.sh"
       - ".github/workflows/python-check.yml"
 
   workflow_dispatch:
@@ -85,13 +87,14 @@ jobs:
             bash -c '
               set -euo pipefail
               WHL=$(ls /src/wheelhouse/*.whl | head -1)
-              # manylinux interpreter for this minor
-              PY=/opt/python/cp${{ matrix.py }}-cp${{ matrix.py }}/bin/python${{ matrix.py }}
+              # manylinux interpreter for this minor: 3.10 -> cp310-cp310
+              PY=/opt/python/${{ matrix.tag }}-${{ matrix.tag }}/bin/python${{ matrix.py }}
               if [ ! -x "$PY" ]; then
-                echo "no interpreter for ${{ matrix.py }}" >&2; exit 1
+                echo "no interpreter for ${{ matrix.py }} at $PY" >&2; exit 1
               fi
-              $PY /src/tools/acceptance_installed_wheel.py \
-                --wheel "$WHL" --interpreter "$PY" --mode generic
+              "$PY" /src/tools/acceptance_installed_wheel.py \
+                --wheel "$WHL" --interpreter "$PY" --mode generic \
+                --expect-minor "${{ matrix.py }}"
             '
 
   udf-acceptance:
@@ -107,10 +110,9 @@ jobs:
         run: |
           docker run --rm \
             -v $PWD:/src \
-            -v /tmp/blobcheck 2>/dev/null || true
             -w /src \
             quay.io/pypa/manylinux_2_28_x86_64 \
-            bash /src/tools/ci_udf_acceptance.sh ${{ matrix.py }}
+            bash /src/tools/ci_udf_acceptance.sh "${{ matrix.py }}"
 
   sanitizer-asan-ubsan:    # W-REL1/R6: ASan+UBSan legs — ADVISORY for v3.6.0
     # (continue-on-error: red here never blocks the tag) flipping to

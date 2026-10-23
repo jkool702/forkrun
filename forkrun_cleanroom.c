@@ -962,7 +962,17 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
      * (including the disposable probe, which uses RTLD_LOCAL and needs the
      * global symbols to resolve). Without this, the probe fails and the UDF
      * route falls back to in-process Python, which the acceptance harness
-     * must not accept. */
+     * must not accept.
+     *
+     * A FAILED preload is NOT an immediate fallback. The version barrier
+     * must still run, because a caller that declares a minor with no
+     * matching libpython can be a MISMATCH -- and returning 71 here hides
+     * that behind a loader error. The probe below can often still read the
+     * helper's build stamp (test helpers and un-repaired local builds keep
+     * their DT_NEEDED, and a stripped helper may load lazily), so let it
+     * try; the comparison then reports 80 when the versions disagree, and
+     * only a MATCHING helper with no usable libpython falls back. */
+    int libpython_loaded = 0;
     {
         /* Prefer an explicitly provided libpython path (from the Python
          * frontend's sysconfig), falling back to name-based resolution. */
@@ -973,7 +983,8 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
             if (!_lh) {
                 fprintf(stderr, "forkrun-cleanroom: dlopen libpython (%s): %s\n",
                         libpython_path, dlerror());
-                return UDF_SETUP_GENERIC;
+            } else {
+                libpython_loaded = 1;
             }
         } else {
             snprintf(_lp, sizeof(_lp), "libpython%d.%d.so.1.0",
@@ -987,7 +998,8 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
             if (!_lh) {
                 fprintf(stderr, "forkrun-cleanroom: dlopen libpython (%s): %s\n",
                         _lp, dlerror());
-                return UDF_SETUP_GENERIC;
+            } else {
+                libpython_loaded = 1;
             }
         }
     }
@@ -1027,7 +1039,14 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
             struct udf_probe_result r;
             r.status = 1; r.pad = 0;
             r.version.major = 0; r.version.minor = 0;
-            void *ph = dlopen(helper_path, RTLD_NOW | RTLD_LOCAL);
+            /* RTLD_LAZY only when libpython could not be preloaded: the
+             * helper's CPython references are then unresolved, and a lazy
+             * bind lets the probe call the (libpython-free) build-stamp
+             * function far enough to READ the version. Everything else
+             * keeps RTLD_NOW, which is the stronger check. */
+            void *ph = dlopen(helper_path,
+                              (libpython_loaded ? RTLD_NOW : RTLD_LAZY)
+                              | RTLD_LOCAL);
             if (ph) {
                 fr_udf_built_version_fn vf =
                     (fr_udf_built_version_fn)
@@ -1111,6 +1130,13 @@ static int setup_udf_helper(const char *helper_path, const char *roots_spec,
             return UDF_SETUP_VERIFY;
         }
     }
+
+    /* The version MATCHED, so this is not a barrier refusal (80) but a
+     * missing runtime dependency. Report the loader error already emitted
+     * above and fall back; loading the helper for real would fail the same
+     * way and the caller must not see a served-routes result. */
+    if (!libpython_loaded)
+        return UDF_SETUP_GENERIC;
 
     /* (2) Load for real.
      *

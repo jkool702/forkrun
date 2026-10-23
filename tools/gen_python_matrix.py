@@ -38,14 +38,27 @@ _ENV = {
 
 
 def build_matrix():
+    missing = [m for m in wheel_matrix.SUPPORTED_MINORS if m not in _ENV]
+    if missing:
+        raise SystemExit(
+            "no CI environment mapping for supported minor(s) %s; "
+            "add them to _ENV in tools/gen_python_matrix.py"
+            % ", ".join(missing))
+    extra = sorted(set(_ENV) - set(wheel_matrix.SUPPORTED_MINORS))
+    if extra:
+        raise SystemExit(
+            "CI environment mapping names unsupported minor(s) %s; "
+            "SUPPORTED_MINORS in tools/wheel_matrix.py is the only "
+            "support definition" % ", ".join(extra))
     include = []
     for minor in wheel_matrix.SUPPORTED_MINORS:
-        if minor not in _ENV:
-            raise SystemExit(
-                "no CI environment mapping for supported minor %s; "
-                "add it to _ENV in tools/gen_python_matrix.py" % minor)
         image, setup = _ENV[minor]
-        include.append({"py": minor, "image": image, "setup": setup})
+        include.append({"py": minor,
+                        # The manylinux interpreter directory uses a
+                        # different spelling from the version string:
+                        # 3.10 -> cp310-cp310, never cp3.10-cp3.10.
+                        "tag": wheel_matrix.minor_tag(minor),
+                        "image": image, "setup": setup})
     return {"include": include}
 
 

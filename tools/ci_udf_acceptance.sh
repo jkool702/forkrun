@@ -1,59 +1,247 @@
 #!/usr/bin/env bash
-# CI script: build shared CPython + per-minor UDF wheels + run acceptance.
-# Usage: ci_udf_acceptance.sh <minor>  (e.g. 3.10)  or "all"
+# CI script: build a shared CPython + per-minor UDF wheel, then prove the
+# INSTALLED wheel runs a real UDF through the cleanroom helper.
+#
+# Usage:
+#   tools/ci_udf_acceptance.sh <minor>     # e.g. 3.10
+#   tools/ci_udf_acceptance.sh all         # every supported minor
+#   tools/ci_udf_acceptance.sh --list      # the supported-minor set
+#
+# The supported-minor SET has exactly one definition:
+# tools/wheel_matrix.py::SUPPORTED_MINORS, read through `--list`. The
+# minor -> CPython patch table below is a MAPPING (which tarball to fetch),
+# not a second support list: it is checked against the one set and fails
+# loudly if a supported minor has no pinned patch.
 set -euo pipefail
-run_one() {
-  local minor="$1"
-  # Build shared CPython if not present.
-  if [ ! -x "/opt/pyshared/cp${minor/./}-cp${minor/./}/bin/python${minor}" ]; then
-    # Inline build (mirrors build_cpython.sh).
-    case "$minor" in
-      3.10) patch=3.10.22 ;; 3.11) patch=3.11.17 ;; 3.12) patch=3.12.15 ;;
-      3.13) patch=3.13.17 ;; 3.14) patch=3.14.9 ;; 3.15) patch=3.15.1 ;;
-    esac
-    prefix="/opt/pyshared/cp${minor/./}-cp${minor/./}"
-    if ! rpm -q openssl-devel >/dev/null 2>&1; then
-      dnf install -y -q openssl-devel bzip2-devel libffi-devel zlib-devel \
-        readline-devel sqlite-devel xz-devel >/dev/null 2>&1
-    fi
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd -- "$SCRIPT_DIR/.." && pwd)
+cd "$REPO"
+
+LIST_PYTHON=${LIST_PYTHON:-python3}
+PREFIX_ROOT=${PREFIX_ROOT:-/opt/pyshared}
+
+die() {
+  echo "ci_udf_acceptance: $*" >&2
+  exit 1
+}
+
+list_minors() {
+  command -v "$LIST_PYTHON" >/dev/null 2>&1 \
+    || die "cannot find '$LIST_PYTHON' to read the supported-minor list"
+  "$LIST_PYTHON" "$REPO/tools/wheel_matrix.py" --list
+}
+
+# Explicit mapping: minor -> pinned CPython source release. This is NOT
+# the support definition; a missing entry is a hard error, not a skip.
+patch_for_minor() {
+  case "$1" in
+    3.10) echo "3.10.22" ;;
+    3.11) echo "3.11.17" ;;
+    3.12) echo "3.12.15" ;;
+    3.13) echo "3.13.17" ;;
+    3.14) echo "3.14.9" ;;
+    3.15) echo "3.15.1" ;;
+    *) return 1 ;;
+  esac
+}
+
+minor_is_supported() {
+  # Capture first: `list_minors | grep -q` can SIGPIPE the producer, and
+  # `set -o pipefail` would then report a SUPPORTED minor as unsupported.
+  local supported
+  supported=$(list_minors) || return 1
+  grep -Fxq -- "$1" <<<"$supported"
+}
+
+install_build_deps() {
+  # bash-devel is required by the substrate; the rest are CPython's
+  # usual optional modules. rpm -q fails if ANY package is absent.
+  if ! rpm -q curl openssl-devel bzip2-devel libffi-devel zlib-devel \
+       readline-devel sqlite-devel xz-devel bash-devel >/dev/null 2>&1; then
+    dnf install -y -q curl openssl-devel bzip2-devel libffi-devel \
+      zlib-devel readline-devel sqlite-devel xz-devel bash-devel \
+      >/tmp/udf-dnf.log 2>&1 \
+      || { tail -n 80 /tmp/udf-dnf.log >&2; die "dnf install failed"; }
+  fi
+}
+
+# Sets PY (interpreter) and PREFIX for the requested minor. A cached
+# prefix is accepted only if it is EXACTLY the pinned patch and was built
+# shared -- a stale/different interpreter is a hard failure, never a
+# silent substitution.
+build_cpython() {
+  local minor="$1" patch prefix py tarball
+  patch=$(patch_for_minor "$minor") \
+    || die "no CPython patch pinned for supported minor $minor"
+  PREFIX="$PREFIX_ROOT/cp${minor/./}-cp${minor/./}"
+  py="$PREFIX/bin/python$minor"
+  if [ ! -x "$py" ]; then
+    install_build_deps
     cd /tmp
     tarball="Python-${patch}.tgz"
-    [ -f "$tarball" ] || curl -fsSL "https://www.python.org/ftp/python/${patch}/${tarball}" -o "$tarball"
+    if [ ! -f "$tarball" ]; then
+      curl -fsSL "https://www.python.org/ftp/python/${patch}/${tarball}" \
+        -o "$tarball" \
+        || die "could not download CPython ${patch}"
+    fi
     rm -rf "Python-${patch}"
     tar xzf "$tarball"
     cd "Python-${patch}"
-    ./configure --enable-shared --prefix="$prefix" >/tmp/cfg.log 2>&1
-    make -j"$(nproc)" >/tmp/make.log 2>&1
-    make install >/tmp/install.log 2>&1
+    ./configure --prefix="$PREFIX" --enable-shared \
+      --with-ensurepip=install >"/tmp/udf-configure-${minor}.log" 2>&1 \
+      || { tail -n 80 "/tmp/udf-configure-${minor}.log" >&2
+           die "configure failed for CPython ${patch}"; }
+    make -j"$(nproc)" >"/tmp/udf-make-${minor}.log" 2>&1 \
+      || { tail -n 80 "/tmp/udf-make-${minor}.log" >&2
+           die "make failed for CPython ${patch}"; }
+    make install >"/tmp/udf-install-${minor}.log" 2>&1 \
+      || { tail -n 80 "/tmp/udf-install-${minor}.log" >&2
+           die "make install failed for CPython ${patch}"; }
+    cd "$REPO"
   fi
-  export LD_LIBRARY_PATH="/opt/pyshared/cp${minor/./}-cp${minor/./}/lib:${LD_LIBRARY_PATH:-}"
-  PY="/opt/pyshared/cp${minor/./}-cp${minor/./}/bin/python${minor}"
-  cd /src
-  rm -rf build python/forkrun.egg-info
-  "$PY" -m pip install --quiet build auditwheel setuptools wheel
-  make -f Makefile.substrate udf-lib PYTHON="$PY"
-  rm -f python/forkrun/_forkrun_cleanroom
-  make -f Makefile.substrate cleanroom-launcher
-  rm -rf /src/dist/raw /src/dist/repaired
-  mkdir -p /src/dist/raw /src/dist/repaired
-  "$PY" setup.py bdist_wheel --dist-dir /src/dist/raw
-  RAW=$(ls /src/dist/raw/*.whl | head -1)
-  "$PY" -m auditwheel repair -w /src/dist/repaired "$RAW"
-  REPAIRED=$(ls /src/dist/repaired/*.whl | head -1)
-  echo "WHEEL=$REPAIRED"
-  rm -rf "/tmp/udfacc_${minor}" && mkdir -p "/tmp/udfacc_${minor}"
-  PYTHONPATH="/tmp/udfacc_${minor}" "$PY" tools/acceptance_installed_wheel.py \
-    --wheel "$REPAIRED" --interpreter "$PY" --mode udf \
-    --udf-func px_udf:up --workdir "/tmp/udfacc_${minor}"
+  [ -x "$py" ] || die "interpreter was not installed: $py"
+  "$py" - "$minor" "$patch" <<'PY' \
+    || die "interpreter at $py is not the pinned shared CPython"
+import sys
+import sysconfig
+
+minor, patch = sys.argv[1], sys.argv[2]
+want = tuple(int(part) for part in patch.split("."))
+got = sys.version_info[:3]
+if got != want:
+    raise SystemExit("interpreter is Python %s, expected %s"
+                     % (".".join(str(x) for x in got), patch))
+if "%d.%d" % got[:2] != minor:
+    raise SystemExit("interpreter minor %d.%d != requested %s"
+                     % (got[0], got[1], minor))
+if not sysconfig.get_config_var("Py_ENABLE_SHARED"):
+    raise SystemExit("interpreter is static; the UDF helper needs a "
+                     "shared libpython")
+PY
+  PY="$py"
 }
 
-if [ "${1:-all}" = "all" ]; then
-  for m in 3.10 3.11 3.12 3.13 3.14 3.15; do
-    run_one "$m"
-  done
-else
-  run_one "$1"
+run_one() {
+  local minor="$1" suffix helper raw_dir rep_dir log
+  local -a raw_wheels rep_wheels
+
+  echo "=== UDF acceptance: Python $minor ==="
+  build_cpython "$minor"
+  export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+  suffix=$("$PY" -c \
+    'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or "")')
+  [ -n "$suffix" ] || die "no EXT_SUFFIX for $minor"
+  if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    die "unusable interpreter for $minor"
+  fi
+  "$PY" -m pip install --quiet --disable-pip-version-check \
+    build auditwheel setuptools wheel \
+    || die "could not install build tools for $minor"
+
+  # THE STALENESS RULE: Makefile.substrate's udf-lib target has no
+  # interpreter stamp, so fr_udf.o (and any helper built by a previous
+  # minor) would be reused for the wrong interpreter. Remove them first;
+  # the suffix assertion below then proves what was actually built.
+  rm -f "$REPO/fr_udf.o" "$REPO"/python/forkrun/_fr_udf*.so
+  rm -rf "$REPO/build" "$REPO/python/forkrun.egg-info"
+  make -f "$REPO/Makefile.substrate" udf-lib \
+    PYTHON="$PY" PYCONFIG="$PY-config" \
+    >"/tmp/udf-helper-${minor}.log" 2>&1 \
+    || { tail -n 80 "/tmp/udf-helper-${minor}.log" >&2
+         die "UDF helper build failed for $minor"; }
+  helper="$REPO/python/forkrun/_fr_udf${suffix}"
+  [ -f "$helper" ] \
+    || die "helper build produced no _fr_udf${suffix} for $minor"
+  [ "$(basename "$helper")" = "_fr_udf${suffix}" ] \
+    || die "helper name does not carry this interpreter's suffix: $helper"
+
+  make -f "$REPO/Makefile.substrate" python-substrate \
+    >"/tmp/udf-substrate-${minor}.log" 2>&1 \
+    || { tail -n 80 "/tmp/udf-substrate-${minor}.log" >&2
+         die "python substrate/launcher build failed for $minor"; }
+  [ -f "$REPO/python/forkrun/libforkrun_python.so" ] \
+    || die "substrate .so missing after build"
+  [ -x "$REPO/python/forkrun/_forkrun_cleanroom" ] \
+    || die "cleanroom launcher missing after build"
+
+  raw_dir="$REPO/dist/udf/$minor/raw"
+  rep_dir="$REPO/dist/udf/$minor/repaired"
+  rm -rf "$REPO/dist/udf/$minor"
+  mkdir -p "$raw_dir" "$rep_dir"
+
+  # Build the INTERMEDIATE linux wheel, then let auditwheel decide the
+  # manylinux floor. Shipping the intermediate is not an option.
+  log="/tmp/udf-wheel-${minor}.log"
+  "$PY" setup.py bdist_wheel --dist-dir "$raw_dir" \
+    --plat-name linux_x86_64 >"$log" 2>&1 \
+    || { tail -n 80 "$log" >&2; die "wheel build failed for $minor"; }
+  shopt -s nullglob
+  raw_wheels=("$raw_dir"/*.whl)
+  shopt -u nullglob
+  [ "${#raw_wheels[@]}" -eq 1 ] \
+    || die "expected exactly one raw wheel for $minor, found ${#raw_wheels[@]}"
+
+  log="/tmp/udf-auditwheel-${minor}.log"
+  "$PY" -m auditwheel repair -w "$rep_dir" "${raw_wheels[0]}" \
+    >"$log" 2>&1 \
+    || { tail -n 80 "$log" >&2
+         die "auditwheel repair failed for $minor"; }
+  shopt -s nullglob
+  rep_wheels=("$rep_dir"/*.whl)
+  shopt -u nullglob
+  [ "${#rep_wheels[@]}" -eq 1 ] \
+    || die "expected exactly one repaired wheel for $minor, found ${#rep_wheels[@]}"
+  local repaired="${rep_wheels[0]}"
+
+  # The tag-vs-artifact rule has one authority; use it before installing.
+  "$PY" "$REPO/tools/wheel_matrix.py" --validate-wheel "$repaired" \
+    || die "repaired wheel failed tag/artifact validation: $repaired"
+  "$PY" - "$repaired" "$minor" "$REPO" <<'PY' \
+    || die "repaired wheel does not name the requested minor"
+import os
+import sys
+
+repo, wheel, minor = sys.argv[3], sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(repo, "tools"))
+import wheel_matrix
+problems = wheel_matrix.validate_wheel(wheel, minor)
+if problems:
+    for problem in problems:
+        sys.stderr.write("FAIL: %s\n" % (problem,))
+    raise SystemExit(1)
+PY
+
+  rm -rf "/tmp/udfacc_${minor}"
+  mkdir -p "/tmp/udfacc_${minor}"
+  "$PY" "$REPO/tools/acceptance_installed_wheel.py" \
+    --wheel "$repaired" --interpreter "$PY" --expect-minor "$minor" \
+    --mode udf --udf-func px_udf:up \
+    --workdir "/tmp/udfacc_${minor}" \
+    || die "installed-wheel UDF acceptance failed for $minor"
+
+  echo "=== UDF acceptance PASSED: Python $minor ($(basename "$repaired")) ==="
+}
+
+if [ "$#" -gt 1 ]; then
+  die "usage: $0 <minor>|all|--list"
 fi
-echo "ALL UDF ACCEPTANCE PASSED"
-EOF
-echo "created"
+target="${1:-all}"
+if [ "$target" = "--list" ]; then
+  list_minors
+  exit 0
+fi
+if [ "$target" != "all" ] && ! minor_is_supported "$target"; then
+  die "not a supported minor: $target (supported: $(list_minors | tr '\n' ' '))"
+fi
+
+if [ "$target" = "all" ]; then
+  while IFS= read -r minor; do
+    [ -n "$minor" ] || continue
+    run_one "$minor"
+  done < <(list_minors)
+  echo "ALL UDF ACCEPTANCE PASSED"
+else
+  run_one "$target"
+fi

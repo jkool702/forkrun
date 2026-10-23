@@ -1519,7 +1519,8 @@ def _caller_libpython_argv():
 
     Resolves via sysconfig so the launcher loads the exact library the
     interpreter is built against, rather than searching by name (which
-    can pick up a wrong or absent library). Returns [] if unresolved.
+    can pick up a wrong or absent library). Returns None if unresolved,
+    which every caller must treat as a refusal of the UDF route.
     """
     try:
         from ._udf import caller_libpython_arg
@@ -1527,6 +1528,36 @@ def _caller_libpython_argv():
         return r  # None if unresolved -> caller must decline route
     except Exception:
         return None
+
+def _udf_libpython_or_decline(route):
+    """Resolve libpython for the cleanroom UDF route, or decline it.
+
+    The launcher preloads the EXACT shared library this interpreter is
+    running against -- by path -- before it dlopen()s the helper.
+    Name-based lookup can silently bind a different libpython (another
+    minor, or a stale one earlier on the loader path), so "unresolved"
+    is a REFUSAL, not a warning plus a guess.
+
+    Returns the argv fragment, or None after warning. The two callers
+    apply the route-specific consequence of the same fact: map() falls
+    through to the in-process path (its contract for a pre-ingest
+    decline is a None return), while stream() raises
+    _CleanroomPreIngestDecline so the generator falls back before it can
+    yield a record. Centralising the FACT here is what stops the two
+    routes from drifting on WHETHER to decline.
+    """
+    lp = _caller_libpython_argv()
+    if lp is not None:
+        return lp
+    import warnings as _warnings
+    _warnings.warn(
+        "forkrun: the cleanroom %s UDF route requires an explicit "
+        "libpython path for this interpreter (%d.%d), but none could be "
+        "resolved; using the in-process Python path."
+        % (route, sys.version_info[0], sys.version_info[1]),
+        UserWarning, stacklevel=3)
+    return None
+
 
 def _record_compat_refusal(code, detail, helper_fp=None):
     """Remember a CONCLUSIVE incompatibility against the helper artifact.
@@ -2091,14 +2122,12 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                  "--udf", udf_module,
                  "--udf-attr", udf_attr]
         argv += _caller_version_argv()
-        _lp = _caller_libpython_argv()
+        _lp = _udf_libpython_or_decline("map")
         if _lp is None:
-            import sys as _sys
-            print("forkrun: WARNING: could not resolve libpython path for "
-                  "this interpreter; cleanroom UDF route will use "
-                  "name-based lookup", file=_sys.stderr)
-        elif _lp:
-            argv += _lp
+            # Refuse the cleanroom UDF route, not the caller's program:
+            # the caller falls through to the in-process UDF executor.
+            return None
+        argv += _lp
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
     elif plugin_path is None and plugin_func is None:
@@ -3012,14 +3041,14 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                  "--udf", udf_module,
                  "--udf-attr", udf_attr]
         argv += _caller_version_argv()
-        _lp = _caller_libpython_argv()
+        _lp = _udf_libpython_or_decline("stream")
         if _lp is None:
-            import sys as _sys
-            print("forkrun: WARNING: could not resolve libpython path for "
-                  "this interpreter; cleanroom UDF route will use "
-                  "name-based lookup", file=_sys.stderr)
-        elif _lp:
-            argv += _lp
+            # A pre-ingest decline, so the streaming fallback can switch
+            # to the in-process path before any record is yielded.
+            raise _CleanroomPreIngestDecline(
+                "cleanroom stream UDF route declined: this interpreter's "
+                "libpython could not be resolved")
+        argv += _lp
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
     else:
