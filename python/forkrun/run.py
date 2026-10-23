@@ -1524,9 +1524,9 @@ def _caller_libpython_argv():
     try:
         from ._udf import caller_libpython_arg
         r = caller_libpython_arg()
-        return r if r else []
+        return r  # None if unresolved -> caller must decline route
     except Exception:
-        return []
+        return None
 
 def _record_compat_refusal(code, detail, helper_fp=None):
     """Remember a CONCLUSIVE incompatibility against the helper artifact.
@@ -2091,7 +2091,14 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                  "--udf", udf_module,
                  "--udf-attr", udf_attr]
         argv += _caller_version_argv()
-        argv += _caller_libpython_argv()
+        _lp = _caller_libpython_argv()
+        if _lp is None:
+            import sys as _sys
+            print("forkrun: WARNING: could not resolve libpython path for "
+                  "this interpreter; cleanroom UDF route will use "
+                  "name-based lookup", file=_sys.stderr)
+        elif _lp:
+            argv += _lp
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
     elif plugin_path is None and plugin_func is None:
@@ -3005,7 +3012,14 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                  "--udf", udf_module,
                  "--udf-attr", udf_attr]
         argv += _caller_version_argv()
-        argv += _caller_libpython_argv()
+        _lp = _caller_libpython_argv()
+        if _lp is None:
+            import sys as _sys
+            print("forkrun: WARNING: could not resolve libpython path for "
+                  "this interpreter; cleanroom UDF route will use "
+                  "name-based lookup", file=_sys.stderr)
+        elif _lp:
+            argv += _lp
         if udf_roots:
             argv += ["--udf-roots", udf_roots]
     else:

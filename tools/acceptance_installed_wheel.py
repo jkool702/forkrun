@@ -266,6 +266,7 @@ def main(argv=None):
             fh.write(
                 "import forkrun, os, sys\n"
                 "sys.path.insert(0, %r)\n"
+                "os.environ.pop('LD_LIBRARY_PATH', None)\n"
                 "parent_pid = os.getpid()\n"
                 "out = list(forkrun.map(%r, %r, workers=2, mode='udf', order='index'))\n"
                 "joined = b''.join(out)\n"

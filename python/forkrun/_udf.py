@@ -84,7 +84,9 @@ def caller_libpython_arg():
 
     Resolves via sysconfig so the launcher loads the exact library the
     interpreter is built against, rather than searching by name (which
-    can pick up a wrong or absent library). Returns [] if unresolved.
+    can pick up a wrong or absent library). Returns None if unresolved,
+    so the caller can decline the route explicitly instead of silently
+    falling back to name-based resolution.
     """
     try:
         import sysconfig
@@ -99,7 +101,7 @@ def caller_libpython_arg():
             return ["--libpython=%s" % ldl]
     except Exception:
         pass
-    return []
+    return None
 
 
 def helper_fingerprint(path):
