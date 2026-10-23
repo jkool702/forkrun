@@ -47,13 +47,36 @@ def main(argv=None):
     report = {"wheel": wheel, "interpreter": interp, "mode": args.mode,
               "workdir": workdir}
 
-    # 1. Create clean venv with the matching interpreter.
+    # 1. Create clean venv WITH THE REQUESTED INTERPRETER (not the
+    # interpreter running this script). Use subprocess so the venv's
+    # Python minor is exactly the one requested.
     env_dir = os.path.join(workdir, "venv")
-    venv.EnvBuilder(with_pip=True, clear=True).create(env_dir)
+    if os.path.exists(env_dir):
+        import shutil
+        shutil.rmtree(env_dir)
+    r = _run([interp, "-m", "venv", env_dir])
+    if r.returncode != 0:
+        report["error"] = "venv creation failed: " + r.stderr[-500:]
+        print(json.dumps(report, indent=2))
+        return 1
     py = os.path.join(env_dir, "bin", "python")
     if not os.path.exists(py):
         py = os.path.join(env_dir, "Scripts", "python.exe")
     report["venv_python"] = py
+    # Assert the venv's minor matches the requested interpreter.
+    r = _run([py, "-c",
+              "import sys; print('%d.%d' % sys.version_info[:2])"])
+    actual_minor = r.stdout.strip()
+    requested_minor = subprocess.run(
+        [interp, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+        capture_output=True, text=True).stdout.strip()
+    report["requested_interpreter_minor"] = requested_minor
+    report["actual_venv_minor"] = actual_minor
+    if actual_minor != requested_minor:
+        report["error"] = ("interpreter mismatch: requested %s, venv is %s"
+                           % (requested_minor, actual_minor))
+        print(json.dumps(report, indent=2))
+        return 1
 
     # 2. Install the wheel.
     r = _run([py, "-m", "pip", "install", "--quiet", "--no-deps", wheel])
@@ -64,14 +87,21 @@ def main(argv=None):
     report["pip_install"] = "ok"
 
     # 3. Prove import provenance: forkrun.__file__ must be inside the venv.
+    # Clear FORKRUN_LIB so the resolver must use the installed library.
+    clean_env = dict(os.environ)
+    clean_env.pop("FORKRUN_LIB", None)
+    clean_env.pop("FORKRUN_CLEANROOM", None)
     code = (
         "import forkrun, os, sys\n"
+        "from forkrun._bindings import find_substrate\n"
+        "lib = find_substrate()\n"
         "print('FILE=' + forkrun.__file__)\n"
         "print('VERSION=' + forkrun.__version__)\n"
         "print('ENGINE=' + str(getattr(forkrun, '__engine_version__', '?')))\n"
+        "print('LIB=' + lib)\n"
         "print('VENV=' + os.path.dirname(os.path.dirname(forkrun.__file__)))\n"
     )
-    r = _run([py, "-c", code], cwd=workdir)
+    r = _run([py, "-c", code], cwd=workdir, env=clean_env)
     if r.returncode != 0:
         report["error"] = "import failed: " + r.stderr[-500:]
         print(json.dumps(report, indent=2))
@@ -87,7 +117,13 @@ def main(argv=None):
                            "not from venv %s" % (info.get("FILE"), env_dir))
         print(json.dumps(report, indent=2))
         return 1
-    report["provenance"] = "ok (forkrun from installed venv)"
+    if env_dir not in info.get("LIB", ""):
+        report["error"] = ("native-lib provenance failure: lib resolved to %s, "
+                           "not inside venv %s" % (info.get("LIB"), env_dir))
+        print(json.dumps(report, indent=2))
+        return 1
+    report["provenance"] = ("ok (forkrun=%s, lib=%s)"
+                            % (info.get("FILE"), info.get("LIB")))
 
     # 4. Check helper presence according to mode.
     pkg_dir = os.path.dirname(info["FILE"])
@@ -139,14 +175,19 @@ def main(argv=None):
             return 1
         mod, func = args.udf_func.split(":", 1)
         # Create the UDF module in the workdir (the launcher scans sys.path).
+        marker = os.path.join(workdir, "udf_pid.txt")
         udf_path = os.path.join(workdir, mod + ".py")
         with open(udf_path, "w") as fh:
-            fh.write("def %s(b):\n    return b.upper()\n" % func)
+            fh.write(
+                "import os as _os\n"
+                "def %s(b):\n"
+                "    with open(%r, 'w') as _f:\n"
+                "        _f.write(str(_os.getpid()))\n"
+                "    return b.upper()\n" % (func, marker))
         inp = os.path.join(workdir, "input.txt")
         with open(inp, "w") as fh:
             for i in range(1000):
                 fh.write("line %d\n" % i)
-        # Expected output: uppercased input.
         with open(inp + ".expected", "wb") as fh:
             fh.write(open(inp, "rb").read().upper())
         driver = os.path.join(workdir, "driver_udf.py")
@@ -154,27 +195,27 @@ def main(argv=None):
             fh.write(
                 "import forkrun, os, sys\n"
                 "sys.path.insert(0, %r)\n"
+                "parent_pid = os.getpid()\n"
                 "out = list(forkrun.map(%r, %r, workers=2, mode='udf', order='index'))\n"
                 "joined = b''.join(out)\n"
                 "expected = open(%r, 'rb').read()\n"
                 "assert joined == expected, 'mismatch %%d vs %%d' %% (len(joined), len(expected))\n"
-                "print('UDF_OK bytes=' + str(len(joined)))\n"
-                % (workdir, args.udf_func, inp, inp + ".expected"))
-        # Run with PYTHONPATH including workdir so the launcher can find the module.
+                "helper_pid = int(open(%r).read().strip())\n"
+                "assert helper_pid != parent_pid, 'helper did not run in a separate process (helper_pid == parent_pid == %%d)' %% parent_pid\n"
+                "print('UDF_OK bytes=' + str(len(joined)) + ' helper_pid=' + str(helper_pid) + ' parent_pid=' + str(parent_pid))\n"
+                % (workdir, args.udf_func, inp, inp + ".expected", marker))
         env = dict(os.environ)
         env["PYTHONPATH"] = workdir + (":" + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
+        env["FORKRUN_CLEANROOM"] = "map-udf"
+        env.pop("FORKRUN_LIB", None)
+        env.pop("FORKRUN_NO_UDF", None)
         r = _run([py, driver], cwd=workdir, env=env)
         if r.returncode != 0 or "UDF_OK" not in r.stdout:
             report["error"] = "UDF workload failed: " + (r.stderr or r.stdout)[-1000:]
             print(json.dumps(report, indent=2))
             return 1
         report["workload"] = r.stdout.strip()
-        r = _run([py, driver], cwd=workdir)
-        if r.returncode != 0 or "UDF_OK" not in r.stdout:
-            report["error"] = "UDF workload failed: " + (r.stderr or r.stdout)[-1000:]
-            print(json.dumps(report, indent=2))
-            return 1
-        report["workload"] = r.stdout.strip()
+        report["route_evidence"] = "helper ran in separate process (helper_pid != parent_pid)"
 
     report["result"] = "PASS"
     print(json.dumps(report, indent=2))

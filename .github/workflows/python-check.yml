@@ -15,7 +15,7 @@ on:
       - "tools/wheel_matrix.py"
       - "tools/check_glibc_versions.py"
       - "tools/gen_python_matrix.py"
-      - "tools/wheel_matrix.py"
+      - "tools/acceptance_installed_wheel.py"
       - ".github/workflows/python-check.yml"
   pull_request:
     branches: [ "main" ]
@@ -32,7 +32,7 @@ on:
       - "tools/wheel_matrix.py"
       - "tools/check_glibc_versions.py"
       - "tools/gen_python_matrix.py"
-      - "tools/wheel_matrix.py"
+      - "tools/acceptance_installed_wheel.py"
       - ".github/workflows/python-check.yml"
 
   workflow_dispatch:
@@ -133,7 +133,6 @@ jobs:
     # A version-conditional skip differing across cells is a FINDING.
     # The 3.13 cell is the genuinely-unknown one: a real failure
     # there halts (named) instead of trimming the matrix.
-    needs: build-wheel
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
