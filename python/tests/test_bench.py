@@ -3,6 +3,7 @@ import csv
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
@@ -91,7 +92,16 @@ class TestHarness(unittest.TestCase):
 
     def test_cpu_pct_around_trivial(self):
         # Idle fn: near-zero attributable CPU, but never negative.
-        pct = cpu_pct_around(lambda: None)
+        #
+        # SLEEP, not a no-op. `cpu_pct_around` samples rusage around the
+        # call, and around `lambda: None` the sample is pure harness
+        # overhead: measured 300 times on four CPUs the median was 84%
+        # and the max 98%, i.e. only 2 points of headroom under the
+        # assertion below. A slower runner crossed 100 and failed. Ten
+        # milliseconds of sleep leaves the same assertion with a
+        # denominator that dwarfs the sampling cost, and it is a truer
+        # "idle work" premise.
+        pct = cpu_pct_around(lambda: time.sleep(0.01))
         self.assertGreaterEqual(pct, 0.0)
         self.assertLess(pct, 100.0)
 

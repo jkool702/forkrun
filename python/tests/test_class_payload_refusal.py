@@ -98,7 +98,7 @@ class ClassReferenceDeclined(unittest.TestCase):
     def test_module_level_function_still_resolves(self):
         """The negative control: the fix must not reject valid payloads."""
         out = forkrun.map("clsmod:up", self.src, workers=1,
-                          on_error="retry", output="bytes")
+                          on_error="retry", output="bytes", lines=1)
         self.assertEqual(len(out), 8, "every batch must produce a result")
         self.assertEqual(sorted(out)[0], b"line0\n")
 
@@ -112,7 +112,7 @@ class ClassReferenceDeclined(unittest.TestCase):
         import clsmod
         inst = clsmod.Callable_()
         out = forkrun.map(inst, self.src, workers=1, on_error="retry",
-                          output="bytes")
+                          output="bytes", lines=1)
         self.assertEqual(len(out), 8)
 
     def test_refusal_happens_before_input_is_consumed(self):

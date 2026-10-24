@@ -499,13 +499,20 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
         return _payload
 
     def _abort_run(self, path, counter, limit, ckpt, action="raise",
-                   workers=2):
-        """Run to a synthetic abort; return nothing (asserts abort)."""
+                   workers=2, lines=None):
+        """Run to a synthetic abort; return nothing (asserts abort).
+
+        ``lines`` pins the batch granularity. The abort premise is
+        "the payload runs ``limit`` times"; auto batching derives the
+        batch count from the CPU count, so a 4-CPU runner can produce
+        fewer batches than the limit and the abort never fires. Callers
+        that need the premise made explicit pass ``lines=1``.
+        """
         with self.assertRaises(RuntimeError):
             forkrun.map(self._counter_payload(counter, limit, action),
                         path, workers=workers, orchestrator=True,
                         order="index", on_error="fail-fast",
-                        checkpoint_file=ckpt, nodes=1)
+                        checkpoint_file=ckpt, nodes=1, lines=lines)
         self.assertTrue(os.path.exists(ckpt),
                         "abort with progress must checkpoint")
 
@@ -518,7 +525,7 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
                 os.unlink(f)
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
-        self._abort_run(path, counter, 8, ckpt)
+        self._abort_run(path, counter, 8, ckpt, lines=1)
         state = parse_checkpoint(ckpt)
         self.assertGreater(state.horizon, 0)
 

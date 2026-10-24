@@ -296,16 +296,19 @@ class TestNumaExecution(ChildLifecycleMixin, unittest.TestCase):
             sys.path.insert(0, d)
             try:
                 res = forkrun.map("w21segv_mod:payload", path,
-                                  workers=4, nodes=NODES_2)
+                                  workers=4, nodes=NODES_2, lines=100)
             finally:
                 sys.path.remove(d)
-            healthy = forkrun.map(_up, path, workers=4, nodes=1)
-            # Batch granularity differs across topologies, so the
-            # comparison is over LINES: every landed line is
-            # byte-exact, and only the crashed batch's lines may be
-            # missing (a SIGKILL-class death runs no code — no escrow
-            # deposit exists for it). Never a hang, never a
-            # whole-run abort for one batch's death.
+            healthy = forkrun.map(_up, path, workers=4, nodes=1, lines=100)
+            # Batch granularity is pinned to 100 lines so the crashed
+            # batch's loss is bounded independently of the host's CPU
+            # count (auto batching loses ~456 lines on a 4-CPU runner,
+            # over the 300-line bound below). The comparison is over
+            # LINES: every landed line is byte-exact, and only the
+            # crashed batch's lines may be missing (a SIGKILL-class
+            # death runs no code — no escrow deposit exists for it).
+            # Never a hang, never a whole-run abort for one batch's
+            # death.
             rl, hl = _lines(res), _lines(healthy)
             self.assertTrue(rl)
             self.assertTrue(set(rl) <= set(hl))

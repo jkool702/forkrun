@@ -72,8 +72,11 @@ class TestCertificateIsConnected(unittest.TestCase):
             os.environ["FORKRUN_C07_DROP_FRAME"] = str(drop)
         Rm._C07_DROP[0] = None      # force a re-read of the env
         Rm._C07_DROP_SEEN[0] = 0
+        # Pin one line per batch: the auto pre-flight derives the batch
+        # size from the CPU count, and the drop positions this suite
+        # exercises (up to 10) must exist on a 4-CPU runner too.
         return forkrun.map(_up, self.src, workers=1, nodes=1,
-                           order="index")
+                           order="index", lines=1)
 
     def test_control_a_clean_run_returns_normally(self):
         """The control.

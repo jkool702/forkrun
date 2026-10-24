@@ -316,15 +316,42 @@ class TestTeardownInterruptSafety(ChildLifecycleMixin, unittest.TestCase):
 
         state, patches = self._fire_sigint_during_the_teardown()
         with _DefaultSigint(), patches[0], patches[1], patches[2]:
-            with self.assertRaises(RuntimeError) as cm:
+            # bytes=16 is load-bearing, not a tuning knob. With the
+            # default batch sizing this 200-line input yields 25
+            # batches on a 28-vCPU host but only 7 on a 4-vCPU runner
+            # (GitHub's), so the 8th invocation below never happens and
+            # the run COMPLETES. The teardown then delivers the
+            # injected SIGINT with no exception in flight -- correct
+            # behaviour, but not the abort this test is about, and
+            # unittest re-raises KeyboardInterrupt, which aborted the
+            # whole suite with exit 130. An explicit cap makes the
+            # batch count independent of the CPU count.
+            try:
                 forkrun.map(_aborting, self.path, workers=2,
                             orchestrator=True, order="index",
                             on_error="fail-fast", checkpoint_file=ckpt,
-                            nodes=1)
-
-        self.assertNotIsInstance(cm.exception, KeyboardInterrupt,
-                                 "the deferred signal replaced the run's "
-                                 "own error")
+                            nodes=1, bytes=16)
+            except BaseException as exc:
+                # Catch KeyboardInterrupt HERE on purpose: if the
+                # premise ever breaks again it must be a reported test
+                # failure, not a suite-aborting escape. The negative
+                # check is load-bearing: ForkrunInterrupted subclasses
+                # BOTH RuntimeError and KeyboardInterrupt, so the
+                # positive check alone cannot tell the run's synthetic
+                # RuntimeError from a deferred interrupt that surfaced
+                # as ForkrunInterrupted. This one separates them.
+                self.assertNotIsInstance(
+                    exc, KeyboardInterrupt,
+                    "the deferred signal surfaced as KeyboardInterrupt: "
+                    "either it replaced the run's own abort, or the run "
+                    "completed first so no abort was in flight (broken "
+                    "premise) -- %r" % (exc,))
+                self.assertIsInstance(
+                    exc, RuntimeError,
+                    "expected the run's synthetic abort, got %r" % (exc,))
+            else:
+                self.fail("the run completed without aborting; the "
+                          "checkpoint path was never exercised")
         self.assertTrue(state["reconciled"],
                         "the cleanup was abandoned at the interrupt")
         self.assertTrue(os.path.exists(ckpt),

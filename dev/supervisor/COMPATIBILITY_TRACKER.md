@@ -1,4 +1,4 @@
-# Compatibility Tracker (WO-COMPAT-01 … WO-COMPAT-06)
+# Compatibility Tracker (WO-COMPAT-01 … WO-COMPAT-07)
 
 Branch: `NEW/REFACTOR4.5` (from `NEW/REFACTOR4.4` @ `01b5de92`).
 Baseline verified: branch `NEW/REFACTOR4.4`, HEAD `01b5de92650cd6ee8323c8d4006967971cd594f0`,
@@ -64,21 +64,52 @@ Supported minors: 3.10, 3.11, 3.12, 3.13, 3.14, 3.15 (GIL only).
 Historical: all six minors measured (3.15 was rc2; now stable 3.15.1 available).
 
 Gaps:
-- Version-matrix (run 39898594446) remains red for 3.10 and 3.12-3.15;
-  3.11 was still in progress when this entry was written. Documented
-  cause: that lane installs the GENERIC wheel, which carries no per-minor
-  helper, so helper-dependent tests fail there. The per-minor helper lane
-  now exists as the UDF acceptance lane (§4); version-matrix still
-  installs the generic wheel only. Tracked separately, NOT part of the
-  acceptance claim.
-- `python-v0` in the same run is red as well: that job builds the
-  substrate but not the per-minor UDF helper, so the source-tree suite
-  reports helper-dependent (and some environment-sensitive cleanroom/bench)
-  failures, then the known pre-existing `KeyboardInterrupt` inside
-  `_signals.py` during `test_teardown_interrupt.py` aborts the run
-  (exit 130). The same suite passes locally from `python/` with the
-  helper built (1587 tests, OK, 2 skipped); not caused by the acceptance
-  changes.
+- Version-matrix (run 39898594446) was red for every Ubuntu cell, and
+  the earlier entry misdiagnosed it. The 3.11 cell never reached the
+  tests: `apt-get install python3.11` pulled tzdata and blocked on the
+  interactive geographic-area prompt at 04:12:32; the job was cancelled
+  44m23s later at its 45-minute timeout. The other cells reached the
+  suite and aborted with exit 130 at
+  `test_teardown_interrupt.py::test_a_signal_during_the_teardown_still_checkpoints`.
+  The detailed FAIL blocks never appeared because unittest prints them
+  at the END, which the abort prevented, so the lane's per-test failures
+  were not enumerated; do not quote a count for them. The abort itself
+  was a test premise that depended on CPU count: its UDF aborts after 8
+  invocations, and default batching gives 25 batches on a 28-vCPU host
+  but only 7 on a 4-vCPU runner. With 7 the run completes; the injected
+  SIGINT is then delivered during teardown with no exception in flight
+  (the documented path), and unittest re-raises KeyboardInterrupt,
+  killing the run.
+  Fixed in WO-COMPAT-07 (§5a): explicit `bytes=16` (106 batches) plus
+  a guard that turns a broken premise into a clean test failure.
+- `python-v0` was red for the same test (exit 130). It built the
+  substrate and the launcher (`cleanroom launcher OK` appears in the
+  log) but not the UDF helper: `udf helper library OK` never appears
+  and 20 tests skipped with `udf helper / launcher not built`. Before
+  the abort the log also shows **8 real FAILs**, not skips (the
+  earlier "helper-dependent failures" wording was closer than a later
+  "they were only skips" correction -- the truth is both):
+
+  * `test_bench.TestHarness.test_cpu_pct_around_trivial`
+  * `test_c07_e2e::test_drop_at_several_positions_is_caught` (drop=10
+    needs 11 frames; a 4-vCPU runner produces fewer)
+  * `test_capability_dispatch::test_map_udf_is_a_distinct_route_from_python`
+  * `test_cleanroom_numa::test_a_helper_death_leaves_no_surviving_descendant`
+  * `test_cleanroom_numa::test_indexer_death_aborts_the_run`
+  * `test_cleanroom_routes::test_launcher_actually_executes_and_bytes_are_exact`
+  * `test_packaging_v2::test_release_check_passes`
+  * `test_supervision_substrate::test_registry_slots_are_reused_across_generations`
+
+  Four have an established mechanism that WO-COMPAT-07 addresses: the
+  C07 drop position (explicit `lines=1`), the two UDF-route tests (the
+  helper is now built), the release gate (`release_check`'s UDF helper
+  check asserts an artifact exists), and `test_cpu_pct_around_trivial`
+  (a no-op is measured almost entirely as harness overhead: 300 samples
+  on four CPUs gave median 84%, max 98%, against a `< 100%` assertion;
+  the test now measures a 10 ms sleep instead). The other three did not
+  reproduce in a full local suite on four CPUs and the aborted log has
+  no tracebacks; the new run is what discriminates them. `python-v0`
+  now installs `python3-devel` and builds `udf` (§5a).
 - Free-threaded explicitly refused (correct, keep).
 
 ## 4. Release wheels (WO-COMPAT-05)
@@ -157,10 +188,88 @@ the workflow on every branch update.
 
 Status (run 39898594446, SHA `2b5f62f0`): build-wheel, six
 generic-acceptance and six udf-acceptance cells green; see §4.
-`python-v0` red: helper-less source-tree suite failures plus the known
-`KeyboardInterrupt` in `_signals.py` during `test_teardown_interrupt.py`
-(exit 130). version-matrix 3.10 and 3.12-3.15 red; 3.11 still in
-progress (§3). sanitizer-asan-ubsan advisory, red (pre-existing).
+`python-v0` and every version-matrix cell were red at
+`test_teardown_interrupt.py` (exit 130); the source core had skipped
+the UDF-helper tests, and the 3.11 cell never started because of the
+tzdata prompt. Those are source-suite/CI status, distinct from the
+wheel-acceptance claim in §4. WO-COMPAT-07 addresses them (§5a).
+sanitizer-asan-ubsan advisory, red (pre-existing).
+
+## 5a. WO-COMPAT-07 — Python CI matrix repair
+
+**Cause of the 3.11 stall.** Not a test hang. `apt-get install
+python3.11` (deadsnakes) pulled tzdata, whose postinst entered the
+interactive "Please select the geographic area" prompt at 04:12:32;
+the job was cancelled at 04:56:55, 44m23s later, at its 45-minute
+timeout. Every version-matrix apt path now exports
+`DEBIAN_FRONTEND=noninteractive` and `TZ=Etc/UTC` before `apt-get
+update`, so the answer is deterministic and no maintainer script can
+block on a prompt.
+
+**version-matrix contract.** The lane runs the full source suite, not
+a generic-wheel package test and not a reduced set. The tests import
+the checkout's `python/forkrun`; the wheel's `libforkrun_python.so`
+is copied beside it and `cmp`'d against the installed copy, so the
+engine is provably the wheel artifact. Because the generic wheel
+deliberately ships no UDF helper, each cell installs
+`python$PYVER-dev` and builds `udf` for that interpreter (`udf` covers
+the helper, the probe and the fork driver -- `udf-lib` alone leaves the
+probe/fork tests skipping); the launcher is built from source
+(`make -o ... cleanroom-launcher`, which dlopens the staged .so and
+needs no bash headers). `test_packaging` AND `test_reproducible` are
+excluded per cell: both compile the substrate and need bash headers,
+which Ubuntu does not carry. They are covered by the Fedora source
+cell + `release_check`. That exclusion is explicit, not a blanket
+skip.
+
+**python-v0 prerequisites.** Fedora now installs `python3-devel` and
+runs `make -f Makefile.substrate python-substrate udf`, so the suite
+it claims to run no longer skips `udf helper / launcher not built`.
+It also marks `/src` as a safe git directory: the container runs as
+root over a host-owned mount, and `release_check`'s clean-tree and
+frozen-file checks shell out to git, which refuses such a repository
+as "dubious ownership" -- a failure that would have looked like a
+dirty tree.
+
+**Teardown interruption.** `test_a_signal_during_the_teardown_still_checkpoints`
+aborted the suite because its `_aborting` UDF raises only after 8
+invocations; a 4-vCPU runner produces 7 batches for the 200-line
+input, so the run completed and the injected SIGINT was delivered
+with no exception in flight. That delivery is the documented
+behaviour, not an implementation defect in `_signals.py`; unittest
+re-raises KeyboardInterrupt, which is why the job exited 130. The
+test now forces `bytes=16` (106 batches, CPU-independent) and catches
+`BaseException` so a future premise break is a named failure, not a
+suite abort. Verified: 10/10 module runs on `taskset -c 0-3` (14
+tests each); with the `bytes=` cap suppressed (the old premise) the
+test reports one clean failure and exits 1, not 130.
+
+**Bench harness premise.** `test_cpu_pct_around_trivial` asserted
+`< 100%` around `lambda: None`, but around a no-op the sample is
+almost entirely the harness's own `getrusage`/`perf_counter` cost:
+300 samples on four CPUs gave median 84% and max 98%, so the
+assertion had about two points of headroom and a slower runner
+crossed it. The test now measures `time.sleep(0.01)`, where the same
+samples read 0.01–0.02%; the assertion itself is unchanged.
+
+**Residual, not this failure.** `_DeferredInterrupt.__exit__` drains a
+pending SIGINT before restoring the mask when an exception is already
+propagating, but a signal that arrives in the window between the
+drain and the restore is still delivered at the restore and can
+replace the original exception. The window is narrow and was not the
+CI cause (the run had no exception in flight). Tracked as an open
+hardening item; no behaviour change was made in this work order.
+
+**Evidence.** Local: a full suite on four CPUs (`taskset -c 0-3`)
+ran 1587 tests with 1 failure and 2 skips; the failure is
+`test_release_check_passes` refusing the dirty tree that this
+uncommitted work created, not a code failure. Ten consecutive
+`test_teardown_interrupt` module runs passed. The per-minor build
+form used by the matrix (`make ... udf PYTHON=... PYCONFIG=...`)
+and the launcher target (`-o <engine>.so cleanroom-launcher`, with no
+engine objects present, exactly the matrix's condition) were
+exercised on a clean clone. CI: pending
+run (update this line with the URL and per-job result once complete).
 
 ## 6. Linux kernel / GNU utilities (WO-COMPAT-01 audit)
 
@@ -213,3 +322,11 @@ No change required; recorded for completeness.
 - Evidence (run 39898594446): six generic + six UDF cells green, with
   pinned patches and per-cell facts in §4. Local full suite: 1587 tests,
   OK, 2 skipped.
+- WO-COMPAT-07: made both version-matrix apt paths noninteractive
+  (`DEBIAN_FRONTEND=noninteractive`, `TZ=Etc/UTC`); aligned that lane
+  with the full source suite by staging and `cmp`-ing the wheel's .so
+  and building the per-minor helper + launcher; added `python3-devel`
+  and `udf` to `python-v0`; diagnosed the exit-130 teardown abort
+  as a 4-vCPU batching premise (7 batches < 8 invocations) and made the
+  test deterministic with `bytes=16` plus a clean-failure guard; made
+  the bench idle-CPU test measure a sleep instead of its own overhead.

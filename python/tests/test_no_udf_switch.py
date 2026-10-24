@@ -120,7 +120,7 @@ class NoUdfKillSwitch(unittest.TestCase):
         """
         os.environ["FORKRUN_NO_UDF"] = "1"
         out = forkrun.map("noudfmod:up", self.src, workers=1,
-                          on_error="retry", output="bytes")
+                          on_error="retry", output="bytes", lines=1)
         self.assertEqual(len(out), 8,
                          "every batch must still produce its result")
         self.assertEqual(sorted(out)[0], b"line0\n")

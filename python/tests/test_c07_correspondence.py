@@ -57,7 +57,12 @@ class C07Correspondence(unittest.TestCase):
                 fh.write("line%d\n" % i)
             path = fh.name
         self.addCleanup(os.unlink, path)
-        out = forkrun.map(_up, path, workers=1, nodes=1, order="index")
+        # Pin the batch granularity: the auto pre-flight derives the
+        # batch size from the CPU count (14 batches on a 28-CPU host,
+        # 4 on a 4-CPU runner), so the measured 14 is only meaningful
+        # with the premise made explicit. 27 lines / 2 per batch = 14.
+        out = forkrun.map(_up, path, workers=1, nodes=1, order="index",
+                          lines=2)
         self.assertEqual(len(out), 14)
         # A UMA run publishes one slot per batch and no sentinel, so the
         # count corresponds 1:1. Passing 14 for 14 does not raise.
