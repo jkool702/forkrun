@@ -96,7 +96,8 @@ class TestSupervisionSubstrate(unittest.TestCase):
 
     def _run(self, extra_env=None, kill_ingest_delay=None,
              kill_worker_after=None, kill_worker_immediately=False,
-             kill_budget=0, workers=2, respawn_cap=None, timeout=30):
+             kill_budget=0, workers=2, respawn_cap=None, timeout=30,
+             lines=None):
         """Run the launcher, optionally killing families mid-run.
 
         `kill_worker_after` is `(wid, delay_s)`. `kill_worker_immediately`
@@ -115,7 +116,8 @@ class TestSupervisionSubstrate(unittest.TestCase):
                          os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
         argv = [
             str(_LAUNCHER), "--so", str(_SUBSTRATE),
-            "--workers", str(workers), "--lines", str(BATCH), "--bytes", "0",
+            "--workers", str(workers), "--lines",
+            str(BATCH if lines is None else lines), "--bytes", "0",
             "--on-error", "0", "--retry", "3",
             "--src", str(src_fd), "--result", str(out_fd),
             "--stats-fd", "-1",
@@ -392,10 +394,14 @@ class TestSupervisionSubstrate(unittest.TestCase):
         must not exhaust them. Every regeneration must be a REUSE of the
         worker's single slot."""
         budget = 30
+        # lines=8 -> 64 batches for the 512-line corpus. The corpus has
+        # only 8 batches at the default 64, so a fast 4-CPU runner can
+        # finish the work before 8 generations have been killed, leaving
+        # the registration/reuse assertions below unexercised.
         rc, _dt, lines, ingest_pid, worker_pids = self._run(
             extra_env={"FORKRUN_TEST_SUP_MAX": "8"},
             kill_worker_immediately=True, kill_budget=budget,
-            workers=1, respawn_cap=10000, timeout=120)
+            workers=1, respawn_cap=10000, timeout=120, lines=8)
         regs = [line for line in lines if "register role=worker" in line]
         reuses = [line for line in lines if "reuse role=worker" in line]
         self.assertGreaterEqual(

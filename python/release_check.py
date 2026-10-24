@@ -131,6 +131,24 @@ def _ensure_artifacts():
     return wheels[0], sdists[0]
 
 
+def _packaged_wheel():
+    """Return the wheel artifact to INSPECT (not necessarily to build).
+
+    FORKRUN_RELEASE_WHEEL names an externally built wheel. The
+    version-matrix lane downloads one and verifies it; rebuilding
+    there would need the bash headers Ubuntu does not carry, and -- more
+    importantly -- would verify a DIFFERENT artifact than the one the
+    lane is testing. Absent the override, build ours as before.
+    """
+    override = os.environ.get("FORKRUN_RELEASE_WHEEL", "").strip()
+    if not override:
+        return _ensure_artifacts()[0]
+    path = os.path.abspath(override)
+    assert os.path.isfile(path), \
+        "FORKRUN_RELEASE_WHEEL=%r is not a file" % override
+    return path
+
+
 @check("Version: __version__ is %s" % PY_VERSION)
 def check_version():
     sys.path.insert(0, os.path.join(REPO_ROOT, "python"))
@@ -624,9 +642,11 @@ def check_wheel_so_version():
     # F-PORT5: the wheel must SHIP the release engine, not a stale
     # local build. Extract the packaged .so and read its version by
     # the same helper as the tree-built substrate. W-REL5-F (F6.4):
-    # reads the single shared build.
+    # reads the single shared build. WO-COMPAT-08: the artifact under
+    # test may be supplied by FORKRUN_RELEASE_WHEEL (version-matrix),
+    # so the lane verifies the wheel it downloaded.
     import zipfile
-    wheel, _ = _ensure_artifacts()
+    wheel = _packaged_wheel()
     with zipfile.ZipFile(wheel) as zf:
         so_names = [n for n in zf.namelist()
                     if n.endswith("libforkrun_python.so")]

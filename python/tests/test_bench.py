@@ -112,8 +112,10 @@ class TestHarness(unittest.TestCase):
 
         def burn():
             for _ in range(4):
+                # sys.executable, not "python3": the 3.12 CI cell has
+                # no bare python3 on PATH.
                 p = subprocess.run(
-                    ["python3", "-c",
+                    [sys.executable, "-c",
                      "t=__import__('time').perf_counter()\n"
                      "while __import__('time').perf_counter()-t < 0.2: pass"],
                     capture_output=True, timeout=60)

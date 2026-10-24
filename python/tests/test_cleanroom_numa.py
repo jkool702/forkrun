@@ -101,12 +101,21 @@ class TestCleanroomNuma(unittest.TestCase):
 
     def _run(self, nodes=2, order="index", workers=4, lines=BATCH,
              extra_env=None, kill_role=None, kill_delay=0.0,
-             timeout=120, numa_map=None):
+             timeout=120, numa_map=None, slow_src=False,
+             feed_chunk=256, feed_delay=0.02):
         """Run the launcher with a logical topology.
 
         `kill_role` names a helper family to SIGKILL once it registers
         (`indexer`, `scanner`, `fallow`, `ingest`). Returns
         (rc, elapsed, stderr_lines, result_bytes, registered_pids).
+
+        `slow_src` feeds the corpus through a PIPE one `feed_chunk` at
+        a time with `feed_delay` between writes. A regular file is read
+        to EOF in microseconds on this corpus, so the indexer/scanner
+        family can finish (or never be spawned at all) before a kill
+        observed at registration lands; the resulting "death" then
+        proves nothing. The trickle keeps the pipeline alive so the
+        injection is honest.
         """
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("FORKRUN_TEST_")}
@@ -118,7 +127,33 @@ class TestCleanroomNuma(unittest.TestCase):
             # _numa.build_numa_map produces for the '@N' form.
             numa_map = ",".join(["0"] * nodes)
 
-        src_fd = os.open(self.corpus, os.O_RDONLY)
+        feeder = None
+        if slow_src:
+            src_fd, feed_fd = os.pipe()
+
+            def _feed():
+                try:
+                    with open(self.corpus, "rb") as fh:
+                        while True:
+                            chunk = fh.read(feed_chunk)
+                            if not chunk:
+                                break
+                            os.write(feed_fd, chunk)
+                            time.sleep(feed_delay)
+                except OSError:
+                    # The launcher tore the pipe down (fatal path). That
+                    # is a legitimate outcome for the death tests.
+                    pass
+                finally:
+                    try:
+                        os.close(feed_fd)
+                    except OSError:
+                        pass
+
+            feeder = threading.Thread(target=_feed, daemon=True)
+            feeder.start()
+        else:
+            src_fd = os.open(self.corpus, os.O_RDONLY)
         out_fd = os.open(self.result,
                          os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
         argv = [
@@ -189,6 +224,8 @@ class TestCleanroomNuma(unittest.TestCase):
                 proc.kill()
                 proc.wait()
             proc.stderr.close()
+            if feeder is not None:
+                feeder.join(timeout=5.0)
 
         if kill_role is not None:
             self.assertTrue(killed,
@@ -503,8 +540,11 @@ class TestCleanroomNuma(unittest.TestCase):
         self._assert_no_survivors(reg)
 
     def test_indexer_death_aborts_the_run(self):
+        # slow_src: see _run. Without it the indexer can finish before
+        # the kill observed at registration lands, and the run exits 0
+        # through no fault of the launcher.
         rc, dt, lines, _blob, reg = self._run(
-            nodes=2, order="index", kill_role="indexer")
+            nodes=2, order="index", kill_role="indexer", slow_src=True)
         self.assertNotEqual(rc, 0, "an indexer death exited 0")
         self.assertTrue(any("is not recoverable -- aborting" in l
                             for l in lines))
@@ -513,7 +553,7 @@ class TestCleanroomNuma(unittest.TestCase):
 
     def test_scanner_death_aborts_the_run(self):
         rc, dt, lines, _blob, reg = self._run(
-            nodes=2, order="index", kill_role="scanner")
+            nodes=2, order="index", kill_role="scanner", slow_src=True)
         self.assertNotEqual(rc, 0, "a scanner death exited 0")
         self.assertTrue(any("is not recoverable -- aborting" in l
                             for l in lines))
@@ -522,7 +562,7 @@ class TestCleanroomNuma(unittest.TestCase):
 
     def test_fallow_death_aborts_the_run(self):
         rc, dt, lines, _blob, reg = self._run(
-            nodes=2, order="index", kill_role="fallow")
+            nodes=2, order="index", kill_role="fallow", slow_src=True)
         self.assertNotEqual(rc, 0, "a fallow death exited 0")
         self.assertTrue(any("is not recoverable -- aborting" in l
                             for l in lines))

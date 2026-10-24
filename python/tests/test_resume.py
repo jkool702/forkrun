@@ -567,7 +567,7 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
                 os.unlink(f)
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
-        self._abort_run(path, counter, 8, ckpt)
+        self._abort_run(path, counter, 8, ckpt, lines=500)
         state = parse_checkpoint(ckpt)
         committed = _byte_lines(0, state.horizon)
         for s, e in state.jagged:
@@ -603,13 +603,19 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
                 os.unlink(f)
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
-        self._abort_run(path, counter, 8, ckpt)
+        self._abort_run(path, counter, 8, ckpt, lines=500)
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
                           order="index", resume=ckpt, nodes=1)
         expect = forkrun.map(_up, path, workers=4, orchestrator=True,
                              order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
-        self.assertEqual(len(res), len(expect))
+        # Chunk COUNT is not part of the contract. A resumed map
+        # batches the corpus that REMAINS after the checkpoint horizon,
+        # so auto batching legitimately splits it into a different
+        # number of chunks than a fresh full run (measured: 12 vs 5 on
+        # a 4-CPU runner). Byte identity above is the claim; this pins
+        # that the comparison cannot pass vacuously on an empty result.
+        self.assertTrue(res)
         # W-REL5-C4 (deliver-then-unlink): the consumed sidecar is
         # RETAINED after a successful resume — deleting it before
         # durable delivery would lose the prefix permanently on a
@@ -635,7 +641,7 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
                 os.unlink(f)
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
-        self._abort_run(path, counter, 8, ckpt)
+        self._abort_run(path, counter, 8, ckpt, lines=500)
         # Aborted run's committed output (sidecar, read BEFORE the
         # resume consumes it) + resumed output: every input line
         # exactly once (multiset proof — any cross-run duplicate
@@ -663,7 +669,7 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
         counter1 = path + ".c1"
         self.addCleanup(
             lambda: os.path.exists(counter1) and os.unlink(counter1))
-        self._abort_run(path, counter1, 8, ckpt)
+        self._abort_run(path, counter1, 8, ckpt, lines=500)
         h1 = parse_checkpoint(ckpt).horizon
         self.assertGreater(h1, 0)
         counter2 = path + ".c2"
@@ -673,7 +679,7 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
             forkrun.map(self._counter_payload(counter2, 12), path,
                         workers=2, orchestrator=True, order="index",
                         on_error="fail-fast", resume=ckpt,
-                        checkpoint_file=ckpt, nodes=1)
+                        checkpoint_file=ckpt, nodes=1, lines=500)
         self.assertTrue(os.path.exists(ckpt))
         h2 = parse_checkpoint(ckpt).horizon
         self.assertGreaterEqual(h2, h1)
@@ -707,7 +713,8 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
         try:
             with self.assertRaises(KeyboardInterrupt):
                 forkrun.map(payload, path, workers=2, orchestrator=True,
-                            order="index", checkpoint_file=ckpt, nodes=1)
+                            order="index", checkpoint_file=ckpt, nodes=1,
+                            lines=500)
         finally:
             _signal.signal(_signal.SIGINT, _old_int)
         self.assertTrue(os.path.exists(ckpt),
@@ -754,9 +761,12 @@ class TestResumeStream(ChildLifecycleMixin, unittest.TestCase):
             time.sleep(0.05)
             return bytes(batch.data).upper()
 
+        # lines=400: 50 batches for 20k lines. Auto batching on a
+        # 4-CPU runner can drop below the 20 this test abandons after,
+        # which would make "tail non-empty" vacuous.
         gen = forkrun.stream(_slow, path, workers=4, orchestrator=True,
                              order="index", checkpoint_file=ckpt,
-                             nodes=1)
+                             nodes=1, lines=400)
         seen = []
         try:
             # ~64 batches for 20k lines at 50ms each: abandon after 20

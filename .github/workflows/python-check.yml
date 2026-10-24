@@ -66,11 +66,18 @@ jobs:
           docker run --rm \
             -v $PWD:/src \
             -w /src \
-            fedora:latest \
+            fedora:44 \
             bash -c 'set -euo pipefail
               dnf install -y git bash-devel gcc make file diffutils \
                 python3 python3-devel python3-pip python3-setuptools \
                 python3-wheel
+              # WO-COMPAT-08: record WHICH bash-devel supplied the engine's
+              # headers. A stale/missing package used to surface as a bare
+              # "config.h: No such file or directory" from inside the
+              # engine; the Makefile now names the package, and this line
+              # makes the version part of the job log either way.
+              rpm -q bash-devel
+              test -f /usr/include/bash/config.h
               # /src is a host-owned mount and this container runs as
               # root; git >= 2.35 refuses to operate on a repository it
               # considers owned by another user ("dubious ownership").
@@ -163,8 +170,8 @@ jobs:
           docker run --rm \
             -v $PWD:/src \
             -w /src \
-            fedora:latest \
-            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file diffutils python3 libasan libubsan && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print \$NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
+            fedora:44 \
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file diffutils python3 libasan libubsan && rpm -q bash-devel && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print \$NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
 
   build-wheel:
     # W-REL5-F (F2): single manylinux_2_28 wheel build feeding the version
@@ -268,10 +275,19 @@ jobs:
               $PYBIN --version
               # Loud substrate assertion (a missing .so would pass
               # vacuously via skipUnless — never silently).
-              WHL=$(ls wheelhouse/*.whl | head -1)
+              WHL=$(readlink -f "$(ls wheelhouse/*.whl | head -1)")
               test -f "$WHL"
               $PYBIN -m venv /tmp/venv
-              /tmp/venv/bin/pip install -q "$WHL"
+              # WO-COMPAT-08: 'packaging' is an IMPORT-TIME dependency of
+              # the UDF packaging tests (their in-module SkipTest is
+              # unreachable when the import itself raises), so install it
+              # rather than letting a missing dependency look like a skip.
+              # FORKRUN_RELEASE_WHEEL points release_check at the wheel
+              # this lane actually downloaded; without it the check
+              # rebuilds the substrate, which needs bash headers Ubuntu
+              # does not carry.
+              /tmp/venv/bin/pip install -q "$WHL" 'packaging>=23'
+              export FORKRUN_RELEASE_WHEEL="$WHL"
               /tmp/venv/bin/python -c "import forkrun; print(forkrun.__version__, forkrun.__engine_version__)"
               INSTALLED_SO=$(/tmp/venv/bin/python -c "import forkrun, os; print(os.path.join(os.path.dirname(forkrun.__file__), \"libforkrun_python.so\"))")
               test -f "$INSTALLED_SO"

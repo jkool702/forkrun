@@ -98,11 +98,26 @@ class TestInterpreterDiscovery(unittest.TestCase):
         os.chmod(p, 0o755)
         return p
 
+    @staticmethod
+    def _minor_other_than_running():
+        """A supported minor the RUNNING interpreter cannot serve.
+
+        `interpreter_for_minor` legitimately offers sys.executable for
+        its own minor, so a test that demands "no interpreter" must not
+        ask about the minor it is running on -- on the 3.11 cell that
+        made the substitution guard report a substitution that did not
+        happen.
+        """
+        running = "%d.%d" % sys.version_info[:2]
+        return next(m for m in wheel_matrix.SUPPORTED_MINORS
+                    if m != running)
+
     def test_a_missing_interpreter_is_not_substituted(self):
         """No interpreter -> None. NOT "the newest one we can find"."""
         self._make_interp("3.13")
         self.assertIsNone(
-            wheel_matrix.interpreter_for_minor("3.11", roots=(self.tmp,)),
+            wheel_matrix.interpreter_for_minor(
+                self._minor_other_than_running(), roots=(self.tmp,)),
             "a missing interpreter resolved to something else -- that is "
             "the substitution this must never do")
 
@@ -116,9 +131,10 @@ class TestInterpreterDiscovery(unittest.TestCase):
         differ, so the artifacts are mutually load-incompatible), so
         building against one could only produce a wheel that is not a
         per-minor wheel."""
-        self._make_interp("3.13", flavour="freethreaded")
+        minor = self._minor_other_than_running()
+        self._make_interp(minor, flavour="freethreaded")
         self.assertIsNone(
-            wheel_matrix.interpreter_for_minor("3.13", roots=(self.tmp,)),
+            wheel_matrix.interpreter_for_minor(minor, roots=(self.tmp,)),
             "the free-threaded interpreter was selected; it cannot "
             "produce a per-minor wheel")
 

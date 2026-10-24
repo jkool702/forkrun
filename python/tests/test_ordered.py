@@ -153,8 +153,12 @@ class TestOrderedStreaming(ChildLifecycleMixin, unittest.TestCase):
                 return bytes(batch.data)
 
             stats: dict = {}
+            # lines=100 -> 40 batches. The gating pattern needs at
+            # least four batches; auto batching on a 4-CPU runner can
+            # produce fewer, leaving reassembly_max < 3 and making the
+            # bound assertions below measure the scheduler.
             out = list(run_mod._execute_streaming(
-                gated, path, lines=None, bytes_=None, workers=4,
+                gated, path, lines=100, bytes_=None, workers=4,
                 on_error="retry", order="index", stats=stats))
             with open(path, "rb") as fh:
                 # No poison: ordered reassembly is byte-exact.

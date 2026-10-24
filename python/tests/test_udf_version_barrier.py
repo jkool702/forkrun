@@ -423,11 +423,28 @@ class MinorMismatchBarrier(unittest.TestCase):
         with open(helper_c, "w") as fh:
             fh.write("int unrelated_symbol(void) { return 1; }\n")
         helper = os.path.join(libdir, "libnohelper.so")
+        # --no-as-needed is LOAD-BEARING: helper.c references nothing in
+        # the dependency, so the default --as-needed drops the DT_NEEDED
+        # entry, the loader never loads libstampdep.so, and a bare dlsym
+        # finds no stamp at all -- the refusal then passes for a reason
+        # this test does not claim.
         subprocess.run(
             ["gcc", "-shared", "-fPIC", "-o", helper, helper_c,
-             "-L" + libdir, "-lstampdep",
-             "-Wl,-rpath," + libdir],
+             "-L" + libdir, "-Wl,--no-as-needed", "-lstampdep",
+             "-Wl,--as-needed", "-Wl,-rpath," + libdir],
             check=True, capture_output=True, timeout=180)
+
+        # Premise assertion: the stamp must be reachable THROUGH the
+        # helper, or the launcher below is not being asked the question
+        # this test exists to ask. ctypes uses the same dlsym semantics
+        # the launcher does (opened object + its dependencies).
+        import ctypes
+        probe = ctypes.CDLL(helper)
+        self.assertTrue(
+            hasattr(probe, "fr_udf_built_version_v2"),
+            "fixture premise failed: the dependency's stamp is not "
+            "reachable through %s, so a bare dlsym could not have found "
+            "it and this test would pass vacuously" % helper)
 
         env = dict(os.environ)
         env["LD_LIBRARY_PATH"] = libdir + ":" + env.get("LD_LIBRARY_PATH", "")
@@ -749,10 +766,15 @@ class MinorMismatchBarrier(unittest.TestCase):
         # ineligible even though _cleanroom_enabled() is True.
         self.assertIsNone(_udf.helper_path())
 
+        # lines=1: the assertion below compares one output element per
+        # RECORD, so the batching must be one record per batch. Auto
+        # batching on a 4-CPU runner groups the 8 lines into fewer
+        # blobs, which is correct engine behaviour and a wrong premise
+        # for this test.
         out, sout, serr = self._capture_stdout_stderr(
             lambda: forkrun.map("bm:up", self.src, mode="udf",
                                 workers=1, on_error="retry",
-                                output="bytes"))
+                                output="bytes", lines=1))
         self.assertNotIn("declined", serr,
                          "no probe happened, so there is no refusal to "
                          "report. Got: %r" % serr[:200])

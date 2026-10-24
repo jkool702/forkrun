@@ -490,14 +490,19 @@ class MatrixAndScriptTests(unittest.TestCase):
                          set(gen_python_matrix._ENV))
 
     def test_udf_script_lists_the_one_supported_minor_list(self):
-        r = subprocess.run(["bash", UDF_SCRIPT, "--list"],
+        # LIST_PYTHON: the harness must not depend on a literal
+        # `python3` existing. The 3.12 CI cell ships only python3.12,
+        # so the script's default lookup failed there.
+        env = dict(os.environ, LIST_PYTHON=sys.executable)
+        r = subprocess.run(["bash", UDF_SCRIPT, "--list"], env=env,
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(0, r.returncode, r.stderr)
         self.assertEqual(list(wheel_matrix.SUPPORTED_MINORS),
                          r.stdout.split())
 
     def test_udf_script_rejects_unsupported_minor_early(self):
-        r = subprocess.run(["bash", UDF_SCRIPT, "3.9"],
+        env = dict(os.environ, LIST_PYTHON=sys.executable)
+        r = subprocess.run(["bash", UDF_SCRIPT, "3.9"], env=env,
                            capture_output=True, text=True, timeout=60)
         self.assertNotEqual(0, r.returncode)
         self.assertIn("not a supported minor", r.stderr)

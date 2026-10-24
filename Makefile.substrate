@@ -19,7 +19,20 @@
 # when the artifact's ELF machine doesn't match the requested compiler.
 CC      ?= gcc
 CFLAGS  ?= -O1 -fPIC -Wall -Wextra
-INCLUDES = -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins
+
+# WO-COMPAT-08: bash's generated headers are supplied by a DISTRO PACKAGE
+# (Fedora: bash-devel; Debian/Ubuntu: bash-builtins), not by this tree and
+# not by the bash binary. forkrun_ring.c is compiled with -DSHELL
+# -DHAVE_CONFIG_H and includes <config.h> followed by command.h/shell.h;
+# when the package is missing or stale the compiler reports a bare
+# "config.h: No such file or directory" from the middle of the engine,
+# which reads like a bug in this repository. The prerequisite below is the
+# ONE place that decides the headers are present, and it names the package.
+# BASH_INCLUDE exists for non-standard prefixes; the -I order stays in
+# lockstep with it.
+BASH_INCLUDE ?= /usr/include/bash
+BASH_HEADERS  = $(BASH_INCLUDE)/config.h $(BASH_INCLUDE)/shell.h
+INCLUDES = -I$(BASH_INCLUDE) -I$(BASH_INCLUDE)/include -I$(BASH_INCLUDE)/builtins
 
 # W-PY23 reproducible builds: same source + same compiler must yield
 # byte-identical outputs. Three inputs defeat that by default:
@@ -83,10 +96,35 @@ $(CCSTAMP): FORCE
 
 FORCE:
 
+# Authoritative bash-header prerequisite (WO-COMPAT-08). ORDER-ONLY on the
+# engine/shim objects: it always runs (so a header that disappears after a
+# successful build still fails the next build loudly) but never forces a
+# recompile, which would defeat make on every invocation.
+.PHONY: bash-headers
+bash-headers:
+	@missing=; for h in $(BASH_HEADERS); do \
+		[ -f "$$h" ] || missing="$$missing $$h"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		{ \
+			echo "ERROR: bash development headers are missing:$$missing"; \
+			echo; \
+			echo "  forkrun_ring.c is built with -DSHELL -DHAVE_CONFIG_H and"; \
+			echo "  includes bash's own headers; they ship in a distro package:"; \
+			echo "    Fedora/RHEL:    dnf install bash-devel"; \
+			echo "    Debian/Ubuntu:  apt-get install bash-builtins"; \
+			echo; \
+			echo "  Looked under BASH_INCLUDE=$(BASH_INCLUDE)"; \
+			echo "  (override BASH_INCLUDE= if bash was installed to another prefix)."; \
+			echo "  Reproduce the install: rpm -q bash-devel || dpkg -l bash-builtins"; \
+		} >&2; \
+		exit 1; \
+	fi
+
 substratestubs.o: substratestubs.c forkrun_substrate.h $(CCSTAMP)
 	$(CC) $(CFLAGS) -c substratestubs.c -o $@
 
-forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h $(CCSTAMP)
+forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h $(CCSTAMP) | bash-headers
 	# NOTE: no -D_GNU_SOURCE here — the TU must set its own FTMs (before any
 	# libc include). A CLI define would mask exactly the include-order bug
 	# class the canary exists to catch.
@@ -96,7 +134,7 @@ $(OUT): forkrun_ring_canary.o $(CANARY_STUBS)
 	$(CC) -shared -o $@ forkrun_ring_canary.o $(CANARY_STUBS) \
 		-Wl,--no-undefined $(ALLOWED_DEPS) $(LDFLAGS_REPRO)
 
-forkrun_python_shim.o: python/forkrun/_shim.c forkrun_ring.c forkrun_substrate.h ring_loadables/forkrun_plugin.h $(CCSTAMP)
+forkrun_python_shim.o: python/forkrun/_shim.c forkrun_ring.c forkrun_substrate.h ring_loadables/forkrun_plugin.h $(CCSTAMP) | bash-headers
 	# NOTE: same FTM hygiene as the canary — no -D_GNU_SOURCE on the CLI.
 	# _shim.c's first directive includes forkrun_ring.c, so the engine's
 	# FTM block still precedes the first libc include in this TU.
