@@ -35,8 +35,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import (FrPyBatch, RC_OK, find_substrate,  # noqa: E402
                                get)
+from forkrun._worker import _HDR  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -118,7 +120,7 @@ def _up(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestClaimPublishRace(unittest.TestCase):
+class TestClaimPublishRace(ChildLifecycleMixin, unittest.TestCase):
     """Death between begin_claim and publish reads TXN_CLAIMING → 4."""
 
     def tearDown(self):
@@ -186,7 +188,7 @@ class TestClaimPublishRace(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestAckClearRace(unittest.TestCase):
+class TestAckClearRace(ChildLifecycleMixin, unittest.TestCase):
     """Death between order-packet write and clear reads COMMITTING → 4."""
 
     def tearDown(self):
@@ -255,7 +257,7 @@ class TestAckClearRace(unittest.TestCase):
 
 
 @unittest.skipUnless(_has_symbols(), "recovery symbols absent")
-class TestPythonOutputRollback(unittest.TestCase):
+class TestPythonOutputRollback(ChildLifecycleMixin, unittest.TestCase):
     """SIGKILL mid-payload rolls back to the cursor, both orders."""
 
     def tearDown(self):
@@ -329,7 +331,9 @@ class TestPythonOutputRollback(unittest.TestCase):
                                         d0, len(d0)), 0)
         self.assertEqual(lib.fr_py_ack_direct(-1, -1), 0)
         end0 = os.fstat(out_fd).st_size
-        self.assertEqual(end0, 16 + len(d0))
+        # DECISION-02: the header now carries a disposition, so the
+        # per-record footprint is _HDR.size, not a literal 16.
+        self.assertEqual(end0, _HDR.size + len(d0))
 
         # Batch 1: emit D1 + ack → end1.
         c1 = FrPyBatch()
@@ -339,7 +343,7 @@ class TestPythonOutputRollback(unittest.TestCase):
                                         d1, len(d1)), 0)
         self.assertEqual(lib.fr_py_ack_direct(-1, -1), 0)
         end1 = os.fstat(out_fd).st_size
-        self.assertEqual(end1, end0 + 16 + len(d1))
+        self.assertEqual(end1, end0 + _HDR.size + len(d1))
 
         # Simulated respawn: fresh generation on the reused fd. The
         # cursor must restart at the live end (one lseek at init).
@@ -366,7 +370,7 @@ class TestPythonOutputRollback(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestPublishPayloadBoundary(unittest.TestCase):
+class TestPublishPayloadBoundary(ChildLifecycleMixin, unittest.TestCase):
     """Kill after CLAIMED but before any payload work: the fundamental
     normal-catastrophic path — truncate (no-op), escrow, retry wins."""
 
@@ -396,7 +400,7 @@ class TestPublishPayloadBoundary(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestMultipleDeaths(unittest.TestCase):
+class TestMultipleDeaths(ChildLifecycleMixin, unittest.TestCase):
     """Each dead worker's transaction is recovered exactly once;
     the final output is complete regardless of death interleaving."""
 

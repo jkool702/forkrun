@@ -1,56 +1,81 @@
-"""forkrun.run / map / stream — Stage 4 Phase 2 (W-PY3) emitter path.
+"""forkrun.run / map / stream — the Python frontend entry points.
 
-v0.5 pipeline (single-node UMA, materializing input):
-  parent: validate -> load substrate -> fr_py_init -> spill source into an
-    ingress memfd -> fr_py_ingest_done -> fr_py_scan (publishes all slots
-    synchronously) -> create one OUTPUT memfd per worker -> fork N workers
-    (both memfds inherited) -> waitpid -> pread output memfds -> destroy.
-  worker (post-fork child): mmap the ingress memfd once -> claim/Batch/
-    payload/invalidate/flush/copy-to-output-memfd/ack loop with escrow
-    retry -> os._exit.
+WHAT THIS MODULE IS
+-------------------
+Dispatch, supervision and result collection for four public entry points
+(`run`, `map`, `stream`, `sweep`) over five payload modes
+(`_api._VALID_MODES`: python, spawn, plugin, splice, udf).
 
-Emitter (§3.9b, v0.5 stage): per-worker output memfds carrying keyed records
-(batch_idx u64 LE, length u64 LE, payload bytes). The emitter TRANSPORTS;
-it does not order — batch_index is the execution identity/ordering key and
-the parent does optional consumer-side reassembly (map(order="index")
-sorts; the C orderer is skipped by design). v0.5 drains after workers
-complete; true PIPE streaming (parent drains while workers run, closing the
-hydraulic backpressure loop) is v1. No Python pipe/queue carries payload
-bytes at any point; no pickle; no bash.
+This docstring previously described the "v0.5 pipeline" — a single-node,
+UMA, fully-materializing shape with `mode="python"` only. Every one of
+those limits has since been lifted, and the text was left asserting them
+next to code that contradicted it line by line. It is rewritten here to
+describe the shape that exists; the historical v0.5 pipeline is recorded
+in dev/supervisor/MOVER_REPORT.md rather than in the module header.
 
-Scope notes (v0.5 != the full plan):
-- Input AND output are materialized: bounded inputs/outputs only. TB-scale
-  boundedness (streaming ingest + fallow + windowed mmap + PIPE drain)
-  is v1/Stage 4 refinement, not this path.
-- Copy-on-return: payload returns bytes/memoryview/str/None; the wrapper
-  copies into the output memfd (stated cost; write-in-place OutputBatch
-  is demand-pulled Stage 6+).
-- No NUMA multi-node (nodes must be "auto"/1), no resume, no spawn/plugin
-  modes (mode must be "python").
-- Same-process retry: a failing batch is escrow-deposited (kills+1) and the
-  worker continues; it re-claims the batch via the escrow drain without a
-  respawn manager. Poisoned batches are skipped+acked. This preserves the
-  retry-then-poison counting of bash -E without a reactor.
-- map() is BATCH-granular (payload receives a Batch, one result per batch),
-  collected parent-side from the output memfds after waitpid.
-- run() with sink=None discards results; with a callable sink the sink runs
-  payload-side in the worker (zero crossing, §3.9a).
+EXECUTOR FAMILIES
+-----------------
+Dispatch selects a supervision model and an ingest shape. They are
+deliberately NOT one flag-driven executor (see DECISION-03): the plain
+waitpid path and the reactor path have different failure-detection,
+recovery and teardown contracts, and merging them would trade a real
+invariant for line count.
+
+  Materialized ingest        Streaming ingest
+  ------------------------    ------------------------
+  _execute_locked            _execute_ingest_locked        (plain)
+  _execute_reactor_locked    _execute_ingest_reactor_locked(reactor)
+  _execute_numa_locked       _execute_numa_stream
+  _execute_cleanroom         _execute_cleanroom_stream     (cleanroom)
+  _execute_streaming         _execute_ingest_stream
+                              _execute_streaming_reactor
+
+  orchestrator=None / True -> the reactor is the DEFAULT (W-REL1/R1)
+  orchestrator=False       -> plain waitpid path
+  nodes>1                  -> NUMA pipeline
+  eligible + FORKRUN_CLEANROOM -> cleanroom launcher (exec'd, no Python
+                             address space inherited by workers)
+
+INVARIANTS THIS MODULE OWNS
+---------------------------
+* No Python pipe/queue carries payload bytes, ever. No pickle.
+* Workers claim exactly one ring slot (INVARIANTS.md 1-4).
+* Escrow deposit and batch recovery are PARENT-side
+  (RESILIENCE_PROTOCOL.md 2, W-PY28/W-PY29). A worker's exit path is
+  cleanup only; depositing there would double-count.
+* Descriptor hygiene: every forked child scrubs to the engine + job fds
+  (`_fd_scrub.scrub_fds`); fd 2 is never redirected or closed.
+* Batching: `workers` is normalized so multi-node topologies cover every
+  node (INVARIANTS.md 18).
+* `FORKRUN_RETRY_LIMIT` is read through `_api._resolve_retry_limit()`
+  and never hardcoded at a worker-init site.
+
+WHAT IS STILL TRUE OF THE OLD TEXT
+----------------------------------
+"map() is batch-granular: one result per batch" and "run() with a
+callable sink runs the sink payload-side in the worker" both remain
+accurate. The emitter transports keyed records and does not order them;
+ordering is a separate concern (`order="none"` default vs
+`order="index"`).
 """
-
 from __future__ import annotations
 
 import os
 import struct
 import mmap as _mmap_mod
 import ctypes
+import fcntl
+import functools
+import inspect
 import weakref
 from collections import deque as _deque
 import sys
 
+from . import _childreg
 from ._api import Mode, Nodes, OnError, Order, _validate
 from ._bindings import RC_OK, get, load
 from ._fd_scrub import scrub_fds, snapshot_fds
-from ._pipes import make_pipe
+from ._pipes import make_pipe, make_stream_notify_pipe
 from ._plugin import make_plugin_payload
 from ._reassembly import ReassemblyBuffer
 from ._executor_core import ExecutorSpec
@@ -61,12 +86,16 @@ from ._resume import (ORDERER_REAP_TIMEOUT, WORKER_REAP_TIMEOUT,
                        consume_sidecar, require_resume_path,
                        resume_begin)
 from ._signals import guard as _signal_guard
+from ._signals import interrupt_safe as _interrupt_safe
 from ._spawn import make_spawn_payload
+from ._udf import (roots_spec as _udf_roots_spec,
+                   udf_payload as _make_udf_payload)
+from ._udf import helper_path as _udf_helper_path
 from ._worker import _HDR, _c_plugin_spec, _c_spawn_spec, \
     _fork_c_plugin_worker, _fork_c_spawn_worker, resolve_payload_parent, \
     worker_main
 from .exceptions import (ForkrunInterrupted, ForkrunPoisonSkip,
-                           ForkrunWorkerFailure)
+                           ForkrunProtocolError, ForkrunWorkerFailure)
 
 import fcntl as _fcntl
 import time as _time
@@ -74,6 +103,10 @@ from typing import Any, Callable, Iterator, List, Optional
 
 # W-PY18: default byte-batch for mode="splice" (bash -b default).
 _SPLICE_DEFAULT_BYTES = 512 * 1024
+
+# DECISION-02 terminal dispositions (must match FR_DISP_* in _shim.c).
+_DISP_DATA = 0
+_DISP_NO_RESULT = 1
 
 # D-PORT3: parent-side SIGINT translation (Bash exit 130). Every
 # `except KeyboardInterrupt` site below aborts first, then raises
@@ -189,9 +222,9 @@ def _require_numa_symbol():
 
     if not _v1a()["numa"]:
         raise RuntimeError(
-            "nodes=@N/multi-node needs the NUMA substrate "
-            "(fr_py_init_numa et al.) — rebuild it ('make -f "
-            "Makefile.substrate python-substrate')")
+                "nodes=@N/multi-node needs the NUMA substrate "
+                "(fr_py_init_numa et al.) — rebuild it ('make -f "
+                "Makefile.substrate python-substrate')")
 
 
 def _resolve_numa(nodes):
@@ -214,9 +247,9 @@ def _require_drain_symbol():
 
     if not _v1a().get("drain"):
         raise RuntimeError(
-            "c_drain=True needs fr_py_drain_loop — rebuild "
-            "the substrate ('make -f Makefile.substrate "
-            "python-substrate')")
+                "c_drain=True needs fr_py_drain_loop — rebuild "
+                "the substrate ('make -f Makefile.substrate "
+                "python-substrate')")
 
 
 def _resolve_output(output) -> bool:
@@ -246,6 +279,58 @@ def _resolve_output(output) -> bool:
         "individually if you need one or the other." % (output,))
 
 
+def _require_v0_mode(mode):
+    """Refuse a mode this version does not support.
+
+    THE SINGLE SOURCE OF TRUTH for the mode half of the v0 envelope.
+    This check was copied verbatim into TEN entry points, so the set of
+    supported modes was written down ten times; a change to the
+    envelope meant finding ten places, and two of the copies had
+    already drifted from the other eight.
+
+    The wording is load-bearing: it is what a user reads when they ask
+    for something this version cannot do.
+    """
+    if mode not in ("python", "splice"):
+        raise NotImplementedError(
+            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+
+
+def _require_v0_envelope(mode, nodes):
+    """Refuse a mode/nodes pair this version does not support.
+
+    The nodes half of the v0 envelope, layered on the mode half. Eight
+    entry points carried both checks, byte-identical; they now call
+    this one helper. The NUMA executors legitimately check mode only
+    (their `nodes` argument means something else), so they call
+    _require_v0_mode directly.
+    """
+    _require_v0_mode(mode)
+    if not (nodes == "auto" or nodes == 1):
+        raise NotImplementedError(
+            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+
+
+def _validate_c_flag(value, name):
+    """Normalize a C-path opt-in flag: None -> False, bool -> itself.
+
+    THE SINGLE SOURCE OF TRUTH for the three C-path opt-in flags
+    (c_drain, c_worker_loop, c_spawn_loop). The rule was written down
+    three times -- once per flag -- and the three copies differed only
+    in the flag's name, which is the one part the caller needs to see
+    because it is in the error message.
+
+    Each flag keeps its own named wrapper below, so the call sites read
+    the same and each flag's measured rationale stays where it belongs.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    raise TypeError(
+        "%s must be None, True, or False, got %r" % (name, value))
+
+
 def _validate_c_drain(c_drain):
     """Normalize the W-PY21-A drain flag (None → False default).
 
@@ -266,12 +351,7 @@ def _validate_c_drain(c_drain):
     raises via _require_drain_symbol (asking for the drain while
     masking its symbol is a contradiction).
     """
-    if c_drain is None:
-        return False
-    if isinstance(c_drain, bool):
-        return c_drain
-    raise TypeError(
-        "c_drain must be None, True, or False, got %r" % (c_drain,))
+    return _validate_c_flag(c_drain, "c_drain")
 
 
 def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
@@ -319,7 +399,7 @@ def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
         results_fd = results_w
 
     arr = (_ctypes.c_int * len(out_fds))(*out_fds)
-    pid = os.fork()
+    pid = _childreg.fork_child('drain')
     if pid == 0:
         try:
             keep = {signal_r, results_fd} | set(out_fds)
@@ -348,6 +428,22 @@ def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
     if mode == "pipe":
         try:
             os.close(results_w)
+        except OSError:
+            pass
+        # WO-PY-CDRAIN-REACTOR-WAKEUP-1: the parent owns the READ end
+        # and is its only reader. It must be nonblocking, because the
+        # pump reads until EAGAIN so that ONE pump call consumes
+        # everything already available; a blocking read there would
+        # stall the supervision path on an empty pipe.
+        #
+        # The DRAIN CHILD's write end stays BLOCKING. That is the
+        # backpressure mechanism: a slow consumer lets the results pipe
+        # fill, the drain's write blocks, the drain stops reading the
+        # workers' notifications, and the workers block. Making the
+        # write end nonblocking would silently remove the backpressure
+        # this whole route exists to provide.
+        try:
+            os.set_blocking(results_r, False)
         except OSError:
             pass
         return pid, results_r
@@ -405,13 +501,7 @@ def _validate_c_worker_loop(c_worker_loop):
     W-PY18 splice loop. Opt-in (default False): the Python worker loop
     stays the default so no user changes behavior without asking.
     """
-    if c_worker_loop is None:
-        return False
-    if isinstance(c_worker_loop, bool):
-        return c_worker_loop
-    raise TypeError(
-        "c_worker_loop must be None, True, or False, got %r"
-        % (c_worker_loop,))
+    return _validate_c_flag(c_worker_loop, "c_worker_loop")
 
 
 def _require_plugin_loop_symbol():
@@ -422,143 +512,187 @@ def _require_plugin_loop_symbol():
 
     if not _v1a().get("plugin_loop"):
         raise RuntimeError(
-            "c_worker_loop=True needs fr_py_worker_plugin_loop — rebuild "
-            "the substrate ('make -f Makefile.substrate "
-            "python-substrate')")
+                "c_worker_loop=True needs fr_py_worker_plugin_loop — rebuild "
+                "the substrate ('make -f Makefile.substrate "
+                "python-substrate')")
 
 
-def _cleanroom_enabled():
-    """W-CR1: is the exec-based cleanroom launcher requested?
+def _cleanroom_route_for(entry, raw_mode):
+    """The route identifier a public call would select, or None.
 
-    WORK IN PROGRESS BETA. Opt-IN via FORKRUN_CLEANROOM, and the
-    default is OFF -- not out of caution, but because in the shape a
-    real caller actually uses, it is currently SLOWER than the in-process
-    path it replaces.
+    `entry` is "map" or "stream"; `raw_mode` is the mode as the CALLER
+    wrote it, before _coerce_payload rewrites plugin->python.
+    """
+    if raw_mode not in ("plugin", "udf", "spawn"):
+        return None
+    route = "%s-%s" % (entry, raw_mode)
+    # Only SERVED routes get an identifier. stream(spawn) has no dispatch,
+    # so "stream-spawn" must not be a name a user could select -- it
+    # would be a selector that appears valid and can never fire, which is
+    # worse than no selector at all. Deriving the check from the served
+    # set also means the two cannot drift apart.
+    return route if route in _CLEANROOM_ROUTES else None
 
-    Integrated benchmark (benchmarks/bench_cleanroom.py, paired
-    interleaved A/B, exact counts asserted, 28 workers, UMA,
-    ml_process_light). Measured with --orchestrator, i.e. the reactor-
-    supervised shape that a plain forkrun.map() uses:
 
-        STARTUP    2000 records   17.91 ms -> 105.88 ms  0.17x (5.9x SLOWER)
-        THROUGHPUT light_5M      640.88 ms -> 719.53 ms  0.89x (11% SLOWER)
+# WO-CR-ROI-2 Phase C: per-route activation.
+#
+# FORKRUN_CLEANROOM was effectively boolean -- any non-false value
+# enabled EVERY eligible route at once, coupling five envelopes whose
+# dispatch and streaming behaviour differ and whose levels of proof
+# differ. A mode-based selector would not fix it: "plugin" would still
+# enable both map(plugin) and stream(plugin). So the identifier is the
+# DISPATCH ROUTE, resolved from the raw public mode plus the entry point
+# BEFORE payload coercion hides either.
+#
+# An unknown value is an ERROR, not a silent "enable everything" --
+# that failure mode is the one a strict parser exists to prevent.
+_CLEANROOM_FALSE_VALUES = ("", "0", "no", "off", "false")
 
-    The gap is a FIXED ~100 ms per run, not per-record work: 105.9 ms at
-    2000 records, 109.6 ms at 20000. Localised by instrumentation (all
-    reverted):
+_CLEANROOM_ROUTES = ("map-plugin", "map-udf", "map-spawn",
+                     "stream-plugin", "stream-udf")
 
-      * not pre-main (0.9 ms), not dlopen (0.4 ms), not the final child
-        joins (~0.2 ms), not post-main (0.8 ms)
-      * it IS the supervision loop: LOOP_DONE at t=103 ms, and the loop
-        is a blocking waitpid, so it is waiting on a child
-      * per-child reap stamps show the scanner and spill exit at
-        t=0.9 ms and ALL FOUR WORKERS exit together at t=101.5-102.1 ms
-        -- they are not slow, they are all released at once
-      * total CPU for the whole run is ~13 ms (user 5.4, sys 18.8), so
-        nobody is spinning: the launcher and its workers are BLOCKED
-      * strace of the whole tree shows two workers sitting in
-        read() = 0 for ~95 ms -- a read waiting for EOF -- alongside one
-        poll() that times out at 100 ms
+# Phase D default. Deliberately a single route.
+_DEFAULT_ROUTES = frozenset(("map-plugin",))
 
-    So this is a CIRCULAR WAIT, not slow work and not a poll interval.
-    The most consistent reading: the launcher holds spare signal/fallow
-    pipe WRITE ends across the supervision loop (closed only after it,
-    so respawns can be handed a fresh end), while a worker blocks reading
-    for EOF; the loop cannot finish until the workers exit, and the
-    workers only wake when a 100 ms timeout breaks the tie.
 
-    NOT yet fixed, and the next thing to try: release the spares as soon
-    as the last worker is spawned and no respawn can occur, or not hold
-    spares at all on the no-death path. Note that lowering the engine's
-    100 ms poll timeouts does NOT help (measured: 100 -> 10 ms changed
-    nothing), so the timeout is not the thing paying for the wait -- it
-    is only what ends it.
+def _cleanroom_selected_routes():
+    """Parse FORKRUN_CLEANROOM into (enabled, routes, explicit).
 
-    An earlier version of this note advertised 1.91x-2.06x FASTER
-    startup and 1.03x throughput. Those were measured with
-    orchestrator=False, which the envelope now REJECTS (see
-    _cleanroom_eligible: the launcher supervises unconditionally and so
-    cannot honour a caller's request for legacy fail-fast). They
-    therefore described a configuration that can no longer take the
-    cleanroom at all. The figures above replace them; the benchmark
-    gained --orchestrator so the default shape can be measured directly.
+    Returns (enabled, routes_or_None, explicit):
+      enabled  -- may this run use the cleanroom at all?
+      routes   -- None means "every eligible route" (legacy behaviour);
+                  a frozenset means "only these";
+      explicit -- did the user set the variable at all?
 
-    The motivation is still sound: the launcher forks its workers from a
-    tiny exec'd process instead of from the possibly-very-large Python
-    parent, so per-fork page-table copy does not scale with host RSS.
-    The in-process path pays that cost on every fork. Fixing the fixed
-    overhead is what stands between the current beta and that win --
-    the idea is sound, the implementation is not there yet.
-
-    OPT-IN, and the default is deliberately OFF. This was ON briefly
-    (commit 5ae0b0a0) and reversed.
-
-    (An earlier version of this note justified that with two claims that
-    are both now FALSE, kept here so they are not re-derived: it said the
-    envelope excluded orchestrator=True "so a plain forkrun.map() never
-    took the cleanroom", and that the launcher "runs no supervisor ...
-    W-CR4 is not landed". W-CR4 IS landed (branch NEW/REFACTOR3.9) and
-    the envelope now REQUIRES orchestrator=True. So neither the
-    reachability argument nor the missing-supervisor argument applies
-    any more, and neither should be used to argue for or against
-    defaulting this on.)
-
-    NOT A CORRECTNESS BUG, despite appearances: the BATCH COUNT varies
-    between runs of identical input, which looks alarming and is not.
-    Measured over 15 runs of 200 records, workers=1:
-
-        blob-count distribution   7 x1, 23 x3, 25 x10, 50 x1
-        distinct joined digests   ONE (15/15)
-        joined bytes              12890 == input bytes
-        zero-length blobs         0
-
-    Every run returns every record exactly once; only the grouping into
-    batches differs, because batch boundaries depend on how much has been
-    ingested when the scanner looks. This is pre-existing and shared with
-    the in-process path -- test_ctx_fields_identical already notes that
-    "batch counts legitimately differ run to run (pre-flight race sets
-    L)". It was mistaken here for record loss by counting BLOBS as
-    records, so do not repeat that: compare JOINED BYTES, which is what
-    test_matches_in_process_content does and why it is stable.
-
-    It stays OFF while it is a beta, for the reasons that are actually    It stays OFF while it is a beta, for the reasons that are actually
-    true today:
-
-    * It is SLOWER in the shape callers use (the fixed ~100 ms above).
-    * It is narrower than the API: mode="plugin" only, UMA only,
-      orchestrator=True only. Everything else declines, so it is an
-      accelerator for a subset, not a transparent swap-in.
-    * Real multi-node hardware has never exercised it; NUMA validation
-      here is fake-NUMA only.
-
-    The intent is that it eventually covers ALL modes and becomes the
-    default. That needs the fixed overhead gone, the envelope widened
-    (mode="python", multi-node), and real-NUMA validation -- in that
-    order, since widening an accelerator that is currently slower would
-    make things worse, not better.
-
-    For reference, the orchestrator=False configuration this feature was
-    originally tuned against measured 2.06x faster startup and 1.034x
-    throughput -- a genuine win, and the reason the idea is worth
-    finishing. That configuration is no longer reachable from the public
-    API (the envelope requires orchestrator=True), so those numbers
-    describe a path that cannot be taken today. Use --orchestrator for
-    the numbers that matter.
+    Raises ValueError on an unknown selector, so a typo cannot silently
+    widen what is enabled.
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:
-        return False         # default OFF; opt in with =1
-    return v.strip().lower() not in ("", "0", "no", "off", "false")
+        # WO-CR-ROI-2 Phase D: the default moved. map(plugin) is now ON
+        # by default; everything else stays opt-IN.
+        #
+        # This is the smallest default that the evidence supports. It is
+        # one route, not "the cleanroom", and the per-route selector is
+        # what makes it expressible -- before Phase C a default could only
+        # be all-or-nothing across five envelopes.
+        #
+        # Evidence, all four of the decision document's blockers closed:
+        #   * route proof  -- python/tests/test_cleanroom_routes.py execs
+        #     the REAL launcher for map(plugin) and compares bytes to an
+        #     in-process reference; mutation-proven (forcing the launcher
+        #     to "missing" turns it red).
+        #   * per-route gate -- Phase C, 6109dd93.
+        #   * packaging -- _forkrun_cleanroom ships inside the manylinux
+        #     wheel (verified in dist/), so a default is not a no-op for
+        #     installed users.
+        #   * performance -- python/benchmarks/
+        #     bench_cleanroom_default_on.py, re-measured on this host
+        #     with the in-repo plugin: startup 1.77x, startup+512MB
+        #     ballast 2.34x, throughput 1.16x, in-process/cleanroom.
+        #     No regime regresses, including the throughput regime where
+        #     the advantage is smallest.
+        #
+        # If the launcher is missing or exec fails, the caller falls
+        # back in-process, so a broken install degrades to the OLD
+        # behaviour rather than to a failure.
+        return True, _DEFAULT_ROUTES, False
+    val = v.strip().lower()
+    if val in _CLEANROOM_FALSE_VALUES:
+        return False, None, True
+    if val in ("1", "yes", "on", "true", "all", "*"):
+        # Legacy: every route the envelope accepts. Preserved exactly.
+        return True, None, True
+    parts = [p.strip() for p in val.split(",") if p.strip()]
+    if not parts:
+        raise ValueError(
+            "FORKRUN_CLEANROOM=%r selects no route. Use one of %s, a "
+            "comma-separated subset, or 1 for every eligible route."
+            % (v, ", ".join(_CLEANROOM_ROUTES)))
+    unknown = [p for p in parts if p not in _CLEANROOM_ROUTES]
+    if unknown:
+        raise ValueError(
+            "FORKRUN_CLEANROOM=%r contains unknown route(s) %s. Valid "
+            "routes: %s. (Use 1 for the legacy all-routes behaviour.)"
+            % (v, ", ".join(repr(u) for u in unknown),
+               ", ".join(_CLEANROOM_ROUTES)))
+    return True, frozenset(parts), True
+
+
+def _cleanroom_enabled():
+    """Is the exec-based cleanroom launcher requested at all?
+
+    The WHOLE-ENVIRONMENT gate. Whether a given call may use it depends
+    additionally on _cleanroom_route_enabled(), so this being true does
+    NOT enable every envelope -- that separation is the point of the
+    per-route selector.
+
+    Current semantics (WO-CR-ROI-2, see
+    dev/supervisor/CLEANROOM_DEFAULT_ON_DECISION.md for the evidence):
+
+        unset                map(plugin) only  [default]
+        0/no/off/false/""    nothing
+        1/yes/on/true/all    every SERVED route [legacy]
+        map-plugin[,...]     the named subset
+        unknown              ValueError
+
+    Two properties that are easy to get wrong:
+
+    * An OFF value is the supported way to restore pre-Phase-D
+      behaviour, since the default is now on for map(plugin). It is
+      checked before route parsing, so the selector cannot shadow it.
+    * "all" means all SERVED routes. stream(spawn) has no dispatch, so
+      it is neither selectable nor enabled by any value.
+
+    The measured performance history (parent-RSS scaling in both THP
+    regimes, and the batch-count-variance note explaining why blob counts
+    are not record counts) lives in
+    dev/supervisor/CLEANROOM_ROUTE_INVENTORY.md and
+    dev/supervisor/CLEANROOM_DEFAULT_ON_DECISION.md. It is deliberately
+    NOT duplicated here: this docstring sat next to the gate for a long
+    time asserting "OFF by default" after the default moved, which is
+    exactly the failure mode comments are supposed to prevent.
+    """
+    enabled, _routes, _explicit = _cleanroom_selected_routes()
+    return enabled
+
+
+def _cleanroom_route_enabled(entry, raw_mode):
+    """May THIS dispatch route use the launcher?
+
+    A route selector narrows; it never widens. If the environment named
+    specific routes, this route must be one of them. With the legacy
+    unset-route selector every eligible route remains eligible.
+    """
+    _enabled, routes, _explicit = _cleanroom_selected_routes()
+    if not _enabled:
+        return False
+    route = _cleanroom_route_for(entry, raw_mode)
+    # The route must EXIST before either branch is consulted. Legacy "=1"
+    # used to return True unconditionally, which reported stream(spawn) as
+    # "enabled" even though it has no dispatch -- the selector said yes to
+    # a route the product cannot serve. Harmless today only because the
+    # stream predicate separately declines spawn, so the envelope still
+    # refused it; that made correctness depend on two unrelated checks
+    # agreeing. One check is enough.
+    if route is None:
+        return False
+    if routes is None:
+        return True                      # legacy: every SERVED route
+    return route in routes
 
 
 def _cleanroom_explicit():
     """Did the user actually ask for the cleanroom?
 
-    Distinguishes "requested" from "not set". With the default OFF
-    this is simply "did the user ask", and it drives the one warning
-    worth emitting: an explicit request that the envelope cannot honour
-    is declined LOUDLY, so nobody believes they got the cleanroom when
-    they did not.
+    Distinguishes "requested" from "not set". Both decline-warning sites
+    are gated on this, and the default is now ON for map(plugin), so the
+    distinction carries more weight than it did: UNSET-ON is not the same
+    as ASKED-ON. A caller who never set the variable should not be warned
+    that their call quietly used the in-process path -- they did not ask
+    for anything. A caller who did set it, and whose call the envelope
+    declines, must be warned, or they will believe they got a cleanroom
+    they did not get.
     """
     v = os.environ.get("FORKRUN_CLEANROOM")
     if v is None:
@@ -566,30 +700,274 @@ def _cleanroom_explicit():
     return v.strip().lower() not in ("", "0", "no", "off", "false")
 
 
+def _cleanroom_multinode_route_enabled(raw_mode):
+    """May THIS call take the multi-node cleanroom route?
+
+    Both conditions are required: the route must be opted into (see
+    _cleanroom_multinode_enabled) and the mode must be one the
+    multi-node envelope serves.
+    """
+    if not _cleanroom_multinode_enabled():
+        return False
+    route_ok = _cleanroom_route_enabled("map", raw_mode)
+    return bool(route_ok)
+
+
+def _cleanroom_multinode_enabled():
+    """Is the MULTI-NODE cleanroom route opted into?
+
+    W-EXP-2 step C makes the launcher able to serve the multi-node
+    plugin envelope, but serving it is not the same as DEFAULTING it.
+    Decision 3 (multi-node default-on) is gated by W-EXP-2 *and* by
+    real multi-socket evidence, and the second half does not exist on a
+    single-node host: there is no way to prove here that the NUMA route
+    behaves on real hardware, so defaulting it would claim an
+    unevidenced win.
+
+    The route selector (FORKRUN_CLEANROOM) names DISPATCH routes
+    (entry x mode). The multi-node envelope is a different dimension --
+    topology -- and folding it into that namespace would silently
+    change what an existing FORKRUN_CLEANROOM=map-plugin means. So it
+    has its own explicit switch, and it stays OFF until Decision 3.
+
+    Returns False for an unset/garbage value; only an explicit truthy
+    value turns it on.
+    """
+    v = os.environ.get("FORKRUN_CLEANROOM_NUMA")
+    if v is None:
+        return False
+    v = v.strip().lower()
+    return v not in ("", "0", "no", "off", "false") and v not in (
+        "none", "auto")
+
+
 def _warn_cleanroom_multinode(num_nodes):
-    """Multi-node routes AROUND the cleanroom envelope entirely.
+    """Multi-node did NOT take the cleanroom: say so, if it was asked for.
 
     Every `if num_nodes > 1:` branch RETURNS before
     _cleanroom_eligible is consulted, so an explicit
     FORKRUN_CLEANROOM used to be dropped here in silence. That
     contradicted the envelope's own rule ("a user who set
-    FORKRUN_CLEANROOM must learn they did not get it") and read as the
+    FORRUN_CLEANROOM must learn they did not get it") and read as the
     cleanroom quietly ignoring them.
 
-    Multi-node is also the launcher's largest remaining gap -- it builds
-    one ring in one process and has no node-bound worker placement -- so
-    the message says so plainly rather than implying a transient miss.
-    It must be called from each branch: the envelope check cannot cover
-    these, because it is never reached.
+    Step C changed the shape of this: multi-node plugin CAN take the
+    launcher, but only when the multi-node route is opted into. When it
+    is not, this message is the difference between "the launcher
+    declined" and "the launcher was never asked" -- and a user who
+    asked for the cleanroom must be able to tell.
     """
     if not (_cleanroom_enabled() and _cleanroom_explicit()):
         return
     import warnings as _warnings
     _warnings.warn(
         "forkrun: FORKRUN_CLEANROOM ignored -- multi-node (nodes=%r) "
-        "runs the dedicated NUMA pipeline. The launcher serves UMA "
-        "single-node only." % (num_nodes,),
+        "runs the dedicated NUMA pipeline. The launcher serves the "
+        "multi-node plugin envelope only when FORKRUN_CLEANROOM_NUMA=1 "
+        "is set (Decision 3 is not passed yet)." % (num_nodes,),
         UserWarning, stacklevel=3)
+
+
+# --------------------------------------------------------------------------
+# Route-owned descriptor discipline (F6 Stage 3)
+# --------------------------------------------------------------------------
+class _RouteFdSet:
+    """Descriptors a cleanroom route created, with single-owner release.
+
+    WHY THIS EXISTS. Every descriptor a route allocates must be closed on
+    EVERY exit -- including an exception raised during descriptor setup,
+    argv construction, the spawn itself, waitpid, the stats or trace read,
+    failure classification, or result collection. Adding a close statement
+    per exit leaves the next exceptional exit uncovered, which is exactly
+    how `errfd` and the streaming `stats_fd` came to leak on every call.
+
+    THREE RULES, because the alternative is double-closing a recycled
+    descriptor number:
+      * `add`    -- the route just created this fd and owns it;
+      * `close`  -- release it now (the common case, kept explicit so the
+                    ordering constraint is visible at the call site);
+      * `release`-- ownership is being TRANSFERRED elsewhere, so this set
+                    must never close it. `_cleanroom_collect` owns
+                    `res_fd` and closes it itself; without `release` the
+                    cleanup would race it.
+    """
+
+    __slots__ = ("_owned", "_done")
+
+    def __init__(self):
+        self._owned = {}
+        self._done = set()
+
+    def add(self, name, fd):
+        """Register a freshly created descriptor.
+
+        SHARP EDGE, recorded rather than defended against: registering a
+        name that is already owned OVERWRITES the entry without closing the
+        descriptor it held, which would leak that descriptor. This cannot
+        happen today -- audited across both route functions, every name is
+        added exactly once per call, and each call gets its own `_own` from
+        the decorator -- so this is a hazard for a future edit rather than a
+        live defect, and changing the behaviour here would widen the diff
+        for no currently-reachable failure. If a second `add()` for the
+        same name is ever introduced, it must close the previous value.
+        """
+        if fd is not None and fd >= 0:
+            self._owned[name] = fd
+        return fd
+
+    def close(self, name):
+        """Close one descriptor now, if still owned. Idempotent."""
+        if name in self._done:
+            return
+        fd = self._owned.pop(name, None)
+        if fd is None:
+            return
+        self._done.add(name)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def release(self, name):
+        """Give up ownership WITHOUT closing (transferred elsewhere)."""
+        self._owned.pop(name, None)
+        self._done.add(name)
+
+    def close_all(self):
+        """Close everything still owned. Never raises."""
+        for name in list(self._owned):
+            self.close(name)
+
+
+def _fd_above_stdio(fd):
+    """Relocate `fd` above fd 2, or return it unchanged if it already is.
+
+    OWNERSHIP: this function takes ownership of `fd`. On any failure path it
+    closes `fd` itself and raises. Every call site passes a ROUTE-OWNED
+    descriptor -- a memfd it just created, one end of a pipe it just made,
+    or the `os.dup()` that `_cleanroom_source_fd()` made of the caller's
+    source -- so closing is correct, and it is what stops a failure during
+    relocation from leaking a descriptor that was never registered with
+    `_RouteFdSet` (the call sites register only after this returns).
+
+    WHY (F6 Stage 3 / C5). The materialized route ends with
+    `os.dup2(errfd, 2)`. If the host process started with fd 2 CLOSED,
+    the kernel hands the route's FIRST allocation the number 2 -- so
+    `src_fd` can land on fd 2 and be silently overwritten by that dup2.
+    The launcher is then told `--src 2` and reads the ERROR MEMFD as its
+    input: a well-formed result computed from the wrong bytes, with no
+    error, no warning and no non-zero exit.
+
+    Relocating the route's own descriptor above 2 is the narrow fix. It
+    deliberately does NOT reopen the caller's fd 0/1/2 in the parent (that
+    would change process state the caller owns), does NOT enumerate
+    /proc/self/fd, and does NOT touch any descriptor the caller supplied:
+    every caller-supplied source is `os.dup()`ed by
+    `_cleanroom_source_fd()` first, so what arrives here is always a
+    route-owned copy and the original stays the caller's.
+
+    F6 Stage 4 -- WHY fcntl(F_DUPFD) AND NOT os.dup().
+    The Stage 3 version used `os.dup()`, which returns the LOWEST FREE
+    descriptor. That is not a relocation at all when the gap is partly
+    occupied: relocating a descriptor on fd 1 with fd 0 busy and fd 2 free
+    returns fd 2, and with fds 1 and 2 busy returns fd 0. Reproduced
+    deterministically before this fix:
+
+        close fd 0 and fd 2, put the source on fd 1
+        -> _fd_above_stdio(1) returned 0
+
+    The Stage 3 low-FD matrix missed this because it closed ALL THREE of
+    fd 0/1/2, which leaves the gap empty and makes the lowest free
+    descriptor happen to be 3. C5 was therefore only closed for the one
+    occupancy pattern the test happened to construct.
+
+    `fcntl(fd, F_DUPFD, 3)` makes "> 2" a guarantee: the kernel picks the
+    lowest descriptor at or above the given minimum, so the result cannot
+    land back in the gap no matter what else is open.
+
+    F6 Stage 5 -- FAILURE MUST NOT DISABLE THE GUARD.
+    The Stage 4 version swallowed the OSError and returned `fd` unchanged,
+    which meant that if the relocation itself failed -- EMFILE, or any other
+    reason the kernel could not supply a number at or above 3 -- the helper
+    returned a descriptor INSIDE the standard-stream gap and the route
+    carried on. That is the C5 corruption, reached by a different road: the
+    guard quietly stopped guarding. Injected with fcntl stubbed to raise
+    EMFILE, it returned fd 1, and the route would have launched with
+    `--src 1`.
+
+    So a failure here is now fatal to the route rather than silent. The
+    same applies to the inheritable-state restore below: F_DUPFD clears
+    FD_CLOEXEC on the new number, so if the original's flag cannot be read
+    back there is no way to know whether the relocated descriptor should
+    cross exec. Guessing would either leak a descriptor across exec or hide
+    one from the launcher, and neither failure is visible to the caller.
+    """
+    if fd is None or fd > 2:
+        return fd
+    try:
+        higher = fcntl.fcntl(fd, fcntl.F_DUPFD, 3)
+    except OSError as exc:
+        os.close(fd)
+        raise OSError(
+            exc.errno,
+            "forkrun: could not place a cleanroom route descriptor above "
+            "fd 2 (F_DUPFD failed for descriptor %d); proceeding would hand "
+            "the launcher a descriptor inside the standard-stream gap, "
+            "which silently corrupts the input it reads" % (fd,),
+        ) from exc
+    try:
+        # F_DUPFD clears FD_CLOEXEC on the new number, so the inheritable
+        # state the route set on the ORIGINAL must be re-applied here or
+        # the relocated descriptor would silently stop crossing exec.
+        inheritable = os.get_inheritable(fd)
+        os.set_inheritable(higher, inheritable)
+    except OSError as exc:
+        os.close(fd)
+        os.close(higher)
+        raise OSError(
+            exc.errno,
+            "forkrun: could not restore the inheritable flag while "
+            "relocating cleanroom descriptor %d; the descriptor's "
+            "close-on-exec state would be wrong in an unknown direction"
+            % (fd,),
+        ) from exc
+    os.close(fd)
+    return higher
+
+
+def _route_fd_cleanup(fn):
+    """Run a launch function with automatic cleanup of registered fds.
+
+    A decorator rather than an inline `try/finally` because both route
+    functions are long (250+ and 240+ lines) and re-indenting them to add
+    a `finally` would be exactly the wholesale restructure this change is
+    meant to avoid -- and would put the cleanup boundary nowhere near the
+    allocations it protects.
+
+    Generator-aware: `_execute_cleanroom_stream` is a generator, so its
+    body is lazy and a plain wrapper would run the cleanup BEFORE the body
+    ever executed. The generator form defers cleanup to generator exit,
+    which is also what makes abandonment clean up.
+    """
+    if inspect.isgeneratorfunction(fn):
+        @functools.wraps(fn)
+        def gen_wrapper(*args, _own=None, **kwargs):
+            own = _own if _own is not None else _RouteFdSet()
+            try:
+                for item in fn(*args, _own=own, **kwargs):
+                    yield item
+            finally:
+                own.close_all()
+        return gen_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args, _own=None, **kwargs):
+        own = _own if _own is not None else _RouteFdSet()
+        try:
+            return fn(*args, _own=own, **kwargs)
+        finally:
+            own.close_all()
+    return wrapper
 
 
 def _cleanroom_launcher_path():
@@ -599,6 +977,28 @@ def _cleanroom_launcher_path():
     cand = os.path.join(os.path.dirname(os.path.abspath(so)),
                         "_forkrun_cleanroom")
     return cand if os.path.exists(cand) else None
+
+
+def _validate_spawn_argv(spawn_argv):
+    """Reject a command vector the launcher could not honour faithfully.
+
+    Runs before the launcher starts and before any source byte is read,
+    so an invalid command costs no input. Mirrors the launcher's own
+    descriptor validation, but the NUL rule lives only here -- C cannot
+    see an embedded NUL at all.
+    """
+    if not spawn_argv:
+        raise ValueError("spawn command vector is empty")
+    for i, el in enumerate(spawn_argv):
+        if not isinstance(el, str):
+            raise TypeError("spawn argv[%d] is %s, not str"
+                            % (i, type(el).__name__))
+        if "\0" in el:
+            raise ValueError(
+                "spawn argv[%d] contains NUL, which cannot be represented "
+                "in a POSIX argument; it would be silently truncated"
+                % i)
+    return list(spawn_argv)
 
 
 def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
@@ -642,9 +1042,17 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
       back, rather than returning silently wrong results. An earlier
       draft of this comment claimed v0 plugins were served "fine too";
       nine existing plugin tests disproved that.
-    * UMA single node -- no multi-node rings.
-    * order in ("none", "index") -- the launcher does NOT run the C
-      orderer (ring_order is forked only by the in-process reactor, for
+    * multi-node -- SERVED for mode="plugin" (W-EXP-2 step C): the
+      launcher builds the real per-node rings and runs the ingest,
+      indexers, scanners and fallow families itself. UDF and spawn
+      multi-node are NOT served (the node-taking worker loop exists for
+      the plugin loop only), and neither is multi-node STREAMING (the
+      launcher's ordered stream is not a live feed). The multi-node
+      route is opt-in behind FORKRUN_CLEANROOM_NUMA because Decision 3
+      (multi-node default-on) is gated on real multi-socket evidence,
+      which a single-node host cannot produce.
+    * order in ("none", "index") -- for UMA the launcher does NOT run the
+      C orderer (ring_order is forked only by the in-process reactor, for
       memory reasons), but it does not need to. The ordering is applied
       downstream by shared code: map/collect sorts by index in
       collect_records, and stream() reassembles parent-side from the
@@ -670,14 +1078,65 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
       supervises -- there is no flag and no non-supervised mode.
     """
     if num_nodes != 1:
-        return False, "UMA single-node only (got nodes=%r)" % (num_nodes,)
-    if raw_mode != "plugin":
-        return False, "mode='plugin' only (got %r)" % (raw_mode,)
-    if not orchestrator:
-        return False, ("orchestrator=False asks for legacy "
-                       "fork-and-wait/fail-fast, but the launcher "
-                       "supervises unconditionally and would recover a "
-                       "dead worker's batch instead of failing the run")
+        # W-EXP-2 step C: the launcher now serves the multi-node PLUGIN
+        # envelope -- real ingest/indexer/scanner/fallow families under
+        # the typed registry, with the engine's own C orderer for
+        # order="index".
+        #
+        # UDF and spawn NUMA are NOT wired: the node-taking worker loop
+        # exists only for the plugin loop, and running a UDF or a command
+        # on node 0 while claiming a multi-node run would be a lie about
+        # where the work happened. Those envelopes are W-EXP-1.5.
+        #
+        # Streaming is not wired either: the streaming cleanroom path is
+        # a different collection contract (no collect step to sort), and
+        # the NUMA orderer writes one ordered stream, not a live feed.
+        if raw_mode != "plugin":
+            return False, ("multi-node is served for mode='plugin' only "
+                           "(got %r)" % (raw_mode,))
+        # The streaming declines live in the streaming block below, which
+        # owns every streaming refusal. Returning here would pre-empt
+        # them, so a streaming multi-node call is declined by the block
+        # that is responsible for declining it.
+    # mode="udf" is served wherever mode="plugin" is: same launcher, same
+    # envelope, same supervision. It differs only in WHICH loop the
+    # launcher selects (fr_py_worker_udf_loop) and that an interpreter is
+    # initialised pre-fork. P1-3.
+    # Stage 3: spawn is served for materialized sources too, alongside
+    # plugin and udf. Its worker loop takes an argv VECTOR, not the
+    # plugin's two strings, so the launcher routes it through a
+    # mode-specific descriptor rather than the plugin callback -- same
+    # arity, incompatible types, and a cast would be undefined behaviour.
+    #
+    # Served only once the lifecycle gates held:
+    #   - a killed worker's command descendants die with its process
+    #     group (in-group cleanup);
+    #   - a descendant that calls setsid() is explicitly OUTSIDE that
+    #     guarantee, and that boundary is pinned by a test;
+    #   - the supervisor observes the death and respawns;
+    #   - teardown kills the group;
+    #   - a command failure is handled by the on_error policy with an
+    #     explicit SKIPPED record, not escalated to an infrastructure
+    #     abort.
+    # All six are in test_stage3_lifecycle.py.
+    if raw_mode not in ("plugin", "udf", "spawn"):
+        return False, ("mode='plugin', 'udf' or 'spawn' only "
+                       "(got %r)" % (raw_mode,))
+    # DECISION-03: orchestrator=False is now SERVED, via the launcher's
+    # fail-fast supervision policy (--supervise fail-fast).
+    #
+    # It was declined because "the launcher supervises unconditionally and
+    # would recover a dead worker's batch instead of failing the run" --
+    # i.e. a caller asking for fail-fast would silently get recovery, and
+    # could not tell from the result. That is fixed structurally rather than
+    # by promising it will not happen: the launcher's fail-fast branch
+    # RETURNS before the recovery call, so there is no flag guarding it.
+    #
+    # Semantics are DECISION-03 section 7.4(b): no recovery, no respawn,
+    # immediate abort on the first worker death. The abandoned option 7.4(a)
+    # ("no recovery but keep going") is NOT implemented and is not on the
+    # roadmap; a caller wanting "don't retry a batch but finish" uses
+    # orchestrator=True with FORKRUN_RETRY_LIMIT=0.
     if order not in ("none", "index"):
         return False, ("order=%r is not served; the launcher relies on "
                        "downstream ordering (collect_records sort for "
@@ -696,23 +1155,77 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
     # is CORRECT (just not accelerated), and is why narrowing here is
     # safe: a declined call falls back, it does not silently change
     # semantics.
+    # CR-FIX1-K: resume / checkpoint_file are refused for EVERY cleanroom
+    # call, and the check sits here -- ABOVE the streaming block -- rather
+    # than inside it.
+    #
+    # It used to live under `if streaming:`, which made the refusal
+    # unreachable for map(). The map() dispatch site did not pass these
+    # arguments either, so a call like
+    #
+    #     map(..., mode="plugin", order="index", orchestrator=True,
+    #          resume=..., checkpoint_file=...)
+    #
+    # was accepted by the envelope, took the launcher, and silently
+    # ignored both. Passing the arguments alone would not have fixed it:
+    # the predicate would still not have executed the check. An
+    # acceleration path must not accept an invocation it cannot honour,
+    # so this is a refusal (with the existing observable warning), not a
+    # silent ignore.
+    if resume is not None or checkpoint_file is not None:
+        return False, ("resume=/checkpoint_file= is not served; the "
+                       "launcher neither transports nor implements "
+                       "checkpoint/resume semantics")
+
     if streaming:
+        # Stage 3: spawn is served for materialized map() only. The stream
+        # path has no spawn dispatch -- it extracts a path:function spec
+        # and has no place to put an argv vector -- so it DECLINES here
+        # rather than falling through to a route that does not exist.
+        # Admitting it would make the predicate disagree with the
+        # dispatch, which is exactly the gap the review found.
+        if raw_mode == "spawn":
+            return False, ("stream(mode='spawn') is not served; the "
+                           "streaming path has no spawn dispatch")
         if order != "none":
             return False, ("stream(order=%r) is not served; the stream "
                            "path has no collect step to sort with"
                            % (order,))
-        if strict_poison:
-            return False, ("stream(strict_poison=True) is not served; no "
-                           "poison count reaches a streaming caller")
-        if resume is not None or checkpoint_file is not None:
-            return False, "stream(resume=/checkpoint_file=) is not served"
+        # W-EXP-2 step C: multi-node streaming is not served. The
+        # launcher's ordered NUMA stream is one ordered output, not a
+        # live feed, so there is no streaming collection contract to
+        # honour.
+        if num_nodes != 1:
+            return False, ("multi-node streaming is not served; the "
+                           "launcher's ordered stream has no live-feed "
+                           "contract")
+        # strict_poison IS served for stream() now. The decline said "no
+        # poison count reaches a streaming caller" -- true when it was
+        # written, and false since P2 (c3c321af) wired a statistics
+        # memfd through the cleanroom stream launch: the launcher writes
+        # the poison count, the parent consumes it AFTER a confirmed-clean
+        # launcher exit, and _LAST_STATS carries it to the caller.
+        #
+        # The gate was simply never lifted, so the capability existed and
+        # was unreachable -- the predicate and the tests disagreed. The
+        # external review caught this by noting that tests existed for
+        # streaming poison behaviour while the predicate still refused the
+        # combination.
+        #
+        # Verified by forcing this gate open and running it end to end:
+        # the cleanroom is entered and raises
+        #   "3 poisoned batch(es) skipped in a streaming run and
+        #    strict_poison=True"
+        # which is the intended error, not a fallback artefact.
 
-    # Sources: a materialized file, any already-open descriptor (int fd,
-    # fifo, socket, file object), or a Python iterable. The last is fed
-    # in by a forked producer child, which is how stream() has always
-    # worked, so map() now shares that machinery instead of demanding a
-    # file on disk. What is NOT servable is a source that is none of
-    # these -- notably a directory, or a path that does not exist.
+    # Sources: a materialized file or any already-open descriptor (int
+    # fd, fifo, socket, file object). Python iterables are NOT accepted:
+    # _api._reject_iterable_source refuses them ("Python is never an
+    # input pump"). A forked iterable producer used to be described
+    # here and in the eligibility comment below; it never ran on either
+    # path and has been removed from both. What is NOT servable is a
+    # source that is none of these -- notably a directory, or a path
+    # that does not exist.
     if isinstance(source, (str, bytes, os.PathLike)):
         try:
             path = os.fspath(source)
@@ -725,16 +1238,743 @@ def _cleanroom_eligible(source, raw_mode, num_nodes, order, strict_poison,
     elif isinstance(source, int) and not isinstance(source, bool):
         pass                                  # descriptor; validated later
     elif hasattr(source, "fileno") or hasattr(source, "__iter__"):
-        pass                                  # file object or iterable
+        # Structural type acceptance ONLY. This does NOT mean an iterable
+        # is a supported cleanroom input:
+        #   * _api._reject_iterable_source refuses Python iterables at the
+        #     public API ("Python is never an input pump"), so no
+        #     user-facing call reaches here with one;
+        #   * an iterable reaching here at all came from an internal
+        #     caller that bypassed validation. It is accepted here because
+        #     the oracle (tools/capability_oracle.py) records that contract
+        #     -- the caller continues to the in-process path rather than
+        #     being refused -- and changing it would alter the recorded
+        #     capability matrix, which is a separate decision;
+        #   * there is no producer to pump one. The forked producer that
+        #     used to exist here was unreachable and was removed from
+        #     both cleanroom paths.
+        pass
     else:
         return False, ("source must be a path, an open descriptor, or "
                        "an iterable (got %r)" % (type(source),))
     return True, ""
 
 
+# ---------------------------------------------------------------------------
+# CR-FIX1-D/C: the launcher outcome contract.
+#
+# Two things the parent used to conflate, both of which could turn a
+# failure into silent data loss:
+#
+#   1. The wait status was reported RAW. os.waitpid() returns a 16-bit
+#      status, so a launcher that exits 78 with code 78 arrives here as
+#      19968 (78 << 8). "status 19968" tells a caller nothing. The
+#      contract below decodes it into a class with an ACTION.
+#
+#   2. Every non-zero exit fell into one generic branch that returned
+#      None, i.e. "fall back in-process". That is only safe when nothing
+#      was consumed. The launcher spills by read()ing the caller's
+#      descriptor, and for a caller-supplied fd that descriptor was
+#      reached through os.dup() -- which shares the open file
+#      description, and therefore the FILE OFFSET. So after ingestion the
+#      fallback resumes mid-stream and returns a truncated result with
+#      exit 0. That is the failure mode this contract exists to remove.
+# ---------------------------------------------------------------------------
+
+# Exit codes that the launcher is guaranteed to return BEFORE the spill
+# child is forked (forkrun_cleanroom.c:411), and therefore before any
+# byte of the caller's source can have been read:
+#
+#   64  argv validation            (:270-290)
+#   69  dlopen / missing symbol    (:321, :343, :96)
+#   71  fr_py_init failed          (:365-368)
+#   78  plugin lacks forkrun_use_ctx (:328-338)
+#
+# 70 is deliberately ABSENT. It is die(), which fires both before the
+# spill fork (:388) and after it (:498 fork(worker), :516 fork(scan),
+# :539 fork(drain)), so it cannot be classified either way.
+# 1 (supervision failure) is always post-ingestion. Any signal death is
+# indeterminate. Both are unsafe.
+_CR_EXIT_PRE_INGEST = frozenset((64, 69, 71, 78, 80, 81, 82))
+
+# CR-FIX1-F: exits where falling back would REPRODUCE the hazard rather
+# than route around it. 79 means the launcher's capability probe of the
+# plugin never completed -- a constructor hung or crashed. The plugin's
+# load is itself unsafe, so retrying in-process would dlopen it in the
+# CALLER's process and reproduce the failure there, in a place with no
+# launcher to bound it. 78 is deliberately NOT in this set: the probe
+# completed and the plugin merely lacks the ctx protocol, which the
+# in-process path handles correctly.
+_CR_EXIT_NO_FALLBACK = frozenset((79,))
+
+# 80/81 are refusals of the CLEANROOM ACCELERATOR, decided before the
+# spill child is forked. They are eligible for in-process fallback and are
+# deliberately absent from _CR_EXIT_NO_FALLBACK, because we CAN establish
+# that declining them is safe -- which is exactly what separates them from
+# 79, where the C plugin probe failed such that loading the plugin in the
+# CALLER would itself be unsafe. The UDF fallback never loads the
+# CPython-linked helper into the caller, so a hung UDF probe is safe to
+# decline even though a hung plugin probe is not.
+
+_CR_EXIT_LABELS = {
+    64: "invalid invocation (bad arguments)",
+    69: "missing launcher dependency or substrate symbol "
+         "(is the substrate built and compatible with this launcher?)",
+    70: "launcher internal error -- may have occurred before or after "
+         "the input was consumed; treated as unsafe",
+    71: "engine initialization failed (fr_py_init), OR a UDF helper could "
+         "not be probed or loaded. Covers more than engine init since the "
+         "UDF helper's disposable probe was added",
+    78: "unsupported plugin capability (no forkrun_use_ctx dialect v1/v2)",
+    79: "plugin capability probe did not complete (a constructor hung or "
+         "crashed); loading this plugin is unsafe, so no fallback is "
+         "attempted",
+    80: "UDF helper CPython version does not match the caller's declared "
+         "major.minor, or the helper's version could not be verified "
+         "(no fr_udf_built_version_v2 symbol); refusing to initialise an "
+         "interpreter across the mismatch",
+    81: "UDF helper probe timed out (an ELF constructor did not return). "
+         "The helper was NOT ACCEPTED into the launcher's execution path "
+         "and was not initialised there, and no input was consumed. Note "
+         "the disposable probe child did dlopen() it, so its constructors "
+         "did run in that child -- this is not a sandbox",
+    82: "invalid --caller-version declaration (must be MAJOR.MINOR with "
+         "nothing after it). A CALLER bug, not a property of the helper -- "
+         "rejected before the helper is loaded, so no ELF constructor runs",
+    1: "runtime worker/helper failure",
+}
+
+
+def _decode_launcher_status(status):
+    """Decode a waitpid() status into (exit_code, signum, label, pre_ingest).
+
+    The fourth element is the whole point: it says whether falling back
+    to the in-process path is SAFE, which is a question about how far the
+    launcher got, not about how it failed.
+
+    "Conservative" means indeterminate is treated as consumed. A refused
+    fallback that turned out to have been fine costs one slow run; a
+    fallback that silently returns half the input costs correctness.
+
+    Codes in _CR_EXIT_NO_FALLBACK are reported with pre_ingest=True --
+    nothing was consumed -- but callers must additionally consult
+    _fallback_forbidden(code) before retrying."""
+    if os.WIFSIGNALED(status):
+        return (None, os.WTERMSIG(status),
+                "killed by signal %d" % (os.WTERMSIG(status),), False)
+    if os.WIFEXITED(status):
+        code = os.WEXITSTATUS(status)
+        label = _CR_EXIT_LABELS.get(code, "unknown exit code %d" % (code,))
+        if code in _CR_EXIT_NO_FALLBACK:
+            return (code, None, label, True)
+        return (code, None, label, code in _CR_EXIT_PRE_INGEST)
+    return (None, None, "unrecognised wait status %d" % (status,), False)
+
+
+def _fallback_forbidden(status):
+    """True when retrying in-process would recreate the original failure."""
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status) in _CR_EXIT_NO_FALLBACK
+    return False
+
+
+class _CleanroomPreIngestDecline(Exception):
+    """The cleanroom was declined BEFORE ingestion began, so falling back
+    in-process cannot duplicate committed work and cannot truncate.
+
+    Base class for the two shapes of this. Both are raised, never
+    returned as ``None``, because "the run failed" and "the accelerator
+    was declined" lead to different next steps and collapsing them loses
+    the distinction -- which is what made the original bare ``return
+    None`` fall through into a route that could not run the payload.
+    """
+
+
+class _CleanroomCompatRefusal(_CleanroomPreIngestDecline):
+    """The cleanroom ACCELERATOR was declined BEFORE ingestion began.
+
+    Distinct from "the run failed". Carries:
+
+      label     -- the launcher's exit-code label, for the message
+      detail    -- the launcher's own diagnostic text
+      conclusive-- True when the launcher positively established that this
+                   artifact cannot serve this caller (a version mismatch or
+                   an unverifiable helper), False when the outcome was
+                   merely inconclusive (a probe timeout).
+
+    Only ``conclusive`` refusals are remembered in the negative cache. A
+    timeout says the helper did not answer in time, which is not evidence
+    that it is incompatible -- caching that would let a transient stall
+    permanently disable the accelerator.
+    """
+
+    def __init__(self, label, detail, conclusive, code=80):
+        super().__init__(label)
+        self.label = label
+        self.detail = detail
+        self.conclusive = conclusive
+        self.code = code
+
+
+# Launcher exits that are a compatibility refusal of the helper. 80 is
+# conclusive (the mismatch or unverifiability is established); 81 is not.
+_CR_COMPAT_REFUSALS = {80: True, 81: False}
+
+
+def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
+                                   num_nodes, orchestrator,
+                                   plugin, func, udf_args, helper_fp=None):
+    """stream() over the cleanroom, with an explicit pre-ingest fallback.
+
+    LAZINESS IS THE POINT, and the first version of this broke it: it
+    primed the cleanroom generator with next() to surface a pre-ingest
+    refusal at the decision point, which made ``stream()`` block until the
+    first record arrived. Measured: with a writer that slept 3s before its
+    first record, stream() took 3.00s to RETURN instead of returning a
+    generator immediately -- turning a live-draining call into a blocking
+    one and defeating the contract the whole streaming surface is built
+    on. An existing test did not catch it.
+
+    So the refusal is handled INSIDE the generator body: nothing happens
+    until the caller's first next(), and because a pre-ingestion code is
+    decided before any record is produced, the first next() is still the
+    earliest point at which the refusal can arrive. No record can have
+    escaped before it, so switching mid-iteration cannot split a stream
+    across two paths.
+    """
+    def _gen():
+        cleanroom = _guarded_gen(
+            _signal_guard(kwargs.get("signal_policy", "default")),
+            _execute_cleanroom_stream(
+                source,
+                lines=kwargs.get("lines"),
+                bytes_=kwargs.get("bytes"),
+                workers=_resolve_workers_numa(
+                    kwargs.get("workers"), num_nodes),
+                plugin_path=plugin, plugin_func=func,
+                on_error=kwargs.get("on_error", "retry"),
+                strict_poison=bool(kwargs.get("strict_poison", False)),
+                **udf_args))
+        try:
+            first = next(cleanroom)
+        except StopIteration:
+            return
+        except _CleanroomPreIngestDecline as exc:
+            if isinstance(exc, _CleanroomCompatRefusal):
+                _record_compat_refusal(exc.code, exc.detail, helper_fp)
+                _warn_compat_refusal(exc)
+            new_payload, new_mode = _coerce_payload(
+                raw_payload, raw_mode, force_inprocess_udf=True)
+            # Only `mode` goes into kwargs: these generators take
+            # `payload` POSITIONALLY, so putting it in kwargs as well is
+            # a duplicate argument. (Which is exactly what happened the
+            # first time.)
+            inproc_kwargs = dict(kwargs, mode=new_mode)
+            yield from _guarded_gen(
+                _signal_guard(inproc_kwargs.get("signal_policy", "default")),
+                _stream_reactor_gen(new_payload, source,
+                                    _execute_ingest_stream_reactor,
+                                    **inproc_kwargs))
+            return
+        yield first
+        yield from cleanroom
+    return _gen()
+
+
+def _helper_fingerprint(path):
+    """Fingerprint a helper NOW, so a refusal can be keyed to this artifact.
+
+    Captured at dispatch time -- before the launcher is exec'd -- and
+    threaded into the refusal handler. A module-global slot was not
+    sufficient: it was written outside _RUN_LOCK, so concurrent calls
+    could overwrite each other and a refusal would be filed against
+    whichever helper happened to be recorded last.
+    """
+    if not path:
+        return None
+    try:
+        from ._udf import fingerprint_now
+        return fingerprint_now(path)
+    except Exception:
+        return None
+
+
+def _caller_version_argv():
+    """``["--caller-version=M.m"]`` from THIS interpreter, or [].
+
+    A declaration, not an authenticated identity -- after exec the
+    launcher cannot know which interpreter started it, so it can only
+    check the helper against what we declare. Taken from
+    sys.version_info directly, never from the environment: a stray
+    FORKRUN_* must not be able to forge the claim.
+    """
+    try:
+        from ._udf import caller_version_arg
+        return [caller_version_arg()]
+    except Exception:
+        return []
+
+
+def _caller_libpython_argv():
+    """``["--libpython=PATH"]`` resolving THIS interpreter's libpython.
+
+    Resolves via sysconfig so the launcher loads the exact library the
+    interpreter is built against, rather than searching by name (which
+    can pick up a wrong or absent library). Returns None if unresolved,
+    which every caller must treat as a refusal of the UDF route.
+    """
+    try:
+        from ._udf import caller_libpython_arg
+        r = caller_libpython_arg()
+        return r  # None if unresolved -> caller must decline route
+    except Exception:
+        return None
+
+def _udf_libpython_or_decline(route):
+    """Resolve libpython for the cleanroom UDF route, or decline it.
+
+    The launcher preloads the EXACT shared library this interpreter is
+    running against -- by path -- before it dlopen()s the helper.
+    Name-based lookup can silently bind a different libpython (another
+    minor, or a stale one earlier on the loader path), so "unresolved"
+    is a REFUSAL, not a warning plus a guess.
+
+    Returns the argv fragment, or None after warning. The two callers
+    apply the route-specific consequence of the same fact: map() falls
+    through to the in-process path (its contract for a pre-ingest
+    decline is a None return), while stream() raises
+    _CleanroomPreIngestDecline so the generator falls back before it can
+    yield a record. Centralising the FACT here is what stops the two
+    routes from drifting on WHETHER to decline.
+    """
+    lp = _caller_libpython_argv()
+    if lp is not None:
+        return lp
+    import warnings as _warnings
+    _warnings.warn(
+        "forkrun: the cleanroom %s UDF route requires an explicit "
+        "libpython path for this interpreter (%d.%d), but none could be "
+        "resolved; using the in-process Python path."
+        % (route, sys.version_info[0], sys.version_info[1]),
+        UserWarning, stacklevel=3)
+    return None
+
+
+def _record_compat_refusal(code, detail, helper_fp=None):
+    """Remember a CONCLUSIVE incompatibility against the helper artifact.
+
+    Only 80 is cached. An 81 timeout is inconclusive and deliberately
+    left uncached, so a transient stall does not permanently disable the
+    accelerator.
+    """
+    if code != 80:
+        return
+    if helper_fp is None:
+        return
+    try:
+        from ._udf import record_incompatible_for
+    except Exception:
+        return
+    # The fingerprint is CAPTURED BEFORE the launcher starts and carried
+    # in as a parameter. Re-deriving it afterwards is a TOCTOU: replace
+    # the file while the launcher runs and the old helper's refusal lands
+    # on the new helper's fingerprint, disabling a valid replacement.
+    #
+    # An earlier revision captured the PATH before launching but still
+    # fingerprinted afterwards, so it fixed nothing on this path. That is
+    # the bug this parameter exists to remove.
+    record_incompatible_for(helper_fp, detail or
+                            _CR_EXIT_LABELS.get(80, "mismatch"))
+
+
+def _warn_compat_refusal(exc):
+    """ONE warning per affected public invocation, deliberately not coalesced.
+
+    ``warnings.warn`` applies the default filter ("default" == once per
+    location), which would emit this once per call SITE and then stay
+    silent -- the opposite of the required contract, since a permanently
+    degraded cleanroom that has stopped complaining looks like a feature
+    that simply chose not to run.
+
+    Going straight to stderr is per-emission by construction and mutates
+    no process-global filter, which is what the contract asks for. This
+    diagnostic is more like a log line than a library warning: the caller
+    is not being told about a type of problem they can catch, they are
+    being told what the runtime did on their behalf.
+    """
+    import sys as _sys
+    _sys.stderr.write(
+        "forkrun [WARN]: cleanroom UDF helper declined (%s): %s\n"
+        "         continuing on the in-process path for this call.\n"
+        % (exc.label, (exc.detail or "").strip() or "no detail"))
+    _sys.stderr.flush()
+
+
+def _warn_if_cached_incompatible():
+    """Warn once per affected invocation when the helper is already known bad.
+
+    A cached mismatch means we skip the probe, so the launcher never runs
+    and never reports anything -- but the call is still AFFECTED, and the
+    contract is one warning per affected invocation, not per probe. Without
+    this, the first call warns and every subsequent call in the process
+    goes quiet, which reads as "the cleanroom just stopped being
+    available".
+
+    Emitted at the public-call decision point rather than inside
+    helper_path(), which is called several times per call and would either
+    warn many times or need state to avoid it.
+    """
+    try:
+        from ._udf import candidate_helper_path, known_incompatible
+    except Exception:
+        return None
+    # candidate_helper_path, NOT helper_path: the cache makes helper_path
+    # return None, which would make the reason invisible and silence the
+    # warning after the very first call.
+    # The kill switch means the UDF path was never considered, so there is
+    # no refusal to report. candidate_helper_path() deliberately ignores
+    # both the cache and the switch to recover identity for diagnostics;
+    # the WARNING DECISION has to honour the switch separately, or a
+    # deliberately-disabled UDF would still nag.
+    if os.environ.get("FORKRUN_NO_UDF"):
+        return None
+    path = candidate_helper_path()
+    reason = known_incompatible(path) if path else None
+    if not reason:
+        return None
+    import sys as _sys
+    _sys.stderr.write(
+        "forkrun [WARN]: cleanroom UDF helper declined (%s): %s\n"
+        "         continuing on the in-process path for this call.\n"
+        % (_CR_EXIT_LABELS.get(80, "version mismatch"), reason.strip()))
+    _sys.stderr.flush()
+    return reason
+
+
+def _cleanroom_attempt(fn, payload, mode, helper_fp=None):
+    """Run the cleanroom attempt, handling a compatibility refusal.
+
+    Returns ``(out, payload, mode)``. On a refusal the warning is emitted
+    (once, here -- the public-call decision point, NOT inside a helper
+    lookup that may run many times per call) and the payload is re-coerced
+    with ``force_inprocess_udf=True`` so the route genuinely becomes the
+    in-process UDF path rather than an ``_UDFPayload`` handed to workers
+    that cannot execute it.
+    """
+    try:
+        out = fn()
+    except _CleanroomCompatRefusal as exc:
+        _record_compat_refusal(exc.code, exc.detail, helper_fp)
+        _warn_compat_refusal(exc)
+        new_payload, new_mode = _coerce_payload(
+            payload, mode, force_inprocess_udf=True)
+        return None, new_payload, new_mode
+    return out, None, None
+
+
+def _cleanroom_may_fallback(status):
+    """DECISION-03 section 7.2 -- may this launcher failure fall back?
+
+    Extracted as a named function rather than left inline, because the
+    policy is the thing worth testing and an inline expression cannot be
+    tested without re-implementing it -- which is exactly the mistake that
+    made the first version of this test vacuous: it passed identically with
+    and without the fix.
+
+    Fallback is permitted ONLY for a failure the launcher confirms happened
+    before execution could begin.
+
+    It USED to be:
+
+        replayable   = pre_ingest or _source_is_reopenable(source)
+        may_fallback = replayable and not forbidden
+
+    which is wrong, and was demonstrably wrong before it was changed:
+
+        launcher exit 1 ("runtime worker/helper failure")
+          PATH source : pre_ingest=False reopenable=True  -> MAY FALL BACK
+          FD source   : pre_ingest=False reopenable=False -> no fallback
+
+    The `or` answers "can the INPUT be re-read?" and then uses that answer
+    for a different question: "is it SAFE to run the whole workload
+    again?". Re-readable input makes replay POSSIBLE; it says nothing about
+    user-code side effects already committed. Exit 1 is a runtime failure --
+    workers ran, user code ran -- so replaying from batch zero re-executes
+    side effects the caller has already been charged for.
+
+    The old rule also made the decision depend on the SHAPE of the source:
+    a path replayed, a caller-supplied descriptor did not, for one identical
+    failure. That is not a safety property.
+
+    This is deliberately conservative. A failure that happened early but is
+    *reported* as a runtime failure now propagates instead of falling back.
+    Slow is recoverable; double-executing a side effect is not. The launcher
+    should eventually report "execution began" explicitly rather than have
+    the parent infer it from an exit code.
+    """
+    _code, _signum, _label, pre_ingest = _decode_launcher_status(status)
+    forbidden = _fallback_forbidden(status)
+    return bool(pre_ingest) and not forbidden
+
+
+def _describe_launcher_failure(status):
+    """One human-readable line for a non-zero launcher exit."""
+    code, signum, label, _pre = _decode_launcher_status(status)
+    if code is not None:
+        return "exit %d (%s)" % (code, label)
+    if signum is not None:
+        return "signal %d (%s)" % (signum, label)
+    return label
+
+
+def _read_launcher_stderr(fd, limit=400):
+    """Tail of what the launcher and its children wrote to stderr.
+
+    A launcher failure with no reason is close to undebuggable. The
+    launcher's own diagnostics are the only place the real cause appears
+    -- `sym()` exits 69 with "missing fr_py_worker_spawn_loop" when the
+    substrate predates a worker loop, and the `--plugin`/`--func` path
+    reports its own dlopen failure. Inheriting fd 2 put those bytes on
+    the caller's terminal, where a test or a captured exception never
+    sees them, so the Python-side error could only say
+    "exit 127 (unknown exit code 127)".
+
+    That is not hypothetical. A stale `libforkrun_python.so` is an
+    ORDINARY state, not an anomaly: both build artifacts are
+    gitignored, so a checkout that has not been rebuilt since a change
+    to the substrate has exactly this failure, and it presented as a
+    generic exec failure with no hint that a rebuild was the fix.
+
+    A memfd, not a pipe: every descendant writes to fd 2, and a pipe
+    would deadlock the launcher once 64KB accumulated with nobody
+    draining it. The size is final after waitpid, so this is read once.
+    """
+    if fd is None or fd < 0:
+        return ""
+    try:
+        size = os.fstat(fd).st_size
+        if size <= 0:
+            return ""
+        with open(fd, "rb", closefd=False) as fh:
+            fh.seek(max(0, size - limit))
+            tail = fh.read(limit)
+    except OSError:
+        return ""
+    text = tail.decode("utf-8", "replace").strip()
+    if not text:
+        return ""
+    # Keep the LAST line: the launcher interleaves children, and the
+    # final "fatal -- ..." summary is the one that names the cause.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def _source_is_reopenable(source):
+    """True if a fallback can re-read the input from the beginning.
+
+    The distinction is OWNERSHIP, and it is decidable at the call site
+    without any runtime safety argument:
+
+      * a path -- _cleanroom_source_fd opens its own descriptor, and
+        _open_source opens another on fallback, so the two have
+        independent file offsets and the source is re-readable.
+      * a caller-supplied descriptor (int, or anything with fileno()) --
+        _cleanroom_source_fd os.dup()s it, which shares the open file
+        description with the descriptor the caller still holds. Once the
+        launcher has read from it, the caller's own descriptor is
+        advanced and cannot be rewound safely.
+
+    For paths this is still only as good as the file not changing under
+    us: a replaced, truncated or deleted path does not replay to the same
+    bytes. That is a documented assumption of the API, not a guarantee
+    this function can make -- see the fallback contract in the docs."""
+    if isinstance(source, (str, bytes, os.PathLike)):
+        return True
+    return False
+
+
+# --------------------------------------------------------------------------
+# Private candidate launch backend (F6 Stage 3) -- TEST-GATED ONLY
+# --------------------------------------------------------------------------
+# NOT a public option. There is no environment selector, no keyword, and no
+# default change: the shipped path is `fork()` + `execv()` and stays that
+# way until a separate adoption decision. Tests flip this module global;
+# nothing reachable from the public API can.
+# F6 Stage 4 -- DEFAULT LAUNCH BACKEND.
+#
+# `posix_spawn` is now the default. The reasons, in the order they mattered:
+#
+#   * CORRECTNESS OF DESCRIPTORS. posix_spawn's file_actions model states
+#     the post-exec descriptor set explicitly, so the route's contract is
+#     written down rather than inherited from whatever fork+execv happened
+#     to leave behind. The Stage 3 descriptor work (F_DUPFD relocation of
+#     the route's own descriptors above the standard-stream gap) had to be
+#     done for BOTH backends anyway; under posix_spawn it is the only thing
+#     standing between a caller and silent input corruption, so it is the
+#     backend where that matters most.
+#   * LARGE PARENTS. On a host whose address space is dominated by private
+#     anonymous memory -- CPython arena growth being the ordinary case for
+#     a real workload -- fork() copies page tables for the whole thing and
+#     then execve tears them down. Measured end to end on this repo's own
+#     route at 2 GiB of Python-heap ballast: 204.9 ms -> 140.6 ms, -31.4%.
+#     With no ballast the two are within noise (-3.4%). The win is real but
+#     it is bounded by how large the parent is; it is NOT a universal
+#     speedup and is not claimed as one.
+#   * THREAD SAFETY. posix_spawn is specified to be callable from a
+#     multithreaded process. That is also why the Stage 4 concurrent suite
+#     exists: not to prove fork+execv is broken here (it is not, because
+#     the route execs immediately rather than running Python between fork
+#     and exec), but to prove the route's OWN descriptor bookkeeping is
+#     per-call under concurrency.
+#
+# `forkexec` remains reachable through `_set_cleanroom_launch_backend()`
+# for tests and for bisecting any regression. There is deliberately no
+# environment selector and no keyword (F7): the environment contract is
+# unchanged, so the backend is not a knob a caller can flip by accident.
+#
+# COMPATIBILITY. `os.posix_spawn` is provided by libc, so it exists
+# wherever `fork`/`exec` do; on this platform it is always present. The
+# guard below is therefore narrow and honest: if the attribute is somehow
+# absent, the module uses fork+execv rather than raising at import time.
+# Note what is NOT here: no retry-on-OSError fallback to forkexec. A
+# spawn that fails at runtime is reported through the route's established
+# exit-127 path, because silently launching a second time could run the
+# work twice and would hide a real failure from the caller.
+_POSIX_SPAWN_AVAILABLE = hasattr(os, "posix_spawn")
+_CLEANROOM_LAUNCH_BACKEND = (
+    "posix_spawn" if _POSIX_SPAWN_AVAILABLE else "forkexec")
+
+
+def _set_cleanroom_launch_backend(name):
+    """PRIVATE, test-only. Returns the previous value.
+
+    Accepts "forkexec" or "posix_spawn". Raises on anything else rather
+    than silently falling back, so a typo in a test cannot quietly
+    exercise the wrong backend. Asking for "posix_spawn" where the
+    platform lacks it is an error too -- a test must not believe it is
+    exercising a backend that is not there.
+    """
+    global _CLEANROOM_LAUNCH_BACKEND
+    if name not in ("forkexec", "posix_spawn"):
+        raise ValueError("unknown cleanroom launch backend %r" % (name,))
+    if name == "posix_spawn" and not _POSIX_SPAWN_AVAILABLE:
+        raise ValueError(
+            "posix_spawn requested but os.posix_spawn is unavailable on "
+            "this platform")
+    prev = _CLEANROOM_LAUNCH_BACKEND
+    _CLEANROOM_LAUNCH_BACKEND = name
+    return prev
+
+
+# A waitpid() status for a normally-exited child, used when posix_spawn
+# raises instead of returning a pid. 127 is exactly what the shipped
+# fork+execv child produces when execv fails (os._exit(127) in
+# _spawn_or_fork), so both backends converge on ONE failure path.
+_CR_SPAWN_FAILURE_STATUS = 127 << 8
+
+
+def _spawn_or_fork(launcher, argv, file_actions):
+    """Launch `launcher`, return the child pid, or raise OSError.
+
+    The default branch is the shipped code, unchanged: `os.fork()` then
+    `os.execv()` in the child. The candidate branch is `os.posix_spawn()`
+    with the EQUIVALENCE-FIRST action list -- it reproduces the current
+    post-exec descriptor set, INCLUDING unrelated inheritable descriptors.
+    It deliberately closes nothing the shipped path keeps.
+
+    No `setsigdef` / `setsigmask` / `setpgroup` / `setsid` / `resetids`:
+    those would change behaviour relative to fork+execv, and the signal
+    probe in test_launch_failure_contract shows `setsigdef` resetting an
+    inherited SIG_IGN to SIG_DFL. Environment is passed unchanged (F7).
+
+    Raises OSError from posix_spawn when the executable cannot be started.
+    There is then no wait status to classify, so the caller must map that
+    onto the route's established exit-127 result explicitly -- otherwise
+    the shipped failure contract would be bypassed.
+    """
+    if _CLEANROOM_LAUNCH_BACKEND != "posix_spawn":
+        pid = _childreg.fork_child('launcher')
+        if pid == 0:
+            try:
+                for act in (file_actions or ()):
+                    if act[0] == os.POSIX_SPAWN_DUP2:
+                        os.dup2(act[1], act[2])
+                os.execv(launcher, argv)
+            except BaseException:
+                os._exit(127)
+        return pid
+    return os.posix_spawn(launcher, argv, os.environ,
+                          file_actions=tuple(file_actions or ()))
+
+
+# W-EXP-2 Phase A: cleanroom completeness certificate.
+#
+# _LAST_COMMITTED carries what the launcher computed
+# for THIS invocation. The recorder below is the only thing that decides
+# what a mismatch means, and it is deliberately asymmetric:
+#
+#   expected is None  -> NO VERDICT. Recorded, never fatal. This covers an
+#                       older substrate with no accessor, a failed node
+#                       read, a sum that would not fit, and counting
+#                       disabled by FORKRUN_C07_COUNT=0. In every one of
+#                       those the counter says nothing about this run, and
+#                       inventing a verdict from it is how a complete run
+#                       gets failed.
+#   expected != seen  -> LOUD. A proven shortfall is a RuntimeError.
+#
+# The disposition differs from the in-process ORDERED certificate on
+# purpose. That one warns, because its envelope can be under-covered and a
+# warning is the honest thing to say about a partially-proven count. Here
+# the count is absolute, per-invocation, and read after every worker has
+# joined, so a mismatch is not "we are not sure" -- it is "the engine
+# published more DATA frames than the caller received". A warning-plus-
+# partial-output is exactly the silent-success shape this certificate
+# exists to prevent.
+_CLEANROOM_C07 = {"verdict": None, "expected": None, "observed": None,
+                  "reason": None}
+
+# The committed-frame count for the most recent cleanroom invocation, or
+# None when the launcher could not supply one.
+#
+# This is deliberately NOT a key of _LAST_STATS. The stats dict is a
+# documented public contract that callers compare exactly, and this is an
+# internal transport detail feeding one certificate -- publishing it
+# would widen the public surface, and break exact-match assertions, for
+# no consumer outside this module. Kept private; None means "no verdict".
+_LAST_COMMITTED = None
+
+
+def _cleanroom_c07_record(expected, observed, *, poisoned=0, reason=None):
+    """Record -- and on a proven shortfall, refuse -- the cleanroom result."""
+    _CLEANROOM_C07["expected"] = expected
+    _CLEANROOM_C07["observed"] = int(observed)
+    _CLEANROOM_C07["reason"] = reason
+    if expected is None:
+        _CLEANROOM_C07["verdict"] = "no-verdict"
+        return
+    expected = int(expected)
+    if expected == int(observed):
+        _CLEANROOM_C07["verdict"] = "complete"
+        return
+    # A shortfall. More published than received is the dangerous direction
+    # and is fatal; receiving MORE than published means the two sides are
+    # not describing the same universe, which is a defect in the check
+    # itself and is also refused rather than silently accepted.
+    _CLEANROOM_C07["verdict"] = "incomplete"
+    raise RuntimeError(
+            "forkrun: cleanroom output is INCOMPLETE -- the launcher reported "
+            "%d committed DATA frame(s) but the caller received %d (poisoned "
+            "batches: %d). A clean exit status is not evidence of complete "
+            "output: packets can be lost after the engine committed them."
+            % (expected, int(observed), int(poisoned)))
+
+
+@_route_fd_cleanup
 def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
                        plugin_func, on_error, views, strict_poison=False,
-                       order="none"):
+                       order="none", orchestrator=True,
+                       udf_helper=None, udf_module=None, udf_attr=None,
+                       udf_roots=None, spawn_argv=None,
+                       num_nodes=1, numa_map="", _own=None):
     """W-CR1: materialized file + C plugin, orchestrated entirely in C.
 
     Everything (fr_py_init, spill to the ingress memfd, per-worker output
@@ -761,34 +2001,50 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     from ._worker import _ON_ERROR_CODES
     so = find_substrate()
 
+    # Validated BEFORE the source is opened or read, so an invalid
+    # command vector costs no input.
+    if spawn_argv is not None:
+        spawn_argv = _validate_spawn_argv(spawn_argv)
+
     # Source resolution, matching the stream() path exactly:
     #   * already a descriptor (int fd, fifo, socket, file object) --
     #     passed straight through as --src. Nothing is pumped; the
     #     launcher reads it the way Bash's -s shape does. Proven by the
     #     SIGKILL tests, which feed a live pipe.
-    #   * a Python iterable -- a forked producer child pumps it into a
-    #     pipe. FORK, not a thread: the producer's closure must survive
-    #     copy-on-write, and nothing in a forked child may contend for
-    #     the GIL with the parent's collect. A thread would also be a
-    #     deadlock hazard in a process that has already forked workers.
     #   * neither -- not eligible; the envelope declines it first.
-    # Descriptors only. Unlike stream(), map()/run() must NOT accept a
-    # Python iterable: _api._reject_iterable_source rejects it outright
-    # ("Python is never an input pump"), so the branch that would fork a
-    # producer here is unreachable from the public API. It was removed
-    # rather than left as dead code -- an unreachable fork of a
-    # multi-threaded process is exactly the deadlock hazard the codebase
+    #
+    # DESCRIPTORS ONLY, on every path including stream().
+    # _api._reject_iterable_source rejects a Python iterable for map(),
+    # run() and stream() alike, so there is no iterable producer here or
+    # in _execute_cleanroom_stream(). Both used to carry one; both were
+    # removed rather than left as dead code -- an unreachable fork of a
+    # possibly-multithreaded process is exactly the hazard the codebase
     # comments warn about, and dead safety code is not safety.
+    own = _own
     src_fd = _cleanroom_source_fd(source)
     if src_fd is None:
         return None
-    res_fd = os.memfd_create("fr_cleanroom_result")
+    # C5: keep every route-owned descriptor above fd 2 so the dup2(errfd, 2)
+    # below can never overwrite one of them when the host started with a
+    # closed standard stream.
+    src_fd = _fd_above_stdio(src_fd)
+    own.add("src_fd", src_fd)
+    res_fd = _fd_above_stdio(os.memfd_create("fr_cleanroom_result"))
+    own.add("res_fd", res_fd)
     # Counter channel. The launcher writes [u32 version][u32 poisoned]
     # here after joining every worker, which is what lets it serve
     # strict_poison and return_stats rather than declining them: without
     # it, _LAST_STATS["poisoned"] stayed 0 and a run with 10 poisoned
     # batches reported total=completed instead of completed+10.
-    stats_fd = os.memfd_create("fr_cleanroom_stats")
+    stats_fd = _fd_above_stdio(os.memfd_create("fr_cleanroom_stats"))
+    own.add("stats_fd", stats_fd)
+    # The launcher's own stderr, captured so a failure can say WHY. See
+    # _read_launcher_stderr: a stale substrate .so otherwise presents as
+    # "exit 127 (unknown exit code 127)" with the real cause --
+    # "missing fr_py_worker_spawn_loop" -- landing on the caller's
+    # terminal where no test or captured exception can see it.
+    errfd = _fd_above_stdio(os.memfd_create("fr_cleanroom_err"))
+    own.add("errfd", errfd)
     # Pre-size so every worker owns a real slot. A memfd starts
     # zero-filled, which the slot-count convention relies on.
     #
@@ -804,14 +2060,53 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # comment at face value.
     _stats_ftruncate(stats_fd, _STATS_HEADER_BYTES
                      + max(int(workers), 1) * _STATS_SLOT_U32 * 4)
+    _stats_stamp_header(stats_fd, workers)
     os.set_inheritable(src_fd, True)
     os.set_inheritable(res_fd, True)
     os.set_inheritable(stats_fd, True)
+
+    # ---- C0.2 opt-in structured trace ----
+    #
+    # OFF unless FORKRUN_CLEANROOM_TRACE is set, and the fd is the ONLY
+    # switch: when it is -1 the launcher's emit helper is a single
+    # predictable branch, so a disabled trace costs no syscall and no
+    # allocation and never appears in a benchmark.
+    #
+    # O_APPEND IS LOAD-BEARING, NOT COSMETIC. Measured on this machine
+    # (os.fork, 16 children, one 64-byte record per write): a shared file
+    # offset recovered 25,962 of 320,000 records -- 92% silently lost --
+    # while O_APPEND recovered all 320,000 with zero torn records. The
+    # trace exists to diagnose CONCURRENT stalls, so without O_APPEND it
+    # would discard most of its evidence exactly when needed, and discard
+    # it SILENTLY: a short but well-formed file reads as "fewer events",
+    # not as "we lost data".
+    trace_fd = -1
+    if _cleanroom_trace_enabled():
+        trace_fd = _fd_above_stdio(os.memfd_create("fr_cleanroom_trace"))
+        os.set_inheritable(trace_fd, True)
+        own.add("trace_fd", trace_fd)
+        # Set O_APPEND on the SHARED open file description, before any
+        # fork, so every child inherits the append semantics.
+        _fcntl.fcntl(trace_fd, _fcntl.F_SETFL,
+                     _fcntl.fcntl(trace_fd, _fcntl.F_GETFL) | os.O_APPEND)
+
     argv = [launcher, "--so", so,
-            "--plugin", plugin_path, "--func", plugin_func,
             "--workers", str(int(workers)),
             "--lines", str(int(lines or 0)),
             "--bytes", str(int(bytes_ or 0)),
+            # W-EXP-2 step C: the topology the launcher must build. The
+            # map is the physical-id list (one entry per LOGICAL node),
+            # so a logical @N run on a one-node host sends the same
+            # physical id N times -- which is exactly what
+            # _numa.build_numa_map produces for the '@N' form.
+            "--nodes", str(int(num_nodes or 1)),
+            "--numa-map", str(numa_map or ""),
+            # The launcher runs the engine's C orderer for the ordered
+            # multi-node envelope, so the parent must NOT sort by
+            # batch_idx afterwards (batch_idx is a PER-NODE ticket and
+            # collides across nodes -- see the step A finding).
+            "--order", ("index" if (num_nodes > 1 and order == "index")
+                        else "none"),
             # Transport the fault policy rather than refusing it: the
             # launcher already accepts both codes, and _ON_ERROR_CODES
             # is the same table the C worker loop uses.
@@ -819,20 +2114,92 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
             "--retry", str(int(_resolve_retry_limit())),
             "--src", str(src_fd), "--result", str(res_fd),
             "--stats-fd", str(stats_fd)]
+    if udf_helper:
+        # P1-3: the launcher initialises the interpreter BEFORE forking
+        # and selects fr_py_worker_udf_loop. --plugin/--func are NOT sent
+        # in this mode; the launcher rejects the combination.
+        argv += ["--udf-helper", udf_helper,
+                 "--udf", udf_module,
+                 "--udf-attr", udf_attr]
+        argv += _caller_version_argv()
+        _lp = _udf_libpython_or_decline("map")
+        if _lp is None:
+            # Refuse the cleanroom UDF route, not the caller's program:
+            # the caller falls through to the in-process UDF executor.
+            return None
+        argv += _lp
+        if udf_roots:
+            argv += ["--udf-roots", udf_roots]
+    elif plugin_path is None and plugin_func is None:
+        # Spawn mode: there is NO plugin to dlopen, and this must not
+        # claim otherwise.
+        #
+        # This sent `--plugin None --func None`, so the launcher
+        # dlopen()ed the literal four-character string "None", failed,
+        # and the run died in the spill child with exit 1 -- surfaced
+        # to the caller as a generic "launcher failed (exit 127)".
+        # Spawn's own argv then still travelled correctly, which is why
+        # the symptom looked like an exec failure rather than a
+        # descriptor mix-up.
+        pass
+    else:
+        argv += ["--plugin", plugin_path, "--func", plugin_func]
+    if spawn_argv:
+        # Stage 3: the command vector travels as DISTINCT elements.
+        #
+        # No shell-word parsing and no newline-delimited encoding: a
+        # newline is a legal character inside a single argument, so any
+        # line-based encoding is ambiguous against one.
+        #
+        # NUL is rejected HERE, at the point user input becomes an argv
+        # element. It cannot be rejected in C: a C string is
+        # NUL-terminated by definition, so an embedded NUL would have
+        # silently truncated the argument before the launcher ever saw
+        # it. This runs before the launcher starts and before the source
+        # is read, so a rejected command costs no input.
+        for _el in spawn_argv:
+            argv += ["--spawn-argv", _el]
+    if trace_fd >= 0:
+        argv += ["--trace-fd", str(trace_fd)]
+    # `orchestrator is False`, NOT `not orchestrator`: map() defaults
+    # orchestrator to None (meaning "ride the reactor"), and None is falsy.
+    # Using `not` here sent --supervise fail-fast for EVERY default call,
+    # which broke the cleanroom for the ordinary path.
+    if orchestrator is False:
+        argv += ["--supervise", "fail-fast"]
 
-    pid = os.fork()
-    if pid == 0:
-        try:
-            os.execv(launcher, argv)
-        except BaseException:
-            os._exit(127)
+    # Equivalence-first candidate action list: the materialized child does
+    # exactly one descriptor transformation before exec, so the spawn
+    # equivalent is a single DUP2. `errfd` itself stays FD_CLOEXEC and is
+    # NOT closed -- that is what the shipped path does, and equivalence
+    # means reproducing it, not improving it.
+    _actions = ((os.POSIX_SPAWN_DUP2, errfd, 2),)
     # Only src_fd was the child's alone. res_fd MUST stay open here --
     # the parent reads the result memfd after waitpid. Closing it (an
     # earlier cut did) leaves the collector fstat-ing a closed
     # descriptor, and since the number is liable to be recycled that
     # surfaces as empty/corrupt output rather than a clean EBADF.
-    os.close(src_fd)
-    _wpid, status = os.waitpid(pid, 0)
+    try:
+        pid = _spawn_or_fork(launcher, argv, _actions)
+    except OSError:
+        # posix_spawn reports "cannot execute" by raising IN THE PARENT:
+        # there is no child, so there is no wait status to classify and no
+        # pid to reap.
+        #
+        # Rather than inventing a parallel error path -- which is how a
+        # backend swap ends up changing the PUBLIC failure contract -- this
+        # synthesises the SAME wait status a child produces when execv
+        # fails (127) and lets the existing classification below run
+        # untouched. Everything downstream (the "NOT falling back"
+        # warning, `_decode_launcher_status`, `_cleanroom_may_fallback`,
+        # the RuntimeError) is therefore identical by construction.
+        # Policy B -- treating this as pre-ingest and falling back -- is
+        # explicitly NOT done, and 127 is outside _CR_EXIT_PRE_INGEST.
+        status = _CR_SPAWN_FAILURE_STATUS
+    else:
+        own.close("src_fd")
+        _wpid, status = os.waitpid(pid, 0)
+    own.close("src_fd")
     # Unpack ONLY after the None check below. _read_cleanroom_stats
     # returns None for "no trustworthy count" -- notably when the
     # launcher declined the payload (a v0 plugin under FORKRUN_CLEANROOM=1
@@ -842,26 +2209,105 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     # test_plugin tests hit this with the gate ON and were green with it
     # off, which is why the cleanroom-OFF run alone never showed it.
     stats = _read_cleanroom_stats(stats_fd)
-    os.close(stats_fd)
+    # W-EXP-2 Phase A: publish the launcher's committed DATA-frame count for
+    # THIS invocation before the descriptor goes away. None when the
+    # launcher could not supply it -- never 0.
+    global _LAST_COMMITTED
+    _LAST_COMMITTED = (stats[3] if (stats is not None and len(stats) > 3)
+                       else None)
+    own.close("stats_fd")
+    # Read the trace AFTER waitpid: the launcher and every child are gone
+    # by then, so the file is complete and its size is final.
+    if trace_fd >= 0:
+        _LAST_TRACE[:] = _read_cleanroom_trace(trace_fd)
+        own.close("trace_fd")
     if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
-        os.close(res_fd)
+        own.close("res_fd")
+        code, signum, label, pre_ingest = _decode_launcher_status(status)
+        # CR-FIX1-F: a failed capability probe means the plugin's LOAD is
+        # unsafe, so the in-process fallback -- which would dlopen it
+        # right here in the caller's process -- would reproduce the
+        # failure in a place with no launcher to bound it. Refuse.
+        forbidden = _fallback_forbidden(status)
+        # DECISION-03 section 7.2: the replay policy lives in a named
+        # function so it can be tested without re-implementing it.
+        may_fallback = _cleanroom_may_fallback(status)
+        _why_launcher = _read_launcher_stderr(errfd)
+        # FD-LEAK-1 (failure half): errfd's LAST parent-side use is the
+        # read above -- _read_launcher_stderr opens with closefd=False,
+        # so the read does NOT close it. Close here, BEFORE every raise
+        # and return below, so each of those exits releases it. Without
+        # this the descriptor survived every failed call as well as every
+        # successful one.
+        own.close("errfd")
+        if code in _CR_COMPAT_REFUSALS:
+            # A compatibility refusal must NOT collapse into a bare
+            # "return None": the dispatcher has to know WHY, because the
+            # generic fall-through re-enters _coerce_payload(), which
+            # consults helper_path() again and would hand back an
+            # _UDFPayload for the ordinary Python worker to fail on --
+            # since the file is still present, only the launcher knows it
+            # is unusable.
+            raise _CleanroomCompatRefusal(label, _why_launcher,
+                                          _CR_COMPAT_REFUSALS[code],
+                                          code=code)
         _warnings.warn(
-            "forkrun: cleanroom launcher failed (status %r) — using the "
-            "in-process path." % (status,), UserWarning, stacklevel=3)
-        return None
+            "forkrun: cleanroom launcher failed (%s)%s — %s"
+            % (_describe_launcher_failure(status),
+               ": " + _why_launcher if _why_launcher else "",
+               "falling back to the in-process path" if may_fallback
+               else "NOT falling back"),
+            UserWarning, stacklevel=3)
+        if forbidden:
+            raise RuntimeError(
+                    "forkrun: cleanroom launcher failed (%s). Retrying "
+                    "in-process would load the same plugin in this process "
+                    "and reproduce the failure here, so the call is refused "
+                    "rather than retried. Load the plugin explicitly once to "
+                    "confirm it is safe before using it with forkrun."
+                    % (_describe_launcher_failure(status),))
+        if may_fallback:
+            return None
+        # CR-FIX1-C: the launcher may have consumed bytes out of the
+        # source, so the in-process path could resume mid-input and return
+        # a truncated result with exit 0. Refuse instead: a failed run that
+        # says so is strictly better than a successful-looking one that
+        # lost records.
+        #
+        # NOTE this used to tell callers that passing a PATH would permit a
+        # retry. That advice is WITHDRAWN. It was the bug: re-readable
+        # input makes replay possible, not safe, and on a path source a
+        # runtime failure replayed the whole workload -- re-executing user
+        # side effects that had already been committed. See
+        # _cleanroom_may_fallback.
+        raise RuntimeError(
+                "forkrun: cleanroom launcher failed (%s) after the input may "
+                "have been consumed, and the supplied source is a descriptor "
+                "whose read position the launcher shares. Retrying in-process "
+                "would resume mid-input and silently return truncated output, "
+                "so this call is refused rather than completed incorrectly. "
+                "Pass a path (or seek the descriptor back to 0 yourself) if "
+                "you want a retry." % (_describe_launcher_failure(status),))
+    else:
+        # FD-LEAK-1 (success half): the launcher exited cleanly, so
+        # nothing reads errfd -- the stderr tail is consulted only on
+        # failure. Without this the descriptor survived every successful
+        # call. `errfd = -1` after closing keeps a stray later close from
+        # hitting a RECYCLED descriptor number.
+        own.close("errfd")
     if stats is None:
         # The counter record is missing, unreadable, or absent because the
         # launcher declined the payload. Refuse the
         # cleanroom result rather than report completed-as-total: a
         # wrong-but-plausible total is worse than the slower path.
-        os.close(res_fd)
+        own.close("res_fd")
         _warnings.warn(
             "forkrun: cleanroom launcher returned no counter record; "
             "poison counts are unknown so total/poisoned would be wrong "
             "(or strict_poison unenforceable) — using the in-process "
             "path.", UserWarning, stacklevel=3)
         return None
-    npois, npois_idx, nrelayed = stats
+    npois, npois_idx, nrelayed = stats[:3]
     # Surface, don't hide: a bounded slot means the list can be a strict
     # prefix of the count. Say so once, loudly, rather than letting a
     # caller infer completeness from a number that quietly stopped
@@ -881,7 +2327,52 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
     _LAST_STATS["poisoned"] = npois
     _LAST_STATS["poisoned_batches"] = list(npois_idx)
     _LAST_STATS["poisoned_batches_truncated"] = _trunc
-    out = _cleanroom_collect(res_fd, views, order)
+    # Ownership TRANSFER: _cleanroom_collect closes res_fd itself. Without
+    # release() the decorator's cleanup would close the same number again,
+    # and if the collector had already closed it the number may have been
+    # recycled -- closing a descriptor the caller now owns.
+    own.release("res_fd")
+    # W-EXP-2 step C: the multi-node ordered envelope runs the engine's
+    # C orderer INSIDE the launcher, so the result stream is ALREADY in
+    # global order. Sorting it again by batch_idx would be wrong twice
+    # over: batch_idx is a per-NODE ticket (two nodes both emit 0, 1,
+    # 2, ...), so the sort is not even a stable re-implementation of
+    # what the orderer produced -- it can move a record across the
+    # stream. The parent-side batch_idx sort stays for the UMA path,
+    # where batch_idx IS a global sequence.
+    launcher_ordered = (int(num_nodes or 1) > 1 and order == "index")
+    out = _cleanroom_collect(res_fd, views,
+                             "none" if launcher_ordered else order)
+
+    # ---- W-EXP-2 Phase A: CLEANROOM COMPLETENESS CERTIFICATE ----
+    #
+    # `exit 0` and EOF are not evidence that output is complete: a run can
+    # return everything it still had after losing a packet, and the parent
+    # would see a clean exit and a short result. The launcher's committed
+    # DATA-frame count is the one number the parent cannot derive itself,
+    # because counting what ARRIVED counts the loss too.
+    #
+    # The comparison is only meaningful when both sides describe the same
+    # universe, so it is skipped -- not faked -- when the launcher's count
+    # is unavailable (older substrate, failed node read, sum overflow) or
+    # when the run poisoned batches, where DATA and control dispositions
+    # are deliberately not equal.
+    _committed = _LAST_COMMITTED
+    if _committed is None:
+        _cleanroom_c07_record(None, len(out), poisoned=npois,
+                              reason="launcher did not supply a committed "
+                                     "DATA-frame count")
+    elif npois:
+        # A poisoned batch emits a POISONED disposition, not DATA, so the
+        # counts are legitimately unequal. Comparing them would fail a
+        # correct run, which is the other way to be wrong.
+        _cleanroom_c07_record(None, len(out), poisoned=npois,
+                              reason="run poisoned %d batch(es); committed "
+                                     "DATA and collected records are not "
+                                     "expected to match" % npois)
+    else:
+        _cleanroom_c07_record(int(_committed), len(out), poisoned=0)
+
     # strict_poison is served now: the count came back over the stats
     # channel, so raising is a real enforcement rather than a guess.
     # Default (False) keeps warn-and-return-partial semantics.
@@ -891,15 +2382,182 @@ def _execute_cleanroom(source, *, lines, bytes_, workers, plugin_path,
 
 
 # Stats channel geometry, mirrored by the launcher (v2 header) and by
-# fr_poison_relay() in forkrun_ring.c. All three must agree:
+# fr_poison_relay() in forkrun_ring.c and the v3 header in
+# forkrun_cleanroom.c. All must agree:
 #   header : [u32 version][u32 poisoned][u32 workers][u32 slot_stride]
+#            [u32 committed_data_frames]        <- v3, appended
 #   slot   : [u32 count][count x u32 batch_idx], one per worker
-_STATS_HEADER_BYTES = 16
+#
+# v3 APPENDS a word rather than filling a v2 pad: [2] and [3] are the
+# worker count and the slot stride, and both are load-bearing for walking
+# the per-worker slots.
+_STATS_HEADER_BYTES = 20
 # Slot STRIDE in u32, not capacity: one count word followed by the indices.
 # Must equal FR_POISON_SLOT_U32 + 1 in forkrun_ring.c, which is also what
 # the launcher puts in the v2 header's stride field.
 _STATS_SLOT_U32 = 1024 + 1
 _STATS_CAPACITY = _STATS_SLOT_U32 - 1   # indices per slot, excluding count
+
+
+class _PoisonStatsChannel:
+    """Parent end of the bounded poison-index relay, for plain paths.
+
+    WO-PY-REL-1 / TD-09. The C relay (fr_py_poison_relay, _shim.c:447)
+    ALREADY runs on the plain path -- fr_py_claim() calls it on the same
+    `num_kills == threshold` edge that increments the shared poisoned
+    count. What was missing is the receiving end: nothing created the
+    stats memfd, nothing exported $FRK_POISON_FD, and the descriptor was
+    not in the worker keep-set, so the relay resolved g_poison_fd < 0 and
+    returned silently. The symptom -- a non-zero `poisoned` beside an
+    empty `poisoned_batches` -- is indistinguishable from "nothing was
+    poisoned", which is why it survived as long as it did.
+
+    This is the same bounded transport the cleanroom already uses, so
+    both paths now share one contract: `_STATS_CAPACITY` indices per
+    worker, silent drop on overflow, and completeness decided by
+    `relayed < poisoned` rather than by the length of the list.
+    """
+
+    __slots__ = ("fd", "workers")
+
+    def __init__(self, workers):
+        self.workers = max(1, int(workers))
+        self.fd = None
+
+    def open(self):
+        """Create this run's stats memfd, pre-sized and headed.
+
+        ONE memfd PER RUN, created here and closed in close(). An earlier
+        iteration of this code reused a single process-wide memfd so the
+        fd NUMBER stayed stable, because fr_py_poison_relay() used to
+        cache the fd it read from $FRK_POISON_FD in a __thread variable
+        and never re-read it; a fresh number per run would have left
+        workers holding a stale one.
+
+        That cache is GONE (see the comment on fr_py_poison_relay in
+        _shim.c -- it was the cause of TD-09 resurfacing under the full
+        suite), so the constraint no longer exists and the simpler
+        per-run memfd is both correct and self-healing: a descriptor
+        closed or recycled by anything else cannot invalidate it, because
+        it lives for exactly one call.
+
+        Pre-sizing matters: the slot convention relies on each worker's
+        region existing so its count word is readable. The header's
+        poisoned field is a placeholder -- the real count is known only
+        after the join, and seal() writes it.
+        """
+        import struct as _struct
+        fd = os.memfd_create("fr_poison_stats")
+        self.fd = fd
+        need = _STATS_HEADER_BYTES + self.workers * _STATS_SLOT_U32 * 4
+        try:
+            size = os.fstat(fd).st_size
+        except OSError:
+            size = 0
+        if size != need:
+            try:
+                os.ftruncate(fd, 0)
+                os.ftruncate(fd, need)
+            except OSError:
+                # Grow-only fallback; a short region just reads back as
+                # fewer slots, and seal() reports that honestly.
+                try:
+                    os.ftruncate(fd, max(need, size))
+                except OSError:
+                    pass
+        # v3, 5 words, matching _STATS_HEADER_BYTES. The committed word is
+        # written as the UNAVAILABLE sentinel, not zero: this relay is
+        # used by the in-process/plain paths where no launcher runs, so
+        # nothing will ever fill it in, and a zero-filled word would read
+        # as "this run committed no DATA frames" -- a fabricated count
+        # that the certificate could then fail a complete run on. The
+        # sentinel is read back as "unavailable", i.e. no verdict.
+        hdr = _struct.pack("<IIIII", 3, 0, self.workers, _STATS_SLOT_U32,
+                           0xFFFFFFFF)
+        os.pwrite(fd, hdr, 0)
+        self.fd = fd
+        return fd
+
+    def seal(self, poisoned):
+        """Publish the authoritative count, then read indices back."""
+        import struct as _struct
+        if self.fd is None:
+            return [], 0
+        try:
+            os.pwrite(self.fd, _struct.pack("<I", int(poisoned)), 4)
+            _got, idxs, relayed = _read_cleanroom_stats(self.fd)[:3]
+        except OSError:
+            return [], 0
+        return sorted(set(idxs)), relayed
+
+    def close(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+
+
+class _ExportedPoisonFd:
+    """Export $FRK_POISON_FD across the fork, and ALWAYS restore it.
+
+    os.environ is process-global, so a plain set-and-forget would leak the
+    variable into every later run and sibling test in the same process --
+    and a stale fd number is worse than none: the relay would write into
+    whatever happens to occupy that number. Restoration is therefore in a
+    finally, not on the success path.
+    """
+
+    __slots__ = ("_prev", "_fd")
+
+    def __init__(self, fd):
+        self._fd = fd
+        self._prev = os.environ.get("FRK_POISON_FD")
+
+    def __enter__(self):
+        if self._fd is not None and self._fd >= 0:
+            os.environ["FRK_POISON_FD"] = str(self._fd)
+        return self
+
+    def __exit__(self, *exc):
+        if self._prev is None:
+            os.environ.pop("FRK_POISON_FD", None)
+        else:
+            os.environ["FRK_POISON_FD"] = self._prev
+        return False
+
+
+def _read_poison_count(lib):
+    """The engine's authoritative poisoned count, or 0 if unreadable."""
+    try:
+        return lib.fr_py_poisoned_count()
+    except Exception:
+        return 0
+
+
+def _collect_plain_poison(channel, poisoned, strict_truncation_warn=True):
+    """Fold plain-path poison indices into _LAST_STATS.
+
+    Called BEFORE report_poison(), because report_poison() may raise via
+    strict_poison and the post-exception stats then have to be inspectable.
+    """
+    if channel is None:
+        return
+    idxs, relayed = channel.seal(poisoned)
+    _trunc = relayed < int(poisoned or 0)
+    _LAST_STATS["poisoned_batches"] = list(idxs)
+    _LAST_STATS["poisoned_batches_truncated"] = bool(_trunc)
+    if _trunc and strict_truncation_warn:
+        import warnings as _warnings
+        _warnings.warn(
+            "forkrun: poisoned_batches is TRUNCATED — %d of %d poisoned "
+            "batch indices are missing because a worker's relay slot is "
+            "full (capacity %d indices per worker). The poisoned count is "
+            "exact; only the index list is incomplete."
+            % (int(poisoned or 0) - relayed, int(poisoned or 0),
+               _STATS_CAPACITY),
+            UserWarning, stacklevel=4)
 
 
 def _stats_ftruncate(fd, size):
@@ -908,6 +2566,133 @@ def _stats_ftruncate(fd, size):
         os.ftruncate(fd, size)
     except OSError:
         pass
+
+
+def _stats_stamp_header(fd, workers):
+    """Write the header BEFORE any worker can write a slot.
+
+    The poison relay derives its slot offset from the version word the
+    header carries (see fr_py_poison_relay), because a hardcoded word
+    count silently drifted once already and turned a correct index list
+    into a plausible wrong one. That only works if the version is on the
+    wire while the workers are running -- but the launcher writes its
+    header at the very END, after the join. So during the run the region
+    is still zero-filled, version reads as 0, and the relay would lay
+    its slots out on the v2 boundary while the parent later reads them
+    on the v3 one: an empty index list, and `poisoned_batches_truncated`
+    wrongly True.
+
+    So the parent stamps the version up front. The launcher overwrites
+    the same header at the end with the real counts and the same
+    version, so this declares the layout rather than competing for the
+    writer's place.
+    """
+    import struct as _struct
+    try:
+        os.pwrite(fd, _struct.pack("<IIIII", 3, 0, int(workers),
+                                   _STATS_SLOT_U32, 0xFFFFFFFF), 0)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# C0.2: the cleanroom structured trace.
+#
+# The wire format is forkrun_trace.h. The constants are duplicated here
+# deliberately rather than generated: a build-time dependency from the
+# Python package on a C header would be a much larger coupling than 14
+# integers, and _test_trace_layout_matches_header asserts the two agree by
+# COMPILING the header, so a divergence fails the suite instead of
+# corrupting a diagnosis.
+# ---------------------------------------------------------------------------
+
+_TRACE_REC = 64
+_TRACE_MAGIC = 0x52544646          # 'F','T','R','F'
+_TRACE_VERSION = 1
+# The format is I,H,H,q,... because the C struct is uint32 magic then
+# uint16 version then uint16 rec_bytes. An earlier draft wrote I,B,B,H --
+# which totals the SAME 8 bytes, so the record-size check passed while
+# every field after magic was misaligned and version was read as two
+# bytes. _test_python_field_offsets_match_c now derives this format's
+# offsets and compares them to the compiler's offsetof, which is the
+# check that was missing and should have caught it.
+_TRACE_STRUCT = "<IHHqIbb2xiiii24x"
+
+_TRACE_ROLES = {
+    0: "launcher", 1: "worker", 2: "probe", 3: "spill",
+    4: "fallow", 5: "scan", 6: "drain", 7: "orderer",
+}
+
+_TRACE_EVENTS = {
+    1: "launcher_init", 2: "fork_request", 3: "fork_return",
+    4: "child_entry", 5: "child_exit", 6: "reap",
+    7: "sup_enter", 8: "sup_exit", 9: "sup_abort", 10: "sup_respawn",
+    11: "fatal_begin", 12: "fatal_kill", 13: "fatal_reap",
+    14: "fatal_end",
+}
+
+# The most recent launcher trace. Empty when tracing was off.
+_LAST_TRACE: list = []
+
+
+def _cleanroom_trace_enabled() -> bool:
+    """Is the opt-in trace on? Off unless the env var is set to a true-ish
+    value.
+
+    Deliberately NOT honoured when the value is present but falsy: a trace
+    left on by an inherited environment is exactly the kind of thing that
+    quietly perturbs a benchmark.
+    """
+    v = os.environ.get("FORKRUN_CLEANROOM_TRACE")
+    return bool(v) and v not in ("0", "false", "no", "off")
+
+
+def _read_cleanroom_trace(trace_fd):
+    """Parse the trace memfd into a list of dicts.
+
+    Returns [] on any doubt. The trace is an OBSERVATION channel: a parse
+    failure must never propagate into the run it was observing, and a
+    partial trace is worse than none because it invites conclusions from
+    missing evidence. Every record is checked for magic, version and
+    record size, so truncation or skew is detected rather than misparsed.
+    """
+    try:
+        size = os.fstat(trace_fd).st_size
+    except OSError:
+        return []
+    if size <= 0:
+        return []
+    # A trailing partial record means the file was cut mid-write. Report
+    # nothing rather than the complete prefix: the caller asked for a
+    # whole run, not a prefix of one.
+    if size % _TRACE_REC:
+        return []
+    try:
+        raw = os.pread(trace_fd, size, 0)
+    except OSError:
+        return []
+    out = []
+    for off in range(0, len(raw), _TRACE_REC):
+        (magic, ver, rec, t_ns, pid, role, event,
+         wid, wincarn, node, rc) = struct.unpack_from(
+            _TRACE_STRUCT, raw, off)
+        if magic != _TRACE_MAGIC or rec != _TRACE_REC:
+            return []
+        if ver != _TRACE_VERSION:
+            return []
+        out.append({
+            "t_ns": t_ns,
+            "pid": pid,
+            "role": _TRACE_ROLES.get(role, "role%d" % role),
+            "event": _TRACE_EVENTS.get(event, "event%d" % event),
+            # FR_TRACE_NA is -1, meaning "not applicable". Surfaced as
+            # None so a reader cannot mistake it for wid 0 or wincarn 0.
+            "wid": None if wid == -1 else wid,
+            "wincarn": None if wincarn == -1 else wincarn,
+            "node": node,
+            "rc": rc,
+        })
+    return out
 
 
 def _read_cleanroom_stats(stats_fd):
@@ -937,20 +2722,46 @@ def _read_cleanroom_stats(stats_fd):
     version, poisoned = struct.unpack_from("<II", raw, 0)
     if version < 1:
         return None
+    # W-EXP-2 Phase A: v3 carries the committed DATA-frame count for THIS
+    # invocation. It is an absolute count, not a delta: the launcher calls
+    # fr_py_init() itself, so the shared state it reads starts zero-filled
+    # for this run and there is no previous invocation to subtract.
+    #
+    # UINT32_MAX is the "not available" sentinel (older substrate, a failed
+    # node read, or a sum that would not fit) and is deliberately NOT
+    # zero: a fabricated zero would fail a complete result or pass a
+    # truncated one. None here means "no verdict", never "no frames".
+    committed = None
+    if version >= 3 and len(raw) >= 20:
+        (committed,) = struct.unpack_from("<I", raw, 16)
+        if committed == 0xFFFFFFFF:
+            committed = None
     if version == 1:
-        return int(poisoned), [], 0
-    # v2: poisoned batch indices follow the header, one bounded slot per
-    # worker. Anything malformed degrades to the scalar alone, which is
-    # still authoritative for total and strict_poison.
-    if len(raw) < _STATS_HEADER_BYTES:
-        return int(poisoned), [], 0
+        return int(poisoned), [], 0, committed
+    # The slot base is DERIVED FROM THE VERSION, not from a constant.
+    #
+    # It used to be _STATS_HEADER_BYTES, which silently assumed every
+    # writer used the current header. A v2 region -- anything built before
+    # v3 existed, including test fixtures that construct a header by hand
+    # -- lays its slots out 4 bytes earlier, so reading them at the v3
+    # offset returned a plausible-looking WRONG list rather than an
+    # error. Deriving the base from the version the writer actually
+    # stamped makes old and new regions both parse correctly, and means
+    # the next header version cannot repeat this bug.
+    hdr_u32 = 5 if version >= 3 else 4
+    slot_base = hdr_u32 * 4
+    # v2/v3: poisoned batch indices follow the header, one bounded slot
+    # per worker. Anything malformed degrades to the scalar alone, which
+    # is still authoritative for total and strict_poison.
+    if len(raw) < slot_base:
+        return int(poisoned), [], 0, committed
     _ver, _poi, workers, stride = struct.unpack_from("<IIII", raw, 0)
     if not stride:
-        return int(poisoned), [], 0
+        return int(poisoned), [], 0, committed
     idxs = []
     relayed = 0
     for wid in range(min(int(workers), 4096)):
-        base = _STATS_HEADER_BYTES + wid * stride * 4
+        base = slot_base + wid * stride * 4
         if base + 4 > len(raw):
             break
         (n,) = struct.unpack_from("<I", raw, base)
@@ -974,7 +2785,7 @@ def _read_cleanroom_stats(stats_fd):
     # does not need to -- both mean the list is incomplete, which is the
     # one thing a caller has to know before trusting len(). Deriving this
     # from data that already crosses keeps the on-wire layout unchanged.
-    return int(poisoned), sorted(set(idxs)), relayed
+    return int(poisoned), sorted(set(idxs)), relayed, committed
 
 
 def _cleanroom_collect(res_fd, views, order="none"):
@@ -1044,7 +2855,7 @@ def _cleanroom_collect(res_fd, views, order="none"):
 
         base = 0
         while size - base >= _HDR.size:
-            _bidx, blen = _HDR.unpack_from(buf, base)
+            _bidx, blen, _disp, _res = _HDR.unpack_from(buf, base)
             start = base + _HDR.size
             if size - start < blen:
                 # A header whose payload is not fully there is a torn
@@ -1065,7 +2876,11 @@ def _cleanroom_collect(res_fd, views, order="none"):
                     "for a worker death mid-record."
                     % (blen - (size - start)), UserWarning, stacklevel=3)
                 break
-            out.append((_bidx, buf[start:start + blen]))
+            # DECISION-02: control records carry no payload; skip them
+            # (see _split_records for why surfacing them as b"" would be
+            # a wrong answer rather than a cosmetic one).
+            if _disp == _DISP_DATA:
+                out.append((_bidx, buf[start:start + blen]))
             base = start + blen
         if order == "index":
             out.sort(key=lambda kv: kv[0])
@@ -1118,33 +2933,38 @@ def _cleanroom_source_fd(source):
     return fd
 
 
+@_route_fd_cleanup
 def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
-                              plugin_path, plugin_func, on_error):
+                              plugin_path, plugin_func, on_error,
+                              strict_poison=False,
+                              udf_helper=None, udf_module=None,
+                              udf_attr=None, udf_roots=None, _own=None):
     """W-CR3: STREAMING cleanroom -- yield results as they arrive.
 
-    Same envelope as the map() path (materialised-vs-streaming aside),
-    plus the producer/descriptor distinction:
+    Same envelope as the map() path (materialised-vs-streaming aside).
+    The source must already be a descriptor -- a path, a fifo, a socket,
+    an int fd or a file object -- and is passed straight through as
+    `--src`. Nothing is pumped.
 
-    * source already a descriptor (fifo, socket, int fd, file object):
-      passed straight through as --src. Nothing is pumped; the launcher
-      reads it exactly as Bash's `-s` shape does.
-    * source a Python iterable: forked producer child pumps it into a
-      pipe. NOTE this is currently unreachable -- _reject_iterable_source
-      refuses iterables for stream() as well -- so it is retained as
-      defence in depth, not as a supported input shape.
+    ACCEPTED INPUT SHAPE, precisely: there is no iterable producer and
+    no producer child. One used to exist here (a forked child pumping a
+    Python iterable into a pipe) but it was UNREACHABLE --
+    `_api._reject_iterable_source` refuses iterables for map(), run() and
+    stream() alike, "Python is never an input pump" -- while its waitpid
+    and teardown entries stayed live in this function's control flow. It
+    was removed; its sibling in `_execute_cleanroom()` had already been
+    removed for the same reason. A source that `_cleanroom_source_fd()`
+    cannot turn into a descriptor is a TypeError, not a forked pump.
 
     The parent only ever DRAINS. That is what makes it deadlock-free:
-    the launcher can block writing results, the spill child can block
-    reading the source, and the producer can block on a full pipe --
-    all three are relieved because the parent never stops reading
-    rr until EOF. Verified on a 200k-record pipe (first result at
-    2.8 ms) and on a deliberately slow producer (2.9 ms), neither of
-    which deadlocked.
+    the launcher can block writing results and the spill child can block
+    reading the source, and both are relieved because the parent never
+    stops reading rr until EOF.
 
     Teardown is explicit rather than best-effort: on abandonment
-    (GeneratorExit) both children are killed before the fds close, so
-    an early `break` out of the caller's loop cannot leave the launcher
-    writing into a closed pipe or the producer blocked forever.
+    (GeneratorExit) the launcher child is killed before the fds close,
+    so an early `break` out of the caller's loop cannot leave it
+    writing into a closed pipe.
     """
     import warnings as _warnings
     launcher = _cleanroom_launcher_path()
@@ -1160,64 +2980,99 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
     so = find_substrate()
 
     src_fd = _cleanroom_source_fd(source)
-    producer_pid = None
     if src_fd is None:
-        if not hasattr(source, "__iter__"):
-            raise TypeError(
-                "FORKRUN_CLEANROOM stream(): source must be a readable "
-                "descriptor or an iterable, got %r" % (type(source),))
-        sr, sw = os.pipe()
+        # Reachable as a VALIDATION (an unrecognised source), so it stays.
+        # What is NOT reachable is the iterable producer this used to
+        # guard: _api._reject_iterable_source refuses Python iterables
+        # before dispatch, so there is nothing to pump.
+        raise TypeError(
+            "FORKRUN_CLEANROOM stream(): source must be a readable "
+            "descriptor or a path, got %r" % (type(source),))
 
+    # C5: every route-owned descriptor must sit above fd 2. This shape has
+    # no dup2(errfd, 2), but a route descriptor landing on a standard-stream
+    # number would still alias what the host left there AND be handed to the
+    # launcher as that number.
+    own = _own
+    src_fd = _fd_above_stdio(src_fd)
+    own.add("src_fd", src_fd)
     rr, rw = os.pipe()
-    if src_fd is not None:
-        os.set_inheritable(src_fd, True)
+    # F6 Stage 4. Stage 3 relocated `src_fd` here and then left the pipe
+    # ends exactly where `os.pipe()` put them, under a comment claiming
+    # "every route-owned descriptor must sit above fd 2". `os.pipe()`
+    # returns the LOWEST FREE pair, so with the standard-stream gap
+    # partly free these land INSIDE it -- and `rw` is then made
+    # inheritable and handed to the launcher as `--result`. A `rw` on fd 1
+    # is simultaneously the launcher's stdout, and a `rw` on fd 2 is its
+    # stderr: results are written into a channel the launcher also uses for
+    # diagnostics, and the parent drains a stream that never contained what
+    # it claimed to. Observed end to end before this fix, with fd 0/1/2
+    # closed: `--src 2`, then `2 worker(s) failed ... respawn cap reached`.
+    rr = _fd_above_stdio(rr)
+    own.add("rr", rr)
+    rw = _fd_above_stdio(rw)
+    own.add("rw", rw)
+    os.set_inheritable(src_fd, True)
     os.set_inheritable(rw, True)
 
+    # DECISION-02 / P2 strict_poison: the streaming launch contract had NO
+    # statistics channel at all, so strict_poison could not be honoured here
+    # -- it was not a dropped return value, the descriptor was never passed.
+    # Same memfd convention as the map path, pre-sized so every worker owns a
+    # real slot.
+    stats_fd = _fd_above_stdio(os.memfd_create("fr_cleanroom_stream_stats"))
+    own.add("stats_fd", stats_fd)
+    _stats_ftruncate(stats_fd, _STATS_HEADER_BYTES
+                     + max(int(workers), 1) * _STATS_SLOT_U32 * 4)
+    _stats_stamp_header(stats_fd, workers)
+    os.set_inheritable(stats_fd, True)
+
     argv = [launcher, "--so", so,
-            "--plugin", plugin_path, "--func", plugin_func,
             "--workers", str(int(workers)),
             "--lines", str(int(lines or 0)),
             "--bytes", str(int(bytes_ or 0)),
             "--on-error", str(_ON_ERROR_CODES.get(on_error, 0)),
             "--retry", str(int(_resolve_retry_limit())),
-            "--src", str(src_fd if src_fd is not None else sr),
-            "--result", str(rw)]
+            "--src", str(src_fd),      # non-None: validated above
+            "--result", str(rw),
+            "--stats-fd", str(stats_fd)]
+    if udf_helper:
+        argv += ["--udf-helper", udf_helper,
+                 "--udf", udf_module,
+                 "--udf-attr", udf_attr]
+        argv += _caller_version_argv()
+        _lp = _udf_libpython_or_decline("stream")
+        if _lp is None:
+            # A pre-ingest decline, so the streaming fallback can switch
+            # to the in-process path before any record is yielded.
+            raise _CleanroomPreIngestDecline(
+                "cleanroom stream UDF route declined: this interpreter's "
+                "libpython could not be resolved")
+        argv += _lp
+        if udf_roots:
+            argv += ["--udf-roots", udf_roots]
+    else:
+        argv += ["--plugin", plugin_path, "--func", plugin_func]
 
-    launch_pid = os.fork()
-    if launch_pid == 0:
-        try:
-            if src_fd is None:
-                os.close(sw)
-            os.close(rr)
-            os.execv(launcher, argv)
-        except BaseException:
-            os._exit(127)
+    # Equivalence-first candidate action list: EMPTY, and deliberately so.
+    # The streaming child closes `rr` before exec, but `rr` is ALREADY
+    # FD_CLOEXEC (os.pipe sets it), so the kernel removes it at exec in the
+    # shipped path too. Adding a POSIX_SPAWN_CLOSE for rr would imitate the
+    # SPELLING of os.close(rr) rather than its EFFECT; the post-exec
+    # descriptor state is already identical with no actions at all.
+    try:
+        launch_pid = _spawn_or_fork(launcher, argv, ())
+    except OSError:
+        # Same mapping as the materialized route: synthesise the exit-127
+        # status so the existing classification raises the STREAMING
+        # truncation error, not a materialized input-consumption one.
+        launch_pid = None
+        launch_status = _CR_SPAWN_FAILURE_STATUS
+    else:
+        launch_status = None
     # parent
-    if src_fd is not None:
-        os.close(src_fd)
-    os.close(rw)
-    if src_fd is None:
-        producer_pid = os.fork()
-        if producer_pid == 0:
-            try:
-                os.close(rr)
-                for chunk in source:
-                    if isinstance(chunk, str):
-                        chunk = chunk.encode()
-                    elif not isinstance(chunk, (bytes, bytearray, memoryview)):
-                        raise TypeError(
-                            "stream source yielded %r; the cleanroom "
-                            "producer writes bytes" % (type(chunk),))
-                    view = memoryview(chunk)
-                    while view:
-                        n = os.write(sw, view[:1 << 20])
-                        view = view[n:]
-                os.close(sw)
-            except BaseException:
-                os._exit(1)
-            os._exit(0)
-        os.close(sw)
-
+    own.close("src_fd")
+    own.close("rw")
     tail = b""
     finished = False
     try:
@@ -1230,11 +3085,13 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                 tail = b""
             base = 0
             while len(data) - base >= _HDR.size:
-                _bidx, blen = _HDR.unpack_from(data, base)
+                _bidx, blen, _disp, _res = _HDR.unpack_from(data, base)
                 start = base + _HDR.size
                 if len(data) - start < blen:
                     break
-                yield data[start:start + blen]
+                # DECISION-02: skip control dispositions (see _split_records).
+                if _disp == _DISP_DATA:
+                    yield data[start:start + blen]
                 base = start + blen
             tail = data[base:]
         # The pipe hit EOF. That is only a legitimate END OF INPUT if the
@@ -1243,28 +3100,21 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
         # exits 0, so the caller would get plausible-looking truncated
         # results and no error.
         #
-        # HONEST SCOPE: this branch is currently UNREACHABLE from the
-        # public API. _api._reject_iterable_source refuses a Python
-        # iterable for map(), run() AND stream() alike ("Python is never
-        # an input pump"), so producer_pid is always None here and every
-        # real streaming source is a pipe/fd fed by the caller. That
-        # caller's failure is not detectable from in here -- there is no
-        # child to inspect -- so a writer that dies mid-stream is still
-        # silently truncated, and no check in this function can fix that.
+        # HONEST SCOPE, and it is a REAL limitation, not a hedge: this
+        # function cannot detect that a CALLER-FED pipe died mid-stream.
+        # There is no child of ours to inspect -- the writer is the
+        # caller's own process or thread -- so a writer that errors out
+        # simply EOFs the pipe, the launcher ingests a SHORT corpus and
+        # exits 0, and the caller receives plausible-looking truncated
+        # results with no error naming the cause.
         #
-        # It is kept as defence in depth, and it is the reason the
-        # producer block above was not deleted along with map()'s copy.
-        # Checked here rather than in the finally because a raise from a
-        # finally would mask the real error.
-        if producer_pid is not None:
-            _pp, pstatus = os.waitpid(producer_pid, 0)
-            producer_pid = None
-            if not (os.WIFEXITED(pstatus)
-                    and os.WEXITSTATUS(pstatus) == 0):
-                raise RuntimeError(
-                    "forkrun: cleanroom source producer failed (status "
-                    "%r); the input was truncated, so the results are "
-                    "not trustworthy" % (pstatus,))
+        # This used to be checkable, via a fork()ed Python producer that
+        # pumped an iterable. That branch was unreachable and was removed
+        # (WO Phase D.4): _api._reject_iterable_source refuses a Python
+        # iterable for map(), run() and stream() alike -- "Python is never
+        # an input pump" -- so the producer could never run, while its
+        # 30-odd lines and its waitpid/teardown entries stayed live in
+        # this function's control flow.
         # EOF on the result pipe is NOT proof of success. The launcher
         # exits non-zero for unrecoverable worker death, helper death,
         # spill failure, recovery failure and abort -- and in every one
@@ -1280,22 +3130,88 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
         # would mask the real error and double-wait the child, hence the
         # explicit waitpid here and finished=1 (which tells the finally
         # the child is already reaped).
-        if launch_pid is not None:
+        if launch_status is not None:
+            # posix_spawn raised: no child exists, so judge the synthesised
+            # exit-127 through the SAME classification the reaped-child path
+            # uses. That preserves the STREAMING route's truncation error
+            # instead of a materialized-route message.
+            lstatus = launch_status
+        elif launch_pid is not None:
             _lp, lstatus = os.waitpid(launch_pid, 0)
             launch_pid = None
-            if not (os.WIFEXITED(lstatus)
-                    and os.WEXITSTATUS(lstatus) == 0):
-                raise RuntimeError(
-                    "forkrun: cleanroom launcher failed (status %r); the "
+        if lstatus is not None and not (os.WIFEXITED(lstatus)
+                                        and os.WEXITSTATUS(lstatus) == 0):
+            # A PRE-INGESTION decline is categorically different from
+            # a failed run, and this function used to treat them the
+            # same. It raised on every nonzero exit because for the
+            # failures that class covers, records WERE yielded first
+            # and a partial stream must not look complete.
+            #
+            # But a refusal decided before the spill child is forked
+            # produced NO records, so "TRUNCATED" is false and raising
+            # loses a recoverable situation for no safety gain. The
+            # launcher's own classification answers which is which --
+            # the same one the map path has used since W-CR1, which
+            # is why this is a shared decision and not a second
+            # opinion formed at the stream call site.
+            _lc, _ls, _ll, _lpre = _decode_launcher_status(lstatus)
+            if _lpre and not _fallback_forbidden(lstatus):
+                if _lc in _CR_COMPAT_REFUSALS:
+                    raise _CleanroomCompatRefusal(
+                        _ll, "", _CR_COMPAT_REFUSALS[_lc], code=_lc)
+                raise _CleanroomPreIngestDecline(
+                    "cleanroom launcher declined before ingestion "
+                    "(%s)" % (_describe_launcher_failure(lstatus),))
+            raise RuntimeError(
+                    "forkrun: cleanroom launcher failed (%s); the "
                     "stream is TRUNCATED and the records already yielded "
-                    "are incomplete" % (lstatus,))
+                    "are incomplete"
+                    % (_describe_launcher_failure(lstatus),))
+        # DECISION-02: consume the poison count ONLY now, and ONLY
+        # after a confirmed-clean exit.
+        #
+        # The ordering is the safety property. A launcher that failed
+        # may have written a partial or absent count, and reading it
+        # anyway would report "0 poisoned" for a run that died -- i.e.
+        # it would disguise a failure as a clean stream. Reading it
+        # after the status check means the two facts stay independent.
+        # _read_cleanroom_stats returns (poisoned, poisoned_batches,
+        # truncated) -- a tuple, not a mapping.
+        stats = _read_cleanroom_stats(stats_fd)
+        if stats is not None:
+            npois, batch_idx, _trunc = stats[:3]
+            # W-EXP-2 Phase A: committed DATA frames for THIS invocation,
+            # or None when the launcher could not supply it. Published so
+            # the completeness certificate can read it without re-reading
+            # the (already closed) stats descriptor.
+            globals()["_LAST_COMMITTED"] = (stats[3] if len(stats) > 3
+                                           else None)
+            _LAST_STATS["poisoned"] = npois
+            _LAST_STATS["poisoned_batches"] = list(batch_idx or [])
+            _LAST_STATS["poisoned_batches_truncated"] = _trunc
+        else:
+            npois = 0
+        if npois and strict_poison:
+            raise RuntimeError(
+                    "forkrun: %d poisoned batch(es) skipped in a "
+                    "streaming run and strict_poison=True" % (npois,))
         finished = True
     finally:
-        try:
-            os.close(rr)
-        except OSError:
-            pass
-        for pid in (launch_pid, producer_pid):
+        # Descriptor ownership: the decorator's close_all() runs when this
+        # generator exits -- on completion, on any raise, and on
+        # abandonment (GeneratorExit) -- so rr and stats_fd are released on
+        # every path without a close statement per exit.
+        #
+        # Closing the parent's copies here cannot disturb a running child:
+        # after fork the two processes hold SEPARATE descriptor-table
+        # entries pointing at one shared open file description, so the
+        # child keeps its own reference and its writes still land. The
+        # stats read has already happened on every non-raising path.
+        #
+        # The child is killed BEFORE that close matters, because a child
+        # still blocked writing into a pipe whose read end just closed
+        # would otherwise linger until the pipe teardown below.
+        for pid in (launch_pid,):
             if pid is None:
                 continue
             try:
@@ -1304,6 +3220,31 @@ def _execute_cleanroom_stream(source, *, lines, bytes_, workers,
                 os.waitpid(pid, 0)
             except OSError:
                 pass
+
+
+def _resolve_c_loop(flag, raw_mode, num_nodes, *, flag_name, mode,
+                    mode_reason, work_order, require_symbol):
+    """Gate a C worker loop to its supported envelope.
+
+    THE SINGLE SOURCE OF TRUTH for the two C-loop gates (the W-PY26
+    plugin loop and the W-PY33 spawn loop). The rule was the same in
+    both and was written twice: honoured only for one mode, UMA only,
+    and only when the substrate carries that loop's symbol. They
+    differed only in which mode, which flag and which symbol -- and
+    the two messages are byte-identical to the originals.
+    """
+    if not flag:
+        return False
+    if raw_mode != mode:
+        raise ValueError(
+            "%s=True needs mode=%r (%s), got mode=%r"
+            % (flag_name, mode, mode_reason, raw_mode))
+    if num_nodes != 1:
+        raise RuntimeError(
+                "%s=True is UMA-only in %s (multi-node is future work) — "
+                "use %s=False" % (flag_name, work_order, flag_name))
+    require_symbol()
+    return True
 
 
 def _resolve_c_plugin_loop(c_worker_loop, raw_mode, num_nodes):
@@ -1316,18 +3257,12 @@ def _resolve_c_plugin_loop(c_worker_loop, raw_mode, num_nodes):
     know when they are not getting it). Splice/streaming/NUMA/run/
     stream executors are future work.
     """
-    if not c_worker_loop:
-        return False
-    if raw_mode != "plugin":
-        raise ValueError(
-            "c_worker_loop=True needs mode='plugin' (the C loop speaks "
-            "only the frozen plugin ABI), got mode=%r" % (raw_mode,))
-    if num_nodes != 1:
-        raise RuntimeError(
-            "c_worker_loop=True is UMA-only in W-PY26 (multi-node is "
-            "future work) — use c_worker_loop=False")
-    _require_plugin_loop_symbol()
-    return True
+    return _resolve_c_loop(
+        c_worker_loop, raw_mode, num_nodes,
+        flag_name="c_worker_loop", mode="plugin",
+        mode_reason="the C loop speaks only the frozen plugin ABI",
+        work_order="W-PY26",
+        require_symbol=_require_plugin_loop_symbol)
 
 
 def _validate_c_spawn_loop(c_spawn_loop):
@@ -1339,13 +3274,7 @@ def _validate_c_spawn_loop(c_spawn_loop):
     loop stays the default so no user changes behavior without
     asking.
     """
-    if c_spawn_loop is None:
-        return False
-    if isinstance(c_spawn_loop, bool):
-        return c_spawn_loop
-    raise TypeError(
-        "c_spawn_loop must be None, True, or False, got %r"
-        % (c_spawn_loop,))
+    return _validate_c_flag(c_spawn_loop, "c_spawn_loop")
 
 
 def _require_spawn_loop_symbol():
@@ -1356,9 +3285,9 @@ def _require_spawn_loop_symbol():
 
     if not _v1a().get("spawn_loop"):
         raise RuntimeError(
-            "c_spawn_loop=True needs fr_py_worker_spawn_loop — rebuild "
-            "the substrate ('make -f Makefile.substrate "
-            "python-substrate')")
+                "c_spawn_loop=True needs fr_py_worker_spawn_loop — rebuild "
+                "the substrate ('make -f Makefile.substrate "
+                "python-substrate')")
 
 
 def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
@@ -1369,18 +3298,12 @@ def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
     a user asking for the C loop must know when they are not getting
     it). Splice/streaming/NUMA/run/stream executors are future work.
     """
-    if not c_spawn_loop:
-        return False
-    if raw_mode != "spawn":
-        raise ValueError(
-            "c_spawn_loop=True needs mode='spawn' (the C loop replays "
-            "a spawn argv per batch), got mode=%r" % (raw_mode,))
-    if num_nodes != 1:
-        raise RuntimeError(
-            "c_spawn_loop=True is UMA-only in W-PY33 (multi-node is "
-            "future work) — use c_spawn_loop=False")
-    _require_spawn_loop_symbol()
-    return True
+    return _resolve_c_loop(
+        c_spawn_loop, raw_mode, num_nodes,
+        flag_name="c_spawn_loop", mode="spawn",
+        mode_reason="the C loop replays a spawn argv per batch",
+        work_order="W-PY33",
+        require_symbol=_require_spawn_loop_symbol)
 
 
 # Process-wide run serialization (W-PY4.b G/Q-series). The engine's
@@ -1391,9 +3314,17 @@ def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
 # NOT make forking safe in general: an unrelated application thread can
 # still hold a lock at fork time. See _warn_threaded_fork. One lock for
 # the whole pipeline: coarse, deterministic, v0-appropriate.
-# W-REL2/R10: RLock, not Lock. Same-thread nesting (a forkrun.map call
-# inside a live stream() iteration) is legitimate and must re-enter
-# instead of deadlocking; cross-thread contenders still serialize.
+# W-REL2/R10: RLock, not Lock, so that cross-thread contenders serialize
+# without deadlocking against the thread that owns the session.
+#
+# WO-ROI-1-R1 CORRECTED THIS. The original text said same-thread
+# nesting "is legitimate and must re-enter instead of deadlocking". That
+# was the reasoning that motivated a bare RLock, and it is exactly what
+# made nesting possible -- and unsafe, because the engine is
+# process-global. A bare RLock prevents a deadlock; it is not a safety
+# property, and a re-entrant lock admits the second session happily.
+# _RunLock now REFUSES same-thread re-entry before acquiring, so
+# nesting raises instead of re-entering. See _RunLock.__enter__.
 import threading as _threading
 
 _THREAD_WARNED = []
@@ -1443,26 +3374,124 @@ def _warn_threaded_fork():
 
 
 class _RunLock:
-    """_RUN_LOCK, plus the threaded-fork warning on entry.
+    """_RUN_LOCK: one live engine session per process, enforced.
 
-    Wrapping the lock rather than adding a check at each `with
-    _RUN_LOCK:` site means all ~20 entry points are covered by
-    construction -- a new executor cannot forget it.
+    THE INVARIANT
+    -------------
+    At most ONE engine session may be live at a time. The C engine's
+    state is process-global (`g_state` / `state` in forkrun_ring.c), so a
+    second session does not merely interleave work -- it REPLACES the
+    first session's state. Specifically:
+
+      * ring_init_main mmaps unconditionally and overwrites `g_state`,
+        leaking the previous mapping;
+      * ring_destroy_main munmaps it and sets both pointers to NULL.
+
+    A nested run therefore returns its own correct results while
+    DESTROYING its parent's ability to supervise or recover its workers.
+    Measured: the enclosing run's fr_py_diag_node goes from rc=0 (live)
+    to rc=-1 (no engine state) across a nested map(). The parent cannot
+    then revert an orphan, so the run aborts with "Worker N recovery
+    failed (orphan revert/escrow)".
+
+    ENFORCEMENT
+    -----------
+    The lock is reentrant, which prevents a same-thread deadlock but is
+    NOT a safety property -- a reentrant lock happily lets the second
+    session in. So re-entry is REFUSED.
+
+    This class is the single choke point: every stream() path returns
+    through _guarded_gen, and every run()/map() branch takes the lock
+    before dispatching, so checking here covers all entry points by
+    construction rather than by remembering to check at each one.
+
+      * different threads -> serialize (the RLock blocks), because
+        engine globals are process-wide;
+      * same thread, no live session -> acquire normally;
+      * same thread, live session -> RuntimeError BEFORE acquiring, so
+        the nested call cannot initialise or destroy anything.
+
+    Every `with _RUN_LOCK:` site in this module is a sibling branch that
+    returns immediately, so no internal path relies on re-entry. That was
+    verified rather than assumed; see
+    python/tests/test_stream_lock.py.
     """
 
     def __init__(self, lock):
         self._lock = lock
+        # Per-thread session marker. A plain counter on self would be
+        # wrong: it must record whether THIS thread is inside a session,
+        # not how many threads are waiting.
+        self._local = _threading.local()
+        # WO-ROI-1-R1: a forked child inherits the parent's thread-local
+        # state, so it inherits `active` too -- VERIFIED: a forked child
+        # sees active=True. A worker that starts a nested run from its
+        # payload therefore inherits the refusal.
+        #
+        # That refusal is the correct outcome, but it arrives by accident
+        # and with a misleading message (it claims another run is live
+        # "in this thread", when what actually happened is that this
+        # PROCESS is a forked worker). So the inheritance is recorded
+        # explicitly and the diagnostic is made accurate.
+        #
+        # The marker is deliberately NOT cleared in the child. Clearing it
+        # would ADMIT worker-side nesting, and that is unsafe: the worker
+        # is mid-batch on the inherited engine state, so a nested
+        # _init_engine_and_fds would mmap over the mapping its own
+        # ack path still depends on. Refusal is the safe contract, and the
+        # smallest defensible one.
+        try:
+            os.register_at_fork(after_in_child=self._after_fork_child)
+        except AttributeError:      # pragma: no cover - non-POSIX
+            pass
+
+    def _after_fork_child(self):
+        # Runs in the child immediately after fork(). `active` is left
+        # True deliberately -- see __init__.
+        self._local.inherited_from_parent = True
+
+    def _session_live(self):
+        return getattr(self._local, "active", False)
 
     def __enter__(self):
+        if self._session_live():
+            # Refuse BEFORE acquiring. Acquiring first would succeed
+            # (RLock) and the nested session would then reinitialise the
+            # engine we are trying to protect.
+            if getattr(self._local, "inherited_from_parent", False):
+                raise RuntimeError(
+                        "forkrun: refusing to start a nested run inside a "
+                        "forkrun worker process. A worker inherits the "
+                        "engine session of the run that created it, and is "
+                        "mid-batch on that state, so a nested session would "
+                        "replace the mapping its own completion path depends "
+                        "on. Start the nested run from the parent instead -- "
+                        "pass it as data, or use a separate process.")
+            raise RuntimeError(
+                    "forkrun: refusing to start a nested run while another "
+                    "forkrun execution is live in this thread. The engine's "
+                    "state is process-global, so a nested session would "
+                    "replace the live one's state and leave the parent "
+                    "unable to supervise or recover its workers. Finish or "
+                    "close the active stream() before starting another run; "
+                    "runs in SEPARATE threads are still supported and are "
+                    "serialised.")
         self._lock.acquire()
         try:
             _warn_threaded_fork()
         except BaseException:
             self._lock.release()
             raise
+        self._local.active = True
         return self._lock
 
     def __exit__(self, *exc):
+        # Cleared BEFORE release so a session is never left marked live
+        # by an exception unwinding through here -- a stuck marker would
+        # make every later top-level run raise, which looks like the
+        # library being broken rather than a leaked guard.
+        self._local.active = False
+        self._local.inherited_from_parent = False
         self._lock.release()
         return False
 
@@ -1474,6 +3503,51 @@ class _RunLock:
 
 
 _RUN_LOCK = _RunLock(_threading.RLock())
+
+# C0.7: how many forkrun runs are live in THIS process, counted across
+# nested execution.
+#
+# WO-ROI-1-R1: the comment here used to say nesting "is permitted",
+# because an RLock is reentrant. That described the pre-guard behaviour
+# and is now WRONG: _RunLock refuses same-thread re-entry outright, so a
+# map() inside a live stream() is rejected rather than admitted. The
+# counter still exists because it is not redundant with the refusal --
+# see below -- but it no longer relies on nesting being allowed.
+#
+# The certificate's expected side is a DELTA of a counter that belongs to
+# the shared engine. That delta is only meaningful if no other producer
+# committed during the interval. A baseline captured before this run's
+# fork does not establish that: an outer stream's worker can commit
+# after the baseline and before this run's final snapshot, and its frame
+# would be charged to the inner run (measured: the inner run collected
+# 24 while a global counter read 56).
+#
+# Rather than attempt producer quiescence -- which would mean suspending
+# an outer run's live workers, mid-stream, around an unrelated call --
+# a nested run simply REFUSES to certify. That is the fail-closed
+# choice, and it is honest: no verdict beats a possibly-wrong one.
+_C07_RUN_DEPTH = [0]
+
+# C0.7: monotonically increasing count of runs STARTED in this process.
+#
+# Depth alone is not enough, because the exposure runs in BOTH
+# directions. A nested run's delta is polluted by the enclosing run's
+# live workers, which depth catches at start. But the ENCLOSING run's
+# delta is polluted too: the nested run commits into the same engine
+# between the enclosing run's baseline and its final snapshot, so the
+# outer run is charged for the inner one's frames. Measured with a
+# map() inside a payload: the outer run reported "collected 0, published
+# 25" -- every one of the 25 being the inner run's.
+#
+# A run that sees this counter advance during its own lifetime knows
+# that some other run committed inside its measurement window.
+_C07_RUNS_STARTED = [0]
+
+# C0.7 test hook state: the Nth DATA frame to drop on the observed side,
+# read once from FORKRUN_C07_DROP_FRAME. 0 (the default) drops nothing.
+# A list rather than a scalar so the walkers do not need `global`.
+_C07_DROP = [None]
+_C07_DROP_SEEN = [0]
 
 
 def _init_engine_and_fds(*, lines, bytes_, spec, num_nodes=None,
@@ -1585,7 +3659,7 @@ def _spill_to_memfd(src_fd) -> tuple[int, int]:
                     n = os.write(memfd, view)
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed writing ingress: %s" % (exc,))
+                            "failed writing ingress: %s" % (exc,))
                 size += n
                 view = view[n:]
         return memfd, size
@@ -1606,7 +3680,7 @@ def _spill_to_memfd(src_fd) -> tuple[int, int]:
                 n = os.pwrite(memfd, view, off)
             except OSError as exc:
                 raise RuntimeError(
-                    "failed writing ingress: %s" % (exc,))
+                        "failed writing ingress: %s" % (exc,))
             view = view[n:]
             off += n
             size += n
@@ -1701,9 +3775,10 @@ def _watch_ingest_helpers(lib, *, fallow_pid, scan_pid, helpers,
         helpers["fallow_rc"] = st
         ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
         if not ok:
-            lib.fr_py_abort()
-            raise RuntimeError(
-                "forkrun: ingest reaper failed (status %r)" % (st,))
+            if not _helper_death_excused("error", False, lib):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: ingest reaper failed (status %r)" % (st,))
     if scan_death_r is not None and helpers["scan_kind"] is None:
         kind, code = check_scanner_death(scan_pid, scan_death_r)
         if kind != "running":
@@ -1716,9 +3791,10 @@ def _watch_ingest_helpers(lib, *, fallow_pid, scan_pid, helpers,
             # never be closed after reuse (W-REL2/R11).
             state.scan_death_r = -1
             if kind == "error" or not gate_issued:
-                lib.fr_py_abort()
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)" % (code,))
+                if not _helper_death_excused("error", False, lib):
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: ingest scanner failed (status %r)" % (code,))
     return scan_death_r
 
 
@@ -1766,10 +3842,11 @@ def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
         helpers["fallow_rc"] = st
         ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
         if not ok:
-            lib.fr_py_abort()
-            raise RuntimeError(
-                "forkrun: NUMA reaper failed (status %r)"
-                % (st,))
+            if not _helper_death_excused("error", False, lib):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: NUMA reaper failed (status %r)"
+                    % (st,))
     _poll_ingest_once(lib, helpers, pipe)
     try:
         eof_posted = lib.fr_py_ingest_eof_posted()
@@ -1802,10 +3879,11 @@ def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
                     helpers.setdefault(
                         "excused", set()).add((key, node))
                 continue
-            lib.fr_py_abort()
-            raise RuntimeError(
-                "forkrun: NUMA %s %d failed "
-                "(status %r)" % (key, node, code))
+            if not _helper_death_excused("error", False, lib):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: NUMA %s %d failed "
+                    "(status %r)" % (key, node, code))
 
 
 def _fork_workers_for_node(state, assignments, node, forked):
@@ -2108,6 +4186,63 @@ def _iter_records(lib, fd, _chunk=_CHUNK, views=False):
             _chunk = len(tail) + _CHUNK
 
 
+# C0.7 frame accounting.
+#
+# The framer ALREADY walks every complete frame; it simply does not count
+# the ones it then filters (non-DATA dispositions, which include the
+# EOF sentinel and any NO_RESULT/SKIPPED/POISONED control record).
+# Counting here -- after a complete frame has been read and validated,
+# BEFORE the disposition filter -- measures exactly the quantity the
+# certificate needs, with no engine change.
+#
+# Named frames, not records: "records" is what the collector YIELDS, and
+# that is the quantity that differs from the ring's published slots.
+# "complete" counts EVERY complete frame, including the non-DATA
+# dispositions the collector filters, so it is NOT the observed side of
+# the certificate. "data_frames" is the DATA-only count: complete, valid
+# FR_DISP_DATA frames actually accepted. A zero-length DATA result still
+# counts as one frame -- it IS a frame, and counting it as zero would
+# make a legitimate b"" look like a lost frame.
+_FRAME_STATS = {"complete": 0, "filtered": 0, "data_frames": 0}
+
+# C0.7 expected-side. fr_py_diag_node answers only while the ring state is
+# live, so the published-slot total has to be captured DURING the run --
+# a probe after map() returns reads zeros. Recorded here purely as
+# telemetry so the correspondence sweep can compare the two sides.
+_PUBLISHED_SLOTS = {"total": None, "nodes": 0}
+
+# C0.7 expected-side, captured DURING the run for the same reason as the
+# published-slot total above: fr_py_committed_data_frames answers only
+# while the ring state is live, so a probe after map() returns reads
+# nothing. The certificate itself reads it inline, where the engine is
+# still up; this copy exists so tools and tests can compare the two
+# sides after the fact, the way c07_correspondence_sweep does.
+_COMMITTED_FRAMES = {"total": None, "nodes": 0}
+
+
+def reset_frame_stats():
+    _FRAME_STATS["complete"] = 0
+    _FRAME_STATS["filtered"] = 0
+    _FRAME_STATS["data_frames"] = 0
+    _PUBLISHED_SLOTS["total"] = None
+    _PUBLISHED_SLOTS["nodes"] = 0
+    _COMMITTED_FRAMES["total"] = None
+    _COMMITTED_FRAMES["nodes"] = 0
+
+
+def frame_stats():
+    return dict(_FRAME_STATS)
+
+
+def published_slots():
+    return dict(_PUBLISHED_SLOTS)
+
+
+def committed_frames():
+    """Committed DATA frames for the most recent run (C0.7 telemetry)."""
+    return dict(_COMMITTED_FRAMES)
+
+
 def _split_records_views(blob):
     """_split_records, yielding memoryview slices instead of bytes.
 
@@ -2120,15 +4255,53 @@ def _split_records_views(blob):
     off = 0
     n = len(blob)
     view = blob if isinstance(blob, memoryview) else memoryview(blob)
+    # C0.7 TEST HOOK: drop the Nth DATA frame on the OBSERVED side, so it
+    # was committed but never delivered -- the shape a completeness
+    # certificate exists to catch.
+    #
+    # Deliberately on this side of the comparison. Dropping at emission
+    # would drop the commit too, and both sides would fall together, which
+    # is precisely the case the certificate must NOT flag.
+    #
+    # Test-only and inert unless the variable is set, matching the
+    # existing FORKRUN_TEST_DIE_* convention in _shim.c. Read once and
+    # cached, so the hot path pays one dict lookup.
+    if _C07_DROP[0] is None:
+        _C07_DROP[0] = int(os.environ.get("FORKRUN_C07_DROP_FRAME", "0") or 0)
+        _C07_DROP_SEEN[0] = 0
     while True:
         rec_start = off
         if off + _HDR.size > n:
             break
-        idx, ln = _HDR.unpack_from(view, off)
+        idx, ln, disp, _res = _HDR.unpack_from(view, off)
         off += _HDR.size
         if off + ln > n:
             off = rec_start
             break
+        # DECISION-02: a NO_RESULT record is a control signal, not data.
+        # It must NOT surface as an empty payload, or a UDF returning None
+        # would hand map()'s caller a spurious b"" -- a new class of wrong
+        # answer in exactly the place that decides what a call returns.
+        if disp != _DISP_DATA:
+            # A COMPLETE frame that carries a control disposition rather
+            # than payload. Counted, because it occupied a published slot
+            # and must be accounted for at the certificate boundary.
+            _FRAME_STATS["complete"] += 1
+            _FRAME_STATS["filtered"] += 1
+            off += ln
+            continue
+        _FRAME_STATS["complete"] += 1
+        # Counted against DATA frames specifically, not against
+        # "complete": complete also counts the filtered control records,
+        # so using it would skip the drop whenever a NO_RESULT preceded
+        # the target -- making the hook silently unreliable.
+        _C07_DROP_SEEN[0] += 1
+        if _C07_DROP[0] and _C07_DROP_SEEN[0] == _C07_DROP[0]:
+            # Committed, but never delivered. See the hook note above.
+            _FRAME_STATS["data_frames"] += 1
+            off += ln
+            continue
+        _FRAME_STATS["data_frames"] += 1
         records.append((idx, view[off:off + ln]))
         off += ln
     tail = view[off:]
@@ -2149,12 +4322,69 @@ def _split_records(blob: bytes) -> tuple:
         rec_start = off
         if off + _HDR.size > n:
             break
-        idx, ln = _HDR.unpack_from(blob, off)
+        idx, ln, disp, _res = _HDR.unpack_from(blob, off)
         off += _HDR.size
         if off + ln > n:
             off = rec_start
             break
+        # DECISION-02: NO_RESULT is a control signal, not data. Surfacing it
+        # as an empty payload would hand map()'s caller a spurious b"" for
+        # a UDF that returned None -- a new class of wrong answer in exactly
+        # the place that decides what a call returns.
+        if disp != _DISP_DATA:
+            _FRAME_STATS["complete"] += 1
+            _FRAME_STATS["filtered"] += 1
+            off += ln
+            continue
+        _FRAME_STATS["complete"] += 1
+        # Counted against DATA frames specifically, not against
+        # "complete": complete also counts the filtered control records,
+        # so using it would skip the drop whenever a NO_RESULT preceded
+        # the target -- making the hook silently unreliable.
+        _C07_DROP_SEEN[0] += 1
+        if _C07_DROP[0] and _C07_DROP_SEEN[0] == _C07_DROP[0]:
+            # Committed, but never delivered. See the hook note above.
+            _FRAME_STATS["data_frames"] += 1
+            off += ln
+            continue
+        _FRAME_STATS["data_frames"] += 1
         records.append((idx, blob[off:off + ln]))
+        off += ln
+    return records, blob[off:]
+
+
+def _split_records_terminal(blob: bytes) -> tuple:
+    """Split a record stream keeping EVERY record's disposition.
+
+    Stage 1. ``_split_records`` drops every non-DATA record, which is
+    correct for its callers (a map() caller must not receive a spurious
+    b"" for a batch that produced nothing) but fatal for ordered
+    reassembly: a NO_RESULT / SKIPPED / POISONED batch then looks
+    identical to a batch that never answered, and the consumer waits on
+    a hole that will never close.
+
+    So this is a SEPARATE parser rather than a change to ``_split_records``.
+    That function's filtering is load-bearing for several other callers,
+    and altering it to keep control records would hand them payloads they
+    are explicitly written not to see.
+
+    Returns (records, tail) where records is [(batch_idx, disposition,
+    payload)] and the tail is an incomplete header or short body, held
+    back for the next chunk exactly as elsewhere.
+    """
+    records = []
+    off = 0
+    n = len(blob)
+    while True:
+        rec_start = off
+        if off + _HDR.size > n:
+            break
+        idx, ln, disp, _res = _HDR.unpack_from(blob, off)
+        off += _HDR.size
+        if off + ln > n:
+            off = rec_start
+            break
+        records.append((idx, disp, blob[off:off + ln]))
         off += ln
     return records, blob[off:]
 
@@ -2183,7 +4413,7 @@ def _parse_records_c(blob: bytes) -> list | None:
     import ctypes as _ct
 
     n = len(blob)
-    bound = n // 16  # records are >= 16 bytes: always terminates
+    bound = n // _HDR.size  # records are >= one header: always terminates
     if bound == 0:
         return []
     # Bound transient memory (24MB/round); grow-and-retry only when
@@ -2273,7 +4503,65 @@ def _resolve_workers_numa(workers, num_nodes=1):
     return base
 
 
-def _coerce_payload(payload, mode):
+def _udf_as_inprocess(fn):
+    """Adapt a mode="udf" callable to the in-process UDF contract.
+
+    THE TWO MODES DO NOT CALL USER CODE THE SAME WAY, which is why a bare
+    fallback is not safe:
+
+    * mode="udf" (embedded CPython in the launcher) hands the callable
+      one ``bytes`` object -- fr_udf_call does PyBytes_FromStringAndSize
+      -- and reads back ``bytes`` or None.
+    * mode="python" hands it a ``forkrun._batch.Batch``, which carries
+      offsets, line counts and metadata as well as the data.
+
+    So without this adapter the "fallback" would silently change the
+    contract: a UDF written for mode="udf" would be handed a Batch,
+    ``b.upper()`` would raise AttributeError, every batch would retry
+    and poison, and the caller would see an empty result with no error
+    naming the cause. That failure was reproduced here before the
+    adapter existed.
+
+    The adapter restores the mode="udf" contract exactly: bytes in,
+    bytes-or-None out. The Batch's own fields are discarded -- a mode="udf"
+    callable has no way to observe them, and synthesising them would be a
+    second, subtler contract change.
+    """
+    def _wrapped(batch):
+        data = batch.data
+        raw = bytes(data) if data is not None else b""
+        out = fn(raw)
+        return out            # bytes passes through; None means no result
+    _wrapped.__name__ = getattr(fn, "__name__", "udf")
+    _wrapped.__doc__ = getattr(fn, "__doc__", None)
+    return _wrapped
+
+
+def _coerce_payload_inprocess(payload, mode):
+    """Coerce a payload for the IN-PROCESS executor path.
+
+    THE DECISION: the map-udf route is served by the cleanroom
+    launcher, not by the in-process executors -- the reactor accepts
+    only "python" and "splice". So on this path a mode="udf" payload
+    MUST be resolved in THIS interpreter: the documented in-process
+    fallback.
+
+    The helper file's existence says the helper was BUILT for this
+    minor; it says NOTHING about whether the route was SELECTED for
+    this call. Conflating the two is what made mode="udf" raise
+
+        NotImplementedError: v0 supports mode='python' only
+
+    in the default configuration (the cleanroom is opt-in, so the
+    route is not selected) -- and a fallback that raises is not a
+    fallback. The UDF route selection lives in the cleanroom dispatch;
+    this is the other half of that decision, and it has one
+    implementation so a future in-process call site cannot forget it.
+    """
+    return _coerce_payload(payload, mode, force_inprocess_udf=True)
+
+
+def _coerce_payload(payload, mode, force_inprocess_udf=False):
     """Normalize the payload + mode for the engine path (W-PY8, eager).
 
     Returns (payload_fn, engine_mode). mode="spawn" wraps the command and
@@ -2282,6 +4570,10 @@ def _coerce_payload(payload, mode):
     wrapper, so the claim/ack loop, emitter, and reassembly never branch
     on mode. Raises ValueError for shape mismatches eagerly, so stream()
     still validates on call.
+
+    ``force_inprocess_udf`` overrides the helper-present branch for a
+    single call whose helper the launcher has just declined. See the
+    comment at that branch.
     """
     if mode == "plugin":
         if callable(payload):
@@ -2298,6 +4590,42 @@ def _coerce_payload(payload, mode):
                 "mode='plugin' payload must be 'path:function' format, "
                 "got %r" % (payload,))
         return make_plugin_payload(path, func_name), "python"
+    if mode == "udf":
+        if callable(payload):
+            raise ValueError(
+                "mode='udf' requires a 'module:attribute' string, not a "
+                "callable.")
+        # A helper for this minor is what makes the isolated in-launcher
+        # interpreter possible. If it is not built, the call must STILL
+        # work -- mode="udf" is not an error, and the documented
+        # fallback is the in-process path, which runs the UDF in THIS
+        # interpreter.
+        #
+        # This used to return ("udf") unconditionally and rely on the
+        # ordinary executors to cope. They cannot: the reactor accepts
+        # only "python" and "splice", so with no helper built (and the
+        # cleanroom flag off, which is the default) the promise of a
+        # fallback ended in
+        #     NotImplementedError: v0 supports mode='python' only
+        # A fallback that raises is not a fallback.
+        #
+        # The trade is isolation, not correctness: resolved here, the UDF
+        # runs in the parent's interpreter instead of an isolated one.
+        # Same "slower and correct beats fast and empty" doctrine the
+        # cleanroom fallback already uses.
+        # force_inprocess_udf is set when the launcher has positively
+        # declined the helper for THIS call. Without it the check below
+        # would consult helper_path() -- which still returns the file,
+        # because the file is present and only the launcher knows it is
+        # unusable -- and hand back an _UDFPayload for the ordinary
+        # Python worker, which cannot execute it as a plain callable.
+        if not force_inprocess_udf and _udf_helper_path() is not None:
+            # Like mode="plugin", the spec is NOT resolved when the
+            # cleanroom will serve it: importing the user's module in
+            # this process would put their state into the parent that
+            # forks every worker.
+            return _make_udf_payload(payload), "udf"
+        return _udf_as_inprocess(resolve_payload_parent(payload)), "python"
     if mode == "spawn":
         if callable(payload):
             raise ValueError(
@@ -2410,9 +4738,9 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
               strict_poison=strict_poison, signal_policy=signal_policy)
     if resume is not None or checkpoint_file is not None:
         raise RuntimeError(
-            "run(): resume=/checkpoint_file= require a C-orderer-backed "
-            "path (map()/stream() with orchestrator=True, "
-            "order='index'); run() has no C orderer")
+                "run(): resume=/checkpoint_file= require a C-orderer-backed "
+                "path (map()/stream() with orchestrator=True, "
+                "order='index'); run() has no C orderer")
     orchestrator = _validate_orchestrator(orchestrator)
     if orchestrator is None:
         # W-REL1/R1 (ratified Option A): recovery is the default.
@@ -2421,8 +4749,8 @@ def run(payload: Any, source: Any, *, mode: Mode = "python",
     c_drain = _validate_c_drain(c_drain)
     if _validate_c_worker_loop(c_worker_loop):
         raise RuntimeError(
-            "run(): c_worker_loop=True needs collection (the C loop "
-            "always frames output records); use map()/stream()")
+                "run(): c_worker_loop=True needs collection (the C loop "
+                "always frames output records); use map()/stream()")
     if mode not in ("python", "spawn", "plugin", "splice"):
         raise NotImplementedError(
             "unknown mode %r" % (mode,))
@@ -2638,9 +4966,65 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         collect=True, c_drain=c_drain, views=output)
 
     if num_nodes > 1:
+        # W-EXP-2 step C: the launcher can serve the multi-node PLUGIN
+        # envelope. It is OPT-IN (FORKRUN_CLEANROOM_NUMA=1) because
+        # Decision 3 (multi-node default-on) is gated on real multi-socket
+        # evidence, which this host cannot produce.
+        #
+        # The attempt happens BEFORE the in-process NUMA executor, and a
+        # decline falls through to it unchanged -- so an opted-in run
+        # that the launcher refuses (missing symbol, wrong mode) still
+        # produces correct results, just slower.
+        if _cleanroom_multinode_route_enabled(mode):
+            _ok, _why = _cleanroom_eligible(
+                source, mode, num_nodes, kwargs.get("order", "none"),
+                kwargs.get("strict_poison", False), orchestrator,
+                bool(return_stats),
+                resume=kwargs.get("resume"),
+                checkpoint_file=kwargs.get("checkpoint_file"))
+            if _ok and mode == "plugin":
+                _p, _sep, _f = payload.rpartition(":")
+                if _p and _f:
+                    with _signal_guard(
+                            kwargs.get("signal_policy",
+                                       "default")) as _sg:
+                        with _RUN_LOCK:
+                            out, _ip_p, _ip_m = _cleanroom_attempt(
+                                lambda: _execute_cleanroom(
+                                    source,
+                                    lines=kwargs.get("lines"),
+                                    bytes_=kwargs.get("bytes"),
+                                    workers=base["workers"],
+                                    plugin_path=_p, plugin_func=_f,
+                                    on_error=kwargs.get("on_error",
+                                                        "retry"),
+                                    views=base["views"],
+                                    strict_poison=bool(
+                                        kwargs.get("strict_poison",
+                                                   False)),
+                                    order=kwargs.get("order", "none"),
+                                    orchestrator=orchestrator,
+                                    num_nodes=num_nodes,
+                                    numa_map=numa_map_str),
+                                payload, mode)
+                        _sg.check()
+                    if _ip_m is not None:
+                        payload, mode = _ip_p, _ip_m
+                    if out is not None:
+                        return _map_return(out, return_stats)
+            else:
+                import warnings as _warnings
+                _warnings.warn(
+                    "forkrun: requested cleanroom ignored for this call "
+                    "(%s) — using the in-process NUMA path." % (_why,),
+                    UserWarning, stacklevel=3)
         _warn_cleanroom_multinode(num_nodes)
         _require_numa_symbol()
-        payload, mode = _coerce_payload(payload, mode)
+        # The in-process executors run the UDF; the map-udf route does
+        # not (NUMA is not a launcher-served envelope), so a mode="udf"
+        # payload is resolved HERE rather than handed to workers that
+        # cannot execute it.
+        payload, mode = _coerce_payload_inprocess(payload, mode)
         order = kwargs.get("order", "none")
         if mode == "splice":
             _require_splice_symbol()
@@ -2670,11 +5054,31 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     raw_mode = mode
     raw_payload = payload
     order = kwargs.get("order", "none")
-    if _cleanroom_enabled() and raw_mode == "plugin":
+    # Initialised BEFORE any branch that may report a reason. The
+    # decline warning below interpolates it, and the condition that
+    # selects it (_cleanroom_enabled() and a launcher-served mode) can be
+    # False while the warning branch is still reached -- e.g. spawn with
+    # FORKRUN_CLEANROOM=1 -- which raised UnboundLocalError instead of
+    # declining cleanly.
+    _why = "mode=%r is not a launcher-served envelope" % (raw_mode,)
+    if raw_mode == "udf":
+        _warn_if_cached_incompatible()
+    # WO-CR-ROI-2 Phase C: the route gate narrows which envelopes the
+    # environment enables. It is consulted with the RAW mode and the
+    # entry point, before _coerce_payload rewrites plugin->python, so the
+    # identifier reflects what the caller asked for.
+    if (_cleanroom_enabled()
+            and _cleanroom_route_enabled("map", raw_mode)):
         _ok, _why = _cleanroom_eligible(
             source, raw_mode, num_nodes, order,
             kwargs.get("strict_poison", False), orchestrator,
-            bool(return_stats))
+            bool(return_stats),
+            # CR-FIX1-K: these were not passed here, so the envelope could
+            # not see them and a resume request was silently dropped.
+            # The predicate is the single authority for the refusal; the
+            # call sites only supply the facts.
+            resume=kwargs.get("resume"),
+            checkpoint_file=kwargs.get("checkpoint_file"))
         if _ok:
             # rpartition on the last colon, exactly as _coerce_payload
             # parses the spec. Deliberately NOT _c_plugin_spec(): that
@@ -2694,23 +5098,106 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             # A plugin without forkrun_use_ctx is refused by the launcher
             # (see its dlopen probe); _cleanroom_eligible's docstring
             # covers why.
-            _p, _sep, _f = raw_payload.rpartition(":")
-            if _p and _f:
+            #
+            # A UDF needs its helper built for THIS minor; if it is not,
+            # fall through to the in-process path rather than refusing --
+            # slower and correct beats fast and missing.
+            # Only plugin and udf carry a "path:function" spec. A spawn
+            # payload is an ARGV LIST and has no rpartition, so parsing
+            # it unconditionally raised AttributeError before the spawn
+            # branch below could run.
+            if raw_mode == "spawn":
+                _p, _sep, _f = "", "", ""
+            else:
+                _p, _sep, _f = raw_payload.rpartition(":")
+            _udf_args = {}
+            if raw_mode == "udf" and _p and _f:
+                # Helper missing for this minor -> fall through to the
+                # in-process path. Slower and correct beats fast and
+                # missing, and an absent build artifact is not a reason
+                # to fail the caller's program.
+                _helper = _udf_helper_path()
+                if _helper:
+                    _udf_args = {
+                        "udf_helper": _helper,
+                        "udf_module": _p,
+                        "udf_attr": _f,
+                        "udf_roots": _udf_roots_spec(_p),
+                    }
+            if raw_mode == "spawn":
+                # Stage 3: spawn carries an ARGV VECTOR, not a
+                # path:function plugin spec. It cannot share the branch
+                # below, which rpartitions a string and passes two
+                # strings to the launcher. The argv is extracted from the
+                # coerced payload's tagged wrapper and validated BEFORE
+                # the launcher starts and before the source is read, so a
+                # malformed command costs no input.
+                from ._worker import _c_spawn_spec as _spawn_argv_of
+                _coerced, _coerced_mode = _coerce_payload(
+                    raw_payload, "spawn")
+                # _coerce_payload returns (payload_fn, engine_mode) and
+                # _c_spawn_spec reads the argv off the FUNCTION's tag.
+                # Passing the TUPLE made getattr() return None, so _sargv
+                # was falsy, the whole launcher branch below was dead
+                # code, and every public map(mode="spawn") call quietly
+                # fell through to the in-process executor -- while
+                # test_map_spawn_routes_through_the_launcher passed,
+                # because it could only check that the OUTPUT was right.
+                _sargv = _spawn_argv_of(_coerced)
+                if _sargv:
+                    _sargv = _validate_spawn_argv(_sargv)
+                    with _signal_guard(
+                            kwargs.get("signal_policy",
+                                       "default")) as _sg:
+                        with _RUN_LOCK:
+                            out, _ip_p, _ip_m = _cleanroom_attempt(
+                                lambda: _execute_cleanroom(
+                                    source,
+                                    lines=kwargs.get("lines"),
+                                    bytes_=kwargs.get("bytes"),
+                                    workers=base["workers"],
+                                    plugin_path=None, plugin_func=None,
+                                    on_error=kwargs.get("on_error", "retry"),
+                                    views=base["views"],
+                                    strict_poison=bool(
+                                        kwargs.get("strict_poison", False)),
+                                    order=order,
+                                    orchestrator=orchestrator,
+                                    spawn_argv=_sargv,
+                                    **_udf_args),
+                                payload, mode,
+                                helper_fp=_helper_fingerprint(
+                                    _udf_args.get("udf_helper")))
+                    _sg.check()
+                    if _ip_m is not None:
+                        payload, mode = _ip_p, _ip_m
+                    if out is not None:
+                        return _map_return(out, return_stats)
+            if raw_mode != "spawn" and _p and _f and (
+                    raw_mode != "udf" or _udf_args):
                 with _signal_guard(
                         kwargs.get("signal_policy", "default")) as _sg:
                     with _RUN_LOCK:
-                        out = _execute_cleanroom(
-                            source,
-                            lines=kwargs.get("lines"),
-                            bytes_=kwargs.get("bytes"),
-                            workers=base["workers"],
-                            plugin_path=_p, plugin_func=_f,
-                            on_error=kwargs.get("on_error", "retry"),
-                            views=base["views"],
-                            strict_poison=bool(
-                                kwargs.get("strict_poison", False)),
-                            order=order)
+                        out, _ip_p, _ip_m = _cleanroom_attempt(
+                            lambda: _execute_cleanroom(
+                                source,
+                                lines=kwargs.get("lines"),
+                                bytes_=kwargs.get("bytes"),
+                                workers=base["workers"],
+                                plugin_path=_p, plugin_func=_f,
+                                on_error=kwargs.get("on_error", "retry"),
+                                views=base["views"],
+                                strict_poison=bool(
+                                    kwargs.get("strict_poison", False)),
+                                order=order,
+                                orchestrator=orchestrator,
+                                **_udf_args),
+                            payload, mode,
+                            helper_fp=_helper_fingerprint(
+                                _udf_args.get("udf_helper")))
                     _sg.check()
+                if _ip_m is not None:
+                    payload, mode = _ip_p, _ip_m
                 if out is not None:
                     return _map_return(out, return_stats)
         elif _cleanroom_explicit():
@@ -2720,13 +5207,17 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             # to hear that the envelope could not be honoured.
             import warnings as _warnings
             _warnings.warn(
-                "forkrun: FORKRUN_CLEANROOM=1 ignored for this call "
+                "forkrun: requested cleanroom ignored for this call "
                 "(%s) — using the in-process path. The launcher covers "
                 "materialized file + C plugin + UMA + "
                 "order in ('none', 'index')." % (_why,),
                 UserWarning, stacklevel=3)
 
-    payload, mode = _coerce_payload(payload, mode)
+    # Reaching here means the map-udf route did NOT serve this call:
+    # either it was not eligible, or the launcher declined the helper
+    # (in which case the payload is already coerced). Either way the
+    # in-process path owns the UDF now.
+    payload, mode = _coerce_payload_inprocess(payload, mode)
 
     base["order"] = order
     base["mode"] = mode
@@ -2770,14 +5261,14 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     if _detect_streaming(source, kwargs.get("streaming")):
         if c_worker_loop:
             raise RuntimeError(
-                "c_worker_loop=True is materialized-only in W-PY26 "
-                "(streaming ingest is future work) — use "
-                "c_worker_loop=False")
+                    "c_worker_loop=True is materialized-only in W-PY26 "
+                    "(streaming ingest is future work) — use "
+                    "c_worker_loop=False")
         if c_spawn_loop:
             raise RuntimeError(
-                "c_spawn_loop=True is materialized-only in W-PY33 "
-                "(streaming ingest is future work) — use "
-                "c_spawn_loop=False")
+                    "c_spawn_loop=True is materialized-only in W-PY33 "
+                    "(streaming ingest is future work) — use "
+                    "c_spawn_loop=False")
         if orchestrator:
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
                 with _RUN_LOCK:
@@ -2806,19 +5297,23 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
         plugin_spec = _c_plugin_spec(payload)
         if plugin_spec is None:
             raise RuntimeError(
-                "c_worker_loop=True needs a dialect-1/2 frozen-ABI "
-                "plugin (forkrun_use_ctx opting into 1 or 2) — this "
-                "payload negotiates no ctx; use c_worker_loop=False")
-    spawn_argv = None
+                    "c_worker_loop=True needs a dialect-1/2 frozen-ABI "
+                    "plugin (forkrun_use_ctx opting into 1 or 2) — this "
+                    "payload negotiates no ctx; use c_worker_loop=False")
+    # NOTE: named c_spawn_argv, not spawn_argv. A bare spawn_argv here
+    # shadowed _execute_cleanroom's parameter of the same name for the
+    # whole module scope of that call, so every cleanroom invocation
+    # raised UnboundLocalError before reaching the launcher.
+    c_spawn_argv = None
     if c_spawn_loop:
         # Coerced spawn payloads carry the argv list on the wrapper
         # (make_spawn_payload tags _forkrun_spawn_argv); the C loop
         # replays exactly this argv per batch (no shell).
-        spawn_argv = _c_spawn_spec(payload)
-        if spawn_argv is None:
+        c_spawn_argv = _c_spawn_spec(payload)
+        if c_spawn_argv is None:
             raise RuntimeError(
-                "c_spawn_loop=True needs a spawn argv payload "
-                "(mode='spawn') — use c_spawn_loop=False")
+                    "c_spawn_loop=True needs a spawn argv payload "
+                    "(mode='spawn') — use c_spawn_loop=False")
 
     # W-CR1: cleanroom (exec-based) launcher. Placed after every other
     # gate, so it only sees calls already known to be materialized, UMA
@@ -2839,7 +5334,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     c_worker_loop=c_worker_loop,
                     plugin_spec=plugin_spec,
                     c_spawn_loop=c_spawn_loop,
-                    spawn_argv=spawn_argv,
+                    spawn_argv=c_spawn_argv,
                     **base)
             _sg.check()
             return _map_return(out, return_stats)
@@ -2851,7 +5346,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
             c_worker_loop=c_worker_loop,
             plugin_spec=plugin_spec,
             c_spawn_loop=c_spawn_loop,
-            spawn_argv=spawn_argv,
+            spawn_argv=c_spawn_argv,
             **base)
         _sg.check()
     return _map_return(results, return_stats)
@@ -2937,12 +5432,12 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
     output = _resolve_output(kwargs.get("output"))
     if _validate_c_worker_loop(kwargs.get("c_worker_loop")):
         raise RuntimeError(
-            "stream(): c_worker_loop=True is map()-only in W-PY26 "
-            "(streaming executors are future work)")
+                "stream(): c_worker_loop=True is map()-only in W-PY26 "
+                "(streaming executors are future work)")
     if _validate_c_spawn_loop(kwargs.get("c_spawn_loop")):
         raise RuntimeError(
-            "stream(): c_spawn_loop=True is map()-only in W-PY33 "
-            "(streaming executors are future work)")
+                "stream(): c_spawn_loop=True is map()-only in W-PY33 "
+                "(streaming executors are future work)")
     kwargs = dict(kwargs, c_drain=c_drain)
     numa_map_str, num_nodes, node_cpus = _resolve_numa(
         kwargs.get("nodes", "auto"))
@@ -2957,8 +5452,10 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
     if num_nodes > 1:
         _warn_cleanroom_multinode(num_nodes)
         _require_numa_symbol()
-        payload, engine_mode = _coerce_payload(payload, kwargs.get(
-            "mode", "python"))
+        # NUMA is not a launcher-served envelope, so the map-udf route
+        # never serves this call: the UDF runs in-process.
+        payload, engine_mode = _coerce_payload_inprocess(
+            payload, kwargs.get("mode", "python"))
         if engine_mode == "splice":
             _require_splice_symbol()
         return _guarded_gen(
@@ -2981,39 +5478,16 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
     if engine_mode == "splice":
         _require_splice_symbol()
         b = kwargs.get("bytes") or _SPLICE_DEFAULT_BYTES
+        # ONE dispatch for the (ingest|materialized) x (reactor|plain)
+        # matrix: the four helpers differed only in which executor they
+        # ran, and the four call sites repeated the same twelve
+        # arguments four times over.
         if _detect_streaming(source, kwargs.get("streaming")):
-            if orchestrator:
-                return _guarded_gen(
-                    _signal_guard(kwargs.get("signal_policy", "default")),
-                    _splice_ingest_stream_reactor_gen(
-                    source, bytes_=b,
-                    workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                    on_error=kwargs.get("on_error", "retry"),
-                    strict_poison=kwargs.get("strict_poison", False),
-                    nodes=kwargs.get("nodes", "auto"),
-                    order=kwargs.get("order", "none"),
-                    c_drain=kwargs.get("c_drain", True)))
-            return _guarded_gen(
-                _signal_guard(kwargs.get("signal_policy", "default")),
-                _splice_ingest_stream_gen(
-                source, bytes_=b,
-                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                on_error=kwargs.get("on_error", "retry"),
-                strict_poison=kwargs.get("strict_poison", False),
-                nodes=kwargs.get("nodes", "auto"),
-                order=kwargs.get("order", "none"),
-                c_drain=kwargs.get("c_drain", True)))
-        if orchestrator:
-            return _guarded_gen(
-                _signal_guard(kwargs.get("signal_policy", "default")),
-                _splice_stream_reactor_gen(
-                source, bytes_=b,
-                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
-                on_error=kwargs.get("on_error", "retry"),
-                strict_poison=kwargs.get("strict_poison", False),
-                nodes=kwargs.get("nodes", "auto"),
-                order=kwargs.get("order", "none"),
-                c_drain=kwargs.get("c_drain", True)))
+            executor = (_execute_ingest_stream_reactor if orchestrator
+                        else _execute_ingest_stream)
+        else:
+            executor = (_execute_streaming_reactor if orchestrator
+                        else _execute_streaming)
         return _guarded_gen(
             _signal_guard(kwargs.get("signal_policy", "default")),
             _splice_stream_gen(
@@ -3023,7 +5497,20 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
             strict_poison=kwargs.get("strict_poison", False),
             nodes=kwargs.get("nodes", "auto"),
             order=kwargs.get("order", "none"),
-            c_drain=kwargs.get("c_drain", True)))
+            c_drain=kwargs.get("c_drain", True),
+            executor=executor))
+    # The cleanroom has had its chance. If it did not serve this call,
+    # the in-process executors own the UDF -- and the spec is resolved
+    # NOW, in the parent, because resolving it imports the user's module
+    # here (the parent that forks every worker). Above, the coercion
+    # deliberately did NOT resolve it: the launcher imports the module in
+    # the ISOLATED helper, and resolving it in the parent would defeat
+    # that. Both the materialized and the streaming branch need this, so
+    # it sits before the split.
+    if engine_mode == "udf":
+        payload, engine_mode = _coerce_payload_inprocess(
+            raw_payload, raw_mode)
+        kwargs = dict(kwargs, mode=engine_mode)
     if _detect_streaming(source, kwargs.get("streaming")):
         # W-CR3: cleanroom streaming, gated by the SAME predicate map()
         # uses. This used to be a second hand-written condition here, and
@@ -3035,7 +5522,12 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
         # an unserved call is the overwhelmingly common case and
         # warning on each would be noise. An explicit request that cannot
         # be honoured still warns, as it does for map().
-        if _cleanroom_enabled() and raw_mode == "plugin":
+        if raw_mode == "udf":
+            _warn_if_cached_incompatible()
+        # WO-CR-ROI-2 Phase C: same route gate as map(), keyed on the
+        # STREAM routes. stream(spawn) has no dispatch regardless.
+        if (_cleanroom_enabled()
+                and _cleanroom_route_enabled("stream", raw_mode)):
             _ok, _why = _cleanroom_eligible(
                 source, raw_mode, num_nodes,
                 kwargs.get("order", "none"),
@@ -3047,38 +5539,49 @@ def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[Any]:
                 _p, _sep, _f = (
                     raw_payload.rpartition(":")
                     if isinstance(raw_payload, str) else ("", "", ""))
-                if _p and _f:
-                    return _guarded_gen(
-                        _signal_guard(
-                            kwargs.get("signal_policy", "default")),
-                        _execute_cleanroom_stream(
-                            source,
-                            lines=kwargs.get("lines"),
-                            bytes_=kwargs.get("bytes"),
-                            workers=_resolve_workers_numa(
-                                kwargs.get("workers"), num_nodes),
-                            plugin_path=_p, plugin_func=_f,
-                            on_error=kwargs.get("on_error", "retry")))
+                # Same UDF wiring as map(): helper for this minor, or
+                # fall through to the in-process path.
+                _udf_args = {}
+                if raw_mode == "udf" and _p and _f:
+                    _helper = _udf_helper_path()
+                    if _helper:
+                        _udf_args = {
+                            "udf_helper": _helper,
+                            "udf_module": _p,
+                            "udf_attr": _f,
+                            "udf_roots": _udf_roots_spec(_p),
+                        }
+                if _p and _f and (raw_mode != "udf" or _udf_args):
+                    return _stream_with_preingest_fallback(
+                        raw_payload, raw_mode, source, kwargs,
+                        num_nodes, orchestrator, _p, _f, _udf_args,
+                        helper_fp=_helper_fingerprint(
+                            _udf_args.get("udf_helper")))
             elif _cleanroom_explicit() and _why:
                 import warnings as _warnings
                 _warnings.warn(
-                    "forkrun: FORKRUN_CLEANROOM=1 ignored for this "
+                    "forkrun: requested cleanroom ignored for this "
                     "stream() call (%s) \u2014 using the in-process path."
                     % (_why,), UserWarning, stacklevel=3)
         if orchestrator:
-            return _guarded_gen(
-                _signal_guard(kwargs.get("signal_policy", "default")),
-                _ingest_stream_reactor_gen(payload, source, **kwargs))
-        return _guarded_gen(
-            _signal_guard(kwargs.get("signal_policy", "default")),
-            _ingest_stream_gen(payload, source, **kwargs))
-    if orchestrator:
-        return _guarded_gen(
-            _signal_guard(kwargs.get("signal_policy", "default")),
-            _stream_reactor_gen(payload, source, **kwargs))
+            gen_fn = _stream_reactor_gen
+            executor = _execute_ingest_stream_reactor
+        else:
+            gen_fn = _stream_gen
+            executor = _execute_ingest_stream
+    else:
+        if orchestrator:
+            gen_fn = _stream_reactor_gen
+            executor = _execute_streaming_reactor
+        else:
+            gen_fn = _stream_gen
+            executor = _execute_streaming
+    # ONE return for the four combinations: the four helpers differed
+    # only in which executor they ran, and the four call sites
+    # repeated the same arguments four times over.
     return _guarded_gen(
         _signal_guard(kwargs.get("signal_policy", "default")),
-        _stream_gen(payload, source, **kwargs))
+        gen_fn(payload, source, executor, **kwargs))
 
 
 def _guarded_gen(guard, gen):
@@ -3096,10 +5599,15 @@ def _guarded_gen(guard, gen):
     this choke point, so all five stream executors (and the
     reactor executors they drive) serialize against concurrent
     run/map/stream in other threads — engine globals are
-    process-global. Same-thread nesting re-enters via RLock;
-    abandonment (close()/GeneratorExit) releases through the
-    with-finally together with the signal guard, riding the
-    existing W-PY6 cleanup.
+    process-global.
+
+    WO-ROI-1-R1 CORRECTED THIS. The line here used to read "Same-thread
+    nesting re-enters via RLock" -- true of a bare RLock, and the reason
+    the guard was needed. _RunLock now REFUSES same-thread re-entry
+    before acquiring, so nesting no longer re-enters anything; a nested
+    run inside a live stream raises RuntimeError. Abandonment
+    (close()/GeneratorExit) still releases through the with-finally
+    together with the signal guard, riding the existing W-PY6 cleanup.
     """
     with _RUN_LOCK:
         with guard as _sg:
@@ -3107,11 +5615,26 @@ def _guarded_gen(guard, gen):
             _sg.check()
 
 
-def _stream_gen(payload, source, **kwargs):
-    # v1 true streaming: yields blobs in worker-completion order WHILE
-    # workers run (not after collection). map() stays on the v0.5
-    # post-completion path; run() (discard/worker-sink) needs no drain.
-    yield from _execute_streaming(
+def _stream_gen(payload, source, executor, **kwargs):
+    """stream() -- ONE implementation for the plain (non-reactor) path.
+
+    THE SINGLE SOURCE OF TRUTH for the plain stream. There were two
+    helpers, one per ingest shape -- _execute_streaming (materialized
+    ingest) and _execute_ingest_stream (streaming ingest) -- and their
+    bodies were IDENTICAL apart from which executor they ran.
+
+    The OTHER frontend solves the same problem the same way: it builds
+    its worker from ONE template, with the per-flag differences
+    injected as small fragments, and assembles the result once. This
+    module cannot eval a template, and should not; one body with the
+    configuration injected is the equivalent shape, and `executor` is
+    that configuration.
+
+    v1 true streaming: yields blobs in worker-completion order WHILE
+    workers run (not after collection). map() stays on the v0.5
+    post-completion path; run() (discard/worker-sink) needs no drain.
+    """
+    yield from executor(
         payload, source,
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
         workers=_resolve_workers_numa(kwargs.get("workers")),
@@ -3122,34 +5645,26 @@ def _stream_gen(payload, source, **kwargs):
         c_drain=kwargs.get("c_drain", True))
 
 
-def _splice_stream_gen(source, *, bytes_, workers, on_error, nodes,
-                       order, c_drain=True, strict_poison=False):
-    # W-PY18 stream() over the C passthrough loop (materialized
-    # ingest, live results): yields raw byte-windows as they arrive.
-    yield from _execute_streaming(
-        None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, strict_poison=strict_poison,
-        mode="splice", nodes=nodes, order=order,
-        splice=True, c_drain=c_drain)
+def _stream_reactor_gen(payload, source, executor, **kwargs):
+    """stream() -- ONE implementation for the reactor path.
 
+    THE SINGLE SOURCE OF TRUTH for the reactor stream. There were two
+    helpers, one per ingest shape -- _execute_streaming_reactor
+    (materialized ingest) and _execute_ingest_stream_reactor (streaming
+    ingest) -- and their bodies were IDENTICAL apart from which
+    executor they ran AND apart from one line: the materialized one
+    passed `splice=` explicitly and the ingest one relied on the
+    default. The two are equivalent here (this path is only reached
+    when mode is not "splice", so both are False), but two copies of
+    one rule is exactly how they drift. One now.
 
-def _splice_ingest_stream_gen(source, *, bytes_, workers, on_error,
-                              nodes, order, c_drain=True,
-                              strict_poison=False):
-    # W-PY18 stream() over passthrough + streaming ingest (unbounded
-    # in, live out — the bash -s shape): spill and drain interleave.
-    yield from _execute_ingest_stream(
-        None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, strict_poison=strict_poison,
-        mode="splice", nodes=nodes, order=order,
-        splice=True, c_drain=c_drain)
-
-
-def _stream_reactor_gen(payload, source, **kwargs):
-    # W-PY19 stream() under reactor supervision (materialized input,
-    # live drain): identical ordering contract to _stream_gen, plus
-    # death pipes, bounded respawn, and trap-ACK confirmation.
-    yield from _execute_streaming_reactor(
+    W-PY19 stream() under reactor supervision (materialized input,
+    live drain): identical ordering contract to _stream_gen, plus
+    death pipes, bounded respawn, and trap-ACK confirmation. For a
+    streaming source the live drain interleaves with the spill (pump
+    hook), the scanner death pipe, and spawn-pipe dynamic scaling.
+    """
+    yield from executor(
         payload, source,
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
         workers=_resolve_workers_numa(kwargs.get("workers")),
@@ -3163,53 +5678,135 @@ def _stream_reactor_gen(payload, source, **kwargs):
         checkpoint_file=kwargs.get("checkpoint_file"))
 
 
-def _splice_stream_reactor_gen(source, *, bytes_, workers, on_error,
-                               nodes, order, c_drain=True,
-                               strict_poison=False):
-    # W-PY19 stream() over splice + reactor (materialized ingest,
-    # live results, respawn on death). Python reassembly only (the C
-    # orderer needs OrderPackets the splice loop never sends).
-    yield from _execute_streaming_reactor(
+def _splice_stream_gen(source, *, bytes_, workers, on_error, nodes,
+                       order, c_drain=True, strict_poison=False,
+                       executor=None):
+    """stream() over the C passthrough loop -- ONE implementation.
+
+    THE SINGLE SOURCE OF TRUTH for the splice stream. There were four
+    helpers, one per (materialized|streaming ingest) x (plain|reactor)
+    combination; their bodies were IDENTICAL apart from which executor
+    they ran, and their four call sites repeated the same twelve
+    arguments four times over.
+
+    The OTHER frontend solves the same problem the same way: it builds
+    its worker from ONE template, with the per-flag differences
+    injected as small fragments, and assembles the result once -- so
+    the worker loop body exists once. This module cannot eval a
+    template, and should not; one body with the configuration injected
+    is the equivalent shape, and `executor` is that configuration.
+
+    The four combinations, and what each one is:
+
+    - _execute_streaming -- W-PY18 stream() over the C passthrough loop
+      (materialized ingest, live results): yields raw byte-windows as
+      they arrive.
+    - _execute_ingest_stream -- W-PY18 stream() over passthrough +
+      streaming ingest (unbounded in, live out -- the bash -s shape):
+      spill and drain interleave.
+    - _execute_streaming_reactor -- W-PY19 stream() over splice +
+      reactor (materialized ingest, live results, respawn on death).
+      Python reassembly only (the C orderer needs OrderPackets the splice
+      loop never sends).
+    - _execute_ingest_stream_reactor -- W-PY19 stream() over splice +
+      streaming ingest + reactor.
+
+    mode="splice" carries NO Python payload: the payload is None and
+    the C passthrough loop does the work.
+    """
+    yield from executor(
         None, source, lines=None, bytes_=bytes_, workers=workers,
         on_error=on_error, strict_poison=strict_poison,
         mode="splice", nodes=nodes, order=order,
         splice=True, c_drain=c_drain)
 
 
-def _ingest_stream_reactor_gen(payload, source, **kwargs):
-    # W-PY19 stream() over a streaming source under the reactor:
-    # live drain interleaved with the spill (pump hook), scanner
-    # death pipe, spawn-pipe dynamic scaling.
-    yield from _execute_ingest_stream_reactor(
-        payload, source,
-        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers_numa(kwargs.get("workers")),
-        on_error=kwargs.get("on_error", "retry"),
-        strict_poison=kwargs.get("strict_poison", False),
-        mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
-        order=kwargs.get("order", "none"),
-        c_drain=kwargs.get("c_drain", True),
-        resume=kwargs.get("resume"),
-        checkpoint_file=kwargs.get("checkpoint_file"))
+# The fork-timing rule answers with one of three actions, not a
+# boolean: the workers may ALREADY exist, in which case the rule
+# reports that and the caller must NOT fork again. Collapsing that
+# case into "should fork" re-forks an existing set -- the first
+# version of this fold did exactly that, and the streaming ingest
+# cells lost records because the workers were forked twice.
+_FORK_HAVE = 0     # the workers already exist; do NOT fork again
+_FORK_NOW = 1      # fork now
+_FORK_WAIT = 2     # not yet
 
 
-def _splice_ingest_stream_reactor_gen(source, *, bytes_, workers,
-                                      on_error, nodes, order,
-                                      c_drain=True, strict_poison=False):
-    # W-PY19 stream() over splice + streaming ingest + reactor.
-    yield from _execute_ingest_stream_reactor(
-        None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, strict_poison=strict_poison,
-        mode="splice", nodes=nodes, order=order,
-        splice=True, c_drain=c_drain)
+def _fork_timing(workers_present, gate_issued, t_start, lib):
+    """The fork-timing rule -- ONE implementation.
+
+    Returns (action, stalled): action is _FORK_HAVE / _FORK_NOW /
+    _FORK_WAIT, and `stalled` is True only when the fork is because
+    the stall timeout elapsed -- the only case that sets the stall
+    flag.
+
+    The rule: if the workers ALREADY EXIST, do not fork again; else
+    fork when DATA has published, or when the stall timeout has
+    elapsed and the gate has NOT been issued (slow-source
+    pipelining). Post-gate waits for publish (CASE A).
+
+    FOUR copies of this rule existed, over two state shapes (a dict and
+    plain locals) and two fork function names, with the explanatory
+    comment present in two and absent in the other two. The rule was
+    the same in all four; only the plumbing around it differed.
+    """
+    if workers_present:
+        return _FORK_HAVE, False
+    try:
+        ready = lib.fr_py_data_ready()
+    except Exception:
+        ready = 0
+    if ready > 0:
+        return _FORK_NOW, False
+    if not gate_issued and (
+            _time.monotonic() - t_start) >= STALL_FORK_AFTER:
+        return _FORK_NOW, True
+    return _FORK_WAIT, False
 
 
-def _drain_worker_memfd(fd, state) -> list:
+def _scanner_watch(scan_pid, scan_rc, lib):
+    """Poll the forked materialized scanner once.
+
+    Returns (scan_pid, scan_rc, failed): the updated state, and the
+    wait status when the scanner exited non-zero (None otherwise).
+
+    ONE implementation. The two copies of this rule had already
+    DRIFTED -- one set scan_pid=None after scan_rc, the other hoisted
+    it above the success check. They are equivalent today (nothing
+    reads the other between the two assignments), but that is exactly
+    how two copies of one rule stop agreeing.
+    """
+    if scan_pid is None or scan_rc is not None:
+        return scan_pid, scan_rc, None
+    try:
+        wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        return scan_pid, scan_rc, None
+    if wpid != scan_pid:
+        return scan_pid, scan_rc, None
+    if os.WIFEXITED(scan_st) and os.WEXITSTATUS(scan_st) == 0:
+        return None, 0, None
+    return None, scan_st, scan_st
+
+
+def _drain_worker_memfd(fd, state, terminal=False) -> list:
     """Incrementally pread new bytes from one worker memfd.
 
     state is [read_offset, tail]; pread (never read/lseek -- the fd's open
     description is SHARED with the writing child). Returns complete
     [(batch_idx, payload)] records; the incomplete tail stays buffered.
+
+    terminal=True parses with _split_records_terminal instead, so
+    control records survive and the result is
+    [(batch_idx, disposition, payload)]. That is what lets a SKIPPED /
+    POISONED / NO_RESULT batch advance an ordered consumer's prefix
+    instead of masquerading as a hole until final_drain(); the
+    DATA-only default stays for callers that must not see control
+    records at all.
+
+    ONE implementation: the data-only and terminal-aware helpers were
+    byte-identical apart from the one splitting call, and
+    _drain_worker_memfd_terminal is now a one-line sibling of this.
 
     W-PYKEEPFSTAT: the fstat-then-pread-the-delta form was measured
     against two cheaper-looking alternatives and WON both, so it stays:
@@ -3243,9 +5840,30 @@ def _drain_worker_memfd(fd, state) -> list:
     if not chunk:
         return []
     state[0] += len(chunk)
-    records, tail = _split_records(state[1] + chunk)
+    # terminal=True parses with _split_records_terminal so control
+    # records survive, returning [(batch_idx, disposition, payload)];
+    # the default parses with _split_records and returns
+    # [(batch_idx, payload)]. ONE implementation, because the two were
+    # byte-identical apart from this one call.
+    split = _split_records_terminal if terminal else _split_records
+    records, tail = split(state[1] + chunk)
     state[1] = tail
     return records
+
+
+def _drain_worker_memfd_terminal(fd, state) -> list:
+    """Terminal-aware sibling of _drain_worker_memfd.
+
+    Same cursor and tail discipline, but parses with
+    _split_records_terminal so control records survive, returning
+    [(batch_idx, disposition, payload)].
+
+    This is what lets a SKIPPED / POISONED / NO_RESULT batch advance an
+    ordered consumer's prefix instead of masquerading as a hole until
+    final_drain(). The DATA-only helper stays for callers that must not
+    see control records at all.
+    """
+    return _drain_worker_memfd(fd, state, terminal=True)
 
 
 def _drain_records(lib, signal_r, out_fds, pids, statuses,
@@ -3309,12 +5927,16 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
             if 0 <= wid:
                 while len(per_worker) <= wid:
                     per_worker.append([0, b""])
-                for _bidx, blob in _drain_worker_memfd(
+                for _bidx, _disp, _blob in _drain_worker_memfd_terminal(
                         out_fds[wid], per_worker[wid]):
                     if reassembly is None:
-                        yield blob
+                        # No ordering requested: only DATA is a result.
+                        # Control records are intentionally dropped, as
+                        # they always were for this shape.
+                        if _disp == _DISP_DATA:
+                            yield _blob
                     else:
-                        reassembly.add(_bidx, blob)
+                        reassembly.add_disposition(_bidx, _disp, _blob)
                         for _, ordered in reassembly.drain():
                             yield ordered
         if _sp:
@@ -3350,12 +5972,13 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
     # this should find nothing — but a short final write must never be
     # silently lost.
     for wid in range(len(per_worker)):
-        for bidx, blob in _drain_worker_memfd(out_fds[wid],
-                                              per_worker[wid]):
+        for bidx, bdisp, bblob in _drain_worker_memfd_terminal(
+                out_fds[wid], per_worker[wid]):
             if reassembly is None:
-                yield blob
+                if bdisp == _DISP_DATA:
+                    yield bblob
             else:
-                reassembly.add(bidx, blob)
+                reassembly.add_disposition(bidx, bdisp, bblob)
                 for _, ordered in reassembly.drain():
                     yield ordered
     if reassembly is not None:
@@ -3363,9 +5986,67 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
             yield ordered
         if stats is not None:
             stats["reassembly_max"] = reassembly.max_size
+        # LABEL CORRECTED (round-9 review). This said "map()", but
+        # _drain_records() is called only from _execute_streaming() and
+        # _execute_ingest_stream() -- both generator/stream paths.
+        # map() never constructs a ReassemblyBuffer at all: it uses the C
+        # orderer (`use_orderer`), so there is no buffer here to refuse.
+        _raise_on_disposition_conflicts(reassembly, "stream()")
 
 
-def _make_results_pump(results_r, order="none", stats=None):
+def _raise_on_disposition_conflicts(reassembly, where):
+    """Refuse a result the reassembly buffer says is untrustworthy.
+
+    `ReassemblyBuffer.conflicts()` is documented as "a caller can refuse
+    the result". Until now no caller existed, so the policy was
+    record-and-ignore -- the conflicts were recorded faithfully and then
+    never read by anything in production.
+
+    This is that caller, and it is wired into EVERY path that
+    constructs a ReassemblyBuffer:
+
+        _drain_records                  (streaming, ingest-stream)
+        _make_results_pump             (C-drain: materialized stream,
+                                         ingest-stream, reactor-stream,
+                                         NUMA-stream)
+        _execute_streaming_reactor
+        _execute_ingest_stream_reactor
+        _execute_numa_stream
+
+    Streams raise at the point of detection rather than at EOF, because
+    a stream cannot retract records already yielded and because
+    delaying permits further output to escape after integrity has
+    already been invalidated. The message says plainly that
+    already-yielded data is not withdrawn.
+
+    ABOUT `map()` -- there is deliberately no hook here, and claiming
+    one would be wrong. map() never constructs a ReassemblyBuffer: its
+    order="index" path uses the C orderer (`use_orderer`), which merges
+    by (major, minor) and emits only records that exist. A skipped or
+    poisoned batch produces no record there at all, so the orderer
+    simply never sees it and no contradiction can arise.
+
+    An earlier version of this helper's comment claimed map() was the
+    collected-result consumer checked here. It was not -- the single
+    call site was inside _drain_records(), which is a STREAM path, and
+    it was mislabelled "map()". Corrected in round 9.
+    """
+    conflicts = reassembly.conflicts()
+    if not conflicts:
+        return
+    detail = "; ".join("batch %d: %s" % (idx, "; ".join(what))
+                       for idx, what in sorted(conflicts.items()))
+    raise ForkrunProtocolError(
+        "forkrun: %s produced contradictory terminal outcomes for %d "
+        "batch(es) -- the result is NOT trustworthy and is refused.\n"
+        "  %s\n"
+        "  A correct producer emits exactly ONE terminal outcome per batch.\n"
+        "  This is an engine-protocol defect, not a caller error."
+        % (where, len(conflicts), detail),
+        conflicts=conflicts)
+
+
+def _make_results_pump(results_r, order="none", stats=None, watch=None):
     """Build a C-drain results-pipe pump for streaming (W-PY21-A).
 
     The drain child moves framed records verbatim into the results
@@ -3375,48 +6056,178 @@ def _make_results_pump(results_r, order="none", stats=None):
     None when nothing is complete YET (not EOF — keep polling), or
     raises StopIteration when producers are gone AND the pipe hit
     EOF AND no buffered records remain (same EOF-anchored rule as
-    _drain_records; a truncated tail drops like _parse_records —
-    a worker that died mid-record, never user data).
+    _drain_records; a truncated tail is dropped, like _parse_records).
+
+    WO-PY-CDRAIN-REACTOR-WAKEUP-1: the pump now consumes EVERYTHING
+    already available in one call, instead of one 64 KiB chunk. The
+    read end is nonblocking (see _fork_drain), so the loop ends on
+    EAGAIN -- which means the pipe's own capacity bounds the read
+    ahead, and the supervisor is not left waiting on a pipe that
+    already has data in it.
+
+    ``watch`` is an optional ExtraWatch holder for the results fd. The
+    pump DISARMS it at EOF: a pipe at EOF is permanently readable, and
+    leaving it in the reactor's watch set would spin the reactor.
+
+    On what a truncated tail means, the wording corrected (round-8
+    review). It previously read "a worker that died mid-record, never
+    user data", which is too strong. `RESILIENCE_PROTOCOL.md` 2.2 states
+    that output rollback is guarded by `S_ISREG` and that PIPES downgrade
+    to at-least-once -- a pipe cannot be truncated, so partial output
+    from a killed batch genuinely can appear on one.
+
+    In this specific path the risk is limited: the results pipe carries
+    already-framed records out of the per-worker memfds, and memfds are
+    S_ISREG, so the rollback that protects a killed batch's partial
+    output happens at the memfd rather than here. The truncation source
+    is therefore the DRAIN process losing a partial write, not a worker
+    emitting a partial batch.
+
+    So the honest statement is that the tail is dropped because it is an
+    incomplete FRAME, not because it is provably not user data. The
+    runtime behaviour is unchanged -- correcting the claim, not the
+    semantics -- but a caller reading this should know the difference.
 
     order="index" reassembles completion-order records into
     batch_idx sequence via ReassemblyBuffer (holes flush sorted at
     EOF — same head-of-line contract as _drain_records). stats
     receives {"reassembly_max": high-water} when ordering.
     """
-    import select as _select
+    # The read end MUST be nonblocking: the pump reads until EAGAIN, so
+    # a blocking fd would stall the supervision path on an empty pipe.
+    # _fork_drain() sets this for the production path, but the pump is
+    # also constructed directly (tests, and anything else that wants to
+    # drive it over its own pipe), so the contract is enforced HERE
+    # rather than left as a caller obligation. The pump is the sole
+    # reader of this descriptor, so changing its flags is safe.
+    try:
+        os.set_blocking(results_r, False)
+    except OSError:
+        pass
 
     st = {"tail": b"", "eof": False, "pending": _deque(),
+          # Bytes already parsed but not yet handed to the consumer.
+          # This is the parent's read-AHEAD, and it is what the pump
+          # must not let grow: it is the difference between a bounded
+          # window and the run's whole output in memory.
+          "pending_bytes": 0,
           "reassembly": (ReassemblyBuffer() if order == "index"
                          else None)}
 
+    def _check_conflicts():
+        # Checked IMMEDIATELY on ingestion, before any further pending
+        # output is handed back.
+        #
+        # Waiting until EOF permits more records to escape after the
+        # producer has already violated the protocol, which is the
+        # window the check exists to close. Already-yielded records
+        # cannot be withdrawn, so the error says so -- but no further
+        # ones are released after the contradiction is known.
+        if st["reassembly"] is not None:
+            _raise_on_disposition_conflicts(
+                st["reassembly"],
+                "stream() [records already yielded before this point "
+                "are NOT withdrawn]")
+
     def _ingest(chunk):
-        records, tail = _split_records(st["tail"] + chunk)
-        st["tail"] = tail
+        # Stage 1: the results-PIPE consumer is a distinct production
+        # path from the worker-memfd drains, and it was still
+        # DATA-only. With the C drain active the records arrive here
+        # through this pipe rather than from the per-worker memfds, so
+        # SKIPPED / POISONED / NO_RESULT were being discarded before
+        # the reassembly buffer saw them and later DATA stayed blocked
+        # behind that hole until finalisation -- the exact behaviour
+        # Stage 1 exists to remove.
+        #
+        # The unordered branch keeps DATA-only semantics, which is what
+        # those callers require.
         if st["reassembly"] is None:
+            records, tail = _split_records(st["tail"] + chunk)
+            st["tail"] = tail
             st["pending"].extend(blob for _, blob in records)
-        else:
-            for bidx, blob in records:
-                st["reassembly"].add(bidx, blob)
-            for _, ordered in st["reassembly"].drain():
-                st["pending"].append(ordered)
+            st["pending_bytes"] += sum(len(blob) for _, blob in records)
+            return
+        records, tail = _split_records_terminal(st["tail"] + chunk)
+        st["tail"] = tail
+        for bidx, bdisp, bblob in records:
+            st["reassembly"].add_disposition(bidx, bdisp, bblob)
+        # BEFORE draining: a contradiction detected here must not release
+        # further output. Checked after drain() it would already have
+        # queued records that the caller can no longer be told about.
+        _check_conflicts()
+        for _, ordered in st["reassembly"].drain():
+            st["pending"].append(ordered)
+            st["pending_bytes"] += len(ordered)
+
+    def _read_available(limit):
+        """Consume what is ALREADY in the results pipe.
+
+        The read end is nonblocking, so this loop can never block --
+        the pump runs inside the supervision path, and a blocking read
+        there would stall death detection.
+
+        The distinctions that matter:
+
+          * EAGAIN/EWOULDBLOCK -> the pipe is momentarily EMPTY. Not
+            EOF. The drain child may write again a moment later, and
+            the reactor's readiness watch will wake us for it.
+          * b"" -> EOF: every writer is gone.
+          * any other OSError -> a genuine I/O failure. The previous
+            code turned EVERY OSError into EOF, so a broken pipe
+            looked exactly like a clean end of stream -- a FALSE CLEAN
+            COMPLETION, with the output silently short. It is raised
+            instead, so the run fails loudly.
+
+        `limit` bounds the loop so a continuously replenished pipe
+        cannot hold the supervision path indefinitely. The pipe's own
+        capacity already bounds it (the drain child blocks once the
+        pipe is full), so the limit is a backstop, not the mechanism.
+        """
+        total = 0
+        while total < limit:
+            # The read-ahead is bounded by what the parent ALREADY holds
+            # and has not yet handed to the consumer. Reading past that
+            # point trades the C drain's flat memory profile for
+            # nothing: the extra bytes just queue up in `pending`.
+            #
+            # This is the bound that makes the read-until-drained loop
+            # safe. The loop is what removes the arbitrary "one 64 KiB
+            # chunk per call" limit (and with it the syscall storm);
+            # the pending budget is what stops it from turning the
+            # parent's memory into the run's whole output.
+            if st["pending_bytes"] >= _RESULTS_PENDING_BUDGET:
+                break
+            try:
+                chunk = os.read(results_r, 65536)
+            except BlockingIOError:
+                # EAGAIN/EWOULDBLOCK: momentarily drained, not EOF.
+                break
+            except InterruptedError:
+                # EINTR: interrupted before transferring anything.
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                        "forkrun: read failed on the C-drain results pipe "
+                        "(fd %r): %s" % (results_r, exc)) from exc
+            if not chunk:
+                st["eof"] = True
+                if watch is not None:
+                    # A pipe at EOF is permanently readable. Leaving it
+                    # in the reactor's watch set would spin the reactor
+                    # on a descriptor that can never produce more.
+                    watch.disarm()
+                break
+            _ingest(chunk)
+            total += len(chunk)
+        return total
 
     def pump(alive):
         if not st["eof"]:
-            try:
-                ready, _, _ = _select.select([results_r], [], [], 0)
-            except (OSError, ValueError):
-                ready = []
-            if ready:
-                try:
-                    chunk = os.read(results_r, 65536)
-                except OSError:
-                    chunk = b""
-                if chunk == b"":
-                    st["eof"] = True
-                else:
-                    _ingest(chunk)
+            _read_available(_RESULTS_READ_BUDGET)
         if st["pending"]:
-            return st["pending"].popleft()
+            blob = st["pending"].popleft()
+            st["pending_bytes"] -= len(blob)
+            return blob
         if not alive and st["eof"]:
             if st["reassembly"] is not None:
                 for _, ordered in st["reassembly"].final_drain():
@@ -3424,6 +6235,10 @@ def _make_results_pump(results_r, order="none", stats=None):
                 if stats is not None:
                     stats["reassembly_max"] = (
                         st["reassembly"].max_size)
+                # And again at EOF, for a contradiction whose second
+                # outcome arrived with the final chunk and was not seen
+                # on a later ingestion pass.
+                _check_conflicts()
                 if st["pending"]:
                     return st["pending"].popleft()
             raise StopIteration
@@ -3447,7 +6262,32 @@ _HELPER_JOIN_TIMEOUT = 10.0
 # fs.pipe-max-size by the kernel; EPERM/EINVAL falls back silently.
 _INGEST_PIPE_SZ = 1 << 20
 
+# WO-PY-CDRAIN-REACTOR-WAKEUP-1: how many result bytes ONE pump call may
+# consume from the C drain's results pipe.
+#
+# The pipe's own capacity already bounds this: the drain child blocks
+# once the pipe is full, so a read-until-EAGAIN loop cannot run away
+# with the data. This is a backstop that keeps the loop inside the
+# supervision path's time budget even if the pipe capacity is ever
+# raised. 4 MiB is 4x the 1 MiB results pipe, so in practice the loop
+# ends on EAGAIN long before the budget -- and the read-ahead the
+# parent holds is then bounded by the pipe, not by this number.
+_RESULTS_READ_BUDGET = 4 << 20
 
+# WO-PY-CDRAIN-REACTOR-WAKEUP-1: how many bytes of PARSED-but-unyielded
+# output the parent will hold while the C drain's results pipe is being
+# read.
+#
+# This is the memory half of the fix. The C drain's whole advantage is
+# that its retention is FLAT (~3.5MB) while the legacy drain's grows
+# with the output; a read-until-drained loop that ignored the consumer
+# would queue the run's whole output in `pending` and throw that
+# advantage away. Measured: with the read unbounded, the 2M-line run's
+# parent retention went from 3.5MB to ~18MB.
+#
+# 256KB is roughly ONE amplified batch at the measured shape, which is
+# what the pre-fix pump effectively held (one 64KB chunk per call).
+_RESULTS_PENDING_BUDGET = 256 << 10
 
 
 def _join_helper_bounded(pid, name, timeout=_HELPER_JOIN_TIMEOUT):
@@ -3478,6 +6318,7 @@ def _join_helper_bounded(pid, name, timeout=_HELPER_JOIN_TIMEOUT):
     return status
 
 
+@_interrupt_safe
 def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                      src_fd, must_close, extra_pids=(), fallow_w=None,
                      drain_pid=None, results_fd=None):
@@ -3554,6 +6395,8 @@ def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
         lib.fr_py_destroy()
     except Exception:
         pass
+    # LAST: reconcile the child registry -- see _teardown_reactor.
+    _childreg.reconcile()
 
 
 def _require_splice_symbol():
@@ -3565,13 +6408,13 @@ def _require_splice_symbol():
 
     if not _v1a()["splice"]:
         raise RuntimeError(
-            "mode='splice' needs fr_py_worker_splice_loop — rebuild "
-            "the substrate ('make -f Makefile.substrate "
-            "python-substrate')")
+                "mode='splice' needs fr_py_worker_splice_loop — rebuild "
+                "the substrate ('make -f Makefile.substrate "
+                "python-substrate')")
 
 
 def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
-                        engine_fds):
+                        engine_fds, extra_keep_fds=None):
     """Fork one C-loop passthrough worker (W-PY18 mode="splice").
 
     The child scrubs to engine + job fds, initializes worker state via
@@ -3583,7 +6426,7 @@ def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
     out_fd must be a parent-created output memfd (never None: splice
     always frames records for the parent to parse).
     """
-    pid = os.fork()
+    pid = _childreg.fork_child('splice-worker')
     if pid == 0:
         try:
             keep = set(engine_fds) | {memfd, out_fd}
@@ -3591,6 +6434,8 @@ def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
                 keep.add(signal_w)
             if fallow_w is not None and fallow_w >= 0:
                 keep.add(fallow_w)
+            if extra_keep_fds:
+                keep.update(extra_keep_fds)
             scrub_fds(keep)
         except Exception:
             pass
@@ -3624,15 +6469,16 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
       pread into a forked C loop feeding a results pipe the parent
       reads incrementally; False keeps the Python _drain_records path.
     """
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
+    # TD-09b: declared at function scope because the poison summary below
+    # sits outside the scope that binds the real channel. Leaving it
+    # unbound there made globals().get() fall back to None, which
+    # silently skipped index collection and published an EMPTY
+    # poisoned_batches next to a non-zero poisoned count.
+    _poison_ch = None
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
@@ -3697,31 +6543,57 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                 scan_rc = 0
                 return True
             scan_rc = scan_st
+            # D-PORT2/D6, through the ONE decision point: an abort
+            # already in flight makes this scanner's death its EXPECTED
+            # consequence, and re-aborting would print a spurious
+            # FATAL and clobber the abort's own outcome. The scanner
+            # IS done either way, so the pump still reports "done".
+            if _helper_death_excused("error", False, lib):
+                return True
             try:
                 lib.fr_py_abort()
             except Exception:
                 pass
             raise RuntimeError(
-                "forkrun: materialized scanner failed (status %r)"
-                % (scan_st,))
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (scan_st,))
 
         _flush_stdio()
 
         out_fds, out_hold = _new_output_memfds(workers)
-        # W-PY15: 1MB signal pipe (65536 outstanding 16B signals vs 4096
-        # at default) — workers run further ahead of a slow consumer.
-        # Best-effort: falls back to 64KB where F_SETPIPE_SZ is capped.
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of the 1MB (65536
+        # notifications) this path used to ask for, so a slow consumer
+        # stops the run-ahead from growing without bound.
+        #
+        # This REPLACES the W-PY15 rationale for a 1MB signal pipe on
+        # the streaming path ("workers run further ahead of a slow
+        # consumer"). Running further ahead was the defect, not the
+        # feature: the output memfds have no backpressure of their own,
+        # so the notification pipe was the only thing bounding the
+        # run-ahead, and a 1MB window bounded it at 65536 completions.
+        # The map/run paths still ask for 1MB -- they collect every
+        # result, so there is no slow consumer to run ahead of.
+        #
+        # Best-effort: the capacity is whatever the kernel grants.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
         # W-DEDUP: single fork dispatch (generator shape closes the
         # parent's signal-read end in the child for exact EOF).
         from ._executor_core import fork_workers as _core_fork
-        pids.extend(_core_fork(
-            lib, workers=workers, memfd=memfd, size=size,
-            out_fds=out_fds, signal_w=signal_w, fallow_w=None,
-            engine_fds=engine_fds, payload=payload, sink=None,
-            mode="python", on_error=on_error,
-            src_fd=src_fd, must_close=must_close,
-            signal_r_to_close=signal_r, spec=_spec))
+        # WO-PY-REL-1/TD-09: poison-index relay receiving end.
+        _poison_ch = _PoisonStatsChannel(workers)
+        _poison_keep = [_poison_ch.open()] or []
+        with _ExportedPoisonFd(_poison_keep[0]):
+            pids.extend(_core_fork(
+                lib, workers=workers, memfd=memfd, size=size,
+                out_fds=out_fds, signal_w=signal_w, fallow_w=None,
+                engine_fds=engine_fds, payload=payload, sink=None,
+                mode="python", on_error=on_error,
+                src_fd=src_fd, must_close=must_close,
+                signal_r_to_close=signal_r, spec=_spec,
+                extra_keep_fds=_poison_keep))
         # Parent drops its write copy: EOF on signal_r then means every
         # worker has exited (or abandoned teardown closed it).
         try:
@@ -3784,14 +6656,15 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                                         os.WEXITSTATUS(scan_st)
                                         == 0):
                                     scan_rc = scan_st
-                                    try:
-                                        lib.fr_py_abort()
-                                    except Exception:
-                                        pass
-                                    raise RuntimeError(
-                                        "forkrun: materialized "
-                                        "scanner failed (status %r)"
-                                        % (scan_st,))
+                                    if not _helper_death_excused("error", False, lib):
+                                        try:
+                                            lib.fr_py_abort()
+                                        except Exception:
+                                            pass
+                                        raise RuntimeError(
+                                                "forkrun: materialized "
+                                                "scanner failed (status %r)"
+                                                % (scan_st,))
                                 scan_rc = 0
                     if drain_alive:
                         try:
@@ -3837,9 +6710,10 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                     if scan_st is not None and not (
                             os.WIFEXITED(scan_st) and
                             os.WEXITSTATUS(scan_st) == 0):
-                        raise RuntimeError(
-                            "forkrun: materialized scanner failed "
-                            "(status %r)" % (scan_st,))
+                        if not _helper_death_excused("error", False, lib):
+                            raise RuntimeError(
+                                    "forkrun: materialized scanner failed "
+                                    "(status %r)" % (scan_st,))
                 else:
                     scan_pid = None
             finally:
@@ -3892,9 +6766,10 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: materialized scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: materialized scanner failed (status %r)"
+                            % (scan_st,))
         else:
             scan_pid = None
 
@@ -3908,12 +6783,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             # above); on a clean worker set a nonzero drain rc is a
             # real infrastructure error. Abandoned runs skip this
             # (teardown EPIPEs the drain → rc 5 by design).
-            if drain_status != 0 and not (
-                    os.WIFEXITED(drain_status) and
-                    os.WEXITSTATUS(drain_status) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (drain_status,))
+            _raise_for_drain(drain_status, lib)
 
         try:
             npois = lib.fr_py_poisoned_count()
@@ -3923,7 +6793,14 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # the engine: prefer the pre-teardown stash when the live
         # read comes back zero (npois_stashed is always defined in
         # this function — initialized beside statuses above).
-        # W-REL6-5: WARN + raise funnel through the core twin.
+        # WO-PY-REL-1/TD-09: collect indices BEFORE the poison summary,
+        # because report_poison raises under strict_poison and the
+        # post-exception stats must stay inspectable.
+        try:
+            _collect_plain_poison(_poison_ch,
+                                  max(npois, npois_stashed))
+        except Exception:
+            pass
         from ._executor_core import report_poison as _core_poison
         _core_poison(lib, strict_poison=strict_poison,
                      npois=max(npois, npois_stashed))
@@ -3937,6 +6814,12 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             pass
         raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
+        # WO-PY-REL-1/TD-09: close the poison-index stats memfd (see
+        # _execute_ingest_locked for why this is not optional).
+        try:
+            _poison_ch.close()
+        except (NameError, UnboundLocalError, AttributeError):
+            pass
         # Idempotent second layer: teardown already ran inside; these are
         # no-ops when it did (Nones/empties) and save abandon paths where
         # setup itself raised before forking.
@@ -3965,15 +6848,22 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
       lazily at first worker fork — workers fork dynamically here);
       False keeps the Python _drain_records path.
     """
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
+    # WO-PY-REL-1/TD-09: holds the poison-index relay channel. Declared at
+    # function scope, not inside the nested forker: in this generator the
+    # fork and the poison summary sit in different scopes.
+    poison_state: dict = {}
+    # TD-09b: the engine poison count, captured while g_state is still
+    # live. The poison summary below runs AFTER the branch finallys call
+    # _teardown_stream -> fr_py_destroy(), and fr_py_poisoned_count()
+    # returns 0 once g_state is NULL, so the count must be stashed before
+    # teardown. Whether the engine happened to still be alive at summary
+    # time was a race (identical runs reported poisoned=0 and poisoned=2).
+    # Same idiom and rationale as _execute_streaming's npois_stashed.
+    npois_stashed = 0
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
@@ -4013,7 +6903,14 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         except OSError:
             pass
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of 1MB (65536), so a
+        # slow consumer stops the run-ahead from growing without
+        # bound. Best-effort: the capacity is whatever the kernel
+        # grants, and the map/run paths keep the 1MB default.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
         fallow_r, fallow_w = os.pipe()
 
         _flush_stdio()
@@ -4076,11 +6973,17 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             # child by exact preservation of the pre-dedup behavior —
             # EOF keys off write ends, so both shapes are correct).
             from ._executor_core import fork_workers as _core_fork
-            pids.extend(_core_fork(
-                lib, workers=workers, memfd=memfd, size=-1,
-                out_fds=out_fds, signal_w=signal_w, fallow_w=fallow_w,
-                engine_fds=engine_fds, payload=payload, sink=None,
-                mode="python", on_error=on_error, spec=_spec))
+            # WO-PY-REL-1/TD-09: poison-index relay receiving end. The
+            # fork is deferred here, so the channel is created with it.
+            poison_state["ch"] = _PoisonStatsChannel(workers)
+            _pk = [poison_state["ch"].open()] or []
+            with _ExportedPoisonFd(_pk[0]):
+                pids.extend(_core_fork(
+                    lib, workers=workers, memfd=memfd, size=-1,
+                    out_fds=out_fds, signal_w=signal_w, fallow_w=fallow_w,
+                    engine_fds=engine_fds, payload=payload, sink=None,
+                    mode="python", on_error=on_error, spec=_spec,
+                    extra_keep_fds=_pk))
             _drop_parent_copies()
             state["workers"] = True
             state["fork_at"] = _time.monotonic()
@@ -4090,22 +6993,16 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             # Fork-timing rule (see module constants): first DATA
             # publish, or stall timeout pre-gate (slow-source
             # pipelining). Post-gate waits for publish (CASE A).
-            if state["workers"]:
+            action, stalled = _fork_timing(
+                state["workers"], gate["issued"], state["t_start"], lib)
+            if action == _FORK_HAVE:
                 return True
-            try:
-                ready = lib.fr_py_data_ready()
-            except Exception:
-                ready = 0
-            if ready > 0:
-                _fork_workers()
-                return True
-            if not gate["issued"] and (
-                    _time.monotonic() - state["t_start"]
-                    ) >= STALL_FORK_AFTER:
+            if action == _FORK_WAIT:
+                return False
+            if stalled:
                 state["stall"] = True
-                _fork_workers()
-                return True
-            return False
+            _fork_workers()
+            return True
 
         # Nonblocking source for the interleave (dup user fds — never
         # mutate flags on a descriptor we don't own).
@@ -4144,8 +7041,8 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                             _drop_parent_copies()
                             return True
                         raise RuntimeError(
-                            "forkrun: ingest scanner published no "
-                            "data for %d spilled bytes" % spill["off"])
+                                "forkrun: ingest scanner published no "
+                                "data for %d spilled bytes" % spill["off"])
                     else:
                         return False
                 else:
@@ -4159,7 +7056,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                     return False
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
+                            "failed reading source: %s" % (exc,))
                 if not chunk:
                     # Source EOF: gate now, unless a stall-triggered
                     # fork is younger than the grace (withhold until
@@ -4190,7 +7087,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                         n = os.pwrite(memfd, view, spill["off"])
                     except OSError as exc:
                         raise RuntimeError(
-                            "failed writing ingress: %s" % (exc,))
+                                "failed writing ingress: %s" % (exc,))
                     view = view[n:]
                     spill["off"] += n
                 _maybe_fork_workers()
@@ -4256,6 +7153,10 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                 drain_status = drain["status"]
                 drain_alive = drain["alive"]
                 exhausted = True
+                # Workers are gone: the engine poison count is final --
+                # stash it before the finally below destroys the engine
+                # (TD-09b).
+                npois_stashed = _poisoned_now(lib)
             finally:
                 _teardown_stream(lib, pids, signal_r, out_fds,
                                  out_hold, memfd, src_fd, must_close,
@@ -4275,6 +7176,9 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                                            statuses, order=order,
                                            stats=stats, pump=_pump):
                     yield blob
+                # Workers are gone: stash the engine poison count before
+                # the finally below destroys the engine (TD-09b).
+                npois_stashed = _poisoned_now(lib)
             finally:
                 _teardown_stream(lib, pids, signal_r, out_fds, out_hold,
                                  memfd, src_fd, must_close,
@@ -4292,12 +7196,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         if use_drain and exhausted and drain_status is not None:
             # Secondary to worker failures (above); abandoned runs
             # skip this (teardown EPIPEs the drain → rc 5 by design).
-            if drain_status != 0 and not (
-                    os.WIFEXITED(drain_status) and
-                    os.WEXITSTATUS(drain_status) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (drain_status,))
+            _raise_for_drain(drain_status, lib)
 
         # Scanner join: strict when observed, proof-based when already
         # reaped by teardown after healthy workers + complete drain
@@ -4315,26 +7214,29 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
-            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
-            if fallow_st is not None and not (
-                    os.WIFEXITED(fallow_st) and
-                    os.WEXITSTATUS(fallow_st) == 0):
-                try:
-                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
-                             b"abnormally; ingress may not be fully "
-                             b"reclaimed.\n")
-                except OSError:
-                    pass
+            _reap_fallow(fallow_pid)
 
         # W-REL6-5: WARN + raise funnel through the core twin
         # (identical text; _raise_for_poisoned stash preserved).
+        # WO-PY-REL-1/TD-09: collect indices BEFORE the poison summary,
+        # because report_poison raises under strict_poison and the
+        # post-exception stats must stay inspectable.
+        try:
+            _collect_plain_poison(poison_state.get("ch"),
+                                  max(_read_poison_count(lib),
+                                      npois_stashed))
+        except Exception:
+            pass
         from ._executor_core import report_poison as _core_poison
-        _core_poison(lib, strict_poison=strict_poison)
+        _core_poison(lib, strict_poison=strict_poison,
+                     npois=max(_read_poison_count(lib),
+                               npois_stashed))
     except KeyboardInterrupt as _ki:
         # W-REL5-B2: stream taxonomy matches the six blocking
         # executors — abort, then ForkrunInterrupted (still a
@@ -4345,24 +7247,16 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             pass
         raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
+        # WO-PY-REL-1/TD-09: close the poison-index stats memfd (see
+        # _execute_ingest_locked for why this is not optional).
+        try:
+            poison_state["ch"].close()
+        except (KeyError, AttributeError):
+            pass
         _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                          src_fd, must_close,
                          extra_pids=[p for p in (fallow_pid, scan_pid)
                                      if p is not None])
-
-
-def _ingest_stream_gen(payload, source, **kwargs):
-    # stream() over a streaming source: live drain interleaved with the
-    # spill (pump hook), same ordering contract as _stream_gen.
-    yield from _execute_ingest_stream(
-        payload, source,
-        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers_numa(kwargs.get("workers")),
-        on_error=kwargs.get("on_error", "retry"),
-        strict_poison=kwargs.get("strict_poison", False),
-        mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
-        order=kwargs.get("order", "none"),
-        c_drain=kwargs.get("c_drain", True))
 
 
 def _new_ingress_memfd():
@@ -4380,12 +7274,7 @@ def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
                     on_error, strict_poison=False, collect, order, mode="python", nodes="auto",
                     splice=False, c_drain=True, views=True):
     """Streaming-ingest entry for map/run (blocking, like _execute)."""
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     with _RUN_LOCK:
         return _execute_ingest_locked(
             payload, source, sink=sink, lines=lines, bytes_=bytes_,
@@ -4413,7 +7302,7 @@ def _fork_materialized_scanner(lib, memfd, engine_fds):
     (The ingest paths keep their first-publish gate instead —
     their input is still arriving while the scanner runs.)
     """
-    pid = os.fork()
+    pid = _childreg.fork_child('scanner')
     if pid == 0:
         try:
             scrub_fds(engine_fds | {memfd})
@@ -4436,7 +7325,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
     The caller forks workers after; the parent closes its fallow copies
     once every child exists (reaper EOF = workers' write ends only).
     """
-    fallow_pid = os.fork()
+    fallow_pid = _childreg.fork_child('fallow')
     if fallow_pid == 0:
         try:
             scrub_fds(engine_fds | {fallow_r, memfd})
@@ -4444,7 +7333,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
         except BaseException:
             rc = 1
         os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
-    scan_pid = os.fork()
+    scan_pid = _childreg.fork_child('scanner')
     if scan_pid == 0:
         try:
             scrub_fds(engine_fds | {memfd})
@@ -4474,6 +7363,9 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
       into a forked C loop (results memfd read once at end);
       False keeps the parent-side memfd parse.
     """
+    # WO-PY-REL-1/TD-09: poison-index relay channel, created with the
+    # deferred fork (this path forks workers on first data publish).
+    poison_state: dict = {}
     use_drain = bool(c_drain) and collect
     if use_drain:
         _require_drain_symbol()
@@ -4557,15 +7449,20 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 # run() rejects splice) but preserved for exactness:
                 # splice needs an out fd per worker.
                 raise RuntimeError(
-                    "splice without collect has no output transport")
+                        "splice without collect has no output transport")
             # W-DEDUP: single fork dispatch (splice fail-loud / python
             # with fallow acks). Pids return in worker-index order.
-            pids.extend(_core_fork(
-                lib, workers=workers, memfd=memfd, size=-1,
-                out_fds=out_fds if collect else [], signal_w=signal_w
-                if use_drain else None, fallow_w=fallow_w,
-                engine_fds=engine_fds, payload=payload, sink=sink,
-                mode="python", on_error=on_error, spec=_spec))
+            # WO-PY-REL-1/TD-09: poison-index relay receiving end.
+            poison_state["ch"] = _PoisonStatsChannel(workers)
+            _pk = [poison_state["ch"].open()] or []
+            with _ExportedPoisonFd(_pk[0]):
+                pids.extend(_core_fork(
+                    lib, workers=workers, memfd=memfd, size=-1,
+                    out_fds=out_fds if collect else [], signal_w=signal_w
+                    if use_drain else None, fallow_w=fallow_w,
+                    engine_fds=engine_fds, payload=payload, sink=sink,
+                    mode="python", on_error=on_error, spec=_spec,
+                    extra_keep_fds=_pk))
             _drop_fallow_copies()
             workers_forked = True
             fork_at = _time.monotonic()
@@ -4588,21 +7485,16 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             # source → CASE-B pipelining). Returns True when workers
             # exist (or the empty-input skip was taken by the caller).
             nonlocal stall_forked
-            if workers_forked:
+            action, stalled = _fork_timing(
+                workers_forked, gate_issued, t_start, lib)
+            if action == _FORK_HAVE:
                 return True
-            try:
-                ready = lib.fr_py_data_ready()
-            except Exception:
-                ready = 0
-            if ready > 0:
-                _fork_workers()
-                return True
-            if not gate_issued and (
-                    _time.monotonic() - t_start) >= STALL_FORK_AFTER:
+            if action == _FORK_WAIT:
+                return False
+            if stalled:
                 stall_forked = True
-                _fork_workers()
-                return True
-            return False
+            _fork_workers()
+            return True
 
         try:
             while True:
@@ -4610,7 +7502,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     chunk = os.read(src_fd, _CHUNK)
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
+                            "failed reading source: %s" % (exc,))
                 if not chunk:
                     break
                 # pwrite at explicit offsets (W-PY16): the scanner seeds
@@ -4625,7 +7517,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                         n = os.pwrite(memfd, view, total_written)
                     except OSError as exc:
                         raise RuntimeError(
-                            "failed writing ingress: %s" % (exc,))
+                                "failed writing ingress: %s" % (exc,))
                     view = view[n:]
                     total_written += n
                 _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued)
@@ -4684,8 +7576,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                             signal_w = signal_r = None
                         break
                     raise RuntimeError(
-                        "forkrun: ingest scanner published no data "
-                        "for %d spilled bytes" % total_written)
+                            "forkrun: ingest scanner published no data "
+                            "for %d spilled bytes" % total_written)
                 _time.sleep(0.05)
 
         failed = []
@@ -4715,10 +7607,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 _dst = 0
             drain_status = _dst
             drain_pid = None
-            if not failed and _dst != 0 and not (
-                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)" % (_dst,))
+            if not failed:
+                _raise_for_drain(_dst, lib)
 
         if failed:
             _raise_worker_failure(failed, len(pids), on_error)
@@ -4742,24 +7632,25 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
-            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
-            if fallow_st is not None and not (
-                    os.WIFEXITED(fallow_st) and
-                    os.WEXITSTATUS(fallow_st) == 0):
-                try:
-                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
-                             b"abnormally; ingress may not be fully "
-                             b"reclaimed.\n")
-                except OSError:
-                    pass
+            _reap_fallow(fallow_pid)
 
+        # WO-PY-REL-1/TD-09: collect indices BEFORE the poison summary,
+        # because report_poison raises under strict_poison and the
+        # post-exception stats must stay inspectable.
+        try:
+            _collect_plain_poison(poison_state.get("ch"),
+                                  _read_poison_count(lib))
+        except Exception:
+            pass
         from ._executor_core import report_poison as _core_poison
-        _core_poison(lib, strict_poison=strict_poison)
+        _core_poison(lib, strict_poison=strict_poison,
+                     npois=_read_poison_count(lib))
 
         if not collect:
             return None
@@ -4838,6 +7729,14 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 os.close(src_fd)
             except OSError:
                 pass
+        # WO-PY-REL-1/TD-09: close the poison-index stats memfd. Omitting
+        # this leaks one fd per call, which the fd-hygiene probes in
+        # test_executor_consistency detect: invisible to a caller, but
+        # unbounded across a long-lived process.
+        try:
+            poison_state["ch"].close()
+        except (KeyError, AttributeError):
+            pass
         try:
             lib.fr_py_destroy()
         except Exception:
@@ -4849,12 +7748,7 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
                collect, order, mode="python", nodes="auto", splice=False,
                c_drain=True, c_worker_loop=False, plugin_spec=None,
                c_spawn_loop=False, spawn_argv=None, views=True):
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     with _RUN_LOCK:
         return _execute_locked(payload, source, sink=sink, lines=lines,
                                bytes_=bytes_, workers=workers,
@@ -4882,14 +7776,14 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
     if c_worker_loop:
         if not collect or plugin_spec is None:
             raise RuntimeError(
-                "c_worker_loop=True needs collection with a "
-                "dialect-1/2 plugin spec")
+                    "c_worker_loop=True needs collection with a "
+                    "dialect-1/2 plugin spec")
         _require_plugin_loop_symbol()
     if c_spawn_loop:
         if not collect or spawn_argv is None:
             raise RuntimeError(
-                "c_spawn_loop=True needs collection with a "
-                "spawn argv payload")
+                    "c_spawn_loop=True needs collection with a "
+                    "spawn argv payload")
         _require_spawn_loop_symbol()
     # W-REL6-5: lattice position (executor #1: UMA, materialized,
     # plain, blocking) + this call's behavior flags, threaded through
@@ -4939,13 +7833,18 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
 
         from ._executor_core import fork_workers as _core_fork
         from ._executor_core import report_poison as _core_poison
-        pids = _core_fork(
-            lib, workers=workers, memfd=memfd, size=size,
-            out_fds=out_fds if collect else [], signal_w=signal_w
-            if use_drain else None, fallow_w=None, engine_fds=engine_fds,
-            payload=payload, sink=sink, mode="python", on_error=on_error,
-            plugin_spec=plugin_spec, spawn_argv=spawn_argv,
-            src_fd=src_fd, must_close=must_close, spec=_spec)
+        # WO-PY-REL-1/TD-09: receiving end of the poison-index relay.
+        _poison_ch = _PoisonStatsChannel(workers)
+        _poison_keep = [_poison_ch.open()] or []
+        with _ExportedPoisonFd(_poison_keep[0]):
+            pids = _core_fork(
+                lib, workers=workers, memfd=memfd, size=size,
+                out_fds=out_fds if collect else [], signal_w=signal_w
+                if use_drain else None, fallow_w=None, engine_fds=engine_fds,
+                payload=payload, sink=sink, mode="python", on_error=on_error,
+                plugin_spec=plugin_spec, spawn_argv=spawn_argv,
+                src_fd=src_fd, must_close=must_close, spec=_spec,
+                extra_keep_fds=_poison_keep)
 
         if use_drain:
             # Parent never writes signals and (no respawns here)
@@ -5004,6 +7903,18 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                             scan_pid = None
                             if not (os.WIFEXITED(scan_st) and
                                     os.WEXITSTATUS(scan_st) == 0):
+                                # D-PORT2/D6: the consult comes BEFORE
+                                # our own abort -- the order IS the fix.
+                                # The abort publishes the reason the
+                                # consult reads, so a consult after it
+                                # would always see "excused" and swallow
+                                # a genuine scan failure. The abort
+                                # itself stays unconditional: the
+                                # engine's reason word is published by a
+                                # CAS, so a second abort cannot
+                                # overwrite the first reason.
+                                excused = _helper_death_excused(
+                                    "error", False, lib)
                                 try:
                                     lib.fr_py_abort()
                                 except Exception:
@@ -5013,9 +7924,10 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                                     _join_helper_bounded(
                                         pid, "worker",
                                         WORKER_REAP_TIMEOUT)
-                                raise RuntimeError(
-                                    "forkrun: scan failed (status %r)"
-                                    % (scan_st,))
+                                if not excused:
+                                    raise RuntimeError(
+                                            "forkrun: scan failed (status %r)"
+                                            % (scan_st,))
                 if alive:
                     _time.sleep(0.005)
         except KeyboardInterrupt as _ki:
@@ -5041,12 +7953,13 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             scan_pid = None
             if not (os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                try:
-                    lib.fr_py_abort()
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    "forkrun: scan failed (status %r)" % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    try:
+                        lib.fr_py_abort()
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                            "forkrun: scan failed (status %r)" % (scan_st,))
 
         if use_drain and drain_pid is not None:
             # Workers are gone so the signal pipe hit EOF; the drain
@@ -5060,10 +7973,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             if _dst is None:
                 _dst = 0
             drain_pid = None
-            if not failed and _dst != 0 and not (
-                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)" % (_dst,))
+            if not failed:
+                _raise_for_drain(_dst, lib)
 
         if failed:
             _raise_worker_failure(failed, len(pids), on_error)
@@ -5071,7 +7982,17 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
         # Parent-side poison summary (g_state is MAP_SHARED: the parent
         # observes worker increments without IPC). Read BEFORE destroy.
         # W-DEDUP: single implementation in _executor_core.
-        _core_poison(lib, strict_poison=strict_poison)
+        #
+        # WO-PY-REL-1/TD-09: collect the index list FIRST. report_poison
+        # raises under strict_poison, and the contract is that stats stay
+        # inspectable after that raise -- which they cannot be if the
+        # indices are collected afterwards.
+        try:
+            _npois = lib.fr_py_poisoned_count()
+        except Exception:
+            _npois = 0
+        _collect_plain_poison(_poison_ch, _npois)
+        _core_poison(lib, strict_poison=strict_poison, npois=_npois)
 
         if not collect:
             return None
@@ -5116,6 +8037,10 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 os.close(results_fd)
             except OSError:
                 pass
+        try:
+            _poison_ch.close()
+        except (NameError, UnboundLocalError):
+            pass
         if signal_r is not None:
             try:
                 os.close(signal_r)
@@ -5181,7 +8106,15 @@ _LAST_STATS: dict = {"total": None, "completed": None,
                      # False means "the index list is the complete truth".
                      # Only the cleanroom's bounded relay slot can make it
                      # True; the in-process path keeps every index.
-                     "poisoned_batches_truncated": False}
+                     "poisoned_batches_truncated": False,
+                     # W-EXP-2 Phase A: committed DATA frames for the LAST
+                     # cleanroom invocation, summed over logical nodes by the
+                     # launcher. None means "the launcher could not supply
+                     # it" (older substrate, failed node read, or a sum
+                     # that would not fit) and is NEVER 0: a fabricated
+                     # zero would fail a complete result or pass a
+                     # truncated one.
+                     }
 
 
 def _reset_stats() -> None:
@@ -5242,6 +8175,16 @@ def last_run_stats():
     relay slot filled up, so poisoned_batches is a prefix of the poisoned
     set rather than all of it. Check it before treating len() as a count;
     `poisoned` itself is always exact.
+
+    ``poisoned_batches`` is populated on the reactor path (the default,
+    ``orchestrator=None``/``True``) and on both cleanroom paths. It is
+    **EMPTY on the non-reactor path** (``orchestrator=False``), where it
+    comes back ``[]`` even when ``poisoned`` is non-zero -- the engine
+    exposes only a poisoned COUNT there (``fr_py_poisoned_count()``), not
+    the indices, so there is nothing to list. Verified divergence; see
+    TD-09 in dev/supervisor/TECH_DEBT_REGISTER.md. Treat ``poisoned`` as
+    the portable field and ``poisoned_batches`` as available only on the
+    paths above.
     """
     return dict(_LAST_STATS)
 
@@ -5264,6 +8207,133 @@ def _abort_reason_now(lib):
         return int(fn())
     except Exception:
         return None
+
+
+def _spawn_c_orderer(engine_fds, out_fds, unordered=False, numa=False):
+    """Start the C orderer: the order pipe, the collection memfd, the child.
+
+    ONE implementation. This block was written out six times, once per
+    executor that serves an ordered stream.
+
+    The configuration that genuinely varies between callers is FORWARDED,
+    not discarded. `numa` is not decoration: it reaches the C orderer as
+    the "numa" argument of `ring_order`, and selects the orderer's NUMA
+    mode. The NUMA executors need it; the UMA ones do not. A shared
+    helper that silently dropped it would change what the orderer does
+    on one of the paths -- which is exactly the failure this helper
+    exists to prevent, moved from the copies into the shared code.
+    """
+    # Imported INSIDE the function, not at module level: _reactor
+    # resolves run.py symbols lazily, so a module-level import would
+    # close the cycle.
+    from ._reactor import ORDER_PIPE_SIZE, spawn_orderer
+    order_r, order_w = os.pipe()
+    try:
+        _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ, ORDER_PIPE_SIZE)
+    except OSError:
+        pass
+    # W-REL5-E7: no tempfile fallback (floor 3.10).
+    coll_fd = os.memfd_create("forkrun_ordered")
+    orderer_pid = spawn_orderer(order_r, coll_fd, unordered=unordered,
+                                numa=numa, engine_fds=engine_fds,
+                                out_fds=out_fds)
+    return order_r, order_w, coll_fd, orderer_pid
+
+
+def _reap_fallow(fallow_pid):
+    """Join the fallow (reaper) child and warn on an abnormal exit.
+
+    ONE implementation. This block was written out four times.
+    """
+    st = _join_helper_bounded(fallow_pid, "fallow")
+    if st is not None and not (os.WIFEXITED(st) and
+                               os.WEXITSTATUS(st) == 0):
+        try:
+            os.write(2, b"forkrun [WARN]: ingest reaper exited "
+                     b"abnormally; ingress may not be fully "
+                     b"reclaimed.\n")
+        except OSError:
+            pass
+
+
+def _raise_for_drain(status, lib):
+    """Fail loudly on a C-drain child's bad exit -- unless an abort explains it.
+
+    ONE implementation. The C drain is a forked child, so its exit is a
+    helper death, and the decision "is this a failure?" was written out
+    TEN times, in ten executors. NOT ONE of them consulted the
+    abort-aware excuse, so the rule D-PORT2/D6 established for helper
+    deaths was never applied here at all -- and a change to it would
+    have had to be made ten times.
+
+    `status` is the child's wait status. None (not observed) and 0
+    (reaped elsewhere, which the callers' leniency already treats as
+    clean) both mean "no failure".
+    """
+    if status is None or status == 0:
+        return
+    if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
+        return
+    if not _helper_death_excused("error", False, lib):
+        raise RuntimeError("forkrun: C drain failed (status %r)" % (status,))
+
+
+def _teardown_orderer(order_w, orderer_pid, lib):
+    """Close the order pipe and join the C orderer child.
+
+    ONE implementation. This block -- close the parent's spare order
+    write end, join the orderer with a bounded wait, and fail loudly on
+    a bad exit -- was written out SIX times, in six executors. Five of
+    them consulted the abort-aware excuse before raising; the NUMA one
+    did not, so a change to the rule would have landed in five of six.
+
+    The excuse is IN this helper, so every caller gets it.
+
+    Returns the caller's new `order_w` (None once the spare is closed).
+    """
+    if order_w is not None:
+        try:
+            os.close(order_w)
+        except OSError:
+            pass
+    if orderer_pid is None:
+        return None
+    # W-REL5-B4: bounded (None => reaped elsewhere, same leniency as
+    # the old ChildProcessError branch).
+    st = _join_helper_bounded(orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
+    if st is None:
+        st = 0
+    if st != 0 and not (os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0):
+        if not _helper_death_excused("error", False, lib):
+            raise RuntimeError(
+                "forkrun: C orderer failed (status %r)" % (st,))
+    return None
+
+
+def _helper_death_excused(kind, eof_ok, lib):
+    """Has an abort already explained this helper child's death?
+
+    ONE decision point for every helper-death site in the front end.
+
+    D-PORT2/D6 introduced the abort-aware classification -- "an abort
+    already in flight makes helper deaths expected (emergency path),
+    not fatal" -- and wired it into 2 of the 17 places the front end
+    turns a helper child's non-zero exit into a fatal error. The other
+    15 had the same rule written out, or omitted it, which is how a
+    fix lands in the copies its author happened to find and then lives
+    on in the execution paths nobody looked at.
+
+    Every site now asks THIS function, so the next change to the rule
+    lands everywhere by construction.
+
+    Returns True when the death is EXCUSED: an abort is already in
+    flight, so this child's non-zero exit is that abort's expected
+    consequence. The caller must then retire the child and carry on
+    WITHOUT aborting again and WITHOUT raising -- re-aborting would
+    print a spurious FATAL and clobber the abort's own outcome.
+    """
+    return (_helper_death_disposition(kind, eof_ok,
+                                      _abort_reason_now(lib)) == "excuse")
 
 
 def _helper_death_disposition(kind, eof_ok, reason):
@@ -5389,6 +8459,7 @@ def _raise_worker_failure(failed, total, on_error, statuses=None):
             statuses if statuses is not None else failed))
 
 
+@_interrupt_safe
 def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
                       out_hold=None, memfd=None, mem_hold=None,
                       src_fd=None, must_close=False, extra_pids=(),
@@ -5555,6 +8626,13 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
         lib.fr_py_destroy()
     except Exception:
         pass
+    # LAST: every child this process forked is registered in
+    # _childreg. The structures above reaped the ones they owned, so
+    # anything still registered AND still our child is an ORPHAN --
+    # one whose bookkeeping was interrupted between the fork and the
+    # record that owns it. Resolve it here, loudly: an orphan that
+    # outlives the run becomes a zombie the next test inherits.
+    _childreg.reconcile()
 
 
 def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
@@ -5582,12 +8660,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                            spawn_orderer)
     import fcntl as _fcntl
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if c_worker_loop:
         # W-PY26: reactor + C loop needs collection, a dialect-gated
         # W-PY26: reactor + C loop needs collection, a dialect-gated
@@ -5595,24 +8668,24 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         # never reaches here with the flag (map() gates raw modes).
         if not collect or plugin_spec is None:
             raise RuntimeError(
-                "c_worker_loop=True needs collection with a "
-                "dialect-1/2 plugin spec")
+                    "c_worker_loop=True needs collection with a "
+                    "dialect-1/2 plugin spec")
         if sink is not None:
             raise RuntimeError(
-                "c_worker_loop=True takes no sink (no per-batch "
-                "Python hook in the C loop)")
+                    "c_worker_loop=True takes no sink (no per-batch "
+                    "Python hook in the C loop)")
         _require_plugin_loop_symbol()
     if c_spawn_loop:
         # W-PY33: reactor + C spawn loop needs collection, a spawn
         # argv payload, and no sink (the C loop has no sink hook).
         if not collect or spawn_argv is None:
             raise RuntimeError(
-                "c_spawn_loop=True needs collection with a "
-                "spawn argv payload")
+                    "c_spawn_loop=True needs collection with a "
+                    "spawn argv payload")
         if sink is not None:
             raise RuntimeError(
-                "c_spawn_loop=True takes no sink (no per-batch "
-                "Python hook in the C loop)")
+                    "c_spawn_loop=True takes no sink (no per-batch "
+                    "Python hook in the C loop)")
         _require_spawn_loop_symbol()
     # W-REL6-5: lattice position (executor #5: UMA, materialized,
     # reactor, blocking) + this call's behavior flags.
@@ -5629,6 +8702,28 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
         collect=collect, splice=splice, source=source)
+    # C0.7 expected-side baseline. Captured HERE: after the engine exists,
+    # after resume-begin has folded in any sidecar, and BEFORE any fork --
+    # so no worker of THIS run has committed anything yet.
+    #
+    # A per-run LOCAL, not a module global, because a nested map() inside
+    # a stream() shares this engine: a shared global would carry the outer
+    # run's commits into the inner run's comparison (measured: inner run
+    # collected 24 while a global counter read 56).
+    # C0.7: keep the None sentinel. `... or 0` would turn an unreadable
+    # baseline into zero, so a baseline read that fails while the FINAL
+    # read succeeds would compare against the CUMULATIVE count and raise
+    # on a correct run. None disables the certificate instead.
+    _c07_base = _c07_read_committed(lib, 1) if _c07_enabled() else None
+    # C0.7: is another run live in this process? Recorded BEFORE the
+    # increment below, so it refers to the enclosing run, not this one.
+    _c07_nested = _C07_RUN_DEPTH[0] > 0
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
+    # Recorded AFTER our own increment: from here on, any further change
+    # means ANOTHER run started inside our measurement window. Recording
+    # it before would make every run trip its own check.
+    _c07_runs_at_start = _C07_RUNS_STARTED[0]
     engine_live = True
 
     src_fd, must_close = _open_source(source)
@@ -5684,17 +8779,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         if use_drain:
             # Workers signal the drain; the parent keeps the spare
@@ -5739,40 +8824,25 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # without the scanner no EOF can arrive, so waiting
             # workers would hang — fail loud instead.
             nonlocal scan_pid, scan_rc
-            if scan_pid is None or scan_rc is not None:
+            scan_pid, scan_rc, failed = _scanner_watch(
+                scan_pid, scan_rc, lib)
+            if failed is None:
                 return
-            try:
-                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
-            except ChildProcessError:
-                return
-            except OSError:
-                return
-            if wpid != scan_pid:
-                return
-            if os.WIFEXITED(scan_st) and \
-                    os.WEXITSTATUS(scan_st) == 0:
-                scan_rc = 0
-                scan_pid = None
-                return
-            scan_rc = scan_st
-            scan_pid = None
             # D-PORT2/D6: query the abort reason BEFORE our own
             # abort — an abort already in flight makes this an
             # expected emergency exit. Retire it as observed (the
             # code stays honest in scan_rc; the abort's own outcome
             # governs the run) instead of raising a spurious fatal
             # over it.
-            if _helper_death_disposition(
-                    "error", False,
-                    _abort_reason_now(lib)) == "excuse":
+            if _helper_death_excused("error", False, lib):
                 return
             try:
                 lib.fr_py_abort()
             except Exception:
                 pass
             raise RuntimeError(
-                "forkrun: materialized scanner failed (status %r)"
-                % (scan_st,))
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (failed,))
 
         try:
             reactor_run(state, service=_watch_scanner)
@@ -5799,9 +8869,10 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: materialized scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: materialized scanner failed (status %r)"
+                            % (scan_st,))
 
         if use_drain:
             # Every worker write end is closed (all reaped) — drop
@@ -5825,44 +8896,49 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                     _dst = 0
                 drain_status = _dst
                 drain_pid = None
-                if _dst != 0 and not (
-                        os.WIFEXITED(_dst) and
-                        os.WEXITSTATUS(_dst) == 0):
-                    raise RuntimeError(
-                        "forkrun: C drain failed (status %r)"
-                        % (_dst,))
+                _raise_for_drain(_dst, lib)
 
         # Orderer EOF: every worker write end is closed (all workers
         # reaped) — drop the parent's spare so the orderer finishes.
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-                state.ctx["order_w"] = -1
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
 
         _reactor_poison_summary(lib, state, strict_poison)
 
         if not collect:
             return None
+        if not use_orderer and collect and order == "index":
+            # The caller ASKED for ordered output, so a completeness
+            # certificate is the natural expectation -- but the C orderer
+            # is not in play, so this run gets no verdict at all.
+            #
+            # This is the dispatch-point warning round 20 asked for.
+            # _c07_evaluate cannot cover it: it lives INSIDE the
+            # use_orderer branch, so splice and any configuration with
+            # the orderer masked (FORKRUN_NO_V1) never reach it. Their
+            # silence was fail-closed but opaque -- the safety property
+            # held while the operator got nothing to act on.
+            #
+            # Deliberately not an error: ordered delivery still happens
+            # via the fallback path. What is missing is the PROOF, not
+            # the ordering.
+            try:
+                os.write(2, ("forkrun [WARN]: ordered output requested but "
+                             "the C orderer is not in use (mode=%s): no C0.7 "
+                             "completeness certificate for this run; ordered "
+                             "delivery still performed, completeness "
+                             "unverified\n" % (mode,)).encode())
+            except OSError:
+                pass
         if use_orderer:
             records = list(_iter_records(lib, coll_fd, views=_zc))
+            # C0.7 observed side: DATA frames THIS collection delivered.
+            # len(records) is exactly that -- _iter_records delegates to
+            # _split_records_views, which filters non-DATA dispositions,
+            # so everything it yields is a DATA frame. Deliberately NOT
+            # _FRAME_STATS, which is a module global and would charge a
+            # nested run with its parent's frames.
+            _c07_observed = len(records)
             # Already batch_idx-ordered by the C orderer; prepend any
             # sidecar output from previously aborted run(s), then sort
             # (committed ranges are jagged — the union of two ordered
@@ -5871,6 +8947,32 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # publish — W-REL5-C4).
             if resume is not None:
                 records = consume_sidecar(resume, records)
+            # C0.7 expected side: committed DATA frames MINUS this run's
+            # baseline, so a shared engine (a nested map inside a stream)
+            # or a resumed run is not charged for frames committed
+            # elsewhere. Producers are quiescent: the orderer has been
+            # joined and the reactor has returned.
+            _c07_now = (_c07_read_committed(lib, 1)
+                        if _c07_enabled() else None)
+            if _c07_nested or _C07_RUNS_STARTED[0] != _c07_runs_at_start:
+                # Either we are nested (an enclosing run's live workers
+                # commit to the same engine counter) or a run STARTED
+                # inside our measurement window (so someone else's
+                # commits landed in our delta). Either way the delta
+                # cannot be attributed to this run alone. Refuse rather
+                # than certify a number we cannot trust -- and note this
+                # covers the ENCLOSING run too, which is charged for a
+                # nested run's frames just as surely.
+                _c07_no_verdict(
+                    "another forkrun run is live or started inside this "
+                    "run's measurement window; all runs on this engine "
+                    "share one committed-frame counter, so the delta "
+                    "cannot be attributed to a single run")
+            elif _c07_now is not None and _c07_base is not None:
+                _c07_total = int(_c07_now) - int(_c07_base)
+                _COMMITTED_FRAMES["total"] = _c07_total
+                _COMMITTED_FRAMES["nodes"] = 1
+                _c07_evaluate(_c07_total, _c07_observed, lib, mode)
             # Already batch_idx-ordered by the C orderer; no sort.
             return [blob for _, blob in records]
         # Collection is _executor_core.collect_records: drain-vs-direct
@@ -5895,6 +8997,11 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             pass
         raise
     finally:
+        # C0.7: leave the nesting depth on EVERY exit path, including
+        # aborts and exceptions. A leaked depth would make every later
+        # top-level run believe it is nested and silently stop
+        # certifying -- a failure that looks like a pass.
+        _C07_RUN_DEPTH[0] -= 1
         _teardown_reactor(lib, state, out_fds=out_fds,
                           out_hold=out_hold, memfd=memfd,
                           src_fd=src_fd, must_close=must_close,
@@ -6014,17 +9121,19 @@ def _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued):
         if name == "scanner":
             helpers["scan_rc"] = st
             if not ok or not gate_issued:
-                lib.fr_py_abort()
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed "
-                    "(status %r)" % (st,))
+                if not _helper_death_excused("error", False, lib):
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: ingest scanner failed "
+                        "(status %r)" % (st,))
         else:
             helpers["fallow_rc"] = st
             if not ok:
-                lib.fr_py_abort()
-                raise RuntimeError(
-                    "forkrun: ingest reaper failed "
-                    "(status %r)" % (st,))
+                if not _helper_death_excused("error", False, lib):
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: ingest reaper failed "
+                        "(status %r)" % (st,))
 
 
 def _parse_drain_quantum(drain, coll_fd, use_orderer, out_fds, per_worker,
@@ -6083,15 +9192,17 @@ def _parse_drain_quantum(drain, coll_fd, use_orderer, out_fds, per_worker,
             for wid in _seen:
                 while len(per_worker) <= wid:
                     per_worker.append([0, b""])
-                for _bidx, blob in _drain_worker_memfd(
+                for _bidx, _disp, _blob in _drain_worker_memfd_terminal(
                         out_fds[wid], per_worker[wid]):
                     if drain["reassembly"] is None:
-                        drain["pending"].append(blob)
+                        if _disp == _DISP_DATA:
+                            drain["pending"].append(_blob)
                     else:
-                        drain["reassembly"].add(_bidx, blob)
+                        drain["reassembly"].add_disposition(
+                            _bidx, _disp, _blob)
                         for _, ordered in drain["reassembly"].drain():
                             drain["pending"].append(ordered)
-                    got = True
+                got = True
     # Compact the consumed prefix once per quantum, not once per signal
     # (see _consume_sig_wakeups).
     if drain["sig_pos"]:
@@ -6152,10 +9263,11 @@ def _poll_ingest_once(lib, helpers, pipe):
         helpers["ingest_code"] = code
         pipe["ingest_death"] = None
         if kind == "error":
-            lib.fr_py_abort()
-            raise RuntimeError(
-                "forkrun: NUMA ingest failed (status %r)"
-                % (code,))
+            if not _helper_death_excused("error", False, lib):
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: NUMA ingest failed (status %r)"
+                    % (code,))
 
 
 def _pipeline_quiescent(helpers, num_nodes):
@@ -6190,17 +9302,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     strays).
     """
     from ._bindings import v1_available as _v1a
-    from ._reactor import (ORDER_PIPE_SIZE, ReactorState, reactor_loop,
-                           spawn_orderer)
+    from ._reactor import (ORDER_PIPE_SIZE, ExtraWatch, ReactorState,
+                           reactor_loop, spawn_orderer)
     import fcntl as _fcntl
     import select as _select
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -6218,6 +9325,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
         collect=True, splice=splice, source=source)
+    # C0.7: count this run in the nesting depth. This executor does
+    # NOT certify, but its workers commit to the same engine counter,
+    # so a nested run must see depth > 0 and refuse. Omitting it here
+    # is exactly what let a map() inside a stream() certify silently.
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (spill/scan, before assignment below).
@@ -6261,7 +9374,14 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         _flush_stdio()
 
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of 1MB (65536), so a
+        # slow consumer stops the run-ahead from growing without
+        # bound. Best-effort: the capacity is whatever the kernel
+        # grants, and the map/run paths keep the 1MB default.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
 
         use_orderer = (order == "index" and not splice
                        and _v1a(lib).get("orderer"))
@@ -6271,17 +9391,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         trap_r, trap_w = os.pipe()
 
@@ -6316,12 +9426,20 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         # The spare write end stays open for future respawns.
         drain_st = {"alive": True, "status": None}
         results_pump = None
+        results_watch = None
         if use_drain:
             drain_pid, results_r = _fork_drain(
                 signal_r, out_fds, workers, mode="pipe")
             signal_r = None
+            # WO-PY-CDRAIN-REACTOR-WAKEUP-1: the reactor must WAKE when
+            # the results pipe has data. Without this the reactor parks
+            # the full poll_timeout every time the pipe is momentarily
+            # empty, which is what put the C drain 16-19x behind the
+            # legacy drain at scale. The PUMP still owns the read side
+            # (framing, reassembly, EOF); the reactor only selects.
+            results_watch = ExtraWatch(results_r)
             results_pump = _make_results_pump(
-                results_r, order=order, stats=stats)
+                results_r, order=order, stats=stats, watch=results_watch)
 
         def _pump_drain_c():
             # W-PY21-A results-pipe consumer: spare management +
@@ -6445,12 +9563,15 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                         while len(per_worker) <= wid:
                             per_worker.append([0, b""])
                         if wid < len(out_fds):
-                            for _bidx, blob in _drain_worker_memfd(
-                                    out_fds[wid], per_worker[wid]):
+                            for _bidx, _disp, _blob in \
+                                    _drain_worker_memfd_terminal(
+                                        out_fds[wid], per_worker[wid]):
                                 if reassembly is None:
-                                    _pending.append(blob)
+                                    if _disp == _DISP_DATA:
+                                        _pending.append(_blob)
                                 else:
-                                    reassembly.add(_bidx, blob)
+                                    reassembly.add_disposition(
+                                        _bidx, _disp, _blob)
                                     for _, ordered in reassembly.drain():
                                         _pending.append(ordered)
                 if _sp:
@@ -6479,6 +9600,16 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 if reassembly is not None:
                     for _, ordered in reassembly.final_drain():
                         _pending.append(ordered)
+                    # Streaming boundary: records yielded BEFORE this
+                    # point cannot be retracted, so the error is raised
+                    # at detection rather than at the end, and says so.
+                    # A contradictory stream must not complete
+                    # successfully just because the contradiction
+                    # happened to arrive before EOF.
+                    _raise_on_disposition_conflicts(
+                        reassembly,
+                        "stream() [records already yielded before this "
+                        "point are NOT withdrawn]")
                     if _pending:
                         return _pending.popleft()
                 # Safety sweep before giving up (short final writes).
@@ -6507,12 +9638,15 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     for _wid in range(len(per_worker)):
                         if _wid >= len(out_fds):
                             continue
-                        for _bidx, blob in _drain_worker_memfd(
-                                out_fds[_wid], per_worker[_wid]):
+                        for _bidx, _disp, _blob in \
+                                _drain_worker_memfd_terminal(
+                                    out_fds[_wid], per_worker[_wid]):
                             if reassembly is None:
-                                _pending.append(blob)
+                                if _disp == _DISP_DATA:
+                                    _pending.append(_blob)
                             else:
-                                reassembly.add(_bidx, blob)
+                                reassembly.add_disposition(
+                                    _bidx, _disp, _blob)
                                 for _, ordered in reassembly.drain():
                                     _pending.append(ordered)
                     if _pending:
@@ -6537,46 +9671,33 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             # without the scanner no EOF can arrive, so waiting
             # workers would hang — fail loud instead.
             nonlocal scan_pid, scan_rc
-            if scan_pid is None or scan_rc is not None:
+            scan_pid, scan_rc, failed = _scanner_watch(
+                scan_pid, scan_rc, lib)
+            if failed is None:
                 return
-            try:
-                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
-            except ChildProcessError:
-                return
-            except OSError:
-                return
-            if wpid != scan_pid:
-                return
-            scan_pid = None
-            if os.WIFEXITED(scan_st) and \
-                    os.WEXITSTATUS(scan_st) == 0:
-                scan_rc = 0
-                return
-            scan_rc = scan_st
             # D-PORT2/D6: query the abort reason BEFORE our own
             # abort — an abort already in flight makes this an
             # expected emergency exit. Retire it as observed (the
             # code stays honest in scan_rc; the abort's own outcome
             # governs the run) instead of raising a spurious fatal
             # over it.
-            if _helper_death_disposition(
-                    "error", False,
-                    _abort_reason_now(lib)) == "excuse":
+            if _helper_death_excused("error", False, lib):
                 return
             try:
                 lib.fr_py_abort()
             except Exception:
                 pass
             raise RuntimeError(
-                "forkrun: materialized scanner failed (status %r)"
-                % (scan_st,))
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (failed,))
 
         try:
             try:
                 yield from reactor_loop(
                     state,
                     drain_gen=_pump_drain_c if use_drain else _pump_drain,
-                    service=_watch_scanner)
+                    service=_watch_scanner,
+                    extra_watch=[results_watch] if results_watch else None)
             finally:
                 pass
         except BaseException as _exc:
@@ -6623,9 +9744,10 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: materialized scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: materialized scanner failed (status %r)"
+                            % (scan_st,))
         else:
             scan_pid = None
 
@@ -6642,34 +9764,10 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     drain_st["alive"] = False
                     drain_st["status"] = _dst
             drain_status = drain_st["status"]
-            if drain_status is not None and drain_status != 0 and not (
-                    os.WIFEXITED(drain_status) and
-                    os.WEXITSTATUS(drain_status) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (drain_status,))
+            _raise_for_drain(drain_status, lib)
 
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
         if stats is not None and reassembly is not None \
                 and not use_drain:
             stats["reassembly_max"] = reassembly.max_size
@@ -6679,6 +9777,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         # abort handler above must not fire on the way out.
         _stream_ok = True
     finally:
+        # C0.7: leave the nesting depth on every exit path.
+        _C07_RUN_DEPTH[0] -= 1
         spare_signal_w = _close_spare_fd(state, spare_signal_w)
         _teardown_reactor(lib, state, signal_r=signal_r,
                           out_fds=out_fds, out_hold=out_hold,
@@ -6718,12 +9818,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                            spawn_orderer)
     import fcntl as _fcntl
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     # W-REL6-5: lattice position (executor #7: UMA, streaming,
     # reactor, blocking) + this call's behavior flags.
     _spec = ExecutorSpec(topology="uma", ingest="streaming",
@@ -6738,6 +9833,12 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
         collect=collect, splice=splice, source=source)
+    # C0.7: count this run in the nesting depth. This executor does
+    # NOT certify, but its workers commit to the same engine counter,
+    # so a nested run must see depth > 0 and refuse. Omitting it here
+    # is exactly what let a map() inside a stream() certify silently.
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
@@ -6791,17 +9892,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         trap_r, trap_w = os.pipe()
 
@@ -6816,7 +9907,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         # Pre-fork default: the finally block reaps ingest_pid even when
         # the run aborts before the ingest child is forked.
         ingest_pid = None
-        fallow_pid = os.fork()
+        fallow_pid = _childreg.fork_child('fallow')
         if fallow_pid == 0:
             try:
                 scrub_fds(engine_fds | {fallow_r, memfd})
@@ -6890,21 +9981,16 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
 
         def _maybe_fork_workers():
             nonlocal stall_forked
-            if workers_forked:
+            action, stalled = _fork_timing(
+                workers_forked, gate_issued, t_start, lib)
+            if action == _FORK_HAVE:
                 return True
-            try:
-                ready = lib.fr_py_data_ready()
-            except Exception:
-                ready = 0
-            if ready > 0:
-                _fork_workers_now()
-                return True
-            if not gate_issued and (
-                    _time.monotonic() - t_start) >= STALL_FORK_AFTER:
+            if action == _FORK_WAIT:
+                return False
+            if stalled:
                 stall_forked = True
-                _fork_workers_now()
-                return True
-            return False
+            _fork_workers_now()
+            return True
 
         # W-PYINGESTCHILD: the spill runs in a FORKED CHILD, so the
         # parent does nothing but run the reactor.
@@ -6932,7 +10018,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         # any more.
         src_fd, must_close = _prepare_ingest_source(src_fd, must_close)
         ingest_death_r, ingest_death_w = os.pipe()
-        ingest_pid = os.fork()
+        ingest_pid = _childreg.fork_child('ingest')
         if ingest_pid == 0:
             # Child — never returns.
             rc = 0
@@ -6989,9 +10075,10 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             ingest_death_r = -1
             if _st is not None and not (os.WIFEXITED(_st)
                                         and os.WEXITSTATUS(_st) == 0):
-                lib.fr_py_abort()
-                raise RuntimeError(
-                    "forkrun: ingest child failed (status %r)" % (_st,))
+                if not _helper_death_excused("error", False, lib):
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: ingest child failed (status %r)" % (_st,))
             # Recovered from the memfd rather than accumulated in the
             # parent: with the copy in a child, the parent no longer
             # sees every write.
@@ -7058,13 +10145,14 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                             signal_w = signal_r = None
                         break
                     raise RuntimeError(
-                        "forkrun: ingest scanner published no data "
-                        "for %d spilled bytes" % total_written)
+                            "forkrun: ingest scanner published no data "
+                            "for %d spilled bytes" % total_written)
                 if helpers["scan_kind"] == "error":
-                    lib.fr_py_abort()
-                    raise RuntimeError(
-                        "forkrun: ingest scanner failed (status %r)"
-                        % (helpers["scan_code"],))
+                    if not _helper_death_excused("error", False, lib):
+                        lib.fr_py_abort()
+                        raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (helpers["scan_code"],))
                 _time.sleep(0.05)
 
         if use_drain and workers_forked and drain_pid is None:
@@ -7125,36 +10213,15 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             if _dst is None:
                 _dst = 0
             drain_pid = None
-            if _dst != 0 and not (
-                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)" % (_dst,))
+            _raise_for_drain(_dst, lib)
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
 
         if helpers["scan_kind"] == "error":
-            raise RuntimeError(
-                "forkrun: ingest scanner failed (status %r)"
-                % (helpers["scan_code"],))
+            if not _helper_death_excused("error", False, lib):
+                raise RuntimeError(
+                        "forkrun: ingest scanner failed (status %r)"
+                        % (helpers["scan_code"],))
         if helpers["scan_kind"] is None:
             # Never observed via the death pipe (already reaped by
             # teardown after healthy workers, or still alive):
@@ -7163,21 +10230,13 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
-            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
-            if fallow_st is not None and not (
-                    os.WIFEXITED(fallow_st) and
-                    os.WEXITSTATUS(fallow_st) == 0):
-                try:
-                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
-                             b"abnormally; ingress may not be fully "
-                             b"reclaimed.\n")
-                except OSError:
-                    pass
+            _reap_fallow(fallow_pid)
 
         _reactor_poison_summary(lib, state, strict_poison)
 
@@ -7214,6 +10273,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             pass
         raise
     finally:
+        # C0.7: leave the nesting depth on every exit path.
+        _C07_RUN_DEPTH[0] -= 1
         # The ingest death pipe is ours on every exit path, not just
         # the joined one: a failure before the join would leak both
         # ends. The child's own copy was closed inside the child.
@@ -7270,19 +10331,14 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     the parent reads incrementally (never signals/memfds itself).
     """
     from ._bindings import v1_available as _v1a
-    from ._reactor import (ORDER_PIPE_SIZE, ReactorState,
+    from ._reactor import (ORDER_PIPE_SIZE, ExtraWatch, ReactorState,
                            check_scanner_death,
                            fork_scanner_with_death_pipe,
                            reactor_loop, spawn_orderer)
     import fcntl as _fcntl
     import select as _select
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    _require_v0_envelope(mode, nodes)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -7300,6 +10356,12 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
         collect=True, splice=splice, source=source)
+    # C0.7: count this run in the nesting depth. This executor does
+    # NOT certify, but its workers commit to the same engine counter,
+    # so a nested run must see depth > 0 and refuse. Omitting it here
+    # is exactly what let a map() inside a stream() certify silently.
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (before assignment below).
@@ -7337,7 +10399,14 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         except OSError:
             pass
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of 1MB (65536), so a
+        # slow consumer stops the run-ahead from growing without
+        # bound. Best-effort: the capacity is whatever the kernel
+        # grants, and the map/run paths keep the 1MB default.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
         fallow_r, fallow_w = os.pipe()
 
         use_orderer = (order == "index" and not splice
@@ -7347,23 +10416,13 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(engine_fds, out_fds)
 
         trap_r, trap_w = os.pipe()
 
         _flush_stdio()
 
-        fallow_pid = os.fork()
+        fallow_pid = _childreg.fork_child('fallow')
         if fallow_pid == 0:
             try:
                 scrub_fds(engine_fds | {fallow_r, memfd})
@@ -7396,6 +10455,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         # at first worker fork like the simple ingest path — the
         # legacy `drain` dict below stays for c_drain=False).
         cdrain = {"pid": None, "results_r": None, "pump": None,
+                  "watch": None,
                   "status": None, "alive": True}
 
         def _fork_cdrain_if_needed():
@@ -7404,8 +10464,13 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 return
             cdrain["pid"], cdrain["results_r"] = _fork_drain(
                 signal_r, out_fds, workers, mode="pipe")
+            # WO-PY-CDRAIN-REACTOR-WAKEUP-1: reactor wakeup source for
+            # the C drain's results pipe (see the streaming-reactor
+            # site for the rationale). The PUMP owns the read side.
+            cdrain["watch"] = ExtraWatch(cdrain["results_r"])
             cdrain["pump"] = _make_results_pump(
-                cdrain["results_r"], order=order, stats=stats)
+                cdrain["results_r"], order=order, stats=stats,
+                watch=cdrain["watch"])
             signal_r = None
             cdrain_pid = cdrain["pid"]
             cresults_r = cdrain["results_r"]
@@ -7432,22 +10497,16 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 gate_issued=gate["issued"])
 
         def _maybe_fork_workers():
-            if fstate["workers"]:
+            action, stalled = _fork_timing(
+                fstate["workers"], gate["issued"], fstate["t_start"], lib)
+            if action == _FORK_HAVE:
                 return True
-            try:
-                ready = lib.fr_py_data_ready()
-            except Exception:
-                ready = 0
-            if ready > 0:
-                _fork_workers_now()
-                return True
-            if not gate["issued"] and (
-                    _time.monotonic() - fstate["t_start"]
-                    ) >= STALL_FORK_AFTER:
+            if action == _FORK_WAIT:
+                return False
+            if stalled:
                 fstate["stall"] = True
-                _fork_workers_now()
-                return True
-            return False
+            _fork_workers_now()
+            return True
 
         src_fd, must_close = _prepare_ingest_source(src_fd, must_close)
         try:
@@ -7484,8 +10543,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                             fstate["pump_done"] = True
                             return True
                         raise RuntimeError(
-                            "forkrun: ingest scanner published no "
-                            "data for %d spilled bytes" % spill["off"])
+                                "forkrun: ingest scanner published no "
+                                "data for %d spilled bytes" % spill["off"])
                     else:
                         return False
                 else:
@@ -7501,7 +10560,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     return False
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
+                            "failed reading source: %s" % (exc,))
                 if not chunk:
                     if fstate["stall"] and (
                             _time.monotonic() - fstate["fork_at"]
@@ -7524,7 +10583,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                         n = os.pwrite(memfd, view, spill["off"])
                     except OSError as exc:
                         raise RuntimeError(
-                            "failed writing ingress: %s" % (exc,))
+                                "failed writing ingress: %s" % (exc,))
                     view = view[n:]
                     spill["off"] += n
                 _maybe_fork_workers()
@@ -7613,6 +10672,10 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 if drain["reassembly"] is not None:
                     for _, ordered in drain["reassembly"].final_drain():
                         drain["pending"].append(ordered)
+                    _raise_on_disposition_conflicts(
+                        drain["reassembly"],
+                        "stream() [records already yielded before this "
+                        "point are NOT withdrawn]")
                     if drain["pending"]:
                         return drain["pending"].popleft()
                 if use_orderer:
@@ -7640,12 +10703,15 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     for _wid in range(len(per_worker)):
                         if _wid >= len(out_fds):
                             continue
-                        for _bidx, blob in _drain_worker_memfd(
-                                out_fds[_wid], per_worker[_wid]):
+                        for _bidx, _disp, _blob in \
+                                _drain_worker_memfd_terminal(
+                                    out_fds[_wid], per_worker[_wid]):
                             if drain["reassembly"] is None:
-                                drain["pending"].append(blob)
+                                if _disp == _DISP_DATA:
+                                    drain["pending"].append(_blob)
                             else:
-                                drain["reassembly"].add(_bidx, blob)
+                                drain["reassembly"].add_disposition(
+                                    _bidx, _disp, _blob)
                                 for _, ordered in drain[
                                         "reassembly"].drain():
                                     drain["pending"].append(ordered)
@@ -7655,7 +10721,9 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             return None
 
         try:
-            yield from reactor_loop(state, drain_gen=_pump_drain)
+            yield from reactor_loop(
+                state, drain_gen=_pump_drain,
+                extra_watch=[cdrain["watch"]] if cdrain["watch"] else None)
         except BaseException as _exc:
             # W-PY22 abort choreography on abnormal generator exit
             # (consumer abandon/GeneratorExit, worker-crash
@@ -7695,12 +10763,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     cdrain["alive"] = False
                     cdrain["status"] = _dst
             cdrain_status = cdrain["status"]
-            if cdrain_status is not None and cdrain_status != 0 and not (
-                    os.WIFEXITED(cdrain_status) and
-                    os.WEXITSTATUS(cdrain_status) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (cdrain_status,))
+            _raise_for_drain(cdrain_status, lib)
 
         # Reaper EOF (same rule as the locked ingest path): drop the
         # parent's spare fallow write end now that no respawn can
@@ -7713,57 +10776,33 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             fallow_w = None
             state.ctx["fallow_w"] = -1
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
         if helpers["scan_kind"] == "error":
-            raise RuntimeError(
-                "forkrun: ingest scanner failed (status %r)"
-                % (helpers["scan_code"],))
+            if not _helper_death_excused("error", False, lib):
+                raise RuntimeError(
+                        "forkrun: ingest scanner failed (status %r)"
+                        % (helpers["scan_code"],))
         if helpers["scan_kind"] is None:
             # W-REL5-B4: bounded (None keeps the leniency below).
             scan_st = _join_helper_bounded(scan_pid, "scanner")
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
-                raise RuntimeError(
-                    "forkrun: ingest scanner failed (status %r)"
-                    % (scan_st,))
+                if not _helper_death_excused("error", False, lib):
+                    raise RuntimeError(
+                            "forkrun: ingest scanner failed (status %r)"
+                            % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
-            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
-            if fallow_st is not None and not (
-                    os.WIFEXITED(fallow_st) and
-                    os.WEXITSTATUS(fallow_st) == 0):
-                try:
-                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
-                             b"abnormally; ingress may not be fully "
-                             b"reclaimed.\n")
-                except OSError:
-                    pass
+            _reap_fallow(fallow_pid)
         if stats is not None and drain["reassembly"] is not None \
                 and not use_drain:
             stats["reassembly_max"] = drain["reassembly"].max_size
 
         _reactor_poison_summary(lib, state, strict_poison)
     finally:
+        # C0.7: leave the nesting depth on every exit path.
+        _C07_RUN_DEPTH[0] -= 1
         spare_signal_w = _close_spare_fd(state, spare_signal_w)
         _teardown_reactor(lib, state, signal_r=signal_r,
                           out_fds=out_fds, out_hold=out_hold,
@@ -7891,8 +10930,8 @@ def _execute_sweep_standalone(payload, combinations, workers, on_error,
                 combo_idx = int(bytes(batch.data).strip())
             except ValueError:
                 raise RuntimeError(
-                    "forkrun: sweep index batch unparseable: %r"
-                    % (bytes(batch.data)[:32],))
+                        "forkrun: sweep index batch unparseable: %r"
+                        % (bytes(batch.data)[:32],))
             batch.metadata = combinations[combo_idx]
             return payload(batch)
 
@@ -7945,7 +10984,7 @@ def _execute_sweep_with_source(payload, source, combinations,
                     chunk = os.read(src_fd, _CHUNK)
                 except OSError as exc:
                     raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
+                            "failed reading source: %s" % (exc,))
                 if not chunk:
                     break
                 chunks.append(chunk)
@@ -8059,7 +11098,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     _flush_stdio()
 
     fallow_r, fallow_w = os.pipe()
-    fallow_pid = os.fork()
+    fallow_pid = _childreg.fork_child('fallow')
     if fallow_pid == 0:
         try:
             scrub_fds(engine_fds | {fallow_r, memfd})
@@ -8076,7 +11115,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     indexer_deaths = []
     for node in range(num_nodes):
         death_r, death_w = os.pipe()
-        pid = os.fork()
+        pid = _childreg.fork_child('worker')
         if pid == 0:
             try:
                 os.close(death_r)
@@ -8120,7 +11159,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
     scanner_deaths = []
     for node in range(num_nodes):
         death_r, death_w = os.pipe()
-        pid = os.fork()
+        pid = _childreg.fork_child('worker')
         if pid == 0:
             try:
                 os.close(death_r)
@@ -8142,7 +11181,7 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
         scanner_deaths.append(death_r)
 
     ingest_death_r, ingest_death_w = os.pipe()
-    ingest_pid = os.fork()
+    ingest_pid = _childreg.fork_child('ingest')
     if ingest_pid == 0:
         try:
             os.close(ingest_death_r)
@@ -8253,10 +11292,22 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
             os.write(2, ("\n".join(parts) + "\n").encode())
         except OSError:
             pass
+    # C0.7: the published-slot total, read HERE because fr_py_diag_node
+    # only answers while the ring state is live -- a probe issued after
+    # map() returns reads zeros. Returning it lets the caller compare it
+    # against the records it subsequently collects, which it cannot do
+    # itself because collection happens after this function returns.
+    expected_total = None
+    if any(w >= 0 for (_n, w, _r, _f, _c, _t, _te) in rows):
+        expected_total = sum(w for (_n, w, _r, _f, _c, _t, _te) in rows
+                             if w >= 0)
+    _PUBLISHED_SLOTS["total"] = expected_total
+    _PUBLISHED_SLOTS["nodes"] = num_nodes
+
     bad = [(node, w, r) for (node, w, r, _f, _c, _t, te) in rows
            if w >= 0 and r >= 0 and w > r and te != 1]
     if not bad:
-        return
+        return expected_total
     detail = ", ".join(
         "node %d (write_idx=%d != read_idx=%d)" % (n, w, r)
         for (n, w, r) in bad)
@@ -8279,12 +11330,219 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
                          ).encode())
         except OSError:
             pass
+        return expected_total
+    raise RuntimeError(
+            "forkrun: NUMA drain incomplete (%s): %d/%d node(s) "
+            "hold unclaimed published batches (%s) — refusing silent "
+            "partial completion" % (label, len(bad), num_nodes,
+                                    detail))
+
+
+def _c07_envelope(lib, mode, *, use_complete, has_emit,
+                  has_ack_direct):
+    """C0.7: decide whether this execution is INSIDE the counted envelope.
+
+    Fail-closed by construction. Every branch here corresponds to a path
+    that writes DATA frames without incrementing the pending counter, or
+    commits without running the shim-side flush. A comment would not
+    help: the risk is a supported fallback silently bypassing the
+    expected side and the certificate still reporting clean.
+
+    Returns (covered: bool, reason: str).
+
+      * mode == "splice" -- fr_py_worker_splice_loop frames DATA inline
+        and streams it with sendfile, bypassing fr_py_emit,
+        fr_py_emit_record_buf AND fr_py_emit_record. Only its
+        sendfile-UNAVAILABLE fallback is counted, so the fast path and
+        the fallback would disagree about accounting.
+      * no C emitter -- the Python `_write_all` fallback in _worker.py
+        writes the frame from Python with no C involvement at all, so a
+        C counter cannot see it (reached under FORKRUN_NO_V1=1).
+      * no fr_py_ack_direct -- _ack() falls back to fr_py_ack, which
+        routes to ring_ack_main and skips the shim-side commit flush.
+        The absence of the symbol DETERMINES that the fallback happens,
+        so this is decidable up front rather than needing to observe a
+        child process.
+    """
+    if mode == "splice":
+        return False, ("splice mode frames DATA inline via sendfile and "
+                       "bypasses all counted emitters")
+    if not (use_complete or has_emit):
+        return False, ("python _write_all fallback emits frames outside "
+                       "the C counter (no fr_py_complete/fr_py_emit)")
+    if not has_ack_direct:
+        return False, ("no fr_py_ack_direct: _ack() falls back to "
+                       "fr_py_ack/ring_ack_main, skipping the commit flush")
+    return True, ""
+
+
+def _c07_enabled():
+    """Read the SAME switch the shim reads.
+
+    Both halves must agree or the feature becomes a false-pass factory:
+    accounting off with the certificate still live compares a counter
+    that reads 0 against real collected frames, so every correct run
+    fails; accounting on with the certificate silently skipped measures
+    nothing while reporting success.
+
+    The shim caches this per process on first use. So must this, or a
+    run would compare against a counter whose accounting state was
+    decided at a different moment.
+    """
+    v = os.environ.get("FORKRUN_C07_COUNT")
+    return not (v and v[0] and v == "0")
+
+
+def _c07_no_verdict(reason):
+    """Emit NO certificate verdict, and say why.
+
+    The distinction from _c07_evaluate matters: that one refuses an
+    uncovered ENVELOPE, this one refuses an untrustworthy NUMBER. Both
+    produce no pass. Neither is an error -- ordered delivery still
+    happened; only the proof is unavailable.
+    """
+    try:
+        os.write(2, ("forkrun [WARN]: C0.7 completeness certificate not "
+                     "evaluated: %s\n" % (reason,)).encode())
+    except OSError:
+        pass
+
+
+def _c07_evaluate(expected, observed, lib, mode):
+    """Gate the comparison on the envelope, then run the certificate.
+
+    Fail-closed: an uncovered execution emits NO verdict. It never emits
+    a passing one. The warning names the specific path, because a bare
+    "certificate unavailable" is not something an operator can act on.
+
+    The capabilities come from v1_available(), NOT from symbol
+    existence. Those differ under FORKRUN_NO_V1: the symbol is still
+    present but masked, so a worker will take the Python _write_all
+    fallback and emit frames the C counter never sees. Asking "does
+    lib.fr_py_emit exist" would have reported the envelope COVERED on
+    exactly the configuration that breaks it.
+    """
+    from ._bindings import v1_available as _v1a
+    _v1 = _v1a()
+    covered, reason = _c07_envelope(
+        lib, mode,
+        use_complete=bool(_v1.get("complete", False)),
+        has_emit=bool(_v1.get("emit", False)),
+        has_ack_direct=bool(_v1.get("ack_direct", False)))
+    if not covered:
+        try:
+            os.write(2, ("forkrun [WARN]: C0.7 completeness certificate "
+                         "not evaluated: execution envelope not covered "
+                         "(mode=%s): %s\n" % (mode, reason)).encode())
+        except OSError:
+            pass
+        return
+    _ordered_completeness_certificate(expected, observed, label="map/run")
+
+
+def _c07_read_committed(lib, num_nodes):
+    """Sum the committed DATA frames across nodes, or None.
+
+    None means "not readable" -- an older substrate without the symbol.
+    That must NEVER be read as zero: a zero would look like "the engine
+    committed nothing", which is the one value that would make the
+    certificate fire on every run. Callers treat None as "no verdict".
+
+    The load itself is RELAXED and that is correct here, because the
+    caller has already joined the workers: quiescence is a lifecycle
+    fact, not something a stronger memory order can express. Reading
+    while a worker were mid-batch would undercount, not double-count.
+    """
+    import ctypes as _ct
+    fn = getattr(lib, "fr_py_committed_data_frames", None)
+    if fn is None:
+        return None
+    total = 0
+    nodes = max(int(num_nodes or 1), 1)
+    for node in range(nodes):
+        out = _ct.c_uint64(0)
+        try:
+            rc = fn(node, _ct.byref(out))
+        except Exception:
+            return None
+        if rc != 0:
+            # A node the engine does not have is not a shortfall; it
+            # means the snapshot is unavailable, so decline the verdict.
+            return None
+        total += int(out.value)
+    return total
+
+
+def _ordered_completeness_certificate(expected, actual, *, label,
+                                      covered=True, unordered=False,
+                                      emit_failed=False):
+    """C0.7: prove every COMMITTED DATA frame reached the ordered output.
+
+    The claim/drain audit can only prove "every published slot was
+    CLAIMED". It cannot prove every claimed record reached the orderer's
+    output: a record can be claimed, framed, written into the order pipe
+    and lost there. Collection deliberately does not sort when the C
+    orderer ran, so there is no second line of defence — `map(...,
+    nodes="@2", order="index")` had no completeness gate at all.
+
+        expected = committed DATA frames, counted in the shim at the
+                  COMMIT point (not at write time -- an uncommitted
+                  frame is rolled back and retried), summed over
+                  nodes, MINUS this run's baseline
+        observed = DATA frames the parent actually collected
+        certificate = (observed == expected)
+
+    THE OLD FORMULATION WAS FALSE, and it is worth recording why: it
+    compared `sum(write_idx)` against collected records. write_idx
+    counts SLOTS, not DATA frames, and the EOF sentinel occupies a slot
+    while yielding no record -- so every multi-node NUMA run was short
+    by exactly one. Asserting that equality would have made a
+    completeness certificate fire on correct runs, which is worse than
+    having none. The committed-DATA invariant excludes the sentinel by
+    construction rather than by calibration.
+
+    Counting rather than inspecting the orderer's heap catches the case
+    a heap inspection CANNOT: a missing FINAL packet leaves an empty
+    heap, so "drained cleanly and heap empty" is not a certificate.
+
+    SCOPE, stated precisely because the code is more limited than the
+    word "certificate" suggests:
+
+      * Only the C-orderer path (order="index" with use_orderer) is
+        certified at all. Splice, and any configuration where the C
+        orderer is unavailable (FORKRUN_NO_V1 masks it), take a
+        different collection path and produce NO verdict at all -- not a
+        pass, and not a warning from here.
+      * Within that path, the envelope (_c07_evaluate) refuses when the
+        worker used an emitter or ack route the counter cannot see.
+
+    unordered mode has no per-slot correspondence, and an emit failure
+    legitimately produces fewer records but already pulls the fire
+    alarm, so it is not double-reported here.
+    """
+    if expected is None:
+        return                      # diag unavailable: disarmed, not failing
+    if unordered or emit_failed:
+        return
+    if int(actual) == int(expected):
+        return
+    where = "ordered output lost published records"
+    detail = ("collected %d record(s) but the engine published %d "
+              "(short by %d)" % (actual, expected, expected - actual))
+    if not covered:
+        # Same disposition as the drain audit: an under-covered pool
+        # cannot claim nodes it never worked, and benchmark sweeps probe
+        # this shape deliberately. Observable, not fatal.
+        try:
+            os.write(2, ("forkrun [WARN]: %s (%s): %s — pool under-covers "
+                         "the topology; partial output is expected here\n"
+                         % (where, label, detail)).encode())
+        except OSError:
+            pass
         return
     raise RuntimeError(
-        "forkrun: NUMA drain incomplete (%s): %d/%d node(s) "
-        "hold unclaimed published batches (%s) — refusing silent "
-        "partial completion" % (label, len(bad), num_nodes,
-                                detail))
+            "forkrun: %s (%s): %s — refusing silent partial completion"
+            % (where, label, detail))
 
 
 def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
@@ -8311,9 +11569,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                            reactor_run, spawn_orderer)
     import fcntl as _fcntl
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    _require_v0_mode(mode)
     # W-REL6-5: lattice position (executor #9: NUMA, reactor-implied,
     # blocking) + this call's behavior flags.
     _spec = ExecutorSpec(topology="numa", ingest="materialized",
@@ -8324,6 +11580,18 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
     lib, engine_fds = _init_engine_and_fds(
         lines=lines, bytes_=bytes_, spec=_spec,
         num_nodes=num_nodes, numa_map=numa_map)
+
+    # C0.7 expected-side baseline -- see the UMA reactor executor for
+    # why this is a local captured before any fork rather than a global.
+    # C0.7: keep the None sentinel -- see the UMA reactor executor.
+    _c07_base = _c07_read_committed(lib, num_nodes) if _c07_enabled() else None
+    _c07_nested = _C07_RUN_DEPTH[0] > 0
+    _C07_RUN_DEPTH[0] += 1
+    _C07_RUNS_STARTED[0] += 1
+    # Recorded AFTER our own increment: from here on, any further change
+    # means ANOTHER run started inside our measurement window. Recording
+    # it before would make every run trip its own check.
+    _c07_runs_at_start = _C07_RUNS_STARTED[0]
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -8363,18 +11631,9 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        unordered=False, numa=True,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(
+                engine_fds, out_fds,
+                unordered=False, numa=True)
 
         if use_drain:
             # Workers signal the drain; the parent keeps the spare
@@ -8579,8 +11838,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 landed = 0
             if landed != 0:
                 raise RuntimeError(
-                    "forkrun: NUMA ingest landed %d bytes with no "
-                    "published batches" % landed)
+                        "forkrun: NUMA ingest landed %d bytes with no "
+                        "published batches" % landed)
             for _fd in (fallow_w, order_w):
                 if _fd is not None:
                     try:
@@ -8618,8 +11877,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
 
         _reactor_failure_check(state, workers, on_error)
 
-        _numa_drain_audit(lib, num_nodes, forked, wid_node,
-                          workers, label="map/run")
+        _expected_published = _numa_drain_audit(
+            lib, num_nodes, forked, wid_node, workers, label="map/run")
 
         if fallow_w is not None:
             try:
@@ -8644,29 +11903,9 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             if _dst is None:
                 _dst = 0
             drain_pid = None
-            if _dst != 0 and not (
-                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)" % (_dst,))
+            _raise_for_drain(_dst, lib)
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded.
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
 
         # Helper joins: ingest strict-clean; indexers/scanners
         # strict unless already observed (proof-based leniency only
@@ -8674,15 +11913,15 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         # All bounded (W-REL5-B4); None keeps the leniency below.
         if helpers["ingest_kind"] == "error":
             raise RuntimeError(
-                "forkrun: NUMA ingest failed (status %r)"
-                % (helpers["ingest_code"],))
+                    "forkrun: NUMA ingest failed (status %r)"
+                    % (helpers["ingest_code"],))
         if helpers["ingest_kind"] is None:
             _st = _join_helper_bounded(pipe["ingest_pid"],
                                        "numa-ingest")
             if _st is not None and not (
                     os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
                 raise RuntimeError(
-                    "forkrun: NUMA ingest failed (status %r)" % (_st,))
+                        "forkrun: NUMA ingest failed (status %r)" % (_st,))
         for key, pids in (("index", pipe["indexer_pids"]),
                           ("scan", pipe["scanner_pids"])):
             for node in range(num_nodes):
@@ -8696,8 +11935,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     kind, code = helpers[key][node]
                     if kind == "error":
                         raise RuntimeError(
-                            "forkrun: NUMA %s %d failed (status %r)"
-                            % (key, node, code))
+                                "forkrun: NUMA %s %d failed (status %r)"
+                                % (key, node, code))
                     continue
                 _st = _join_helper_bounded(
                     pids[node], "numa-%s-%d" % (key, node))
@@ -8714,8 +11953,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                             "excused", set()).add((key, node))
                         continue
                     raise RuntimeError(
-                        "forkrun: NUMA %s %d failed (status %r)"
-                        % (key, node, _st))
+                            "forkrun: NUMA %s %d failed (status %r)"
+                            % (key, node, _st))
         if helpers["fallow_rc"] is None:
             _fst = _join_helper_bounded(pipe["fallow_pid"],
                                         "numa-fallow")
@@ -8733,7 +11972,54 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if not collect:
             return None
         if use_orderer:
-            return [blob for _, blob in _iter_records(lib, coll_fd, views=_zc)]
+            # C0.7 HISTORY, kept because each failure invalidated a
+            # different scoping strategy and none of the three is
+            # obvious in hindsight. The sweep shows committed ==
+            # collected on all 24 line configurations across UMA, @2 and
+            # @4.
+            #
+            # A first wiring attempt failed in three distinct ways, each
+            # of which invalidated a different attempt to scope it:
+            #
+            #  - _FRAME_STATS is a module global, so it accumulated across
+            #    map() calls in one process ("collected 282, published
+            #    26"). Fixed by resetting per collection.
+            #  - a RESUME merges sidecar records committed by EARLIER
+            #    runs, which were counted then, so including them gave
+            #    "collected 40, published 33" on a correct resume. Fixed
+            #    by snapshotting the observed count before the merge.
+            #  - a NESTED map() inside a stream() SHARES the engine, so
+            #    the committed counter is cumulative across both runs.
+            #    The inner run collected 24 while the counter read 56.
+            #    No amount of resetting the observed side fixes this: the
+            #    EXPECTED side needed a baseline captured before this
+            #    run's workers commit, compared as a delta. That is what
+            #    _c07_base does, below.
+            #
+            # That baseline is a real design decision (where to capture
+            # it, how it interacts with resume and with nested runs), so
+            # it is not being guessed at here. The count, the accessor,
+            # the envelope and both proof tests stand.
+            #
+            # SOLVED by scoping the EXPECTED side: _c07_base was captured
+            # at engine init, before any fork, so the comparison is this
+            # run's commits minus this run's baseline. See the UMA reactor
+            # executor for why the baseline is a per-run local.
+            _ordered = [blob for _, blob in _iter_records(lib, coll_fd,
+                                                          views=_zc)]
+            _c07_now = (_c07_read_committed(lib, num_nodes)
+                        if _c07_enabled() else None)
+            if _c07_nested:
+                _c07_no_verdict(
+                    "nested inside another forkrun run, whose live workers "
+                    "commit to the same engine counter; the delta cannot be "
+                    "attributed to this run alone")
+            elif _c07_now is not None and _c07_base is not None:
+                _c07_total = int(_c07_now) - int(_c07_base)
+                _COMMITTED_FRAMES["total"] = _c07_total
+                _COMMITTED_FRAMES["nodes"] = int(num_nodes or 1)
+                _c07_evaluate(_c07_total, len(_ordered), lib, mode)
+            return _ordered
         # Collection is _executor_core.collect_records: drain-vs-direct
         # and order-index-vs-none are mechanics, not lifecycle shape.
         return collect_records(use_drain=use_drain,
@@ -8746,6 +12032,11 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             pass
         raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
+        # C0.7: leave the nesting depth on EVERY exit path, including
+        # aborts and exceptions. A leaked depth would make every later
+        # top-level run believe it is nested and silently stop
+        # certifying -- a failure that looks like a pass.
+        _C07_RUN_DEPTH[0] -= 1
         extra = []
         if pipe is not None:
             extra = ([pipe["fallow_pid"], pipe["ingest_pid"]]
@@ -8804,15 +12095,13 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
     """
     from ._bindings import v1_available as _v1a
     from ._numa import wid_to_node
-    from ._reactor import (ORDER_PIPE_SIZE, ReactorState,
+    from ._reactor import (ORDER_PIPE_SIZE, ExtraWatch, ReactorState,
                            check_scanner_death, reactor_loop,
                            spawn_orderer)
     import fcntl as _fcntl
     import select as _select
 
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    _require_v0_mode(mode)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -8856,7 +12145,14 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         except OSError:
             pass
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w, _ = make_pipe()
+        # WO-PY-STREAM-BACKPRESSURE-1: the stream notification pipe
+        # is the producer's run-ahead window -- a worker blocked
+        # writing its completion notification cannot claim its next
+        # batch. 4KB (256 notifications) instead of 1MB (65536), so a
+        # slow consumer stops the run-ahead from growing without
+        # bound. Best-effort: the capacity is whatever the kernel
+        # grants, and the map/run paths keep the 1MB default.
+        signal_r, signal_w, _ = make_stream_notify_pipe()
 
         use_orderer = (order == "index" and not splice
                        and _v1a(lib).get("orderer"))
@@ -8865,18 +12161,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         if use_drain:
             _require_drain_symbol()
         if use_orderer:
-            order_r, order_w = os.pipe()
-            try:
-                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
-                             ORDER_PIPE_SIZE)
-            except OSError:
-                pass
-            # W-REL5-E7: no tempfile fallback (floor 3.10).
-            coll_fd = os.memfd_create("forkrun_ordered")
-            orderer_pid = spawn_orderer(order_r, coll_fd,
-                                        unordered=False, numa=True,
-                                        engine_fds=engine_fds,
-                                        out_fds=out_fds)
+            order_r, order_w, coll_fd, orderer_pid = _spawn_c_orderer(
+                engine_fds, out_fds,
+                unordered=False, numa=True)
 
         trap_r, trap_w = os.pipe()
 
@@ -8959,6 +12246,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         # once some node forked — signals queue until the drain
         # starts; empty inputs never need one).
         cdrain_n = {"pid": None, "results_r": None, "pump": None,
+                    "watch": None,
                     "status": None, "alive": True}
 
         def _pump_drain_c_numa():
@@ -8970,8 +12258,14 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             if forked and cdrain_n["pid"] is None:
                 cdrain_n["pid"], cdrain_n["results_r"] = _fork_drain(
                     signal_r, out_fds, workers, mode="pipe")
+                # WO-PY-CDRAIN-REACTOR-WAKEUP-1: reactor wakeup source
+                # for the C drain's results pipe (see the
+                # streaming-reactor site for the rationale). The PUMP
+                # owns the read side.
+                cdrain_n["watch"] = ExtraWatch(cdrain_n["results_r"])
                 cdrain_n["pump"] = _make_results_pump(
-                    cdrain_n["results_r"], order=order, stats=stats)
+                    cdrain_n["results_r"], order=order, stats=stats,
+                    watch=cdrain_n["watch"])
                 signal_r = None
                 drain_pid = cdrain_n["pid"]
                 results_r = cdrain_n["results_r"]
@@ -9030,18 +12324,27 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 for _wid in range(len(per_worker)):
                     if _wid >= len(out_fds):
                         continue
-                    for _bidx, blob in _drain_worker_memfd(
+                    for _bidx, _disp, _blob in _drain_worker_memfd_terminal(
                             out_fds[_wid], per_worker[_wid]):
                         if drain["reassembly"] is None:
-                            drain["pending"].append(blob)
+                            if _disp == _DISP_DATA:
+                                drain["pending"].append(_blob)
                         else:
-                            drain["reassembly"].add(_bidx, blob)
+                            drain["reassembly"].add_disposition(
+                                _bidx, _disp, _blob)
                             for _, ordered in drain[
                                     "reassembly"].drain():
                                 drain["pending"].append(ordered)
             if drain["reassembly"] is not None:
                 for _, ordered in drain["reassembly"].final_drain():
                     drain["pending"].append(ordered)
+                # Added (round-9 review): this route finalised without
+                # consulting conflicts(), so a contradiction recorded on
+                # the NUMA-stream path was silently ignored.
+                _raise_on_disposition_conflicts(
+                    drain["reassembly"],
+                    "stream() [records already yielded before this point "
+                    "are NOT withdrawn]")
 
         def _pump_drain():
             nonlocal spare_signal_w, signal_w
@@ -9088,8 +12391,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                     landed = 0
                 if landed != 0:
                     raise RuntimeError(
-                        "forkrun: NUMA ingest landed %d bytes with no "
-                        "published batches" % landed)
+                            "forkrun: NUMA ingest landed %d bytes with no "
+                            "published batches" % landed)
                 pump_state["done"] = True
             elif helpers["ingest_kind"] == "clean" and (
                     forked or _pipeline_quiescent(helpers, num_nodes)):
@@ -9127,7 +12430,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             return None
 
         try:
-            yield from reactor_loop(state, drain_gen=_pump_drain)
+            yield from reactor_loop(
+                state, drain_gen=_pump_drain,
+                extra_watch=[cdrain_n["watch"]] if cdrain_n["watch"] else None)
         finally:
             pass
 
@@ -9145,13 +12450,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 if _dst is not None:
                     cdrain_n["alive"] = False
                     cdrain_n["status"] = _dst
-            if cdrain_n["status"] is not None and cdrain_n["status"] != 0 \
-                    and not (
-                        os.WIFEXITED(cdrain_n["status"]) and
-                        os.WEXITSTATUS(cdrain_n["status"]) == 0):
-                raise RuntimeError(
-                    "forkrun: C drain failed (status %r)"
-                    % (cdrain_n["status"],))
+            _raise_for_drain(cdrain_n['status'], lib)
 
         if fallow_w is not None:
             try:
@@ -9161,30 +12460,11 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             fallow_w = None
             state.ctx["fallow_w"] = -1
         if use_orderer:
-            if order_w is not None:
-                try:
-                    os.close(order_w)
-                except OSError:
-                    pass
-                order_w = None
-            if orderer_pid is not None:
-                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
-                # same leniency as the old ChildProcessError
-                # branch).
-                _ost = _join_helper_bounded(
-                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
-                if _ost is None:
-                    _ost = 0
-                if _ost != 0 and not (
-                        os.WIFEXITED(_ost) and
-                        os.WEXITSTATUS(_ost) == 0):
-                    raise RuntimeError(
-                        "forkrun: C orderer failed (status %r)"
-                        % (_ost,))
+            order_w = _teardown_orderer(order_w, orderer_pid, lib)
         if helpers["ingest_kind"] == "error":
             raise RuntimeError(
-                "forkrun: NUMA ingest failed (status %r)"
-                % (helpers["ingest_code"],))
+                    "forkrun: NUMA ingest failed (status %r)"
+                    % (helpers["ingest_code"],))
         if helpers["ingest_kind"] is None:
             # W-REL5-B4: bounded (None keeps the leniency below).
             _st = _join_helper_bounded(pipe["ingest_pid"],
@@ -9192,7 +12472,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             if _st is not None and not (
                     os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
                 raise RuntimeError(
-                    "forkrun: NUMA ingest failed (status %r)" % (_st,))
+                        "forkrun: NUMA ingest failed (status %r)" % (_st,))
         for key, pids in (("index", pipe["indexer_pids"]),
                           ("scan", pipe["scanner_pids"])):
             for node in range(num_nodes):
@@ -9206,8 +12486,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                     kind, code = helpers[key][node]
                     if kind == "error":
                         raise RuntimeError(
-                            "forkrun: NUMA %s %d failed (status %r)"
-                            % (key, node, code))
+                                "forkrun: NUMA %s %d failed (status %r)"
+                                % (key, node, code))
                     continue
                 # W-REL5-B4: bounded (None keeps the leniency
                 # below).
@@ -9226,8 +12506,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                             "excused", set()).add((key, node))
                         continue
                     raise RuntimeError(
-                        "forkrun: NUMA %s %d failed (status %r)"
-                        % (key, node, _st))
+                            "forkrun: NUMA %s %d failed (status %r)"
+                            % (key, node, _st))
         if helpers["fallow_rc"] is None:
             # W-REL5-B4: bounded (WARN-lenient below covers None).
             _fst = _join_helper_bounded(pipe["fallow_pid"],

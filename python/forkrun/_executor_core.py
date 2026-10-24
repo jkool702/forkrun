@@ -31,6 +31,7 @@ import os
 import sys
 import time as _time
 
+from . import _childreg
 from ._bindings import RC_OK, get as _get_lib
 from ._fd_scrub import scrub_fds
 
@@ -163,7 +164,7 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
                   plugin_spec=None, spawn_argv=None, splice=None,
                   c_worker_loop=None, c_spawn_loop=None,
                   src_fd=None, must_close=False, signal_r_to_close=None,
-                  spec=None):
+                  spec=None, extra_keep_fds=None):
     """Fork ``workers`` children; return pid list. Single dispatch site.
 
     Branches: splice / c_plugin / c_spawn / python — a dispatch table over
@@ -190,6 +191,15 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
     unambiguous, so the "obviously safe" mitigation was deleted rather
     than kept with a caveat. Do not reintroduce it without a test that
     exercises recovery.
+
+    ``extra_keep_fds``: descriptors the child must keep across
+      ``scrub_fds``. Exists for the poison-index stats memfd (WO-PY-REL-1):
+      the relay resolves ``$FRK_POISON_FD`` inside the child, but scrub
+      closes every fd outside its keep set, so exporting the variable alone
+      yields a closed fd and a SILENTLY empty index list -- indistinguishable
+      from "nothing was poisoned". Threading it explicitly is preferred to
+      teaching scrub_fds to read the environment, which would make the keep
+      set depend on ambient state that must not leak between runs.
 
     ``src_fd``/``must_close``: materialized executors close the source in
     the Python child post-fork (parent spilled already; I3 hygiene).
@@ -237,20 +247,23 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
         if splice:
             pids.append(_run_mod._fork_splice_worker(
                 lib, i, memfd, out_fds[i],
-                signal_w, fallow_w, engine_fds))
+                signal_w, fallow_w, engine_fds,
+                extra_keep_fds=extra_keep_fds))
             continue
         if c_worker_loop:
             pids.append(_fork_c_plugin_worker(
                 lib, i, plugin_spec[0], plugin_spec[1],
                 memfd, out_fds[i], signal_w, fallow_w,
-                engine_fds, on_error))
+                engine_fds, on_error,
+                extra_keep_fds=extra_keep_fds))
             continue
         if c_spawn_loop:
             pids.append(_fork_c_spawn_worker(
                 lib, i, spawn_argv, memfd, out_fds[i],
-                signal_w, fallow_w, engine_fds, on_error))
+                signal_w, fallow_w, engine_fds, on_error,
+                extra_keep_fds=extra_keep_fds))
             continue
-        pid = os.fork()
+        pid = _childreg.fork_child('worker')
         if pid == 0:
             try:
                 if signal_r_to_close is not None:
@@ -279,6 +292,8 @@ def fork_workers(lib, *, workers, memfd, size, out_fds, signal_w, fallow_w,
                     keep.add(signal_w)
                 if fallow_w is not None and fallow_w >= 0:
                     keep.add(fallow_w)
+                if extra_keep_fds:
+                    keep.update(extra_keep_fds)
                 scrub_fds(keep)
             except Exception:
                 pass

@@ -25,6 +25,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, v1_available  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -152,7 +153,7 @@ class TestCWorkerLoopValidation(unittest.TestCase):
                            c_worker_loop=True)
 
 
-class TestCWorkerLoopParity(unittest.TestCase):
+class TestCWorkerLoopParity(ChildLifecycleMixin, unittest.TestCase):
     """Byte-identical results to the Python worker loop."""
 
     def setUp(self):

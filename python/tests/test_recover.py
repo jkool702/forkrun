@@ -67,6 +67,21 @@ class TestRecoverCore(unittest.TestCase):
 
     def _init_with_lines(self, lines):
         lib = get()
+        # The engine is PROCESS-GLOBAL. This helper is documented as
+        # producing a "fresh engine", but it only ever called fr_py_init
+        # and inherited whatever g_state a previously-run test left behind
+        # (an earlier fr_py_emit, say). That made test_orphan_revert_and_escrow
+        # order-dependent: it passed solely because every module that
+        # emits sorts AFTER test_recover in discovery order, so nothing
+        # had dirtied the state yet. Add a test file that sorts earlier
+        # and it failed -- recovery returned RECOVERED without rolling the
+        # output fd back.
+        #
+        # Destroy first, so "fresh" means fresh regardless of ordering.
+        try:
+            lib.fr_py_destroy()
+        except Exception:
+            pass
         self.assertEqual(lib.fr_py_init(0, 0), 0)
         memfd = os.memfd_create("fr_txn_test_in")
         self.addCleanup(lambda: self._close(memfd))
@@ -108,6 +123,23 @@ class TestRecoverCore(unittest.TestCase):
 
         self.assertEqual(lib.fr_py_worker_init(0, 0, 0, 3, 0), 0)
         lib.fr_py_set_output_fd(out_fd)
+        # Initialize the worker's output cursor for THIS fd.
+        #
+        # worker_output_end is __thread state and the engine deliberately
+        # initializes it exactly once per worker, in
+        # worker_txn_init_output_cursor (forkrun_ring.c: "This is the ONLY
+        # place lseek is called for the output cursor"), reached via
+        # fr_py_ack_init / ring_ack_init. Nothing else resets it, and
+        # nothing resets it between tests in this process.
+        #
+        # So a test that points the engine at a fresh memfd without this
+        # call inherits whatever frontier an earlier test left behind, and
+        # recovery truncates to the wrong offset while still reporting
+        # RECOVERED -- which is precisely the assertion below. It only ever
+        # passed because every module that emits happened to sort AFTER
+        # test_recover in discovery order. Pre-existing: reproduced at
+        # HEAD with `unittest test_v1_emit test_recover`.
+        lib.fr_py_ack_init(out_fd)
 
         claimed = FrPyBatch()
         rc = lib.fr_py_claim(ctypes.byref(claimed))

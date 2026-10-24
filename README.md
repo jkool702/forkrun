@@ -59,7 +59,7 @@ frun -s -I bash -c 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique o
 - **forkrun:** ~90% aggregate (27.1 / 28 cores in steady-state default mode = 97%; 27.6/28 = 98.6% for default-mode sustained runs at ≥1B-line scale (100M-scale measures 24.5–25.5/28 for default -X); `-U` unsafe runs hit 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28) — *No centralized dispatcher; all cores do actual work when work exists.*
 - **GNU Parallel:** 9.6% total (2.68 / 28 cores), 6% useful work (1.68 / 28) — *1 full core used strictly for dispatching work; 1.68 cores doing actual work.*
 
-### Python Frontend (forkrun 0.16.0 — `python/`)
+### Python Frontend (forkrun 0.17.0 — `python/`)
 
 *10M lines (large), median of 5, same i9-7940X class hardware. Method: `python/benchmarks/` (`run_all.py --scale large`). CPU% = attributable process-tree CPU (self + reaped children) over wall × cores — not system-wide. Full record: `python/benchmarks/results/large.md` + `large.csv`.*
 
@@ -129,24 +129,31 @@ forkrun is designed to run anywhere with zero friction:
 **Supported bash versions** (v3.6.0 verification status — bootstrap = source + load + `ring_version`; suites = 96 + 264):
 
 > **Two-axis reality (read both):** the *bash* axis below was verified on
-> new-glibc iron. Independently, the shipped x86-64 loadables carry **no**
-> `GLIBC_ABI_GNU2_TLS` requirement (D-TLS: rebuilt with
-> `-mtls-dialect=gnu`, dropping the gcc-16 TLSDESC codegen; verified
-> zero references, max `GLIBC_2.38` across all shipped blobs). So glibc
-> ≥2.38 loads (Ubuntu 24.04's 2.39 OK); Debian 12 (2.36) and RHEL ≤9
-> remain below the floor. Non-x86 blobs never carried the requirement.
-> Pure-shell parsing works everywhere regardless, but that is not a
-> usable state without the engine.
+> new-glibc iron. Independently, the shipped loadables (x86-64 v2/v3/v4,
+> aarch64, ppc64le, s390x) are now built in the `manylinux_2_28`
+> environment and carry **no** `GLIBC_ABI_GNU2_TLS` requirement (D-TLS)
+> and a maximum `GLIBC_2.28` symbol requirement (verified by
+> `tools/check_glibc_versions.py`). So glibc ≥2.28 loads on those arches
+> (RHEL 8's 2.28, Debian 10+, Ubuntu 20.04+). The riscv64 blob is built
+> on a newer glibc and remains at `GLIBC_2.38` (riscv64 is an advisory
+> architecture). Pure-shell parsing works everywhere regardless, but that
+> is not a usable state without the engine.
 
 | Bash | Bootstrap + smoke ×10 | Full suites | Status (on new glibc) |
 |------|----------------------|-------------|----------------------|
-| 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; RHEL8 glibc (2.28) still below the 2.38 floor |
+| 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; glibc 2.28 floor now satisfied |
 | 5.0 | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable |
 | 5.1 | ✅ 10/10 incl. round-trips (D-SEGFIX, source-built 5.1.0 + extracted 5.1.16, byte-exact) | — (suites run on 5.2/5.3 only) | ✅ usable |
 | 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
 | 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
 
-> **Effective floor (W-REL5-D): bash ≥4.4.** D-SEGFIX landed (worker segfault root-caused to the engine's `ARRAY`-struct walk + fixed via pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in the v3.6.0 blob cycle. glibc ≥2.38 (D-TLS rebuild, this cycle).
+> **Effective floor (W-REL5-D + WO-COMPAT-03): bash ≥4.4, glibc ≥2.28** on
+> x86-64/aarch64/ppc64le/s390x (riscv64 ≥2.38). D-SEGFIX landed (worker
+> segfault root-caused to the engine's `ARRAY`-struct walk + fixed via
+> pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in
+> the v3.6.0 blob cycle. glibc floor lowered from 2.38 to 2.28 by
+> rebuilding every non-riscv64 blob in `manylinux_2_28` (verified by
+> `tools/check_glibc_versions.py` and an end-to-end round-trip on glibc 2.28).
 
 ---
 

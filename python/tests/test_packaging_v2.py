@@ -325,9 +325,47 @@ class TestReleaseChecklist(unittest.TestCase):
             unreleased = re.search(
                 r"^##\s+v3\.6\.1\s*(?:\(|—|-)\s*unreleased\s*\)?",
                 fh.read(), re.M) is not None
-        proc = subprocess.run(
-            [sys.executable, "python/release_check.py"],
-            capture_output=True, text=True, timeout=1500, cwd=REPO_ROOT)
+        # The deadline here must exceed the release gate's OWN nested
+        # suite deadline (2400s in release_check.py) plus its other
+        # checks. It used to be 1500s, which was LOWER than the nested
+        # budget: the outer test could kill the gate while its nested
+        # suite was still running, so raising the inner budget alone
+        # changed nothing -- the outer deadline was the binding one.
+        # Both layers now hold the same intent, and this one is the
+        # outer bound.
+        # The outer deadline is derived from the gate's OWN nested
+        # deadline, so the two layers cannot drift apart: the outer one
+        # must exceed the inner one plus the gate's other checks.
+        # Reading the constant (rather than hard-coding a second
+        # number) is what makes that true by construction.
+        sys.path.insert(0, os.path.join(REPO_ROOT, "python"))
+        import release_check as _rc
+        outer_deadline = _rc.SUITE_DEADLINE_S + 600
+        try:
+            proc = subprocess.run(
+                [sys.executable, "python/release_check.py"],
+                capture_output=True, text=True, timeout=outer_deadline,
+                cwd=REPO_ROOT)
+        except subprocess.TimeoutExpired as exc:
+            # A timeout is a DEADLINE being reached, not a verdict: the
+            # gate did not finish, so it is not known whether the cause
+            # was load, a hang, or a regression. The partial output is
+            # what makes it diagnosable.
+            self.fail(
+                "release_check.py did not finish within %ds -- the "
+                "gate's own nested suite deadline is %ds, so this is the "
+                "OUTER deadline being reached. The result is INCOMPLETE: "
+                "without a finished run it cannot be said whether the "
+                "cause was load, a hang, or a regression. Partial "
+                "output:\n%s\n%s"
+                % (outer_deadline, _rc.SUITE_DEADLINE_S,
+                   (exc.stdout or b"")[-3000:]
+                   if isinstance(exc.stdout, bytes)
+                   else (exc.stdout or "")[-3000:],
+                   (exc.stderr or b"")[-1000:]
+                   if isinstance(exc.stderr, bytes)
+                   else (exc.stderr or "")[-1000:]))
+            return
         if unreleased:
             self.assertEqual(proc.returncode, 1,
                              "expected designed-red checklist:\n%s\n%s"

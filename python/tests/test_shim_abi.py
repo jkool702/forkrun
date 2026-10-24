@@ -164,7 +164,161 @@ class TestShimBindings(unittest.TestCase):
                     if v["linkage"] == "extern")
         n_st = sum(1 for v in table.values()
                    if v["linkage"] == "static")
-        self.assertEqual((n_ext, n_st), (50, 11),
+        # 50->52 extern, 11->13 static (P1-3, 2026-10-11):
+        #   extern  fr_py_udf_bind        launcher binds the helper's
+        #                                 fr_udf_call/fr_udf_free so the
+        #                                 shim never links libpython.
+        #   extern  fr_py_worker_udf_loop the fifth execution-mode loop.
+        #                                 Same signature as the plugin
+        #                                 loop, so spawn_wid is unchanged.
+        #   static  fr_py_emit_record_buf frames an in-memory payload with
+        #                                 an EXPLICIT disposition. Needed
+        #                                 because fr_py_emit_record infers
+        #                                 NO_RESULT from src_len == 0,
+        #                                 which would collapse None and
+        #                                 b"" -- the exact conflation
+        #                                 DECISION-02 removes.
+        #   static  fr_py_udf_invoke     the UDF invoke body.
+        #   extern  fr_py_emit_disposition SKIPPED/POISONED terminal
+        #                                 records (P5). Exported rather
+        #                                 than static so the exactly-once
+        #                                 proof exercises the REAL
+        #                                 emitter; a test that re-wrote
+        #                                 the record would skip the
+        #                                 frontier advance and pass while
+        #                                 the shipped path leaked a
+        #                                 duplicate on every retry.
+        #                                 records (P5). Zero payload --
+        #                                 an empty DATA record would make
+        #                                 poison indistinguishable from a
+        #                                 UDF returning b"".
+        # Behavior delta: this one is NOT purely additive in effect.
+        # fr_py_emit_disposition adds two new records to the stream --
+        # a POISONED record per poison-skipped batch and a SKIPPED record
+        # per on_error=skip batch, in all four worker loops. Readers
+        # already filtered every non-DATA disposition, so no caller sees
+        # them as results; what changes is that a terminal outcome now
+        # has a representation on the wire instead of being inferred from
+        # a counter. No existing symbol changed arity or signature.
+        # static additions: fr_py_signal_write (factored out of
+        # fr_py_emit so the disposition emitter can announce its record),
+        # fr_py_maybe_die_before_ack (the shared fault-injection
+        # hook, so every worker loop is injectable and not just the UDF
+        # one), and fr_py_maybe_die_after_signal (fault injection in the
+        # interval the before-ack hook structurally cannot reach --
+        # after a DATA record is written AND signalled, before the ack).
+        # Inert unless the env var is set; it exists to expose the
+        # pre-existing publication/commit defect documented in
+        # dev/supervisor/CLEANROOM_EXPANSION_PROPOSAL.md section 0a,
+        # which is otherwise untestable because a DATA record is never
+        # signalled before the before-ack hook fires. Extern count is
+        # unchanged at 53: no dlsym-visible entry was added or changed,
+        # so this is a fault-injection-only addition.
+        #
+        # C0.7 extern (54 -> 55): fr_py_committed_data_frames(node, *out).
+        # Read-only snapshot of COMMITTED DATA frames per node, for the
+        # ordered completeness certificate. Purely additive: a NEW entry
+        # point, no existing symbol changed arity or signature.
+        #
+        #   extern  fr_py_committed_data_frames C0.7 committed-DATA
+        #                                 snapshot. Deliberately its own
+        #                                 entry point rather than a 7th
+        #                                 value on fr_py_diag_node:
+        #                                 existing callers allocate
+        #                                 exactly six, so widening that
+        #                                 array would overrun their
+        #                                 buffers. Returns the DATA-only
+        #                                 count, NOT the generic
+        #                                 complete-frame statistic, which
+        #                                 includes non-DATA dispositions
+        #                                 the parent filters -- the two
+        #                                 are not interchangeable.
+        #
+        # Behavior delta: read-only and inert until a caller opts in.
+        # A missing symbol on an older substrate is treated by callers as
+        # "certificate unavailable", never as a pass, so the new entry
+        # point cannot make an uncovered run look certified. Nothing is
+        # written by this symbol; the counter it reads is maintained by
+        # the commit flush in fr_py_ack_core.
+        #
+        # W-EXP-2 Phase A extern (55 -> 56): fr_py_c07_counting_enabled().
+        # The companion to fr_py_committed_data_frames, and it exists
+        # because that counter is NOT self-describing. With
+        # FORKRUN_C07_COUNT=0 nothing increments, so the counter reads
+        # zero -- indistinguishable, from outside, from a run that
+        # genuinely committed no DATA frames. The cleanroom launcher
+        # would then sum 0 against the records it actually collected and
+        # the completeness certificate would fail every COMPLETE run. A
+        # caller can only avoid that by asking whether the counter is
+        # live, so the launcher dlsyms this and reports "unavailable"
+        # rather than a fabricated zero. No existing symbol changed
+        # arity or signature.
+        #
+        #   extern  fr_py_c07_counting_enabled  Whether the committed-DATA
+        #                                 counter is live in this process.
+        #                                 Read-only and inert; consults
+        #                                 the same fr_c07_enabled() gate
+        #                                 that decides whether commits are
+        #                                 counted at all. Its absence on
+        #                                 an older substrate is treated as
+        #                                 "unavailable", which is
+        #                                 fail-OPEN into "no verdict" --
+        #                                 never into a pass.
+        #
+        # Behavior delta: none on any existing path. Nothing calls this
+        # symbol except the cleanroom launcher, which treats "no symbol",
+        # "symbol says disabled", and "symbol says enabled" as three
+        # distinct cases and only certifies in the third.
+        #
+        # W-EXP-2 step C adds ONE extern:
+        #
+        #   extern  fr_py_worker_plugin_loop_numa
+        #                                 The plugin loop with an explicit
+        #                                 logical node id. It is the same
+        #                                 loop body; fr_py_worker_init
+        #                                 already accepted node_id and the
+        #                                 Python paths already supply it,
+        #                                 so this only exposes an existing
+        #                                 operation to the exec-based
+        #                                 launcher. fr_py_worker_plugin_loop
+        #                                 is unchanged. No existing symbol
+        #                                 changed signature.
+        #
+        #   extern  fr_py_worker_bind_node
+        #                                 Bind the logical node the next
+        #                                 fr_py_worker_init call will use.
+        #                                 It exists so the multi-node
+        #                                 launcher can select a ring
+        #                                 WITHOUT a second copy of the
+        #                                 worker loop body: the parity
+        #                                 test requires the three worker
+        #                                 modes to share one lifecycle, and
+        #                                 a duplicated body would be a
+        #                                 fourth place for a fix to miss.
+        #                                 Inert (-1) unless called.
+        #
+        #   extern  fr_py_node_index_complete
+        #                                 Whether this NODE's indexer has
+        #                                 consumed every chunk published
+        #                                 for it, and the global ingest
+        #                                 EOF is posted (so no further
+        #                                 chunk can arrive). The global
+        #                                 marker alone is NOT a per-node
+        #                                 completion signal: it says the
+        #                                 source was consumed, not that
+        #                                 this node's work is done.
+        #                                 Read-only. 1 complete, 0 not,
+        #                                 -1 no verdict.
+        #
+        #   extern  fr_py_node_scan_complete
+        #                                 Whether this NODE's scanner
+        #                                 finished publishing its final
+        #                                 ring state (scanner_finished,
+        #                                 published after the final
+        #                                 write_idx and before the EOF
+        #                                 evfd blast). Read-only. Same
+        #                                 1/0/-1 convention.
+        self.assertEqual((n_ext, n_st), (60, 16),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

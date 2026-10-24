@@ -72,6 +72,14 @@ def parse_shim(path=SHIM_SRC):
 
 def render_header(defs):
     lines = []
+    # CR-FIX1-I: derived, not written down. This used to be the literal
+    # 45 while the header carried 50 declarations, and because the
+    # literal is never recomputed, `gen_shim.py --check` reproduced the
+    # same wrong number byte-for-byte and could not catch the drift. The
+    # count now comes from the same data the declarations come from, so
+    # adding or removing an export cannot desynchronise the prose.
+    n_extern = sum(1 for d in defs if d[3] == "extern")
+    n_static = sum(1 for d in defs if d[3] != "extern")
     lines.append("/* forkrun_shim.h — W-DEDUP R-D8 ABI gate (signatures only).")
     lines.append(" *")
     lines.append(" * GENERATED FILE — do not edit. Regenerate with:")
@@ -82,8 +90,10 @@ def render_header(defs):
     lines.append(" *")
     lines.append(" * Scope: declarations, argument types, return types only.")
     lines.append(" * No semantic contracts (see test_invariant_gate.py §3/§6/§9).")
-    lines.append(" * Extern entries are the dlsym-visible ABI surface (45);")
-    lines.append(" * static entries are internal (listed with linkage in")
+    lines.append(" * Extern entries are the dlsym-visible ABI surface (%d);"
+                 % n_extern)
+    lines.append(" * static entries are internal (%d, listed with linkage in"
+                 % n_static)
     lines.append(" * shim_signatures.json, omitted here).")
     lines.append(" *")
     lines.append(" * Header hygiene (substrate rules): self-contained (no includes")

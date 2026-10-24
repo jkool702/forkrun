@@ -22,7 +22,7 @@ from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._numa import distribute_workers  # noqa: E402
 from forkrun.run import _resolve_workers_numa  # noqa: E402
 
-from _helpers import assert_no_zombies, joined_bytes  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, joined_bytes  # noqa: E402
 
 try:
     find_substrate()
@@ -58,7 +58,7 @@ def _map_warn(payload, path, **kw):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestNumaWorkerBump(unittest.TestCase):
+class TestNumaWorkerBump(ChildLifecycleMixin, unittest.TestCase):
     def test_workers_bumped_to_node_count(self):
         # workers=1 on @4: completes exact, warns once with counts.
         path = _make_input()

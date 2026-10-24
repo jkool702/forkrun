@@ -22,6 +22,7 @@ from forkrun._plugin import (ForkrunCtx, PluginError,  # noqa: E402
                              load_plugin)
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -91,7 +92,7 @@ class TestPluginLayout(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestPluginMode(unittest.TestCase):
+class TestPluginMode(ChildLifecycleMixin, unittest.TestCase):
     def _spec(self, fn):
         return "%s:%s" % (PLUGIN_SO, fn)
 

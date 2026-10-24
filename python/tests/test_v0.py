@@ -251,7 +251,12 @@ class TestBatchSemantics(unittest.TestCase):
 class TestErrors(unittest.TestCase):
     def _flaky(self, batch):
         d = bytes(batch.data)
-        if b"line 1\n" in d or d.startswith(b"line 1"):
+        # Poison exactly ONE batch, and make that premise independent of
+        # the machine: it must be the batch holding line 7. With
+        # lines=1x below, that is batch 0; a substring test for
+        # "line 1" poisoned the whole first 1024-line auto batch on a
+        # 4-CPU runner and took line 100 with it.
+        if b"line 7\n" in d:
             raise RuntimeError("boom")
         return d
 
@@ -261,7 +266,10 @@ class TestErrors(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 2000)
-            out = forkrun.map(self._flaky, path, workers=1, nodes=1)
+            # lines=10 -> 200 batches, so line 7's batch is 10 lines and
+            # line 100 cannot share its fate.
+            out = forkrun.map(self._flaky, path, workers=1, nodes=1,
+                              lines=10)
             got = b"".join(out)
             # Unaffected batches are delivered exactly once.
             self.assertIn(b"line 100\n", got)
@@ -275,7 +283,8 @@ class TestErrors(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 2000)
-            out = forkrun.map(self._flaky, path, workers=1, on_error="skip", nodes=1)
+            out = forkrun.map(self._flaky, path, workers=1, on_error="skip",
+                              nodes=1, lines=10)
             self.assertIn(b"line 100\n", b"".join(out))
         finally:
             os.unlink(path)

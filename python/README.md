@@ -75,9 +75,20 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
   `bytes` (it drains live, with no finished file to map). Full contract:
   [docs/API.md](docs/API.md#result-representation).
 
-- `payload`: `"pkg.mod:func"` (imported post-fork in the worker — keeps the
-  parent virgin of native imports) or a callable (fork-inherited, never
+- `payload`: `"pkg.mod:func"` or a callable (fork-inherited, never
   pickled). Receives a `Batch`, returns `bytes`/`memoryview`/`str`/`None`.
+  Where a **string** spec is imported depends on the path, and it is not
+  the same everywhere:
+  - `mode="plugin"` (and `mode="python"` when the cleanroom UDF helper is
+    not built, as in a plain wheel install) resolves it in the **parent**,
+    before any fork. A child forked from a threaded host must never import:
+    frozen import locks in the child deadlock. Import errors therefore
+    surface early, in the caller.
+  - `mode="udf"` / `mode="python"` with the helper built resolve it
+    **inside the launcher**, after `exec`, so the user's module state never
+    enters the process that forks the workers.
+  Both are deliberate; see `_worker.py` (`resolve_payload_parent`) and
+  `_udf.py`.
 - `source`: path | fd | pipe/socket object. v0.5 **materializes** the input
   into an ingress memfd and mmaps it whole: bounded inputs only.
 - `Batch.data`: borrowed `memoryview` (zero-copy MAP_SHARED window). Valid
@@ -90,8 +101,11 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
 - `streaming`: `None` (default; fifo/socket sources stream, files
   materialize), `True` (bounded-ingress streaming ingest, TB-scale),
   `False` (force materialized).
-- Modes `spawn`/`plugin`, multi-node, ordered emitter pipe, resume: not in
-  v0 (`NotImplementedError`).
+- All five modes are shipped: `python` (default), `spawn`, `plugin`,
+  `splice`, `udf` (`_VALID_MODES` in `_api.py`). An earlier revision of
+  this line still listed `spawn`/`plugin`, multi-node, the ordered
+  emitter and resume as "not in v0" — all four landed (W-PY13, W-PY21,
+  W-PY22, W-PY7) and the line was stale.
 - Workers are single-threaded by contract: payloads must not spawn threads
   (documented, not policed at runtime since W-PY21-B — a thread that
   outlives its batch is UB-by-contract); return bytes and
@@ -103,10 +117,15 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
   `batch_index` sequence with `order="index"` (parent-side reassembly;
   landed W-PY7).
 - **Spawn/plugin v1 fast paths (W-PY13, landed):** C-level dispatch with
-  v0 fallback — see Modes. Remaining: NUMA multi-node.
+  v0 fallback — see Modes. Also landed: NUMA multi-node (W-PY21), the
+  `mode="udf"` helper route (P1-3), and resume/checkpoint (W-PY22).
 - **Resume UX, halt, TUI:** Stage 6 (demand-pulled).
 
 ## Modes
+
+Five modes are accepted (`_api.py::_VALID_MODES`). Four are enumerated
+below; `udf` is documented in `docs/MODES.md` because its payload and
+helper rules differ from the others.
 
 - `mode="python"` (default): payload is `"pkg.mod:func"` (imported
   post-fork in the worker) or a callable (fork-inherited, never pickled).

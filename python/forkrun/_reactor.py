@@ -1,8 +1,21 @@
 """Python reactor: event-driven worker lifecycle management (W-PY19).
 
 Translates the bash wrapper's ring_poll reactor loop into Python.
-Manages worker spawning, death detection, respawn, trap-ACK
-confirmation, and poison batch tracking.
+Manages worker spawning, death detection, respawn, batch recovery
+classification, and poison batch tracking.
+
+RECOVERY IS PARENT-SIDE C, NOT A TRAP-ACK GRACE. Since W-PY28/W-PY29,
+`fr_py_recover_worker` classifies every death — including exit 0 — and
+the reactor respawns on its verdict (rc 0/1/3), frees the slot (rc 2),
+or aborts (rc 4/5). The 3-second trap-ACK grace described below is
+LEGACY: it is armed only in the `else` branch of `worker_died`, which
+runs only against a pre-W-PY28 `libforkrun_python.so` that lacks
+`fr_py_recover_worker` (mixed-version safety). On any build from this
+tree the symbol always exists, so no grace is ever armed and
+`trap_ack_deadlines` stays empty. The protocol constant
+`TRAP_ACK_GRACE_S` still matches `FR_TRAP_ACK_GRACE_MS_DEFAULT` in
+`forkrun_substrate.h`, which is why it reads as current: it matches
+numerically while being unreachable in practice.
 
 The reactor runs in the PARENT process. For map/run it supervises
 fork-and-wait to completion; for stream it supervises alongside the
@@ -12,9 +25,11 @@ Design mirrors the bash wrapper:
   - ring_poll → select on death pipes + spawn pipe + trap-ACK pipe
   - SPAWN event → fork new workers on the requested node
   - WORKER_DEATH → waitpid, classify, respawn if needed
-  - TRAP_ACK → confirm graceful failure (worker trapped before death)
+  - TRAP_ACK → poison-skip notices only; worker-death confirmation is
+    NOT carried here on the current path (legacy substrates only)
   - SCAN_DEATH → abort if the scanner failed
-  - TIMEOUT → worker died without trap-ACK inside the grace (fatal)
+  - TIMEOUT → legacy-substrate grace expiry (never armed from this tree;
+    the C recovery core raises instead)
 
 OPT-IN... no longer: since W-REL1/R1 the reactor is the DEFAULT
 (run/map/stream with orchestrator=None ride this module's loop);
@@ -43,10 +58,18 @@ import signal as _signal
 import time as _time
 from collections import defaultdict
 
-# Trap-ACK grace: bash protocol constant (3s). A worker that exits
-# non-zero must confirm via the trap-ACK pipe within this long, or
-# the reactor declares catastrophic failure. Matches
+from . import _childreg
+
+# Trap-ACK grace: bash protocol constant (3s). Matches
 # FR_TRAP_ACK_GRACE_MS_DEFAULT in forkrun_substrate.h.
+#
+# LEGACY. Retained only for a pre-W-PY28 substrate that lacks
+# fr_py_recover_worker: there the reactor must distinguish a worker that
+# died cleanly from one that died without confirming, and this deadline
+# is the only signal available. On any build from this tree the C core
+# classifies every death instead, so no deadline is armed and this
+# constant is never consulted. Do not read it as live policy, and do
+# not delete it while mixed-version safety is still supported.
 TRAP_ACK_GRACE_S = 3.0
 
 # W-REL5-B5: bounded death-confirm spin for worker_died_poll.
@@ -145,8 +168,10 @@ class ReactorState:
       Mirrors fr_config_t.respawn_cap.
     spawn_ceiling: max LIVE workers (-1 = max_workers).
       Mirrors fr_config_t.spawn_ceiling.
-    trap_ack_grace: seconds to wait for trap-ACK after a non-zero
-      death before declaring catastrophic (default TRAP_ACK_GRACE_S).
+    trap_ack_grace: LEGACY-substrate only. Seconds to wait for trap-ACK
+      after a non-zero death before declaring catastrophic (default
+      TRAP_ACK_GRACE_S). Unused when fr_py_recover_worker is present,
+      which is every build from this tree.
     startup_deadline: seconds a forked worker may take to signal
       readiness (READY_BYTE) before it is SIGKILLed and treated as
       a death (W-REL6-3.1). None resolves via
@@ -328,7 +353,7 @@ class ReactorState:
         from ._executor_core import warn_fork_cost_once as _warn_fork
         _t0 = _time.perf_counter()
 
-        pid = os.fork()
+        pid = _childreg.fork_child('worker')
         if pid == 0:
             # Child — never returns.
             try:
@@ -958,6 +983,64 @@ def handle_trap_ack_bytes(state, data):
                 state.trap_ack_deadlines.pop(wid, None)
 
 
+def drain_trap_ack(state) -> int:
+    """Read every byte currently buffered on the trap-ACK pipe.
+
+    Returns the number of bytes consumed (0 when there was nothing).
+
+    The trap-ACK pipe carries two kinds of line, and they are NOT
+    equally protected:
+
+      * ``"<wid>"`` -- the worker's graceful-failure confirmation. A
+        death without an ACK arms a trap-ACK grace DEADLINE, and the
+        deadline keeps the supervision loop alive to poll for it. That
+        deadline is what makes this line hard to lose.
+
+      * ``"P:<idx>:<kills>"`` -- the poison notification. It arms NO
+        deadline, so nothing else keeps the run alive on its behalf.
+
+    So on the path where the last worker exits, the poison notification
+    is the one line that can still be sitting in the pipe unread.
+
+    The window is real and it is narrow. The death pipe is the reactor's
+    primary death detector, but ``reap_clean_exits()`` is an out-of-band
+    WNOHANG backstop that can observe a worker's exit in a round whose
+    select() snapshot PREDATES that worker's write. The parent then
+    learns of the death through waitpid while the notification arrives
+    through the pipe, and the loop can reach its termination branch in
+    between -- leaving the line buffered.
+
+    The symptom is two incompatible stories about one run: a non-zero
+    ``poisoned`` count (the engine's scalar) beside an EMPTY
+    ``poisoned_batches`` list (the reactor's), because the scalar is
+    read from the engine and the list only from this pipe.
+
+    Draining here costs one select() with a zero timeout plus one read
+    per buffered chunk. It never blocks: the pipe is a BLOCKING pipe,
+    so readability is checked first and a read is issued only when
+    select() says there is something to take.
+    """
+    fd = getattr(state, "trap_ack_r", -1)
+    if fd is None or fd < 0:
+        return 0
+    total = 0
+    while True:
+        try:
+            _r, _, _ = _select.select([fd], [], [], 0)
+        except (OSError, ValueError):
+            return total
+        if not _r:
+            return total
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            return total
+        if not chunk:
+            return total
+        total += len(chunk)
+        handle_trap_ack_bytes(state, chunk)
+
+
 def handle_spawn_bytes(state, data):
     """Consume raw scanner spawn-pipe bytes; fork workers per line.
 
@@ -1012,7 +1095,8 @@ def handle_spawn_bytes(state, data):
                 break
 
 
-def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
+def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None,
+                 extra_watch=None):
     """Supervise workers to completion (bash ring_poll equivalent).
 
     Death pipes + spawn pipe + trap-ACK pipe are select()ed each
@@ -1027,6 +1111,12 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
     callable run once per round after event handling (NUMA helper
     watches — pipeline deaths raise promptly instead of waiting
     for worker completion).
+
+    extra_watch (optional) is a list of ExtraWatch holders: descriptors
+    the loop WAKE on but never read. The C drain's results pipe is one
+    (WO-PY-CDRAIN-REACTOR-WAKEUP-1). Without it, an empty results pipe
+    costs a full poll_timeout before the next result is noticed, which
+    is what put the C drain 16-19x behind the legacy drain at scale.
 
     Yields result blobs (streaming) and returns
     {"statuses": [(pid, status)], "poisoned": [...]}.
@@ -1055,18 +1145,16 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
         # bounds the hang instead of select() waiting forever).
         state.check_startup_timeouts()
 
-        # 2. Death-pipe + spawn + trap-ACK events.
-        watch = []
+        # 2. Death-pipe + spawn + trap-ACK events, plus any EXTRA
+        # wakeup descriptors (the C drain's results pipe). The watch set
+        # comes from reactor_watch_fds -- the SAME builder reactor_poll_once
+        # uses -- so the two cannot drift (there used to be two copies
+        # of this list, which is exactly the drift the work order
+        # warns about).
         death_of = {}
-        for slot in state.workers.values():
-            if slot.alive and slot.death_r is not None \
-                    and slot.death_r >= 0:
-                watch.append(slot.death_r)
-                death_of[slot.death_r] = slot.wid
-        if state.spawn_r is not None and state.spawn_r >= 0:
-            watch.append(state.spawn_r)
-        if state.trap_ack_r is not None and state.trap_ack_r >= 0:
-            watch.append(state.trap_ack_r)
+        extra_fds = _extra_fds(extra_watch)
+        watch = reactor_watch_fds(state, extra=extra_fds, death_of=death_of)
+        extra_set = set(extra_fds)
 
         if watch:
             try:
@@ -1081,6 +1169,12 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
             except (OSError, ValueError):
                 readable = []
             for fd in readable:
+                if fd in extra_set:
+                    # A WAKEUP event only. The PUMP owns the read side
+                    # (framing, reassembly, EOF); reading here would
+                    # steal bytes from it and corrupt the framing.
+                    # The drain burst below services the pump.
+                    continue
                 if fd == state.spawn_r:
                     chunk = _drain_pipe_nonblock(fd, "_spawn_buf")
                     if chunk is None:
@@ -1200,6 +1294,19 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
                 else:
                     _time.sleep(poll_timeout)
                 continue
+            # W-PYPOISONDRAIN: the pipe can still hold a poison
+            # notification, and NOTHING else keeps this run alive for
+            # it -- the notification arms no trap-ACK deadline, so the
+            # deadline branch above cannot cover it. Leaving here with
+            # the line buffered yields a non-zero `poisoned` count
+            # beside an EMPTY `poisoned_batches` list: the engine's
+            # scalar and the reactor's list disagreeing about one run.
+            #
+            # The loss window is the gap between the round's select()
+            # (which may predate the worker's write) and the
+            # out-of-band reap sweep that observes the worker's exit.
+            # Draining before leaving closes it.
+            drain_trap_ack(state)
             break
 
     return {"statuses": list(state.statuses),
@@ -1220,7 +1327,48 @@ def reactor_run(state, poll_timeout=0.1, service=None):
             "poisoned": list(state.poisoned_batches)}
 
 
-def reactor_watch_fds(state, spawn=True):
+class ExtraWatch:
+    """A descriptor the reactor SELECTS on but never reads.
+
+    The C drain's results pipe is one. The PUMP owns the read side
+    (framing, reassembly, EOF); the reactor only needs to know that DATA
+    IS AVAILABLE, so that an empty interval does not cost the full poll
+    timeout before the next result is noticed.
+
+    The holder is mutable so the OWNER can disarm it: a pipe at EOF is
+    permanently readable, and leaving it in the watch set would spin the
+    reactor. The pump disarms it when it observes EOF.
+
+    Lifetime: the holder belongs to the executor that created the
+    pipe, and must outlive every reactor round that selects on it.
+    """
+
+    __slots__ = ("fd",)
+
+    def __init__(self, fd):
+        self.fd = fd
+
+    def disarm(self):
+        """Stop watching this descriptor (EOF reached, or torn down)."""
+        self.fd = -1
+
+    def active(self) -> bool:
+        return self.fd is not None and self.fd >= 0
+
+
+def _extra_fds(extra_watch):
+    """The live fds of a list of ExtraWatch holders (disarmed ones drop out)."""
+    if not extra_watch:
+        return ()
+    out = []
+    for holder in extra_watch:
+        fd = getattr(holder, "fd", holder)
+        if fd is not None and fd >= 0:
+            out.append(fd)
+    return out
+
+
+def reactor_watch_fds(state, spawn=True, extra=(), death_of=None):
     """Descriptors reactor_poll_once() selects on.
 
     Factored out so a caller that is waiting on something ELSE -- the
@@ -1230,19 +1378,35 @@ def reactor_watch_fds(state, spawn=True):
     (W-PYINGESTWAIT). Single source of truth: the list here and the
     dispatch inside reactor_poll_once must agree, and two copies of it
     would drift exactly the way duplicated flag lists do.
+
+    ``extra`` adds descriptors the reactor must WAKE on but must NOT
+    read -- the C drain's results pipe (WO-PY-CDRAIN-REACTOR-WAKEUP-1).
+    They are appended last, de-duplicated, and None/negative sentinels
+    are ignored. ``death_of``, if given, is filled in with the
+    death-pipe -> wid map so a caller can classify a readable death pipe
+    without rebuilding it.
+
+    reactor_loop() uses this too, so the two watch sets cannot drift.
     """
     watch = []
     for slot in state.workers.values():
         if slot.alive and slot.death_r is not None and slot.death_r >= 0:
             watch.append(slot.death_r)
+            if death_of is not None:
+                death_of[slot.death_r] = slot.wid
     if spawn and state.spawn_r is not None and state.spawn_r >= 0:
         watch.append(state.spawn_r)
     if state.trap_ack_r is not None and state.trap_ack_r >= 0:
         watch.append(state.trap_ack_r)
+    for fd in extra:
+        if fd is None or fd < 0:
+            continue
+        if fd not in watch:
+            watch.append(fd)
     return watch
 
 
-def reactor_poll_once(state, poll_timeout=0.0, spawn=True):
+def reactor_poll_once(state, poll_timeout=0.0, spawn=True, extra_watch=None):
     """Service one nonblocking event round (spill-loop interleaving).
 
     Runs a single select round over death/spawn/trap-ACK pipes plus
@@ -1264,21 +1428,28 @@ def reactor_poll_once(state, poll_timeout=0.0, spawn=True):
     batches". Suppressing the watch entry (rather than blanking
     state.spawn_r around the gate) keeps the descriptor parked on state
     for teardown, so it cannot leak on any early-error path.
+
+    ``extra_watch`` is a list of ExtraWatch holders: descriptors this
+    round WAKE on but never read (the C drain's results pipe).
     """
     state.check_trap_timeouts()
     # W-REL6-3.1: startup deadline also bounds spill-loop supervision
     # (a hung child would otherwise stall the spill, not just the run).
     state.check_startup_timeouts()
-    watch = reactor_watch_fds(state, spawn=spawn)
-    death_of = {slot.death_r: slot.wid for slot in state.workers.values()
-                if slot.alive and slot.death_r is not None
-                and slot.death_r >= 0}
+    death_of = {}
+    extra_fds = _extra_fds(extra_watch)
+    watch = reactor_watch_fds(state, spawn=spawn, extra=extra_fds,
+                              death_of=death_of)
+    extra_set = set(extra_fds)
     if watch:
         try:
             readable, _, _ = _select.select(watch, [], [], poll_timeout)
         except (OSError, ValueError):
             readable = []
         for fd in readable:
+            if fd in extra_set:
+                # A WAKEUP event only -- the PUMP owns the read side.
+                continue
             if fd == state.spawn_r:
                 try:
                     chunk = os.read(fd, 4096)
@@ -1347,7 +1518,7 @@ def spawn_orderer(order_r, output_fd=1, unordered=False, numa=False,
     """
     from ._bindings import get as _get
     lib = _get()
-    pid = os.fork()
+    pid = _childreg.fork_child('orderer')
     if pid == 0:
         try:
             from ._fd_scrub import scrub_fds
@@ -1378,7 +1549,7 @@ def fork_scanner_with_death_pipe(lib, memfd, spawn_w=-1,
     scaling); -1 runs the plain scan.
     """
     death_r, death_w = os.pipe()
-    pid = os.fork()
+    pid = _childreg.fork_child('scanner')
     if pid == 0:
         try:
             os.close(death_r)
@@ -1457,6 +1628,7 @@ def check_scanner_death(scan_pid, death_r):
 __all__ = ["WorkerSlot", "ReactorState", "reactor_loop", "reactor_run",
            "reactor_poll_once",
            "handle_trap_ack_bytes", "handle_spawn_bytes",
+           "drain_trap_ack",
            "report_poisoned", "spawn_orderer",
            "fork_scanner_with_death_pipe", "check_scanner_death",
            "TRAP_ACK_GRACE_S", "ORDER_PIPE_SIZE", "DRAIN_BURST"]

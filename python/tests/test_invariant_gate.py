@@ -33,6 +33,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get  # noqa: E402
 
 from _helpers import (assert_no_zombies, redirect_fd, restore_fd,  # noqa: E402
+                      ChildLifecycleMixin,
                       write_lines)
 
 try:
@@ -51,7 +52,7 @@ def _lines(path, n, fmt="line %d\n"):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestEscrowAdvisory(unittest.TestCase):
+class TestEscrowAdvisory(ChildLifecycleMixin, unittest.TestCase):
     """INVARIANTS §6: ignore escrow entirely, still complete all work."""
 
     def tearDown(self):
@@ -150,7 +151,7 @@ class TestEscrowAdvisory(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestBatchAtomicity(unittest.TestCase):
+class TestBatchAtomicity(ChildLifecycleMixin, unittest.TestCase):
     """INVARIANTS §3: a batch is claimed whole or not at all."""
 
     def tearDown(self):
@@ -185,7 +186,7 @@ class TestBatchAtomicity(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestContiguousPrefix(unittest.TestCase):
+class TestContiguousPrefix(ChildLifecycleMixin, unittest.TestCase):
     """INVARIANTS §9: emit only contiguous prefix; holes reported."""
 
     def tearDown(self):

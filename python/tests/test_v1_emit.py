@@ -1,9 +1,17 @@
 """W-PY14 C-level output emit: one fr_py_emit call per batch (Stage 5).
 
-Covers the C function directly (framing, signal, edge cases, error
-codes) and the worker integration (byte-exact map/stream, None-vs-b"",
-fallback, validation preserved). The emit path is auto-selected when
-the symbol exists; FORKRUN_NO_V1=1 forces the v0 Python writes.
+Covers the C function directly (framing, edge cases, error codes) and
+the worker integration (byte-exact map/stream, None-vs-b"", fallback,
+validation preserved). The emit path is auto-selected when the symbol
+exists; FORKRUN_NO_V1=1 forces the v0 Python writes.
+
+STAGE0: emit and publication are now SEPARATE steps. fr_py_emit writes
+the record and deliberately does NOT signal -- publishing before the
+commit is the race Stage 0 removes. Notification happens afterwards via
+fr_py_notify_committed, which carries the COMMITTED FRONTIER (an
+absolute output offset), not a batch index. These tests pin that split:
+nothing may appear on the signal pipe until the frontier is published,
+and what appears is (wid, offset).
 """
 
 import ctypes
@@ -19,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get, v1_available  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -27,8 +35,30 @@ try:
 except FileNotFoundError:
     HAVE_LIB = False
 
-_HDR = struct.Struct("<QQ")
+# DECISION-02: the record header gained an explicit disposition field.
+# The v0 contract this file pins is EXTENDED, not changed: a zero-length
+# payload is still a real empty result, and it is now distinguishable from
+# "completed with no result" by an explicit tag rather than by absence.
+_HDR = struct.Struct("<QQII")   # batch_idx, len, disposition, reserved
+_HDR_BYTES = _HDR.size          # was 16
+_DISP_DATA = 0
+_DISP_NO_RESULT = 1
 _SIG = struct.Struct("<QQ")
+
+
+def _drain_signal(fd, want):
+    """Read whatever is available on the signal pipe, up to 16 bytes."""
+    import select
+    got = b""
+    while len(got) < 16:
+        r, _, _ = select.select([fd], [], [], want)
+        if not r:
+            break
+        chunk = os.read(fd, 16 - len(got))
+        if not chunk:
+            break
+        got += chunk
+    return got
 
 
 def _emit_lib():
@@ -38,6 +68,10 @@ def _emit_lib():
         ctypes.c_uint64, ctypes.c_uint64,
         ctypes.c_char_p, ctypes.c_uint64]
     lib.fr_py_emit.restype = ctypes.c_int
+    # STAGE0: publication is a separate exported entry point.
+    lib.fr_py_notify_committed.argtypes = [ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_uint64]
+    lib.fr_py_notify_committed.restype = ctypes.c_int
     return lib
 
 
@@ -64,16 +98,21 @@ class TestFrPyEmit(unittest.TestCase):
         r, w = os.pipe()
         try:
             self.assertEqual(lib.fr_py_emit(out, w, 3, 7, b"hello", 5), 0)
+            # STAGE0: emit alone publishes nothing.
+            self.assertEqual(b"", _drain_signal(r, 0))
+            # Publication is explicit and carries the committed frontier,
+            # which is the output offset -- not the batch index.
+            self.assertEqual(lib.fr_py_notify_committed(w, out, 3), 0)
+            self.assertEqual((3, _HDR_BYTES + 5),
+                             _SIG.unpack(os.read(r, 16)))
             os.close(w)
             w = -1
             os.lseek(out, 0, 0)
-            idx, ln = _HDR.unpack(_read_all(out)[:16])
+            idx, ln, disp, _res = _HDR.unpack(_read_all(out)[:_HDR_BYTES])
             os.lseek(out, 0, 0)
             raw = _read_all(out)
             self.assertEqual((idx, ln), (7, 5))
-            self.assertEqual(raw[16:16 + ln], b"hello")
-            sig = os.read(r, 16)
-            self.assertEqual(_SIG.unpack(sig), (3, 7))
+            self.assertEqual(raw[_HDR_BYTES:_HDR_BYTES + ln], b"hello")
         finally:
             os.close(out)
             os.close(r)
@@ -81,16 +120,19 @@ class TestFrPyEmit(unittest.TestCase):
                 os.close(w)
 
     def test_emit_none_signal_only(self):
-        # Payload returned None: no record bytes, signal still sent.
+        # Payload returned None: no record bytes. STAGE0: no signal
+        # either -- emit never publishes. The caller publishes the
+        # committed frontier, which for a no-output batch equals the
+        # previous frontier, so the drain has nothing new to forward.
         lib = _emit_lib()
         out = os.memfd_create("e")
         r, w = os.pipe()
         try:
             self.assertEqual(lib.fr_py_emit(out, w, 1, 8, None, 0), 0)
-            os.close(w)
-            w = -1
             self.assertEqual(os.fstat(out).st_size, 0)
-            self.assertEqual(_SIG.unpack(os.read(r, 16)), (1, 8))
+            self.assertEqual(b"", _drain_signal(r, 0))
+            self.assertEqual(lib.fr_py_notify_committed(w, out, 1), 0)
+            self.assertEqual((1, 0), _SIG.unpack(os.read(r, 16)))
         finally:
             os.close(out)
             os.close(r)
@@ -104,13 +146,19 @@ class TestFrPyEmit(unittest.TestCase):
         r, w = os.pipe()
         try:
             self.assertEqual(lib.fr_py_emit(out, w, 1, 9, b"", 0), 0)
+            # STAGE0: still no publication until the frontier is sent.
+            self.assertEqual(b"", _drain_signal(r, 0))
+            self.assertEqual(lib.fr_py_notify_committed(w, out, 1), 0)
+            self.assertEqual((1, _HDR_BYTES), _SIG.unpack(os.read(r, 16)))
             os.close(w)
             w = -1
             os.lseek(out, 0, 0)
             raw = _read_all(out)
-            self.assertEqual(len(raw), 16)
-            self.assertEqual((9, 0), _HDR.unpack(raw))
-            self.assertEqual(_SIG.unpack(os.read(r, 16)), (1, 9))
+            self.assertEqual(len(raw), _HDR_BYTES)
+            # b"" is a REAL empty result, so it stays DATA -- NOT
+            # NO_RESULT. This is the distinction DECISION-02 exists to
+            # preserve: len == 0 was already spoken for.
+            self.assertEqual((9, 0, _DISP_DATA, 0), _HDR.unpack(raw))
         finally:
             os.close(out)
             os.close(r)
@@ -126,7 +174,9 @@ class TestFrPyEmit(unittest.TestCase):
             self.assertEqual(lib.fr_py_emit(out, -1, 1, 10, b"xy", 2), 0)
             os.lseek(out, 0, 0)
             raw = _read_all(out)
-            self.assertEqual(raw, _HDR.pack(10, 2) + b"xy")
+            self.assertEqual(raw, _HDR.pack(10, 2, _DISP_DATA, 0) + b"xy")
+            # STAGE0: out_fd < 0 frames nothing and publishes nothing.
+            self.assertEqual(b"", _drain_signal(r, 0))
             import select
             self.assertEqual(select.select([r], [], [], 0.0)[0], [])
         finally:
@@ -135,14 +185,23 @@ class TestFrPyEmit(unittest.TestCase):
             os.close(w)
 
     def test_emit_no_output(self):
-        # out_fd=-1 (discard path): nothing framed, signal still sent.
+        # out_fd=-1 (discard path): nothing framed. STAGE0: nothing
+        # published either, and the notifier reports failure because
+        # there is no output fd to take a frontier from -- the caller
+        # must not treat that as "published successfully".
         lib = _emit_lib()
         r, w = os.pipe()
         try:
             self.assertEqual(lib.fr_py_emit(-1, w, 2, 4, b"zz", 2), 0)
+            self.assertEqual(b"", _drain_signal(r, 0))
+            # Notifying with no signal fd is a no-op success...
+            self.assertEqual(lib.fr_py_notify_committed(-1, -1, 2), 0)
+            # ...but asking to publish with no output fd to read a
+            # frontier from must NOT report success.
+            self.assertNotEqual(lib.fr_py_notify_committed(w, -1, 2), 0)
+            self.assertEqual(b"", _drain_signal(r, 0))
             os.close(w)
             w = -1
-            self.assertEqual(_SIG.unpack(os.read(r, 16)), (2, 4))
         finally:
             os.close(r)
             if w >= 0:
@@ -159,9 +218,9 @@ class TestFrPyEmit(unittest.TestCase):
             w = -1
             os.lseek(out, 0, 0)
             raw = _read_all(out)
-            idx, ln = _HDR.unpack_from(raw, 0)
+            idx, ln, disp, _res = _HDR.unpack_from(raw, 0)
             self.assertEqual((idx, ln), (0, len(big)))
-            self.assertEqual(raw[16:], big)
+            self.assertEqual(raw[_HDR_BYTES:], big)
         finally:
             os.close(out)
             os.close(r)
@@ -188,14 +247,18 @@ class TestFrPyEmit(unittest.TestCase):
         r, w = os.pipe()
         os.close(r)
         try:
-            self.assertEqual(lib.fr_py_emit(out, w, 0, 0, b"d", 1), -2)
+            # STAGE0: the signal write moved out of fr_py_emit into
+            # fr_py_notify_committed, so this is now a plain success and
+            # the failure is reported by the notifier instead.
+            self.assertEqual(lib.fr_py_emit(out, w, 0, 0, b"d", 1), 0)
+            self.assertNotEqual(lib.fr_py_notify_committed(w, out, 0), 0)
         finally:
             os.close(out)
             os.close(w)
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerEmitIntegration(unittest.TestCase):
+class TestWorkerEmitIntegration(ChildLifecycleMixin, unittest.TestCase):
     """End-to-end: the worker's emit path is byte-exact."""
 
     def test_emit_available(self):

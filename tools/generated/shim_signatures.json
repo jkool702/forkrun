@@ -34,6 +34,11 @@
     "linkage": "extern",
     "return": "uint64_t"
   },
+  "fr_py_c07_counting_enabled": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_cap_rewind": {
     "args": "int *slot, const char *name",
     "linkage": "static",
@@ -41,6 +46,11 @@
   },
   "fr_py_claim": {
     "args": "fr_py_batch_t *out",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_committed_data_frames": {
+    "args": "int node, uint64_t *out",
     "linkage": "extern",
     "return": "int"
   },
@@ -89,8 +99,18 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_emit_disposition": {
+    "args": "int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx, uint32_t disposition",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_emit_record": {
     "args": "int out_fd, uint64_t batch_idx, int src_fd, uint64_t src_off, uint64_t src_len",
+    "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_emit_record_buf": {
+    "args": "int out_fd, uint64_t batch_idx, const char *data, uint64_t len, uint32_t disposition",
     "linkage": "static",
     "return": "int"
   },
@@ -159,9 +179,34 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_maybe_die_before_ack": {
+    "args": "int wid, int signal_fd",
+    "linkage": "static",
+    "return": "void"
+  },
+  "fr_py_maybe_die_before_notify": {
+    "args": "int signal_fd, int out_fd, int wid",
+    "linkage": "static",
+    "return": "void"
+  },
+  "fr_py_node_index_complete": {
+    "args": "int node",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_node_scan_complete": {
+    "args": "int node",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_nonblock": {
     "args": "int fd",
     "linkage": "static",
+    "return": "int"
+  },
+  "fr_py_notify_committed": {
+    "args": "int signal_fd, int out_fd, uint64_t wid",
+    "linkage": "extern",
     "return": "int"
   },
   "fr_py_numa_ingest": {
@@ -259,10 +304,25 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_signal_write": {
+    "args": "int signal_fd, uint64_t wid, uint64_t frontier",
+    "linkage": "static",
+    "return": "int"
+  },
   "fr_py_spill_sequential": {
     "args": "int src_fd, int dst_fd, uint64_t max_bytes",
     "linkage": "extern",
     "return": "int64_t"
+  },
+  "fr_py_udf_bind": {
+    "args": "fr_udf_call_fn call_fn, fr_udf_free_fn free_fn",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_udf_invoke": {
+    "args": "int ingress_fd, int out_fd, uint64_t batch_off, uint64_t batch_len, uint64_t batch_idx, const char *module, const char *attr",
+    "linkage": "static",
+    "return": "int"
   },
   "fr_py_unmap": {
     "args": "uint64_t addr, uint64_t length",
@@ -274,6 +334,11 @@
     "linkage": "extern",
     "return": "const char *"
   },
+  "fr_py_worker_bind_node": {
+    "args": "int node_id",
+    "linkage": "extern",
+    "return": "void"
+  },
   "fr_py_worker_init": {
     "args": "int wid, int node_id, int wincarn, int retry_limit, int debug",
     "linkage": "extern",
@@ -284,6 +349,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_worker_plugin_loop_numa": {
+    "args": "int wid, const char *path, const char *func_name, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error, int node_id",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_worker_spawn_loop": {
     "args": "int wid, char **argv, int argc, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error",
     "linkage": "extern",
@@ -291,6 +361,11 @@
   },
   "fr_py_worker_splice_loop": {
     "args": "int wid, int ingress_fd, int out_fd, int signal_fd, int fallow_fd",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_worker_udf_loop": {
+    "args": "int wid, const char *module, const char *attr, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error",
     "linkage": "extern",
     "return": "int"
   },

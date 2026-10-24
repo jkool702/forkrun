@@ -53,6 +53,41 @@ class TestReleaseVersionGates(unittest.TestCase):
         fn = _check_by_name("Wheel: embedded .so reports")
         self.assertTrue(fn())
 
+    @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+    def test_packaged_wheel_override_is_inspected(self):
+        """WO-COMPAT-08: FORKRUN_RELEASE_WHEEL must be the artifact read.
+
+        The version-matrix lane holds a downloaded wheel but has no bash
+        headers, so a rebuild is impossible there and would in any case
+        verify a different artifact. `_ensure_artifacts` is booby-trapped
+        here, so taking the build path fails instead of silently passing.
+        """
+        import tempfile
+        import zipfile
+        from unittest import mock
+
+        so = find_substrate()
+        with tempfile.TemporaryDirectory() as td:
+            whl = os.path.join(td, "forkrun-test.whl")
+            with zipfile.ZipFile(whl, "w") as zf:
+                zf.write(so, "forkrun/libforkrun_python.so")
+            fn = _check_by_name("Wheel: embedded .so reports")
+            with mock.patch.dict(os.environ,
+                                 {"FORKRUN_RELEASE_WHEEL": whl}):
+                with mock.patch.object(
+                        release_check, "_ensure_artifacts",
+                        side_effect=AssertionError(
+                            "built a wheel instead of inspecting the "
+                            "FORKRUN_RELEASE_WHEEL override")):
+                    self.assertTrue(fn())
+            # A bogus override is a loud failure, never a silent fallback
+            # to building our own wheel.
+            with mock.patch.dict(os.environ,
+                                 {"FORKRUN_RELEASE_WHEEL":
+                                  os.path.join(td, "missing.whl")}):
+                with self.assertRaises(AssertionError):
+                    release_check._packaged_wheel()
+
 
 if __name__ == "__main__":
     unittest.main()

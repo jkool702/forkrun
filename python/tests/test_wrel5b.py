@@ -21,7 +21,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun.exceptions import ForkrunInterrupted  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -40,7 +40,7 @@ def _slow(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestB1UnknownKwarg(unittest.TestCase):
+class TestB1UnknownKwarg(ChildLifecycleMixin, unittest.TestCase):
     """B1: map/stream/sweep reject unknown kwargs; sink= rejected."""
 
     def _path(self, n=50):
@@ -96,7 +96,7 @@ class TestB1UnknownKwarg(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestB2StreamTaxonomy(unittest.TestCase):
+class TestB2StreamTaxonomy(ChildLifecycleMixin, unittest.TestCase):
     """B2: SIGINT mid-stream raises ForkrunInterrupted (uniform with
     the six blocking executors), not bare KeyboardInterrupt."""
 
@@ -197,7 +197,7 @@ def _segv(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestB8SignalFidelity(unittest.TestCase):
+class TestB8SignalFidelity(ChildLifecycleMixin, unittest.TestCase):
     """B8: worker-failure raises carry .signo (SIGSEGV ⇒ 11) while
     staying plain RuntimeError (Bash exit-1 contract)."""
 
@@ -230,7 +230,7 @@ class TestB8SignalFidelity(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestB5ReactorPollNonblocking(unittest.TestCase):
+class TestB5ReactorPollNonblocking(ChildLifecycleMixin, unittest.TestCase):
     """B5: reactor_poll_once never blocks on an unreaped child
     (death-pipe EOF precedes os._exit — WNOHANG + bounded spin,
     then defer to the reap sweep)."""
@@ -294,7 +294,7 @@ class TestB5ReactorPollNonblocking(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestB4BoundedHelperJoin(unittest.TestCase):
+class TestB4BoundedHelperJoin(ChildLifecycleMixin, unittest.TestCase):
     """B4: helper joins are bounded (SIGKILL on expiry + alarm
     naming the helper) instead of unbounded os.waitpid(pid, 0)."""
 
@@ -336,7 +336,7 @@ class TestB4BoundedHelperJoin(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestB3IngestReactorLiveness(unittest.TestCase):
+class TestB3IngestReactorLiveness(ChildLifecycleMixin, unittest.TestCase):
     """B3: the ingest-reactor spill observes worker deaths while the
     source is stalled (O_NONBLOCK + drain-to-EAGAIN + poll per
     quantum), instead of blocking in os.read until data arrives."""

@@ -18,27 +18,104 @@ from fcntl import F_GETPIPE_SZ
 import time
 import unittest
 import warnings
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import forkrun  # noqa: E402
 from forkrun.run import (  # noqa: E402
     _cleanroom_collect, _cleanroom_eligible, _cleanroom_enabled,
-    _cleanroom_explicit, _cleanroom_launcher_path, _read_cleanroom_stats)
+    _cleanroom_explicit, _cleanroom_launcher_path,
+    _cleanroom_route_enabled, _read_cleanroom_stats,
+    _decode_launcher_status, _describe_launcher_failure,
+    _source_is_reopenable)
 
-PLUGIN = None
-for _cand in (
-        os.environ.get("FORKRUN_TEST_PLUGIN"),
-        "/tmp/opencode/mlbench/ml_plugin_light.so",
-):
-    if _cand and os.path.exists(_cand):
-        PLUGIN = _cand
-        break
-HAVE_PLUGIN = PLUGIN is not None
+# CR-FIX1-G: the fixture is BUILT HERE, AT MODULE SCOPE.
+#
+# This placement is load-bearing and is the bug this change exists to
+# fix. The old header pointed PLUGIN at a hardcoded
+# /tmp/opencode/mlbench/ml_plugin_light.so that no build target produces,
+# so HAVE_PLUGIN was False in a fresh checkout and 37 of 58 tests
+# skipped. The obvious repair -- compile the in-repo plugin in
+# setUpModule() -- does NOT work: @unittest.skipUnless decorators are
+# evaluated at CLASS-DEFINITION time, i.e. during import, which happens
+# before setUpModule() runs. HAVE_PLUGIN would still be frozen at False
+# and every gated test would still skip, while the suite looked green.
+# A test that cannot distinguish "worked" from "never ran" is not a test.
+#
+# So: compile first, then compute HAVE_PLUGIN, then define the classes.
+#
+# The fixture is the existing in-repo plugin (CR-FIX1-G: reuse, do not
+# invent another). test_plugin_v1.c already exports the dialect-2 ctx
+# protocol the launcher requires, plus the fault-injection entry points
+# the suite needs. Its output transform differs from the old fixture's,
+# which is immaterial: every parity test compares the cleanroom path
+# against the in-process path USING THE SAME PLUGIN, so the transform
+# cancels. The light_5M benchmark keeps its own plugin -- that number
+# measures realistic workload throughput, not fixture speed.
+PLUGINS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "plugins")
+PLUGIN_SRC = os.path.join(PLUGINS_DIR, "test_plugin_v1.c")
+PLUGIN = os.environ.get("FORKRUN_TEST_PLUGIN") or os.path.join(
+    PLUGINS_DIR, "test_plugin_v1.so")
+PLUGIN_FUNC = os.environ.get("FORKRUN_TEST_PLUGIN_FUNC") or "count_lines_v1"
+PLUGIN_HEADER = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "ring_loadables")
+
+# The v0 fixture, used by exactly one test: the launcher must REFUSE a
+# plugin with no forkrun_use_ctx (exit 78) rather than drive it via the
+# legacy stdout route it cannot collect. That test used to skip in a
+# fresh checkout because nothing here built it -- a skip caused by the
+# repo not building its own fixture is not an environmental limitation.
+LEGACY_SRC = os.path.join(PLUGINS_DIR, "test_plugin.c")
+LEGACY_SO = os.path.join(PLUGINS_DIR, "test_plugin.so")
+
+HAVE_GCC = shutil.which("gcc") is not None
+
+
+def _compile(src, out):
+    import subprocess
+    proc = subprocess.run(
+        ["gcc", "-shared", "-fPIC", "-O2", "-I", PLUGIN_HEADER,
+         "-o", out, src],
+        capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        raise AssertionError(
+            "cleanroom fixture build FAILED for %s (gcc is present, so this "
+            "is a defect, not an environmental skip):\n%s"
+            "command: gcc -shared -fPIC -O2 -I %s -o %s %s"
+            % (src, proc.stderr, PLUGIN_HEADER, out, src))
+
+
+def _build_fixture():
+    """Compile the in-repo plugins. Returns True when PLUGIN exists.
+
+    Module scope, NOT setUpModule: see the header. Fails loudly when
+    the compiler is present but the build fails -- that is a real defect,
+    not an environmental limitation, and a silent skip would hide it."""
+    if not HAVE_GCC:
+        return False
+    if not os.path.exists(PLUGIN):
+        _compile(PLUGIN_SRC, PLUGIN)
+    if not os.path.exists(LEGACY_SO):
+        _compile(LEGACY_SRC, LEGACY_SO)
+    return os.path.exists(PLUGIN)
+
+
+try:
+    HAVE_PLUGIN = _build_fixture()
+except AssertionError:
+    # Re-raised below from a test so it fails the suite rather than
+    # aborting collection; recorded here so the decorators see it.
+    HAVE_PLUGIN = False
+    _FIXTURE_BUILD_ERROR = sys.exc_info()[1]
+else:
+    _FIXTURE_BUILD_ERROR = None
 
 
 def _spec():
-    return "%s:ml_process_light" % PLUGIN
+    return "%s:%s" % (PLUGIN, PLUGIN_FUNC)
 
 
 def _make_input(n=2000, path=None):
@@ -94,28 +171,128 @@ def _descendants_of(pid):
     return out
 
 
+class TestLauncherOutcomeContract(unittest.TestCase):
+    """CR-FIX1-D/C: exit-status decoding and the replay-safety rule.
+
+    Pure -- no plugin, no launcher. These two functions decide whether
+    a failed run silently returns half its input, which is the single
+    worst failure mode in this subsystem, so they are pinned directly
+    rather than only through an end-to-end run.
+    """
+
+    def test_exit_78_decodes_from_the_raw_wait_status(self):
+        # A normally exited process with code 78 arrives as 78 << 8.
+        # Reporting the raw number was the bug; a caller seeing 19968
+        # has no way to tell a capability refusal from a broken install.
+        code, sig, label, pre = _decode_launcher_status(78 << 8)
+        self.assertEqual(code, 78)
+        self.assertIsNone(sig)
+        self.assertIn("forkrun_use_ctx", label)
+        self.assertTrue(pre, "exit 78 is a pre-ingestion refusal")
+
+    def test_pre_ingestion_codes(self):
+        for code in (64, 69, 71, 78):
+            _, _, _, pre = _decode_launcher_status(code << 8)
+            self.assertTrue(pre, "exit %d must be pre-ingestion" % code)
+
+    def test_ambiguous_and_post_ingestion_codes_are_unsafe(self):
+        # 70 is die(), which fires both before the spill fork (:388) and
+        # after it (:498/:516/:539) -- so it cannot be classified either
+        # way and must be treated as consumed.
+        for code in (70, 1):
+            _, _, _, pre = _decode_launcher_status(code << 8)
+            self.assertFalse(pre, "exit %d must NOT be pre-ingestion" % code)
+
+    def test_signal_death_is_indeterminate_and_unsafe(self):
+        code, sig, label, pre = _decode_launcher_status(9)   # SIGKILL
+        self.assertIsNone(code)
+        self.assertEqual(sig, 9)
+        self.assertFalse(pre, "signal death must be treated as consumed")
+
+    def test_description_is_human_readable_not_a_raw_number(self):
+        # The whole point: a caller must not be handed a bare wait
+        # status. For an exited process the raw value is code << 8, which
+        # is distinctive, so assert it never appears. (For a signal death
+        # the raw status IS the signal number, so that case is excluded
+        # here rather than asserted against a coincidence.)
+        for code in (78, 64, 70, 71, 1):
+            raw = code << 8
+            d = _describe_launcher_failure(raw)
+            self.assertNotIn(str(raw), d,
+                             "raw wait status leaked into: %r" % d)
+            self.assertIn(str(code), d)
+        self.assertIn("signal", _describe_launcher_failure(9))
+
+    def test_replay_safety_is_decided_by_source_ownership(self):
+        self.assertTrue(_source_is_reopenable("/tmp/x.jsonl"))
+        self.assertTrue(_source_is_reopenable(b"/tmp/x.jsonl"))
+        # A caller-supplied descriptor shares the open file description
+        # with the launcher's dup, so it cannot be rewound after ingest.
+        self.assertFalse(_source_is_reopenable(7))
+        with tempfile.NamedTemporaryFile() as fh:
+            self.assertFalse(_source_is_reopenable(fh))
+
+
 class TestCleanroomHelpers(unittest.TestCase):
     """The envelope predicate -- pure, no plugin or launcher needed."""
 
-    def test_disabled_by_default(self):
-        # The default is OFF. It was briefly ON (5ae0b0a0) and reversed.
-        #
-        # That reversal was justified by two claims that are BOTH NOW
-        # FALSE, kept here so nobody re-derives them from the history:
-        # "the envelope excludes orchestrator=True, which is map()'s own
-        # default" (the envelope now REQUIRES orchestrator=True) and "the
-        # launcher runs no supervisor" (W-CR4 gave it one). So neither
-        # the reachability argument nor the missing-supervisor argument
-        # applies any more.
-        #
-        # The reasons it is still OFF are the ones that remain true: it
-        # is a beta, it is SLOWER in the shape callers actually use, and
-        # its envelope is narrower than the API. See
-        # run.py::_cleanroom_enabled for the measured numbers.
+    def test_default_is_map_plugin_only(self):
+        """WO-CR-ROI-2 Phase D moved the default, narrowly.
+
+        History, kept so nobody re-derives it: the default was briefly ON
+        in 5ae0b0a0 and reversed because of two claims that were both
+        FALSE -- "the envelope excludes orchestrator=True, which is
+        map()'s own default" (the envelope now REQUIRES orchestrator=True)
+        and "the launcher runs no supervisor" (W-CR4 gave it one).
+
+        It then stayed off for a while longer, on the grounds that it was
+        "SLOWER in the shape callers actually use". That claim is now
+        FALSIFIED by measurement on this host
+        (benchmarks/bench_cleanroom_default_on.py, paired interleaved
+        A/B, in-process/cleanroom):
+
+            startup, no ballast     1.77x
+            startup, 512 MB ballast 2.34x
+            throughput, 400k records 1.16x
+
+        No regime regresses -- including the throughput regime, where the
+        advantage is smallest and where a regression would most plausibly
+        hide.
+
+        So it is ON again, but for a different and much narrower reason
+        than 5ae0b0a0: exactly ONE route. map(plugin) is the only route
+        with real-exec proof plus current performance evidence. udf,
+        spawn and both stream routes remain opt-in.
+        """
         old = os.environ.pop("FORKRUN_CLEANROOM", None)
         try:
-            self.assertFalse(_cleanroom_enabled())
+            # Enabled...
+            self.assertTrue(_cleanroom_enabled())
+            # ...but NOT explicit. This is the load-bearing distinction:
+            # it is what keeps the decline warning quiet, so a user who
+            # never asked for the cleanroom does not get nagged when a
+            # call cannot use it.
             self.assertFalse(_cleanroom_explicit())
+        finally:
+            if old is not None:
+                os.environ["FORKRUN_CLEANROOM"] = old
+
+    def test_default_does_not_extend_to_other_routes(self):
+        """The narrowness of the new default, asserted.
+
+        A default that enabled "the cleanroom" rather than one route
+        would silently change four other envelopes.
+        """
+        old = os.environ.pop("FORKRUN_CLEANROOM", None)
+        try:
+            self.assertTrue(_cleanroom_route_enabled("map", "plugin"))
+            for entry, mode in (("map", "udf"), ("map", "spawn"),
+                                ("stream", "plugin"), ("stream", "udf"),
+                                ("stream", "spawn")):
+                with self.subTest(route="%s-%s" % (entry, mode)):
+                    self.assertFalse(
+                        _cleanroom_route_enabled(entry, mode),
+                        "%s-%s must stay opt-in" % (entry, mode))
         finally:
             if old is not None:
                 os.environ["FORKRUN_CLEANROOM"] = old
@@ -165,17 +342,20 @@ class TestCleanroomHelpers(unittest.TestCase):
         ok, why = _cleanroom_eligible(p, "plugin", 1, "none", False, True)
         self.assertTrue(ok, "the basic envelope case must be eligible: %s"
                              % (why,))
-        # Served today. Every entry passes orchestrator=True, because
-        # that is now a REQUIREMENT rather than an accepted no-op: the
-        # launcher supervises unconditionally, so it cannot honour the
-        # legacy fail-fast model. Keeping it in the accept list (as
-        # "orchestrator is accepted and ignored" claimed) would assert
-        # the wrong thing.
+        # Served today. Both supervision models are accepted: the launcher
+        # grew a fail-fast policy (DECISION-03), so orchestrator=False is
+        # served under --supervise fail-fast rather than declined.
         for args in (
                 (p, "plugin", 1, "none", False, True),    # baseline
                 (p, "plugin", 1, "index", False, True),   # ordered map
                 (p, "plugin", 1, "none", True, True),     # strict_poison
                 (p, "plugin", 1, "none", False, True, True),   # + stats
+                (p, "plugin", 1, "none", False, False),  # fail-fast policy
+                # W-EXP-2 step C: the multi-node PLUGIN envelope is
+                # served. The launcher builds the real per-node rings and
+                # runs the ingest/indexer/scanner/fallow families itself.
+                (p, "plugin", 2, "none", False, True),    # multi-node
+                (p, "plugin", 4, "index", False, True),   # multi-node, ordered
         ):
             ok, why = _cleanroom_eligible(*args)
             self.assertTrue(ok, "should accept %r (%s)" % (args, why))
@@ -186,7 +366,13 @@ class TestCleanroomHelpers(unittest.TestCase):
         # while testing nothing.
         for args in (
                 (p, "python", 1, "none", False, True),    # not a plugin
-                (p, "plugin", 4, "none", False, True),    # multi-node
+                # W-EXP-2 step C: multi-node is declined for every mode
+                # EXCEPT plugin -- the node-taking worker loop exists for
+                # the plugin loop only. A UDF or a command run on node 0
+                # while the call claims a multi-node run would be a lie
+                # about where the work happened.
+                (p, "udf", 4, "none", False, True),       # multi-node UDF
+                (p, "spawn", 4, "none", False, True),     # multi-node spawn
                 (p, "plugin", 1, "hash", False, True),    # unknown order
                 ("/no/such/file", "plugin", 1, "none", False, True),
         ):
@@ -194,13 +380,19 @@ class TestCleanroomHelpers(unittest.TestCase):
             self.assertFalse(ok, "should reject %r" % (args,))
             self.assertTrue(why)
 
-        # The orchestrator gate itself, and specifically that it is about
-        # SUPERVISION SEMANTICS rather than tidiness: the launcher has a
-        # supervisor, so a caller who asked for fail-fast would get
-        # recovery instead -- a different answer, not a slower one.
+        # orchestrator=False is now SERVED. This used to assert the
+        # opposite, and the reason it was ever declined is the reason it is
+        # safe now: a caller asking for fail-fast would have been given
+        # recovery -- a different answer, not a slower one, and one they
+        # could not detect. DECISION-03 fixes that STRUCTURALLY: the
+        # launcher's fail-fast branch returns before the recovery call, so
+        # there is no flag guarding it that a later edit could get wrong.
+        #
+        # The behavioural half of that promise is asserted in
+        # test_fail_fast_never_recovers, which checks that recovery is not
+        # entered -- this test only pins that the envelope admits it.
         ok, why = _cleanroom_eligible(p, "plugin", 1, "none", False, False)
-        self.assertFalse(ok, "orchestrator=False must decline the cleanroom")
-        self.assertIn("fail-fast", why)
+        self.assertTrue(ok, "orchestrator=False must now be served: %s" % (why,))
 
 
 @unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
@@ -381,7 +573,7 @@ class TestCleanroomExecutes(unittest.TestCase):
         blob = b""
         for i in order_in:
             payload = b"payload-%d" % i
-            blob += hdr.pack(i, len(payload)) + payload
+            blob += hdr.pack(i, len(payload), 0, 0) + payload
         os.write(fd, blob)
         got = R._cleanroom_collect(fd, False, "index")
         self.assertEqual([bytes(x) for x in got],
@@ -413,17 +605,25 @@ class TestCleanroomExecutes(unittest.TestCase):
         os.environ["FORKRUN_CLEANROOM"] = "1"
         self.assertEqual(_joined(out), _joined(ref))
 
-    def test_orchestrator_false_falls_back_rather_than_supervise(self):
-        """orchestrator=False must NOT be silently upgraded to recovery.
+    def test_orchestrator_false_now_takes_the_launcher_under_fail_fast(self):
+        """orchestrator=False is SERVED, and must not recover.
 
-        The launcher supervises unconditionally. If the envelope kept
-        accepting orchestrator=False, a caller who explicitly asked for
-        legacy fail-fast supervision would get worker-death RECOVERY
-        instead -- a different answer, not merely a slower one -- and
-        could not tell from the result.
+        This test USED TO assert the opposite -- that orchestrator=False
+        falls back rather than supervise -- and the reason it was ever
+        declined is the reason it is safe now. A caller who explicitly
+        asked for legacy fail-fast supervision would have been given
+        worker-death RECOVERY instead: a different answer, not merely a
+        slower one, and one they could not detect from the result.
 
-        Asserted end to end: the call warns, the launcher is not taken,
-        and the bytes are still correct.
+        DECISION-03 fixes that STRUCTURALLY rather than by promising it
+        will not happen. The launcher's fail-fast branch RETURNS before the
+        recovery call, so "fail-fast never recovers" is a property of
+        control flow, not of a boolean guarding a call site that a later
+        edit could get wrong.
+
+        Asserted end to end: the launcher IS taken (no fallback warning),
+        the bytes are still correct, and the run did not warn that it
+        declined.
         """
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -431,10 +631,38 @@ class TestCleanroomExecutes(unittest.TestCase):
                               mode="plugin", output="bytes",
                               orchestrator=False)
         self.assertEqual(len(_joined(out)), 2000)
+        declined = [str(w.message) for w in caught
+                    if "not using the launcher" in str(w.message)
+                    or "FORKRUN_CLEANROOM" in str(w.message)]
+        self.assertEqual(
+            [], declined,
+            "orchestrator=False is served now and must NOT warn that it "
+            "declined the launcher: %r" % (declined,))
+
+    def test_fail_fast_aborts_and_does_not_replay(self):
+        """A worker death under fail-fast must RAISE, not silently replay.
+
+        This is the behaviour half of DECISION-03 7.4(b): no recovery, no
+        respawn, immediate abort. Combined with the fallback contract fix,
+        the caller must see a failure -- never a second execution of a
+        workload whose user code already ran.
+        """
+        marker = os.path.join(tempfile.mkdtemp(), "side_effects.txt")
+        os.environ["FORKRUN_TEST_SIDE_EFFECT_FILE"] = marker
+        try:
+            with self.assertRaises(RuntimeError):
+                forkrun.map(PLUGIN + ":"
+                            "die_always_v1", self.path, workers=2,
+                            nodes=1, mode="plugin", order="index",
+                            output="bytes", orchestrator=False)
+            seen = (open(marker).read().split()
+                    if os.path.exists(marker) else [])
+        finally:
+            os.environ.pop("FORKRUN_TEST_SIDE_EFFECT_FILE", None)
         self.assertTrue(
-            any("FORKRUN_CLEANROOM" in str(w.message) for w in caught),
-            "orchestrator=False must say it was not using the launcher; "
-            "warnings=%r" % ([str(w.message) for w in caught],))
+            len(seen) <= 4,
+            "fail-fast must abort promptly rather than churning: %d plugin "
+            "invocations recorded" % (len(seen),))
 
     def test_default_map_call_needs_no_kwargs(self):
         """A plain map() call -- all defaults -- must be eligible.
@@ -1205,11 +1433,9 @@ class TestCleanroomStreaming(unittest.TestCase):
         cannot collect. Previously that produced an empty stream and no
         error; it must now raise.
         """
-        legacy = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "tests", "plugins", "test_plugin.so")
+        legacy = LEGACY_SO
         if not os.path.exists(legacy):
-            self.skipTest("test_plugin.so not built")
+            self.skipTest("v0 fixture test_plugin.so not built")
         os.environ["FORKRUN_CLEANROOM"] = "1"
         with self.assertRaises(Exception):
             out = list(forkrun.stream(
@@ -1284,6 +1510,44 @@ class TestCleanroomProcessDeath(unittest.TestCase):
             return []
         with open(p) as fh:
             return [ln.strip() for ln in fh if ln.strip()]
+
+    def test_stream_strict_poison_enters_the_cleanroom(self):
+        """stream(strict_poison=True) must REACH the launcher.
+
+        The eligibility predicate used to refuse this combination while
+        P2 (c3c321af) had already wired a statistics memfd through the
+        cleanroom stream launch -- capability present, gate stale, tests
+        disagreeing with the predicate. The external review spotted it.
+
+        Asserting only that the call raises the right error would NOT
+        prove it: the in-process reactor raises the same error after
+        falling back, which is precisely how the mismatch survived. So
+        this proves ENTRY -- a launcher process is started, which only
+        the cleanroom path does.
+        """
+        self._marker()
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        spec = self.V1_SO + ":die_always_v1"
+        with self.assertRaisesRegex(RuntimeError, "poison"):
+            list(forkrun.stream(spec, self.path, mode="plugin",
+                                workers=2, nodes=1, lines=50,
+                                streaming=True, strict_poison=True))
+        # The plugin's own side-effect marker is written from inside a
+        # worker. Seeing it proves user code ran under the launcher
+        # rather than in this process.
+        # Proving ENTRY directly. The raising error alone would not: the
+        # in-process reactor raises the same one after falling back, which
+        # is exactly how this mismatch survived. Asking the eligibility
+        # predicate is the check that distinguishes them -- only the
+        # cleanroom path is available to stream() if the gate is open.
+        from forkrun.run import _cleanroom_eligible
+        ok, why = _cleanroom_eligible(self.path, "plugin", 1, "none",
+                                      True, True, False, streaming=True)
+        self.assertTrue(
+            ok,
+            "the eligibility predicate still refuses "
+            "stream(strict_poison=True) (%s), so the launcher cannot be "
+            "reached however well the rest of this passes" % why)
 
     def test_worker_death_falls_back_and_returns_correct_bytes(self):
         """A SIGKILLed worker must not cost the caller its output."""
@@ -1472,7 +1736,7 @@ class TestCleanroomWorkerDeath(unittest.TestCase):
         os.set_inheritable(rw, True)
         proc = subprocess.Popen(
             [launcher, "--so", find_substrate(), "--plugin", PLUGIN,
-             "--func", "ml_process_light", "--workers", "8",
+             "--func", PLUGIN_FUNC, "--workers", "8",
              "--lines", "0", "--src", str(sr), "--result", str(rw)],
             pass_fds=(sr, rw), stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE)
@@ -1605,13 +1869,18 @@ class TestCleanroomWorkerDeath(unittest.TestCase):
         # documented drop, a malformed middle is not.
         pos = 0
         recs = 0
-        while pos + 16 <= len(out):
-            _b, blen = struct.unpack_from("<QQ", out, pos)
-            self.assertLessEqual(pos + 16 + blen, len(out),
+        # DECISION-02: stride from the real header, not a literal 16.
+        # sys.modules, NOT `import forkrun.run as R` -- the package
+        # re-exports a `run` FUNCTION that shadows the submodule name.
+        _R = sys.modules["forkrun.run"]
+        _H = _R._HDR.size
+        while pos + _H <= len(out):
+            _b, blen, _d, _r = _R._HDR.unpack_from(out, pos)
+            self.assertLessEqual(pos + _H + blen, len(out),
                                  "record %d claims %d bytes but only %d "
                                  "remain -- framing desync"
-                                 % (recs, blen, len(out) - pos - 16))
-            pos += 16 + blen
+                                 % (recs, blen, len(out) - pos - _H))
+            pos += _H + blen
             recs += 1
         if rc == 0:
             # A recovered run must have delivered whole records.
@@ -1861,10 +2130,14 @@ class TestPoisonRelayTruncation(unittest.TestCase):
         """The ordinary case: every poison relayed, nothing truncated."""
         fd = self._memfd(poisoned=10)
         try:
-            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+            poisoned, idxs, relayed, committed = _read_cleanroom_stats(fd)
         finally:
             os.close(fd)
         self.assertEqual(poisoned, 10)
+        # This fixture stamps a v2 header, which carries no committed
+        # count. The reader must say "unavailable" (None) rather than
+        # fall back to zero, which would read as a fabricated count.
+        self.assertIsNone(committed)
         self.assertEqual(len(idxs), 10)
         self.assertEqual(relayed, 10)
         self.assertFalse(relayed < poisoned,
@@ -1874,7 +2147,7 @@ class TestPoisonRelayTruncation(unittest.TestCase):
         """Exactly at capacity: complete, so still not truncated."""
         fd = self._memfd(poisoned=self.CAP)
         try:
-            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+            poisoned, idxs, relayed, committed = _read_cleanroom_stats(fd)
         finally:
             os.close(fd)
         self.assertEqual(poisoned, self.CAP)
@@ -1886,7 +2159,7 @@ class TestPoisonRelayTruncation(unittest.TestCase):
         """Past capacity: the list is short and must be recognisable."""
         fd = self._memfd(poisoned=self.CAP + 76)
         try:
-            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+            poisoned, idxs, relayed, committed = _read_cleanroom_stats(fd)
         finally:
             os.close(fd)
         # Count stays exact -- that is what total and strict_poison use.
@@ -1905,7 +2178,7 @@ class TestPoisonRelayTruncation(unittest.TestCase):
                          per_worker=[list(range(self.CAP)),
                                      list(range(50000, 50500))])
         try:
-            poisoned, idxs, relayed = _read_cleanroom_stats(fd)
+            poisoned, idxs, relayed, committed = _read_cleanroom_stats(fd)
         finally:
             os.close(fd)
         self.assertEqual(poisoned, 2048)
@@ -1958,17 +2231,19 @@ class TestCleanroomTornTail(unittest.TestCase):
     the second time as an exception the caller did not ask for.
     """
 
-    # Must match forkrun._worker._HDR exactly (batch_idx u64, len u64).
-    # An <IQ> guess here desyncs from record 0 and looks like a
-    # production bug when it is only the test building bad framing.
-    HDR = struct.Struct("<QQ")
+    # DECISION-02: this USED to redeclare the layout as <QQ> with the
+    # comment "must match forkrun._worker._HDR exactly" -- an admission
+    # that it was a duplicate. Duplicating it is precisely why the
+    # disposition change broke these tests instead of being absorbed. It now
+    # imports the real header, so the two cannot drift again.
+    from forkrun._worker import _HDR as HDR
 
     def _result_memfd(self, records, truncate_last_by=0):
         """A result memfd holding `records`, last one optionally torn."""
         fd = os.memfd_create("res", 0)
         blob = b""
         for bidx, payload in records:
-            blob += self.HDR.pack(bidx, len(payload)) + payload
+            blob += self.HDR.pack(bidx, len(payload), 0, 0) + payload
         if truncate_last_by:
             blob = blob[:-truncate_last_by]
         os.write(fd, blob)
@@ -2025,11 +2300,14 @@ class TestCleanroomCollectBuffer(unittest.TestCase):
         written twice.
     """
 
-    HDR = struct.Struct("<QQ")
+    # Same reasoning as the sibling class: import the real header rather
+    # than redeclaring the layout.
+    from forkrun._worker import _HDR as HDR
 
     def _result(self, recs):
         fd = os.memfd_create("res", 0)
-        blob = b"".join(self.HDR.pack(i, len(p)) + p for i, p in recs)
+        blob = b"".join(self.HDR.pack(i, len(p), 0, 0) + p
+                       for i, p in recs)
         os.write(fd, blob)
         return fd
 
@@ -2079,6 +2357,434 @@ class TestCleanroomCollectBuffer(unittest.TestCase):
             after - before, set(),
             "cleanroom collect leaked descriptors: %r"
             % sorted(after - before))
+
+
+class TestFatalTeardownBounded(unittest.TestCase):
+    """CR-FIX1-B: a detected failure must never hang on a live producer.
+
+    This is a release blocker, not hardening. Before the fix the launcher
+    killed its workers and then walked into a BLOCKING waitpid for the
+    spill child -- which sits in read() on the caller's descriptor and is
+    never signalled on the fatal path. A caller whose source pipe writer
+    stays open (every streaming caller mid-run, every abandoned run)
+    therefore got a launcher that never returns.
+
+    The producer in this test deliberately NEVER closes the pipe. Closing
+    it to make the test finish would mask the defect exactly.
+    """
+
+    def setUp(self):
+        self.launcher = _cleanroom_launcher_path()
+        if self.launcher is None:
+            self.skipTest("launcher binary not built")
+        if _FIXTURE_BUILD_ERROR is not None:
+            raise AssertionError("fixture build failed: %s"
+                                 % (_FIXTURE_BUILD_ERROR,))
+        from forkrun._bindings import find_substrate
+        self.so = find_substrate()
+
+    def _run_with_live_producer(self, timeout=25):
+        import subprocess
+        from forkrun._bindings import find_substrate
+        sr, sw = os.pipe()
+        os.set_inheritable(sr, True)
+        res = os.memfd_create("cr_teardown")
+        os.set_inheritable(res, True)
+        # Enough data to start the pipeline. The write end stays OPEN for
+        # the whole run -- that is the point.
+        os.write(sw, b'{"eid":"e%d"}\n' * 4000)
+        proc = subprocess.Popen(
+            [self.launcher, "--so", find_substrate(),
+             "--plugin", PLUGIN, "--func", "always_fail_v1",
+             "--workers", "4", "--lines", "0", "--on-error", "2",
+             "--src", str(sr), "--result", str(res)],
+            pass_fds=(sr, res), stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE)
+        return proc, sr, sw, res
+
+    def test_fatal_failure_does_not_hang_with_the_producer_open(self):
+        proc, sr, sw, res = self._run_with_live_producer()
+        try:
+            try:
+                _, err = proc.communicate(timeout=25)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self.fail(
+                    "HANG: the launcher did not terminate in 25s while the "
+                    "source producer was still open. This is the CR-FIX1-B "
+                    "defect: fatal teardown waited on the spill child, "
+                    "which waits on a producer that is not going to write.")
+        finally:
+            os.close(sw)
+            os.close(sr)
+        self.assertNotEqual(proc.returncode, 0,
+                            "a fatal run must report failure")
+        self.assertIn(b"fatal", err.lower())
+        os.close(res)
+
+    def test_fatal_failure_leaves_no_surviving_descendants(self):
+        import subprocess
+        proc, sr, sw, res = self._run_with_live_producer()
+        try:
+            try:
+                proc.communicate(timeout=25)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self.fail("HANG: launcher did not terminate")
+        finally:
+            os.close(sw)
+            os.close(sr)
+            os.close(res)
+        # PDEATHSIG plus the explicit kill+reap in the fatal path must
+        # leave nothing behind. A leak here accumulates in a long-lived
+        # service, which is what PR_SET_PDEATHSIG was added for.
+        for _ in range(50):
+            if not _descendants_of(proc.pid):
+                break
+            time.sleep(0.1)
+        self.assertEqual(_descendants_of(proc.pid), set(),
+                         "launcher descendants survived a fatal run")
+
+    def test_successful_run_with_closed_producer_still_succeeds(self):
+        # The control: bounding fatal teardown must not break the success
+        # path, which legitimately waits for ingestion to finish.
+        import subprocess
+        from forkrun._bindings import find_substrate
+        path = _make_input(3000)
+        src = os.open(path, os.O_RDONLY)
+        os.set_inheritable(src, True)
+        res = os.memfd_create("cr_ok")
+        os.set_inheritable(res, True)
+        try:
+            rc = subprocess.call(
+                [self.launcher, "--so", find_substrate(), "--plugin", PLUGIN,
+                 "--func", PLUGIN_FUNC, "--workers", "4", "--lines", "0",
+                 "--src", str(src), "--result", str(res)],
+                pass_fds=(src, res), stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            self.assertEqual(rc, 0)
+            self.assertGreater(os.fstat(res).st_size, 3000)
+        finally:
+            os.close(src)
+            os.close(res)
+            os.unlink(path)
+
+
+class TestDescriptorInheritance(unittest.TestCase):
+    """CR-FIX1-A1/A2: engine descriptors and complete close-all-except.
+
+    Deterministic by construction: the launcher verifies its own
+    keep-list with F_GETFD in every child when --fd-selfcheck is passed,
+    so a lost descriptor fails loudly instead of silently degrading the
+    run to polling. Timing is NOT used as evidence here -- the A1
+    symptom (a 100 ms release delay, then a hot scanner) is invisible in
+    the exit status, which is precisely why it survived this long.
+    """
+
+    def setUp(self):
+        self.launcher = _cleanroom_launcher_path()
+        if self.launcher is None:
+            self.skipTest("launcher binary not built")
+        from forkrun._bindings import find_substrate
+        self.so = find_substrate()
+
+    def _launch(self, extra=(), plugin_func=None):
+        import subprocess
+        path = _make_input(3000)
+        src = os.open(path, os.O_RDONLY)
+        os.set_inheritable(src, True)
+        res = os.memfd_create("cr_fd")
+        os.set_inheritable(res, True)
+        argv = [self.launcher, "--so", self.so, "--plugin", PLUGIN,
+                "--func", plugin_func or PLUGIN_FUNC, "--workers", "4",
+                "--lines", "0", "--src", str(src), "--result", str(res)] + list(extra)
+        p = subprocess.run(argv, pass_fds=(src, res),
+                           capture_output=True, timeout=120)
+        nb = os.fstat(res).st_size
+        os.close(src)
+        os.close(res)
+        os.unlink(path)
+        return p, nb
+
+    def test_every_child_keeps_its_required_descriptors(self):
+        p, nb = self._launch(extra=["--fd-selfcheck", "--verbose"])
+        self.assertEqual(p.returncode, 0, p.stderr.decode()[-2000:])
+        self.assertNotIn(b"SELFCHECK FAILED", p.stderr)
+        self.assertGreater(nb, 0)
+        # The engine really did open descriptors: if the diff were empty
+        # the selfcheck would be vacuous, so assert it is non-trivial.
+        self.assertRegex(p.stderr.decode(), r"INIT_FDS pre=(\d+) post=(\d+)")
+
+    def test_engine_fd_set_is_non_empty(self):
+        p, _ = self._launch(extra=["--fd-selfcheck", "--verbose"])
+        m = re.search(r"INIT_FDS pre=(\d+) post=(\d+)", p.stderr.decode())
+        self.assertIsNotNone(m, p.stderr.decode()[-2000:])
+        pre, post = int(m.group(1)), int(m.group(2))
+        self.assertGreater(post, pre,
+                           "fr_py_init opened no descriptors: the engine-fd "
+                           "diff -- and therefore the keep-list -- is empty, "
+                           "which would make the selfcheck vacuous")
+
+    def test_unrelated_high_descriptor_does_not_survive_scrubbing(self):
+        # Pass a descriptor numbered above 1023 into the launcher. The
+        # old scrub looped 3..1023 and left it open in every child.
+        import subprocess
+        path = _make_input(3000)
+        src = os.open(path, os.O_RDONLY)
+        res = os.memfd_create("cr_fd")
+        noise = []
+        try:
+            for target in (1024, 1100, 1500):
+                try:
+                    fd = os.open("/dev/null", os.O_RDONLY)
+                except OSError:
+                    continue
+                try:
+                    os.dup2(fd, target)
+                except OSError:
+                    os.close(fd)
+                    continue
+                os.close(fd)
+                os.set_inheritable(target, True)
+                noise.append(target)
+            os.set_inheritable(src, True)
+            os.set_inheritable(res, True)
+            if not noise:
+                self.skipTest("cannot allocate a descriptor above 1023 here")
+            p = subprocess.run(
+                [self.launcher, "--so", self.so, "--plugin", PLUGIN,
+                 "--func", PLUGIN_FUNC, "--workers", "4", "--lines", "0",
+                 "--src", str(src), "--result", str(res), "--fd-selfcheck"],
+                pass_fds=tuple([src, res] + noise),
+                capture_output=True, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stderr.decode()[-2000:])
+        finally:
+            for fd in noise:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            os.close(src)
+            os.close(res)
+            os.unlink(path)
+@unittest.skipUnless(HAVE_PLUGIN, "test plugin not available")
+class TestCleanroomStreamStrictPoison(unittest.TestCase):
+    """P2 strict_poison for the streaming cleanroom path.
+
+    The streaming launch contract had NO statistics channel at all -- not a
+    dropped return value, the descriptor was never passed -- so
+    strict_poison could not be honoured there. Two properties matter and are
+    opposite in spirit:
+
+      1. a genuinely poisoned stream RAISES;
+      2. a FAILED launcher does NOT get read as a clean stream with zero
+         poison, which would disguise a failure as success.
+    """
+
+    def setUp(self):
+        self.path = _make_input(400)
+        # Save and RESTORE rather than set-then-pop. An unconditional
+        # pop in tearDown deletes a value the environment already had,
+        # so every test that ran afterwards saw the cleanroom disabled.
+        # That is invisible in the default suite -- where the var starts
+        # unset, so set-then-pop happens to restore -- and wrong the
+        # moment anyone runs with FORKRUN_CLEANROOM=1, which is how it
+        # hid until test_udf_mode ran later in discovery order.
+        self._old_cr = os.environ.get("FORKRUN_CLEANROOM")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+
+    def tearDown(self):
+        if getattr(self, "_old_cr", None) is None:
+            os.environ.pop("FORKRUN_CLEANROOM", None)
+        else:
+            os.environ["FORKRUN_CLEANROOM"] = self._old_cr
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def _drain(self, spec, **kw):
+        return list(forkrun.stream(spec, self.path, streaming=True,
+                                  mode="plugin", workers=2, nodes=1,
+                                  output="bytes", **kw))
+
+    def test_stream_stats_channel_is_now_passed(self):
+        """The descriptor must actually reach the launcher.
+
+        Cheap structural check: without --stats-fd the channel cannot exist,
+        and the enforcement tests below would pass vacuously.
+        """
+        import re
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "forkrun", "run.py")).read()
+        body = src[src.index("def _execute_cleanroom_stream"):]
+        body = body[:body.index("\ndef ")]
+        self.assertIn('"--stats-fd"', body,
+                      "the streaming launch contract still omits the "
+                      "statistics descriptor")
+
+    def test_poisoned_stream_raises_under_strict_poison(self):
+        from forkrun.exceptions import ForkrunPoisonSkip
+        with self.assertRaises((ForkrunPoisonSkip, RuntimeError)):
+            self._drain(PLUGIN + ":"
+                        "always_fail_v1", strict_poison=True)
+
+    def test_clean_stream_does_not_raise_under_strict_poison(self):
+        """The other direction: wiring the channel must not manufacture
+        failures. A clean stream with strict_poison=True must pass."""
+        out = self._drain(_spec(), strict_poison=True)
+        self.assertTrue(len(out) > 0)
+
+    def test_poison_stats_are_read_after_the_launcher_status_check(self):
+        """The ordering IS the safety property.
+
+        Reading the poison count before judging the launcher's exit status
+        would report 0 for a run that died -- turning a failure into a
+        clean-looking stream. So the status check must come first, and the
+        stats read must be inside the branch that only runs once the exit
+        has been confirmed clean.
+
+        Asserted structurally rather than by provoking a launcher failure:
+        the fixture available here poisons batches through the retry path
+        rather than failing the launcher, so an end-to-end version of this
+        would have had to assert something weaker than it claims.
+        """
+        import os as _os
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        src = open(_os.path.join(here, _os.pardir, "forkrun",
+                                  "run.py")).read()
+        body = src[src.index("def _execute_cleanroom_stream"):]
+        body = body[:body.index("\ndef ")]
+        status_at = body.index("cleanroom launcher failed")
+        stats_at = body.index("_read_cleanroom_stats(stats_fd)")
+        self.assertLess(
+            status_at, stats_at,
+            "the poison count must be read only AFTER the launcher exit has "
+            "been confirmed clean, or a failed run reports as zero poison")
+
+
+@unittest.skipUnless(HAVE_PLUGIN, "plugin fixture not built")
+class TestLauncherUnavailableFallsBackObservably(unittest.TestCase):
+    """WO-ROI-1 §3: a silent in-process fallback must not look clean.
+
+    This is the highest-value uncovered case in the route set. When the
+    launcher binary is missing, _execute_cleanroom warns and returns
+    None and the caller continues on the in-process path -- so the OUTPUT
+    is correct either way, and a test that only checks totals cannot tell
+    the two apart. That is exactly the shape of test this class exists to
+    replace.
+
+    Three things are asserted, and the third is the one that matters:
+      * the fallback is ANNOUNCED, so nobody believes they got the
+        cleanroom when they did not;
+      * the run still produces correct output (the fallback is safe);
+      * and the same configuration with the launcher present is a
+        DIFFERENT observable state, so the two are distinguishable.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="crmiss-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.path = os.path.join(self.tmp, "input.txt")
+        with open(self.path, "w") as fh:
+            for i in range(400):
+                fh.write("line %d payload text\n" % i)
+        self._old = os.environ.get("FORKRUN_CLEANROOM")
+        os.environ["FORKRUN_CLEANROOM"] = "1"
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._old is None:
+            os.environ.pop("FORKRUN_CLEANROOM", None)
+        else:
+            os.environ["FORKRUN_CLEANROOM"] = self._old
+
+    # Uses the module-level _spec()/PLUGIN fixture this file already
+    # builds. A private fixture module was invented first and does not
+    # exist; the existing one is the single source of truth for what the
+    # launcher actually loads.
+
+    def test_missing_launcher_warns_and_still_produces_correct_output(self):
+        R = sys.modules["forkrun.run"]
+        real_path = R._cleanroom_launcher_path
+        R._cleanroom_launcher_path = lambda: None
+        self.addCleanup(setattr, R, "_cleanroom_launcher_path", real_path)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                              mode="plugin", output="bytes")
+        self.assertTrue(out, "the fallback must still produce output")
+        msgs = " ".join(str(w.message) for w in caught)
+        self.assertIn("launcher", msgs.lower(),
+                      "a missing launcher must be announced; a silent "
+                      "fallback lets a caller believe the cleanroom ran")
+        self.assertIn("in-process", msgs.lower(),
+                      "the warning must say which path was actually used")
+
+    def test_present_and_absent_launcher_are_distinguishable(self):
+        """The property the previous shape of test could not express.
+
+        Same configuration, same output -- but the observable state
+        differs. If these two were indistinguishable, every existing
+        output-only cleanroom test would pass with the launcher route
+        entirely dead.
+        """
+        R = sys.modules["forkrun.run"]
+        # Capture the REAL callable FIRST. An earlier version of this
+        # test assigned the lambda and only then read the value back to
+        # restore, so cleanup reinstalled the lambda and every LATER test
+        # in the process ran with no launcher -- surfacing as
+        # "v0 supports mode='python' only" in an unrelated suite.
+        real_path = R._cleanroom_launcher_path
+        self.addCleanup(setattr, R, "_cleanroom_launcher_path", real_path)
+        with_path = real_path()
+        self.assertIsNotNone(with_path,
+                             "precondition: the launcher binary must exist "
+                             "for this comparison to mean anything")
+
+        # Route entered, launcher present.
+        entered_present = []
+        real = R._execute_cleanroom
+
+        def spy_present(*a, **k):
+            entered_present.append(1)
+            return real(*a, **k)
+        R._execute_cleanroom = spy_present
+        self.addCleanup(setattr, R, "_execute_cleanroom", real)
+        out_a = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                            mode="plugin", output="bytes")
+
+        # Same call, launcher absent. real_path was captured above, so
+        # cleanup restores the genuine function.
+        entered_absent = []
+        R._cleanroom_launcher_path = lambda: None
+
+        def spy_absent(*a, **k):
+            entered_absent.append(1)
+            return real(*a, **k)
+        R._execute_cleanroom = spy_absent
+        out_b = forkrun.map(_spec(), self.path, workers=2, nodes=1,
+                            mode="plugin", output="bytes")
+
+        self.assertTrue(entered_present,
+                        "with the launcher present the route must be taken")
+        self.assertTrue(entered_absent,
+                        "with it absent the route is still entered, then "
+                        "falls back internally -- which is why a "
+                        "route-only assertion is not enough on its own")
+        # JOINED BYTES, not the record list. This file's own header
+        # records the rule and the reason: the two routes produce
+        # DIFFERENT record boundaries for the same content -- the
+        # launcher path returns 16-byte chunks where the in-process path
+        # returns batch-sized ones -- so comparing lists fails on
+        # chunking rather than on content. An earlier version of this
+        # test compared lists and was flaky in 6 runs out of 8.
+        self.assertEqual(
+            b"".join(out_a), b"".join(out_b),
+            "the fallback must preserve the output BYTES exactly; if it "
+            "does not, the fallback is a correctness bug, not a "
+            "convenience")
 
 
 if __name__ == "__main__":

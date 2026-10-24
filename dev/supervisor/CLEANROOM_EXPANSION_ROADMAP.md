@@ -1,0 +1,2196 @@
+# Cleanroom Expansion Roadmap — `NEW/REFACTOR4.2`
+
+**Purpose.** A reviewable plan for widening the Python cleanroom launcher beyond
+the UMA C-plugin envelope it serves today, and for eventually enabling it by
+default. **No implementation begins until this document is accepted**, and the
+acceptance that matters is the one that has already happened three times: an
+external AI reading the source and refuting what is wrong.
+
+**Supersedes.** The first draft of this document, which carried two `[V]` claims
+that were false on first contact. See §12.2 — the correction history is part of
+the evidence.
+
+**Base state:** `NEW/REFACTOR4.2`, carrying CR-FIX1 (7 commits on
+`NEW/REFACTOR4.1`). Function names are the authorities; line numbers are given
+as evidence and may drift.
+
+**Review history: six rounds completed, all amendments accepted.** Round 1
+raised ten findings, all accepted. Round 2 accepted all ten, raised one blocking
+finding (the node-0 worker assignment), and made one scope correction. Round 3
+accepted the clarifications. Round 4 made targeted amendments for internal
+consistency — a resolver/coverage mismatch, an M2 import-contract contradiction,
+a false "share no code" claim, an incomplete dependency graph, an incomplete
+capability set, and four contract-preciseness fixes. Round 5 scoped lifecycle
+requirements by candidate and separated detectable exclusions from documented
+limitations. Round 6 made rollout gates independent, added the caller-minor
+handoff, and pinned the eligible-object rule. Round 7 added Python 3.15 to the
+interpreter gate and corrected two eligibility examples that testing — not
+reading — had shown wrong. **No round requested a redesign; every finding was a
+correction to something specific, and the recurring shape was internal
+contradiction rather than architectural disagreement.**
+
+---
+
+## 0. How to review this document
+
+### 0.1 Tag vocabulary, and a warning about it
+
+| Tag | Meaning |
+|---|---|
+| **[V]** | **Verified** — evidence given **inline**, as `file:line` or as a measurement |
+| **[H]** | **Hypothesis** — reasoning over verified facts, not measured |
+| **[M]** | **Needs measurement** — unknown; must be measured before dependent work is designed |
+
+**[V] Every `[V]` tag in the previous draft of this document was wrong on first
+contact — twice.** A `[V]` invites agreement where an `[H]` invites checking,
+which makes an erroneous `[V]` more dangerous than an admitted guess. So:
+
+* **`[V]` claims here carry inline evidence rather than a reference to one.**
+  Reviewers should be able to check each without navigating.
+* **Reviewers should spot-check `[V]` claims, not sample them.** The two prior
+  errors were found by a reviewer reading code this author had read and
+  mis-generalised; neither was found by sampling.
+* **A claim that turns out false is a finding about the document, not about the
+  reviewer.** Record which tag it carried.
+
+### 0.2 What was wrong before, as a calibration aid
+
+| Claim | Tag | Actual | How found |
+|---|---|---|---|
+| "workers self-pin from `getcpu()`" (§6.2) | **[V]** | **False.** The C loops hardcode logical node 0 (`_shim.c:2865`, `:3018`). The self-pinning claim is true of bash's `ring_worker inc`, a different entry point | Round 3 reviewer |
+| "the ~100 ms is a circular wait on spare pipe write ends" (`_cleanroom_enabled`, pre-CRFIX1) | comment | **Refuted.** Those close only after the supervision loop exits, which happens at `live == 0` | CR-FIX1 measurement |
+
+The common shape: a claim about one code path generalised to a sibling path.
+
+---
+
+## 1. Where the feature stands
+
+| Property | State |
+|---|---|
+| Serves | `mode="plugin"` (C `.so`, ctx dialect v1/v2), UMA, `orchestrator=True` |
+| Declines | `mode="python"` (**the default mode**), splice, multi-node, `resume=`, `checkpoint_file=`, `orchestrator=False`; `stream(spawn)` |
+| Gate | `FORKRUN_CLEANROOM`, per-ROUTE. **map(plugin) is default-ON** (WO-CR-ROI-2 Phase D, `04485e52`); every other route opt-in |
+| Tests | 1169 full suite, 0 failures, 2 skips **[V]** (measured, committed tree) |
+| Measured | **current**, re-measured Phase D: startup 1.77×, startup+512 MB ballast 2.34×, throughput (400k records) 1.16× vs in-process **[V]** (`benchmarks/bench_cleanroom_default_on.py`). Historical 1.57×–10.25× startup / 1.56×–3.78× throughput across 30 MB–2127 MB parent RSS remains provenance-sound; its plugin fixture no longer exists on this machine, so it is not reproducible as written |
+
+### 1.1 "Default on" is three decisions, not one
+
+**[V]** Enabling the `FORKRUN_CLEANROOM` gate changes nothing for any
+non-plugin caller: they reach `_cleanroom_eligible`, decline, and take the
+in-process path unchanged. Verified by predicate inspection — `mode="python"`
+declines with *"mode='plugin' only"*, `orchestrator=False` declines, and
+`resume=` declines.
+
+So "make it the default" decomposes into three independently-gated decisions:
+
+1. enable for `mode="plugin"` — small, well-tested blast radius;
+2. enable for `mode="python"` — the default mode, largest population;
+3. enable for multi-node — thinnest validation.
+
+**Each gets its own evidence gate, its own commit, and its own revert.**
+
+**Status: Decision 1 is DONE** (`04485e52`). The other two are not.
+
+Decision 1 could only be expressed once a per-ROUTE selector existed
+(`6109dd93`): with the old boolean gate, "default on" would have meant
+"default on for five envelopes at once", which is precisely the coupling
+that made the question unanswerable. Decisions 2 and 3 remain blocked —
+`mode="python"` has no launcher dispatch at all, and multi-node bypasses the
+envelope entirely.
+
+---
+
+## 2. Standing constraints
+
+Unchanged and **not negotiable**:
+
+* **The ring engine stays frozen.** `forkrun_ring.c` is not modified. If a
+  requirement below can only be met by changing it, the constraint is
+  **revisited explicitly** with a source-backed argument — not worked around.
+* **The substrate stays free of `libpython`.** `libforkrun_python.so` links
+  `-ldl -lrt` only **[V]** (`Makefile.substrate:44` `ALLOWED_DEPS`), enforced by
+  `-Wl,--no-undefined` on both the canary (`:91`) and substrate (`:101`) rules.
+  **[V]** The wheel's interpreter-independence depends on this: the substrate is
+  `ctypes`-loaded, so one wheel serves 3.10–3.14.
+* **`ALLOWED_DEPS` is never widened.** It is referenced by two rules, so
+  extending it "for a helper" would silently legalise the dependency for the
+  zero-bash-linkage artifacts. New build products get their own variable and
+  their own gate.
+* **Each newly supported envelope stays opt-in until its OWN default-on gate
+  passes** (§8). W-EXP-1's envelope is gated by Decision 2, W-EXP-2's by
+  Decision 3, and the existing plugin envelope by Decision 1 — which is
+  **independent of both** and does not wait for the spawn-pipe performance
+  experiment (W-EXP-3). Nothing here makes the whole feature default-on at once.
+* **Batch-count variance is valid.** It is pre-existing and shared with the
+  in-process path. Validation compares joined bytes or independently known
+  record identities, never blob counts.
+* **`_shim.c` changes are permitted only to expose an operation that already
+  exists**, or to fix a defect in the Python wrapper. W-EXP-2's node-taking
+  worker loop qualifies: `fr_py_worker_init` already accepts `node_id`
+  (**[V]** `_shim.c:244`) and the Python paths already supply it (**[V]**
+  `_worker.py:324`, `_reactor.py:760`).
+
+---
+
+## 3. Sequencing
+
+```
+        ┌───────────────────────────────────────────────┐
+        │ Phase 0 — contracts, instrumentation, M1/M2    │
+        │   (no production behaviour changes)            │
+        │   C0.1 capability matrix                       │
+        │   C0.2 trace facility                          │
+        │   C0.3 UDF eligibility + import contract       │
+        │   C0.4 CPython fork-lifecycle prototype        │
+        │   C0.5 interpreter matrix gate (3.10-3.14)     │
+        │   C0.6 M1/M2 measurement                       │
+        │   C0.7 ordered-output certificate (design only)│
+        └───────┬───────────────────────────┬───────────┘
+                │ gates                     │ gates
+   ┌────────────▼────────────┐   ┌──────────▼───────────────┐
+   │ W-EXP-1  Python UDF     │   │ W-EXP-2  NUMA             │
+   │ (UMA, module refs only) │   │ (needs the live ordered-  │
+   └────────────┬────────────┘   │  output fix first)       │
+                │                └──────────┬───────────────┘
+                └────────┬───────────────────┘
+                         │ requires both independently correct
+┌────────▼────────────┐
+                 │ W-EXP-1.5 UDF+NUMA │   needs both to be correct
+                 └────────┬────────────┘
+                 ┌────────▼────────────┐
+                 │ W-EXP-3  spawn-pipe│   perf only
+                 └─────────────────────┘
+
+  DEFAULT-ON  (three decisions, each gated ONLY by its own evidence)
+
+    ┌──────────────────────────────────────────────────────┐
+    │ Decision 1 — plugin envelope   (evidence ALREADY in  │
+    │   hand: CR-FIX1 tests, RSS curve). Does NOT wait for  │
+    │   W-EXP-1, W-EXP-2, W-EXP-1.5 or W-EXP-3.            │
+    ├──────────────────────────────────────────────────────┤
+    │ Decision 2 — UDF envelope       gated by W-EXP-1      │
+    ├──────────────────────────────────────────────────────┤
+    │ Decision 3 — multi-node envelope gated by W-EXP-2     │
+    │                          (and real multi-socket)      │
+    └──────────────────────────────────────────────────────┘
+```
+
+> **[V] The performance-only stage W-EXP-3 is not a prerequisite for any
+> default-on decision.** The previous diagram placed W-EXP-4 downstream of it,
+> which contradicted §8's independent-gates policy. Decision 1 is releasable as
+> soon as its own evidence gate passes; W-EXP-3 remains an independent
+> optimisation with its own kill switch.
+
+**[V] Workstreams have separate acceptance gates, but they are NOT independent
+in code.** The previous revision claimed W-EXP-1, W-EXP-2 and W-EXP-3 "share no
+code", which its own later sections contradict:
+
+* §6.3 — W-EXP-2 must add **per-worker death pipes** to the launcher.
+* §7 — W-EXP-3 requires `poll()` over the spawn pipe **plus per-worker death
+  pipes**, replacing the current blocking `waitpid(-1)` supervision.
+
+Those are shared launcher-supervision infrastructure. **Either the shared
+supervision interface is specified and frozen in Phase 0, or one branch is
+integrated and rebased before the other.** Which is decided in Phase 0; the
+acceptance gates stay separate either way.
+
+#### W-EXP-2 step A — ordering identity: resolved in source, confirmed by probe
+
+**Status: closed. The source conclusion and the probe agree, and the probe
+is pinned as a test rather than left as a one-off measurement.**
+
+**The identity for global ordering is `(major, minor)`, not `batch_idx`.**
+Reading the claim path directly:
+
+* `out->batch_idx = my_read_idx` (`forkrun_ring.c:6385`), where
+  `local_state = &state[my_numa_node]` (`ring.c:6158`, `4166`). The claim
+  counter is per node, so `batch_idx` is a per-node ticket: two nodes both
+  emit 0, 1, 2, ...
+* The global ordering key is `(major, minor)`, packed by `FR_PACK_KEY`, and
+  the C orderer sorts on the packed key in numa mode (`ring.c:7673`).
+* The wire framing `<QQII>` is `(batch_idx, len, disposition, reserved)` --
+  `major`/`minor` **never reach the parent**. Nothing the parent collects
+  carries the global key on its own.
+
+**[V] The probe confirms, and does not overrule, the source.** On a corpus
+large enough that both logical nodes claim (5.4 MB, several
+`SCANNER_CHUNK_SIZE` chunks), at `lines=4096`: 150 records, `batch_idx`
+spanning `0..86` with **63 collisions**. And the consequence is visible:
+sorting the collision by `batch_idx` yields **wrong order**; the first
+mismatch puts node 1's `batch_idx=0` (`u0116508`) where the input expects
+`u0004096`. With `lines=512`: 1175 records, orderer byte-exact, fallback
+sort wrong. Both granularities agree.
+
+**[V] The production orderer path is byte-exact.** `order="index"` under
+`@2` with the orderer returns exactly the input sequence, byte for byte,
+at both granularities -- because collection reads from `coll_fd`, the
+orderer's output pipe (`_iter_records(lib, coll_fd)`); the parent does not
+sort, the engine already did, by the packed key. In-process `@4` was also
+byte-exact.
+
+**Design consequence for the cleanroom, now explicit.** The cleanroom's
+current `order="index"` is a parent-side sort on `batch_idx`
+(`_cleanroom_collect`), which is valid only where `batch_idx` is a global
+sequence -- UMA. A cleanroom NUMA route must instead run the **existing C
+orderer** in the launcher so the result stream arrives in global order,
+and the parent must collect it **without sorting** (already-ordered). The
+parent-side `batch_idx` sort must never be the cross-node mechanism, and
+the fallback hazard is pinned by test so a small-input run cannot make it
+look safe again.
+
+**Guard against the "limited test" trap.** The committed test asserts
+per-run node liveness by probing `fr_py_diag_node` inside the drain-audit
+window, and the multi-chunk corpus size is asserted (a 4608-byte mutation
+is rejected at setUpClass). A run that did not engage both nodes' claim
+counters cannot pass, so absent collisions can never be mistaken for
+evidence of global uniqueness.
+
+**`python/tests/test_numa_ordering_identity.py` -- 4 tests,
+mutation-checked on the corpus premise.** This host has one physical NUMA
+node: everything here is logical `@N`, i.e. protocol validation. Physical
+locality and bandwidth remain unmeasured.
+
+#### W-EXP-2 Phase B — source-level design audit (no code written)
+
+Audit only. Nothing in this section is implemented, and nothing here should be
+read as a claim that NUMA works in the cleanroom.
+
+**1. Supervision — the largest structural gap.** `forkrun_cleanroom.c`
+supervises a **flat `pids[wid]` array in a single global worker-id space** and
+has no node concept at all: no `--nodes`, no `num_nodes`, no per-node
+scheduling. The in-process path instead forks fallow-phys + N indexers + N
+scanners + ingest and reaps them from Python. Promoting NUMA to the cleanroom
+therefore moves *five* process families under C supervision at once, not one,
+and §6.3's per-worker death pipes become a prerequisite rather than a
+follow-up. Treating this as "wire up NUMA" would understate it by a wide
+margin.
+
+**2. Capability inventory — the capability is there; the wiring is not.** Every
+NUMA entry point already exists in the generated ABI: `fr_py_init_numa`,
+`fr_py_fallow_phys`, `fr_py_indexer_numa`, `fr_py_numa_scanner`,
+`fr_py_numa_ingest`, `fr_py_orderer`, `fr_py_set_order_pipe`. The launcher
+resolves six symbols and **none** of them are NUMA entry points. So Phase C is
+wiring and supervision design, not new engine capability — but the supervisor
+must be built before the capability can be used safely.
+
+**3. Topology resolver — sound, and it fails closed. [V]** `python/forkrun/_numa.py`
+validates a physical request against `/sys/devices/system/node/online` and
+raises `ValueError` when fewer nodes are online than asked
+("silently running UMA after nodes=4 was requested would be a benchmarking
+lie"). Verified here: `nodes=2` on this machine raises
+`nodes=2 requested but only 1 NUMA node(s) online ([0])`. The `@N` form is an
+explicit, labelled escape hatch for *logical* nodes on a single-socket box.
+
+**This machine has exactly one NUMA node** (`node0`, online mask `0`,
+28 CPUs). Consequently **no physical multi-node claim can be validated here at
+all.** The mandatory NUMA matrix can only ever run in logical `@N` mode, and
+that must be labelled as such in any evidence. This is a standing limit on
+what W-EXP-2 can prove on this host, not something implementation can fix.
+
+**4. Ordering — proven in-process, unresolved for the cleanroom. [V]** The
+cleanroom launcher runs **no orderer**; `order="index"` is implemented in Python
+by sorting each record's own `batch_idx` after collection
+(`_cleanroom_collect`), because the launcher's drain is in batch-*completion*
+order. Under UMA `batch_idx` is a global `0..N-1` sequence, so the sort is
+valid — verified end to end.
+
+In-process NUMA ordering is already correct: `nodes="@2"` and `nodes="@4"`
+with `order="index"` both return **byte-exact input order**. So the *engine*
+ordering works. What is unresolved is whether `batch_idx` is globally unique
+once batch boundaries are per-node — this audit did not settle that, and it is
+the blocking question for the cleanroom's post-hoc sort. **A sort cannot
+detect a gap**, which is precisely why Phase A's count comparison, not the
+sort, is the completeness mechanism for `order="index"`.
+
+**5. `already_ordered` — the distinction the work order asked about.** In the
+cleanroom there is no engine ordering to trust: "ordered" is a post-hoc sort in
+Python. In-process, the orderer runs. These are different guarantees behind one
+API flag, and the cleanroom certificate must remain the thing that detects loss
+in both.
+
+**6. Record-count arithmetic is not `ceil(total/lines)`. [V]** Under NUMA the
+source is partitioned per node, so a global batch boundary splits: 512 lines at
+`lines=64` yields **9** records under `@2`/`@4`, not 8 — one 960-byte batch
+arrives as 255 + 705. Total bytes are exact and the output is an exact multiset
+match of the input (no loss, no duplication). This validates Phase A's choice to
+compare the engine's own committed count rather than an arithmetic
+expectation; a `ceil()` formula would have reported a false shortfall on every
+NUMA run.
+
+#### W-EXP-2 step B — typed supervision substrate (implemented, opt-in)
+
+**Status: gate met.** `forkrun_cleanroom.c` now carries a typed family
+registry (`enum sup_role`, `g_sup_policy`, `struct sup_proc`). It is **inert
+unless `FORKRUN_SUPERVISE_TYPED=1`**: with the variable absent, every
+registry call returns without touching the loop, and the supervision loop is
+the original blocking `waitpid(-1, &st, 0)`. Production behaviour is
+unchanged, which is asserted by a dedicated test.
+
+**Role / policy inventory (the required written model).** Identity is what a
+death notification must match before it is acted on; nothing is inferred from
+a pid alone.
+
+| Role | Identity on death | Recoverable | Node scope | Policy on abnormal death |
+|---|---|---|---|---|
+| `worker` | `(wid, incarnation, node)` | **yes** | logical node, stable across respawn | recover, then respawn the *same* wid/node with `incarnation+1`; bounded by `--retry` and `--respawn-cap` |
+| `orderer` | `(role, pid, incarnation)` | no | whole run | fatal: output correctness depends on it |
+| `indexer` | `(role, pid, incarnation)` | no | whole run | fatal: the ring cannot be built without it |
+| `scanner` | `(role, pid, incarnation)` | no | whole run | fatal: its finalization (EOF blast) is what releases workers |
+| `fallow` | `(role, pid, incarnation)` | no | whole run | fatal: escrow/reclamation stops |
+| `ingest` | `(role, pid, incarnation)` | no | whole run | fatal on abnormal death; a clean exit is EOF and benign |
+| `drain` | `(role, pid, incarnation)` | no | whole run | fatal: no output can be delivered |
+
+The table has no default arm: `SUP_ROLE__COUNT` is the loop bound and every
+role is initialised explicitly. Helper families are **not** recoverable:
+re-forking one would resume with a different pipeline generation and no
+re-execution capability, which W-EXP-2 forbids inventing.
+
+**Death notification identity, not just a pipe.** A helper's note is a fixed
+record `{magic, role, pid, rc, incarnation}`. It is applied only when
+`(role, pid, incarnation)` matches the generation registered **now**; a stale
+note is logged (`forkrun-sup: stale note ... -- ignored`) and dropped, so it
+cannot reach a replacement. EOF without a valid note is classified by
+`waitpid` alone; the pipe is the notification channel, the registry match is
+the proof. Worker deaths still classify from the wait status, and the typed
+mode reconciles the reaped `(wid, pid, incarnation)` against the registry
+without moving policy into the reaper.
+
+**The sentinel.** The only helper this step actually forks is a sentinel
+registered as `ingest`. It is a real long-lived process whose control pipe is
+owned by the launcher: closing it at teardown yields a clean exit and a clean
+note, while `SIGKILL` yields EOF with no note and must be classified as an
+abnormal, non-recoverable family death. Because every worker scrubs that
+write end, the sentinel's clean exit doubles as a descriptor-ownership proof.
+
+**Bounded teardown.** `sup_guillotine()` signals each registered helper once
+and reaps within `SUP_REAP_BUDGET_MS` (2 s), reporting `leftover=` rather than
+blocking. The success path's `sup_stop_helpers()` closes the control channel,
+waits the same budget and falls back to the guillotine; a helper that refuses
+to exit is reported as fatal.
+
+**Tests** (`python/tests/test_supervision_substrate.py`): policy inventory is
+explicit; worker respawn keeps the node and increments the incarnation; a
+stale note is ignored and does not disturb the replacement; a fatal helper
+death aborts within bound with no surviving registered descendants; two fatal
+events in flight converge on one bounded abort; a healthy run reaps the
+sentinel cleanly; the registry is completely inert without the env hook.
+Every case drives the launcher as a real process and asserts the injection
+actually fired.
+
+**Limits, stated rather than implied.** Helpers other than the sentinel are
+not yet forked by the launcher, so their policies are modelled and tested as
+data, not exercised as live process families; wiring the real NUMA helpers is
+step C. Everything here is logical-identity validation on a single physical
+NUMA node. No spawn-pipe/W-EXP-3 work is included.
+
+#### W-EXP-2 step B follow-up — registry lifecycle and role-aware clean exits
+
+Two findings from the external review of `25ec5193`, fixed before Step C.
+
+**1. Registry slots were consumed by respawn history.** `sup_retire()` left the
+slot in place and `sup_register_worker()` allocated a fresh one per generation,
+so `g_sup_n` grew with the number of respawns rather than the number of live
+children. At 512 workers the registry would exhaust after a handful of
+respawns overall. Fixed: one CURRENT entry per worker id, reused across
+generations (`forkrun-sup: reuse role=worker ...`); `g_sup_n` is now bounded
+by `workers + helpers`. A registration over an entry that is still `active`
+is refused loudly rather than overwritten, and helper registrations are never
+eligible for worker-slot reuse. Identity checks are unchanged, so a stale
+`(wid, pid, incarnation)` cannot reach the replacement. A test-only
+`FORKRUN_TEST_SUP_MAX` can only LOWER the allocation bound (default stays
+`SUP_MAX_PROCS = 520`), letting the regression cross the boundary
+deterministically; a manual 560-kill run against the production bound also
+completed cleanly with the fix.
+
+**2. Clean exit is now role-aware.** `sup_apply_policy()` no longer accepts
+exit status zero on its own. Each policy declares a clean-exit window:
+
+| Window | Meaning | Roles |
+|---|---|---|
+| `eof` | a clean exit is expected only WITH the identity-checked completion event | `ingest` |
+| `teardown` | a clean exit is expected only once completion has begun (`g_sup_stopping`) | `orderer`, `indexer`, `scanner`, `fallow`, `drain` |
+| `never` | clean exit means the generation finished normally; the recoverable branch owns it | `worker` |
+
+**The `eof` window is evidence-based, not status-based.** `SUP_CLEAN_AT_EOF`
+requires the completion flag on the helper's identity-checked death note, and
+that note is accepted only when `(role, pid, incarnation)` matches the current
+registered generation. A clean exit without the flag is fatal: a valid-looking
+prefix is not proof the source was fully ingested. The catch-all `waitpid`
+path consumes the note before classifying, so evidence cannot be lost to the
+reap race. This completion flag is a **test model**: the sentinel's control
+pipe is its source, so its EOF is its completion event. **Step C must replace
+the self-report with engine-backed evidence (`fr_py_ingest_eof_posted`) before
+real ingest can satisfy the window.**
+
+The strict `teardown` window for orderer/indexer/scanner is deliberate: their
+real completion happens before teardown, but the launcher cannot yet prove the
+completion stage for them. **Step C must add the per-role completion handshake
+(EOF published, orderer input closed) before relaxing those windows** — until
+then an unexpected early clean exit is logged and fatal. Exit status alone is
+never treated as proof of pipeline completion. Worker clean exits are
+classified by the `never` window as normal completion and never emit the
+helper diagnostic.
+
+**Tests.** `python/tests/test_supervision_substrate.py` has 10 cases. New:
+slot reuse across 30 killed generations with the cap lowered to 8 (fails as
+`supervision registry full` without the fix); unexpected clean exit of an
+`orderer`-registered sentinel aborts; early clean ingest exit WITHOUT the
+completion flag aborts (status-only acceptance fails this test); the healthy
+ingest death carries `evidence=1`; and a normal worker completion emits no
+helper diagnostic. Mutation recap: `per-generation slots` → launcher dies at
+the 7th respawn; `any clean exit accepted` → early-exit test exits 0;
+`status-only EOF acceptance` → unproven ingest exit exits 0;
+`worker clean classified unacceptable` → worker emits the bogus diagnostic.
+
+**Step C capacity gate (added by the same review).** The registry is a fixed
+`SUP_MAX_PROCS = 520` array. The target topology (512 workers + 4 indexers +
+4 scanners + 3 global helpers = 523) already exceeds it before any extra
+process. Step C must size the registry from the requested worker count, node
+count and fixed-role counts — or validate and publish an explicit supported
+configuration limit BEFORE spawning. It must not discover the mismatch
+halfway through startup and terminate via `die("supervision registry full")`.
+
+#### W-EXP-2 step C — the multi-node cleanroom envelope (implemented, opt-in)
+
+**Status: gate met, for the logical-`@N` envelope.** The launcher now runs
+the real NUMA pipeline under the typed registry: a NUMA ingest, one indexer
+and one scanner per logical node, a physical fallow, and the engine's C
+orderer for ordered collection. Five families, five identities, one
+supervisor.
+
+**What is wired, and how it is known to be right.**
+
+* **The launcher owns the topology.** `--nodes N --numa-map MAP` selects the
+  logical topology; `fr_py_init_numa` builds the per-node rings, and the
+  launcher forks the families itself (`fr_py_numa_ingest`, `fr_py_indexer_numa`,
+  `fr_py_numa_scanner`, `fr_py_fallow_phys`, `fr_py_orderer`). Every one of
+  those entry points already existed in the substrate; Phase B's finding was
+  that the wiring did not, and that is what this step adds.
+* **Node-taking worker loops.** `fr_py_worker_plugin_loop` hardcoded node 0,
+  so a multi-node launcher would have run every worker on one ring while
+  claiming a multi-node run. The shim now exposes
+  `fr_py_worker_plugin_loop_numa(..., node_id)` — the same loop body with the
+  node supplied — which the roadmap's standing constraint already sanctioned
+  (`fr_py_worker_init` accepts `node_id`; the Python paths already pass it).
+  The existing symbol is unchanged and still passes `-1` (auto/UMA). ABI
+  surface: 57 externs / 16 statics (was 56/16).
+* **Ordering is the engine's job, not the parent's.** The cleanroom's
+  `order="index"` was a parent-side sort on `batch_idx`, which is a PER-NODE
+  ticket (step A: two nodes both emit 0, 1, 2, ...; 63 collisions on the
+  probe corpus). Under the multi-node envelope the launcher runs the C
+  orderer and the parent collects WITHOUT sorting. Measured: `@2` and `@4`,
+  `order="index"`, **byte-exact** against the input at both node counts;
+  `order="none"` yields the complete multiset. The parent-side sort remains
+  for UMA, where `batch_idx` IS a global sequence.
+* **Completeness is certified, not assumed.** The launcher's v3 counter
+  carries committed DATA frames summed over nodes, and the parent refuses a
+  shortfall. Measured through the public API: expected 9 == observed 9,
+  verdict `complete`.
+* **The EOF window is engine-backed.** A clean ingest/indexer/scanner exit is
+  accepted only when the ENGINE reports ingest EOF posted
+  (`fr_py_ingest_eof_posted`), never on exit status and never on the child's
+  own report. The step B note flag remains only as the sentinel's test model.
+  A clean exit without that evidence is fatal.
+* **The registry is sized from the configuration.** `SUP_MAX_PROCS = 520` is
+  gone; the registry is `calloc`'d to exactly what the request needs
+  (workers + 2 per node + fallow + ingest + orderer/drain). The reviewed
+  topology — 512 workers + 4 indexers + 4 scanners + 3 global helpers = **523
+  entries** — is now accepted and runs, where the fixed array would have
+  failed halfway through startup. An explicit hard ceiling (8192) is
+  enforced BEFORE any fork, and the worker count is checked against the
+  engine's own `MAX_TXN_WORKERS` ceiling up front, so an unservable
+  configuration costs no input.
+
+**Two limits found and fixed on the way, both pre-existing.**
+
+* **The descriptor keep-list capped the launcher at ~250 workers.** The
+  drain child must hold one output descriptor per worker, and the keep-list
+  was a fixed 256 entries — so a 512-worker run failed in a CHILD with
+  "could not be given a complete descriptor set", mid-startup, with the
+  real cause invisible. The bound is now derived from the engine's own
+  worker ceiling (`MAX_TXN_WORKERS = 1024`) plus headroom, and an oversized
+  worker count is refused before the first fork.
+* **The multi-node fatal path left its killed workers unreaped**, so
+  dead workers were still observable as processes after the launcher exited.
+  The path now reaps what it signalled.
+
+**Fault injection across helper families.** Killing the ingest, an indexer,
+a scanner or the fallow aborts the run, and the run leaves no surviving
+registered descendant. The classification matches the in-process reference
+(`check_scanner_death`): clean exit is normal, anything else is fatal.
+
+**Routing, and why it is opt-in.** The multi-node envelope is served
+through `FORKRUN_CLEANROOM_NUMA=1`, a separate switch from the
+`FORKRUN_CLEANROOM` route selector. The route selector names DISPATCH
+routes (entry x mode); the multi-node envelope is a different dimension
+(topology), and folding it into that namespace would silently change what
+an existing `FORKRUN_CLEANROOM=map-plugin` means. It stays OFF because
+Decision 3 (multi-node default-on) is gated on real multi-socket evidence,
+which this host cannot produce. Without the switch, a multi-node call runs
+the in-process NUMA path exactly as before — the launcher is not merely
+decline-and-warn, it is never asked.
+
+**Tests** (`python/tests/test_cleanroom_numa.py`, 23 cases): `@2`/`@4`
+byte-exact for `order="index"`; complete multiset for `order="none"`; every
+family registered under its own role with workers distributed across nodes;
+the ingest death carries `evidence=1`; a clean exit without EOF evidence is
+fatal; the registry capacity equals the requirement and exceeds the old
+fixed array; the sizing MODEL is pinned exactly with no process burst; an
+oversized topology is refused before any process starts; a mismatched
+`--numa-map` is refused; `--order index` requires a multi-node topology; a
+helper death in each of the four families aborts the run and leaves no
+survivors; an indexer and a scanner that exit cleanly before their OWN
+node is complete abort the run; the public-API route serves the launcher
+only when opted in, and the certificate holds on both sides of it.
+
+**Mutation recap.** Ten mutants, all killed, each by the case named
+beside it:
+
+| # | Mutation | Killed by | Effect |
+|---|---|---|---|
+| 1 | the parent re-sorts the launcher's ordered stream by `batch_idx` | `test_multinode_route_serves_the_launcher_when_opted_in` | `EXACT False` |
+| 2 | a fixed 520-entry registry | `test_registry_capacity_is_sized_from_the_topology` | the 523-entry topology dies |
+| 3 | a recoverable indexer policy | `test_indexer_death_aborts_the_run` | the run hangs instead of aborting |
+| 4 | status-only EOF acceptance | `test_clean_exit_without_eof_evidence_is_fatal` | an unproven clean exit exits 0 |
+| 5 | the multi-node route ignores its opt-in | `test_multinode_route_requires_the_explicit_opt_in` | the launcher serves a call that did not ask for it |
+| 6 | an unvalidated `--numa-map` | `test_a_tampered_topology_is_refused` | the refusal disappears |
+| 7 | the keep-list back at 256 | `test_a_large_worker_complement_is_servable` | a 260-worker run dies in a child |
+| 8 | the fatal-path reap removed | `test_a_helper_death_leaves_no_surviving_descendant` | four workers survive |
+| 9 | the INDEXER's evidence falls back to the global EOF | `test_indexer_clean_exit_before_its_node_is_indexed_is_fatal` | the node's work is skipped and the run HANGS |
+| 10 | the SCANNER's evidence falls back to the global EOF | `test_scanner_clean_exit_before_its_node_finished_is_fatal` | the node's work is skipped and the run HANGS |
+
+Mutants 9 and 10 are the per-node corrections, one per family, and each
+is killed by its own family's case: the global marker is enough for the
+INGEST, and only for the ingest. The hang is the failure the per-node
+evidence exists to prevent, so those two cases time out quickly rather
+than wait it out.
+
+**The premature-clean-exit cases.** Two live-process tests force an indexer
+and a scanner to exit 0 once the global marker is published but BEFORE
+their own node's completion condition holds. The launcher proves the setup
+before the exit -- the child reports the marker and its own node's state
+-- so the test cannot pass by accident on a run where the marker never
+arrived. Each then asserts a bounded fatal abort with no surviving
+registered descendant.
+
+**Scope, stated rather than implied.**
+
+* **UDF and spawn NUMA are NOT served** (W-EXP-1.5): the node-taking loop
+  exists for the plugin loop, and running a UDF or a command on node 0 while
+  claiming a multi-node run would be a lie about where the work happened.
+  The launcher refuses that combination rather than falling back.
+* **Streaming NUMA is NOT served**: the streaming cleanroom path is a
+  different collection contract, and the orderer writes one ordered stream,
+  not a live feed.
+* **The NUMA scanner's dynamic spawn is disarmed** (`-1`): the launcher
+  forks its whole worker complement up front, so it cannot service spawn
+  requests. That is the W-EXP-3 optimisation, not a gap.
+* **Everything here is LOGICAL `@N`.** This host has one physical NUMA
+  node, so no claim about physical locality, binding or bandwidth is made
+  or supported by this evidence.
+
+#### Hard dependency graph (corrected — the previous list was incomplete)
+
+* **Phase 0** contracts and measurements gate the expansion work they inform.
+* **The ordered-output completion defect gates W-EXP-2** (§4.7). It is live in
+  shipping code and W-EXP-2 may not proceed on a design that cannot establish
+  completeness.
+* **The shared launcher-supervision interface gates W-EXP-2 and W-EXP-3**
+  (§3, above).
+* **W-EXP-1.5 requires W-EXP-1 and W-EXP-2 to have passed independently.**
+
+The W-EXP-1-first preference is a **priority**, not a hard dependency: if
+parallel development is used, W-EXP-2 may proceed once the ordered-output item
+and the supervision interface are in place.
+
+**Why this priority order.**
+
+* **Phase 0 is contract work**, because every substantive design question
+  downstream was answered by a measurement nobody had taken, and CR-FIX1 spent
+  three rounds undoing a hypothesis that had hardened into a narrative.
+* **W-EXP-1 is prioritised first** on population: `mode="python"` is the
+  default and the largest user base. Until it is served, "default on" means an
+  accelerator the default path never uses.
+* **W-EXP-2 is gated on the live ordered-output fix** (§4.7) because that
+  defect is reachable in shipping code today, independently of any cleanroom
+  work.
+* **W-EXP-3 last** because it is a performance refinement, not a capability, and
+  it carries the roadmap's only *silent* failure mode (§7).
+
+**[H] This ordering is a judgement, not a derivation.** A reviewer who believes
+breadth-of-blast-radius should precede breadth-of-population should say so.
+
+---
+
+## 4. Phase 0 — contracts, instrumentation, measurement
+
+**No production behaviour changes.** Exit gate: every contract below is
+reviewable, and every prototype either passes or is explicitly reported as not
+passing. **No throughput claim is required to exit this phase.**
+
+### C0.1 — Capability matrix
+
+Enumerate the full cross-product and record `served / declined / unsupported /
+needs-fallback` for each cell: {materialized, streaming} × {path, descriptor} ×
+{plugin, python, spawn, splice} × {UMA, NUMA} × `order` × `orchestrator` ×
+`strict_poison` × {resume, checkpoint} × {replayable, non-replayable} sources.
+
+The matrix must be **generated from `_cleanroom_eligible()` and the dispatch
+sites**, not hand-maintained. It is a deliverable, not an exercise.
+
+> **[V] A generated matrix is documentation, not evidence.** A test that
+> regenerates the matrix from the predicate and compares it to the predicate
+> proves the generator is deterministic — it cannot show the predicate matches
+> the *intended* contract. A predicate that is wrong in both the code and the
+> generated table is self-consistent and still wrong.
+
+So: keep a **separate expected-behaviour oracle** — a hand-maintained table of
+what each combination *should* do, written from the API contract — and check the
+generated matrix against **it**. The oracle is the test; the generator is the
+document. Where they disagree, one of them is a bug.
+
+**Acceptance:** matrix published; generated matrix compared against an
+independent expected-behaviour table; a test asserts they agree.
+
+**Status: DONE** (`tools/capability_oracle.py`, `tools/capability_matrix.py`,
+`python/tests/test_capability_matrix.py`, `dev/supervisor/CLEANROOM_CAPABILITY_MATRIX.md`).
+16,128 cells, 12 outcomes, 14 tests.
+
+> **Independence is structural, not editorial.** The oracle and the generator
+> are **separate modules**, and `tools/capability_oracle.py` imports nothing
+> from `forkrun`. A test asserts this **by AST**, so the independence cannot
+> rot into a comment — which is the failure mode the paragraph above warns
+> about. Splitting the files is what makes the oracle an independent check
+> rather than a restatement; had both halves lived in one module, the
+> independence claim would have been unfalsifiable.
+
+> **[V] The suite was mutation-tested, because a passing suite proves nothing
+> until it has been shown to fail.** Six mutations of the live predicate, all
+> caught: serving `orchestrator=False` (4 failures); deleting the resume
+> refusal (10); moving it below the streaming block — **the exact CR-FIX1-K
+> defect** (8); serving `strict_poison` on the stream path (4); reintroducing
+> the historical map/stream drift (6); and having the oracle import `forkrun`
+> (caught by the AST independence test). Green after restoring each.
+
+> **[V] Two corrections to the axis list above**, found by enumerating rather
+> than by reading. **`replayable` is not an eligibility axis at all** — it is
+> computed in the *outcome* contract at `run.py:1025` as
+> `replayable = pre_ingest or _source_is_reopenable(source)` and gates
+> `may_fallback`, so it answers "may we fall back?", not "may the launcher
+> serve this call?". And **`return_stats` is a real axis that the list above
+> omits** — it is a predicate parameter, currently *constant* (never
+> consulted, therefore always served). A currently-constant axis is kept in
+> the matrix precisely because it is what a future change would silently start
+> varying.
+
+### C0.2 — Trace facility
+
+Opt-in via `FORKRUN_CLEANROOM_TRACE`; disabled by default; records to a memfd
+allocated in the Python parent and passed as an explicitly inheritable
+descriptor.
+
+Minimum viable set: monotonic timestamp, PID, **role**, event, worker
+`wid`/`wincarn`, node, result code. **No user payload bytes.**
+
+Minimum events: launcher init boundaries; child fork request and returned pid;
+child entry and exit; reap with decoded status; supervisor-loop
+entry/exit/abort/respawn; fatal teardown actions; orderer entry/exit and
+completion state.
+
+The purpose is specific: **distinguish a worker blocked in the engine's ring
+poll from a drain waiting for pipe EOF from a spill child waiting on the input
+producer.** That is the question CR-FIX1's diagnosis could not answer without
+reverting its own instrumentation.
+
+**Acceptance:** records reconstruct pid/role/fork/reap/abort for a successful
+run and an injected-failure run; test parses them; children preserve the fd
+without weakening scrubbing; disabled by default and absent from benchmarks.
+
+**Status: Phase A DONE** (`forkrun_trace.h`, `forkrun_cleanroom.c`,
+`python/forkrun/run.py`, `python/tests/test_cleanroom_trace.py`). 29 records
+from a representative run; every role carries a balanced
+`fork_request → fork_return → child_entry → child_exit` story, and worker
+pids link back to the parent's `fork_return`.
+
+> **[V] Three defects found by building it, none of them visible by reading.**
+>
+> 1. **The Python parser's struct format was wrong in a way a size check
+>    could not see.** It read `I,B,B,H` where the C struct is `uint16,
+>    uint16`. Both spellings total 8 bytes, so the record-size guard passed
+>    and every field after `magic` was misaligned — `version` was read as
+>    two separate bytes. The fix was not to re-check sizes but to change
+>    what the guard asserts: a **round-trip test** where C emits a record
+>    with distinctive per-field values and every one must arrive intact in
+>    Python. Layout reasoning cannot substitute for that.
+> 2. **A parent-side record emitted before the `if (pid == 0)` branch is
+>    emitted by the child too**, so every fork produced two `fork_return`
+>    records and the trace claimed forks that never happened. Caught by a
+>    pairing assertion, added afterwards: `fork_request` and `fork_return`
+>    counts must match per role.
+> 3. **The trace descriptor is added inside `enter_child`, not at each of
+>    the five call sites.** Five copies of one line is five chances for a
+>    future fork site to scrub the trace away, and that failure would look
+>    like "the trace stopped working" in a facility that is off by default.
+>    Putting it in the scrub path makes the property structural.
+
+> **[V] Mutation-tested; five mutations, all caught.** Reintroducing the
+> exact `I,B,B,H` bug; swapping `role`/`event` in the parser's output; the
+> **same-width swap of `wid`/`wincarn`** (which leaves every offset check
+> green — the reason the round-trip test exists); dropping the trace fd
+> from the keep-list; and re-emitting `fork_return` before the child branch.
+
+> **[V] A stale `__pycache__` invalidated one whole round of those results.**
+> A scripted edit swapping two identifiers preserves the file size, and a
+> `.pyc` whose recorded mtime still matched was accepted — so the suite ran
+> the OLD bytecode. The symptom was a parser that provably could not swap
+> two fields, demonstrably swapping them, from source that demonstrably did
+> not. Recorded in the test module's docstring: clear the bytecode cache
+> before trusting any "impossible" result in this area.
+
+**Phase A found one packaging defect:** `forkrun_trace.h` was absent from
+`MANIFEST.in`, so the sdist could not rebuild the launcher and
+`test_sdist_installs_from_source` failed. Added to `MANIFEST.in` and to
+`release_check.py`'s `check_sdist` required-file list. A new header is a
+packaging obligation, not just a source file.
+
+#### Scope — established by inspection and measurement, not assumption
+
+**[V] HARD CONSTRAINT — the trace memfd MUST be `O_APPEND`.** Measured on
+this machine with `os.fork()`, one 64-byte record per `write()`, 16
+concurrent children:
+
+| mode | records recovered | expected | verdict |
+|---|---|---|---|
+| shared offset | 25,962 | 320,000 | **CORRUPTED — 92% silently lost** |
+| `O_APPEND` | 320,000 | 320,000 | **ATOMIC**, 0 torn |
+
+A shared file offset loses records to the classic lost-update race. This is
+not a hypothetical: the trace's entire purpose is diagnosing **concurrent**
+stalls, so without `O_APPEND` it would drop most of its evidence precisely
+when it is most needed, and drop it *silently* — the parent would parse a
+short but well-formed file. `O_APPEND` is what makes one `write()` per
+record atomic on tmpfs. Every record must be a **single** `write()`; batching
+records into one buffer is fine only because the whole buffer still lands as
+one append (verified above), but per-record writes are the simpler contract.
+
+**[V] The launcher never forks the orderer.** `ring_order` / `orderer` have
+**zero** occurrences in `forkrun_cleanroom.c`; the predicate docstring already
+says the orderer "is forked only by the in-process reactor, for memory
+reasons". So the minimum-event list's *"orderer entry/exit and completion
+state"* **cannot be produced by a launcher trace**. Scope decision: **v1 is
+launcher-only**, and those events are dropped rather than stubbed. Ordering
+visibility for the in-process path is a separate item — it lives in the frozen
+engine, which C0.2 does not touch.
+
+**[V] `node` is constant (always 0) in v1.** The envelope requires
+`num_nodes == 1`, so the launcher is UMA-only. Keep the field — W-EXP-2 NUMA
+will need it — but state it carries no information yet. This is the same
+lesson as `return_stats` in C0.1: a constant field is kept precisely because
+it is what a future change would silently start varying.
+
+**Record format: binary, fixed-width, one `write()` per record.** This matches
+the existing `stats_fd` counter channel (`[version][poisoned]`, read back by
+`_read_cleanroom_stats`), so it introduces no new format to justify. Text or
+JSONL would require a formatter in C and buys nothing a test cannot do with
+`struct.unpack`.
+
+**[V] Integration points, all enumerated:**
+
+| what | where |
+|---|---|
+| `--trace-fd N` option | `forkrun_cleanroom.c:528-543`, beside `--stats-fd` |
+| `O_APPEND` on the fd | once, in the parent, before any fork |
+| timestamp source | `CLOCK_MONOTONIC`, already used at `forkrun_cleanroom.c:105` |
+| keep-list additions | **5** `keep_init(&k)` sites: `408`, `786`, `882`, `936`, `973` |
+| fork sites to instrument | **6**: `402` (worker), `591` (probe), `781` (spill), `877` (fallow), `931` (scan), `968` (drain) |
+| supervisor / reap events | `501`, `511` (`waitpid` loops), `642` (probe reap) |
+| parent-side memfd + read-back | `run.py:956-962` pattern; reader modelled on `_read_cleanroom_stats` (`run.py:1120`) |
+
+**The probe child does not scrub** — it has no `keep_init`, because it has no
+unrelated descriptors to scrub. It needs the trace fd *passed*, but not added
+to a keep-list. That is why 5 keep-lists cover 6 fork sites.
+
+**[V] Keep-list budget is not a constraint.** `CR_MAX_KEEP` is 256 and
+`keep_add` **fails closed** on overflow (`forkrun_cleanroom.c:207`), setting
+`overflow` and refusing to run rather than scrubbing partially. One
+additional descriptor is far inside budget, and the fail-closed behaviour
+means an over-budget child cannot silently lose the trace fd.
+
+**Non-goals for C0.2:** no user payload bytes; no in-process / reactor
+coverage; no engine (`forkrun_ring.c`) changes; no default-on; not in
+benchmarks.
+
+**Open decisions for review before implementation:**
+1. **Launcher-only v1** vs covering the in-process path too. — **DECIDED:
+   launcher-only for v1.**
+2. Whether the trace survives into the **fatal-teardown** path, where the
+   launcher kills children under time pressure and every `write()` is latency
+   the boundedness budget pays for. — **DECIDED: instrument it**, accepting
+   the cost, because that is where the trace is most valuable. The cost is
+   bounded by keeping fatal-path records to the minimum set.
+
+---
+
+#### Phase A → Phase B: full coverage, and what the frozen gate costs
+
+Phase A is launcher-only. **Phase B adds the in-process path and the orderer,
+which means touching the frozen engine.** Decided in advance so Phase B is not
+a surprise: the work is planned, but it is gated, not skipped.
+
+**[V] The frozen-engine gate makes Phase B a policy decision, not just code.**
+`python/release_check.py:51` freezes:
+
+```python
+FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
+```
+
+and `check_engine_frozen` (`python/release_check.py:471-485`) asserts **two**
+things:
+the files are unmodified in the working tree, **and** the most recent commit
+touching any of them is **not** HEAD. So adding trace instrumentation to the
+orderer requires *both* modifying `forkrun_ring.c` and making that commit
+HEAD-adjacent — the check cannot be satisfied by accident, only by an explicit
+change to the freeze policy or a deliberate carve-out.
+
+That is the "unless explicitly revisited" clause of the §2 constraints being
+exercised for real. Phase B therefore carries its own gate:
+
+| step | what | why it is a gate |
+|---|---|---|
+| B0 | Add `forkrun_trace.h` (new file, **not** an edit to the frozen `forkrun_substrate.h`) | keeps Phase A already shippable against the unmodified freeze policy |
+| B1 | Amend `FROZEN_FILES` with a narrow, reviewed carve-out for trace-only engine hunks, or drop `forkrun_ring.c` from the freeze with a recorded rationale | the freeze is a release *policy*; changing it is a decision with its own evidence, not a side effect of adding instrumentation |
+| B2 | Orderer entry/exit/completion in `forkrun_ring.c`, plus the reactor's own fork sites | needs B1 first |
+| B3 | In-process worker/spill/drain paths, matching Phase A's event vocabulary | needs B2's record discipline to be proven in production first |
+
+**[V] Phase A is therefore built to be extensible rather than throwaway.** The
+record format, the `O_APPEND` discipline, and the emit helper live in a **new
+shared header**, `forkrun_trace.h`, included by `forkrun_cleanroom.c` in
+Phase A and by `forkrun_ring.c` in Phase B. A new header is required anyway:
+`forkrun_substrate.h` is itself frozen, so the format cannot live there.
+Phase B then becomes *additive* — new emit calls in a file that already
+includes the header — rather than a redefinition of the record format.
+
+**Phase A exit criterion for Phase B:** Phase A's record parser, event
+vocabulary and `O_APPEND` discipline must survive in the launcher long enough
+to be trusted before the engine inherits them. The roadmap's recurring lesson
+applies — seven review rounds found contradictions in *written* contracts; the
+Phase B risk is inheriting an untested one.
+
+### C0.3 — UDF eligibility and import contract
+
+**Eligibility for W-EXP-1: module-level functions only.**
+
+A `"pkg.mod:func"` string resolving to a module-level function.
+
+> **[V] Class-qualified references are NOT in the W-EXP-1 contract.** The
+> existing shared resolver **[V]** (`_worker.py:136-137`) does
+> `mod = importlib.import_module(mod_name)` followed by a single
+> `fn = getattr(mod, func_name)`. There is no dotted traversal, so
+> `"pkg.mod:Class.method"` looks for a module attribute literally named
+> `"Class.method"` and cannot resolve. Claiming `staticmethod`/`classmethod`
+> support here would repeat this document's characteristic error — promising
+> what the code cannot deliver.
+>
+> Adding it is a **separate, later** change: it requires extending the
+> *shared* resolver, which also changes the in-process path's behaviour from
+> `TypeError` to working. That is a shipped-path behaviour change and is
+> justified on its own merits, not as cleanroom scope.
+>
+> Worth recording precisely: `"pkg.mod:Class"` **does** resolve today, because a
+> class object is callable — and would be invoked as a *constructor*, not as a
+> method. That is a different contract from "reference a method", and is not
+> part of W-EXP-1 either.
+
+Explicitly **not** eligible, with a loud observable decline when the cleanroom
+was explicitly requested: lambdas, closures, locally-defined functions,
+**caller-supplied bound methods**, callable instances carrying mutable state,
+class-qualified method references, and functions whose behaviour depends on
+caller-side mutation of their module globals.
+
+> **[V] Two different cases, kept distinct.** A *caller-supplied bound method*
+> is an object graph crossing `exec` — ineligible for the structural reason
+> below. A *classmethod deliberately resolved from an accepted string reference*
+> would be a different case entirely, governed by whether the resolver supports
+> it. Conflating them would misreport why something declines.
+
+> **[V] Rationale for the structural limit.** `mode="python"` supports an
+> arbitrary callable by fork inheritance — the payload is a live `PyObject*` in
+> the parent's heap. `exec` cannot carry one. This document's first draft
+> promised "the identical UDF runs unchanged on both paths", which is
+> unsatisfiable for closures; that acceptance criterion is withdrawn.
+
+#### Three categories, because not every restriction is detectable
+
+**[V] Narrowing the documented contract does not stop the implementation
+accepting what is outside it.** The resolver performs only a `callable()` check
+(**[V]** `_worker.py:138`), and a class object *is* callable — so
+`"pkg.mod:Class"` passes today's check and would be invoked as a constructor.
+W-EXP-1 needs an **explicit preflight kind check** on the resolved object, not a
+documented intention.
+
+| # | Category | Who is responsible | Contract |
+|---|---|---|---|
+| **1** | **Structurally ineligible references** — lambdas, closures, bound-method objects, **classes**, callable instances | **Implementation detects and declines**, before input consumption | A preflight check on the resolved object's kind; a test proving a class reference and other unsupported callable attributes are declined pre-consumption |
+| **2** | **Supported references with semantic preconditions** — importable module-level functions | **Caller**, and documented as a limitation | The caller must not rely on state the cleanroom process cannot inherit. **These are generally not detectable** and are not promised an observable decline |
+| **3** | **Parity fixtures** — deterministic, replay-safe UDFs | **Tests** | Byte-identical output across both paths, as an acceptance criterion for these fixtures |
+
+> **[V] Category 2 cannot be reduced to category 1.** Whether a function depends
+> on caller-mutated globals, process-local state, a caller-seeded random
+> generator, or the environment is **not a decidable property of an importable
+> reference**. A module-level UDF returning `os.getpid()` is structurally
+> perfect and will legitimately differ between paths; one using caller-seeded
+> randomness can diverge after a fresh import. **Promising automatic detection
+> here would be the same class of error as promising byte-identity for every
+> module-level function.** Document these as limitations; do not fake a
+> detector for them.
+
+**What "parity" therefore means.** Byte-identical output is required for
+**category 3** fixtures, and is the acceptance criterion for W-EXP-1's
+deterministic corpus. It is **not** claimed for every module-level function.
+The supported contract defines equivalence as *byte-identical for deterministic,
+replay-safe UDFs*; category-2 behaviour is a caller obligation with a
+documented failure mode.
+
+> **This closes the M2 question's first half.** The post-fork candidate cannot
+> be treated as a faster implementation of the pre-fork candidate until the
+> category-2 behavioural contract is established — because per-worker imports
+> can differ observably from one parent import, and neither is required to
+> reproduce caller-process state.
+
+#### The eligible object kind, pinned
+
+> **[V] `callable()` — or even `inspect.isfunction()` — is not sufficient.**
+> Lambdas, closures and nested functions are **all** function objects and pass
+> both checks. The exclusions above cannot be enforced without a sharper rule.
+
+**[V] Verified discriminator** (tested against each case on this tree):
+
+```python
+def is_eligible_module_function(f, attr_name, module_name):
+    if not inspect.isfunction(f):          return False   # class, instance,
+                                                        # builtin, native
+    if f.__closure__ is not None:          return False   # closure over state
+    if f.__qualname__ != attr_name:        return False   # nested / <locals>
+    if f.__name__ != attr_name:            return False   # exported lambda
+    return True
+```
+
+Measured outcomes — **each check catches a distinct thing**, so the table
+below names which:
+
+| check | catches |
+|---|---|
+| `inspect.isfunction` | classes, callable instances, built-in/native functions |
+| `__closure__ is not None` | **any closure over captured state**, named or anonymous |
+| `__qualname__ != attr_name` | **nested** definitions (`<locals>` in the qualname) |
+| `__name__ != attr_name` | **lambdas**, including a lambda exported as a module attribute |
+
+| case | `callable()` | `isfunction()` | rejected by | rule |
+|---|---|---|---|---|
+| module-level `def plain` | T | T | — | **ELIGIBLE** |
+| nested `def outer(): def inner()` | T | T | `__qualname__` | reject |
+| **named** closure over captured state | T | T | `__closure__` | reject |
+| lambda exported as a module attribute | T | T | `__name__` | reject |
+| module-exported class | T | **F** | `isfunction` | reject |
+| same-name re-export (`from other import plain`) | T | T | — | **ELIGIBLE** |
+| **aliased** re-export (`from other import plain as p2`) | T | T | `__name__` | **reject** |
+
+> **[V] Two corrections to an earlier draft of this table**, both found by
+> testing rather than reading. A **zero-capture lambda** has
+> `__closure__ is None` — the `__closure__` check does *not* catch it; the
+> `__name__` check does. And a **named** closure has
+> `__qualname__ == 'make.<locals>.inner'`, **not** `'<lambda>'` — the
+> `__qualname__` check catches nesting, not closure-ness. Conflating the two
+> made both rows wrong.
+
+**[V] Stated limitation — aliased re-exports are rejected.** Because the rule
+requires `__name__ == attr_name`, `from other import plain as p2` is refused
+even though the object is a perfectly good module-level function. This is a
+**known, deliberate** restriction of the first contract, not an oversight; it
+is revisable by relaxing the `__name__` check and adding a test.
+
+**Stated decisions:** built-in and native functions are **excluded** from
+W-EXP-1 (conservative). A **same-name** re-export is eligible. These are
+choices, not accidents; both are revisable in a later extension.
+
+**Tests:** one per row above, each asserting decline **before input
+consumption**.
+
+#### Import contract — defined per candidate, not once
+
+**[V] The previous revision's single contract was internally inconsistent.** It
+required the UDF to be resolved once in the launcher, while M2's post-fork
+candidate requires each worker to initialise its own interpreter. Those cannot
+both hold.
+
+| | **Pre-fork candidate** | **Post-fork candidate** |
+|---|---|---|
+| Before consuming input | validate **and resolve** the UDF in the launcher | validate the reference, then pass a **readiness barrier** |
+| Actual module import | **once**, in the launcher | **once per worker process** |
+| Fork lifecycle | CPython fork hooks where applicable | interpreter initialised *after* the worker fork |
+| Startup failure | refuse before source consumption | refuse before source consumption; **no ingest until the worker readiness barrier passes** |
+| Import side effects | occur once, before worker forks | **may occur independently in multiple workers** |
+
+**The rule shared by both: no source bytes are consumed until the selected
+architecture has resolved its startup requirements.** For the post-fork
+candidate this means an explicit readiness barrier — not a promise that workers
+eventually report status — before the spill or ingest path begins.
+
+**[M] Open question, settled in M2, not assumed here.** Whether the post-fork
+candidate can honour the *same* supported-UDF contract is unknown. Repeated
+per-worker imports can have observably different effects from one parent
+import, and module initialisation can depend on process-specific state. If
+they are not equivalent, post-fork is **a different execution contract**, not a
+faster variant of the same one, and the roadmap must say so. **Timing results
+from the two candidates must not be compared as if semantic equivalence had
+already been established.**
+
+> **[V] Do not probe-then-import.** A disposable probe followed by the real
+> import performs the import **twice**, and module imports can have observable
+> side effects — so merely requesting the accelerator would change behaviour. A
+> separate probe may exist as an opt-in diagnostic with that consequence stated.
+
+Requirements in **both** candidates: bounded startup deadline so a hanging
+import cannot hang the API call; readiness/refusal reported to the supervising
+parent; **no automatic fallback after a startup failure**, because falling back
+would re-enter the same unsafe path.
+
+> **[V] Pre-fork thread detection is a PRE-FORK-candidate requirement only.**
+> The previous revision listed it under "both candidates", which is wrong: in
+> the post-fork candidate the launcher forks its workers **before** any worker
+> initialises Python or imports the UDF, so there is no launcher-side UDF import
+> whose resulting threads could need detecting before those forks. The
+> post-fork candidate's equivalent obligation is the **worker-side
+> initialisation/readiness contract**, not a pre-fork scan.
+
+| | Pre-fork candidate | Post-fork candidate |
+|---|---|---|
+| Import-time thread detection | **required**, before the launcher forks its pipeline | **not applicable** — no launcher-side UDF import precedes the forks |
+| Equivalent obligation | — | worker-side init + readiness barrier before any ingest |
+
+> **[V] Thread detection must not equate "no Python-managed threads" with "no
+> threads".** A native extension can start OS threads that never appear in
+> `threading.enumerate()`. Either specify an OS-level check (`/proc/self/task`
+> count versus a pre-import baseline) or document explicitly which cases the
+> detector cannot rule out. A detector that reports "no threads" from
+> `threading.enumerate()` alone is unsound. **[V] And the lifecycle prototype
+> and its acceptance tests must exercise the candidate actually being
+> evaluated** — a pre-fork hook test proves nothing about post-fork.
+
+### C0.4 — CPython fork-lifecycle prototype
+
+**[V] The hook requirement is scoped by whether an initialised interpreter
+exists at that fork — which differs by candidate.**
+
+| | Pre-fork candidate | Post-fork candidate |
+|---|---|---|
+| Launcher forks | an initialised interpreter is live in the launcher | **no initialised interpreter exists in the launcher** |
+| `PyOS_BeforeFork()` / `PyOS_AfterFork_Parent()` | required, in the main thread of the main interpreter | **not applicable** — there is no interpreter to prepare |
+| `PyOS_AfterFork_Child()` | required **only** for a child that will re-enter Python | required in each worker, **after** its own `fork()`, once it initialises |
+| Pairing | the parent hook is required whether `fork()` succeeds **or fails** | **no launcher-side hook exists at these forks** — there is no interpreter. Post-fork initialisation is inside the child, after its own `fork()`, and any pairing applies there |
+
+**[V] A helper that executes only C and immediately `_exit()`s is not a Python
+worker.** Treating all five launcher fork sites symmetrically would be wrong: it
+adds hook cost to roles that never touch the Python API — and in the post-fork
+candidate it would add hooks around forks for which no interpreter exists.
+
+Inventory every `fork()` in `forkrun_cleanroom.c`; classify each role as
+Python-using or not **per candidate**; specify the hook pair per site **and per
+candidate**; pair correctly on the fork-failure path as well as success.
+
+Prototype against a minimal embedding **before** integrating the pipeline.
+**Prototype the candidate under evaluation, not a generic hybrid.**
+
+**Acceptance — candidate-scoped, matching the table above.** Prototype passes on
+the matrix in C0.5, and **no fork site is left unclassified for the candidate
+under evaluation**.
+
+* **Pre-fork candidate:** a thread-starting import is detected **before** the
+  launcher forks its pipeline; the CPython hook pair is applied at every fork
+  site that has a live interpreter; failure and cleanup paths are exercised on
+  both fork success and fork failure.
+* **Post-fork candidate:** no launcher-side hook is applied, because no
+  interpreter exists there. Instead the worker-side equivalent is proven — a
+  worker whose startup import fails or hangs **prevents ingest** until the
+  readiness barrier succeeds or times out, and a worker exiting abnormally
+  during initialisation is detected.
+
+### C0.5 — Interpreter matrix gate
+
+**Minimum gate: 3.10, 3.11, 3.12, 3.13 (the current CI matrix), plus 3.14
+and 3.15.**
+
+> **[V] 3.15.0 was released 2026-10-09** (Python.org release page; devguide
+> versions table lists 3.15 first release 2026-10-09). It is therefore part of
+> the support surface, and the same reasoning that required 3.14 applies
+> verbatim: `python_requires=">=3.10"` **[V]** (`setup.py:233`) sets no upper
+> bound, so **silently inferring 3.15 compatibility from 3.10–3.14 results
+> would reproduce the exact gap this gate exists to close.**
+
+> **[V] 3.15 is not a formality — two of its PEPs touch this design directly:**
+> **PEP 829 (package startup configuration files)** interacts with the
+> `PyConfig` and runtime-environment design in §5.3, and **PEP 810 (explicit
+> lazy imports)** changes import cost, which is a direct input to the M2
+> measurements. Both must be exercised on the matrix rather than reasoned about.
+
+CI currently tests 3.10–3.13 only. Either extend the matrix to 3.14 and 3.15 or
+revise the project's supported-version policy explicitly. Default-on must not
+infer 3.15 compatibility from 3.10–3.14 results.
+
+**Free-threaded CPython is out of scope** for the initial gate and the roadmap
+says so explicitly.
+
+Per-minor fork-lifecycle tests, **scoped to the candidate under evaluation** —
+a pre-fork criterion is not inherited unchanged by the post-fork candidate:
+
+| Test | Pre-fork | Post-fork |
+|---|---|---|
+| successful UDF execution after the hooks | yes | yes, after the worker's own init |
+| failure and cleanup around each fork site | yes | yes, launcher-side forks take no hooks |
+| **import that starts a background thread detected before the launcher forks** | **yes** | **not applicable** — no launcher-side import precedes the forks; its obligation is the worker-side readiness barrier |
+| worker exiting abnormally during startup | yes | yes |
+| UDF import failure / bounded import hang | yes, pre-fork | yes, in-worker, before the readiness barrier |
+| repeated invocations (stale interpreter state, thread/resource leakage) | yes | yes, per worker |
+
+**This gate blocks W-EXP-1 implementation, not W-EXP-1 design.**
+
+### C0.6 — M1/M2 measurement
+
+**M1 is a retained datum, not a projection.** Bare `Py_Initialize` with
+`PyConfig{isolated=1, install_signal_handlers=0, user_site_directory=0}`:
+
+| | wall | RSS |
+|---|---|---|
+| bare `Py_Initialize` | **11.6–13.6 ms** **[V]** (measured) | 2.5 MB → **8.4 MB** |
+| + `import json, os, sys, re` | +6.2 ms **[V]** (measured) | → 10.0 MB |
+
+Cross-check: `python3 -c pass` peaks at 8.4 MB **[V]** (measured), so the embed
+is not paying for a `site` initialisation it does not use.
+
+> **[V] The 6.2 ms import increment is a floor, not an estimate.** It was measured
+> on four stdlib modules. It is **withdrawn as decision evidence**: the previous
+> draft's projected crossover rows added it to measured cleanroom startup and
+> published ratios. Those rows are deleted. Crossover discovery happens in M2.
+
+**M2 compares two co-equal candidates.** The previous draft called pre-fork
+"probably right"; that preference is **withdrawn** — it rested on an untested
+memory argument while paying an undesigned fork-lifecycle cost.
+
+> **[H] The memory column below is a qualitative expectation, not a
+> measurement.** Pre-fork COW sharing depends on *which* pages workers dirty —
+> a worker writing its output dirties shared pages, and the saving is smaller
+> than "the interpreter is shared" suggests. Post-fork processes still share
+> file-backed library and code pages, so "~8 MB × N" overstates it too. Both
+> arrows are directionally right and numerically unverified. **Measured PSS/USS
+> establishes the actual fleet-memory curve; these rows do not.**
+
+| | serial cost | fleet memory **[H]** | fork-time interpreter state |
+|---|---|---|---|
+| **Pre-fork** (init in launcher, workers inherit) | **bare interpreter-init component only:** +11.6–13.6 ms **[V]** measured — **not** the complete pre-fork startup cost | lower — one interpreter shared, COW, reduced by worker-dirtied pages | live interpreter and possibly threads at every launcher fork |
+| **Post-fork** (each worker initialises) | ~0 ms serial; concurrent across workers | higher — per-worker private pages, still sharing file-backed code and libraries | none |
+
+> **[V] The pre-fork row is one component, not the total.** It measures
+> `Py_Initialize` alone. It **excludes** UDF import and its dependencies, runtime
+> environment resolution, and the rest of the integrated startup path — all of
+> which are measured in M2. The withdrawn projection error came from adding a
+> component to measured startup and presenting the sum as a measurement;
+> **the label must keep that distinction visible**, because startup crossover is
+> exactly where the earlier draft overreached.
+
+Semantic non-equivalence is possible and is tracked as **[M]** in C0.3: per-worker
+imports can differ observably from one parent import. **M2 measures both and
+reports the contract each satisfies, not just the timings.**
+
+Measure on the C0.5 matrix, with **the same UDF and dependency set**, across
+representative worker counts: complete API-entry-to-return wall time; time to
+first completed result; throughput on light/medium/heavy UDFs; peak RSS **and
+PSS/USS**; THP on and off; parent RSS at 30/64/128/256/554/2127 MB.
+
+**Do not use the four-module stdlib import as a proxy for a user's UDF.** Use
+representative dependency sets — pure-Python and native-extension — and publish
+crossover as a distribution, not one row.
+
+**Acceptance:** measured curves published with exact configuration, parent RSS,
+THP state and interpreter version. Any crossover stated as a range.
+
+### C0.7 — Ordered-output completion certificate (design only)
+
+**This is a live defect in shipping code and is tracked as a separate work
+item.** Phase 0 records the design contract; the implementation, fault-injection
+tests and review belong to that item.
+
+The design must specify: the terminal ordering key/count; exactly how it proves
+no packet is missing; and how it is obtained **without changing the frozen
+engine** — or, if it cannot be, an explicit argument for revisiting that
+constraint.
+
+> **[V] The exposure, verified.** `ring_order_main` frees its heaps and returns
+> `EXECUTION_SUCCESS` at EOF (`forkrun_ring.c:7834`). The `heap_left`
+> diagnostic is gated behind `FORKRUN_DIAG_NUMA1=1`, so **with the diagnostic
+> off a residual heap at EOF produces no signal and exit 0**.
+> `_numa_drain_audit` **[V]** (`run.py:8386`) compares per-node `write_idx`
+> against `read_idx` plus chunk state — a claim/drain audit that cannot
+> distinguish "every batch was claimed" from "every OrderPacket reached the
+> orderer". Collection deliberately does not sort when the orderer ran, so there
+> is no second line of defence.
+>
+> Consequence: `map(..., nodes="@2", order="index")` **today** has no gate on
+> ordered-output completeness beyond a proxy for it.
+
+> **[V] Correction to an earlier over-reading of this defect.** A first pass
+> described it as an unnoticed silent-success bug. Reading it properly, two
+> things that were missed make that framing wrong:
+>
+> * The inner `break` on `heap[0].key != expected_key` is the **designed**
+>   mechanism, not a defect. The heap exists to buffer out-of-order
+>   records, so gaps mid-stream are normal; breaking out of the drain loop
+>   returns to the outer read loop to read more, which is how a gap is
+>   filled. Mid-stream, the break is correct.
+> * The residual-heap-at-EOF condition is **already known and named** in
+>   the source: the diagnostic's own comment reads "Distinguishes gap loss
+>   (expected stuck, heap full) from early exit at a glance."
+>
+> What actually survives is narrower and should be stated as it is: there
+> is **no enforced** completeness certificate — only an *observed* one,
+> behind an env-gated diagnostic that nothing acts on. Whether
+> `exit 0` is contractually required to mean "complete" is a question of
+> intent the code does not settle, and the orderer passing substantial
+> testing is consistent with the condition being unreachable outside fault
+> injection. This was not established and is not claimed.
+
+Required fault injection, each ending in loud nonzero failure — never a
+warning plus partial data, never exit 0: an interior `(major, minor)`
+packet missing with later packets present; **the final expected packet missing**; an
+order-pipe writer dying before its final packet; the orderer dying or reporting
+an emit failure; per-node ring counters complete while ordered output is not.
+
+> **[V] "Successful drain plus empty heap" is not a certificate.** A missing
+> *terminal* packet leaves nothing in the heap to expose the gap.
+
+#### C0.7 at the cleanroom boundary — W-EXP-2 Phase A (implemented)
+
+**Status: the in-process certificate exists; the cleanroom boundary did
+not, and now does.** Reconciling the three states honestly, because they
+are genuinely different:
+
+* **Proven (pre-existing).** `fr_py_committed_data_frames` and the
+  in-process evaluators in `_execute_reactor_locked` /
+  `_execute_numa_locked`. All 44 pre-existing C0.7 tests pass — and none
+  of them mentions `FORKRUN_CLEANROOM`. That absence *was* the defect:
+  the certificate was proven only where it could not be lost.
+* **Implemented (this phase).** The launcher resolves
+  `fr_py_committed_data_frames` (and its new liveness companion) out of the
+  `.so` it already dlopens, sums it across logical nodes **after every
+  worker has joined**, and publishes it as a fifth header word (stats v3).
+  The parent compares it against the records it actually collected.
+* **Still cleanroom-open.** Nothing in this phase proves the count under
+  NUMA. That is Phase B onward, and it remains blocked.
+
+**The disposition is deliberately asymmetric, and differs from the
+in-process ORDERED certificate, which warns.** A proven shortfall at the
+cleanroom boundary raises. The in-process path can only warn because its
+envelope can be under-covered, which is the honest description of a
+partially-proven count; the cleanroom count is absolute, per-invocation,
+and read after quiescence, so a mismatch is not "we are not sure" but
+"the engine published more DATA frames than the caller received".
+Warning-plus-partial-output is the exact shape this certificate exists to
+prevent.
+
+**Unavailable is never zero.** Three distinct cases are all "no verdict",
+never a pass and never a fabricated count: the accessor is absent (older
+substrate), the count was disabled (`FORKRUN_C07_COUNT=0`), or the sum was
+unavailable. The third exists because **`fr_py_committed_data_frames` is
+not self-describing** — with counting disabled nothing increments, so the
+counter reads zero, which is indistinguishable from a run that genuinely
+committed nothing. Reading it without asking would fail every *complete*
+run. Hence `fr_py_c07_counting_enabled` (extern 55 → 56).
+
+**[V] A silent-corruption defect found and fixed while landing this.**
+The poison relay hardcoded the header length as 4 u32 and the header grew
+to 5, so writer and reader disagreed by one word. Nothing raised:
+`poisoned_batches` came back as `[0, 5]` instead of `[2, 5]`. A plausible
+wrong index list is worse than an error for exactly the kind of evidence a
+poisoned-batch test exists to provide. Both sides now **derive** the
+layout from the version word the region carries, and the parent stamps
+that version before spawning any writer (the launcher only writes its
+header at the end, after the join, so during the run the word was 0).
+
+**Evidence — `python/tests/test_c07_cleanroom_boundary.py`, 17 tests,
+mutation-proven.** Disabling the certificate fails 12 of them. Covers:
+healthy complete run; interior packet missing with later packets present;
+final expected packet missing; all-but-one missing; truncation is *not*
+loss; worker death before commit and before notify (both still certify —
+the counter sits at commit, not emit, so a recovered run re-converges);
+counting disabled → no verdict; repeated invocations do not accumulate.
+
+**Not established, and not claimed:** NUMA, the orderer route, and
+physical topology. This phase certifies the UMA cleanroom boundary only.
+
+#### C0.7 design — the engine-free route, and the measurement that enables it
+
+**The premise was tested, not assumed.** The obvious counter-argument is
+that a completeness certificate must live inside the orderer, because the
+orderer is the only party that sees every packet. That is false, and the
+following measurement is why.
+
+**[V] The orderer does not coalesce — the SCANNER does.** Varying `lines=`
+(lines per published batch) on a 1000-line input, in-process,
+`order="index"`, one worker:
+
+| `lines` | emitted records | `ceil(1000/lines)` |
+|---|---|---|
+| 1 | 1000 | 1000 |
+| 10 | 100 | 100 |
+| 100 | 10 | 10 |
+
+The emitted-record count tracks `ceil(n/lines)` **exactly**. The number of
+output records is therefore fixed at scan time, and the orderer emits
+**one record per published slot**. Coalescing happens upstream of
+ordering and is not an ordering concern.
+
+*Corroboration:* the aggregating fixture `count_lines_v1` also yields one
+record per slot (13 records for 50 lines), identical to the pass-through
+UDF on the same input — so the invariant is **UDF-independent**, which is
+what makes it a system invariant rather than a caller convention.
+
+**Consequence: the certificate is a count comparison, not a heap
+inspection.**
+
+```
+expected_records = sum over nodes of write_idx   (slots published)
+actual_records   = framed records the parent collected
+certificate      = (actual_records == expected_records)
+```
+
+`write_idx` is exposed by the **existing** `fr_py_diag_node` symbol and
+read through ctypes. **No engine change is required** — which is the
+answer C0.7 asked for.
+
+**Why it catches what the heap cannot.** Each required fault injection
+drops at least one emitted record while leaving the ring's published
+count untouched, so each appears as `actual < expected`:
+
+| fault injection | caught because |
+|---|---|
+| interior `(major, minor)` missing, later packets present | emitted < published |
+| **final expected packet missing** | emitted < published — **and this is exactly the case heap-draining cannot catch**, since no residual heap exists |
+| order-pipe writer dies before its final packet | emitted < published |
+| orderer dies or reports an emit failure | emitted < published |
+| per-node ring counters complete, ordered output not | emitted < published |
+
+The last row matters most: the ring counters and the ordered output are
+independent facts, and this compares them.
+
+**[V] Obtaining `write_idx` has a real constraint.** `fr_py_diag_node`
+returns data only while the ring state is live — it must be called where
+`_numa_drain_audit` already calls it (after supervision returns, before
+the parent parses output). A probe issued after `map()` returns gets
+`rc == -1`, which is why an after-the-fact measurement reads zeros.
+
+**[V] `_numa_drain_audit` is NUMA-only today.** Its two call sites are
+`_execute_numa_locked` (`run.py:8967`) and one further NUMA path
+(`run.py:9482`). A UMA `order="index"` run invokes it **zero** times —
+measured by instrumenting the function across five input sizes. The
+claim-side guard is real but does not cover UMA, so extending the
+certificate means extending that call, which is a **Python-side** change.
+
+**Scope conditions — where the certificate must NOT be asserted:**
+
+* `stdout_broken` / emit failure: legitimately fewer records, but it also
+  pulls the fire alarm so the run already fails; the check must not
+  double-report it as a completeness violation.
+* `unordered` mode: no ordering, so no per-slot correspondence.
+* Under-covered pools (`workers < num_nodes`): the existing audit warns
+  rather than raising, by documented design; the certificate keeps that
+  disposition rather than escalating it.
+
+**Not established here, and belonging to the implementation item:** no
+fault injection has been run, so the check has not yet been *observed* to
+fire. The premise (`emitted == published`) is measured across five sizes
+and two batch granularities; the detection behaviour is design, not
+evidence.
+
+**[V] CORRECTION — the premise is FALSIFIED for multi-node NUMA.**
+Implementing the certificate immediately shows `actual_records ==
+sum(write_idx)` is FALSE there, and wiring it fails healthy runs.
+
+Measured, 27-line input, 4 workers, `nodes="@2"`:
+
+| signal | value |
+|---|---|
+| node0 | `write=14 read=14 finished=1 tail_empty=1` |
+| node1 | `write=1 read=1 finished=1 tail_empty=1` |
+| orderer | `recv=15 emitted=15 heap_left=0 stdout_broken=0` |
+| parent collected | **14** records, **179 bytes** |
+
+179 bytes is exactly the input size, so **nothing is lost**. The extra
+published slot is the **EOF sentinel / empty tail**: it occupies a slot
+but yields no record. `write_idx` counts **SLOTS**, not DATA slots, and
+`fr_py_diag_node` exposes no data-slot count — the same concept the drain
+audit already handles via `tail_empty`.
+
+The premise survived earlier measurement because those cases were
+**single-worker in-process**, where no sentinel is published: UMA
+`order="index"` does satisfy the equality exactly (verified 14 published,
+14 collected).
+
+**[V] A SECOND plan-level finding: the submission site cannot count
+frames.** Round 17's review located the packet-write site
+(`fr_py_ack_core`, `_shim.c:3108`, mirroring `ring_ack_main`,
+`forkrun_ring.c:6934`) and it is the right site for "successfully
+SUBMITTED". It is **not** the right site for the frame count, for two
+reasons found by reading the emit path rather than assuming:
+
+1. **Granularity.** One packet covers every record appended since the
+   last ack (`op.len = curr - last_ack_offset`), so one packet may carry
+   several frames.
+2. **Disposition is not visible at submission.** `fr_py_emit`
+   (`_shim.c:907`) sets
+   `hdr.disposition = (src_len == 0) ? FR_DISP_NO_RESULT : FR_DISP_DATA`,
+   and the framer **filters** non-`DATA` frames. So a packet with
+   `op.len > 0` can carry a NO_RESULT record the parent never observes —
+   and counting it produces a mismatch on a perfectly healthy run that
+   emitted `None` or `b""`.
+
+Note the surrounding comment claims "a real empty DATA result is carried
+as DATA with len == 0", which the line below it contradicts. That
+doc/code contradiction is pre-existing and is **not** fixed here; it is
+recorded because the counter design depends on which one is true, and the
+CODE is what runs.
+
+**Revised counting site:** `fr_py_emit`, once per **`FR_DISP_DATA`
+record, after `fr_py_write_all` succeeds**. That is per-frame, has the
+disposition available, and is post-write. `fr_py_emit` is in the **shim**,
+so only the `SharedState` field itself is a ring change — the increment
+is not. `ring_ack_main`'s parallel path is out of envelope for the Python
+certificate and must be documented as excluded, not silently ignored.
+
+**[V] THIRD finding — and a BLOCKER: emission is not commit.**
+Incrementing at `fr_py_emit` counts *written* DATA frames, but a written
+frame can be **rolled back before the batch commits**.
+
+Verified in source:
+
+* `fr_py_complete` = emit + signal; the **acknowledgement** is the commit
+  linearization point (`_shim.c:1767-1770`: "Called ONLY after the
+  acknowledgement has succeeded, i.e. after the transaction has committed
+  (worker_txn_clear -> TXN_IDLE)").
+* Recovery truncates uncommitted output: *"uncommitted output is truncated
+  back to output_start by recovery"* (`_shim.c:1772-1773`).
+
+So this sequence is a valid execution:
+
+1. worker writes a DATA frame; counter increments;
+2. worker dies **before** the ack, transaction still recoverable;
+3. recovery rolls the output back;
+4. the batch is retried, writes again, counter increments again.
+
+Final collected output holds **one** frame; the counter says **two**. A
+healthy, successfully-recovered run would fail the certificate. Producer
+quiescence does **not** fix this — quiescence stabilises the counter, it
+cannot undo an increment from a rolled-back attempt.
+
+**[V] A fourth finding: `fr_py_emit` is not the only Python emitter.**
+`_worker.py` has three branches — `fr_py_complete` (which calls
+`fr_py_emit`), `fr_py_emit` directly, and a **Python `_write_all`
+fallback** (`:767`) that bypasses `fr_py_emit` entirely and is exercised
+by `test_v1_emit.py` under `FORKRUN_NO_V1=1`. A counter placed only in
+`fr_py_emit` would therefore be **invisible** to a supported fallback
+path. Either every supported emitter is instrumented, or the certificate
+must REFUSE to claim completeness when the selected path is uncovered.
+
+**Consequence:** the expected-side count must be defined against
+**committed** DATA records, not written ones, and its execution envelope
+must be explicit. The ring field is **not** added until both are settled.
+
+**Consequence for the work item:** the certificate cannot be wired as
+specified. Deriving the correct correspondence needs either an engine-side
+data-slot count or a publisher-side data marker — both of which touch the
+frozen ring or add per-record state. Until then, the implemented
+`_ordered_completeness_certificate()` exists but is **deliberately not
+wired**, and `test_c07_correspondence.py` pins the measurement so the
+false positive is not rediscovered as an engine correctness bug. It is
+also why the earlier claim "the check has not been observed to fire"
+mattered: the first implementation attempt fired on a *correct* run.
+
+
+**Status: DESIGN DONE** (this subsection). Implementation, fault-injection
+tests and review remain a separate work item per the section's opening
+paragraph. The design requires **no engine change**, so it does not gate
+on the frozen-engine decision.
+
+### C0.8 — Phase 0 exit gate
+
+- Capability matrix published and checked against the independent
+  expected-behaviour oracle (**C0.1**).
+- Trace facility working and documented.
+- UDF eligibility and import contracts documented **per M2 candidate**
+  (**C0.3**), with the three categories separated and the decline observable
+  for category 1.
+- Fork-lifecycle prototype passing for **the candidate to be evaluated**, or
+  reported as not passing (**C0.4**). **[DONE]** `fr_udf_fork` — pre-fork
+  passes; see `DECISION-01` §9.3. A harness defect that emitted a confident
+  wrong verdict when BOTH candidates failed was found and fixed.
+- M1/M2 curves published; crossover stated as a range or "not yet observed".
+  **[PARTIAL]** See `C0.6_M2_MEASUREMENT.md` and
+  `C0.5_INTERPRETER_MATRIX.md`. **Now measured on all six minors**, so
+  the lifecycle result is no longer a 3.14.7 extrapolation: pre-fork
+  wins on 48/48 (56/56 on 3.14) configurations of EVERY minor, with
+  medians in a 3.6x-4.7x band and no trend across versions. Crossover
+  is faster on 56/56 configurations, but the margin decays ~3.5x across the
+  axis as parent RSS goes 0 -> 2127 MB. The parent's own USS was
+  found miscalculated and is now fixed.
+  **Fleet memory (children's PSS/USS) is now MEASURED**, closing the last
+  C0.6 item — see `C0.6_M2_MEASUREMENT.md`. Two cautions travel with the
+  number. (a) The barrier that made it measurable was **broken until this
+  session**: both ends of the barrier pipe were used backwards, both calls
+  failed with `EBADF`, and both errors were discarded with `(void)`, so
+  the barrier was a no-op that looked like it worked. The variance it was
+  built to remove was in fact the symptom, and the first result it
+  produced was **wrong in direction**. (b) With the barrier repaired the
+  result **reverses** the earlier claim: pre-fork is *worse* on memory at
+  1-2 workers (+39%, +7.5% at parent 0 MB), crosses over near 3 workers,
+  and is better from there (-46% at 16 workers); parent size swamps the
+  difference (within 0.5% at 2127 MB). Replicated on all six minors with
+  integrity counters clean. **[MEASURED]** — scope remains one host, one
+  sample point, and the inflation buffer as the only large shared mapping;
+  a workload that dirties most shared pages is untested.
+- Interpreter matrix decision recorded (add 3.14, or revise the policy).
+  **[DONE]** See `C0.5_INTERPRETER_MATRIX.md` and `tools/matrix_c05.sh`.
+  All six minors 3.10-3.15 exercised (3.15 is rc2). Pre-fork works on
+  every one, control probe non-vacuous on every one, respawn inherits no
+  interpreter state on every one. Three real defects found, none
+  reachable from a single-interpreter check -- including that the helper
+  did not COMPILE on 3.10, which is what this gate existed to find.
+- M1/M2 curves published; crossover stated as a range or "not yet observed".
+- Ordered-output certificate designed, implementation tracked separately.
+
+**And two decisions that are prerequisites, not conclusions:**
+
+- **The shared launcher-supervision interface (§3) must be specified, and its
+  integration strategy recorded, before W-EXP-2 or W-EXP-3 begins.** Either it
+  is frozen in Phase 0, or one branch is designated for integration and rebased
+  before the other. Starting either workstream without this recorded is how two
+  branches end up rewriting the same supervisor.
+  **[DONE]** `SUPERVISION_INTERFACE.md` specifies it and records the
+  integration strategy: **this branch owns the supervisor**, and W-EXP-2 and
+  W-EXP-3 land here in that order and rebase onto it. Two findings from writing
+  it are worth carrying: the launcher has **no NUMA concept at all**
+  (`grep -c numa forkrun_cleanroom.c` is 0), so W-EXP-2 is not an extension of
+  an existing per-node supervisor but the first one; and DECISION-03 §7.3's
+  central requirement is **already implemented** in the launcher (fail-fast
+  classifies death from the raw wait status at `forkrun_cleanroom.c:2232` and
+  never reaches `p_recover`), so the gate's substance is satisfied even though
+  the signatures did not exist. **Not implemented and not externally
+  reviewed** — the specification closes the recorded gate, nothing more.
+- **The packaging path (§5.4) must be chosen before W-EXP-1 implementation
+  begins**: source-only optional prototype, interpreter-specific release
+  wheels, or abandoning the CPython-linked helper for the bootstrap design.
+  **[V]** It does not force an `auditwheel` investigation if the choice is
+  source-only for the prototype — but it must be a **recorded decision**, not an
+  unresolved option that slips past Phase 0.
+
+---
+
+## 5. W-EXP-1 — Python UDF mode (UMA, module references only)
+
+**Goal:** serve `mode="python"` with a module function reference.
+
+### 5.1 The constraint that decides the design
+
+**[V]** `mode="python"` resolves its payload in the Python parent
+(`resolve_payload_parent`, called pre-fork) and passes a live `PyObject*` by
+fork inheritance. `exec` destroys that graph.
+
+**[V] This supersedes the committed ruling.** `DOCS/CLEANROOM_DESIGN.md`
+currently records the boundary as *"hard ... not negotiable"*, and
+`CLEANROOM_HANDOVER.md` says *"Structurally impossible; do not attempt it."*
+That is correct about **carrying** and incorrect about **reachability**: `exec`
+prevents transporting an object graph; it does not prevent the far side from
+**re-creating** an interpreter and re-importing the module. The repository
+already does exactly this for the shell — `frun.bash` `exec -c bash --norc
+--noprofile` and rebuilds its world.
+
+The supersession lands in `DOCS/CHANGELOG.md` and `CLEANROOM_DESIGN.md` in the
+same commit as the code, or the change reads as a rules violation.
+
+### 5.2 Options
+
+| Option | Shape | Verdict |
+|---|---|---|
+| **A** | Optional helper `.so` linking CPython, `dlopen`ed by the launcher **only in UDF mode**; substrate and launcher stay Python-free | **Recommended** |
+| B | Python UDF-host process; workers IPC per batch | **Rejected** |
+| C | `posix_spawnp` N independent Python bootstraps + attachable engine | **Escape hatch** |
+| D | Link `-lpython3` into the launcher | **Rejected** |
+
+**B:** the host holds the GIL, so UDF execution serialises through one process
+— a centralised dispatcher, the architecture forkrun's thesis is against, and
+it would collapse the CPU-utilisation result.
+
+**C, escape hatch:** **[V]** `fr_py_init` creates engine state with
+`MAP_SHARED|MAP_ANONYMOUS` — inherited by `fork()`, but not a re-openable
+artifact for unrelated processes. Making it attachable means reconstructing
+`g_state`, `state[]`, all four eventfd arrays, `global_num_nodes`,
+`g_logical_to_phys_map` and the steal thresholds. That violates the frozen-engine
+constraint and is a different project. Retained as fallback only.
+
+> **[V] C is not the same as post-fork initialisation.** Post-fork inside an
+> ordinary forked worker needs neither `posix_spawn` nor engine attachment — the
+> worker inherits already-initialised shared state, then initialises its own
+> interpreter. It is a **live M2 candidate** (C0.6), not an escape hatch. The
+> previous draft conflated them.
+
+**D:** binds a CPython minor into a shipped artifact and drags the requirement
+into the `make python-substrate` critical path, where a missing `python3-devel`
+would fail every Python CI job.
+
+### 5.3 Design A
+
+**Artifact.** `python/forkrun/_forkrun_udf.so`, built **only if `python3-config`
+is present**, and **not** a prerequisite of `python-substrate`.
+
+> **[V] `python3-devel` is promised in `pyproject.toml:9` and
+> `python/docs/INSTALLATION.md:10` but installed in none of the six CI `dnf
+> install` lines.** Optionality is load-bearing, not cosmetic.
+
+> **[V] Presence of `python3-config` is not sufficient — its version must
+> match.** Multiple Python installations coexist in most environments, and
+> **[V]** `tools/build_wheel.sh` deliberately builds with
+> `/opt/python/cp31X-cp31X` interpreters rather than the system one. A helper
+> compiled against whichever `python3-config` happens to be first on `PATH`
+> would bind the wrong minor. The build must resolve and verify the intended
+> interpreter explicitly (version probe, not name), and the helper must record
+> the minor it was built against for the runtime check in §5.5.
+
+**Discovery.** Via `/proc/self/exe` — **[V]** not `argv[0]`, which `execv` can
+rewrite. The launcher already reads `/proc/self/status` (`rss_kb`), so `/proc`
+is idiomatic here.
+
+**Caller-minor handoff — an explicit, validated argument.**
+
+> **[V] The launcher is entered by `exec` and cannot infer the initiating
+> interpreter's minor.** It is a different process with no `sys.modules` and no
+> CPython runtime of its own. Recording the helper's *build* minor is only half
+> the check — it says what the helper is, not who is calling.
+
+So the Python wrapper passes its own minor explicitly — `--caller-version=3.12`
+on the launcher argv, alongside the existing `--so`/`--plugin` arguments — and
+the launcher validates it against the helper's recorded build minor **before
+any source bytes are consumed**.
+
+> **[V] The argument's NAME is `--caller-version`, not `--caller-minor`.**
+> An earlier draft of this section wrote `--caller-minor=3.X`. The
+> implemented and REVIEWED name is `--caller-version=MAJOR.MINOR`:
+> `REVIEW_REQUEST_ROUND12.md` records it as a new REQUIRED launcher
+> argument and `ROUND13.md` records that the requirement was added as a
+> condition of approval. The implementation under review is authoritative
+> over this prose, so the prose was corrected rather than the code. The
+> value carried is the same either way: the minor, declared explicitly,
+> validated pre-consumption.
+
+**[V] Do not shell out to `python3-config` at runtime.** It identifies a *build
+tool* on `PATH`, not necessarily the interpreter that initiated the call; with
+multiple installations (§5.4) it can name the wrong minor and would validate a
+mismatch as a match.
+
+Refusal must be loud and pre-consumption, with the same exit-code discipline as
+§5.3's absent-helper case.
+
+**Reuse `_worker` over a second Python loop in C.**
+
+> **[V]** `_worker.py` already owns the `Batch` type, the borrowed-memoryview
+> lifetime, `invalidate()` rules, `_coerce_result()` return conversion, output
+> framing, and the retry/skip/fail-fast path. A C batch loop would duplicate
+> exactly the semantics most likely to drift, and would require the launcher to
+> construct a `Batch` — which, if it were a different type, would mean the same
+> UDF working on one path and failing on the other.
+
+**Runtime environment — declared, not discovered.**
+
+> **[V] `PyConfig{isolated=1}` plus one package-root insertion does not give
+> third-party import support.** `isolated` ignores `PYTHONPATH` and the user
+> site directory; `site_import=0` removes `site`'s path handling. A UDF may need
+> a virtualenv, site-packages, an editable install, a `.pth` file,
+> `sitecustomize`, or a project `sys.path`.
+
+Decide and document one of: (a) an isolated embedded interpreter with an
+explicit, validated list of stdlib and permitted dependency roots passed by the
+caller; or (b) a more conventional configuration with a documented
+environment/`sys.path` handoff. Either way, `PyConfig.home`, prefix/executable
+handling, venv paths and native-extension search paths get specific tests —
+**from an installed package, not a source checkout.**
+
+**Return contract — parity for deterministic, replay-safe fixtures. [V]**
+
+> **Scope of the parity claim.** Byte-identical output is required for the
+> **deterministic, replay-safe** category-3 fixtures (C0.3). It is **not**
+> claimed for every module-level function, and this heading does not override
+> C0.3's explicit restriction of parity to those fixtures.
+
+| return | behaviour |
+|---|---|
+| `None` | **no record emitted** — `data=NULL` skips the write; signal still sent |
+| `b""` | **one empty record** — header written with `len == 0` |
+| `bytes` / `bytearray` / `memoryview` | one framed record |
+| `str` | UTF-8 encoded, then framed |
+| raises | the existing `on_error` taxonomy, never a silent drop |
+
+A UDF exception is **not** a transport failure. Sentinel/EOF batches are
+filtered before the UDF is invoked, so `None` never means EOF.
+
+**Kill switch.** `FORKRUN_NO_UDF` masks **only** the `udf` capability, and
+`udf` appears in **every** `v1_available()` return shape — including the
+`FORKRUN_NO_V1` branch, which returns all-present capabilities as `False`.
+
+> **[V]** `v1_available()` **[V]** (`_bindings.py:460-500`) has a dictionary
+> contract with two return shapes. `FORKRUN_NO_UDF` must not be a "mirror of
+> `FORKRUN_NO_V1`" in the sense of forcing everything `False`.
+
+**Absent helper.** A distinct exit code — **not 79**, which means "the probe
+failed and fallback is unsafe" — so Python warns and takes the in-process path,
+mirroring the exit-78 refusal precedent. The in-process path is correct for
+Python UDFs; refusal is about capability, not safety.
+
+### 5.4 Packaging — decided before implementation
+
+**Do not ship a CPython-linked helper under an ABI-independent wheel tag.**
+
+> **[V]** The substrate ships as `py3-none` because it is `ctypes`-loaded and
+> interpreter-agnostic. A helper linked to the **builder's** `libpython3.X` is
+> not version-agnostic merely because the substrate remains so — and building it
+> from the sdist does not make the resulting wheel honest, because the binary
+> still carries the builder's minor while the tag claims otherwise.
+
+> **[DECIDED]** This choice was made in `DECISION-01-helper-packaging.md`:
+> **Option A (per-minor wheels) for release, Option C (source-only) as the
+> documented development path**, with the implementation sequence in
+> DECISION-01 §6.3 — prototype against the local interpreter's headers to
+> establish the runtime contract, then complete the per-minor wheel matrix
+> for release. The requirement below is therefore **met**, and what remains
+> is verification, not selection.
+
+Three options (see `DECISION-01-helper-packaging.md`, where A and C are
+the chosen pair):
+
+1. **Source-only prototype.** Helper source in the sdist; built locally as an
+   explicitly optional capability; **not advertised as present in the generic
+   wheel.** A locally built wheel must not be mislabelled as reusable across
+   minors.
+2. **Release support.** Interpreter-specific wheels per supported minor, with a
+   truthful ABI tag, and `tools/build_wheel.sh` **[V]** adjusted — it currently
+   globs `forkrun-*-none-*.whl` at line 143, which rejects a `cp3XX` tag
+   outright.
+3. **Abandon Option A** for the per-worker bootstrap design (Option C), accepting
+   its cost.
+
+> **[V] Unresolved:** `auditwheel repair` may vendor `libpython3.X.so` into the
+> wheel with an RPATH, loading a private copy. `auditwheel` is not installed on
+> the measurement machine, so this is **unverified**. Inspect real
+> `auditwheel show` and `repair` output before shipping any binary. The docs
+> establish what `repair` may do, not what this artifact will contain.
+
+> **[PARTIALLY VERIFIED]** DECISION-01 §6.2.1 ran the two checks that do not
+> need `auditwheel`: the helper's `DT_NEEDED` requests the intended
+> `libpython3.X`, and the artifact carries **no `RPATH`/`RUNPATH` at all**.
+> The `DT_NEEDED` check was given a negative control — the same source
+> rebuilt against 3.12 headers requests `libpython3.12.so.1.0` — because a
+> build against the host's own headers trivially agrees with the host, so
+> the check only means something if the minor is shown to *follow the
+> headers*. The `auditwheel` question above is untouched and remains open.
+
+### 5.5 Acceptance criteria
+
+* [ ] Every eligible module reference produces **byte-identical** output to the
+      in-process path on the same corpus.
+* [ ] `None` / `b""` / `bytes` / `bytearray` / `memoryview` / `str` / invalid
+      return pinned by tests.
+* [ ] The `Batch` delivered is the exact `forkrun._batch.Batch`; borrowed
+      memoryview lifetime and `.invalidate()` behaviour match.
+* [ ] Ineligible callables are detected **before input is consumed**, decline
+      to in-process, and the decline is observable when the cleanroom was
+      explicitly requested.
+* [ ] **A class reference and other unsupported callable attributes are declined
+      pre-consumption by an explicit kind check**, not merely undocumented
+      (**[V]** the resolver's `callable()` check at `_worker.py:138` admits
+      classes).
+* [ ] **A caller/helper CPython-minor mismatch is refused safely before input
+      consumption**, with the refusal observable. A helper built for 3.12 must
+      not be driven by a 3.14 caller.
+* [ ] A UDF raising an exception matches the in-process `on_error` behaviour for
+      all three policies.
+* [ ] UDFs with a third-party pure-Python dependency and a native-extension
+      dependency both work, tested **from an installed package**.
+* [ ] Import failure is distinguished from an exception raised during batch
+      execution; a bounded import hang terminates.
+* [ ] Import-time threading is detected before the launcher forks — **pre-fork
+      candidate only**; the post-fork candidate's obligation is the worker-side
+      readiness barrier (C0.4).
+* [ ] **Duplicate side-effecting import — candidate-scoped.** The **pre-fork**
+      protocol must not probe-then-import or otherwise duplicate the
+      launcher-side import. The **post-fork** protocol imports **once per
+      worker by design**; its replicated side effects belong to that
+      candidate's separately documented execution contract and are not a
+      duplication defect.
+* [ ] No `-lpython3` in the substrate link line; canary green.
+* [ ] Missing `python3-devel` degrades to in-process with a warning; no CI job
+      fails.
+* [ ] `FORKRUN_NO_UDF=1` forces in-process and masks nothing else.
+* [ ] Worker SIGKILL / respawn, parent abandonment, poison counts, strict
+      poison, and no surviving descendants — all tested with byte-completeness.
+* [ ] Non-replayable sources are **not** blindly retried after possible
+      consumption.
+* [ ] C0.5 matrix green.
+* [ ] Measured crossover published, including the RSS at which UDF mode is
+      **slower** than in-process. **No claim of uniform superiority.**
+
+---
+
+## 6. W-EXP-2 — NUMA
+
+**Blocked on the separate ordered-output work item (C0.7).**
+
+### 6.1 The ordering constraint
+
+**[V] In NUMA the record header's `batch_idx` is not a global sequence.**
+`do_lockfree_claim` sets `out->batch_idx = my_read_idx`, where `my_read_idx` is
+`atomic_fetch_add` on `state[my_numa_node].read_idx` — a **per-node** counter.
+Each node has an independent `SharedState` with its own ring.
+
+Therefore: two nodes routinely emit the same `batch_idx`; it has no
+relationship to input order; and `_cleanroom_collect`'s sort
+(**[V]** `run.py:1278`) is **invalid** for NUMA.
+
+**[V]** The global key is `FR_PACK_KEY(major, minor)` — 42-bit major ‖ 22-bit
+minor. `major_ring[i]` is the ingest's global chunk id, `minor` the within-chunk
+counter, and exactly one scanner claims each chunk, so the pair is unique by
+construction. The C orderer already consumes that key and emits only on an
+exact expected-key match.
+
+**Two changes, both mandatory:**
+
+1. **Fork the C orderer** and route its output to a distinct ordered result fd.
+2. **Suppress the collector's sort selectively** — via an explicit
+   `already_ordered` signal, **not** by removing the sort. Removing it globally
+   would break currently supported UMA `order="index"` calls, which are covered
+   by passing tests.
+
+**A third hazard, from the separate work item:** the orderer is *stricter than a
+sort*. It emits only on exact `(major, minor)` sequence and **[V]** returns
+success with a residual heap at EOF (`forkrun_ring.c:7834`). W-EXP-2 requires
+**both** the per-node drain audit and the ordered-output completion
+certificate — they detect different loss modes.
+
+### 6.2 Worker-to-node assignment — the correction
+
+> **[V] The C plugin and spawn worker loops select logical node 0
+> unconditionally.**
+> `fr_py_worker_plugin_loop` calls `fr_py_worker_init(wid, 0, ...)`
+> **[V]** (`_shim.c:2865`); `fr_py_worker_spawn_loop` does the same
+> **[V]** (`_shim.c:3018`). **[V]** `fr_py_worker_init` **[V]** (`_shim.c:244`)
+> uses that argument to set `g_fr_config.ring_node_id`, assign
+> `my_numa_node`, pin to `g_logical_to_phys_map[my_numa_node]`, and increment
+> `state[my_numa_node].active_workers`. Neither loop has a node parameter.
+
+A worker in that state claims against **node 0's ring** regardless of where it
+was placed. Scheduling it onto a schedule does not fix this.
+
+**The previous draft of this document claimed the loop "self-pins from
+`getcpu()`". That was `[V]`-tagged and false.** Self-pinning is true of the
+bash `ring_worker inc` loadable, a different entry point. See §0.2.
+
+> **[V] This is a port constraint, not a live defect.** Both C loops are
+> UMA-gated in-process — `c_worker_loop` **[V]** (`run.py:1535`) and
+> `c_spawn_loop` **[V]** (`run.py:1588`) both raise for `num_nodes != 1`. The
+> NUMA executor is reactor-based and takes the arm that supplies the real node:
+> `worker_main_with_death_pipe` → **[V]** `_worker.py:324`.
+> Measured with `FORKRUN_DIAG_NUMA1=1`, `nodes="@4"`, `workers=8`: every node's
+> ring fully drained (`write == read`, `tail_empty=1`), wids partitioned
+> `[0,1] [2,3] [4,5] [6,7]`, full 5,000,000 bytes returned.
+
+**Required mechanism.** The launcher must supply each worker's logical node.
+A new node-taking shim entry point is the expected shape — it *exposes an
+operation that already exists*: **[V]** `fr_py_worker_init` already accepts
+`node_id`, and the Python paths already supply it (**[V]** `_worker.py:324`,
+`_reactor.py:760`). **No engine change.** The entry point carries an explicit
+capability contract.
+
+**Assignment must be stable across respawn** — same `wid`, same node,
+`wincarn` advancing as the engine's recovery protocol expects.
+
+**Acceptance verifies both** the logical ring each worker claims from **and**
+its observed CPU affinity. **Affinity alone cannot prove ring assignment**: a
+worker correctly pinned to physical node 1 while claiming node 0's ring would
+look right under affinity checks and be wrong under ring checks.
+
+### 6.3 Other design points
+
+* **Topology resolution is not reimplemented.** **[V]**
+  `_numa.build_numa_map()` has a deliberate loud `ValueError` when
+  `nodes > len(online)` — *"silently running UMA after nodes=4 was requested
+  would be a benchmarking lie"*. Python resolves and passes an explicit
+  validated map; the launcher validates only the range.
+* **Fork order:** fallow → N indexers → N scanners → ingest. **[V]** Reverse of
+  bash's order, matching the in-process Python path. Satisfies the constraint
+  that scanner/worker forks follow closure of every indexer death-pipe write
+  end.
+* **NUMA ingest replaces the spill child**, not supplements it. Never both.
+* **Death pipes must be added.** The launcher has none; it identifies children by
+  matching `pids[]`. bash and `_reactor.py` both watch scanner and indexer
+  deaths via `ring_poll` types 1 and 4.
+* **[V] The `INDEXER_DEATH` handler must check `abort_reason == 0` before
+  treating a non-zero status as a fault** — the indexer returns failure on any
+  `emergency_abort`, so classifying that as a death prints a spurious FATAL on
+  every clean early exit and clobbers SLURM exit codes (143→1).
+
+### 6.4 Worker spawning — measured, not mirrored
+
+**Neither eager spawning nor mirroring the existing fork gate is presumed
+correct.**
+
+**[V]** Two separate properties, often conflated: the engine can publish
+without workers (so eager spawn is *safe*), and that says nothing about startup
+performance or node coverage. The `+34%` figure that motivates the gate was
+**[V]** measured on the Python NUMA path, whose dynamics differ — separate
+ingest process, self-pinning workers.
+
+Required:
+
+1. Explicit `wid → logical node` assignment, stable across respawn.
+2. **Measurement** comparing eager with publication-gated spawning under
+   equivalent workloads.
+3. Evidence that the chosen policy preserves correctness, per-node progress and
+   fault recovery — **independently of its throughput**.
+4. The decision recorded as a **performance** choice, not a correctness
+   dependency. **A performance experiment must not gate a correctness phase.**
+
+### 6.5 Acceptance criteria
+
+* [ ] `nodes="@2"` and `nodes="@4"` byte-identical to the in-process path, for
+      `order in ("none", "index")`.
+* [ ] **`order="index"` on NUMA reconstructs input order byte-exactly.** The
+      single highest-value test in this item — it is where §6.1 bites and where
+      a silent tail-drop would hide.
+* [ ] A forced `(major, minor)` gap and a forced missing **terminal** packet
+      each fail loudly, via the completion certificate and independently of the
+      drain audit.
+* [ ] Every worker's **logical ring** and **observed affinity** are both
+      verified, across respawn.
+* [ ] SIGKILL of ingest, each indexer, scanner, fallow and orderer each terminate
+      with failure and leave no descendants.
+* [ ] `nodes=1` behaviour bit-identical to today.
+* [ ] `order="index"` **UMA** still parent-side sorts — a regression test, since
+      the collector change is the risky part.
+* [ ] Capability probe refuses the cleanroom **before input consumption** when
+      any required symbol is absent, including the node-taking worker loop —
+      with a test for the missing-symbol case (§6.6).
+
+### 6.6 Capability surface
+
+**[V]** `v1_available()["numa"]` **[V]** (`_bindings.py:486`) requires **seven**
+symbols. The first draft listed five and omitted two.
+
+```
+fr_py_init_numa       _shim.c:1735      fr_py_fallow_phys      _shim.c:1847
+fr_py_numa_ingest     _shim.c:1775      fr_py_data_ready_node _shim.c:1955
+fr_py_indexer_numa    _shim.c:1796      fr_py_ingest_eof_posted _shim.c:1989
+fr_py_numa_scanner    _shim.c:1820
+```
+
+**And an eighth, which W-EXP-2 introduces.**
+
+> **[V] The seven-symbol check is a snapshot of today's substrate, and becomes
+> insufficient the moment W-EXP-2 lands.** The node-taking worker loop (§6.2)
+> does not exist yet; a stale or mismatched substrate would pass all seven
+> checks and then fail — after the launcher has begun work and possibly consumed
+> input.
+
+Required: a **separate `numa_plugin_loop` capability** covering the node-taking
+entry point, gated by the same refuse-before-consumption rule.
+
+**Rule: the launcher's capability probe is derived from what it calls, never
+hand-maintained.** If the design uses per-node spawn gating, backlog snapshots,
+a drain audit or a node-taking worker loop, those are declared required
+capabilities too. **A capability set that has not been re-derived when the call
+set changes is a stale gate.**
+
+### 6.7 The validation gap
+
+**[V]** `test_numa_recovery.py` is gated on `len(detect_numa_nodes()) >= 2` and
+is skipped entirely on a UMA box. **[V]** Under `numa=fake=N`, `set_mempolicy`
+is exercised but **physically inert**, and every SRAT distance is 10, so
+distance-scaled stealing is untested.
+
+**[H]** So NUMA cleanroom coverage will be logic-correct under fake-NUMA and
+**completely unvalidated** for placement and stealing. That argues for shipping
+it narrower than the rest of the roadmap, not for skipping it.
+
+---
+
+## 7. W-EXP-3 — Spawn-pipe-driven incremental workers
+
+**[V] Not a capability blocker.** The engine publishes into per-node rings
+regardless of worker existence — the publish wait explicitly *bails out* when
+`active_workers == 0`, and EOF finalisation is unconditional.
+
+**[V] What it costs:** workers are born against a barely-filled ring, spin, and
+steal cores the ingest needs. **[V]** The `+34%` figure is measured on the
+Python NUMA path.
+
+**[V] What implementing it requires:** arming the pipe via
+`fr_py_scan_with_spawn`; **inverting the fork order**; replacing the blocking
+`waitpid(-1)` with a `poll()` over the spawn pipe **plus per-worker death
+pipes** (which do not exist); and reproducing `_spawn_quiescent`'s three
+conditions — **scanner reaped AND no live worker AND spawn pipe empty** — before
+closing the signal spare.
+
+> **[V] The third condition is load-bearing and its failure mode is SILENT DATA
+> LOSS, not a hang**: 4092 of 18890 bytes dropped in 5–10% of streaming runs,
+> with no exception and a clean drain-side exit. Scanners exit **after** writing
+> requests.
+
+**[V]** Reassuringly, `fr_py_drain_loop` already tolerates late workers — purely
+signal-driven, indexing `out_fds[wid]` only when a signal for that wid arrives.
+
+**"Performance only" is true only after the quiescence conditions are proven not
+to lose results.** Fault injection required around every close/reap transition:
+partial pipe reads, scanner death after writing the final request, duplicate
+spawn requests, worker death during the spawn ramp, early consumer abandonment.
+
+**Acceptance compares joined bytes and independently known record identities, not
+blob counts.** Publish the measured benefit against the all-workers-at-start
+baseline and retain a kill switch.
+
+---
+
+## 8. Default-on — three independent decisions
+
+> **[V] These are the same three decisions redrawn in §3, stated here as gates.
+> Each envelope stays opt-in until ITS OWN gate passes.** None waits on another,
+> and none waits on the performance-only W-EXP-3.
+
+**[V] Plugin default-on does not technically depend on W-EXP-1 or W-EXP-2.**
+The previous draft said "eligible once W-EXP-1/2 are done", which contradicted
+its own separability argument. Corrected: separability implies by definition
+that plugin need not wait. Deferring anyway is a **risk-tolerance choice, not a
+dependency**, and will be written as one.
+
+### Decision 1 — plugin envelope
+
+* **Evidence gate:** correctness and fault-injection coverage; both gate
+  states (`FORKRUN_CLEANROOM` unset and `=1`); installed-package behaviour;
+  measured performance with stated parent RSS and THP; explicit rollback.
+* **Status: evidence already in hand.** 70/70 cleanroom tests with zero skips;
+  738 full suite; CR-FIX1 correctness fixes demonstrated with before/after
+  controls; the RSS curve published in `DOCS/CHANGELOG.md`.
+* **Residual obligation:** batch-count variance becomes visible with two code
+  paths serving one call. **[V]** Pre-existing and documented — a documentation
+  obligation, not a blocker.
+* **Must not** be gated on UDF or NUMA evidence.
+* Lands as its own revertible commit. `FORKRUN_CLEANROOM=0` remains the global
+  rollback.
+
+### Decision 2 — Python UDF envelope
+
+* **Evidence gate:** §5.5 in full, plus the published crossover.
+* **If the measured crossover sits above typical caller RSS**, this is a
+  high-RSS optimisation. Then either leave opt-in, or adopt a **documented,
+  measured RSS-based selection policy** — an explicit policy decision, not one
+  smuggled in via a default.
+
+### Decision 3 — multi-node envelope
+
+* **Evidence gate:** §6.5, plus **real multi-socket hardware**.
+* **[H]** This is the decision most likely to be wrong if made now. Fake-NUMA
+  validates logical plumbing only; it does not validate physical placement,
+  remote memory, or distance-scaled stealing. Cheapest thing that would make it
+  defensible is real hardware — not more fake-NUMA tests.
+
+---
+
+## 9. Standing gaps
+
+| Item | Source | Why it matters |
+|---|---|---|
+| `test_numa_recovery.py` unreachable on UMA | CR-FIX1 | NUMA crash/respawn lock-ins are skipped in the default environment. Boot `numa=fake=N` for the matrix (**requires a reboot**) or mark the cells required-manual. Silent skipping of a crash test is a coverage lie. |
+| Path-source replay assumes a stable file | CR-FIX1-C | A path is replayable by reopening, which assumes contents do not change mid-invocation. Documented as an API assumption; explicitly not solved by spooling. |
+| Fleet memory sharing unmeasured | C0.6 | Pre-fork vs post-fork differ by ~8 MB × N. Needs PSS/USS, not peak RSS. |
+| Free-threaded CPython | C0.5 | Out of scope for the initial gate; stated, not silently ignored. |
+
+**Closed:** the W-CR6 RSS curve — re-measured in both THP regimes and recorded
+in `DOCS/CHANGELOG.md` and `_cleanroom_enabled`.
+
+---
+
+## 10. Exit criteria
+
+* [ ] W-EXP-1 shipped: §5.5 complete, crossover published.
+* [ ] W-EXP-2 shipped: §6.5 complete, dependent ordered-output item closed,
+      validation gap stated plainly.
+* [ ] W-EXP-1.5 (UDF + NUMA) proven — cross-product tests across
+      `nodes ∈ {1, @2, @4}` × `order` × `on_error` × respawn × strict poison ×
+      non-replayable sources. **Success in W-EXP-1 plus W-EXP-2 does not
+      imply the combination works.**
+* [ ] W-EXP-3 shipped or explicitly deferred with a measured cost.
+* [ ] The three default-on decisions made separately, each with its own commit
+      and revert.
+* [ ] Capability predicate widened only for combinations that have tests.
+* [ ] `FORKRUN_CLEANROOM` semantics and the kill switch documented where users
+      read them.
+* [ ] `DOCS/FUTURE_WORK.md` Tier 4b emptied or rewritten to reflect reality.
+
+---
+
+## 11. What this roadmap does not establish
+
+* **Only C0.6 M1 and the CR-FIX1 figures are measured.** W-EXP-1's viability
+  depends on M2, which does not exist yet. **No crossover is claimed.**
+* **[V] No multi-socket hardware was used.** Every NUMA statement here is
+  `numa=fake=N`, where mempolicy is inert and all SRAT distances are 10.
+* **[V] `auditwheel`'s treatment of `libpython` is unverified** — not installed
+  on the measurement machine. §5.4 depends on the answer.
+* **[H] The W-EXP-1 → W-EXP-2 ordering is a judgement**, not a derivation.
+* **No sub-interpreter or free-threading behaviour has been considered** beyond
+  stating free-threading is out of scope.
+* **The interpreter matrix is a gap in this document's own confidence:** the
+  M1 numbers come from one interpreter (3.14.7) on one machine. Whether
+  `Py_Initialize` cost varies materially across 3.10–3.13 is unmeasured, and
+  C0.6 is what settles it.
+* **The UDF eligibility contract will reject natural code.** `map(lambda b:
+  b.data, path)` declines. That is a correctness cost, recorded so it is not
+  rediscovered as a bug.
+
+---
+
+## 12. Review checklist
+
+### 12.1 For the reviewer
+
+1. **Spot-check `[V]` claims, do not sample.** Each carries inline evidence.
+   Two `[V]` claims in the previous draft were false on first contact; both were
+   found by a reviewer reading code the author had read and mis-generalised.
+2. **Attack §6.2 hardest.** Worker-to-node assignment is the item where being
+   wrong produces *silently wrong placement* — correct output on a
+   single-socket box, wrong on real hardware.
+3. **Confirm §6.1's collector change is selective.** A global sort removal would
+   break supported UMA `order="index"`.
+4. **Disagree with §3's ordering** if breadth should precede population.
+5. **Answer §5.4.** Whether the helper ships in a wheel is a maintainer
+   decision with real consequences, and `auditwheel` behaviour is unknown.
+6. **Confirm §12.2** — whether recording the two false `[V]` claims is useful
+   calibration or noise.
+
+### 12.2 Correction history, retained deliberately
+
+| Claim | Tag | Actual | Found by |
+|---|---|---|---|
+| "workers self-pin from `getcpu()`" | **[V]** | False. C loops hardcode node 0 (`_shim.c:2865`, `:3018`); self-pinning is true of `ring_worker inc`, a different entry point | Round 3 |
+| "~100 ms circular wait on spare pipe write ends" | comment | Refuted. Those close only after the supervision loop exits, at `live == 0` | CR-FIX1 |
+| "all five NUMA symbols exist" | implied | Seven. `v1_available()` requires `fr_py_data_ready_node` and `fr_py_ingest_eof_posted` too | Round 1 |
+| "identical UDF runs unchanged on both paths" | acceptance criterion | Unsatisfiable for closures | Round 1 |
+
+The shared shape: a claim about one code path generalised to a sibling path.
+Every `[V]` in this revision is scoped to the specific function it names.
+
+*Reviewers: quote `file:line` or measurement output when refuting. A claim
+rejected without evidence will simply be re-derived.*

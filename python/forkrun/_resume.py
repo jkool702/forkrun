@@ -209,25 +209,30 @@ def _set_engine_state(lib, state):
             "failed to set resume state (rc=%d)" % (rc,))
 
 
-def _waitpid_bounded(pid, timeout):
-    """Blocking reap with a deadline; SIGKILL on expiry, then reap.
+_UNREAPED = object()
 
-    Returns (reaped, status-or-None). Never raises.
+
+def _waitpid_until(pid, timeout):
+    """Wait for a child to exit, up to `timeout` seconds.
+
+    Returns its wait status, or None when the child was already
+    reaped elsewhere, or _UNREAPED when it did not exit in time.
+    Never raises. ONE implementation of the bounded wait, because the
+    rule it encodes ("give up at the deadline and say so") is the
+    same rule in both places it is used.
     """
-    if pid is None or pid <= 0:
-        return False, None
     deadline = time.monotonic() + max(0.0, timeout)
     while True:
         try:
             wpid, status = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
-            return True, None
+            return None       # already reaped elsewhere
         except OSError:
-            return False, None
+            return _UNREAPED
         if wpid == pid:
-            return True, status
+            return status
         if time.monotonic() >= deadline:
-            break
+            return _UNREAPED
         # W-REL5-B4/coord-fix: 2ms quantum (was 20ms). The old 20ms
         # overshot every still-running helper join by up to a full
         # quantum — on 15ms-scale completion paths (scanner + drain
@@ -235,15 +240,34 @@ def _waitpid_bounded(pid, timeout):
         # test_c_drain_not_slower deterministically (0.05→0.14s).
         # Deadline + SIGKILL + named-alarm semantics unchanged.
         time.sleep(0.002)
+
+
+def _waitpid_bounded(pid, timeout):
+    """Blocking reap with a deadline; SIGKILL on expiry, then reap.
+
+    Returns (reaped, status-or-None). Never raises.
+
+    The post-SIGKILL reap is BOUNDED too. SIGKILL is not a guarantee:
+    a process in uninterruptible sleep does not die on it, and the
+    old `os.waitpid(pid, 0)` here was an UNBOUNDED blocking wait --
+    so a helper that could not die hung the entire run, with no
+    report. A bounded wait that gives up and says so is the honest
+    shape: the caller reports the child as unresolved.
+    """
+    if pid is None or pid <= 0:
+        return False, None
+    status = _waitpid_until(pid, timeout)
+    if status is not _UNREAPED:
+        return True, status
     try:
         os.kill(pid, 9)
     except OSError:
         pass
-    try:
-        _, status = os.waitpid(pid, 0)
-        return True, status
-    except (ChildProcessError, OSError):
+    # Bounded after SIGKILL as well: SIGKILL is not a guarantee.
+    status = _waitpid_until(pid, timeout)
+    if status is _UNREAPED:
         return False, None
+    return True, status
 
 
 def _read_fd_all(fd):
