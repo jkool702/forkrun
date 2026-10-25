@@ -165,16 +165,18 @@ run_test() {
     ((FAILED_TESTS++))
     print_test_result "FAIL" "$test_name" "$fail_reason"
 
-    if [[ "${CI:-}" != "true" ]]; then
-      echo -e "    ${YELLOW}Command:${NC} $cmd"
-      echo -e "    ${YELLOW}Expected tokens:${NC}"
-      echo "      $(echo "$expected_output" | tr -s ' \t\n' ' ' | head -c 100)..."
-      echo -e "    ${YELLOW}Actual tokens:${NC}"
-      echo "      $(echo "$stdout_content" | tr -s ' \t\n' ' ' | head -c 100)..."
-      [[ -n "$stderr_content" ]] && {
-        echo -e "    ${YELLOW}Stderr:${NC}"
-        echo "      $(echo "$stderr_content" | sed 's/^/        /')"
-      }
+    # Always print failure evidence. The old CI gate (`CI != true`) hid
+    # exactly the diagnostics needed in CI; a bare "stdout mismatch" is
+    # not actionable. Cap each stream so a large failing case stays
+    # readable rather than flooding the job log.
+    echo -e "    ${YELLOW}Command:${NC} $cmd"
+    echo -e "    ${YELLOW}Expected (first 20 lines):${NC}"
+    echo "$expected_output" | head -20 | sed 's/^/      /'
+    echo -e "    ${YELLOW}Actual (first 20 lines):${NC}"
+    echo "$stdout_content" | head -20 | sed 's/^/      /'
+    if [[ -n "$stderr_content" ]]; then
+      echo -e "    ${YELLOW}Stderr:${NC}"
+      echo "$stderr_content" | head -20 | sed 's/^/      /'
     fi
   fi
 
@@ -201,9 +203,10 @@ run_test_regex() {
     exit_code=$?
   fi
 
-  local content
+  local content stderr_content
+  stderr_content=$(cat "$stderr_file")
   if $check_stderr; then
-      content=$(cat "$stderr_file")
+      content="$stderr_content"
   else
       content=$(cat "$stdout_file")
   fi
@@ -232,11 +235,13 @@ run_test_regex() {
     ((FAILED_TESTS++))
     print_test_result "FAIL" "$test_name" "$fail_reason"
 
-    if [[ "${CI:-}" != "true" ]]; then
-      echo -e "    ${YELLOW}Command:${NC} $cmd"
-      echo -e "    ${YELLOW}Regex:${NC} $line_regex"
-      echo -e "    ${YELLOW}Actual Content:${NC}"
-      echo "      $(echo "$content" | sed 's/^/        /')"
+    echo -e "    ${YELLOW}Command:${NC} $cmd"
+    echo -e "    ${YELLOW}Regex:${NC} $line_regex"
+    echo -e "    ${YELLOW}Actual content (first 20 lines):${NC}"
+    echo "$content" | head -20 | sed 's/^/      /'
+    if [[ -n "$stderr_content" ]]; then
+      echo -e "    ${YELLOW}Stderr (first 20 lines):${NC}"
+      echo "$stderr_content" | head -20 | sed 's/^/      /'
     fi
   fi
 
@@ -287,11 +292,13 @@ run_test_stderr() {
     ((FAILED_TESTS++))
     print_test_result "FAIL" "$test_name" "$fail_reason"
 
-    if [[ "${CI:-}" != "true" ]]; then
-      echo -e "    ${YELLOW}Command:${NC} $cmd"
-      echo -e "    ${YELLOW}Expected stderr regex:${NC} $expected_stderr_regex"
-      echo -e "    ${YELLOW}Actual stderr:${NC}"
-      echo "      $(echo "$stderr_content" | sed 's/^/        /')"
+    echo -e "    ${YELLOW}Command:${NC} $cmd"
+    echo -e "    ${YELLOW}Expected stderr regex:${NC} $expected_stderr_regex"
+    echo -e "    ${YELLOW}Actual stderr (first 20 lines):${NC}"
+    echo "$stderr_content" | head -20 | sed 's/^/      /'
+    if [[ -n "$stdout_content" ]]; then
+      echo -e "    ${YELLOW}Stdout (first 20 lines):${NC}"
+      echo "$stdout_content" | head -20 | sed 's/^/      /'
     fi
   fi
 
@@ -917,6 +924,25 @@ print_section "Misc additional tests"
 # Force extreme out-of-order completion to stress min-heap
 run_test "Min-heap ordering: 100 batches with random sleep skew" \
   "skewed() { sleep 0.\$((RANDOM%50)); echo \"\$1\"; }; export -f skewed 2>/dev/null; seq 1 100 | FORKRUN_EXTRA_FUNCS='skewed' frun -l 1 -k -j 16 skewed" \
+  "$(seq 1 100)"
+
+# Deterministic out-of-order completion: early lines take longer than the
+# rest, so later batches finish first. The orderer must buffer them until
+# 1..3 arrive. Unlike the randomized test above, this pins the exact
+# completion order on every run/topology.
+run_test "Min-heap ordering: deterministic out-of-order delays" \
+  "delay_skew() { case \"\$1\" in 1) sleep 0.30;; 2) sleep 0.20;; 3) sleep 0.10;; esac; echo \"\$1\"; }; seq 1 20 | FORKRUN_EXTRA_FUNCS='delay_skew' frun -l 1 -k -j 8 delay_skew" \
+  "$(seq 1 20)"
+
+# Worker ceiling: -j above the engine's provisioned output-slot count.
+# ring_init caps its slot allocation at 2 * usable cores (always <=
+# 2 * nproc), so this request is above the ceiling on every topology.
+# Pre-fix, the frontend spawned the extra workers anyway; their
+# ${fd_out[$RING_WID]} redirect failed ("ambiguous redirect"), they
+# exited having emitted nothing, and ordered output was silently short.
+_OVERSHOOT=$(( 2 * $(nproc 2>/dev/null || echo 4) + 4 ))
+run_test "Worker cap: -j above engine ceiling keeps ordered output" \
+  "seq 1 100 | frun -l 1 -k -j $_OVERSHOOT printf \"%s\\n\"" \
   "$(seq 1 100)"
 
 # Downstream consumer dies mid-stream; verify clean abort

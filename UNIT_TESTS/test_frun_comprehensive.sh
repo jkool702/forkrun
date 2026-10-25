@@ -19,7 +19,8 @@
 #
 # USAGE:
 #   Run from repo root:           bash UNIT_TESTS/test_frun_comprehensive.sh
-#   Run with verbose failure info: VERBOSE=true bash UNIT_TESTS/test_frun_comprehensive.sh
+#   Failure diagnostics are always printed; VERBOSE=true raises the
+#   per-stream line cap from 20 to 200.
 #   Run single section:           SECTION=B bash UNIT_TESTS/test_frun_comprehensive.sh
 # ============================================================================
 
@@ -99,6 +100,26 @@ _print_result() {
     esac
 }
 
+# Failure diagnostics are ALWAYS printed. The old gate on VERBOSE meant CI
+# (which does not set it) reported a bare "output mismatch" with no actual,
+# expected, or stderr — exactly the evidence needed to tell a product bug
+# from harness noise. VERBOSE now only widens the per-stream line cap.
+_print_failure_diag() {
+    local cmd="$1" reason="$2" expected="$3" actual="$4" err="${5:-}"
+    local _n=20
+    [[ "${VERBOSE:-}" == "true" ]] && _n=200
+    echo -e "    ${YELLOW}cmd:${NC} $cmd"
+    echo -e "    ${YELLOW}reason:${NC} $reason"
+    echo -e "    ${YELLOW}expected (first ${_n} lines):${NC}"
+    printf '%s\n' "$expected" | head -n "$_n" | sed 's/^/      /'
+    echo -e "    ${YELLOW}actual (first ${_n} lines):${NC}"
+    printf '%s\n' "$actual" | head -n "$_n" | sed 's/^/      /'
+    if [[ -n "$err" ]]; then
+        echo -e "    ${YELLOW}stderr (first ${_n} lines):${NC}"
+        printf '%s\n' "$err" | head -n "$_n" | sed 's/^/      /'
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # run_test_exact: exact stdout comparison (both sides compared as-is)
 # Use for: ordered output, single-line outputs, version strings
@@ -125,12 +146,7 @@ run_test_exact() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
-            echo -e "    ${YELLOW}cmd:${NC} $cmd"
-            echo -e "    ${YELLOW}expected:${NC} $(echo "$expected" | head -3 | sed 's/^/      /')"
-            echo -e "    ${YELLOW}actual:${NC}   $(echo "$out" | head -3 | sed 's/^/      /')"
-            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC}   $(echo "$err" | head -3 | sed 's/^/      /')"
-        fi
+        _print_failure_diag "$cmd" "$reason" "$expected" "$out" "$err"
     fi
 }
 
@@ -178,11 +194,7 @@ run_test_sorted() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
-            echo -e "    ${YELLOW}cmd:${NC} $cmd"
-            echo -e "    ${YELLOW}reason:${NC} $reason"
-            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC} $(echo "$err" | head -3 | sed 's/^/      /')"
-        fi
+        _print_failure_diag "$cmd" "$reason" "$expected" "$out" "$err"
     fi
 }
 
@@ -213,11 +225,7 @@ run_test_regex() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
-            echo -e "    ${YELLOW}cmd:${NC}     $cmd"
-            echo -e "    ${YELLOW}regex:${NC}   $regex"
-            echo -e "    ${YELLOW}content:${NC} $(echo "$content" | head -3 | sed 's/^/      /')"
-        fi
+        _print_failure_diag "$cmd" "$reason" "regex: $regex" "$content" "$err"
     fi
 }
 
@@ -249,11 +257,7 @@ run_test_line_count() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
-            echo -e "    ${YELLOW}cmd:${NC} $cmd"
-            echo -e "    ${YELLOW}$reason${NC}"
-            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC} $(echo "$err" | head -3 | sed 's/^/      /')"
-        fi
+        _print_failure_diag "$cmd" "$reason" "expected lines: $expected_lines" "actual lines: $actual_lines" "$err"
     fi
 }
 
@@ -3744,103 +3748,57 @@ FUNCEOF
 fi
 
 # --- R5: Sweep inline args (:::) with {1}-{2} substitution ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo {1}-{2} ::: a b c ::: 1 2 2>&1 | sort")
-    _REXP="a-1
+# Application stdout is compared independently of stderr: the helper
+# captures stderr separately, so engine advisories (e.g. the THP hint)
+# can never be sorted into the data and reported as an output mismatch.
+run_test_sorted R "R5: Sweep inline args (:::) with {1}-{2}" \
+    "frun echo {1}-{2} ::: a b c ::: 1 2" \
+    "a-1
 a-2
 b-1
 b-2
 c-1
 c-2"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R5: Sweep inline args (:::) with {1}-{2}"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R5: Sweep inline args (:::) with {1}-{2}"
-    else
-        TEST_RESULTS["R5: Sweep inline args (:::) with {1}-{2}"]="FAIL"
-        TEST_ERRORS["R5: Sweep inline args (:::) with {1}-{2}"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R5: Sweep inline args (:::) with {1}-{2}" "output mismatch"
-    fi
-fi
 
 # --- R6: Sweep inline args (:::) default args ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo ::: a b c ::: 1 2 2>&1 | sort")
-    _REXP="a 1
+run_test_sorted R "R6: Sweep inline args (:::) default args" \
+    "frun echo ::: a b c ::: 1 2" \
+    "a 1
 a 2
 b 1
 b 2
 c 1
 c 2"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R6: Sweep inline args (:::) default args"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R6: Sweep inline args (:::) default args"
-    else
-        TEST_RESULTS["R6: Sweep inline args (:::) default args"]="FAIL"
-        TEST_ERRORS["R6: Sweep inline args (:::) default args"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R6: Sweep inline args (:::) default args" "output mismatch"
-    fi
-fi
 
 # --- R7: Sweep file args (::::) default args ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/R_SWEEP2"; mkdir -p "$_MD"
-    printf "x\ny\nz\n" > "$_MD/f1.txt"
-    printf "100\n200\n" > "$_MD/f2.txt"
-
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo :::: '$_MD/f1.txt' :::: '$_MD/f2.txt' 2>&1 | sort")
-    _REXP="x 100
+_MD="$TEST_DIR/R_SWEEP2"; mkdir -p "$_MD"
+printf "x\ny\nz\n" > "$_MD/f1.txt"
+printf "100\n200\n" > "$_MD/f2.txt"
+run_test_sorted R "R7: Sweep file args (::::) default args" \
+    "frun echo :::: '$_MD/f1.txt' :::: '$_MD/f2.txt'" \
+    "x 100
 x 200
 y 100
 y 200
 z 100
 z 200"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R7: Sweep file args (::::) default args"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R7: Sweep file args (::::) default args"
-    else
-        TEST_RESULTS["R7: Sweep file args (::::) default args"]="FAIL"
-        TEST_ERRORS["R7: Sweep file args (::::) default args"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R7: Sweep file args (::::) default args" "output mismatch"
-    fi
-fi
 
 # --- R8: Sweep --link zip mode ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun --link echo ::: a b c ::: 1 2 3 2>&1 | sort")
-    _REXP="a 1
+run_test_sorted R "R8: Sweep --link zip mode" \
+    "frun --link echo ::: a b c ::: 1 2 3" \
+    "a 1
 b 2
 c 3"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R8: Sweep --link zip mode"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R8: Sweep --link zip mode"
-    else
-        TEST_RESULTS["R8: Sweep --link zip mode"]="FAIL"
-        TEST_ERRORS["R8: Sweep --link zip mode"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R8: Sweep --link zip mode" "output mismatch"
-    fi
-fi
 
 # --- R9: Sweep with bash function ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && my_func() { echo \"\$1:\$2\"; }; frun my_func ::: a b ::: 1 2 2>&1 | sort" 2>/dev/null)
-    _REXP="a:1
+# Single-quoted: $1/$2 must reach the worker function definition, not be
+# expanded by the test process.
+run_test_sorted R "R9: Sweep with bash function" \
+    'my_func() { echo "$1:$2"; }; frun my_func ::: a b ::: 1 2' \
+    "a:1
 a:2
 b:1
 b:2"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R9: Sweep with bash function"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R9: Sweep with bash function"
-    else
-        TEST_RESULTS["R9: Sweep with bash function"]="FAIL"
-        TEST_ERRORS["R9: Sweep with bash function"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R9: Sweep with bash function" "output mismatch"
-    fi
-fi
 
 # --- R10: SLURM SIGTERM triggers checkpoint and exit 143 ---
 # Verifies that standard SLURM scancel/preemption (SIGTERM) is caught and handled identically to SIGUSR1
@@ -3900,25 +3858,16 @@ FUNCEOF
 fi
 
 # --- R12: Sweep file args from stdin (:::: -) ---
-# Verifies the mapfile /dev/stdin branch works perfectly
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(printf "x\ny\nz\n" | bash -c "source '$FRUN_SOURCE' && frun echo ::: a b :::: - 2>&1 | sort")
-    _REXP="a x
+# Verifies the mapfile /dev/stdin branch works perfectly. The pipeline is
+# part of the command, so stderr remains separately captured by the helper.
+run_test_sorted R "R12: Sweep file args from stdin (:::: -)" \
+    "printf 'x\ny\nz\n' | frun echo ::: a b :::: -" \
+    "a x
 a y
 a z
 b x
 b y
 b z"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R12: Sweep file args from stdin (:::: -)"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R12: Sweep file args from stdin (:::: -)"
-    else
-        TEST_RESULTS["R12: Sweep file args from stdin (:::: -)"]="FAIL"
-        TEST_ERRORS["R12: Sweep file args from stdin (:::: -)"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R12: Sweep file args from stdin (:::: -)" "output mismatch"
-    fi
-fi
 
 # --- R13: Sweep --link zip mode truncates uneven arrays safely ---
 # Verifies the bash orchestrator safely truncates to the shortest length and warns the user
@@ -4905,9 +4854,10 @@ fi
 # --- T12 (v2): jagged-straddle resume — buffered mode + batch-membership stall ---
 # BUFFERED mode (not -k): the tracker records every COMPLETED batch, so the
 # checkpoint has real jagged intervals (in ordered mode, un-emitted completed
-# batches are untracked — see note). HUP lands mid-drain (size-gated);
-# batches completing out of order around the frontier become the jagged
-# edge (W-PY28: crashes recover instead of aborting, so the checkpoint
+# batches are untracked — see note). HUP lands only after the crash hole is
+# open AND the buffered drain has gone quiet (size-stable gate), so batches
+# completing out of order around the frontier are guaranteed to be in the
+# checkpoint (W-PY28: crashes recover instead of aborting, so the checkpoint
 # comes from an operator HUP, not a kill).
 # Resume with -l 37: run-2 batches straddle those intervals.
 # F-T12-RACE: the crash batch (holding line 19500) kill-loops until HUP.
@@ -4928,10 +4878,8 @@ crash_batch6() {
     # W-PY28: per-line burn (busy first: each cascade re-execution also
     # burns, delaying poison-fill well past the HUP below), then a
     # crash-once kill for the batch holding line 19500 (~97.5%): the
-    # kill opens a genuine hole with completed batches beyond it, and
-    # the HUP lands ~0.2s later — long before the ~3s poison cascade
-    # could fill it. That hole + backlog is the jagged edge. On resume
-    # (checkpoint exists) the batch runs normally to completion.
+    # kill opens a genuine hole with completed batches beyond it. On
+    # resume (checkpoint exists) the batch runs normally to completion.
     for a in "$@"; do for ((j=0;j<2000;j++)); do :; done; done
     if [[ " $* " == *" 19500 "* ]] && ! [[ -f ./.forkrun_resume ]]; then
         kill -9 $BASHPID
@@ -4940,15 +4888,60 @@ crash_batch6() {
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_RETRY_LIMIT='-1' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 crash_batch6 > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
-        > /dev/null 2>&1
+    # At least two workers are required for a completed batch to exist
+    # beyond the crash hole; use the host's CPU count otherwise.
+    _T12_JOBS=$(nproc 2>/dev/null || echo 2)
+    (( _T12_JOBS < 2 )) && _T12_JOBS=2
+
+    # HUP trigger: a byte threshold alone is not sufficient. 100000 bytes
+    # is reached ~500 batches before the hole on a fast host, so the HUP
+    # could land before line 19500 was ever claimed — CI then checkpointed
+    # with jagged=0 (a false failure; the data itself was exact). Gate on
+    # the crash signature instead: the self-kill pins `-l 100` batch
+    # [19401..19500] forever under retry=-1, so once every batch beyond it
+    # has completed the output size stops advancing. Require the floor AND
+    # 8 consecutive unchanged samples (1.6s) before signalling.
+    cat > "$_MD/hup.sh" <<EOF
+#!/usr/bin/env bash
+cd '$_MD'
+source '$FRUN_SOURCE'
+source funcs.sh
+rm -f .hup_ready
+cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_RETRY_LIMIT='-1' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 -j $_T12_JOBS crash_batch6 > output1.txt 2>err1.txt &
+_frun_pid=\$!
+for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done
+_THRESH=100000
+_stable=0
+_last=0
+for _j in \$(seq 1 500); do
+    _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0)
+    if (( _sz >= _THRESH )) && (( _sz == _last )); then
+        _stable=\$((_stable + 1))
+    else
+        _stable=0
+    fi
+    _last=\$_sz
+    (( _stable >= 8 )) && break
+    sleep 0.2
+done
+kill -HUP "\$(cat .hup_ready)"
+wait "\$_frun_pid"
+true
+EOF
+    bash "$_MD/hup.sh" > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["T12: jagged-straddle resume (buffered, differing -l)"]="FAIL"
         TEST_ERRORS["T12: jagged-straddle resume (buffered, differing -l)"]="no checkpoint (crash condition never fired?)"
         ((FAILED_TESTS++)); _print_result FAIL "T12: jagged-straddle resume (buffered, differing -l)" "no checkpoint"
     else
-        _TJAG=$(grep -c 'FORKRUN_RESUME_JAGGED=("' "$_MD/.forkrun_resume" 2>/dev/null || echo 0)
+        # grep -c prints "0" AND exits 1 on no match. The old
+        # `|| echo 0` therefore produced "0\n0", and (( _TJAG >= 1 ))
+        # rejected the trailing token with a syntax error — reported as
+        # jagged=0 even when the capture was legitimate. Keep grep's
+        # count; default only a genuinely empty capture (unreadable file).
+        _TJAG=$(grep -c 'FORKRUN_RESUME_JAGGED=("' "$_MD/.forkrun_resume" 2>/dev/null) || true
+        _TJAG=${_TJAG:-0}
 
         _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
         if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
