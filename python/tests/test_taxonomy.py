@@ -218,8 +218,13 @@ class TestParentInterrupt(ChildLifecycleMixin, unittest.TestCase):
                                                          _signal.SIGINT))
             try:
                 timer.start()
+                # lines=100 -> 40 batches x 50ms over 2 workers is
+                # ~1s of work, so the 0.5s SIGINT lands mid-run. Auto
+                # batching finishes the 4000 lines in ~100ms on a
+                # 4-CPU runner, before the timer fires.
                 with self.assertRaises(ForkrunInterrupted) as ctx:
-                    forkrun.map(_slow, path, workers=2, nodes=1)
+                    forkrun.map(_slow, path, workers=2, nodes=1,
+                                lines=100)
             finally:
                 timer.cancel()
                 _signal.signal(_signal.SIGINT, old)

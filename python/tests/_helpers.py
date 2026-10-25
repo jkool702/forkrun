@@ -94,6 +94,19 @@ def _child_state(pid):
         return "?"
 
 
+def pid_alive(pid):
+    """True only for a process that is still RUNNING.
+
+    `/proc/<pid>` persists while a child is a ZOMBIE, and a
+    just-killed child is a zombie until its reaper runs, so
+    `os.path.exists("/proc/<pid>")` is not a liveness test -- it
+    reports a correctly-dead process as a survivor. Delegates to the
+    same /proc/<pid>/stat state reader as child_census(), so there is
+    one definition of "dead" for test assertions.
+    """
+    return _child_state(pid) not in ("Z", "?")
+
+
 def _child_cmdline(pid):
     """What a child was, for the report.
 

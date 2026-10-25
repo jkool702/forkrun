@@ -23,6 +23,7 @@ import re
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import forkrun  # noqa: E402
+from _helpers import pid_alive  # noqa: E402
 from forkrun.run import (  # noqa: E402
     _cleanroom_collect, _cleanroom_eligible, _cleanroom_enabled,
     _cleanroom_explicit, _cleanroom_launcher_path,
@@ -135,7 +136,19 @@ def _joined(res):
 
 
 def _find_launcher():
-    """pid of the live cleanroom launcher among our children."""
+    """pid of the live cleanroom launcher among our children.
+
+    Identification is by EXECUTABLE, not by `comm`. `comm` is capped at
+    15 characters, so the old check could only test a prefix -- and a
+    pid is an identity: the teardown assertions below must not be
+    pointed at some other process that happens to share the prefix.
+    A zombie has no readable /proc/<pid>/exe link, which conveniently
+    also answers "is it still running".
+    """
+    path = _cleanroom_launcher_path()
+    if not path:                    # not built: nothing to identify
+        return None
+    want = os.path.realpath(path)
     for d in glob.glob("/proc/self/task/*/children"):
         try:
             pids = [int(x) for x in open(d).read().split()]
@@ -143,13 +156,11 @@ def _find_launcher():
             continue
         for p in pids:
             try:
-                with open("/proc/%d/comm" % p, "rb") as fh:
-                    # /proc/pid/comm is capped at 15 chars (TASK_COMM_LEN),
-                    # so "_forkrun_cleanroom" never matches in full.
-                    if fh.read().startswith(b"_forkrun"):
-                        return p
+                exe = os.path.realpath("/proc/%d/exe" % p)
             except OSError:
-                pass
+                continue
+            if exe == want:
+                return p
     return None
 
 
@@ -1350,45 +1361,64 @@ class TestCleanroomStreaming(unittest.TestCase):
         gen = forkrun.stream(
             _spec(), r2, mode="plugin", workers=4, nodes=1,
             streaming=True, orchestrator=True)
-        got = next(iter(gen))
-        self.assertTrue(len(bytes(got)) > 0)
-        # The library has now dup'd the source and closed its own copy,
-        # so dropping ours leaves the spill child as the only reader.
-        # That is what lets the producer see EPIPE once the subtree dies,
-        # instead of parking forever on a pipe nobody is draining.
-        os.close(r2)
+        # The generator is closed in a finally: an assertion or a
+        # launcher-identification failure below must not leave the
+        # children running while the test reports a different problem.
+        try:
+            got = next(iter(gen))
+            self.assertTrue(len(bytes(got)) > 0)
+            # The library has now dup'd the source and closed its own
+            # copy, so dropping ours leaves the spill child as the only
+            # reader. That is what lets the producer see EPIPE once the
+            # subtree dies, instead of parking forever on a pipe nobody
+            # is draining.
+            os.close(r2)
 
-        # Snapshot the launcher's whole subtree BEFORE abandoning --
-        # afterwards the launcher is gone and there is nothing to walk.
-        launch_pid = _find_launcher()
-        self.assertIsNotNone(launch_pid, "launcher pid not found")
-        before = _descendants_of(launch_pid)
-        self.assertTrue(before, "launcher had no descendants to leak")
+            # Snapshot the launcher's whole subtree BEFORE abandoning --
+            # afterwards the launcher is gone and there is nothing to
+            # walk.
+            launch_pid = _find_launcher()
+            self.assertIsNotNone(launch_pid, "launcher pid not found")
+            before = _descendants_of(launch_pid)
+            self.assertTrue(before, "launcher had no descendants to leak")
 
-        gen.close()
+            gen.close()
 
-        # The whole point: nothing outlives the launcher.
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            alive = [k for k in before
-                     if os.path.exists("/proc/%d" % k)]
-            if not alive:
-                break
-            time.sleep(0.1)
-        self.assertFalse(
-            os.path.exists("/proc/%d" % launch_pid),
-            "launcher survived gen.close()")
-        survivors = [k for k in before
-                     if os.path.exists("/proc/%d" % k)]
-        self.assertEqual(
-            survivors, [],
-            "descendants survived abandonment -- PDEATHSIG not effective: "
-            "%r" % (survivors,))
-        # And the producer must unwind rather than park on a full pipe.
-        th.join(timeout=30)
-        self.assertFalse(th.is_alive(),
-                         "producer still blocked after abandonment")
-        th.join(timeout=5)
+            # The whole point: nothing outlives the launcher. A zombie
+            # is dead -- see pid_alive in _helpers.
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                alive = [k for k in before if pid_alive(k)]
+                if not alive and not pid_alive(launch_pid):
+                    break
+                time.sleep(0.1)
+            self.assertFalse(
+                pid_alive(launch_pid),
+                "launcher survived gen.close()")
+            survivors = [k for k in before if pid_alive(k)]
+            self.assertEqual(
+                survivors, [],
+                "descendants survived abandonment -- PDEATHSIG not "
+                "effective: %r" % (survivors,))
+            # And the producer must unwind rather than park on a full
+            # pipe.
+            th.join(timeout=30)
+            self.assertFalse(th.is_alive(),
+                             "producer still blocked after abandonment")
+            th.join(timeout=5)
+        finally:
+            try:
+                gen.close()
+            except Exception:
+                pass
+            # r2 is closed in the body once the library has dup'd it;
+            # close it here too for the case where next() raised before
+            # that, so a failing test does not also leak an fd.
+            try:
+                os.close(r2)
+            except OSError:
+                pass
+            th.join(timeout=5)
 
     def test_stream_regular_file_path_is_not_eaten_as_an_iterable(self):
         """stream(spec, "/path/file", streaming=True) must read the FILE.

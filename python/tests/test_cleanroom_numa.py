@@ -35,6 +35,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "python"))
 
+from _helpers import pid_alive  # noqa: E402
 from forkrun._worker import _HDR  # noqa: E402
 
 _LAUNCHER = REPO / "python" / "forkrun" / "_forkrun_cleanroom"
@@ -263,7 +264,7 @@ class TestCleanroomNuma(unittest.TestCase):
 
     def _assert_no_survivors(self, registered):
         pids = [p for seq in registered.values() for p in seq]
-        alive = [p for p in pids if os.path.exists("/proc/%d" % p)]
+        alive = [p for p in pids if pid_alive(p)]
         self.assertEqual(alive, [],
                          "registered descendants survived the run: %r" % alive)
 
@@ -578,8 +579,11 @@ class TestCleanroomNuma(unittest.TestCase):
         reads as "a descendant survived the run" for a process that was
         in fact already dead.
         """
+        # slow_src: the scanner must still be alive when the kill
+        # lands, or "no survivors" is asserted about a scan that had
+        # already finished (and the family was never killed).
         rc, _dt, _lines, _blob, reg = self._run(
-            nodes=2, order="index", kill_role="scanner")
+            nodes=2, order="index", kill_role="scanner", slow_src=True)
         self.assertNotEqual(rc, 0)
         # The workers are the descendants that outlive a naive teardown.
         workers = reg.get("worker", [])
