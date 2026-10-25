@@ -1454,29 +1454,46 @@ def _stream_with_preingest_fallback(raw_payload, raw_mode, source, kwargs,
                 on_error=kwargs.get("on_error", "retry"),
                 strict_poison=bool(kwargs.get("strict_poison", False)),
                 **udf_args))
+        # CLOSING THIS WRAPPER MUST CLOSE THE PRIMED GENERATOR, and that
+        # cannot be left to reference counting. `cleanroom` is held in a
+        # LOCAL while this generator is suspended at `yield first`, so
+        # close() at that point never delegates to it: CPython 3.12.3
+        # clears the closed generator's visible frame but keeps its
+        # local references alive until the generator object is
+        # deallocated. Measured on ubuntu:24.04 / Python 3.12.3: after
+        # close(), `_RUN_LOCK._local.active` was still True, the launcher
+        # was still alive, and the NEXT stream raised "refusing to start
+        # a nested run". 3.12.15 does not reproduce, so this is a
+        # version-sensitive interpreter behaviour, not a timing flake --
+        # and the cleanup that matters (the run lock and the launcher
+        # subtree) must not depend on when GC happens to run.
         try:
-            first = next(cleanroom)
-        except StopIteration:
-            return
-        except _CleanroomPreIngestDecline as exc:
-            if isinstance(exc, _CleanroomCompatRefusal):
-                _record_compat_refusal(exc.code, exc.detail, helper_fp)
-                _warn_compat_refusal(exc)
-            new_payload, new_mode = _coerce_payload(
-                raw_payload, raw_mode, force_inprocess_udf=True)
-            # Only `mode` goes into kwargs: these generators take
-            # `payload` POSITIONALLY, so putting it in kwargs as well is
-            # a duplicate argument. (Which is exactly what happened the
-            # first time.)
-            inproc_kwargs = dict(kwargs, mode=new_mode)
-            yield from _guarded_gen(
-                _signal_guard(inproc_kwargs.get("signal_policy", "default")),
-                _stream_reactor_gen(new_payload, source,
-                                    _execute_ingest_stream_reactor,
-                                    **inproc_kwargs))
-            return
-        yield first
-        yield from cleanroom
+            try:
+                first = next(cleanroom)
+            except StopIteration:
+                return
+            except _CleanroomPreIngestDecline as exc:
+                if isinstance(exc, _CleanroomCompatRefusal):
+                    _record_compat_refusal(exc.code, exc.detail, helper_fp)
+                    _warn_compat_refusal(exc)
+                new_payload, new_mode = _coerce_payload(
+                    raw_payload, raw_mode, force_inprocess_udf=True)
+                # Only `mode` goes into kwargs: these generators take
+                # `payload` POSITIONALLY, so putting it in kwargs as well
+                # is a duplicate argument. (Which is exactly what
+                # happened the first time.)
+                inproc_kwargs = dict(kwargs, mode=new_mode)
+                yield from _guarded_gen(
+                    _signal_guard(
+                        inproc_kwargs.get("signal_policy", "default")),
+                    _stream_reactor_gen(new_payload, source,
+                                        _execute_ingest_stream_reactor,
+                                        **inproc_kwargs))
+                return
+            yield first
+            yield from cleanroom
+        finally:
+            cleanroom.close()
     return _gen()
 
 

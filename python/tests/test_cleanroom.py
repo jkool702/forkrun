@@ -135,7 +135,19 @@ def _joined(res):
     return b"".join(bytes(x) for x in res)
 
 
-def _find_launcher():
+def _child_pids():
+    """Every pid currently in our children files, from every thread."""
+    out = set()
+    for d in glob.glob("/proc/self/task/*/children"):
+        try:
+            with open(d) as fh:
+                out.update(int(x) for x in fh.read().split())
+        except OSError:
+            continue
+    return out
+
+
+def _find_launcher(exclude=()):
     """pid of the live cleanroom launcher among our children.
 
     Identification is by EXECUTABLE, not by `comm`. `comm` is capped at
@@ -144,23 +156,28 @@ def _find_launcher():
     pointed at some other process that happens to share the prefix.
     A zombie has no readable /proc/<pid>/exe link, which conveniently
     also answers "is it still running".
+
+    `exclude` is a snapshot of the children that existed BEFORE the run
+    under test was started. Without it this lookup returns the FIRST
+    matching launcher, which -- if an earlier test leaked one -- is not
+    the pid this test is about to kill. The assertion would then report
+    "launcher survived" about a process this test never owned, masking
+    the real leak instead of exposing it.
     """
     path = _cleanroom_launcher_path()
     if not path:                    # not built: nothing to identify
         return None
     want = os.path.realpath(path)
-    for d in glob.glob("/proc/self/task/*/children"):
+    skip = set(exclude)
+    for p in _child_pids():
+        if p in skip:
+            continue
         try:
-            pids = [int(x) for x in open(d).read().split()]
+            exe = os.path.realpath("/proc/%d/exe" % p)
         except OSError:
             continue
-        for p in pids:
-            try:
-                exe = os.path.realpath("/proc/%d/exe" % p)
-            except OSError:
-                continue
-            if exe == want:
-                return p
+        if exe == want:
+            return p
     return None
 
 
@@ -1358,6 +1375,9 @@ class TestCleanroomStreaming(unittest.TestCase):
         r2 = os.dup(r)
         os.close(r)
         os.environ["FORKRUN_CLEANROOM"] = "1"
+        # Children that predate this run; the launcher this test owns is
+        # the one NOT in this set (see _find_launcher's `exclude`).
+        prior = _child_pids()
         gen = forkrun.stream(
             _spec(), r2, mode="plugin", workers=4, nodes=1,
             streaming=True, orchestrator=True)
@@ -1377,7 +1397,7 @@ class TestCleanroomStreaming(unittest.TestCase):
             # Snapshot the launcher's whole subtree BEFORE abandoning --
             # afterwards the launcher is gone and there is nothing to
             # walk.
-            launch_pid = _find_launcher()
+            launch_pid = _find_launcher(exclude=prior)
             self.assertIsNotNone(launch_pid, "launcher pid not found")
             before = _descendants_of(launch_pid)
             self.assertTrue(before, "launcher had no descendants to leak")
@@ -1406,6 +1426,22 @@ class TestCleanroomStreaming(unittest.TestCase):
             self.assertFalse(th.is_alive(),
                              "producer still blocked after abandonment")
             th.join(timeout=5)
+
+            # And the PROCESS-WIDE session lock must be free NOW, not
+            # whenever the closed generator's frame happens to be
+            # collected. On CPython 3.12.3 the primed inner generator was
+            # retained by the closed wrapper, so this second run raised
+            # "refusing to start a nested run" while the first stream's
+            # launcher was still alive -- the same defect as the survivor
+            # assertion above, seen through its user-visible symptom.
+            path2 = _make_input(200)
+            self.addCleanup(
+                lambda: os.path.exists(path2) and os.unlink(path2))
+            second = list(forkrun.stream(
+                _spec(), path2, mode="plugin", workers=2, nodes=1,
+                streaming=True, orchestrator=True))
+            self.assertTrue(
+                second, "a run started after close() produced no records")
         finally:
             try:
                 gen.close()
