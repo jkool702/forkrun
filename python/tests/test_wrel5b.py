@@ -128,6 +128,18 @@ class TestB2StreamTaxonomy(ChildLifecycleMixin, unittest.TestCase):
         #    observed yields ~9 batches, so ~8 remain after the first.
         #    0.05 s is short against _slow's 0.05 s per batch.
         path = self._path(n=5000)
+        # PIN THE BATCHING. The number of batches is what makes the
+        # 0.05 s SIGINT land MID-STREAM, and auto-batching made it
+        # host-dependent: a 3.15 cell measured 3 batches for these 5000
+        # lines (the fast pre-flight's very wide CASE A), so the timer
+        # fired as the stream was winding down and a bare
+        # KeyboardInterrupt escaped between yields -- the test then
+        # reported a taxonomy failure that was nothing of the kind.
+        # lines=64 is the narrow mode already measured here (~79
+        # batches, ~2 s), which leaves dozens of batches in flight when
+        # the signal arrives on every host. This is the repo's rule:
+        # a test that depends on a batch count must pin it.
+        kw = dict(kw, lines=64)
         old = _signal.getsignal(_signal.SIGINT)
         _signal.signal(_signal.SIGINT, _signal.default_int_handler)
         # Deliver SIGINT from the kernel via setitimer, NOT a

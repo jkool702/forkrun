@@ -530,8 +530,17 @@ class TestCleanroomNuma(unittest.TestCase):
         self.assertLess(dt, 240.0)
 
     def test_ingest_death_aborts_the_run(self):
+        # slow_src: the ingest child drains a regular file in
+        # microseconds on this corpus, so on a fast machine it can exit
+        # 0 before the kill observed at registration lands -- and an
+        # ingest that already COMPLETED is not a death, so the launcher
+        # correctly exits 0. Measured: this test passed in python-v0's
+        # direct suite and failed (rc=0) in the release_check suite on
+        # the same machine, which is the race, not a policy defect. The
+        # trickle keeps the ingest alive, exactly as the indexer and
+        # scanner cases below already do.
         rc, dt, lines, _blob, reg = self._run(
-            nodes=2, order="index", kill_role="ingest")
+            nodes=2, order="index", kill_role="ingest", slow_src=True)
         self.assertNotEqual(rc, 0, "an ingest death exited 0")
         self.assertTrue(any("is not recoverable -- aborting" in l
                             for l in lines),

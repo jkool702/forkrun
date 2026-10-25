@@ -202,7 +202,8 @@ class TestSupervisionSubstrate(unittest.TestCase):
             self.assertGreaterEqual(
                 kills, kill_budget,
                 "the respawn injection stopped firing before the budget: "
-                "%d of %d kills" % (kills, kill_budget))
+                "%d of %d kills (rc=%r; last launcher lines: %r)"
+                % (kills, kill_budget, rc, lines[-8:]))
         return rc, time.time() - t0, lines, ingest_pid, worker_pids
 
     @staticmethod

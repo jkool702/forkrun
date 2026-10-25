@@ -346,10 +346,23 @@ class TestUdfWheelTagRule(unittest.TestCase):
                           "an absent helper was reported as present")
 
     def test_a_helper_for_another_minor_is_refused(self):
-        # A helper built for 3.12 in a tree running 3.14: its name
-        # differs, so it is not found, so it cannot ship under cp314.
-        other = "_fr_udf" + self.suffix.replace(
-            "cpython-%d%d" % sys.version_info[:2], "cpython-312")
+        # A helper built for ANOTHER minor: its name differs, so it is
+        # not found, so it cannot ship under this interpreter's tag.
+        #
+        # The "other" minor must actually differ from the RUNNING one.
+        # The first version hardcoded 312, which is a no-op substitution
+        # on a 3.12 interpreter: it created this interpreter's real
+        # helper name, the detector found it, and the test failed on
+        # 3.12 ONLY (the matrix cell that runs with the system Python).
+        # Pick 313 when running 3.12 and 312 everywhere else, then
+        # ASSERT that the substitution was not a no-op -- the test's
+        # premise is that the fixture name names another minor.
+        other_minor = ("cpython-313" if self.minor == "cpython-312"
+                       else "cpython-312")
+        other = "_fr_udf" + self.suffix.replace(self.minor, other_minor)
+        self.assertNotEqual(
+            other, self.suffix,
+            "the fixture did not name another minor: %r" % (other,))
         open(os.path.join(self.d, other), "wb").close()
         self.assertIsNone(
             self._detect(),
