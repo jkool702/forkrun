@@ -328,6 +328,19 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # W-PY31: read-only waiter accounting.  fr_py_active_waiters
+        # returns the engine gauge the scanner consults;
+        # fr_py_worker_probe reports (txn state, txn node, shim waiter
+        # registration word) for one wid.  Tests and supervision
+        # diagnostics only — no run-path caller.
+        lib.fr_py_active_waiters.argtypes = [ctypes.c_int]
+        lib.fr_py_active_waiters.restype = ctypes.c_int
+        lib.fr_py_worker_probe.argtypes = [
+            ctypes.c_int, ctypes.POINTER(ctypes.c_uint32)]
+        lib.fr_py_worker_probe.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
         # C0.7: committed DATA frames for one node, read after producers
         # are quiescent. Separate from fr_py_diag_node (whose callers
         # allocate exactly six values, so widening it would overrun

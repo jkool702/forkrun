@@ -325,7 +325,16 @@ class TestShimBindings(unittest.TestCase):
         # The extern surface is therefore unchanged (60) and the
         # static surface grows 16 -> 17. No existing signature and no
         # struct layout changed.
-        self.assertEqual((n_ext, n_st), (60, 17),
+        # W-PY31 waiter accounting (this change): TWO read-only extern
+        # probes, so the recovery tests can observe the same state the
+        # shim decides from rather than inferring it from timing:
+        #   fr_py_active_waiters(node)  the scanner-facing gauge
+        #   fr_py_worker_probe(wid,out) (txn phase, txn node, this wid's
+        #                               shim waiter registration word)
+        # Both are inert diagnostics: no library caller, nothing
+        # written, no existing signature or struct layout changed.
+        # Extern 60 -> 62; static stays 17.
+        self.assertEqual((n_ext, n_st), (62, 17),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

@@ -29,6 +29,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_active_waiters": {
+    "args": "int node",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_backlog_node": {
     "args": "int node",
     "linkage": "extern",
@@ -356,6 +361,11 @@
   },
   "fr_py_worker_plugin_loop_numa": {
     "args": "int wid, const char *path, const char *func_name, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error, int node_id",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_worker_probe": {
+    "args": "int wid, uint32_t *out",
     "linkage": "extern",
     "return": "int"
   },

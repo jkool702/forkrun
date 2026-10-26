@@ -8,7 +8,7 @@
  *
  * Scope: declarations, argument types, return types only.
  * No semantic contracts (see test_invariant_gate.py §3/§6/§9).
- * Extern entries are the dlsym-visible ABI surface (60);
+ * Extern entries are the dlsym-visible ABI surface (62);
  * static entries are internal (17, listed with linkage in
  * shim_signatures.json, omitted here).
  *
@@ -34,6 +34,7 @@ int fr_py_abort_reason(void);
 int fr_py_ack(int fallow_fd, int target_fd);
 int fr_py_ack_direct(int fallow_fd, int target_fd);
 int fr_py_ack_init(int fd);
+int fr_py_active_waiters(int node);
 uint64_t fr_py_backlog_node(int node);
 int fr_py_c07_counting_enabled(void);
 int fr_py_claim(fr_py_batch_t *out);
@@ -86,6 +87,7 @@ void fr_py_worker_bind_node(int node_id);
 int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit, int debug);
 int fr_py_worker_plugin_loop(int wid, const char *path, const char *func_name, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error);
 int fr_py_worker_plugin_loop_numa(int wid, const char *path, const char *func_name, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error, int node_id);
+int fr_py_worker_probe(int wid, uint32_t *out);
 int fr_py_worker_spawn_loop(int wid, char **argv, int argc, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error);
 int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd, int signal_fd, int fallow_fd);
 int fr_py_worker_udf_loop(int wid, const char *module, const char *attr, int ingress_fd, int out_fd, int signal_fd, int fallow_fd, int order_fd, int trap_ack_fd, int wincarn, int retry_limit, int on_error);

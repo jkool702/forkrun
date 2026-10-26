@@ -48,6 +48,18 @@ except FileNotFoundError:
     HAVE_LIB = False
 
 
+# WorkerTxn phases. 0-3 live in forkrun_ring.c; 4 (WAITING) is the
+# shim-only phase that makes an idle worker's death recoverable.
+(TXN_IDLE, TXN_CLAIMING, TXN_CLAIMED, TXN_COMMITTING,
+ TXN_WAITING) = range(5)
+
+
+def _waiter_node(reg):
+    """Decode the shim waiter-registry word: 0 = not registered,
+    else the node the wid registered on."""
+    return (reg >> 1) if (reg & 1) else None
+
+
 
 def _has_symbols():
     if not HAVE_LIB:
@@ -220,6 +232,200 @@ class TestClaimPublishRace(ChildLifecycleMixin, unittest.TestCase):
         finally:
             del os.environ["FORKRUN_TEST_DIE_AT_CLAIM"]
             os.unlink(path)
+
+
+@unittest.skipUnless(HAVE_LIB, "substrate .so not built")
+class TestWaiterAccounting(ChildLifecycleMixin, unittest.TestCase):
+    """W-PY31: a dead waiter's active_waiters contribution is removed
+    exactly once, and only if it actually registered.
+
+    The registry is wid-scoped, so recovery must not decrement a live
+    sibling's contribution and must not underflow on a death that
+    happened before the registration increment.  Observations go
+    through fr_py_worker_probe / fr_py_active_waiters (the same state
+    recovery reads), not through timing guesses.
+    """
+
+    def tearDown(self):
+        assert_no_zombies(self)
+
+    @staticmethod
+    def _close(fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def _init(self, nodes=1):
+        lib = get()
+        if nodes == 1:
+            self.assertEqual(lib.fr_py_init(0, 0), 0)
+        else:
+            self.assertEqual(
+                lib.fr_py_init_numa(0, 0, nodes,
+                                    ",".join(str(i)
+                                             for i in range(nodes)).encode()),
+                0)
+        self.addCleanup(lib.fr_py_destroy)
+        out_fd = os.memfd_create("fr_wait_out")
+        self.addCleanup(lambda: self._close(out_fd))
+        return lib, out_fd
+
+    @staticmethod
+    def _probe(lib, wid):
+        out = (ctypes.c_uint32 * 3)()
+        rc = lib.fr_py_worker_probe(wid, out)
+        if rc != 0:
+            raise AssertionError("worker_probe(%d) rc=%d" % (wid, rc))
+        return out[0], out[1], out[2]
+
+    def _fork_claim(self, lib, wid, out_fd, hook=None, node=0,
+                    incarnation=0):
+        """Fork a worker that enters fr_py_claim and blocks waiting.
+
+        `hook` (if given) makes the child SIGKILL itself at that
+        injection point.  A child without a hook stays parked in
+        TXN_WAITING until the test kills it.
+        """
+        pid = os.fork()
+        if pid == 0:
+            try:
+                lib.fr_py_worker_init(wid, node, incarnation, 3, 0)
+                lib.fr_py_set_output_fd(out_fd)
+                lib.fr_py_ack_init(out_fd)
+                if hook:
+                    os.environ[hook] = "1"
+                claimed = FrPyBatch()
+                lib.fr_py_claim(ctypes.byref(claimed))
+            except BaseException:
+                pass
+            os._exit(42)
+        return pid
+
+    def _wait_count(self, lib, node, want, deadline=10.0):
+        end = time.monotonic() + deadline
+        last = None
+        while time.monotonic() < end:
+            last = lib.fr_py_active_waiters(node)
+            if last == want:
+                return
+            time.sleep(0.01)
+        self.fail("active_waiters[%d] never reached %d (last=%r)"
+                  % (node, want, last))
+
+    def test_death_before_registration_preserves_other_waiter(self):
+        """A pre-registration death decrements nothing.
+
+        This is the case a blanket 'TXN_WAITING => active_waiters--'
+        would get wrong: the dead worker never contributed, so the
+        subtraction would steal the live sibling's slot.
+        """
+        lib, out_fd = self._init()
+        live = self._fork_claim(lib, 0, out_fd)
+        self._wait_count(lib, 0, 1)
+
+        dead = self._fork_claim(lib, 1, out_fd,
+                                "FORKRUN_TEST_DIE_AT_WAIT")
+        _, status = os.waitpid(dead, 0)
+        self.assertTrue(os.WIFSIGNALED(status))
+        self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+        st, _node, reg = self._probe(lib, 1)
+        self.assertEqual(st, TXN_WAITING)
+        self.assertEqual(reg, 0, "worker died before registering")
+        self.assertEqual(lib.fr_py_active_waiters(0), 1)
+
+        self.assertEqual(lib.fr_py_recover_worker(1, 0, out_fd, 9), 1)
+        self.assertEqual(
+            lib.fr_py_active_waiters(0), 1,
+            "pre-registration recovery stole the live waiter's slot")
+        self.assertEqual(self._probe(lib, 1)[2], 0)
+
+        os.kill(live, signal.SIGKILL)
+        os.waitpid(live, 0)
+        self.assertEqual(_waiter_node(self._probe(lib, 0)[2]), 0)
+        self.assertEqual(lib.fr_py_recover_worker(0, 0, out_fd, 9), 1)
+        self.assertEqual(lib.fr_py_active_waiters(0), 0)
+
+    def test_death_after_registration_restores_count(self):
+        """A registered waiter's death is removed by recovery."""
+        lib, out_fd = self._init()
+        pid = self._fork_claim(lib, 0, out_fd,
+                               "FORKRUN_TEST_DIE_AT_WAIT_REGISTERED")
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFSIGNALED(status))
+        self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+
+        st, node, reg = self._probe(lib, 0)
+        self.assertEqual(st, TXN_WAITING)
+        self.assertEqual(node, 0)
+        self.assertEqual(_waiter_node(reg), 0,
+                         "worker must have registered as a waiter")
+        self.assertEqual(lib.fr_py_active_waiters(0), 1)
+
+        self.assertEqual(lib.fr_py_recover_worker(0, 0, out_fd, 9), 1)
+        self.assertEqual(lib.fr_py_active_waiters(0), 0)
+        self.assertEqual(self._probe(lib, 0)[:2], (TXN_IDLE, 0))
+
+    def test_two_registered_waiters_remove_only_the_dead_one(self):
+        """Concurrent waiters: recovery is wid-scoped, not a node reset."""
+        lib, out_fd = self._init()
+        live = self._fork_claim(lib, 0, out_fd)
+        self._wait_count(lib, 0, 1)
+
+        dead = self._fork_claim(lib, 1, out_fd,
+                                "FORKRUN_TEST_DIE_AT_WAIT_REGISTERED")
+        os.waitpid(dead, 0)
+        self.assertEqual(lib.fr_py_active_waiters(0), 2)
+
+        self.assertEqual(lib.fr_py_recover_worker(1, 0, out_fd, 9), 1)
+        self.assertEqual(
+            lib.fr_py_active_waiters(0), 1,
+            "recovery removed a live sibling's waiter contribution")
+        self.assertEqual(_waiter_node(self._probe(lib, 0)[2]), 0,
+                         "live waiter lost its registration")
+
+        os.kill(live, signal.SIGKILL)
+        os.waitpid(live, 0)
+        self.assertEqual(lib.fr_py_recover_worker(0, 0, out_fd, 9), 1)
+        self.assertEqual(lib.fr_py_active_waiters(0), 0)
+
+    def test_repeated_registered_deaths_same_wid(self):
+        """Respawning the same wid cannot leave a stale contribution."""
+        lib, out_fd = self._init()
+        for gen in range(3):
+            pid = self._fork_claim(
+                lib, 0, out_fd, "FORKRUN_TEST_DIE_AT_WAIT_REGISTERED",
+                incarnation=gen)
+            _, status = os.waitpid(pid, 0)
+            self.assertTrue(os.WIFSIGNALED(status))
+            self.assertEqual(lib.fr_py_active_waiters(0), 1)
+            self.assertEqual(
+                lib.fr_py_recover_worker(0, gen, out_fd, 9), 1)
+            self.assertEqual(lib.fr_py_active_waiters(0), 0)
+            self.assertEqual(self._probe(lib, 0)[2], 0)
+
+    def test_worker_init_publishes_node_before_first_claim(self):
+        """A never-published worker's txn node is its real node.
+
+        Recovery classifies an IDLE/WAITING death against
+        txn->node.  Before this floor, a node-1 worker that died before
+        its first claim read node 0 and could be dismissed as
+        'normal exit' while node 0 was drained and node 1 was not.
+        """
+        lib, out_fd = self._init(nodes=2)
+        pid = self._fork_claim(lib, 0, out_fd, node=1)
+        self._wait_count(lib, 1, 1)
+        st, node, reg = self._probe(lib, 0)
+        self.assertEqual(st, TXN_WAITING)
+        self.assertEqual(node, 1,
+                         "worker_init must publish the generation's node")
+        self.assertEqual(_waiter_node(reg), 1,
+                         "registration must name the worker's node")
+
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        self.assertEqual(lib.fr_py_recover_worker(0, 0, out_fd, 9), 1)
+        self.assertEqual(lib.fr_py_active_waiters(1), 0)
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")

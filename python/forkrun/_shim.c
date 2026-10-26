@@ -235,6 +235,163 @@ int fr_py_output_advanced(uint64_t nbytes) {
     return 0;
 }
 
+/* W-PY31 waiter registry (shim-side; the engine stays frozen).
+ *
+ * `active_waiters` is the scanner's "is anyone parked on this ring?"
+ * gauge: it decides whether a publish needs an evfd_data poke.  The
+ * engine owns the field, but the shim owns the wait loop now (the
+ * Python/cleanroom paths use the non-blocking claim), so the shim must
+ * keep the gauge exact across worker DEATH as well as across ordinary
+ * wakeups.  A dead worker cannot run cleanup_waiter_state(), and
+ * blindly decrementing every TXN_WAITING death would steal a live
+ * sibling's contribution (or underflow when the worker died before
+ * registering).
+ *
+ * Two pieces of shared state, one authority:
+ *
+ *   g_wait_reg[wid]   0 = not registered; (node << 1) | 1 = registered
+ *                     as a waiter on `node`.  A single atomic store /
+ *                     exchange, so recovery learns the node from the
+ *                     word it removes.
+ *   g_wait_bits        per-node bitmap derived from the registry, used
+ *                     only to recompute the mirror cheaply.
+ *
+ * `active_waiters` is a MIRROR of popcount(g_wait_bits[node]): on every
+ * transition (register / release / recover) it is recomputed and
+ * stored, never adjusted by a delta whose complement may have been
+ * lost.  Ordering is deliberate and load-bearing:
+ *
+ *   register: reg = 1, THEN set the bit   (reg is the authority)
+ *   release:  clear the bit, THEN reg = 0 (reg=0 => bit clear)
+ *
+ * A death anywhere in either sequence leaves reg set with the bit
+ * possibly clear; recovery clears the bit idempotently, clears reg and
+ * re-mirrors, which is exact.  A death after the bit is set but before
+ * the mirror store is likewise repaired by the same recompute.  The
+ * mapping is MAP_SHARED anonymous memory created before any worker
+ * forks, so the parent's fr_py_recover_worker() sees the dead child's
+ * registration.
+ *
+ * Do not collapse this into the engine's counter arithmetic: the point
+ * is that recovery recomputes from a registry it can read, not from a
+ * count whose increments it cannot attribute.
+ */
+#define SHIM_WAIT_WORDS ((MAX_TXN_WORKERS + 63) / 64)
+
+static uint32_t *g_wait_reg = NULL;   /* [MAX_TXN_WORKERS] */
+static uint64_t *g_wait_bits = NULL;  /* [FR_MAX_LOGICAL_NODES][WORDS] */
+
+/* Allocate (once) and clear the registry.  Called from fr_py_init /
+ * fr_py_init_numa, i.e. before any worker forks.  A re-init starts a
+ * new epoch: a stale registration from the previous run must not count
+ * against the fresh ring. */
+static int shim_waiters_init(void) {
+    if (!g_wait_reg) {
+        const size_t reg_sz = sizeof(uint32_t) * MAX_TXN_WORKERS;
+        const size_t bits_sz =
+            sizeof(uint64_t) * SHIM_WAIT_WORDS * FR_MAX_LOGICAL_NODES;
+        void *p = mmap(NULL, reg_sz + bits_sz, PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED)
+            return 1;
+        g_wait_reg = (uint32_t *)p;
+        g_wait_bits = (uint64_t *)((char *)p + reg_sz);
+    }
+    memset(g_wait_reg, 0, sizeof(uint32_t) * MAX_TXN_WORKERS);
+    memset(g_wait_bits, 0,
+           sizeof(uint64_t) * SHIM_WAIT_WORDS * FR_MAX_LOGICAL_NODES);
+    return 0;
+}
+
+static inline uint64_t *shim_wait_word(int node, int wid) {
+    return &g_wait_bits[(size_t)node * SHIM_WAIT_WORDS +
+                        (size_t)wid / 64u];
+}
+
+static inline uint32_t shim_waiter_count(int node) {
+    uint32_t n = 0;
+    int w;
+    if (!g_wait_bits || node < 0 || node >= (int)FR_MAX_LOGICAL_NODES)
+        return 0;
+    for (w = 0; w < (int)SHIM_WAIT_WORDS; w++) {
+        uint64_t bits = __atomic_load_n(
+            &g_wait_bits[(size_t)node * SHIM_WAIT_WORDS + (size_t)w],
+            __ATOMIC_ACQUIRE);
+        n += (uint32_t)__builtin_popcountll(bits);
+    }
+    return n;
+}
+
+/* Store the derived count into the engine's gauge.  Best-effort: a
+ * node outside the live topology is ignored (worker_init clamps to a
+ * real node, so this only guards a malformed caller). */
+static inline void shim_waiter_mirror(int node) {
+    if (!state || node < 0 || node >= (int)global_num_nodes)
+        return;
+    /* SEQ_CST, not release: the decrement this replaces in the engine
+     * is a SEQ_CST fetch_add, and the worker follows this store with a
+     * load of write_idx.  Without the StoreLoad half of the barrier a
+     * publisher that loads active_waiters and a waiter that loads
+     * write_idx can both read the stale value and the poke is lost.
+     * A lost poke is not fatal (the 100 ms poll timeout re-checks),
+     * but it would add 100 ms of latency to an otherwise immediate
+     * handoff, so keep the engine's ordering exactly. */
+    __atomic_store_n(&state[node].active_waiters, shim_waiter_count(node),
+                     __ATOMIC_SEQ_CST);
+}
+
+/* Registered as a waiter on `node`.  See the ordering note above. */
+static inline void shim_waiter_register(int wid, int node) {
+    if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS || node < 0 ||
+        node >= (int)FR_MAX_LOGICAL_NODES)
+        return;
+    __atomic_store_n(&g_wait_reg[wid], ((uint32_t)node << 1) | 1u,
+                     __ATOMIC_RELEASE);
+    __atomic_fetch_or(shim_wait_word(node, wid),
+                      1ull << ((unsigned)wid % 64u), __ATOMIC_ACQ_REL);
+    is_waiting_on_ring = true;  /* keep the engine's TLS view coherent */
+    shim_waiter_mirror(node);
+}
+
+/* Remove THIS wid's registration.  Idempotent: safe on a worker that
+ * never registered, and safe for recovery on an already-cleared wid. */
+static inline void shim_waiter_release(int wid) {
+    uint32_t old;
+    int node;
+    if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS)
+        return;
+    old = __atomic_load_n(&g_wait_reg[wid], __ATOMIC_ACQUIRE);
+    if (!(old & 1u))
+        return;
+    node = (int)(old >> 1);
+    if (node >= 0 && node < (int)FR_MAX_LOGICAL_NODES)
+        __atomic_fetch_and(shim_wait_word(node, wid),
+                           ~(1ull << ((unsigned)wid % 64u)),
+                           __ATOMIC_ACQ_REL);
+    __atomic_store_n(&g_wait_reg[wid], 0, __ATOMIC_RELEASE);
+    is_waiting_on_ring = false;
+    shim_waiter_mirror(node);
+}
+
+/* Recovery twin: remove a DEAD worker's registration and re-mirror.
+ * Runs in the supervising process, where is_waiting_on_ring is not the
+ * dead worker's TLS, so it is deliberately untouched here. */
+static inline void shim_waiter_recover(int wid) {
+    uint32_t old;
+    int node;
+    if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS)
+        return;
+    old = __atomic_exchange_n(&g_wait_reg[wid], 0, __ATOMIC_ACQ_REL);
+    if (!(old & 1u))
+        return;
+    node = (int)(old >> 1);
+    if (node >= 0 && node < (int)FR_MAX_LOGICAL_NODES)
+        __atomic_fetch_and(shim_wait_word(node, wid),
+                           ~(1ull << ((unsigned)wid % 64u)),
+                           __ATOMIC_ACQ_REL);
+    shim_waiter_mirror(node);
+}
+
 /* Initialize the substrate for one UMA node. lines/bytes are mutually
  * exclusive (0 = default adaptive). Returns the engine rc (0 ok, 1 fail). */
 int fr_py_init(int lines, int bytes) {
@@ -256,7 +413,13 @@ int fr_py_init(int lines, int bytes) {
         snprintf(a1, sizeof(a1), "--bytes=%d", bytes);
         argv[argc++] = a1;
     }
-    return ring_init_main(argc, argv);
+    argv[argc] = NULL;
+    {
+        int rc = ring_init_main(argc, argv);
+        if (rc == 0 && shim_waiters_init() != 0)
+            return 1;
+        return rc;
+    }
 }
 
 /* Tear down substrate state (parent only; children os._exit without this). */
@@ -381,6 +544,18 @@ fr_py_txn_out_fd = -1;
         my_numa_node = 0;
     if (my_numa_node >= (int)global_num_nodes)
         my_numa_node = 0;
+    /* Publish this generation's node into the transaction record even
+     * before its first claim.  Recovery classifies an IDLE/WAITING
+     * death against the DEAD WORKER's node; an unpublished record
+     * otherwise reads the mapping's zero (node 0), so on a multi-node
+     * run a node-N death can be judged "node 0 is drained", the slot
+     * freed WITHOUT a respawn, and node N's work stranded.
+     * worker_txn_publish() overwrites this on every claim, so it is a
+     * floor for the never-published case, not a second identity. */
+    if (g_state && wid >= 0 && wid < MAX_TXN_WORKERS)
+        __atomic_store_n(&g_state->worker_txn[wid].node,
+                         (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0),
+                         __ATOMIC_RELEASE);
     /* W-PY21: worker self-pinning (mirrors ring_worker inc exactly:
      * pin when multi-node OR explicit map, via the engine's own
      * logical→physical map; best-effort, never fatal — UMA paths
@@ -434,7 +609,13 @@ static inline void worker_txn_begin_wait(int wid) {
  * DECISION stays in do_lockfree_claim(); this only mirrors its wait set
  * (data eventfd, escrow pipe, EOF eventfd) so an idle worker sleeps in
  * poll() instead of spinning.  The transaction is in WAITING here, so a
- * death during this wait is recoverable. */
+ * death during this wait is recoverable.
+ *
+ * Returns 1 when poll reported an event (any of the three sources) and
+ * 0 on timeout/error.  The caller does not treat that as "there is
+ * work" -- the eventfd is shared, so a sibling can consume a poke.  It
+ * is only the signal to leave WAITING and attempt a non-blocking claim;
+ * a timeout stays in WAITING and polls again. */
 static int fr_py_claim_wait_poll(void) {
     int node = (my_numa_node >= 0) ? my_numa_node : 0;
     struct pollfd pfds[3];
@@ -470,7 +651,7 @@ static int fr_py_claim_wait_poll(void) {
         while (sys_read(pfds[2].fd, &v, 8) > 0) {
         }
     }
-    return 0;
+    return 1;
 }
 
 int fr_py_claim(fr_py_batch_t *out) {
@@ -486,6 +667,31 @@ int fr_py_claim(fr_py_batch_t *out) {
             my_numa_node = 0;
     }
     for (;;) {
+        /* Already registered as a waiter?  Recheck the engine's own
+         * wake conditions first.  A poll TIMEOUT (no data, no escrow,
+         * no EOF) keeps us in WAITING and re-polls without ever
+         * entering the claim-without-publish window -- which is what
+         * makes an idle worker's death recoverable for the whole time
+         * the source is stalled, not just between 100 ms rounds.  The
+         * recheck (rather than trusting the eventfd) mirrors the
+         * engine's blocking wait: the eventfd is shared, so a sibling
+         * may have consumed the poke meant for us. */
+        if (waiting) {
+            uint64_t w_now, r_now;
+            int done_now;
+            if (atomic_load_relaxed(&state[0].emergency_abort)) {
+                rc = 1;
+                goto claim_done;
+            }
+            w_now = atomic_load_acquire(&state[my_numa_node].write_idx);
+            r_now = atomic_load_relaxed(&state[my_numa_node].read_idx);
+            done_now = atomic_load_acquire(
+                &state[my_numa_node].scanner_finished);
+            if (r_now >= w_now && !done_now) {
+                if (!fr_py_claim_wait_poll())
+                    continue;  /* timeout: stay WAITING, no CLAIMING */
+            }
+        }
         /* W-PY29: IDLE → CLAIMING immediately before a NON-BLOCKING
          * claim.  The ticket can only be issued by this call, so the
          * window stays bounded; the wait itself is WAITING. */
@@ -514,34 +720,40 @@ int fr_py_claim(fr_py_batch_t *out) {
         }
 
         worker_txn_begin_wait(g_fr_config.ring_wid);
-        /* W-PY31 adversarial hook: die while WAITING (no ticket).  The
-         * unit test pins that recovery classifies this as NO_BATCH, not
-         * RACE_DETECTED.  Inert unless set. */
-        if (getenv("FORKRUN_TEST_DIE_AT_WAIT") != NULL)
-            raise(SIGKILL);
         if (!waiting) {
             int node = (my_numa_node >= 0) ? my_numa_node : 0;
-            __atomic_fetch_add(&state[node].active_waiters, 1,
-                               __ATOMIC_SEQ_CST);
-            is_waiting_on_ring = true;
+            /* W-PY31 adversarial hook: die BEFORE registering (no
+             * ticket, no waiter contribution).  Recovery must classify
+             * NO_BATCH and must not touch active_waiters.  Inert unless
+             * set. */
+            if (getenv("FORKRUN_TEST_DIE_AT_WAIT") != NULL)
+                raise(SIGKILL);
+            shim_waiter_register(g_fr_config.ring_wid, node);
             waiting = 1;
+            /* W-PY31 adversarial hook: die AFTER registering, while
+             * other workers may be waiting too.  Recovery must remove
+             * exactly THIS wid's contribution.  Inert unless set. */
+            if (getenv("FORKRUN_TEST_DIE_AT_WAIT_REGISTERED") != NULL)
+                raise(SIGKILL);
         }
-        (void)fr_py_claim_wait_poll();
-        if (atomic_load_relaxed(&state[0].emergency_abort)) {
-            worker_txn_abort_claim(g_fr_config.ring_wid);
-            rc = 1;
-            goto claim_done;
-        }
+        /* Re-check from the top instead of polling here.  A publish
+         * that raced this registration read active_waiters == 0 and
+         * therefore did not poke the eventfd, so the data may already
+         * be claimable; the top re-reads write_idx/scanner_finished
+         * BEFORE deciding to poll, which is the engine's own blocking
+         * order (register, re-check, then poll).  A poll timeout there
+         * keeps us in WAITING and re-polls. */
+        continue;
     }
     if (waiting) {
-        cleanup_waiter_state();
+        shim_waiter_release(g_fr_config.ring_wid);
         waiting = 0;
     }
     /* fall through: batch is ours and the transaction is CLAIMING */
 
 claim_done:
     if (waiting)
-        cleanup_waiter_state();
+        shim_waiter_release(g_fr_config.ring_wid);
     if (rc != 0) {
         /* EOF/abort: no batch acquired — CLAIMING → IDLE. */
         worker_txn_abort_claim(g_fr_config.ring_wid);
@@ -2658,7 +2870,12 @@ int fr_py_init_numa(int lines, int bytes, int num_nodes,
         argv[argc++] = a2;
     }
     argv[argc] = NULL;
-    return ring_init_main(argc, argv);
+    {
+        int rc = ring_init_main(argc, argv);
+        if (rc == 0 && shim_waiters_init() != 0)
+            return 1;
+        return rc;
+    }
 }
 
 /* NUMA ingest (W-PY21): born-local data distributor.
@@ -3043,6 +3260,31 @@ int fr_py_diag_node(int node, uint64_t *out) {
         }
         out[5] = (uint64_t)all_empty;
     }
+    return 0;
+}
+
+/* W-PY31 read-only probes.  They exist so the waiter-accounting tests
+ * can observe the SAME state recovery reads (transaction phase, the
+ * dead generation's node, this wid's registration mirror, and the
+ * scanner gauge) instead of inferring it from timing.  Read-only; no
+ * caller in the library uses them. */
+int fr_py_active_waiters(int node) {
+    if (!state || node < 0 || node >= (int)global_num_nodes)
+        return -1;
+    return (int)__atomic_load_n(&state[node].active_waiters,
+                                __ATOMIC_ACQUIRE);
+}
+
+int fr_py_worker_probe(int wid, uint32_t *out) {
+    if (!out || !g_state || wid < 0 || wid >= MAX_TXN_WORKERS)
+        return -1;
+    out[0] = __atomic_load_n(&g_state->worker_txn[wid].state,
+                             __ATOMIC_ACQUIRE);
+    out[1] = __atomic_load_n(&g_state->worker_txn[wid].node,
+                             __ATOMIC_ACQUIRE);
+    out[2] = g_wait_reg
+                 ? __atomic_load_n(&g_wait_reg[wid], __ATOMIC_ACQUIRE)
+                 : 0;
     return 0;
 }
 
@@ -3910,13 +4152,20 @@ int fr_py_recover_worker(int wid, int incarnation, int output_fd,
      * the shim-only phase to IDLE before the frozen core sees it, so the
      * death is classified "no batch in flight" (respawn, or normal EOF)
      * instead of RACE_DETECTED.  The worker is reaped by the caller, so
-     * no live worker can still be transitioning out of WAITING here. */
+     * no live worker can still be transitioning out of WAITING here.
+     *
+     * The waiter registry is cleared for EVERY death, not just WAITING:
+     * a worker can register, then move to CLAIMING and die before its
+     * normal release, and recovery owns that contribution from then on.
+     * Removal is idempotent and wid-scoped, so it cannot take a live
+     * sibling's slot. */
     if (g_state && wid >= 0 && wid < MAX_TXN_WORKERS) {
         uint32_t st = __atomic_load_n(&g_state->worker_txn[wid].state,
                                       __ATOMIC_ACQUIRE);
         if (st == TXN_WAITING)
             __atomic_store_n(&g_state->worker_txn[wid].state, TXN_IDLE,
                              __ATOMIC_RELEASE);
+        shim_waiter_recover(wid);
     }
     int rc = ring_recover_worker_core(wid, incarnation, output_fd,
                                       exit_code);
