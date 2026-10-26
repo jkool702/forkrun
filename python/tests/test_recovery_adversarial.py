@@ -174,6 +174,41 @@ class TestClaimPublishRace(ChildLifecycleMixin, unittest.TestCase):
         rc = lib.fr_py_recover_worker(0, 0, out_fd, 9)
         self.assertEqual(rc, 4)  # RACE_DETECTED
 
+    def test_waiting_returns_code_1(self):
+        """A death while WAITING (no ticket) is recoverable, not a race.
+
+        W-PY31: the old shim set TXN_CLAIMING across the whole blocking
+        claim, so an idle worker killed while waiting for its first
+        batch was misclassified as RACE_DETECTED and aborted the run.
+        WAITING is the "no ticket yet" phase; recovery must respawn.
+        """
+        lib = get()
+        self.assertEqual(lib.fr_py_init(0, 0), 0)
+        self.addCleanup(lib.fr_py_destroy)
+        out_fd = os.memfd_create("fr_adv_wait_out")
+        self.addCleanup(lambda: self._close(out_fd))
+
+        pid = os.fork()
+        if pid == 0:
+            try:
+                lib.fr_py_worker_init(0, 0, 0, 3, 0)
+                lib.fr_py_set_output_fd(out_fd)
+                lib.fr_py_ack_init(out_fd)
+                os.environ["FORKRUN_TEST_DIE_AT_WAIT"] = "1"
+                claimed = FrPyBatch()
+                lib.fr_py_claim(ctypes.byref(claimed))
+            except BaseException:
+                pass
+            # If the hook failed to fire, fail loudly.
+            os._exit(42)
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFSIGNALED(status),
+                        "child should die by signal, got %r" % (status,))
+        self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+
+        rc = lib.fr_py_recover_worker(0, 0, out_fd, 9)
+        self.assertEqual(rc, 1)  # NO_BATCH — respawn, no ticket in flight
+
     def test_forced_claim_publish_death(self):
         """Real run with DIE_AT_CLAIM: every worker dies claiming →
         the reactor aborts (conservative) instead of losing a ticket."""

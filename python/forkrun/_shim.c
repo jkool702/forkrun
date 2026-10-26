@@ -400,9 +400,83 @@ fr_py_txn_out_fd = -1;
  * *out. Returns 0 success, 2 EOF, 1 failure/abort. Never touches bash
  * variables. */
 
+/* W-PY31: WAITING is the "no ticket yet" phase of a claim.
+ *
+ * `TXN_CLAIMING` is the claim-without-publish window: the ticket may
+ * have been issued, so recovery must abort rather than guess.  The
+ * original shim bracketed the WHOLE blocking `do_lockfree_claim` with
+ * that state.  A worker waiting for the first batch (or for a slow
+ * producer) therefore sat in CLAIMING for an unbounded time, and a
+ * death there -- an OOM kill, an operator kill, the supervision test's
+ * immediate-kill injection -- was misclassified as an unattributable
+ * ticket.  Measured: 47/100 slot-pressure runs aborted with recovery
+ * rc=4 while no batch was in flight at all.
+ *
+ * WAITING is deliberately a shim-side value: the engine is frozen, and
+ * its recovery core knows only 0..3.  fr_py_recover_worker() translates
+ * WAITING to IDLE before delegating, which is exactly the truth -- no
+ * ticket has been issued.  All Python and cleanroom worker loops call
+ * fr_py_claim(), so they share this phase; the bash worker retains the
+ * engine's original bracketing and is unaffected.
+ *
+ * Do not collapse WAITING into IDLE: the state is what lets recovery
+ * distinguish "waiting" from the CLAIMING window it must still abort on.
+ */
+#define TXN_WAITING 4u
+
+static inline void worker_txn_begin_wait(int wid) {
+    if (!g_state || wid < 0 || wid >= MAX_TXN_WORKERS) return;
+    __atomic_store_n(&g_state->worker_txn[wid].state, TXN_WAITING,
+                     __ATOMIC_RELEASE);
+}
+
+/* Block until a claim attempt has a reason to be retried.  The claim
+ * DECISION stays in do_lockfree_claim(); this only mirrors its wait set
+ * (data eventfd, escrow pipe, EOF eventfd) so an idle worker sleeps in
+ * poll() instead of spinning.  The transaction is in WAITING here, so a
+ * death during this wait is recoverable. */
+static int fr_py_claim_wait_poll(void) {
+    int node = (my_numa_node >= 0) ? my_numa_node : 0;
+    struct pollfd pfds[3];
+    int pr;
+
+    pfds[0].fd = evfd_data_arr ? evfd_data_arr[node] : -1;
+    pfds[0].events = POLLIN;
+    pfds[0].revents = 0;
+    pfds[1].fd = (fd_escrow_r && fd_escrow_r[node] >= 0)
+                     ? fd_escrow_r[node] : -1;
+    pfds[1].events = POLLIN;
+    pfds[1].revents = 0;
+    pfds[2].fd = evfd_eof_arr ? evfd_eof_arr[node] : -1;
+    pfds[2].events = POLLIN;
+    pfds[2].revents = 0;
+
+    do {
+        pr = poll(pfds, 3, 100);
+    } while (pr < 0 && errno == EINTR);
+    if (pr <= 0)
+        return 0;
+
+    /* Drain the eventfds this helper owns.  The escrow pipe is left
+     * untouched: do_lockfree_claim() is its sole reader and must see
+     * the packet. */
+    if (pfds[0].fd >= 0 && (pfds[0].revents & POLLIN)) {
+        uint64_t v;
+        while (sys_read(pfds[0].fd, &v, 8) > 0) {
+        }
+    }
+    if (pfds[2].fd >= 0 && (pfds[2].revents & POLLIN)) {
+        uint64_t v;
+        while (sys_read(pfds[2].fd, &v, 8) > 0) {
+        }
+    }
+    return 0;
+}
+
 int fr_py_claim(fr_py_batch_t *out) {
     struct WorkerBatchState batch;
     int rc;
+    int waiting = 0;
 
     if (!out)
         return 1;
@@ -411,20 +485,63 @@ int fr_py_claim(fr_py_batch_t *out) {
         if (my_numa_node >= (int)global_num_nodes)
             my_numa_node = 0;
     }
-    /* W-PY29: IDLE → CLAIMING before the ticket is issued
-     * (do_lockfree_claim is untouched — the hook only brackets it). */
-    worker_txn_begin_claim(g_fr_config.ring_wid);
-    /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_CLAIM=1 makes
-     * the worker SIGKILL itself inside the claim-without-publish
-     * window (deterministic race injection). Inert unless the env var
-     * is set. Deliberately uncached: the value is read fresh so
-     * forked children observe the post-fork environment (a cached
-     * "unset" inherited across fork would disarm the hook) and
-     * set/del cycles across tests behave. Cost is one getenv per
-     * claim (~tens of ns, invisible next to batch work). */
-    if (getenv("FORKRUN_TEST_DIE_AT_CLAIM") != NULL)
-        raise(SIGKILL);
-    rc = do_lockfree_claim(&batch, true);
+    for (;;) {
+        /* W-PY29: IDLE → CLAIMING immediately before a NON-BLOCKING
+         * claim.  The ticket can only be issued by this call, so the
+         * window stays bounded; the wait itself is WAITING. */
+        worker_txn_begin_claim(g_fr_config.ring_wid);
+        /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_CLAIM=1 makes
+         * the worker SIGKILL itself inside the claim-without-publish
+         * window (deterministic race injection). Inert unless the env var
+         * is set. Deliberately uncached: the value is read fresh so
+         * forked children observe the post-fork environment (a cached
+         * "unset" inherited across fork would disarm the hook) and
+         * set/del cycles across tests behave. Cost is one getenv per
+         * claim (~tens of ns, invisible next to batch work). */
+        if (getenv("FORKRUN_TEST_DIE_AT_CLAIM") != NULL)
+            raise(SIGKILL);
+        rc = do_lockfree_claim(&batch, false);
+        if (rc == 0)
+            break;
+
+        /* No ticket was issued (or the engine failed/aborted). */
+        worker_txn_abort_claim(g_fr_config.ring_wid);
+        if (rc != 1)
+            goto claim_done;
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {
+            rc = 1;
+            goto claim_done;
+        }
+
+        worker_txn_begin_wait(g_fr_config.ring_wid);
+        /* W-PY31 adversarial hook: die while WAITING (no ticket).  The
+         * unit test pins that recovery classifies this as NO_BATCH, not
+         * RACE_DETECTED.  Inert unless set. */
+        if (getenv("FORKRUN_TEST_DIE_AT_WAIT") != NULL)
+            raise(SIGKILL);
+        if (!waiting) {
+            int node = (my_numa_node >= 0) ? my_numa_node : 0;
+            __atomic_fetch_add(&state[node].active_waiters, 1,
+                               __ATOMIC_SEQ_CST);
+            is_waiting_on_ring = true;
+            waiting = 1;
+        }
+        (void)fr_py_claim_wait_poll();
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {
+            worker_txn_abort_claim(g_fr_config.ring_wid);
+            rc = 1;
+            goto claim_done;
+        }
+    }
+    if (waiting) {
+        cleanup_waiter_state();
+        waiting = 0;
+    }
+    /* fall through: batch is ours and the transaction is CLAIMING */
+
+claim_done:
+    if (waiting)
+        cleanup_waiter_state();
     if (rc != 0) {
         /* EOF/abort: no batch acquired — CLAIMING → IDLE. */
         worker_txn_abort_claim(g_fr_config.ring_wid);
@@ -3789,6 +3906,18 @@ int fr_py_is_resume_mode(void) {
  * ===================================================================== */
 int fr_py_recover_worker(int wid, int incarnation, int output_fd,
                          int exit_code) {
+    /* W-PY31: a worker killed while WAITING issued no ticket.  Translate
+     * the shim-only phase to IDLE before the frozen core sees it, so the
+     * death is classified "no batch in flight" (respawn, or normal EOF)
+     * instead of RACE_DETECTED.  The worker is reaped by the caller, so
+     * no live worker can still be transitioning out of WAITING here. */
+    if (g_state && wid >= 0 && wid < MAX_TXN_WORKERS) {
+        uint32_t st = __atomic_load_n(&g_state->worker_txn[wid].state,
+                                      __ATOMIC_ACQUIRE);
+        if (st == TXN_WAITING)
+            __atomic_store_n(&g_state->worker_txn[wid].state, TXN_IDLE,
+                             __ATOMIC_RELEASE);
+    }
     int rc = ring_recover_worker_core(wid, incarnation, output_fd,
                                       exit_code);
 
