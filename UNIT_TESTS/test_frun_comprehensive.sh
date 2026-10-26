@@ -4929,6 +4929,11 @@ _t12_self_pgid=\$(ps -o pgid= -p \$\$ 2>/dev/null | tr -d '[:space:]')
 if [[ ! "\${_frun_pgid:-}" =~ ^[0-9]+\$ ]] || (( \${_frun_pgid:-0} <= 1 )) || [[ "\${_frun_pgid:-}" == "\${_t12_self_pgid:-}" ]]; then
     _frun_pgid=
 fi
+# Test-only: pretend no safe process group exists so the snapshot-based
+# fallback teardown is exercised on hosts where job control always
+# yields one.  Does nothing else -- the kill sequence, the survivor
+# check and the parent-side verification all run their real code.
+if [[ -n "\${FORKRUN_T12_FORCE_FALLBACK:-}" ]]; then _frun_pgid=; fi
 _hup_target=
 for _i in \$(seq 1 100); do
     if [[ -s .hup_ready ]]; then _hup_target=\$(cat .hup_ready); break; fi
@@ -4938,7 +4943,12 @@ _THRESH=100000
 # 1000 samples = 200s. The gate must actually be reached now, so leave
 # headroom over the ~78 samples observed on a 4-CPU host; a stuck gate
 # still fails (with diagnostics) instead of signalling.
-_MAX=1000
+#
+# FORKRUN_T12_GATE_MAX overrides the sample budget. It exists so the
+# NOT-REACHED branch -- and therefore the teardown/cleanup evidence
+# below -- can be exercised deterministically (e.g. =3) instead of
+# waiting for a real stall.
+_MAX=\${FORKRUN_T12_GATE_MAX:-1000}
 # True only for a live (non-zombie) process. kill -0 still succeeds for
 # an unreaped zombie, which must not be treated as a survivor.
 _t12_pid_running() {
@@ -4961,6 +4971,27 @@ _t12_tree_pids() {
         _t12_tree_pids "\$_p"
     done
 }
+# Direct children of THIS shell, read from /proc.  Under job control the
+# pipeline's first element (the input \`cat\`) is a SIBLING of the wrapper
+# -- bash forks each element directly -- so the wrapper's subtree alone
+# does not describe the job.  Reading /proc instead of \`pgrep -P \$\$\`
+# also keeps the scan from listing its own helper: a \$(pgrep ...)
+# subshell becomes the pgrep process and shows up as a child of this
+# shell, whereas here the only processes are the ones we may need to
+# kill.
+_t12_direct_children() {
+    local _d _f _stat
+    for _d in /proc/[0-9]*; do
+        _stat=
+        { read -r _stat < "\$_d/stat"; } 2>/dev/null
+        [[ -n "\$_stat" ]] || continue
+        _stat="\${_stat##*) }"   # drop "pid (comm) "
+        _stat="\${_stat#* }"     # drop state, leaving "ppid ..."
+        [[ "\${_stat%% *}" == "\$\$" ]] || continue
+        _f="\${_d#/proc/}"
+        printf '%s\n' "\$_f"
+    done
+}
 _t12_any_running() {
     local _p
     for _p in "\$@"; do
@@ -4970,6 +5001,22 @@ _t12_any_running() {
 }
 _t12_gate_fail() {
     local _reason="\$1"
+    # Snapshot the teardown set BEFORE signalling: once the wrapper dies
+    # its children are reparented and no longer discoverable.  With a
+    # safe process group the group is the unit; without one, take the
+    # wrapper's subtree AND this shell's direct children (see
+    # _t12_direct_children for why the subtree is not the whole job).
+    local -a _victims=()
+    if [[ -z "\${_frun_pgid:-}" ]]; then
+        mapfile -t _victims < <(
+            {
+                if [[ -n "\${_frun_pid:-}" ]]; then
+                    _t12_tree_pids "\$_frun_pid"
+                fi
+                _t12_direct_children
+            } | awk 'NF && !seen[\$0]++'
+        )
+    fi
     {
         echo "reason: \$_reason"
         echo "attempt: \${_j:-0}/\${_MAX:-1000}"
@@ -4980,18 +5027,14 @@ _t12_gate_fail() {
         echo "wrapper_pid: \${_frun_pid:-missing}"
         echo "cleanroom_pid: \${_hup_target:-missing}"
         echo "process_group: \${_frun_pgid:-unavailable}"
+        # The exact set the fallback teardown signalled.  Recorded even
+        # when empty so the parent can tell "no fallback" from "fallback
+        # that captured nothing".
+        echo "fallback_victims: \${_victims[*]:-}"
         echo "err1.txt tail:"
         tail -n 5 err1.txt 2>/dev/null
     } > .t12_gate_diag
     : > .t12_gate_timeout
-
-    # Snapshot descendants before signalling: if a safe process group
-    # could not be established, this is the only way to reach the
-    # workers/helpers after the wrapper dies and they are reparented.
-    local -a _victims=()
-    if [[ -z "\${_frun_pgid:-}" ]]; then
-        mapfile -t _victims < <(_t12_tree_pids "\$_frun_pid")
-    fi
 
     # TERM the actual cleanroom first so frun's trap can reap workers and
     # helpers. Then TERM the whole test-scoped process group, which also
