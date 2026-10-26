@@ -49,6 +49,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_claim_wait_poll": {
+    "args": "void",
+    "linkage": "static",
+    "return": "int"
+  },
   "fr_py_committed_data_frames": {
     "args": "int node, uint64_t *out",
     "linkage": "extern",

@@ -318,7 +318,14 @@ class TestShimBindings(unittest.TestCase):
         #                                 write_idx and before the EOF
         #                                 evfd blast). Read-only. Same
         #                                 1/0/-1 convention.
-        self.assertEqual((n_ext, n_st), (60, 16),
+        # W-PY31 (aec0161c): static fr_py_claim_wait_poll (the idle
+        # worker's data/escrow/EOF wait, mirroring do_lockfree_claim's
+        # own wait set) is internal -- it is called only from
+        # fr_py_claim in this translation unit and is never dlsym'd.
+        # The extern surface is therefore unchanged (60) and the
+        # static surface grows 16 -> 17. No existing signature and no
+        # struct layout changed.
+        self.assertEqual((n_ext, n_st), (60, 17),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

@@ -21,7 +21,8 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun.exceptions import ForkrunInterrupted  # noqa: E402
 
-from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (ChildLifecycleMixin, assert_no_zombies,  # noqa: E402
+                      joined_bytes, write_lines)
 
 try:
     find_substrate()
@@ -379,11 +380,15 @@ class TestB3IngestReactorLiveness(ChildLifecycleMixin, unittest.TestCase):
         rfd, wfd = os.pipe()
 
         # Small first chunk: fully claimed+processed within a
-        # second, so the stall-forked workers are blocked on
-        # claims (at rest, no in-flight batch) when one is
-        # killed mid-stall — a SIGKILL landing mid-claim is the
-        # honest claim-without-publish abort (rc==4), not a
-        # recovery case.
+        # second.  From then until the writer resumes the workers sit
+        # in TXN_WAITING, the "no ticket yet" shim phase (W-PY31): an
+        # idle waiter rechecks the ring and sleeps in poll() without
+        # entering the claim-without-publish window.  A SIGKILL there
+        # is recoverable -- the reactor must observe it promptly and
+        # respawn, NOT abort -- so this test now asserts completion
+        # with exact output after the source resumes.  The genuine
+        # claim-without-publish abort remains pinned separately by
+        # test_recovery_adversarial.TestClaimPublishRace.
         lines1 = "".join("line %d\n" % i for i in range(200))
         lines2 = "".join("line %d\n" % i for i in range(200, 400))
 
@@ -425,7 +430,6 @@ class TestB3IngestReactorLiveness(ChildLifecycleMixin, unittest.TestCase):
             rt = threading.Thread(target=_run, daemon=True)
             rt.start()
             time.sleep(1.0)
-            early_kids = self._children()
             # Mid-stall (writer quiet until t=8): the spill loop
             # must be alive — stall-forked workers present beyond
             # the two helpers (fallow + scanner).
@@ -446,19 +450,13 @@ class TestB3IngestReactorLiveness(ChildLifecycleMixin, unittest.TestCase):
                 "spill loop dead during stall: only helpers present %s "
                 "(reactor blind while blocked in read)"
                 % (sorted(mid_kids),))
-            # Kill a stall-forked worker; observation must be
-            # prompt (poll quantum), not at writer release.
-            # NOTE: a SIGKILL landing while pre-gate workers are
-            # claim-spinning is the honest claim-without-publish
-            # abort (rc==4, engine semantics — unattributable
-            # batch), not a respawn: the promise under test is
-            # prompt OBSERVATION/termination, not recovery.
+            # Kill an idle worker.  By t=4s every worker has drained the
+            # first chunk and is parked in TXN_WAITING (no data event has
+            # fired since), so recovery classifies it NO_BATCH and
+            # respawns instead of aborting on an unattributable ticket.
             # Pick a WORKER, not a helper. Helpers (fallow + scanner) are
             # always forked before workers, and Linux pids are monotonic,
-            # so the highest child is a worker. Selecting by "appeared
-            # after t=1s" no longer works now that workers fork without an
-            # artificial delay -- by t=1s they are already present, so the
-            # newly-appeared set is empty.
+            # so the highest child is a worker.
             victim = max(mid_kids)
             t_kill = time.monotonic()
             os.kill(victim, 9)
@@ -466,8 +464,14 @@ class TestB3IngestReactorLiveness(ChildLifecycleMixin, unittest.TestCase):
             t_end = time.monotonic()
             self.assertFalse(rt.is_alive(), "run hung")
             err = result.get("error")
-            self.assertIsInstance(err, RuntimeError)
-            self.assertIn("signal 9", str(err))
+            self.assertIsNone(
+                err,
+                "worker killed in TXN_WAITING must be recovered, not "
+                "abort the run: %r" % (err,))
+            self.assertEqual(
+                joined_bytes(result.get("out") or []),
+                (lines1 + lines2).encode(),
+                "output not exact after mid-stall worker recovery")
         finally:
             _reactor_mod.ReactorState.worker_died_poll = real_wd
             try:
@@ -482,9 +486,14 @@ class TestB3IngestReactorLiveness(ChildLifecycleMixin, unittest.TestCase):
             latency, 4.0,
             "worker death unobserved for %.1fs during source stall "
             "(reactor blind while blocked in read)" % latency)
-        # Prompt termination: the abort surfaced from the stall
-        # (~0.5s), not at writer release (t=8s, i.e. ~4s later).
-        self.assertLess(t_end - t_kill, 3.0)
+        # The run CANNOT finish before the writer resumes at t=8s: with
+        # the death recovered, processing continues instead of aborting,
+        # so the old "<3s to terminate" assertion encoded the pre-W-PY31
+        # abort semantics.  Prompt DETECTION is the invariant (asserted
+        # above); completion is bounded by rt.join(30) and the exactness
+        # check.  Keep a generous ceiling so a regression that waits for
+        # EOF far past the source resume still fails.
+        self.assertLess(t_end - t_kill, 15.0)
         assert_no_zombies(self)
 
 
