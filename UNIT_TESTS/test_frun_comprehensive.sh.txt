@@ -4871,7 +4871,9 @@ fi
 if in_section T2; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/T12"; mkdir -p "$_MD"
-    seq 20000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 20000 > "$_MD/input.txt"
+    rm -f "$_MD/.forkrun_resume" "$_MD/.t12_crash_hole" \
+          "$_MD/.t12_gate_timeout" "$_MD/.t12_gate_diag"
 
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_batch6() {
@@ -4882,6 +4884,9 @@ crash_batch6() {
     # resume (checkpoint exists) the batch runs normally to completion.
     for a in "$@"; do for ((j=0;j<2000;j++)); do :; done; done
     if [[ " $* " == *" 19500 "* ]] && ! [[ -f ./.forkrun_resume ]]; then
+        # Dedicated marker: the kill below is the crash hole. The HUP gate
+        # waits for this file before it will call the hole established.
+        : > .t12_crash_hole
         kill -9 $BASHPID
     fi
     printf '%s\n' "$@"
@@ -4897,10 +4902,13 @@ FUNCEOF
     # is reached ~500 batches before the hole on a fast host, so the HUP
     # could land before line 19500 was ever claimed — CI then checkpointed
     # with jagged=0 (a false failure; the data itself was exact). Gate on
-    # the crash signature instead: the self-kill pins `-l 100` batch
-    # [19401..19500] forever under retry=-1, so once every batch beyond it
-    # has completed the output size stops advancing. Require the floor AND
-    # 8 consecutive unchanged samples (1.6s) before signalling.
+    # the crash signature instead: the self-kill writes .t12_crash_hole
+    # immediately before dying and pins `-l 100` batch [19401..19500]
+    # forever under retry=-1, so once every batch beyond it has completed
+    # the output size stops advancing. Require the marker, the floor, AND
+    # 8 consecutive unchanged samples (1.6s) before signalling. The gate
+    # is mandatory: exhausting the poll loop without it is a test failure,
+    # never a silent HUP.
     cat > "$_MD/hup.sh" <<EOF
 #!/usr/bin/env bash
 cd '$_MD'
@@ -4909,28 +4917,72 @@ source funcs.sh
 rm -f .hup_ready
 cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_RETRY_LIMIT='-1' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 -j $_T12_JOBS crash_batch6 > output1.txt 2>err1.txt &
 _frun_pid=\$!
-for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done
+_hup_target=
+for _i in \$(seq 1 100); do
+    if [[ -s .hup_ready ]]; then _hup_target=\$(cat .hup_ready); break; fi
+    sleep 0.2
+done
 _THRESH=100000
+# 1000 samples = 200s. The gate must actually be reached now, so leave
+# headroom over the ~78 samples observed on a 4-CPU host; a stuck gate
+# still fails (with diagnostics) instead of signalling.
+_MAX=1000
+_t12_gate_fail() {
+    local _reason="\$1"
+    {
+        echo "reason: \$_reason"
+        echo "attempt: \${_j:-0}/\${_MAX:-1000}"
+        echo "output_size: \${_last:-0} (floor \${_THRESH:-0})"
+        echo "stable_samples: \${_stable:-0}/8"
+        echo "crash_marker: \$([[ -e .t12_crash_hole ]] && echo present || echo missing)"
+        echo "hup_pidfile: \$([[ -n "\${_hup_target:-}" ]] && echo present || echo missing)"
+        echo "err1.txt tail:"
+        tail -n 5 err1.txt 2>/dev/null
+    } > .t12_gate_diag
+    : > .t12_gate_timeout
+    # Safe teardown: TERM lets frun run its trap (worker reaping and any
+    # checkpoint); KILL only if it does not exit within 5s.
+    kill -TERM "\$_frun_pid" 2>/dev/null
+    for _k in \$(seq 1 50); do
+        kill -0 "\$_frun_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -KILL "\$_frun_pid" 2>/dev/null
+    wait "\$_frun_pid" 2>/dev/null
+    exit 1
+}
+[[ -n "\$_hup_target" ]] || _t12_gate_fail "cleanroom pidfile never appeared"
 _stable=0
 _last=0
-for _j in \$(seq 1 500); do
+_gate=0
+for _j in \$(seq 1 \$_MAX); do
     _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0)
-    if (( _sz >= _THRESH )) && (( _sz == _last )); then
+    if [[ -e .t12_crash_hole ]] && (( _sz >= _THRESH )) && (( _sz == _last )); then
         _stable=\$((_stable + 1))
     else
         _stable=0
     fi
     _last=\$_sz
-    (( _stable >= 8 )) && break
+    if (( _stable >= 8 )); then _gate=1; break; fi
     sleep 0.2
 done
-kill -HUP "\$(cat .hup_ready)"
+(( _gate == 1 )) || _t12_gate_fail "stability gate not reached"
+kill -HUP "\$_hup_target"
 wait "\$_frun_pid"
 true
 EOF
-    bash "$_MD/hup.sh" > /dev/null 2>&1
+    _T12_HUP_RC=0
+    bash "$_MD/hup.sh" > /dev/null 2>&1 || _T12_HUP_RC=$?
 
-    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+    if [[ -f "$_MD/.t12_gate_timeout" ]] || (( _T12_HUP_RC != 0 )); then
+        TEST_RESULTS["T12: jagged-straddle resume (buffered, differing -l)"]="FAIL"
+        TEST_ERRORS["T12: jagged-straddle resume (buffered, differing -l)"]="HUP gate not satisfied (driver rc=$_T12_HUP_RC)"
+        ((FAILED_TESTS++)); _print_result FAIL "T12: jagged-straddle resume (buffered, differing -l)" "HUP gate not satisfied (driver rc=$_T12_HUP_RC)"
+        if [[ -f "$_MD/.t12_gate_diag" ]]; then
+            echo -e "    ${YELLOW}T12 gate diagnostics:${NC}"
+            sed 's/^/      /' "$_MD/.t12_gate_diag"
+        fi
+    elif [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["T12: jagged-straddle resume (buffered, differing -l)"]="FAIL"
         TEST_ERRORS["T12: jagged-straddle resume (buffered, differing -l)"]="no checkpoint (crash condition never fired?)"
         ((FAILED_TESTS++)); _print_result FAIL "T12: jagged-straddle resume (buffered, differing -l)" "no checkpoint"
