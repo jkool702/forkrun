@@ -4915,8 +4915,20 @@ cd '$_MD'
 source '$FRUN_SOURCE'
 source funcs.sh
 rm -f .hup_ready
+# Job control gives this pipeline its own process group. That group is
+# the test-scoped teardown unit: wrapper, cleanroom, workers, helpers
+# and the input cat are all members. \$! is the pipeline wrapper (the
+# last-command subshell), NOT the cleanroom -- the pidfile identifies
+# the cleanroom reactor separately.
+set -m
 cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_RETRY_LIMIT='-1' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 -j $_T12_JOBS crash_batch6 > output1.txt 2>err1.txt &
 _frun_pid=\$!
+set +m
+_frun_pgid=\$(ps -o pgid= -p "\$_frun_pid" 2>/dev/null | tr -d '[:space:]')
+_t12_self_pgid=\$(ps -o pgid= -p \$\$ 2>/dev/null | tr -d '[:space:]')
+if [[ ! "\${_frun_pgid:-}" =~ ^[0-9]+\$ ]] || (( \${_frun_pgid:-0} <= 1 )) || [[ "\${_frun_pgid:-}" == "\${_t12_self_pgid:-}" ]]; then
+    _frun_pgid=
+fi
 _hup_target=
 for _i in \$(seq 1 100); do
     if [[ -s .hup_ready ]]; then _hup_target=\$(cat .hup_ready); break; fi
@@ -4927,6 +4939,35 @@ _THRESH=100000
 # headroom over the ~78 samples observed on a 4-CPU host; a stuck gate
 # still fails (with diagnostics) instead of signalling.
 _MAX=1000
+# True only for a live (non-zombie) process. kill -0 still succeeds for
+# an unreaped zombie, which must not be treated as a survivor.
+_t12_pid_running() {
+    local _st
+    _st=\$(ps -o stat= -p "\${1:-}" 2>/dev/null | tr -d '[:space:]')
+    [[ -n "\$_st" && "\$_st" != Z* ]]
+}
+# True while the pipeline's process group still contains a live process.
+_t12_group_running() {
+    [[ -n "\${_frun_pgid:-}" ]] || return 1
+    ps -eo pgid=,stat= 2>/dev/null | awk -v p="\$_frun_pgid" '\$1==p && \$2 !~ /^Z/ {found=1} END{exit(found?0:1)}'
+}
+# Fallback when no safe process group could be established: recursively
+# enumerate the wrapper's descendants BEFORE signalling, because after
+# the wrapper dies its children are reparented and no longer discoverable.
+_t12_tree_pids() {
+    local _p
+    printf '%s\n' "\$1"
+    for _p in \$(pgrep -P "\$1" 2>/dev/null); do
+        _t12_tree_pids "\$_p"
+    done
+}
+_t12_any_running() {
+    local _p
+    for _p in "\$@"; do
+        _t12_pid_running "\$_p" && return 0
+    done
+    return 1
+}
 _t12_gate_fail() {
     local _reason="\$1"
     {
@@ -4936,19 +4977,79 @@ _t12_gate_fail() {
         echo "stable_samples: \${_stable:-0}/8"
         echo "crash_marker: \$([[ -e .t12_crash_hole ]] && echo present || echo missing)"
         echo "hup_pidfile: \$([[ -n "\${_hup_target:-}" ]] && echo present || echo missing)"
+        echo "wrapper_pid: \${_frun_pid:-missing}"
+        echo "cleanroom_pid: \${_hup_target:-missing}"
+        echo "process_group: \${_frun_pgid:-unavailable}"
         echo "err1.txt tail:"
         tail -n 5 err1.txt 2>/dev/null
     } > .t12_gate_diag
     : > .t12_gate_timeout
-    # Safe teardown: TERM lets frun run its trap (worker reaping and any
-    # checkpoint); KILL only if it does not exit within 5s.
-    kill -TERM "\$_frun_pid" 2>/dev/null
+
+    # Snapshot descendants before signalling: if a safe process group
+    # could not be established, this is the only way to reach the
+    # workers/helpers after the wrapper dies and they are reparented.
+    local -a _victims=()
+    if [[ -z "\${_frun_pgid:-}" ]]; then
+        mapfile -t _victims < <(_t12_tree_pids "\$_frun_pid")
+    fi
+
+    # TERM the actual cleanroom first so frun's trap can reap workers and
+    # helpers. Then TERM the whole test-scoped process group, which also
+    # covers the missing-pidfile case.
+    if _t12_pid_running "\${_hup_target:-}"; then
+        kill -TERM "\$_hup_target" 2>/dev/null
+    fi
+    if [[ -n "\${_frun_pgid:-}" ]]; then
+        kill -TERM -- "-\$_frun_pgid" 2>/dev/null
+    else
+        for _p in "\${_victims[@]}"; do
+            _t12_pid_running "\$_p" && kill -TERM "\$_p" 2>/dev/null
+        done
+    fi
+
+    # Bounded grace (5s). Escalate only for a target still running.
     for _k in \$(seq 1 50); do
-        kill -0 "\$_frun_pid" 2>/dev/null || break
+        if [[ -n "\${_frun_pgid:-}" ]]; then
+            _t12_group_running || break
+        else
+            _t12_any_running "\${_victims[@]}" || break
+        fi
         sleep 0.1
     done
-    kill -KILL "\$_frun_pid" 2>/dev/null
+
+    if [[ -n "\${_frun_pgid:-}" ]]; then
+        _t12_group_running && kill -KILL -- "-\$_frun_pgid" 2>/dev/null
+    else
+        for _p in "\${_victims[@]}"; do
+            _t12_pid_running "\$_p" && kill -KILL "\$_p" 2>/dev/null
+        done
+    fi
+    # Covers a target that somehow escaped the group; still conditional.
+    if _t12_pid_running "\${_hup_target:-}"; then
+        kill -KILL "\$_hup_target" 2>/dev/null
+    fi
+    if _t12_pid_running "\$_frun_pid"; then
+        kill -KILL "\$_frun_pid" 2>/dev/null
+    fi
+
     wait "\$_frun_pid" 2>/dev/null
+
+    # Cleanup evidence for the caller and for post-mortem diagnostics.
+    local _left=""
+    if [[ -n "\${_frun_pgid:-}" ]] && _t12_group_running; then
+        _left="process-group \${_frun_pgid}"
+    fi
+    if _t12_pid_running "\${_hup_target:-}"; then
+        _left="\${_left:+\$_left }\${_hup_target}"
+    fi
+    if _t12_pid_running "\$_frun_pid"; then
+        _left="\${_left:+\$_left }\${_frun_pid}"
+    fi
+    if [[ -n "\$_left" ]]; then
+        echo "cleanup_leftover: \$_left" >> .t12_gate_diag
+    else
+        echo "cleanup: complete" >> .t12_gate_diag
+    fi
     exit 1
 }
 [[ -n "\$_hup_target" ]] || _t12_gate_fail "cleanroom pidfile never appeared"
@@ -4978,6 +5079,25 @@ EOF
         TEST_RESULTS["T12: jagged-straddle resume (buffered, differing -l)"]="FAIL"
         TEST_ERRORS["T12: jagged-straddle resume (buffered, differing -l)"]="HUP gate not satisfied (driver rc=$_T12_HUP_RC)"
         ((FAILED_TESTS++)); _print_result FAIL "T12: jagged-straddle resume (buffered, differing -l)" "HUP gate not satisfied (driver rc=$_T12_HUP_RC)"
+        # Independent post-driver check: the timeout path must have removed
+        # the wrapper, cleanroom, workers and helpers. The driver records
+        # the process group and (when available) the two target PIDs.
+        if [[ -f "$_MD/.t12_gate_timeout" ]]; then
+            _T12_PGID=$(sed -n 's/^process_group: //p' "$_MD/.t12_gate_diag" 2>/dev/null | head -n 1)
+            _T12_SURVIVORS=""
+            if [[ "$_T12_PGID" =~ ^[0-9]+$ ]] && (( _T12_PGID > 1 )); then
+                _T12_SURVIVORS=$(ps -eo pgid=,stat=,pid= 2>/dev/null | awk -v p="$_T12_PGID" '$1==p && $2 !~ /^Z/ {print $3}' | tr '\n' ' ')
+            else
+                while read -r _T12_TP; do
+                    [[ "$_T12_TP" =~ ^[0-9]+$ ]] || continue
+                    _T12_ST=$(ps -o stat= -p "$_T12_TP" 2>/dev/null | tr -d '[:space:]')
+                    [[ -n "$_T12_ST" && "$_T12_ST" != Z* ]] && _T12_SURVIVORS+=" $_T12_TP"
+                done < <(sed -n -e 's/^wrapper_pid: //p' -e 's/^cleanroom_pid: //p' "$_MD/.t12_gate_diag" 2>/dev/null)
+            fi
+            if [[ -n "${_T12_SURVIVORS// /}" ]]; then
+                echo "cleanup_leftover_after_driver:${_T12_SURVIVORS}" >> "$_MD/.t12_gate_diag"
+            fi
+        fi
         if [[ -f "$_MD/.t12_gate_diag" ]]; then
             echo -e "    ${YELLOW}T12 gate diagnostics:${NC}"
             sed 's/^/      /' "$_MD/.t12_gate_diag"
