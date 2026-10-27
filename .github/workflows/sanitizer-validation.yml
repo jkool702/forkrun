@@ -47,6 +47,8 @@ jobs:
           MODE="$1"
           dnf install -y bash-devel gcc make file diffutils
           rpm -q bash-devel
+          if [ "$MODE" = "tsan" ]; then dnf install -y libtsan libtsan-static; fi
+          if [ "$MODE" = "asan-ubsan" ]; then dnf install -y libasan libasan-static libubsan libubsan-static; fi
           for arch in x86-64-v2 x86-64-v3 x86-64-v4; do
             tools/build_sanitizer_blob.sh "$MODE" "$arch" "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so"
           done
