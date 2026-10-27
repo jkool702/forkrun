@@ -134,7 +134,6 @@ jobs:
           chmod +x /tmp/test_frun.san.sh
           grep -q 'FRUN_SOURCE="/src/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
           # Probe
-          bash -c "source /src/frun.san.bash 2>&1; echo \\"ring_version type: [\\$(type -t ring_version)]\\"; frun -V" 2>&1 || true
           bash /tmp/test_frun.san.sh
           CONTAINER
 
