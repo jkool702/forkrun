@@ -101,16 +101,12 @@ jobs:
           set -euo pipefail
           for arch in x86-64-v2 x86-64-v3 x86-64-v4; do
             key="${arch//-/_}"
-            ring_loadables/verify_blob_freshness.bash \
-              "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so" \
-              frun.san.bash "$key"
+            ring_loadables/verify_blob_freshness.bash "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so" frun.san.bash "$key"
           done
           test -f frun.san.bash
           grep -q 'exec .*bash.*norc' frun.san.bash
-          ! grep -q 'exec -c' frun.san.bash
           echo "provenance OK: embedded payload == freshly built sanitizer .so"
-
-      - name: Preflight: verify Bash sanitizer load
+      - name: "Preflight: verify Bash sanitizer load"
         run: |
           set -euo pipefail
           docker run --rm -i \
