@@ -23,6 +23,7 @@ No threads. Forks only where noted; every forked child is reaped.
 
 import ctypes
 import os
+import select
 import signal
 import sys
 import tempfile
@@ -234,16 +235,13 @@ class TestClaimPublishRace(ChildLifecycleMixin, unittest.TestCase):
             os.unlink(path)
 
 
-@unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-class TestWaiterAccounting(ChildLifecycleMixin, unittest.TestCase):
-    """W-PY31: a dead waiter's active_waiters contribution is removed
-    exactly once, and only if it actually registered.
+class WaiterHarness:
+    """Shared driver for the W-PY31 waiter-registry probes.
 
-    The registry is wid-scoped, so recovery must not decrement a live
-    sibling's contribution and must not underflow on a death that
-    happened before the registration increment.  Observations go
-    through fr_py_worker_probe / fr_py_active_waiters (the same state
-    recovery reads), not through timing guesses.
+    Claims are issued by forked children because the registry lives in
+    a MAP_SHARED mapping created before any fork, and every observation
+    goes through fr_py_worker_probe / fr_py_active_waiters -- the same
+    state recovery reads -- rather than through timing guesses.
     """
 
     def tearDown(self):
@@ -280,27 +278,58 @@ class TestWaiterAccounting(ChildLifecycleMixin, unittest.TestCase):
         return out[0], out[1], out[2]
 
     def _fork_claim(self, lib, wid, out_fd, hook=None, node=0,
-                    incarnation=0):
+                    incarnation=0, env=None, delay=0.0):
         """Fork a worker that enters fr_py_claim and blocks waiting.
 
         `hook` (if given) makes the child SIGKILL itself at that
-        injection point.  A child without a hook stays parked in
-        TXN_WAITING until the test kills it.
+        injection point.  `env` is applied in the CHILD only, so a test
+        can arm the publication-pause hook for one worker without
+        arming it for the parent or for siblings forked later.  A child
+        without a hook stays parked in TXN_WAITING until the test kills
+        it.
         """
         pid = os.fork()
         if pid == 0:
             try:
+                if delay:
+                    time.sleep(delay)
                 lib.fr_py_worker_init(wid, node, incarnation, 3, 0)
                 lib.fr_py_set_output_fd(out_fd)
                 lib.fr_py_ack_init(out_fd)
                 if hook:
                     os.environ[hook] = "1"
+                for key, val in (env or {}).items():
+                    os.environ[key] = val
                 claimed = FrPyBatch()
                 lib.fr_py_claim(ctypes.byref(claimed))
             except BaseException:
                 pass
             os._exit(42)
         return pid
+
+    def _kill(self, pid):
+        """SIGKILL (if still alive) and reap, so recovery sees a dead,
+        already-reaped worker -- the order the supervisor uses."""
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+    def _wait_exit(self, pid, deadline=10.0):
+        end = time.monotonic() + deadline
+        while time.monotonic() < end:
+            try:
+                w, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                return True
+            if w == pid:
+                return True
+            time.sleep(0.01)
+        return False
 
     def _wait_count(self, lib, node, want, deadline=10.0):
         end = time.monotonic() + deadline
@@ -312,6 +341,51 @@ class TestWaiterAccounting(ChildLifecycleMixin, unittest.TestCase):
             time.sleep(0.01)
         self.fail("active_waiters[%d] never reached %d (last=%r)"
                   % (node, want, last))
+
+    def _wait_registered(self, lib, wid, node, deadline=10.0):
+        end = time.monotonic() + deadline
+        last = None
+        while time.monotonic() < end:
+            last = _waiter_node(self._probe(lib, wid)[2])
+            if last == node:
+                return
+            time.sleep(0.01)
+        self.fail("wid %d never registered on node %d (last=%r)"
+                  % (wid, node, last))
+
+    def _registry_count(self, lib, node, wids):
+        """The authority the mirror must match: how many of `wids` say
+        they are registered on `node`."""
+        return sum(1 for w in wids
+                   if _waiter_node(self._probe(lib, w)[2]) == node)
+
+    def _trigger_eof(self, lib):
+        """Publish end-of-input with nothing to read, so every parked
+        worker's next claim decodes as EOF (and releases its wait)."""
+        fd = os.memfd_create("fr_wait_eof")
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            self.assertEqual(lib.fr_py_ingest_done(), 0)
+            self.assertEqual(lib.fr_py_scan(fd), 0)
+        finally:
+            self._close(fd)
+
+
+@unittest.skipUnless(HAVE_LIB, "substrate .so not built")
+class TestWaiterAccounting(WaiterHarness, ChildLifecycleMixin,
+                           unittest.TestCase):
+    """W-PY31: a dead waiter's active_waiters contribution is removed
+    exactly once, and only if it actually registered.
+
+    The registry is wid-scoped, so recovery must not decrement a live
+    sibling's contribution and must not underflow on a death that
+    happened before the registration increment.  Observations go
+    through fr_py_worker_probe / fr_py_active_waiters (the same state
+    recovery reads), not through timing guesses.
+
+    These cases sequence the transitions.  TestWaiterPublishRace is the
+    concurrent counterpart: same registry, competing publications.
+    """
 
     def test_death_before_registration_preserves_other_waiter(self):
         """A pre-registration death decrements nothing.
@@ -426,6 +500,175 @@ class TestWaiterAccounting(ChildLifecycleMixin, unittest.TestCase):
         os.waitpid(pid, 0)
         self.assertEqual(lib.fr_py_recover_worker(0, 0, out_fd, 9), 1)
         self.assertEqual(lib.fr_py_active_waiters(1), 0)
+
+
+@unittest.skipUnless(HAVE_LIB, "substrate .so not built")
+class TestWaiterPublishRace(WaiterHarness, ChildLifecycleMixin,
+                            unittest.TestCase):
+    """W-PY31: competing waiter transitions cannot leave a stale mirror.
+
+    shim_waiter_publish() snapshots popcount(g_wait_bits[node]) and
+    publishes it into the engine's active_waiters gauge.  A snapshot
+    taken before a competing transition and stored after it is stale,
+    and if it is the LAST store the gauge stops mirroring the registry.
+    A stale zero is the dangerous direction (the scanner skips the
+    eventfd poke that would wake a waiter); a stale high costs
+    unnecessary pokes.
+
+    Each case holds one publication between its snapshot and its store
+    (FORKRUN_TEST_WAITER_PAUSE_MS, filtered to the transition under
+    test), lets a real competing transition complete, then releases it.
+    A test that only registers sequentially never overlaps those two
+    operations, which is exactly the defect this class covers.
+
+    Every case waits for the participating transitions to SETTLE and
+    then compares the gauge with the registry (fr_py_worker_probe) --
+    the authority the gauge must mirror.
+    """
+
+    def test_register_vs_register_keeps_the_newest_count(self):
+        """Two registrations: the first snapshot is stale-low.
+
+        The pauser signals each time it holds a snapshot, so the test
+        can prove the stale publication was actually RETRIED -- polling
+        the gauge alone would pass as soon as the late worker's publish
+        landed, before the stale store ever happened.
+        """
+        lib, out_fd = self._init()
+        procs = []
+        try:
+            base = self._fork_claim(lib, 0, out_fd)
+            procs.append(base)
+            self._wait_count(lib, 0, 1)
+
+            sig_r, sig_w = os.pipe()
+            self.addCleanup(self._close, sig_r)
+            pauser = self._fork_claim(
+                lib, 1, out_fd,
+                env={"FORKRUN_TEST_WAITER_PAUSE_MS": "800",
+                     "FORKRUN_TEST_WAITER_PAUSE_ON": "register",
+                     "FORKRUN_TEST_WAITER_SIGNAL_FD": str(sig_w)})
+            procs.append(pauser)
+            self._close(sig_w)
+            # The pause is observable: wid 1 has claimed its bit (so the
+            # registry already names it) but has not published the count.
+            end = time.monotonic() + 10.0
+            while time.monotonic() < end:
+                if (_waiter_node(self._probe(lib, 1)[2]) == 0
+                        and lib.fr_py_active_waiters(0) == 1):
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("worker 1 never entered the register pause")
+
+            late = self._fork_claim(lib, 2, out_fd)
+            procs.append(late)
+            self._wait_registered(lib, 2, 0)
+
+            # First signal: the held snapshot.  Second: the retry the
+            # stale store must trigger.  A store that simply won would
+            # not retry.
+            for want in (1, 2):
+                ready, _, _ = select.select([sig_r], [], [], 10.0)
+                self.assertTrue(
+                    ready, "worker 1 never signalled pause %d -- the "
+                           "stale snapshot was not retried" % want)
+                self.assertEqual(len(os.read(sig_r, 8)), 8,
+                                 "worker 1 exited before pause %d" % want)
+
+            # Settled: the retry's own 800 ms pause, then the exact count.
+            self._wait_count(lib, 0, 3)
+            self.assertEqual(self._registry_count(lib, 0, (0, 1, 2)), 3)
+        finally:
+            for pid in procs:
+                self._kill(pid)
+
+    def test_recovery_vs_register_cannot_publish_stale_zero(self):
+        """Recovery snapshots zero, then a new waiter registers.
+
+        This is the direction that loses a wakeup: if the stale zero is
+        the last store, the scanner believes nobody is parked and does
+        not poke the eventfd.
+        """
+        lib, out_fd = self._init()
+        procs = []
+        try:
+            dead = self._fork_claim(lib, 0, out_fd)
+            procs.append(dead)
+            self._wait_count(lib, 0, 1)
+            self._kill(dead)
+
+            # Register while the recovery holds its zero snapshot.  Fork
+            # BEFORE arming the pause: the child must not inherit it.
+            late = self._fork_claim(lib, 1, out_fd, delay=0.1)
+            procs.append(late)
+            os.environ["FORKRUN_TEST_WAITER_PAUSE_MS"] = "800"
+            os.environ["FORKRUN_TEST_WAITER_PAUSE_ON"] = "recover"
+            try:
+                rc = lib.fr_py_recover_worker(0, 0, out_fd, 9)
+            finally:
+                del os.environ["FORKRUN_TEST_WAITER_PAUSE_MS"]
+                del os.environ["FORKRUN_TEST_WAITER_PAUSE_ON"]
+            self.assertEqual(rc, 1)
+            # Settled: the register that landed during the held zero
+            # wins, and the recovery's retry republishes that value.
+            self._wait_count(lib, 0, 1)
+            self._wait_registered(lib, 1, 0)
+            self.assertEqual(self._registry_count(lib, 0, (0, 1)), 1)
+            self.assertEqual(self._probe(lib, 0)[2], 0)
+        finally:
+            for pid in procs:
+                self._kill(pid)
+
+    def test_release_vs_recovery_cannot_publish_stale_high(self):
+        """A release snapshots one waiter, recovery removes the other.
+
+        The dead waiter's bit is still set when the live worker clears
+        its own, so the live worker's snapshot is 1; recovery then takes
+        the last bit and publishes 0.  The release's stale 1 must not
+        be the final store.
+        """
+        lib, out_fd = self._init()
+        procs = []
+        try:
+            base = self._fork_claim(lib, 0, out_fd)
+            procs.append(base)
+            self._wait_count(lib, 0, 1)
+
+            sig_r, sig_w = os.pipe()
+            self.addCleanup(self._close, sig_r)
+            releaser = self._fork_claim(
+                lib, 1, out_fd,
+                env={"FORKRUN_TEST_WAITER_PAUSE_MS": "800",
+                     "FORKRUN_TEST_WAITER_PAUSE_ON": "release",
+                     "FORKRUN_TEST_WAITER_SIGNAL_FD": str(sig_w)})
+            procs.append(releaser)
+            self._close(sig_w)
+            self._wait_count(lib, 0, 2)
+
+            # Kill BEFORE EOF: the dead waiter keeps its bit (recovery
+            # has not run), so the releaser's snapshot still counts it.
+            self._kill(base)
+            self._trigger_eof(lib)
+
+            ready, _, _ = select.select([sig_r], [], [], 10.0)
+            self.assertTrue(
+                ready, "worker 1 never entered the release pause")
+            self.assertEqual(len(os.read(sig_r, 8)), 8,
+                             "worker 1 exited before its release pause")
+
+            # The gate is already closed (EOF was published), so an IDLE
+            # death is classified NORMAL_EXIT (2) rather than NO_BATCH
+            # (1).  Either way the registry cleanup has already run.
+            self.assertIn(
+                lib.fr_py_recover_worker(0, 0, out_fd, 9), (1, 2))
+            self.assertTrue(self._wait_exit(releaser),
+                            "releaser never finished its release")
+            self.assertEqual(lib.fr_py_active_waiters(0), 0)
+            self.assertEqual(self._registry_count(lib, 0, (0, 1)), 0)
+        finally:
+            for pid in procs:
+                self._kill(pid)
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")

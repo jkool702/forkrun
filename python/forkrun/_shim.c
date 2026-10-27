@@ -247,28 +247,62 @@ int fr_py_output_advanced(uint64_t nbytes) {
  * sibling's contribution (or underflow when the worker died before
  * registering).
  *
- * Two pieces of shared state, one authority:
+ * Three pieces of shared state, one authority:
  *
- *   g_wait_reg[wid]   0 = not registered; (node << 1) | 1 = registered
- *                     as a waiter on `node`.  A single atomic store /
- *                     exchange, so recovery learns the node from the
- *                     word it removes.
- *   g_wait_bits        per-node bitmap derived from the registry, used
- *                     only to recompute the mirror cheaply.
+ *   g_wait_reg[wid]  0 = not registered; (node << 1) | 1 = registered
+ *                    as a waiter on `node`.  One atomic word per wid:
+ *                    recovery learns the node from the word it removes,
+ *                    and can only ever touch that wid.
+ *   g_wait_bits      per-node bitmap DERIVED from the registry.  It is
+ *                    the authority for the count, so recovery removes a
+ *                    dead wid's contribution by clearing its bit.
+ *   g_wait_seq       per-node publication sequence (see below).
  *
- * `active_waiters` is a MIRROR of popcount(g_wait_bits[node]): on every
- * transition (register / release / recover) it is recomputed and
- * stored, never adjusted by a delta whose complement may have been
- * lost.  Ordering is deliberate and load-bearing:
+ * `active_waiters` is a MIRROR of popcount(g_wait_bits[node]), never a
+ * counter adjusted by deltas whose complement may have been lost: every
+ * transition (register / release / recover) RECOMPUTES it.
  *
- *   register: reg = 1, THEN set the bit   (reg is the authority)
+ * Recompute-and-store alone is not safe, and this is the defect the
+ * sequence closes: two workers can interleave so that one computes an
+ * older count, the other publishes a newer one, and the first then
+ * overwrites it with the stale value -- including a stale ZERO, which
+ * makes the scanner skip the poke that would have woken a waiter.  So
+ * the store is a compare-exchange and every completed publication bumps
+ * the per-node sequence:
+ *
+ *   1. v0 = seq[node]
+ *   2. n  = popcount(bits)
+ *   3. CAS(active_waiters, old, n)    (SEQ_CST: also the StoreLoad half
+ *                                      of the wakeup handshake below)
+ *   4. if seq[node] == v0 and popcount(bits) == n:
+ *          seq[node] += 1; return      (verified: n is settled)
+ *      else retry
+ *
+ * Why step 4 makes it exact: a CAS can store an `n` that the bitmap has
+ * already moved past.  The mover either COMMITTED -- it bumped the
+ * sequence, which step 4 sees -- or it has not published yet, and its
+ * CAS comes after its own bitmap store, hence after ours, so the LAST
+ * store carries a fresh count.  The second popcount closes the remaining
+ * window: a bit that moved after step 2 is either visible in that
+ * re-read (popcount != n -> retry) or its publisher's sequence bump is
+ * still to come.  Only the TOTAL is published, so two opposite moves
+ * that leave the same count between the reads are harmless.
+ *
+ * There is NO lock, deliberately: a worker killed at any point leaves at
+ * most an uncommitted bitmap change, and the next publication on that
+ * node recomputes from the bitmap and settles it.  Recovery always makes
+ * one for a registered death, so a death is repaired by the death
+ * episode rather than left for some later transition.  Ordering is
+ * deliberate and load-bearing:
+ *
+ *   register: reg = 1, THEN set the bit   (reg is the claim)
  *   release:  clear the bit, THEN reg = 0 (reg=0 => bit clear)
  *
- * A death anywhere in either sequence leaves reg set with the bit
- * possibly clear; recovery clears the bit idempotently, clears reg and
- * re-mirrors, which is exact.  A death after the bit is set but before
- * the mirror store is likewise repaired by the same recompute.  The
- * mapping is MAP_SHARED anonymous memory created before any worker
+ * so no death window orphans a bit: a death after the clear but before
+ * the reg store is still seen by recovery as "registered", which clears
+ * an already-clear bit and republishes -- exact.
+ *
+ * The mapping is MAP_SHARED anonymous memory created before any worker
  * forks, so the parent's fr_py_recover_worker() sees the dead child's
  * registration.
  *
@@ -280,6 +314,7 @@ int fr_py_output_advanced(uint64_t nbytes) {
 
 static uint32_t *g_wait_reg = NULL;   /* [MAX_TXN_WORKERS] */
 static uint64_t *g_wait_bits = NULL;  /* [FR_MAX_LOGICAL_NODES][WORDS] */
+static uint64_t *g_wait_seq = NULL;   /* [FR_MAX_LOGICAL_NODES] */
 
 /* Allocate (once) and clear the registry.  Called from fr_py_init /
  * fr_py_init_numa, i.e. before any worker forks.  A re-init starts a
@@ -290,16 +325,20 @@ static int shim_waiters_init(void) {
         const size_t reg_sz = sizeof(uint32_t) * MAX_TXN_WORKERS;
         const size_t bits_sz =
             sizeof(uint64_t) * SHIM_WAIT_WORDS * FR_MAX_LOGICAL_NODES;
-        void *p = mmap(NULL, reg_sz + bits_sz, PROT_READ | PROT_WRITE,
+        const size_t seq_sz = sizeof(uint64_t) * FR_MAX_LOGICAL_NODES;
+        void *p = mmap(NULL, reg_sz + bits_sz + seq_sz,
+                       PROT_READ | PROT_WRITE,
                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         if (p == MAP_FAILED)
             return 1;
         g_wait_reg = (uint32_t *)p;
         g_wait_bits = (uint64_t *)((char *)p + reg_sz);
+        g_wait_seq = (uint64_t *)((char *)p + reg_sz + bits_sz);
     }
     memset(g_wait_reg, 0, sizeof(uint32_t) * MAX_TXN_WORKERS);
     memset(g_wait_bits, 0,
            sizeof(uint64_t) * SHIM_WAIT_WORDS * FR_MAX_LOGICAL_NODES);
+    memset(g_wait_seq, 0, sizeof(uint64_t) * FR_MAX_LOGICAL_NODES);
     return 0;
 }
 
@@ -322,39 +361,119 @@ static inline uint32_t shim_waiter_count(int node) {
     return n;
 }
 
-/* Store the derived count into the engine's gauge.  Best-effort: a
- * node outside the live topology is ignored (worker_init clamps to a
- * real node, so this only guards a malformed caller). */
-static inline void shim_waiter_mirror(int node) {
-    if (!state || node < 0 || node >= (int)global_num_nodes)
+/* Transition kinds, so a test can target the pause at the one transition
+ * whose window it needs to force. */
+#define SHIM_WAITER_REG 1  /* a worker registered          */
+#define SHIM_WAITER_REL 2  /* a worker released            */
+#define SHIM_WAITER_REC 3  /* recovery removed a dead wid  */
+
+/* Test-only injection point: pause between the bitmap snapshot and its
+ * publication, so a competing transition can be forced into the exact
+ * window the CAS/verify protocol exists to close.
+ *
+ *   FORKRUN_TEST_WAITER_PAUSE_MS   milliseconds to hold the snapshot
+ *   FORKRUN_TEST_WAITER_PAUSE_ON   register|release|recover (default all)
+ *   FORKRUN_TEST_WAITER_SIGNAL_FD  write 8 bytes just before the sleep,
+ *                                  so a test can tell that the pause has
+ *                                  begun instead of racing a timer
+ *
+ * Deliberately uncached (same rule as the FORKRUN_TEST_DIE_* hooks): a
+ * child sets the value after it forks, so a cached "unset" inherited
+ * across fork would disarm it.  Inert unless the variables are set. */
+static inline void shim_waiter_test_pause(int kind) {
+    const char *ms_s = getenv("FORKRUN_TEST_WAITER_PAUSE_MS");
+    const char *on;
+    int ms;
+    if (!ms_s)
         return;
-    /* SEQ_CST, not release: the decrement this replaces in the engine
-     * is a SEQ_CST fetch_add, and the worker follows this store with a
-     * load of write_idx.  Without the StoreLoad half of the barrier a
-     * publisher that loads active_waiters and a waiter that loads
-     * write_idx can both read the stale value and the poke is lost.
-     * A lost poke is not fatal (the 100 ms poll timeout re-checks),
-     * but it would add 100 ms of latency to an otherwise immediate
-     * handoff, so keep the engine's ordering exactly. */
-    __atomic_store_n(&state[node].active_waiters, shim_waiter_count(node),
-                     __ATOMIC_SEQ_CST);
+    ms = atoi(ms_s);
+    if (ms <= 0)
+        return;
+    on = getenv("FORKRUN_TEST_WAITER_PAUSE_ON");
+    if (on && *on) {
+        if ((!strcmp(on, "register") && kind != SHIM_WAITER_REG) ||
+            (!strcmp(on, "release") && kind != SHIM_WAITER_REL) ||
+            (!strcmp(on, "recover") && kind != SHIM_WAITER_REC))
+            return;
+    }
+    {
+        const char *fd_s = getenv("FORKRUN_TEST_WAITER_SIGNAL_FD");
+        if (fd_s && *fd_s) {
+            int fd = atoi(fd_s);
+            unsigned long long one = 1;
+            if (fd >= 0)
+                (void)sys_write(fd, &one, sizeof(one));
+        }
+    }
+    usleep((useconds_t)ms * 1000);
+}
+
+/* Publish popcount(g_wait_bits[node]) into the engine's gauge.  See the
+ * protocol note above; step 4 is the part that makes it exact. */
+static inline void shim_waiter_publish(int node, int kind) {
+    uint32_t n, old;
+    uint64_t v0;
+    if (!g_wait_bits || !g_wait_seq || !state)
+        return;
+    if (node < 0 || node >= (int)global_num_nodes)
+        return;  /* nothing reads a node outside the live topology */
+    for (;;) {
+        v0 = __atomic_load_n(&g_wait_seq[node], __ATOMIC_ACQUIRE);
+        n = shim_waiter_count(node);
+        shim_waiter_test_pause(kind);
+        old = __atomic_load_n(&state[node].active_waiters,
+                              __ATOMIC_ACQUIRE);
+        if (!__atomic_compare_exchange_n(&state[node].active_waiters,
+                                         &old, n, false,
+                                         __ATOMIC_SEQ_CST,
+                                         __ATOMIC_SEQ_CST))
+            continue;
+        if (__atomic_load_n(&g_wait_seq[node], __ATOMIC_ACQUIRE) == v0 &&
+            shim_waiter_count(node) == n) {
+            __atomic_fetch_add(&g_wait_seq[node], 1, __ATOMIC_RELEASE);
+            return;
+        }
+        /* Someone moved the bitmap under us (or published a newer
+         * count); our store is not a settled snapshot.  Recompute. */
+    }
 }
 
 /* Registered as a waiter on `node`.  See the ordering note above. */
 static inline void shim_waiter_register(int wid, int node) {
-    if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS || node < 0 ||
-        node >= (int)FR_MAX_LOGICAL_NODES)
+    uint32_t old;
+    if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS)
         return;
+    if (!state || node < 0 || node >= (int)global_num_nodes)
+        return;  /* no gauge for that node, so do not claim a bit */
+    old = __atomic_load_n(&g_wait_reg[wid], __ATOMIC_ACQUIRE);
+    if ((old & 1u) && (int)(old >> 1) != node) {
+        /* Per-wid transitions are serialized by process lifetime, so a
+         * second registration cannot happen.  If it ever does, drop the
+         * old node's bit BEFORE moving the claim word: while the word
+         * still names the old node, a death in this window is still
+         * attributable, and recovery clears an already-clear bit
+         * harmlessly.  (Dropping the bit after the exchange would leave
+         * the old bit orphaned for a death in between.) */
+        int onode = (int)(old >> 1);
+        if (onode >= 0 && onode < (int)FR_MAX_LOGICAL_NODES) {
+            __atomic_fetch_and(shim_wait_word(onode, wid),
+                               ~(1ull << ((unsigned)wid % 64u)),
+                               __ATOMIC_ACQ_REL);
+            shim_waiter_publish(onode, SHIM_WAITER_REL);
+        }
+    }
     __atomic_store_n(&g_wait_reg[wid], ((uint32_t)node << 1) | 1u,
                      __ATOMIC_RELEASE);
     __atomic_fetch_or(shim_wait_word(node, wid),
                       1ull << ((unsigned)wid % 64u), __ATOMIC_ACQ_REL);
     is_waiting_on_ring = true;  /* keep the engine's TLS view coherent */
-    shim_waiter_mirror(node);
+    shim_waiter_publish(node, SHIM_WAITER_REG);
 }
 
 /* Remove THIS wid's registration.  Idempotent: safe on a worker that
- * never registered, and safe for recovery on an already-cleared wid. */
+ * never registered, and safe for recovery on an already-cleared wid.
+ * Clears the bit BEFORE dropping the claim word so that a death in
+ * between is still attributable (see the ordering note above). */
 static inline void shim_waiter_release(int wid) {
     uint32_t old;
     int node;
@@ -370,26 +489,43 @@ static inline void shim_waiter_release(int wid) {
                            __ATOMIC_ACQ_REL);
     __atomic_store_n(&g_wait_reg[wid], 0, __ATOMIC_RELEASE);
     is_waiting_on_ring = false;
-    shim_waiter_mirror(node);
+    shim_waiter_publish(node, SHIM_WAITER_REL);
 }
 
-/* Recovery twin: remove a DEAD worker's registration and re-mirror.
+/* Recovery twin: remove a DEAD worker's registration and republish.
  * Runs in the supervising process, where is_waiting_on_ring is not the
- * dead worker's TLS, so it is deliberately untouched here. */
+ * dead worker's TLS, so it is deliberately untouched here.  The claim
+ * word is removed with an exchange so that two recoveries for the same
+ * wid cannot both publish a removal.
+ *
+ * Recovery republishes for EVERY death, not only a registered one.  A
+ * worker that dies after clearing its bit and storing reg=0 -- but
+ * before its own publish -- leaves a stale HIGH mirror that no later
+ * transition on that node is guaranteed to repair: the claim word no
+ * longer names the node, so the registry alone cannot say where to look.
+ * The dead worker's transaction node can (worker_init publishes it), so
+ * recovery publishes there regardless.  A recompute is harmless when
+ * the mirror was already exact; skipping it is not, and a stale high
+ * turns every later publish into an unnecessary eventfd poke. */
 static inline void shim_waiter_recover(int wid) {
     uint32_t old;
-    int node;
+    int node = -1;
     if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS)
         return;
-    old = __atomic_exchange_n(&g_wait_reg[wid], 0, __ATOMIC_ACQ_REL);
-    if (!(old & 1u))
-        return;
-    node = (int)(old >> 1);
-    if (node >= 0 && node < (int)FR_MAX_LOGICAL_NODES)
-        __atomic_fetch_and(shim_wait_word(node, wid),
-                           ~(1ull << ((unsigned)wid % 64u)),
-                           __ATOMIC_ACQ_REL);
-    shim_waiter_mirror(node);
+    old = __atomic_load_n(&g_wait_reg[wid], __ATOMIC_ACQUIRE);
+    if (old & 1u) {
+        node = (int)(old >> 1);
+        if (node >= 0 && node < (int)FR_MAX_LOGICAL_NODES)
+            __atomic_fetch_and(shim_wait_word(node, wid),
+                               ~(1ull << ((unsigned)wid % 64u)),
+                               __ATOMIC_ACQ_REL);
+        __atomic_exchange_n(&g_wait_reg[wid], 0, __ATOMIC_ACQ_REL);
+    } else if (g_state) {
+        node = (int)__atomic_load_n(&g_state->worker_txn[wid].node,
+                                    __ATOMIC_ACQUIRE);
+    }
+    if (node >= 0)
+        shim_waiter_publish(node, SHIM_WAITER_REC);
 }
 
 /* Initialize the substrate for one UMA node. lines/bytes are mutually
