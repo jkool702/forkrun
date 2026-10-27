@@ -135,6 +135,15 @@ so `LD_PRELOAD` survives, and runs the Bash basic suite + the Python canary subs
 runtime. Normal release workflow and artifacts are untouched. The legacy
 `TESTING/TSAN` and `TESTING/ASAN+UBSAN` branch-copy procedure is deprecated.
 
+**Mode selection:** `workflow_dispatch` input `mode` ∈ {all, tsan, asan-ubsan};
+push triggers run `all`. Invalid mode fails the `prepare` job (exit 2).
+
+**TSan Bash limitation:** TSan does not support `atomic_thread_fence` (warnings
+at forkrun_ring.c:3865/3892/4344) and does not support fork in instrumented
+code; loading a TSan-instrumented loadable into the Bash test suite segfaults.
+TSan Bash validation is therefore blocked; Python substrate TSan validation
+passes (81 tests). Do not claim full TSan coverage.
+
 If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under both standard and sanitized conditions, the build is considered stable and ready for release.
 
 ---
