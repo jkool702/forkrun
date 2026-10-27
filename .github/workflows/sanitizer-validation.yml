@@ -85,7 +85,7 @@ jobs:
           cd ring_loadables
           source update_frun_base64.bash
           cd forkrun-libs
-          update_frun_base64 frun.san.bash
+          update_frun_base64 /src/frun.san.bash
           cd /src
           set -euo pipefail
           # Scratch-only: remove exec -c so LD_PRELOAD survives (MAINTAINERS §5).
@@ -124,10 +124,9 @@ jobs:
             export UBSAN_OPTIONS=print_stacktrace=1
           fi
           cd UNIT_TESTS
-          cp ../frun.san.bash /tmp/frun.san.bash
-          sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"/tmp/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
+          sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"$GITHUB_WORKSPACE/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
           chmod +x /tmp/test_frun.san.sh
-          grep -q 'FRUN_SOURCE="/tmp/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
+          grep -q "FRUN_SOURCE=\"$GITHUB_WORKSPACE/frun.san.bash\"" /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
           bash /tmp/test_frun.san.sh
       - name: Upload scratch wrapper + blobs
         if: always()
