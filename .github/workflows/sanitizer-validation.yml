@@ -81,17 +81,17 @@ jobs:
           # Embed into a SCRATCH wrapper (not the release frun.bash).
           set +u
           set +o pipefail
-          cp frun.bash /tmp/frun.san.bash
+          cp frun.bash frun.san.bash
           cd ring_loadables
           source update_frun_base64.bash
           cd forkrun-libs
-          update_frun_base64 /tmp/frun.san.bash
+          update_frun_base64 frun.san.bash
           cd /src
           set -euo pipefail
           # Scratch-only: remove exec -c so LD_PRELOAD survives (MAINTAINERS §5).
-          sed -i 's/exec -c "${BASH:-bash}"/exec "${BASH:-bash}"/' /tmp/frun.san.bash
-          test -f /tmp/frun.san.bash
-          grep -q 'exec .*bash.*norc' /tmp/frun.san.bash
+          sed -i 's/exec -c "${BASH:-bash}"/exec "${BASH:-bash}"/' frun.san.bash
+          test -f frun.san.bash
+          grep -q 'exec .*bash.*norc' frun.san.bash
           CONTAINER
           echo "embedded scratch wrapper ready"
 
@@ -102,11 +102,11 @@ jobs:
             key="${arch//-/_}"
             ring_loadables/verify_blob_freshness.bash \
               "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so" \
-              /tmp/frun.san.bash "$key"
+              frun.san.bash "$key"
           done
-          test -f /tmp/frun.san.bash
-          grep -q 'exec .*bash.*norc' /tmp/frun.san.bash
-          ! grep -q 'exec -c' /tmp/frun.san.bash
+          test -f frun.san.bash
+          grep -q 'exec .*bash.*norc' frun.san.bash
+          ! grep -q 'exec -c' frun.san.bash
           echo "provenance OK: embedded payload == freshly built sanitizer .so"
 
       - name: Run basic Bash suite under sanitizer
@@ -124,6 +124,7 @@ jobs:
             export UBSAN_OPTIONS=print_stacktrace=1
           fi
           cd UNIT_TESTS
+          cp ../frun.san.bash /tmp/frun.san.bash
           sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"/tmp/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
           chmod +x /tmp/test_frun.san.sh
           grep -q 'FRUN_SOURCE="/tmp/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
@@ -134,7 +135,7 @@ jobs:
         with:
           name: sanitizer-bash-${{ matrix.mode }}
           path: |
-            /tmp/frun.san.bash
+            frun.san.bash
             ring_loadables/forkrun-libs/forkrun_ring.x86-64-*.so
 
   python-sanitizer:
