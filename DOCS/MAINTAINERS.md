@@ -120,6 +120,21 @@ We maintain two dedicated branches specifically configured for sanitizer testing
 
 **Matrix Policy Rule:** Sanitizer runs execute once, on frozen code; any post-run code change invalidates the full matrix and requires a complete re-run.
 
+### §5.1 Integrated sanitizer validation (NEW/REFACTOR4.6)
+
+Sanitizer build/test is now available via `.github/workflows/sanitizer-validation.yml`
+(triggered by `workflow_dispatch` with `mode` = `all`/`tsan`/`asan-ubsan`, or by
+push touching `forkrun_ring.c`/`forkrun_substrate.h`/`ring_loadables/forkrun_plugin.h`/`META`/
+`tools/build_sanitizer_blob.sh`/the workflow).
+
+It builds instrumented blobs from the checked-out commit using the shared
+`tools/build_sanitizer_blob.sh` (mode: normal/tsan/asan-ubsan), embeds them into a
+scratch `frun.bash` (NOT the release file), removes `exec -c` in that scratch copy
+so `LD_PRELOAD` survives, and runs the Bash basic suite + the Python canary subset
+(`test_v0 test_fault test_reactor test_spawn`) under the appropriate sanitizer
+runtime. Normal release workflow and artifacts are untouched. The legacy
+`TESTING/TSAN` and `TESTING/ASAN+UBSAN` branch-copy procedure is deprecated.
+
 If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under both standard and sanitized conditions, the build is considered stable and ready for release.
 
 ---

@@ -1,0 +1,121 @@
+name: sanitizer-validation
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Sanitizer mode to validate"
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "tsan", "asan-ubsan"]
+  push:
+    paths:
+      - 'forkrun_ring.c'
+      - 'forkrun_substrate.h'
+      - 'ring_loadables/forkrun_plugin.h'
+      - 'META'
+      - 'tools/build_sanitizer_blob.sh'
+      - '.github/workflows/sanitizer-validation.yml'
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  bash-sanitizer:
+    name: Bash loadable (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [tsan, asan-ubsan]
+    if: ${{ github.event.inputs.mode == '' || github.event.inputs.mode == 'all' || github.event.inputs.mode == matrix.mode }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Build + embed sanitizer blobs (x86-64 v2/v3/v4)
+        run: |
+          set -euo pipefail
+          for arch in x86-64-v2 x86-64-v3 x86-64-v4; do
+            key="${arch//-/_}"
+            tools/build_sanitizer_blob.sh "${{ matrix.mode }}" "$arch" "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so"
+          done
+          bash ring_loadables/update_frun_base64.bash
+          # Scratch wrapper: remove exec -c so LD_PRELOAD survives (MAINTAINERS §5).
+          cp frun.bash /tmp/frun.san.bash
+          sed -i 's/exec -c "${BASH:-bash}"/exec "${BASH:-bash}"/' /tmp/frun.san.bash
+          grep -n 'exec .*bash.*norc' /tmp/frun.san.bash | head -1
+      - name: Run basic Bash suite under sanitizer
+        run: |
+          set -euo pipefail
+          export FRUN_SOURCE=/tmp/frun.san.bash
+          # The suite hard-codes ../frun.bash; symlink the scratch wrapper in place.
+          cp /tmp/frun.san.bash frun.bash.san-scratch 2>/dev/null || true
+          # Run from UNIT_TESTS with a patched source path via sed (test reads FRUN_SOURCE? no). Instead run a version-tolerant invocation.
+          cd UNIT_TESTS
+          # Patch the suite's FRUN_SOURCE resolution by env is not supported; use a temp copy of the suite pointing at scratch wrapper.
+          sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"/tmp/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
+          chmod +x /tmp/test_frun.san.sh
+          if [ "${{ matrix.mode }}" = "tsan" ]; then
+            export LD_PRELOAD="$(ldconfig -p | grep libtsan | awk 'NR==1{print $NF}')"
+          else
+            export LD_PRELOAD="$(ldconfig -p | grep libasan | awk 'NR==1{print $NF}')"
+            export ASAN_OPTIONS=detect_leaks=0
+            export UBSAN_OPTIONS=print_stacktrace=1
+          fi
+          bash /tmp/test_frun.san.sh
+      - name: Upload scratch wrapper + blobs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-bash-${{ matrix.mode }}
+          path: |
+            /tmp/frun.san.bash
+            ring_loadables/forkrun-libs/forkrun_ring.x86-64-*.so
+
+  python-sanitizer:
+    name: Python substrate (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [tsan, asan-ubsan]
+    if: ${{ github.event.inputs.mode == '' || github.event.inputs.mode == 'all' || github.event.inputs.mode == matrix.mode }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Build substrate + run tests under sanitizer
+        run: |
+          docker run --rm -i \
+            -v $PWD:/src \
+            -w /src \
+            fedora:44 \
+            bash -s -- "${{ matrix.mode }}" <<'CONTAINER'
+          set -euo pipefail
+          MODE="$1"
+          dnf install -y git bash-devel gcc make file diffutils python3 python3-devel python3-pip
+          rpm -q bash-devel
+          git config --global --add safe.directory /src
+          if [ "$MODE" = "tsan" ]; then
+            export CC="gcc -fsanitize=thread"
+            export CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer"
+            export LD_PRELOAD="$(ldconfig -p | grep libtsan | awk 'NR==1{print $NF}')"
+          else
+            export CC="gcc -fsanitize=address,undefined"
+            export CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer"
+            export LD_PRELOAD="$(ldconfig -p | grep libasan | awk 'NR==1{print $NF}')"
+            export ASAN_OPTIONS=detect_leaks=0
+            export UBSAN_OPTIONS=print_stacktrace=1
+          fi
+          make -f Makefile.substrate python-substrate CC="$CC" CFLAGS="$CFLAGS" PY_OUT=/tmp/san_substrate.so
+          ls /tmp/san_substrate.so
+          cd python/tests
+          FORKRUN_LIB=/tmp/san_substrate.so python3 -m unittest test_v0 test_fault test_reactor test_spawn -v
+          CONTAINER
