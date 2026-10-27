@@ -4851,6 +4851,37 @@ FUNCEOF
     fi
 fi
 
+# Independent post-driver cleanup verifier for the T12 teardown.  Reads
+# a .t12_gate_diag and prints every PID it names that is still a live
+# (non-zombie) process.  The driver's own `cleanup:` verdict is computed
+# INSIDE the driver, after ITS teardown; this is the parent-side check
+# that the same evidence supports it.  The two teardown modes stay
+# distinct:
+#   - a safe process group is the unit, and its live members are the
+#     survivors;
+#   - without one, the captured set is the wrapper, the cleanroom and
+#     EVERY serialized fallback victim.
+# A zombie is not a survivor (kill -0 would call it one).
+_t12_diag_survivors() {
+    local _diag="$1" _pgid _pid _st
+    _pgid=$(sed -n 's/^process_group: //p' "$_diag" 2>/dev/null | head -n 1)
+    if [[ "$_pgid" =~ ^[0-9]+$ ]] && (( _pgid > 1 )); then
+        ps -eo pgid=,stat=,pid= 2>/dev/null |
+            awk -v p="$_pgid" '$1==p && $2 !~ /^Z/ && !seen[$3]++ {print $3}'
+        return 0
+    fi
+    sed -n -e 's/^wrapper_pid: //p' \
+           -e 's/^cleanroom_pid: //p' \
+           -e 's/^fallback_victims: //p' "$_diag" 2>/dev/null |
+        tr ' ' '\n' |
+        awk 'NF && !seen[$0]++' |
+        while read -r _pid; do
+            [[ "$_pid" =~ ^[0-9]+$ ]] || continue
+            _st=$(ps -o stat= -p "$_pid" 2>/dev/null | tr -d '[:space:]')
+            [[ -n "$_st" && "$_st" != Z* ]] && printf '%s\n' "$_pid"
+        done
+}
+
 # --- T12 (v2): jagged-straddle resume — buffered mode + batch-membership stall ---
 # BUFFERED mode (not -k): the tracker records every COMPLETED batch, so the
 # checkpoint has real jagged intervals (in ordered mode, un-emitted completed
@@ -5075,19 +5106,40 @@ _t12_gate_fail() {
         kill -KILL "\$_frun_pid" 2>/dev/null
     fi
 
+    # SIGKILL is immediate, but a target can still be in the kernel's exit
+    # path when the verdict is computed.  Give the teardown UNIT -- the
+    # process group, or every captured PID when there is no safe group --
+    # a bounded chance to leave.  Zombies already count as "not running"
+    # (see _t12_pid_running), so this is about exit, not about reaping.
+    # The bound cannot weaken the verdict: the loop only ends early when
+    # the unit is EMPTY.
+    for _k in \$(seq 1 10); do
+        if [[ -n "\${_frun_pgid:-}" ]]; then
+            _t12_group_running || break
+        else
+            _t12_any_running "\${_victims[@]}" || break
+        fi
+        sleep 0.1
+    done
+
     wait "\$_frun_pid" 2>/dev/null
 
     # Cleanup evidence for the caller and for post-mortem diagnostics.
-    local _left=""
+    # EVERY captured PID is checked, not just the wrapper and the
+    # cleanroom: a helper in the fallback snapshot that survived the kill
+    # must make a "cleanup: complete" verdict impossible.
+    local _left="" _p
     if [[ -n "\${_frun_pgid:-}" ]] && _t12_group_running; then
         _left="process-group \${_frun_pgid}"
     fi
-    if _t12_pid_running "\${_hup_target:-}"; then
-        _left="\${_left:+\$_left }\${_hup_target}"
-    fi
-    if _t12_pid_running "\$_frun_pid"; then
-        _left="\${_left:+\$_left }\${_frun_pid}"
-    fi
+    for _p in "\${_victims[@]}" "\${_hup_target:-}" "\$_frun_pid"; do
+        [[ "\$_p" =~ ^[0-9]+\$ ]] || continue
+        _t12_pid_running "\$_p" || continue
+        case " \$_left " in
+            *" \$_p "*) ;;
+            *) _left="\${_left:+\$_left }\$_p" ;;
+        esac
+    done
     if [[ -n "\$_left" ]]; then
         echo "cleanup_leftover: \$_left" >> .t12_gate_diag
     else
@@ -5126,17 +5178,7 @@ EOF
         # the wrapper, cleanroom, workers and helpers. The driver records
         # the process group and (when available) the two target PIDs.
         if [[ -f "$_MD/.t12_gate_timeout" ]]; then
-            _T12_PGID=$(sed -n 's/^process_group: //p' "$_MD/.t12_gate_diag" 2>/dev/null | head -n 1)
-            _T12_SURVIVORS=""
-            if [[ "$_T12_PGID" =~ ^[0-9]+$ ]] && (( _T12_PGID > 1 )); then
-                _T12_SURVIVORS=$(ps -eo pgid=,stat=,pid= 2>/dev/null | awk -v p="$_T12_PGID" '$1==p && $2 !~ /^Z/ {print $3}' | tr '\n' ' ')
-            else
-                while read -r _T12_TP; do
-                    [[ "$_T12_TP" =~ ^[0-9]+$ ]] || continue
-                    _T12_ST=$(ps -o stat= -p "$_T12_TP" 2>/dev/null | tr -d '[:space:]')
-                    [[ -n "$_T12_ST" && "$_T12_ST" != Z* ]] && _T12_SURVIVORS+=" $_T12_TP"
-                done < <(sed -n -e 's/^wrapper_pid: //p' -e 's/^cleanroom_pid: //p' "$_MD/.t12_gate_diag" 2>/dev/null)
-            fi
+            _T12_SURVIVORS=$(_t12_diag_survivors "$_MD/.t12_gate_diag" | tr '\n' ' ')
             if [[ -n "${_T12_SURVIVORS// /}" ]]; then
                 echo "cleanup_leftover_after_driver:${_T12_SURVIVORS}" >> "$_MD/.t12_gate_diag"
             fi
@@ -5180,6 +5222,204 @@ EOF
             ((FAILED_TESTS++)); _print_result FAIL "T12: jagged-straddle resume (buffered, differing -l)" "uniq=$_MUNIQ dupes=$_MDUP jagged=$_TJAG"
         fi
     fi
+
+    # --- T12c: the parent-side verifier's OWN controls ---
+    # Every arm above passes trivially if _t12_diag_survivors() always
+    # reports nothing, because the teardown leaves no survivors to find.
+    # So the verifier gets a positive control (a live PID must be
+    # reported) and a negative control (a ZOMBIE must not be -- kill -0
+    # would say it lives).  The zombie is held by a python helper
+    # because THIS shell reaps its own children: a fork whose parent
+    # does not wait is the only way to keep one in Z state.
+    ((TOTAL_TESTS++))
+    _t12c_name="T12c: teardown verifier controls (live, zombie, group)"
+    _t12c_ok=1
+    _t12c_detail=""
+    _t12c_live=""
+    _t12c_zombie=""
+    _t12c_zparent=""
+    sleep 30 &
+    _t12c_live=$!
+    python3 - "$_MD/.t12c_zombie" <<'PYZ' &
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+with open(sys.argv[1], "w") as f:
+    f.write(str(pid))
+time.sleep(30)
+PYZ
+    _t12c_zparent=$!
+    for _k in $(seq 1 100); do
+        [[ -s "$_MD/.t12c_zombie" ]] && break
+        sleep 0.02
+    done
+    _t12c_zombie=$(cat "$_MD/.t12c_zombie" 2>/dev/null)
+    # It only counts as a zombie once it has EXITED; before that it is a
+    # live process and reporting it would be correct.
+    _t12c_zstate=""
+    for _k in $(seq 1 100); do
+        [[ -n "$_t12c_zombie" ]] || break
+        _t12c_zstate=$(ps -o stat= -p "$_t12c_zombie" 2>/dev/null | tr -d '[:space:]')
+        [[ "$_t12c_zstate" == Z* ]] && break
+        sleep 0.02
+    done
+    printf 'process_group: unavailable\nwrapper_pid: %s\ncleanroom_pid: missing\nfallback_victims: %s %s\n' \
+        "$_t12c_live" "$_t12c_live" "$_t12c_zombie" > "$_MD/.t12c_diag"
+    _t12c_found=$(_t12_diag_survivors "$_MD/.t12c_diag" | tr '\n' ' ')
+    # The group branch is a different scan; this script's own process
+    # group is live by definition, so it must name this script.
+    _t12c_self_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')
+    printf 'process_group: %s\n' "$_t12c_self_pgid" > "$_MD/.t12c_gdiag"
+    _t12c_gfound=$(_t12_diag_survivors "$_MD/.t12c_gdiag" | tr '\n' ' ')
+    if [[ " $_t12c_found " != *" $_t12c_live "* ]]; then
+        _t12c_ok=0
+        _t12c_detail="live pid $_t12c_live not reported (found:${_t12c_found:-none})"
+    elif [[ "$_t12c_zstate" != Z* ]]; then
+        # No negative control means the zombie rule was not exercised;
+        # say so instead of passing on the positive control alone.
+        _t12c_ok=0
+        _t12c_detail="could not hold a zombie control (state:${_t12c_zstate:-gone})"
+    elif [[ " $_t12c_found " == *" $_t12c_zombie "* ]]; then
+        _t12c_ok=0
+        _t12c_detail="zombie pid $_t12c_zombie counted as a survivor"
+    elif [[ " $_t12c_gfound " != *" $$ "* ]]; then
+        _t12c_ok=0
+        _t12c_detail="group scan missed this script (pgid ${_t12c_self_pgid:-?}, found:${_t12c_gfound:-none})"
+    else
+        _t12c_detail="live + group reported, zombie ignored"
+    fi
+    kill -KILL "$_t12c_live" 2>/dev/null
+    kill -KILL "$_t12c_zparent" 2>/dev/null
+    wait "$_t12c_live" 2>/dev/null
+    wait "$_t12c_zparent" 2>/dev/null
+    if (( _t12c_ok )); then
+        TEST_RESULTS["$_t12c_name"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "$_t12c_name" "$_t12c_detail"
+    else
+        TEST_RESULTS["$_t12c_name"]="FAIL"
+        TEST_ERRORS["$_t12c_name"]="$_t12c_detail"
+        ((FAILED_TESTS++)); _print_result FAIL "$_t12c_name" "$_t12c_detail"
+    fi
+
+    # --- T12b: forced-timeout teardown (the FAILURE branch) ---
+    # The arm above must PASS on the normal path.  This one forces the
+    # NOT-REACHED branch (GATE_MAX=3 < the 8 stable samples) and checks
+    # the teardown it performs.  The timeout is EXPECTED here: an arm
+    # passes only when the driver's own verdict AND the independent
+    # parent-side survivor scan agree that every process captured by the
+    # teardown is gone.  Run twice -- once with the pipeline's real
+    # process group, once with FORKRUN_T12_FORCE_FALLBACK=1, which is the
+    # snapshot-based fallback the fallback_victims list exists for.
+    _t12_teardown_arm() {
+        # $1 = arm label; $2 = non-empty to force the fallback.
+        # Sets _T12B_STATUS and _T12B_DETAIL.
+        local _force="$2" _rc=0 _diag="$_MD/.t12_gate_diag"
+        local _pgid="" _victims="" _local="" _survivors=""
+        _T12B_STATUS=FAIL
+        _T12B_DETAIL=""
+        # A previous arm's state must not be mistaken for this one's:
+        # .forkrun_resume would make the pipeline resume instead of run,
+        # and a stale .hup_ready would satisfy the pidfile wait before
+        # the new pipeline exists.
+        rm -f "$_MD/.forkrun_resume" "$_MD/.t12_crash_hole" \
+              "$_MD/.t12_gate_timeout" "$_MD/.t12_gate_diag" \
+              "$_MD/.hup_ready" "$_MD/output1.txt" "$_MD/err1.txt"
+        if [[ -n "$_force" ]]; then
+            FORKRUN_T12_FORCE_FALLBACK=1 FORKRUN_T12_GATE_MAX=3 \
+                bash "$_MD/hup.sh" > /dev/null 2>&1 || _rc=$?
+        else
+            FORKRUN_T12_GATE_MAX=3 \
+                bash "$_MD/hup.sh" > /dev/null 2>&1 || _rc=$?
+        fi
+        if (( _rc == 0 )) || [[ ! -f "$_MD/.t12_gate_timeout" ]]; then
+            _T12B_DETAIL="forced gate did not time out (rc=$_rc, marker=$([[ -f "$_MD/.t12_gate_timeout" ]] && echo present || echo missing))"
+            return 0
+        fi
+        if [[ ! -f "$_diag" ]]; then
+            _T12B_DETAIL="timed out without diagnostics ($_diag missing)"
+            return 0
+        fi
+        if ! grep -qx 'reason: stability gate not reached' "$_diag"; then
+            _T12B_DETAIL="unexpected gate reason: $(sed -n 's/^reason: //p' "$_diag" | head -n 1)"
+            return 0
+        fi
+        _pgid=$(sed -n 's/^process_group: //p' "$_diag" | head -n 1)
+        _victims=$(sed -n 's/^fallback_victims: //p' "$_diag" | head -n 1)
+        _survivors=$(_t12_diag_survivors "$_diag" | tr '\n' ' ')
+        if grep -qx 'cleanup: complete' "$_diag"; then
+            _local="complete"
+        else
+            _local="leftover:$(sed -n 's/^cleanup_leftover: //p' "$_diag" | head -n 1)"
+        fi
+        if [[ "$_local" != "complete" ]]; then
+            _T12B_DETAIL="driver reported leftover after its teardown (${_local})"
+            return 0
+        fi
+        if [[ -n "${_survivors// /}" ]]; then
+            _T12B_DETAIL="driver said complete but these are still live:${_survivors}"
+            return 0
+        fi
+        if [[ -n "$_force" ]]; then
+            # Non-vacuity: the fallback arm must actually have taken the
+            # snapshot path and captured a set.  "cleanup: complete" over
+            # an empty victim list would prove nothing.
+            if [[ "$_pgid" != "unavailable" ]]; then
+                _T12B_DETAIL="fallback arm kept a process group ('${_pgid}')"
+                return 0
+            fi
+            if [[ -z "${_victims// /}" ]]; then
+                _T12B_DETAIL="fallback captured no victims (vacuous teardown check)"
+                return 0
+            fi
+            _T12B_DETAIL="$(echo "$_victims" | wc -w | tr -d ' ') fallback victims, all gone"
+        else
+            # A host with no safe process group cannot exercise this
+            # arm; say so instead of passing it vacuously.
+            if [[ ! "$_pgid" =~ ^[0-9]+$ ]] || (( _pgid <= 1 )); then
+                _T12B_STATUS=SKIP
+                _T12B_DETAIL="host produced no safe process group"
+                return 0
+            fi
+            _T12B_DETAIL="process group ${_pgid} empty"
+        fi
+        _T12B_STATUS=PASS
+    }
+
+    for _t12b_arm in group fallback; do
+        if [[ "$_t12b_arm" == "fallback" ]]; then
+            _t12b_name="T12b: forced-timeout teardown (fallback survivors)"
+            _t12_teardown_arm "$_t12b_arm" 1
+        else
+            _t12b_name="T12b: forced-timeout teardown (process group)"
+            _t12_teardown_arm "$_t12b_arm" ""
+        fi
+        ((TOTAL_TESTS++))
+        TEST_RESULTS["$_t12b_name"]="$_T12B_STATUS"
+        case "$_T12B_STATUS" in
+            PASS)
+                ((PASSED_TESTS++))
+                _print_result PASS "$_t12b_name" "$_T12B_DETAIL"
+                ;;
+            SKIP)
+                ((SKIPPED_TESTS++))
+                _print_result SKIP "$_t12b_name" "$_T12B_DETAIL"
+                ;;
+            *)
+                TEST_ERRORS["$_t12b_name"]="$_T12B_DETAIL"
+                ((FAILED_TESTS++))
+                _print_result FAIL "$_t12b_name" "$_T12B_DETAIL"
+                echo -e "    ${YELLOW}T12b gate diagnostics:${NC}"
+                sed 's/^/      /' "$_MD/.t12_gate_diag" 2>/dev/null
+                ;;
+        esac
+        # Keep THIS arm's diagnostics.  The driver always writes
+        # .t12_gate_diag, so without a copy the fallback arm overwrites
+        # the group arm's evidence.
+        if [[ -f "$_MD/.t12_gate_diag" ]]; then
+            cp "$_MD/.t12_gate_diag" "$_MD/.t12_gate_diag.${_t12b_arm}"
+        fi
+    done
 fi
 
 # --- T13: mid-claim worker death under ordered mode (stress form) ---
