@@ -45,19 +45,16 @@ case "$MODE" in
     OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fomit-frame-pointer -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC"
     WARN_FLAGS="-DNDEBUG -Wall -Wextra"
     LINK_FLAGS="-Wl,-O1 -Wl,--as-needed -Wl,-Bsymbolic"
-    DEPS=""
     ;;
   tsan)
     OPT_FLAGS="-Og -g -fno-omit-frame-pointer -fsanitize=thread -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC"
     WARN_FLAGS="-DNDEBUG -Wall -Wextra"
     LINK_FLAGS=""
-    DEPS="libtsan"
     ;;
   asan-ubsan)
     OPT_FLAGS="-Og -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC"
     WARN_FLAGS="-Wall -Wextra"
     LINK_FLAGS=""
-    DEPS="libasan libubsan"
     ;;
 esac
 

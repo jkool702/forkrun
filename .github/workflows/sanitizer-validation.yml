@@ -23,14 +23,37 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  prepare:
+    name: Select sanitizer modes
+    runs-on: ubuntu-latest
+    outputs:
+      modes: ${{ steps.select.outputs.modes }}
+    steps:
+      - id: select
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            m="${{ github.event.inputs.mode }}"
+          else
+            m="all"
+          fi
+          case "$m" in
+            all)        echo 'modes=["tsan","asan-ubsan"]' ;;
+            tsan)       echo 'modes=["tsan"]' ;;
+            asan-ubsan) echo 'modes=["asan-ubsan"]' ;;
+            *) echo "::error::invalid mode: $m"; exit 2 ;;
+          esac >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
   bash-sanitizer:
     name: Bash loadable (${{ matrix.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [prepare]
     strategy:
       fail-fast: false
       matrix:
-        mode: [tsan, asan-ubsan]
+        mode: ${{ fromJson(needs.prepare.outputs.modes) }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -92,10 +115,11 @@ jobs:
     name: Python substrate (${{ matrix.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [prepare]
     strategy:
       fail-fast: false
       matrix:
-        mode: [tsan, asan-ubsan]
+        mode: ${{ fromJson(needs.prepare.outputs.modes) }}
     steps:
       - uses: actions/checkout@v3
         with:
