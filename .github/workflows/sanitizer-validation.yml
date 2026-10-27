@@ -105,6 +105,7 @@ jobs:
           done
           test -f frun.san.bash
           grep -q 'exec .*bash.*norc' frun.san.bash
+          ! grep -q 'exec -c' frun.san.bash
           echo "provenance OK: embedded payload == freshly built sanitizer .so"
       - name: "Preflight: verify Bash sanitizer load"
         run: |
