@@ -127,7 +127,7 @@ jobs:
           sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"$GITHUB_WORKSPACE/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
           chmod +x /tmp/test_frun.san.sh
           grep -q 'FRUN_SOURCE=".*/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
-          bash -c "source \"$GITHUB_WORKSPACE/frun.san.bash\"; echo \"ring_version type: \$(type -t ring_version)\"; frun -V" || true
+          bash -c "source \"$GITHUB_WORKSPACE/frun.san.bash\" 2>&1; echo \"ring_version type: [\$(type -t ring_version)]\"; frun -V" 2>&1 || true
           bash /tmp/test_frun.san.sh
 
       - name: Upload scratch wrapper + blobs
