@@ -98,16 +98,32 @@ DOC_CLAIMS = [
         "assertion_summary": "workers < nodes bumped with UserWarning",
     },
     {
-        "claim": "Streaming bounded memory: slow consumer does not "
-                 "grow the parent",
+        # CORRECTED by WO-PY-REL-1. The old claim here was "slow consumer
+        # does not grow the parent", and STREAMING.md asserted "holds
+        # parent RSS flat (measured +0MB)". Neither survived a valid
+        # measurement: with current RSS sampled during consumption, the
+        # streaming parent retains ~0.50x the OUTPUT bytes, and that ratio
+        # is constant rather than the byte count being constant. The old
+        # test could not have caught it -- its 60MB bound sat above the
+        # measured collect-all figure for the same workload.
+        #
+        # What is now asserted is the property that is true and actually
+        # regressible: the parent retains materially LESS than a consumer
+        # that keeps everything. TD-13 records the rest.
+        "claim": "Streaming memory: slow consumer retains materially "
+                 "less than collect-all",
         "doc_source": "python/docs/STREAMING.md",
-        "key_phrase": "flat",
+        "key_phrase": "consumer that retains everything",
         "covering_tests": [
             "test_streaming.TestStreaming."
-            "test_slow_consumer_bounds_memory",
+            "test_slow_consumer_holds_less_than_collect_all",
         ],
-        "assertion_summary": "slow consumer holds only the in-flight "
-                             "window",
+        "assertion_summary": "streaming parent growth is less than a "
+                             "collect-all control run in every one of "
+                             "3 alternating paired measurements, and the "
+                             "median ratio is under 0.8x; measured as "
+                             "current RSS during consumption in an "
+                             "isolated process",
     },
     {
         "claim": "strict_poison raises ForkrunPoisonSkip; "

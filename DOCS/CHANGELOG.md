@@ -1,5 +1,763 @@
 # forkrun Changelog
 
+## v3.6.2 — unreleased
+
+(Version bump for the 3.6.2 / 0.18.0 release; closeout notes to follow.)
+
+## Unreleased — the child-lifecycle helper stopped blaming the wrong test
+
+**Test infrastructure, no product change.** `assert_no_zombies()` did a
+single `waitpid(-1, WNOHANG)` and reported the result as a "zombie
+leak". That conflates three outcomes, and the conflation had
+consequences beyond the wording:
+
+- `waitpid` returning `(0, 0)` means "a child exists and has **not
+  terminated**". A child that is still RUNNING is not a zombie. Worse:
+  because the child stayed alive, the check kept failing **every later
+  test in the run**. One test's leftover child failed **169 unrelated
+  tests**, and the failure MOVED between runs -- so it looked like a
+  production regression in a different place each time.
+- `waitpid(-1, ...)` reaps ANY child of the test process, including
+  one an **earlier** test left behind: that misattributes the failure
+  to whichever test runs next, and destroys the evidence that the
+  earlier test left the child.
+
+The helper now takes a `/proc` census of this process's direct
+children -- every THREAD's children -- and distinguishes the three
+outcomes: no children (pass), a child that has EXITED (reaped here, by
+pid, and reported as an unreaped terminated child), and a child still
+RUNNING (reported as a lifecycle leak, and NOT reaped -- it is still
+running). The assertion is **not** weakened: both faults were failures
+before and both are failures now. What changed is that the report
+names the child (pid, state, cmdline), and that a leftover is reported
+**once**, by the test that left it, so the real culprit is the one that
+fails.
+
+`python/tests/test_child_lifecycle_helper.py` pins the behaviour on a
+deliberately live child, an exited-but-unreaped child, a fully-reaped
+process, and the reported-once property.
+
+**The suspected production regression was not one.** The SIGINT
+checkpoint path was isolated and compared directly -- `test_resume_sigint`
+in a fresh process per round, same substrate and environment, against
+the pre-change implementation and the changed one, 30 rounds each -- and
+**both were green**. The failures were the harness reporting a leftover
+child and blaming whichever test ran next.
+
+## Unreleased — the duplicated DECISIONS are now single points of truth
+
+**Architecture, no behaviour change intended.** A function-level scan
+finds duplicated code; the expensive duplication is a decision written
+out INLINE, at the point where the rule is applied, which such a scan
+does not see. `tools/ssot_scan.py` (new) compares BLOCKS -- a function
+body and the body of every if/for/while/try/with/except -- after
+canonicalisation, and it found:
+
+- the rule "a helper child's death is fatal unless an abort already
+  explained it" was consulted in **2 of 28** places that apply it;
+- the C drain's "is this a failure?" decision -- also a helper child's
+  death -- was consulted in **none** of its **10** places.
+
+Both are now single points of truth:
+
+- `_helper_death_excused()` -- consulted by **all 24** helper-death
+  raise sites, including the ten C-drain sites that consulted it
+  nowhere and the two ingest-scanner sites that consulted it in five of
+  seven copies;
+- `_raise_for_drain(status, lib)` -- the C drain's failure decision,
+  ten copies -> one, with the excuse inside it;
+- `_teardown_orderer()` -- the C orderer's teardown, six copies -> one
+  (the NUMA copy did not consult the excuse; the helper does, so all
+  six get it);
+- `_spawn_c_orderer()` -- the C orderer's setup, six copies -> one;
+- `_reap_fallow()` -- the reaper's reap and its abnormal-exit warning,
+  four copies -> one.
+
+Not folded, deliberately: the fallow child's exit handling (one copy
+calls `fr_py_fallow_phys` where the others call `fr_py_fallow_loop` --
+a genuine semantic difference, not drift), and the checkpoint-on-abort
+handler (the two sites differ in their surrounding state, and the block
+is a 9-argument call).
+
+**A configuration dimension the first fold lost, and now keeps.** The
+orderer fold initially dropped the two NUMA callers' `numa=True` --
+`numa` is not decoration: it reaches the C orderer as the "numa"
+argument of `ring_order`, selecting the orderer's NUMA mode. The NUMA
+ordered paths were therefore running the default orderer mode, and no
+test noticed: `nodes="@2"` forces two LOGICAL nodes (cycling over the
+online physicals), so the NUMA executors do run on a single-node host,
+but the orderer's NUMA MODE is not observable in the output with one
+physical node -- the ordering comes out the same either way. The
+configuration was therefore checkable but its EFFECT was not, which is
+exactly why the regression survived a green gate. `_spawn_c_orderer()`
+now takes the configuration that varies and forwards it, and
+`python/tests/test_orderer_config.py` asserts that the NUMA executors
+ask for the NUMA orderer mode and the UMA ones do not.
+
+## Unreleased — a helper child's death is now decided in ONE place
+
+**Correctness, no API change.** The front end turns a helper child's
+non-zero exit into a fatal error in **28** places. D-PORT2/D6 taught
+that such a death is *expected* when an abort is already in flight --
+the child died as the abort's consequence, and re-aborting would print a
+spurious FATAL and clobber the abort's own outcome -- and it wired that
+rule into **2** of the 28. The other 26 had the same rule written out,
+or omitted it entirely, including the materialized plain path's inline
+scanner watch.
+
+**That is the failure mode the de-duplication exists to remove**: a fix
+lands in the copies its author happened to find, and lives on in the
+execution paths nobody looked at. The D-PORT2 commit's own wording --
+"both UMA scanner watches" -- shows the author believed there were two.
+
+**One decision point now.** `_helper_death_excused()` holds the rule,
+and every one of the 28 sites asks it, so the next change to the rule
+lands everywhere by construction. The sites keep their own shape: what
+the executor does next (abort, raise) stays with the caller.
+
+**The order is part of the rule, and is now checked.** A consult placed
+AFTER the abort always sees "excuse" -- the reason the abort just
+published -- and so swallows a *genuine* helper failure silently.
+D-PORT2 says so: "query the abort reason BEFORE the handler's own
+abort -- the order is the fix". `python/tests/test_helper_death_excuse.py`
+asserts that every helper-death site asks the shared decision AND that
+the consult precedes the abort in its block. Both are mutation-checked:
+unwiring one site fails the first, moving one consult after its abort
+fails the second.
+
+## Unreleased — the cleanroom's UDF route can import a C extension again
+
+**Correctness and performance, no API change.** The cleanroom's
+`mode="udf"` route could not import **any** CPython extension module.
+The launcher loaded the per-minor helper with `RTLD_LOCAL`, so
+libpython's symbols never entered the global namespace — and since
+CPython 3.8 on Unix, extension modules resolve libpython's symbols
+(`PyFloat_Type` and friends) out of the **global** namespace at load
+time. CPython's own embedding guidance is explicit: libpython must be
+loaded with `RTLD_GLOBAL` when Python is embedded, precisely because C
+extensions no longer link libpython directly.
+
+**The mechanism.** `forkrun_cleanroom.c` now loads the real helper with
+`RTLD_GLOBAL`. The **disposable probe** load is unchanged
+(`RTLD_LOCAL` — it is a throwaway child whose only job is to prove the
+artifact loads), as are the plugin probe and the substrate load;
+neither is CPython-linked. The wider symbol scope is confined to the
+launcher's own address space: the launcher is a separate, `exec`'d
+process, so the caller's Python process is untouched.
+
+**What it broke, and how quietly.** Two consequences, and the second is
+the more dangerous one because it is **silent**:
+
+- A UDF importing `math`, `re` or `numpy` returned **ZERO records and
+  NO exception** — every batch poisoned, with nothing naming the cause
+  in the caller's visible output.
+- `json` still imported, but **without its C accelerator**, so
+  `json.loads` ran 13.19us instead of 2.88us — **4.6x slower**, with no
+  diagnostic of any kind.
+
+That second effect was the *entire* throughput gap of the route: on a
+json-per-record payload the cleanroom's `map-udf` route measured
+3.65x–4.6x slower than the in-process path, and only 1.5x slower on a
+payload that does no json at all. The route's own overhead is ~30ms of
+start-up plus a per-batch cost *smaller* than the in-process path's.
+
+**After the fix**, with the A/B arms alternating per rep, the route is
+at **parity** (0.975x–1.038x across 1–28 workers) and keeps its memory
+advantage: with a 599MB parent at 28 workers the in-process path's tree
+RSS is 16.4GB against the cleanroom's 1.1GB. The route is now strictly
+better than the path it would replace — the same speed, less memory,
+and a UDF that keeps its extensions.
+
+**Why the suite never saw it.** Two reasons, and the second is the
+worse one. Its UDF fixture is **pure Python** (`b.upper()`,
+`import sys`) and imports no extension at all, so a hundred green UDF
+tests were compatible with the route being unable to import `math`. And
+those hundred tests were **not running**: a test module restored the
+ambient `FORKRUN_CLEANROOM` by *deleting* it, so every later test that
+gated on it **skipped** — including the whole end-to-end UDF suite, in
+the gate pass that runs with the flag set. A green gate was not
+evidence.
+
+Both are closed. `python/tests/test_udf_extension_import.py` adds a
+fixture importing `math` and `re` **at module level**, a deterministic
+witness that the C accelerator is loaded
+(`json.decoder.scanstring.__module__ == "_json"`, not a timing), a
+byte-for-byte comparison of the two arms, and an explicit
+no-poisoned-batches assertion; it **owns its precondition** rather than
+gating on ambient state. The restoring test module now restores the
+saved value instead of deleting the variable. The gate counts show the
+revival: 1446 -> 1451 tests with the flag off, 1446 -> 1458 with it on,
+both passes OK. Reverting the loader flag makes all five new tests
+fail.
+
+**The loader policy is recorded, not incidental.** The helper's exported
+dynamic symbols were inspected: 15 of them, all prefixed `fr_udf_*`.
+Symbol visibility is **not** treated as a security boundary here — the
+boundary is the separate process, the interpreter's isolated config,
+and the explicit root allowlist.
+
+**This was a Python-frontend drift from the bash reference.** The bash
+side's helper runner `fr_udf_fork` is *linked* against libpython, so
+its symbols were global from the start and extension imports always
+worked there; the bash frontend does not use `_forkrun_cleanroom` at
+all. The fix restores parity with the frozen reference rather than
+inventing a policy.
+
+**Not claimed.** The `mode="udf"` **fallback** defect is separate and
+still open: with a helper built, `mode="udf"` raises
+`NotImplementedError` unless the route is explicitly selected, rather
+than taking the documented in-process fallback. The route stays
+**opt-in**, and the default-on decision stays uncommitted.
+`dev/supervisor/UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` has the full
+analysis.
+
+## Unreleased — `mode="udf"` falls back when the route is not selected
+
+**The fallback now exists in every case it is documented for.** The
+`map-udf` route is served by the cleanroom launcher; the in-process
+executors accept only `mode="python"` and `"splice"`. When the route
+is not selected for a call — the helper is not built for this minor,
+**or** the cleanroom is off (the default), **or** the call is not one
+the launcher serves — `mode="udf"` now degrades to the documented
+in-process path instead of raising:
+
+    NotImplementedError: v0 supports mode='python' only
+
+The helper's existence is not what decides this: a helper built for
+this minor says the isolated path is *possible*, not that it was
+*chosen*. Confusing the two is what made the default configuration
+raise. The decision now has one authoritative implementation
+(`_coerce_payload_inprocess`), used by every in-process call site, so a
+future caller cannot forget it.
+
+`stream()` resolves the spec only AFTER the cleanroom has had its
+chance, so the user's module is still imported in the isolated helper
+whenever the launcher serves the call — resolving it in the parent
+would put the user's state into the process that forks every worker.
+
+Tests: `python/tests/test_udf_fallback.py` (15 tests, mutation-checked).
+Work log: `dev/supervisor/WO_PY_UDF_FALLBACK_1_WORKLOG.md`.
+
+## Unreleased — the Python-UDF helper ships in a per-minor wheel
+
+**Packaging, no API change.** The cleanroom's optional Python-UDF helper
+(`_fr_udf`, a separate CPython-linked shared object) was built by the
+Makefile but **listed nowhere** in `setup.py`'s `package_data`, and the
+wheel was tagged `py3-none-<platform>`. So a wheel install silently had
+**no UDF accelerator** — the same class of bug as CR-FIX1-I, where the
+cleanroom launcher was "listed NOWHERE" and a wheel install silently had
+no cleanroom at all. And `DECISION-01` §6.2.1's warning applied
+verbatim: *"a wheel built from an sdist on one machine and tagged
+`py3-none` would carry a different minor than its tag claims, with
+nothing in the artifact to prove it."*
+
+**The wheel's python tag now follows the HELPER, not the running
+interpreter.** The helper's extension suffix *encodes* the minor it was
+compiled against (`_fr_udf.cpython-314-x86_64-linux-gnu.so` -> 3.14), so
+a helper built for a different minor has a different NAME and is simply
+not found. That is what makes a mismatched build safe: it cannot
+produce a wheel that claims the wrong minor.
+
+- helper for this interpreter present -> it ships, and the wheel is
+  tagged `cp3XX`;
+- otherwise -> no helper ships, and the tag stays `py3-none-<platform>`,
+  so the substrate wheel remains interpreter-agnostic.
+
+This satisfies "keep the source-only development path honest: do not
+advertise a locally built helper as present in a generic ABI-independent
+wheel" **by construction**: the tag is never `py3-none` while a helper
+is present. A plain `_fr_udf.so` (no suffix) is deliberately NOT
+shipped — its minor cannot be established from its name — while the
+runtime fallback still finds it in a source checkout, so the development
+path keeps working.
+
+`tools/build_wheel.sh` now accepts a `cp3XX` tag (the old glob
+`forkrun-*-none-*.whl` rejected one outright), refuses to choose between
+two wheels, and requires the python tag and the shipped helper to agree:
+a `cp3XX` wheel with a mismatched helper, or a `py3` wheel carrying
+one, is a lying tag and fails the build.
+
+**The ABI tag, which is not the same thing as the version tag.** `cp314`
+names a python VERSION; the ABI tag names the ABI. A free-threaded
+CPython 3.14 links `libpython3.14t.so.1.0` where a GIL one links
+`libpython3.14.so.1.0` — different sonames, so a helper built for one
+cannot be loaded by the other — and the free-threaded extension suffix
+(`cpython-314t-...`) *contains* the GIL one, so a substring check on
+the minor alone accepts it. Meanwhile the loose ABI tag `none` means "no
+ABI constraint", and `packaging`'s own tag generator gives a
+free-threaded 3.14 a set that includes `cp314-none-<platform>` exactly
+as a GIL 3.14's does — so a GIL-built helper in a `none`-ABI wheel
+advertises compatibility with an interpreter that cannot load it.
+
+**Free-threaded CPython is NOT supported for this helper route**, and
+**both layers now decline it**. The packaging ships no helper for such a
+build and keeps the generic `py3-none` tag — and so does the RUNTIME,
+which refuses a free-threaded interpreter's helper outright. The runtime
+has to be the one that decides: the version barrier compares only
+`major.minor` (the build stamp carries no free-threading bit), so the
+two flavours of a minor are indistinguishable to it, and a packaging-only
+refusal would have left a free-threaded source checkout using an
+unmeasured configuration. The policy now lives in ONE place —
+`forkrun/_udf.py` — and `setup.py` asks its answer rather than keeping
+a second copy of the rule; a test asserts the two agree. The reasons are structural, not
+caution — the helper links a different `libpython` soname, the
+interpreter matrix fetches GIL builds only, and the launcher has never
+been exercised against a free-threaded build. A wheel that DOES ship the
+helper now carries the **real** ABI tag (`cp314-cp314`), so its
+compatibility set is exactly the interpreters that can load it: accepted
+by a GIL 3.14, **rejected** by a free-threaded 3.14, where the old
+`cp314-none` was accepted by both. If free-threaded is supported later
+the tag becomes `cp314-cp314t`; the two directions are distinguishable,
+so today's position is a policy and not a limitation of the tagging.
+
+**Also fixed: the C0.5 interpreter matrix could not build a single
+per-minor driver.** `tools/matrix_c05.sh`'s manual gcc line was missing
+`-I"$ROOT"`, and `forkrun_udf_version.h` (the build stamp the launcher
+and the helper must agree on) lives at the REPO ROOT. Every per-minor
+build had been failing on it — and the failure was **invisible**,
+because the lifecycle sweep then measured the STALE driver left over
+from a previous run. The harness now removes the old driver before
+building, and the sweep refuses to measure a driver this run did not
+produce.
+
+With that fixed, the matrix is **green on all six minors** (3.10-3.15):
+the verdict probe passes, the control probe is DIRTY as required (so the
+probe is not vacuous), and the respawn probe is CLEAN (a respawned
+generation inherits no interpreter state). The lifecycle curves are now
+measured on fresh drivers: pre-fork faster on **48/48 configurations on
+each** of the five fetched minors, medians 2.84x-3.59x.
+
+**One naming correction.** The roadmap's prose named the launcher's
+version argument `--caller-minor=3.X`; the implemented and REVIEWED name
+is `--caller-version=MAJOR.MINOR` (`REVIEW_REQUEST_ROUND12/13` record
+it as a new required argument, added as a condition of approval). The
+implementation under review is authoritative, so the PROSE was corrected,
+not the code.
+
+## Unreleased — the stream notification pipe is a window, not a queue
+
+**Performance/memory, no API change.** The worker-completion notification
+pipe on the public `stream()` paths now asks for **4 KB** instead of 1 MB.
+The capacity of that pipe is not a tuning knob — it *is* the producer's
+run-ahead window.
+
+**The mechanism.** A worker that finishes a batch writes one 16-byte
+notification; the parent reads them. The pipe holds N notifications, so N
+is how many completions may be outstanding before a worker blocks writing
+its notification — and a blocked worker cannot claim its next batch. The
+per-worker output memfds have no backpressure of their own (a memfd does
+not push back), so this pipe is the **only** thing bounding how far a
+worker may run ahead of the consumer. At 1 MB that bound was 65536
+completions: wide enough that the bound was not a bound. At 4 KB it is
+256 — the same order of window the bash frontend's ack pipe uses
+(`ORDER_PIPE_SIZE=4096`, the H3 backpressure invariant), which is the
+conceptual reference for this change.
+
+**What changed, exactly.** `forkrun/_pipes.py` gains a named
+`STREAM_NOTIFY_PIPE_SIZE` (4096) and `make_stream_notify_pipe()`. The five
+`stream()`-reachable executors use it: `_execute_streaming`,
+`_execute_ingest_stream`, `_execute_streaming_reactor`,
+`_execute_ingest_stream_reactor`, `_execute_numa_stream`.
+
+**What did not change.** The `map()`/`run()` executors still ask for 1 MB:
+they collect every result, so there is no slow consumer to run ahead of.
+The C-drain results pipe keeps its own capacity — it is a *separate*
+backpressure stage, and shrinking it too would confound the experiment.
+Order pipes, trap-ACK pipes, fallow, spawn, death and escrow pipes are
+untouched, as is `make_pipe()`'s general default. The bash frontend is
+untouched.
+
+**Correctness fix in the same change.** `fr_py_notify_committed()` returns
+`FR_PY_ERR_NOTIFY` (-4) to mean *committed but not notified* — explicitly
+not an ordinary retryable payload error, and explicitly "NEVER a plain
+retry". The Python worker loop special-cased `-2` and `-3` but let `-4`
+fall through to the generic output-error path, which reaches the
+`on_error` ladder's **retry** branch. That branch re-arms the batch for a
+same-process re-claim: it retries work whose commit already happened.
+The shipped C worker loop treats *any* nonzero `fr_py_complete` rc as
+fatal for exactly this reason; the Python loop now does too.
+
+**Not claimed.** This is **not** a hard byte bound on a stream, and it does
+not close TD-13. A single batch can still generate large output, and
+`order="index"` can still buffer behind a poisoned or skipped head. The
+measured effect is a reduction in peak retention for a slow consumer; the
+exact figures and the residual limitations are recorded in TD-13.
+
+## Unreleased — the reactor no longer loses a poison notification on its way out
+
+**Correctness fix, no API change.** `poisoned` and `poisoned_batches` are
+read from two different places: the scalar from the engine, the index list
+from the trap-ACK pipe the worker writes its `P:<idx>:<kills>` notification
+to. When the supervision loop ended with that notification still buffered,
+the run reported a non-zero `poisoned` count beside an **empty**
+`poisoned_batches` list — two incompatible stories about one run, which is
+exactly what the index list exists to prevent.
+
+**The window.** The death pipe is the reactor's primary death detector, but
+`reap_clean_exits()` is an out-of-band `waitpid(WNOHANG)` backstop that can
+observe a worker's exit in a round whose `select()` snapshot *predates* that
+worker's write. The parent then learns of the death through `waitpid` while
+the notification arrives through the pipe, and the loop reaches its
+termination branch in between. The notification arms no trap-ACK grace
+deadline, so unlike the `<wid>` graceful-failure ACK nothing else kept the
+run alive on its behalf.
+
+The window is microseconds wide in normal operation, so this presented as a
+rare flake rather than a constant failure — one occurrence was caught by
+`test_fault.test_map_return_stats` inside a full-suite run and reproduced on
+demand only by delaying the backstop sweep. Measured with the delay in place
+and the fix absent, the notification was lost on 47–58 runs in 60 across the
+worker and line-batch combinations tried; with the fix in place it was lost
+on none of them.
+
+**The fix.** The supervision loop now drains the trap-ACK pipe before it
+leaves, so a notification that arrives in the gap between the round's
+`select()` and the out-of-band exit sweep is still accounted for. The drain
+is non-blocking by construction: readability is checked with a zero-timeout
+`select()` first, and a read is issued only when there is something to take.
+
+**Coverage.** `test_poison_accounting.TestPoisonNotificationSurvivesTeardown`
+widens the window deliberately and asserts the count and the list describe
+the same run. A companion test asserts the widener is actually in force, so
+the regression cannot go vacuously green if the sweep stops being called.
+
+## Unreleased — F6 Stage 4: `posix_spawn` is the default cleanroom launcher
+
+**Behaviour change, no API change.** The cleanroom routes now start the
+launcher with `os.posix_spawn()` instead of `os.fork()` + `os.execv()`.
+There is no new keyword and no new environment variable: the backend is not
+a caller-facing knob, and `FORKRUN_CLEANROOM` keeps exactly the meaning it
+had. `fork()` + `execv()` remains in the tree as a private fallback.
+
+**What a caller should expect.** Results, ordering, supervision, poison
+accounting, signal dispositions and the environment are unchanged — the
+descriptor contract was held to equivalence deliberately rather than
+tightened. What changes is the failure mode of a host that runs with a
+standard stream already closed, and the cost of launching from a
+large-heap process:
+
+* **Correctness fix — standard-stream descriptors.** The route now relocates
+  its own descriptors above the fd 0/1/2 gap before handing them to the
+  launcher, and does so with `fcntl(F_DUPFD, 3)` rather than `dup()`. `dup()`
+  returns the *lowest free* descriptor, so it could relocate a descriptor
+  straight back into the gap; the streaming result pipe had not been
+  relocated at all. A route descriptor landing on a standard-stream number
+  made the launcher read the wrong bytes as input — a well-formed result
+  computed from the wrong data, with no error and no non-zero exit. With a
+  stream closed, the routes now return the correct records with the correct
+  payload, where the materialised route previously could return nothing at
+  all.
+* **Performance, conditional on the caller.** `fork()` cost scales with the
+  parent's address space when that space is private anonymous memory —
+  ordinary CPython arena growth. End to end on a 200k-record `map()`:
+  −1.8% with a small parent (noise), −22.5% at 1 GiB, −32.9% at 2 GiB.
+  Those three figures are the first end-to-end measurement (5 samples, no
+  paired trials). A later controlled run — 15 paired/interleaved
+  repetitions, one process per mapping type, with the ballast's mapping
+  verified from the VMA permission word — measured **−31.6% at 2 GiB**,
+  within the same band.
+  Callers with a small parent should expect no measurable change.
+* **Compatibility.** `os.posix_spawn` is provided by libc, so it is present
+  wherever `fork`/`exec` are; the module checks for the attribute and uses
+  `fork()`+`execv()` if it is somehow absent. There is deliberately **no**
+  fallback if a spawn fails at runtime — that is reported through the
+  existing exit-127 path rather than silently re-running the work.
+
+## Unreleased — WO-CR-ROI-2: `map(plugin)` is default-on
+
+**Behaviour change.** When `FORKRUN_CLEANROOM` is unset, `map(plugin)` now
+runs through the exec-based cleanroom launcher. `udf`, `spawn`,
+`stream(plugin)` and `stream(udf)` are **unchanged** and still opt-in.
+
+To return to the previous behaviour: `FORKRUN_CLEANROOM=0`.
+
+### Per-route gate
+
+`FORKRUN_CLEANROOM` was a single boolean, so "turn it on" enabled five
+envelopes at once. It is now a **route** selector:
+
+    unset                     map-plugin only (the new default)
+    0 / no / off / false / "" disable, all routes
+    1 / yes / on / true / all every eligible route (legacy, unchanged)
+    map-plugin                one route
+    map-plugin,map-udf        a subset
+    unknown route or bad value  ValueError
+
+Route names: `map-plugin`, `map-udf`, `map-spawn`, `stream-plugin`,
+`stream-udf`. An unknown value raises rather than being treated as "on" —
+a typo must not silently widen the blast radius.
+
+The false aliases (`0`, `no`, `off`, `false`, `""`, case-insensitive and
+whitespace-tolerant) are unchanged from before, and remain the documented
+way to restore the old behaviour. They are checked **before** route
+parsing, so they keep working; `test_off_values_disable_even_the_new_default`
+pins that they disable the new default too.
+
+Note the selector is **per route, not per mode**: `plugin` would still
+have enabled both `map(plugin)` and `stream(plugin)`.
+
+Unset-on is **not** asked-on: `FORKRUN_CLEANROOM` unset reports
+`explicit=False`, so a user who never requested the cleanroom is not
+warned when a call cannot use it.
+
+### Why
+
+All four blockers in `CLEANROOM_DEFAULT_ON_DECISION.md` are closed:
+
+* **Route proof for all five routes.** `python/tests/test_cleanroom_routes.py`
+  replaces the launcher path with a wrapper that records its own `exec`
+  and then `exec`s the real binary. Output-only assertions are not
+  sufficient: they pass identically when the launcher is missing and the
+  call falls back in-process. Mutation-verified — forcing the launcher
+  to "missing" turns these red.
+* **Per-route gate** (the original structural blocker).
+* **Performance re-measured.** `benchmarks/bench_cleanroom_default_on.py`,
+  paired interleaved A/B, exactness guard, same in-repo plugin the route
+  tests build: startup **1.77x**, startup + 512 MB parent ballast
+  **2.34x**, throughput (400k records) **1.16x**, in-process/cleanroom.
+  No measured regime regresses. This falsifies the old "it is slower"
+  rationale for keeping the default off.
+* **Packaging.** `forkrun/_forkrun_cleanroom` ships inside the manylinux
+  wheel, so the default is not a no-op for installed users.
+
+### Compatibility and failure mode
+
+* Missing or unexec'able launcher → falls back in-process, i.e. the old
+  behaviour. A broken install degrades, it does not fail.
+* `mode="python"`, multi-node, `stream(spawn)`, `resume=` and
+  `checkpoint_file=` are untouched and still decline.
+* `stream(spawn)` has no route identifier, because it has no dispatch; a
+  selectable-but-dead route is indistinguishable from being ignored.
+
+## Unreleased — CR-FIX1: the Python cleanroom launcher, hardened
+
+Scope: the UMA C-plugin cleanroom only. NUMA, Python UDF, a libpython
+helper and dynamic worker spawning are explicitly NOT implemented and
+remain future work.
+
+### Python UDF: carrying vs reachability (CR-FIX1)
+
+`CLEANROOM_HANDOVER.md` recorded Python UDF as "Structurally impossible;
+do not attempt it". That ruling is **correct about carrying and incorrect
+about reachability**, and is superseded in part.
+
+A UDF callable is a live Python closure, and crossing `exec` destroys an
+object graph — so a *closure* still cannot cross, and coverage stays
+materialized + C plugin for that form. But `exec` does not prevent the far
+side from **re-creating** an interpreter and re-importing a **module
+reference**, which is exactly what `frun.bash` already does for the shell
+(`exec -c bash --norc --noprofile`, with `_FR_IN_CLEANROOM=1` as a
+recursion guard).
+
+A module function reference is therefore reachable, and is the
+`mode="python"` work item (Option A: an optional helper `.so` linking
+CPython, `dlopen`ed by the launcher only in that mode — substrate and
+launcher stay Python-free). "Reachable" is not "cheap": the seam set
+`CLEANROOM_DESIGN.md` prices is the real work.
+
+Updated `CLEANROOM_HANDOVER.md` to carry the distinction rather than the
+absolute, so the reason a closure cannot cross stays findable.
+
+
+**Opt-in structured trace of the launcher (C0.2 Phase A).** Set
+`FORKRUN_CLEANROOM_TRACE=1` and each run records a monotonic timestamp,
+pid, role, event, worker `wid`/`wincarn`, node and result code to a memfd
+inherited by every child — enough to reconstruct a stalled run as a
+pid/role/fork/reap/abort story instead of reverting the instrumentation
+that produced it. Off by default; with it off the emit path costs no
+syscall and no allocation. **No user payload bytes ever enter the
+channel**, asserted by a test that plants a marker in the input and
+searches the trace for it.
+
+The trace memfd **must** be opened `O_APPEND`, and that is measured rather
+than assumed: with `os.fork`, 16 children and one 64-byte record per
+`write`, a shared file offset recovered 25,962 of 320,000 records — 92%
+silently lost — while `O_APPEND` recovered all 320,000 with zero torn
+records. The facility exists to diagnose *concurrent* stalls, so without
+it the trace would discard most of its evidence exactly when needed, and
+discard it silently: a short well-formed file reads as "fewer events"
+rather than as data loss.
+
+Scope is the launcher only. The orderer is never forked by the launcher
+(`ring_order` has zero occurrences in `forkrun_cleanroom.c`), so its
+events cannot be produced here; the in-process path and orderer coverage
+are Phase B and require revisiting the frozen engine.
+
+### Correctness
+
+**Fatal teardown is bounded (was: an unbounded hang).** On the failure
+path the launcher killed its workers and then walked into a *blocking*
+`waitpid` for the spill child, which is never signalled and sits in
+`read()` on the caller's descriptor. A caller whose source pipe writer
+stayed open — every streaming caller mid-run, every abandoned run —
+therefore got a launcher that never returned. Fatal teardown now
+signals the whole live set (workers *and* every helper, spill included)
+and reaps non-blocking. Measured, same source and producer state:
+
+| | outcome |
+|---|---|
+| pre-fix | **still running after 20 s** |
+| post-fix | exit 1 in **0.114 s** |
+
+Reaped worker PIDs are also invalidated in `pids[wid]` at the moment they
+are reaped and refilled only on a real respawn, so fatal cleanup signals
+only known-live children.
+
+**Fallback is replay-safe (was: silent truncation).** `os.dup()` shares
+the open file description, so after the launcher ingested from a
+caller-supplied descriptor, that descriptor was advanced and the
+in-process retry resumed mid-input — returning a truncated result with
+exit 0. Fallback is now refused with an explicit error unless the source
+is a path (reopenable) or the launcher provably failed before ingestion.
+The exit codes that mean "pre-ingestion" are enumerated: 64, 69, 71, 78.
+Exit 70 (`die()`) is deliberately excluded — it fires both before the
+spill fork and after it — and signal deaths are treated as indeterminate.
+
+**The capability probe no longer forks from an unsafe process.** `dlopen`
+runs a plugin's ELF constructors in whatever process calls it. The
+launcher's probe called it in-process, so a constructor that started a
+thread left a thread behind and every subsequent fork died. Measured with
+such a plugin: **SIGSEGV**. The probe now runs in a disposable
+subprocess with a bounded wait; that plugin now completes normally
+(exit 0, full output). A probe that never completes exits **79**, which
+*suppresses* fallback — the in-process path would `dlopen` the same
+plugin in the caller and reproduce the failure with no launcher to bound
+it.
+
+**`map()` can no longer silently ignore `resume=`/`checkpoint_file=`.**
+The shared predicate's refusal for both was nested under
+`if streaming:`, and the `map()` call site never passed the arguments —
+so the check could not execute. Both are now refused unconditionally,
+above the streaming block.
+
+**Spill writes complete or fail.** A single `pwrite()` treated any
+result other than a complete write — including `-1`/`EINTR` — as fatal.
+Now a positional-write loop: `EINTR` is retried and partial writes
+advance both buffer and offset, so a legal short write no longer
+terminates a healthy run.
+
+### Correctness of the descriptor model
+
+**Every child inherits the engine descriptors.** The spill, fallow and
+scanner children kept only their own data descriptors, so
+`fr_py_ingest_data_post()` and every scanner eventfd poke were writes to
+closed descriptors — silently dropped, because `sys_write` ignores its
+return value. The keep-list policy is now a single role-aware helper.
+
+**Scrubbing covers the whole descriptor space.** The old loop ran
+`for (fd = 3; fd < 1024; fd++)`, which is not a close-all-except policy.
+Now `close_range()` over the gaps between sorted keep-list entries
+(extending to `UINT_MAX`, the syscall's own argument ceiling), falling
+back to `/proc/self/fd` enumeration. `RLIMIT_NOFILE` is a cross-check,
+never the authority.
+
+**A truncated or failed descriptor snapshot fails the run.** `snap_fds`
+stopped at a fixed 64 entries and returned a count the caller could not
+distinguish from a complete snapshot; a short snapshot meant children
+silently lost eventfds. Truncation and `readdir` failure are now
+reported and fatal. The fixed table grew to 256.
+
+A new `--fd-selfcheck` flag makes each child verify its own keep-list
+with `F_GETFD` after scrubbing, so a lost descriptor fails loudly rather
+than degrading the run to polling.
+
+### Performance
+
+The fixed ~100 ms startup overhead is **gone**. Paired interleaved A/B,
+medians, 28 workers, UMA, byte-exact output asserted identical on both
+sides (5020240 bytes every run):
+
+| variant | startup (2000 recs) | light_5M throughput |
+|---|---|---|
+| pre-fix | 107.06 ms (44 ms cpu) | 232.2 ms (858 ms cpu) |
+| scanner descriptors only | 3.30 ms (21 ms cpu) | 227.9 ms (1652 ms cpu) |
+| full fix | 3.41 ms (21 ms cpu) | 192.9 ms (1840 ms cpu) |
+
+* **startup 32.5x faster** — the scanner omission accounted for all of it
+* **throughput 1.20x faster** — the spill omission gave the scanner back
+* **CPU 858 -> 1840 ms**, which is not a regression: effective cores rose
+  from 3.7 to 9.5 while finishing 20% sooner. That is the intended
+  behaviour — workers doing work instead of sleeping on a poll timeout.
+
+The previously recorded "circular wait" diagnosis (spare signal/fallow
+pipe write ends) is **refuted**: those spares are closed only after the
+supervision loop exits, and the loop exits when `live == 0`, i.e. after
+every worker has already terminated.
+
+The symptom was both latency *and* a hot core: the scanner's pre-flight
+`poll()` over a closed descriptor returns `POLLNVAL` immediately, and
+that path does not check for it, so the pre-flight spun rather than
+sleeping.
+
+### Parent-RSS scaling, re-measured after CR-FIX1
+
+The W-CR6 figures ("parent RSS is the dimension that matters") were taken
+*before* this pass and described a launcher with a fixed ~100 ms of
+overhead. That overhead is gone, so the curve moved and is recorded here
+in both THP regimes. Method: `python/benchmarks/bench_cleanroom.py`,
+paired interleaved A/B, medians, 28 workers, UMA, `--orchestrator`,
+exact record counts asserted on every pass; i9-7940X, 14c/28t.
+
+**Startup** (2000 records), and **end-to-end** (light_5M):
+
+| parent RSS | startup, THP=never | startup, THP=always | e2e, THP=never | e2e, THP=always |
+|---|---|---|---|---|
+| 30 MB | 16.24 -> 6.34 ms (2.56x) | 17.37 -> 11.05 ms (1.57x) | 294.5 -> 203.8 ms (1.45x) | 264.0 -> 168.9 ms (1.56x) |
+| 554 MB | 118.9 -> 15.3 ms (7.78x) | 200.6 -> 27.0 ms (7.43x) | 330.6 -> 212.9 ms (1.55x) | 349.9 -> 189.4 ms (1.85x) |
+| 2127 MB | 454.7 -> 42.4 ms (10.74x) | 734.8 -> 71.7 ms (10.25x) | 665.6 -> 248.3 ms (2.68x) | 863.3 -> 228.3 ms (3.78x) |
+
+Two findings worth separating, because they point in opposite directions:
+
+* **THP costs the launcher a fixed init charge.** Absolute startup gets
+  worse under `shmem=always` at every RSS level (6.3 -> 11.1 ms at the
+  floor). Allocating and zeroing a 2 MB huge page lands inside a short
+  run's critical path, and the in-process path overlaps that charge with
+  ~17 ms of other startup work, which is why the 30 MB *ratio* compresses
+  from 2.56x to 1.57x while the 2 GB ratio barely moves.
+* **THP saves the launcher proportional work.** Throughput is better
+  under THP everywhere, and the ratio *widens* with parent size
+  (2.68x -> 3.78x at 2 GB) because the in-process arm degrades faster as
+  the address space grows.
+
+The cleanroom wins in both regimes at every RSS measured. The 30 MB row
+is not a crossover but the **floor** -- interpreter plus substrate, the
+smallest parent a real caller has -- so the crossover sits at or below
+any real Python process. That is the "negative crossover" W-CR6 claimed
+for the pre-CRFIX1 launcher; it is now reached rather than predicted.
+
+
+### Tests
+
+`python/tests/test_cleanroom.py` is self-contained. The primary fixture
+pointed at a hardcoded `/tmp/opencode/mlbench/ml_plugin_light.so` that no
+build target produces, so **37 of 58 tests skipped** by default and one
+errored. It now builds the in-repo fixture at **module scope** — not in
+`setUpModule`, because `@skipUnless` decorators evaluate at import and
+the fix would have appeared to work while still skipping everything.
+
+* **58 tests, 37 skipped, 1 error** -> **70 tests, 0 skipped, 0 failures**
+
+New coverage: the exit-status contract and replay-safety rule; the
+open-pipe fatal-teardown regression (the producer deliberately never
+closes the pipe); descendant cleanup after a fatal run; descriptor
+self-check; unrelated descriptors above 1023.
+
+### Packaging
+
+The launcher is now listed in `package_data`, so it ships in the wheel.
+It previously shipped in neither wheel nor sdist, making `pip install
+forkrun` silently different from a source checkout. The `setup.py` gcc
+fallback builds it too — it used to stop at the substrate. The tracked
+binary is now gitignored and removed by `clean`/`clean-python`; it was a
+stale copy that could be run in place of the source it was built from.
+
+Two build gates fixed: `tools/check_canary_versions.py` concatenated a
+2-tuple with a list before formatting it with two numeric specifiers, so
+every above-floor finding raised `TypeError` instead of being reported —
+a gate that crashes is not a gate. `tools/gen_shim.py` hardcoded the
+extern count as `45` while the header carried `50`; the count is now
+derived from the same data the declarations come from.
+
 ## v3.6.1 — 2026-10-06
 
 ### Verification

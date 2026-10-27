@@ -1,5 +1,24 @@
 # forkrun — Python frontend performance work
 
+> **Read before changing the Python front end.**
+> `dev/supervisor/SSoT.md` is the mandatory **Single Source of Truth**
+> policy: one correctness-critical decision, one authoritative
+> implementation, any number of consumers. It governs the decisions a
+> change introduces, modifies or relies on — it is not a licence to
+> audit the tree.
+>
+> Its worked example (section 11) is the case that motivated it: the
+> abort-aware helper-death rule was wired into **2 of the 28** places
+> that apply it, because the other 26 copies were *inline* and a
+> function-level duplicate scan cannot see them. Two tools make the
+> policy actionable:
+>
+> - `tools/ssot_scan.py` — finds the duplication. It compares statement
+>   **blocks**, not function bodies.
+> - `python/tests/test_helper_death_excuse.py` — the architecture test
+>   that keeps the invariant: every helper-death site routes through
+>   the shared decision, and the consult precedes the abort it guards.
+
 ## Status (2026-10-02)
 
 Branch `NEW/REFACTOR3.2`, built on `NEW/REFACTOR3.0` + `3.1`:
@@ -105,6 +124,21 @@ on a bigger corpus before believing it.
 
 ## Traps hit (do not repeat)
 
+- **A supervision loop must drain its notification pipe before it
+  leaves.** The reactor's `poisoned` scalar comes from the engine and the
+  `poisoned_batches` list comes from the trap-ACK pipe, so a notification
+  still buffered when the loop ends gives one run two descriptions: a
+  non-zero count beside an empty list. The trap-ACK *grace deadline* is
+  what keeps the loop alive for the `<wid>` ACK; the poison notification
+  arms no deadline, so nothing kept the run alive for it. The window is
+  the gap between a round's `select()` and `reap_clean_exits()` — the
+  out-of-band `waitpid(WNOHANG)` backstop can observe a worker's exit in
+  a round whose `select()` snapshot PREDATES that worker's write, so the
+  death arrives via `waitpid` and the notification via the pipe, and the
+  loop can terminate in between. It presented as a rare flake (one
+  occurrence in a full-suite run; 0/200 standalone). Widening the window
+  by delaying the backstop sweep reproduced it on 47-58 runs in 60;
+  draining the pipe before the break took it to 0 in 150.
 - **`fr_py_data_ready_node` is consume-once.** It walks `write_idx`
   forward from a private hwm. A caller that polls it and then decides
   "below floor" has already destroyed the evidence — the floor becomes
@@ -475,6 +509,25 @@ the list; "both pay it" does not.
 
 ## Reporting rules for this repo
 
+- **Python front end changes must follow `dev/supervisor/SSoT.md`** (the
+  Single Source of Truth policy). Before writing decision logic, search
+  for an existing authoritative implementation — with
+  `tools/ssot_scan.py`, which compares statement BLOCKS, because
+  inline duplication is invisible to a function-level scan. Where
+  copies have drifted, the divergence is the defect: resolve it, say
+  which behaviour won, and test it. The report must name the
+  authoritative implementation, its consumers, and the tests actually
+  run.
+- **A critical section is a decision too** (SSoT.md 4.2). Whoever
+  acquires a resource must acquire it ATOMICALLY with the resource,
+  and the release must survive the interruption that would abandon it:
+  defer the interruption across the section (never swallow it), and do
+  not let it replace an exception that is already propagating. One
+  authoritative registry for acquisitions
+  (`python/forkrun/_childreg.py`), one authoritative primitive for
+  deferring interrupts (`python/forkrun/_signals.py::defer_interrupts`).
+  A forked child that is not adopted at the fork is invisible to the
+  teardown — it is never reaped, and it becomes a zombie.
 - `forkrun_ring.c` is UNMODIFIED by the shim by design (`_shim.c`
   `#include`s it). Prefer shim-side additions.
 - ABI surface is locked in `python/tests/test_shim_abi.py`
@@ -899,3 +952,218 @@ Two findings from this round worth more than the fixes:
 - Comparing invocation counts ACROSS the two execution models measures
   batch shape, not semantics (27 vs 50 was batching). At-least-once
   had to be measured within one path.
+
+### W-PY-STREAM-BACKPRESSURE-1: the notification pipe is a window, and a cliff
+
+**The mechanism, which was not obvious from the name.** The
+worker-completion notification pipe's capacity IS the producer's
+read-ahead window. A worker that finishes a batch writes one 16-byte
+notification; the parent reads them. The pipe holds N notifications, so
+N is how many completions may be outstanding before a worker blocks
+writing its notification — and a blocked worker cannot claim its next
+batch. The per-worker output memfds have no backpressure of their own
+(a memfd does not push back), so this pipe was the ONLY thing bounding
+how far a worker ran ahead of the drain. At 1MB that bound was 65536
+completions: wide enough that it was not a bound.
+
+**The cliff is arithmetic, and it will bite anyone who tunes this.** A
+pipe of S bytes holds S/16 notifications, and it only binds if that is
+fewer than the outstanding completions. On a 977-batch run, 16KB (1024
+slots) can hold EVERY notification of the run and never blocks — so
+1MB, 64KB and 16KB measured IDENTICALLY, and only 4KB (256 slots)
+applied any backpressure. **A capacity not below the run's
+outstanding-notification count does nothing at all.** Before measuring
+this, I calibrated with a 400k-line corpus: 98 batches — fewer than the
+256 slots of a 4KB pipe — so the experiment would have shown nothing
+however the code was written. **Size the corpus so the mechanism can
+fire before running the A/B.**
+
+**Path dependence, measured (4M lines, amp 5, 4 reps, medians).**
+Plain supervision (`orchestrator=False`): peak retention -24% to -65%,
+throughput unchanged (no demonstrated penalty), first-result latency
+unchanged. Reactor
+supervision (the DEFAULT): retention -0.4% to +3.7%, throughput and
+latency unchanged. The reactor drains the notification pipe
+eagerly (up to `DRAIN_BURST` completions per round), so it never falls
+behind at the NOTIFICATION level; its retention is the parent's own
+parsed-record queue, and the workers' read-ahead is bounded by
+something else there. **So the lever helps the path where the drain is
+the bottleneck and does nothing on the default path.**
+
+**A near-miss I have to record, because it nearly produced a wrong
+conclusion.** An early 5-rep A/B showed the small pipe *reducing*
+throughput 33% in one cell, and I reported it as a fast-consumer
+regression. With 4 reps and four capacity arms it reversed: 1MB is the
+SLOWEST arm (2080 rec/s vs 2784 for 4KB), and the cell's first-result
+latency is BIMODAL in every arm (0.014s or 0.15-0.40s — the reactor's
+poll quanta). Medians over 5 reps landed on different sides of that
+bimodality in the two arms. **A 33% "regression" that reverses with
+more reps and more arms was a bimodality artifact, and reporting it
+would have been a wrong conclusion.** The repo's own rule — interleave,
+alternate the A/B order, take medians — is what caught it.
+
+**The `-4` contract, and the test that is not vacuous.**
+`fr_py_notify_committed()` returns `FR_PY_ERR_NOTIFY` (-4) for
+"committed but not notified" — explicitly not a retryable payload
+error. The Python worker special-cased `-2`/`-3` but let `-4` fall into
+the generic output-error path, which reaches the `on_error` ladder's
+**retry** branch: that branch re-arms the batch for a same-process
+re-claim, i.e. it retries work whose commit already happened. The
+shipped C worker treats ANY nonzero `fr_py_complete` rc as fatal for
+exactly this reason.
+
+**THE MUTATION CHECK EARNED ITS KEEP.** The obvious assertion — "no
+duplicate batch execution" — is VACUOUS: with the fix reverted there is
+still no duplicate, because the engine does not re-offer an
+already-committed batch. A test that cannot fail is worse than no test.
+The discriminating observable is WHICH function deposited the escrow:
+`_deposit_or_loud_skip` (the failure ladder — the bug) versus
+`_escrow_deposit_exit_loud` (the exit path — correct). The caller's
+frame name separates them exactly, and the worker is a forked child, so
+a spy installed in the parent is inherited. Reverting the fix fails
+exactly that test.
+
+**And the consequence, stated rather than hidden:** a worker that exits
+on -4 makes the parent respawn it, and the per-process fault hook fires
+again in the new process, so the run can reach the respawn cap and fail
+CLOSED. That is the correct behaviour for a genuinely lost notification
+(the parent is gone), but it means an injected fault ends the run
+instead of completing it. Measured, not assumed.
+
+**C DRAIN IS 16-19x SLOWER ON THE STREAM PATH, AND IT IS NOT MY
+CHANGE.** Pre-existing (98.5s at 1MB vs 98.3s at 4KB). It has a sharp
+cliff at ~64 blobs — the reactor's `DRAIN_BURST` size — below which it
+matches the legacy drain (1.01-1.21x, which is very likely where the
+"0.7-1.0x" figure in `_validate_c_drain` came from). Above it, 16-19x.
+Instrumented: 162 select calls, **9.72s of a 10.43s run spent WAITING
+in `select()`** (93%), 97 calls over 50ms, against 5 calls and 0.01s
+for the legacy drain. The mechanism: the C drain's pump reads 65536
+bytes per call and returns None whenever that does not complete a blob,
+which ends the `DRAIN_BURST`, which leaves `drained_last` False, which
+makes the reactor's next `select()` wait the FULL `poll_timeout` (0.1s).
+The legacy drain does not park because its data source is the worker's
+memfd, which is ALWAYS pollable — it preads unconditionally and yields
+whatever is there. The reactor's own comment names the cap: *"otherwise
+throughput caps at ~10 blobs/s (one yield per 100ms idle select)"*.
+
+**Why that matters more than the slowness: the C drain's peak
+retention is FLAT at ~3.5 MB regardless of scale, where the legacy
+drain's grows linearly to 138 MB.** So the C drain is the RIGHT
+mechanism for the default path's memory problem, and it is broken by a
+100ms park. Fixing the park (drain the results pipe fully per call;
+and/or put `results_r` in the reactor's watch set for an event-based
+wakeup) is worth more than shrinking the notification pipe.
+
+**The backpressure CHAIN, which is the thing to remember.** Bash's
+backpressure is three links and the ack pipe is the LAST: a slow
+consumer fills the **stdout pipe**, so `ring_order` blocks writing
+stdout, so `ring_order` stops clearing the **ack pipe**, so the ack
+pipe fills, so workers block on the ack. The ack pipe is small (4096,
+one page, `frun.bash:1730` — *"Size order ack pipe to 4096 (1 page) for
+closed hydraulic backpressure"*) because it only has to LATCH a
+backpressure the stdout pipe has already started.
+
+The 4KB notification pipe IS that ack pipe, so it can only engage if
+the chain upstream of it is closed — and it is closed on exactly ONE of
+the two Python paths:
+
+- **Plain supervision: closed.** Its drain YIELDS INSIDE the collection
+  loop (`run.py:5698`), so it is CONSUMER-PACED: the next notification
+  is not read until the consumer asks for the next record. The
+  consumer's slowness stops the drain, the pipe fills, the workers
+  block. Retention -24% to -65%.
+- **Reactor supervision (the default): BROKEN AT THE FIRST LINK.** Its
+  drain collects into a `_pending` list and pops one at a time
+  (`run.py:9207`), and the reactor pulls up to `DRAIN_BURST` (64)
+  records per round regardless of the consumer. The consumer's slowness
+  is absorbed by a PYTHON LIST, not by a pipe, so the notification pipe
+  never fills and the ack-pipe analogue never engages. Retention
+  unchanged.
+
+**So the missing piece on the default path is bash's STDOUT-PIPE
+analogue** — a bounded transport between the drain and the consumer that
+blocks the producer. Making the reactor's drain consumer-paced is NOT
+the answer: `DRAIN_BURST` exists to bound death-detection latency, and a
+consumer-paced drain would starve the supervisor. **The C drain's
+results pipe IS that transport** (which is why its retention is flat at
+3.5 MB while the legacy drain's grows to 138 MB) and it is the 100ms
+park that makes it unusable at speed.
+
+**Lesson worth keeping: a backpressure mechanism is a CHAIN, and you can
+shrink any one link to no effect.** The first measurement of this work
+("4KB did nothing on the default path") looked like a failed
+experiment. It was not: it was the chain telling us which link was
+missing, and it pointed at a 100ms park in the reactor's poll loop that
+nobody was looking for. **When a backpressure lever does nothing, find
+the missing link before tuning the one you can see.**
+
+**A REVIEWER FOUND A REAL GAP, AND THE FIX FOR IT FOUND A REAL TRADE.**
+The `-4` tests asserted that the failure ladder was not entered, that
+there was no duplicate execution, and that the run terminated. They did
+NOT assert what the CALLER observed -- "the worker exited" is not "the
+caller got complete output or a visible failure". Two further tests now
+cover both permitted outcomes, at two corpus sizes: a ONE-batch run
+completes (the live silent-truncation check), and an EIGHT-batch run
+fails closed. A test that only exercised the failing branch would leave
+the truncation check as dead code -- and the first attempt at this
+assertion did exactly that.
+
+**And the new test is discriminating: it FAILS when the `-4` fix is
+reverted.** Measured at the 8-batch corpus:
+
+  * fix reverted: the run **SUCCEEDS** -- 4 records, 56 bytes, all 8
+    lines delivered, no duplicate execution. It reports success after a
+    committed-but-unnotified batch.
+  * fix present: the run **fails closed** (ForkrunWorkerFailure).
+
+**So the fix trades "continue, correctly, BY LUCK" for "fail closed, BY
+CONTRACT", and the contract is the reason to take it.** The reverted
+path happens to deliver complete output only because the engine does
+not re-offer an already-committed batch -- exactly the behaviour the C
+code says not to rely on ("a caller that retries on those would
+re-execute committed work"). The reverted path also re-arms an
+already-committed batch in the escrow slot and reports a misleading
+error ("output write failed on batch N" for a batch whose output WAS
+written and committed).
+
+**Lesson worth keeping: a test that asserts an intermediate property
+is not a test of the contract.** The ladder-entry assertion proved the
+MECHANISM; only an outcome assertion proves what the user gets. Ask
+what the CALLER can observe, not only what the implementation did.
+
+**THE C DRAIN'S 100ms PARK, AND THE BOUND THAT IS PART OF THE FIX
+(WO-PY-CDRAIN-REACTOR-WAKEUP-1).** The reactor now SELECTS on the C
+drain's results pipe -- an `ExtraWatch` holder it wakes on but NEVER
+reads (the pump keeps sole ownership of the read side, and the holder is
+DISARMED at EOF so a readable-EOF pipe cannot spin the reactor) -- and the
+pump consumes everything already available instead of one 64 KiB chunk
+per call. The cliff is gone: **16-19x -> 1.00-1.05x** at scale, and the
+`select()` wait collapsed from **9.72s of a 10.43s run (93%)** to
+**0.003s over 6 calls**.
+
+**THE PART THAT IS EASY TO GET WRONG: Step A UNBOUNDED THROWS AWAY THE
+WHOLE POINT OF THE C DRAIN.** Read-until-EAGAIN, as the work order's
+first implementation suggests, queues the run's whole output in the
+parent's `pending` deque: the C drain's peak retention went from a flat
+**3.5MB to ~18MB** -- and the wall time did NOT improve (5.60s vs
+5.62s), because the WAKEUP had already removed the park. So the
+implementing the two steps literally would have shipped a 5x regression
+in the only property that makes the C drain worth using.
+
+**The bound that fixes it: the pump tracks the bytes it has PARSED BUT
+NOT YET HANDED TO THE CONSUMER, and stops reading when that exceeds a
+budget (256KB).** So the read-ahead is bounded by the CONSUMER'S PACE,
+not by the pipe. The pipe's capacity is no longer the bound -- which is
+the point: the C drain's advantage was never "the pipe is small", it is
+"the producer cannot get ahead of the consumer", and a PIPE cannot
+express that. A BUDGET CAN.
+
+**Two more things the measurements corrected, both against my own
+first guess:** the residual ~100ms in the fast-consumer cells was NOT a
+termination-path sleep (`term_sleeps=0` in every cell) and NOT a select
+park -- it is noise on 0.02-0.19s runs, far below this repo's own "~2s
+per measurement" rule, and it did not reproduce under instrumentation.
+And the `order="index"` rows are a CORRECTNESS arm, not a performance
+one: the C drain is not used with the orderer at all
+(`use_drain = ... and not use_orderer`), so both arms measure the same
+path there.

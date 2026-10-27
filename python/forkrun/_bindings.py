@@ -163,6 +163,41 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # W-EXP-2 step C: the same plugin loop with an explicit logical
+        # node id (last argument). The exec-based cleanroom launcher
+        # resolves this by name; Python keeps the binding so the ABI
+        # surface stays fully covered by the drift check.
+        lib.fr_py_worker_plugin_loop_numa.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int]
+        lib.fr_py_worker_plugin_loop_numa.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-EXP-2 step C follow-up: PER-NODE completion evidence.
+        # The global ingest-EOF marker is not a per-node completion
+        # signal -- it says the source was consumed, not that this
+        # node's indexer consumed its chunks or that this node's
+        # scanner finished its ring state. Read-only: 1 complete,
+        # 0 not complete, -1 no verdict.
+        lib.fr_py_node_index_complete.argtypes = [ctypes.c_int]
+        lib.fr_py_node_index_complete.restype = ctypes.c_int
+        lib.fr_py_node_scan_complete.argtypes = [ctypes.c_int]
+        lib.fr_py_node_scan_complete.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # Bind the logical node the next fr_py_worker_init call uses.
+        # Used by the multi-node launcher to select a ring without a
+        # second copy of the worker loop body.
+        lib.fr_py_worker_bind_node.argtypes = [ctypes.c_int]
+        lib.fr_py_worker_bind_node.restype = None
+    except AttributeError:
+        pass
+    try:
         # W-PY33: C spawn worker loop (claim→spawn→signal→ack).
         # argv: NULL-terminated arg vector; argc is a redundancy
         # check (argv[argc] must be NULL). Rest mirrors the plugin
@@ -293,6 +328,33 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # W-PY31: read-only waiter accounting.  fr_py_active_waiters
+        # returns the engine gauge the scanner consults;
+        # fr_py_worker_probe reports (txn state, txn node, shim waiter
+        # registration word) for one wid.  Tests and supervision
+        # diagnostics only — no run-path caller.
+        lib.fr_py_active_waiters.argtypes = [ctypes.c_int]
+        lib.fr_py_active_waiters.restype = ctypes.c_int
+        lib.fr_py_worker_probe.argtypes = [
+            ctypes.c_int, ctypes.POINTER(ctypes.c_uint32)]
+        lib.fr_py_worker_probe.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # C0.7: committed DATA frames for one node, read after producers
+        # are quiescent. Separate from fr_py_diag_node (whose callers
+        # allocate exactly six values, so widening it would overrun
+        # them) and deliberately NOT the generic complete-frame count,
+        # which includes non-DATA dispositions the parent filters.
+        # Absent on older substrates -- callers treat a missing symbol as
+        # "certificate unavailable", never as a pass.
+        lib.fr_py_committed_data_frames.argtypes = [ctypes.c_int,
+                                                    ctypes.POINTER(
+                                                        ctypes.c_uint64)]
+        lib.fr_py_committed_data_frames.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
         # W-PY21-A: C drain process (data/control path separation).
         lib.fr_py_drain_loop.argtypes = [ctypes.c_int,
                                          ctypes.POINTER(ctypes.c_int),
@@ -323,6 +385,34 @@ def _setup_signatures(lib) -> None:
         lib.fr_py_spill_sequential.argtypes = [
             ctypes.c_int, ctypes.c_int, ctypes.c_uint64]
         lib.fr_py_spill_sequential.restype = ctypes.c_int64
+    except AttributeError:
+        pass
+    try:
+        # P1-3: UDF helper entry points, bound by the launcher pre-fork.
+        # The C types mirror fr_udf.h exactly; see test_shim_abi, which
+        # checks arity against the generated signature table.
+        lib.fr_py_udf_bind.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p]
+        lib.fr_py_udf_bind.restype = ctypes.c_int
+        lib.fr_py_worker_udf_loop.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int]
+        lib.fr_py_worker_udf_loop.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # P5: terminal control dispositions (SKIPPED / POISONED).
+        lib.fr_py_emit_disposition.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+            ctypes.c_uint64, ctypes.c_uint32]
+        lib.fr_py_emit_disposition.restype = ctypes.c_int
+        # STAGE0: publication is a separate step from emit, and carries
+        # the committed frontier rather than a batch index.
+        lib.fr_py_notify_committed.argtypes = [ctypes.c_int, ctypes.c_int,
+                                               ctypes.c_uint64]
+        lib.fr_py_notify_committed.restype = ctypes.c_int
     except AttributeError:
         pass
     try:
@@ -460,23 +550,46 @@ __all__ = ["FrPyBatch", "RecordDescriptor", "FrPyInterval",
 def v1_available(lib=None) -> dict:
     """W-PY13: which C-level fast paths the loaded substrate offers.
 
-    Returns {"exec": bool, "plugin": bool}. Missing symbols (pre-v1
-    .so) read as False — the worker then uses the v0 subprocess/ctypes
-    dispatch. Respects the FORKRUN_NO_V1 kill switch (test escape hatch
-    + operator override: forces v0 even when the symbols exist).
+    Respects the FORKRUN_NO_V1 kill switch (test escape hatch + operator
+    override: forces v0 even when the symbols exist).
+
+    On the "udf" key specifically: True means **a candidate helper file
+    is present**, NOT that the launcher has validated it. The two differ
+    in the way that matters: a helper can be present and still be
+    incompatible with the running interpreter (wrong CPython minor), in
+    which case the launcher refuses it before initialising anything and
+    the call degrades to the in-process path. `udf` is False in that case
+    too, but False is not proof of either "no file" or "validated" — it
+    means the cleanroom UDF accelerator is not available to this caller.
     """
     if lib is None:
         lib = get()
     if os.environ.get("FORKRUN_NO_V1"):
+        # "udf" appears in EVERY return shape, including this one: a
+        # consumer reading caps["udf"] must not KeyError here. This branch
+        # is the documented two-shape contract (roadmap 5.3).
         return {"exec": False, "plugin": False, "emit": False,
                 "splice": False, "ack_direct": False, "complete": False,
                 "spill": False, "parse": False, "resume": False,
                 "plugin_loop": False, "spawn_loop": False,
                 "orderer": False, "order_pipe": False,
                 "scan_spawn": False, "numa": False,
-                "drain": False}
+                "drain": False, "udf": False}
     has = hasattr
-    return {"exec": has(lib, "fr_py_exec_spawn"),
+    # UDF is not a substrate symbol -- the helper is a separate per-minor
+    # file (DECISION-01 6.2.1), so its availability is a filesystem
+    # question. helper_path() already honours FORKRUN_NO_UDF, so reading
+    # it here means the capability report and the routing decision cannot
+    # disagree.
+    try:
+        from ._udf import helper_path as _udf_helper
+        udf_cap = _udf_helper() is not None
+    except Exception:
+        # An unimportable _udf module must not take down a capability
+        # report; the route degrades to in-process either way.
+        udf_cap = False
+    return {"udf": udf_cap,
+            "exec": has(lib, "fr_py_exec_spawn"),
             "plugin": has(lib, "fr_py_plugin_call"),
             "emit": has(lib, "fr_py_emit"),
             "splice": has(lib, "fr_py_worker_splice_loop"),

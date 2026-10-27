@@ -1,9 +1,17 @@
 # forkrun Streaming Guide
 
 `stream()` is `map()` with the collection removed: results
-yield live, while workers are still running, with bounded
-memory. Everything else — batching, modes, recovery,
-ordering contract — is identical.
+yield live, while workers are still running. Everything
+else — batching, modes, recovery, ordering contract — is
+identical.
+
+On memory: what is established is **live delivery and
+backpressure** (a slow consumer stops the pipeline instead
+of letting a queue grow) and **lower measured parent RSS
+than retaining every blob**, for the workload measured
+below. What is **not** established is output-size
+independence — measured peak RSS growth there is about
+half the output bytes, not a constant. See TD-13.
 
 ## Basic shape
 
@@ -29,7 +37,7 @@ for blob in forkrun.stream(process, "input.txt", workers=8):
   (`0` silences), else the dynamic default of 2x the largest
   batch x 32 in-flight depth allowance.
 
-## Backpressure (how memory stays flat)
+## Backpressure (why no unbounded queue forms)
 
 The workers signal one 16-byte index per record down a 1MB
 pipe. A slow consumer lets the pipe fill; the next signal
@@ -38,8 +46,38 @@ stop across the pipeline. No unbounded queues anywhere —
 with one documented exception: `order="index"` behind a
 poisoned/skipped head buffers the tail (above), which is
 ordering memory, not queueing, and warns at the high-water
-limit: a 10MB input with 5× amplification and a 1ms/batch consumer
-holds parent RSS flat (measured +0MB).
+limit.
+
+**Correction (WO-PY-REL-1).** This section previously claimed a 10MB
+input with 5× amplification and a 1ms/batch consumer "holds parent RSS
+flat (measured +0MB)". That was measured with `ru_maxrss` before/after,
+which is a process PEAK and therefore cannot attribute memory to a
+workload. Re-measured as CURRENT RSS, sampled during consumption, in an
+isolated process, the same workload retains about **0.50× the output
+bytes** — 24.7 MB for 47.4 MB of output — and that ratio is constant
+across output sizes from 47 MB to 380 MB, not a constant number of
+bytes.
+
+So the honest statement is: the parent stays flat **relative to a
+consumer that retains everything** (which measures ~1.0× output), but it
+does **not** stay flat in absolute terms. No unbounded queue is created
+and backpressure works as described above; retention still scales with
+output at about half the rate. See TD-13 in
+`dev/supervisor/TECH_DEBT_REGISTER.md`; reproducing it:
+
+    python3 python/tests/_streaming_rss_probe.py --amp 20
+    python3 python/tests/_streaming_rss_probe.py --amp 20 --collect
+
+The gate's assertion of this claim is **paired and alternating**: the two
+arms are measured several times with their order alternated between
+pairs, the strict relation (streaming retains less than collect-all) is
+required for *every* pair, and the 0.8× margin is asserted on the
+*median* ratio. A single pair cannot tell a property of the workload
+from a property of the moment — one cleanroom-on gate run measured
+0.82× on a single pair while the same workload measured 0.39–0.50×
+under every controlled condition tried (alternating order, CPU load,
+20 GB of memory pressure). The median is what makes the margin a
+property of the workload.
 
 Consequences worth knowing:
 
@@ -78,10 +116,17 @@ ordered, multi-death, SIGKILL, and NUMA topologies.
 | | `stream()` | `map()` |
 |---|---|---|
 | First result | immediately | at the end |
-| Parent memory | flat | output-sized |
+| Parent memory | not output-sized independent (TD-13); lower than retaining every blob, and no queue grows | output-sized |
 | Consumer | incremental | whole list |
 | Ordering | both orders | both orders |
 | Recovery | identical | identical |
 
 Use `stream()` when output is large or the consumer is
 incremental; `map()` when you want the whole answer.
+
+Note the two are not interchangeable element-wise: `map()`
+defaults to `output="view"` (zero-copy memoryviews) while
+`stream()` always yields `bytes` regardless of `output`
+(`docs/API.md`), and batch boundaries can differ between
+two runs of the same input. Compare joined bytes, not
+lists of records.

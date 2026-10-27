@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get, v1_available  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -57,7 +57,7 @@ class TestSpliceValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSpliceMode(unittest.TestCase):
+class TestSpliceMode(ChildLifecycleMixin, unittest.TestCase):
     def test_splice_basic(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:

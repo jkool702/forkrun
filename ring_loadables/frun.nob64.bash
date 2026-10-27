@@ -1462,6 +1462,11 @@ EOF
         ring_init_opts+=("--numa-map=$numa_map_str")
     fi
 
+    # Clear any output-slot array from a previous in-process run so the
+    # ceiling clamp below measures THIS engine's provisioned slots, not a
+    # stale (possibly larger) count left by an earlier call.
+    [[ "${order_mode}" == "realtime" ]] || fd_out=()
+
     # Initialize Ring
     # F30: ring_init validates topology (e.g. --nodes=@N above the 512
     # meta_ring ceiling returns EXECUTION_FAILURE). Running on without the
@@ -1475,6 +1480,20 @@ EOF
         return 1
     }
     : "${FORKRUN_NUM_NODES:=1}" # Fallback safety
+
+    # --- WORKER CEILING RECONCILIATION ---
+    # ring_init clamps the requested worker count to its topology ceiling
+    # (2 * usable cores, affinity/cgroup aware) and creates exactly that
+    # many --out slots. The frontend's -j value is not clamped by
+    # ring_init, so without this a request above the ceiling spawns
+    # workers whose RING_WID indexes past fd_out: their stdout redirect
+    # fails as "ambiguous redirect", the worker exits having emitted
+    # nothing, and ordered output is silently short. fd_out is the
+    # authority — it is allocated from the engine's clamped ceiling.
+    if [[ "${order_mode}" != "realtime" ]] && (( ${#fd_out[@]} > 0 )) && (( nWorkersMax > ${#fd_out[@]} )); then
+        echo "forkrun [WARNING]: requested worker maximum ${nWorkersMax} exceeds this topology's engine ceiling (${#fd_out[@]} output slots); capping at ${#fd_out[@]}." >&2
+        nWorkersMax=${#fd_out[@]}
+    fi
 
     # Create Data Memfd
     # W-REL5-A6: an unchecked failure here used to surface as a bare

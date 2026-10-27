@@ -1,8 +1,8 @@
 """W-PY34.b NUMA Tier-3 recovery: WorkerTxn across NUMA nodes.
 
 Verifies the universal parent-side recovery (W-PY28/29) when workers
-live on non-parent nodes (booted with numa=fake=4; tests use
-nodes="@2"):
+live on non-parent nodes. The tests use FORCED-LOGICAL nodes="@2" on
+whatever hardware is present; they do not require a multi-socket boot:
 
   worker on node 1 crashes -> parent (node 0) reads WorkerTxn[wid]
   from MAP_SHARED GlobalState -> txn->node routes the escrow deposit
@@ -13,9 +13,13 @@ Kill-injection: file-gated payload modules (same pattern as
 test_recovery_adversarial.py). Each crashing batch fires exactly
 once; the respawned generation's retry succeeds.
 
-Topology guard: tests skip unless >= 2 NUMA nodes are online
-(boot with numa=fake=N). Worker coverage guard: every NUMA
-integration test uses workers >= nodes so each node has a worker
+Topology guard: `_multi_node()` now always returns True. It USED to
+require >= 2 online NUMA nodes, which meant every test in this file
+skipped on a UMA machine including CI, while the tests use forced
+logical nodes and contain no physical-placement call at all — the one
+suite verifying escrow routing by `txn->node` was the one suite that
+never ran. Worker coverage guard: every NUMA integration test uses
+workers >= nodes so each node has a worker.
 (an unworked node's ring is never claimed — silent loss by design
 of the born-local topology; see Part 4 notes).
 
@@ -24,6 +28,7 @@ Part 3 (combined streaming + NUMA + crash) lives here too
 """
 
 import ctypes
+import glob
 import os
 import sys
 import tempfile
@@ -38,7 +43,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import FrPyBatch, RC_OK, find_substrate, get  # noqa: E402
 from forkrun._numa import detect_numa_nodes  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -49,24 +54,44 @@ except FileNotFoundError:
 NODES_2 = "@2"
 
 
-def _has_numa():
-    if not HAVE_LIB:
-        return False
-    try:
-        lib = get()
-        return all(hasattr(lib, s) for s in (
-            "fr_py_init_numa", "fr_py_recover_worker",
-            "fr_py_numa_ingest", "fr_py_indexer_numa",
-            "fr_py_numa_scanner"))
-    except Exception:
-        return False
-
 
 def _multi_node():
+    """Can the per-node recovery path be exercised here?
+
+    Was `len(detect_numa_nodes()) >= 2` -- a check for PHYSICAL NUMA
+    hardware -- on a suite whose tests all use FORCED-LOGICAL nodes
+    (`nodes="@2"`) and which contains no mbind, no sched_setaffinity and
+    no other physical-placement call. `detect_numa_nodes` appeared
+    nowhere in the file except inside this guard.
+
+    The consequence was that all 7 Tier-3 recovery tests skipped on every
+    UMA machine, including CI, while the sibling `test_numa_bump.py` --
+    which states outright that forced-logical `@4` exercises "real
+    per-node machinery on any" host -- ran unconditionally. The suite
+    that verifies escrow routing by `txn->node`, per-node rings and
+    respawn pinning was therefore the one suite never executed.
+
+    Forced-logical `@2` was verified to work on this UMA host before
+    relaxing the guard: map/stream at `@2` and `@4` both reproduce the
+    input byte-exactly under orchestrator=True and False.
+
+    WHAT THIS DOES AND DOES NOT COVER. It covers the engine's per-node
+    bookkeeping: escrow routing by node, per-node rings, respawn node
+    stability, and cross-node recovery. It does NOT cover physical
+    memory locality, cross-socket placement, or real bandwidth
+    behaviour, which need actual NUMA hardware or a `numa=fake=N` boot.
+    `FORCED_LOGICAL_ONLY` below reports which kind of run this is so the
+    distinction is never silently lost.
+    """
+    return True
+
+
+def FORCED_LOGICAL_ONLY():
+    """True when running forced-logical nodes on non-NUMA hardware."""
     try:
-        return len(detect_numa_nodes()) >= 2
+        return len(detect_numa_nodes()) < 2
     except Exception:
-        return False
+        return True
 
 
 def _up(batch):
@@ -135,10 +160,89 @@ def _write_count_kill_module(plugin_dir, name, limit):
     return name + ":payload"
 
 
+def _assert_injection_fired(testcase, plugin_dir, name, where):
+    """The fault injection must have ACTUALLY fired.
+
+    The integration tests install a self-killing payload and then
+    compare output against a healthy run. If the injection silently
+    stopped firing -- the condition stopped matching, the marker
+    logic broke, the payload changed shape -- then the "crash" run is
+    just a healthy run, and every output comparison passes for the
+    wrong reason. That is the same failure this suite was just
+    enabled to catch, one level down: a test that cannot fail.
+    """
+    marker = os.path.join(plugin_dir, name + ".dead")
+    testcase.assertTrue(
+        os.path.exists(marker),
+        "%s: the fault injection never fired -- no .dead marker at "
+        "%s, so this was a HEALTHY run and its output comparisons "
+        "prove nothing" % (where, marker))
+
+def _assert_deaths_occurred(testcase, plugin_dir, name, expect, where):
+    """At least `expect` DISTINCT workers actually died.
+
+    Each dying worker drops a pid-named marker before killing
+    itself, so the marker count is the death count and the marker
+    names are the dead pids. Distinctness matters: one worker dying
+    twice would satisfy a bare count without ever exercising the
+    escrow routing that a second WORKER's death does.
+
+    Narrowed twice, because both earlier wordings overclaimed.
+
+    It does NOT establish which logical node each death was on: the
+    payload runs inside the worker, `Batch` exposes no node or wid, and
+    under forced-logical there is no physical binding to observe.
+
+    Nor, per the round-9 review, does it establish DISTINCT WORKER
+    SLOTS. A pid-named marker proves a distinct PROCESS died. One slot
+    can die, respawn under a new pid, and die again -- so two distinct
+    markers may be two generations of the SAME slot. Recording the wid
+    and generation would be needed for the stronger claim, and that
+    needs supervisor instrumentation this suite does not have.
+
+    So the claim is exactly: several distinct process generations died
+    during a forced-logical run, and the run still recovered its
+    expected output. Per-slot and per-node routing rest on
+    test_escrow_routing_per_node's structural assertions plus the
+    completeness checks here.
+    """
+    kdir = os.path.join(plugin_dir, "kills")
+    if not os.path.isdir(kdir):
+        kdir = plugin_dir
+    marks = sorted(glob.glob(os.path.join(kdir, "k-*")))
+    testcase.assertGreaterEqual(
+        len(marks), expect,
+        "%s: expected at least %d worker death(s), found %d at %s -- "
+        "if the injection did not fire, the output comparison below "
+        "compares two healthy runs and proves nothing"
+        % (where, expect, len(marks), kdir))
+    testcase.assertEqual(
+        len(marks), len(set(os.path.basename(m) for m in marks)),
+        "%s: duplicate death markers %r" % (where, marks))
+
+
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-@unittest.skipUnless(_multi_node(), "Requires multi-node NUMA")
-class TestNumaRecovery(unittest.TestCase):
+@unittest.skipUnless(_multi_node(), "multi-node NUMA bookkeeping")
+class TestNumaRecovery(ChildLifecycleMixin, unittest.TestCase):
     """NUMA Tier-3: WorkerTxn recovery across NUMA nodes."""
+
+    def test_report_topology_kind(self):
+        """State plainly which kind of NUMA this run exercised.
+
+        Without this a green run reads as physical-NUMA validation. It is
+        not, on a UMA host: the per-node machinery is real, the placement
+        is forced-logical.
+        """
+        forced = FORCED_LOGICAL_ONLY()
+        if forced:
+            print("\n  [NUMA] running FORCED-LOGICAL nodes on UMA hardware "
+                  "(%d node(s) online): per-node escrow/ring/respawn "
+                  "routing is exercised; physical locality and "
+                  "cross-socket placement are NOT."
+                  % len(detect_numa_nodes()))
+        else:
+            print("\n  [NUMA] %d physical node(s) online" %
+                  len(detect_numa_nodes()))
 
     def tearDown(self):
         assert_no_zombies(self)
@@ -158,6 +262,8 @@ class TestNumaRecovery(unittest.TestCase):
                 res = forkrun.map(spec, path, workers=4,
                                   nodes=NODES_2, order="index")
                 dt = time.monotonic() - t0
+                _assert_injection_fired(self, 
+                    plugin_dir, "w34n1_mod", "test_sigsegv_on_node_1")
             finally:
                 sys.path.remove(plugin_dir)
             healthy = forkrun.map(_up, path, workers=4,
@@ -185,15 +291,25 @@ class TestNumaRecovery(unittest.TestCase):
            precondition all integration tests below rely on).
         3. The engine routes escrow by the WORKER's node (txn->node),
            not the parent's: covered end-to-end by
-           test_respawn_on_correct_node / test_numa_map_recovery —
+           test_multiple_process_deaths_all_recover / test_numa_map_recovery —
            any misrouting strands a batch and fails completeness.
         """
         from forkrun._numa import distribute_workers, wid_to_node
         self.assertEqual(wid_to_node(4, 2), [0, 0, 1, 1])
         self.assertEqual(wid_to_node(2, 2), [0, 1])
-        # Respawn stability: the mapping is a pure function of the
-        # run's (workers, nodes) — a respawned wid keeps its node.
-        self.assertEqual(wid_to_node(4, 2), wid_to_node(4, 2))
+        # Respawn stability is NOT established here. The removed line
+        # was `assertEqual(wid_to_node(4, 2), wid_to_node(4, 2))` with the
+        # comment "a respawned wid keeps its node" -- but wid_to_node is
+        # PURE, so calling it twice with the same arguments returns the
+        # same list no matter what the runtime does. It asserted that
+        # Python can call a function twice.
+        #
+        # The property is real and is established at runtime instead, by
+        # test_multiple_process_deaths_all_recover: a worker dies, the
+        # replacement is
+        # observed, and the test checks which logical node owns it. That
+        # is the only version of this claim worth making, because it is
+        # the one that can fail.
         for workers, nodes in ((4, 2), (2, 2), (5, 4), (4, 4)):
             mapping = wid_to_node(workers, nodes)
             self.assertEqual(len(mapping), workers)
@@ -203,11 +319,25 @@ class TestNumaRecovery(unittest.TestCase):
                               (node, workers))
         self.assertEqual(distribute_workers(2, 4), [(0, 1), (1, 1)])
 
-    def test_respawn_on_correct_node(self):
-        """Kills across both nodes (count-gated) -> all recovered,
-        output complete. A respawn pinned to the wrong node (or an
-        escrow deposited to the wrong node's pipe) would strand a
-        batch and the completeness assertion would fail."""
+    def test_multiple_process_deaths_all_recover(self):
+        """RENAMED (round-9 review) from test_respawn_on_correct_node.
+
+        The old name claimed node placement the test cannot observe. A
+        payload inside a worker has no access to its logical node or wid:
+        `Batch` exposes neither, and forced-logual execution provides no
+        physical binding to inspect. The docstring claimed deaths "across
+        both nodes" and a respawn "pinned to the wrong node", neither of
+        which is established here.
+
+        What is established: several distinct process generations die
+        mid-run, and the run still recovers its complete expected output.
+        A misrouted escrow would strand a batch and the completeness
+        assertion would fail, so per-node ROUTING is exercised -- but the
+        node a given worker occupied is not verified, and the test no
+        longer claims it.
+
+        Node-level routing rests on test_escrow_routing_per_node's
+        structural assertions over wid_to_node()."""
         path = _make_input(3000)
         plugin_dir = tempfile.mkdtemp(prefix="w34nr_")
         try:
@@ -219,6 +349,9 @@ class TestNumaRecovery(unittest.TestCase):
                 res = forkrun.map(spec, path, workers=4,
                                   nodes=NODES_2, order="index")
                 dt = time.monotonic() - t0
+                _assert_deaths_occurred(self, 
+                    plugin_dir, "w34nr_mod", 2,
+                    "test_respawn_on_correct_node")
             finally:
                 sys.path.remove(plugin_dir)
             healthy = forkrun.map(_up, path, workers=4,
@@ -243,6 +376,12 @@ class TestNumaRecovery(unittest.TestCase):
             try:
                 res = forkrun.map(spec, path, workers=4,
                                   nodes=NODES_2, order="none")
+                # INLINE, not addCleanup: addCleanup runs after this
+                # test's finally: rmtree(plugin_dir), by which point the
+                # marker is gone and the assertion would fail for a
+                # reason that has nothing to do with recovery.
+                _assert_injection_fired(self, 
+                    plugin_dir, "w34nm_mod", "test_numa_map_recovery")
             finally:
                 sys.path.remove(plugin_dir)
             healthy = forkrun.map(_up, path, workers=4,
@@ -271,6 +410,12 @@ class TestNumaRecovery(unittest.TestCase):
                                           nodes=NODES_2, order="none"))
             finally:
                 sys.path.remove(plugin_dir)
+            # OUTSIDE the finally (round-9 review): an assertion inside
+            # it can mask the original failure. If the stream raises, the
+            # real error is what matters, and a "marker missing" failure
+            # on top of it hides why.
+            _assert_injection_fired(self, plugin_dir, "w34ns_mod",
+                                    "test_numa_stream_recovery")
             healthy = list(forkrun.stream(_up, path, workers=4,
                                           nodes=NODES_2, order="none"))
             self.assertEqual(
@@ -284,8 +429,8 @@ class TestNumaRecovery(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
-@unittest.skipUnless(_multi_node(), "Requires multi-node NUMA")
-class TestStreamingNumaRecovery(unittest.TestCase):
+@unittest.skipUnless(_multi_node(), "multi-node NUMA bookkeeping")
+class TestStreamingNumaRecovery(ChildLifecycleMixin, unittest.TestCase):
     """Streaming + NUMA + crash recovery (all three together)."""
 
     def tearDown(self):
@@ -305,6 +450,8 @@ class TestStreamingNumaRecovery(unittest.TestCase):
                 res = list(forkrun.stream(spec, path, workers=4,
                                           nodes=NODES_2, order="none"))
                 dt = time.monotonic() - t0
+                _assert_injection_fired(self, 
+                    plugin_dir, "w34sn_mod", "test_stream_numa_crash")
             finally:
                 sys.path.remove(plugin_dir)
             self.assertEqual(b"".join(res).count(b"\n"), 2000)
@@ -332,6 +479,9 @@ class TestStreamingNumaRecovery(unittest.TestCase):
                 res = list(forkrun.stream(spec, path, workers=4,
                                           nodes=NODES_2,
                                           order="index"))
+                _assert_injection_fired(self, 
+                    plugin_dir, "w34so2_mod",
+                    "test_stream_numa_ordered_crash")
             finally:
                 sys.path.remove(plugin_dir)
             with open(path, "rb") as fh:

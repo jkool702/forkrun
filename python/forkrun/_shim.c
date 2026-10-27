@@ -41,24 +41,57 @@ void fr_py_poison_relay(unsigned int batch_idx);
 #include <sys/uio.h>
 
 void fr_py_poison_relay(uint32_t batch_idx) {
-    /* The relay moved here from forkrun_ring.c, so its fd cache moves
-     * with it. It lived in ring.c only because the function did; once the
-     * definition is here, keeping the cache in ring.c only worked by
-     * accident of _shim.c including that file into the same translation
-     * unit. The wheel build compiles _shim.c on its own and caught the
-     * dangling reference. -2 = not yet looked up. */
-    static __thread int g_poison_fd = -2;
-    if (g_poison_fd == -2) {
-        const char *e = getenv("FRK_POISON_FD");
-        g_poison_fd = (e && e[0]) ? atoi(e) : -1;
-    }
+    /* The fd is RE-READ on every call, deliberately, with no caching.
+     *
+     * It used to be cached in a __thread variable ("g_poison_fd"), which
+     * is wrong now that a Python parent owns the transport: the parent
+     * can call fr_py_claim() itself (python/tests/test_exactly_once.py
+     * drives a batch to its retry limit that way), and the first such call
+     * with $FRK_POISON_FD unset cached -1 FOREVER in that thread. Every
+     * worker forked afterwards inherited the -1 through fork(), so the
+     * relay was permanently dead for the rest of the process -- a correct
+     * poisoned count beside a permanently empty index list, i.e. exactly
+     * the TD-09 symptom, reintroduced by the fix that was meant to close
+     * it. It only showed up in the full suite, never in isolation.
+     *
+     * The cache bought nothing worth having: this function runs at most
+     * once per POISONED batch, which is a terminal event, so a getenv per
+     * call is not on any hot path. The cleanroom launcher still works
+     * unchanged -- it execs a fresh process per run, so it never shared
+     * a cache across runs either.
+     */
+    const char *e = getenv("FRK_POISON_FD");
+    int g_poison_fd = (e && e[0]) ? atoi(e) : -1;
     if (g_poison_fd < 0)
         return;
     const unsigned wid = g_fr_config.ring_wid;
     if (wid >= 4096u)
         return;
-    /* header is 4 u32; slot is [count][idx...] with a fixed capacity. */
-    const off_t slot = (off_t)(4 + (size_t)wid * (FR_POISON_SLOT_U32 + 1)) * 4;
+    /* The header size is READ FROM THE REGION, not hardcoded.
+     *
+     * It used to be a literal 4 (v2's four u32 words). When stats v3
+     * appended a fifth word the writer was left behind, and the two
+     * sides disagreed by exactly one word: the relay placed each worker's
+     * slot at the v2 offset while the reader walked the v3 one. Nothing
+     * raised -- poisoned_batches just came back as a plausible-looking
+     * WRONG list ([0, 5] instead of [2, 5]), which is the worst possible
+     * failure for a poisoned-batch index. A literal here is a shared
+     * constant across two files with no compiler to connect them, so it
+     * is derived from the version word the header actually carries:
+     *
+     *     v1/v2 -> 4 u32 header      v3 -> 5 u32 header
+     *
+     * An unknown/short version falls back to 4, the pre-v3 layout, so a
+     * malformed header degrades to the old behaviour instead of writing
+     * indices into the wrong place. Slot is [count][idx...] with a fixed
+     * capacity. */
+    uint32_t hdr_ver = 0;
+    if (pread(g_poison_fd, &hdr_ver, sizeof hdr_ver, 0) !=
+        (ssize_t)sizeof hdr_ver)
+        hdr_ver = 0;
+    const uint32_t hdr_u32 = (hdr_ver >= 3u) ? 5u : 4u;
+    const off_t slot =
+        (off_t)(hdr_u32 + (size_t)wid * (FR_POISON_SLOT_U32 + 1)) * 4;
     uint32_t n = 0;
     if (pread(g_poison_fd, &n, sizeof n, slot) != (ssize_t)sizeof n)
         return;
@@ -109,6 +142,55 @@ const char *fr_py_version(void) {
  * demands it. */
 static __thread int fr_py_txn_out_fd = -1;
 
+/* C0.7: worker-local count of DATA frames written for the CURRENT
+ * transaction but not yet committed.
+ *
+ * This is deliberately NOT the shared counter. Writing a frame does not
+ * commit it: if the worker dies before acknowledgement, recovery
+ * truncates the output (ring_revert_output) and the retry writes again.
+ * Counting at write time therefore overcounts every recovered run --
+ * measured 2 writes : 1 committed record at one death, 4 : 1 at three.
+ *
+ * So emitters bump THIS, and the value is transferred to the shared
+ * per-node field only in fr_py_ack_core, after every acknowledgement
+ * side effect has succeeded and immediately before worker_txn_clear()
+ * publishes TXN_IDLE. fr_py_recover_worker discards it on the RECOVERED
+ * branch, so a rolled-back attempt contributes nothing.
+ *
+ * Thread-local, like fr_py_txn_out_fd, so concurrent workers on one node
+ * never contend here; the only shared write is the commit flush. */
+static __thread uint64_t fr_py_txn_pending_data = 0;
+
+/* C0.7 accounting switch.
+ *
+ * Reads ONE env var and applies it to BOTH halves of the feature: the
+ * per-emitter pending increment AND the commit-time flush. They cannot be
+ * separated, and that is deliberate.
+ *
+ * Separating them would be a false-pass factory. With the flush disabled
+ * and the certificate still active, the counter reads 0 while the parent
+ * collects its frames, so every correct run would fail. With the
+ * accounting disabled and the certificate silently skipped, every run
+ * would "pass" with nothing measured. One switch, both behaviours,
+ * means the only two reachable states are "measured and checked" and
+ * "not attempted at all".
+ *
+ * Default ON. The cost when on is one thread-local increment per DATA
+ * frame plus one relaxed fetch_add per committed batch -- measured below
+ * the noise floor of the ordered workload. Turning it off exists for
+ * operators who want that back on hot C-emitter paths such as
+ * order="none", and it costs the certificate, which the docs must say
+ * plainly. Inert unless the variable is set to 0. */
+static int fr_c07_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("FORKRUN_C07_COUNT");
+        cached = !(v && v[0] && strcmp(v, "0") == 0);
+    }
+    return cached;
+}
+
 /* Set the worker-local output fd for W-PY28 transaction records.
  * Call once post-fork, post-init (idempotent; -1 disarms). */
 int fr_py_set_output_fd(int fd) {
@@ -153,6 +235,299 @@ int fr_py_output_advanced(uint64_t nbytes) {
     return 0;
 }
 
+/* W-PY31 waiter registry (shim-side; the engine stays frozen).
+ *
+ * `active_waiters` is the scanner's "is anyone parked on this ring?"
+ * gauge: it decides whether a publish needs an evfd_data poke.  The
+ * engine owns the field, but the shim owns the wait loop now (the
+ * Python/cleanroom paths use the non-blocking claim), so the shim must
+ * keep the gauge exact across worker DEATH as well as across ordinary
+ * wakeups.  A dead worker cannot run cleanup_waiter_state(), and
+ * blindly decrementing every TXN_WAITING death would steal a live
+ * sibling's contribution (or underflow when the worker died before
+ * registering).
+ *
+ * Three pieces of shared state, one authority:
+ *
+ *   g_wait_reg[wid]  0 = not registered; (node << 1) | 1 = registered
+ *                    as a waiter on `node`.  One atomic word per wid:
+ *                    recovery learns the node from the word it removes,
+ *                    and can only ever touch that wid.
+ *   g_wait_bits      per-node bitmap DERIVED from the registry.  It is
+ *                    the authority for the count, so recovery removes a
+ *                    dead wid's contribution by clearing its bit.
+ *   g_wait_seq       per-node publication sequence (see below).
+ *
+ * `active_waiters` is a MIRROR of popcount(g_wait_bits[node]), never a
+ * counter adjusted by deltas whose complement may have been lost: every
+ * transition (register / release / recover) RECOMPUTES it.
+ *
+ * Recompute-and-store alone is not safe, and this is the defect the
+ * sequence closes: two workers can interleave so that one computes an
+ * older count, the other publishes a newer one, and the first then
+ * overwrites it with the stale value -- including a stale ZERO, which
+ * makes the scanner skip the poke that would have woken a waiter.  So
+ * the store is a compare-exchange and every completed publication bumps
+ * the per-node sequence:
+ *
+ *   1. v0 = seq[node]
+ *   2. n  = popcount(bits)
+ *   3. CAS(active_waiters, old, n)    (SEQ_CST: also the StoreLoad half
+ *                                      of the wakeup handshake below)
+ *   4. if seq[node] == v0 and popcount(bits) == n:
+ *          seq[node] += 1; return      (verified: n is settled)
+ *      else retry
+ *
+ * Why step 4 makes it exact: a CAS can store an `n` that the bitmap has
+ * already moved past.  The mover either COMMITTED -- it bumped the
+ * sequence, which step 4 sees -- or it has not published yet, and its
+ * CAS comes after its own bitmap store, hence after ours, so the LAST
+ * store carries a fresh count.  The second popcount closes the remaining
+ * window: a bit that moved after step 2 is either visible in that
+ * re-read (popcount != n -> retry) or its publisher's sequence bump is
+ * still to come.  Only the TOTAL is published, so two opposite moves
+ * that leave the same count between the reads are harmless.
+ *
+ * There is NO lock, deliberately: a worker killed at any point leaves at
+ * most an uncommitted bitmap change, and the next publication on that
+ * node recomputes from the bitmap and settles it.  Recovery always makes
+ * one for a registered death, so a death is repaired by the death
+ * episode rather than left for some later transition.  Ordering is
+ * deliberate and load-bearing:
+ *
+ *   register: reg = 1, THEN set the bit   (reg is the claim)
+ *   release:  clear the bit, THEN reg = 0 (reg=0 => bit clear)
+ *
+ * so no death window orphans a bit: a death after the clear but before
+ * the reg store is still seen by recovery as "registered", which clears
+ * an already-clear bit and republishes -- exact.
+ *
+ * The mapping is MAP_SHARED anonymous memory created before any worker
+ * forks, so the parent's fr_py_recover_worker() sees the dead child's
+ * registration.
+ *
+ * Do not collapse this into the engine's counter arithmetic: the point
+ * is that recovery recomputes from a registry it can read, not from a
+ * count whose increments it cannot attribute.
+ */
+#define SHIM_WAIT_WORDS ((MAX_TXN_WORKERS + 63) / 64)
+
+static uint32_t *g_wait_reg = NULL;   /* [MAX_TXN_WORKERS] */
+static uint64_t *g_wait_bits = NULL;  /* [FR_MAX_LOGICAL_NODES][WORDS] */
+static uint64_t *g_wait_seq = NULL;   /* [FR_MAX_LOGICAL_NODES] */
+
+/* Allocate (once) and clear the registry.  Called from fr_py_init /
+ * fr_py_init_numa, i.e. before any worker forks.  A re-init starts a
+ * new epoch: a stale registration from the previous run must not count
+ * against the fresh ring. */
+static int shim_waiters_init(void) {
+    if (!g_wait_reg) {
+        const size_t reg_sz = sizeof(uint32_t) * MAX_TXN_WORKERS;
+        const size_t bits_sz =
+            sizeof(uint64_t) * SHIM_WAIT_WORDS * FR_MAX_LOGICAL_NODES;
+        const size_t seq_sz = sizeof(uint64_t) * FR_MAX_LOGICAL_NODES;
+        void *p = mmap(NULL, reg_sz + bits_sz + seq_sz,
+                       PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED)
+            return 1;
+        g_wait_reg = (uint32_t *)p;
+        g_wait_bits = (uint64_t *)((char *)p + reg_sz);
+        g_wait_seq = (uint64_t *)((char *)p + reg_sz + bits_sz);
+    }
+    memset(g_wait_reg, 0, sizeof(uint32_t) * MAX_TXN_WORKERS);
+    memset(g_wait_bits, 0,
+           sizeof(uint64_t) * SHIM_WAIT_WORDS * FR_MAX_LOGICAL_NODES);
+    memset(g_wait_seq, 0, sizeof(uint64_t) * FR_MAX_LOGICAL_NODES);
+    return 0;
+}
+
+static inline uint64_t *shim_wait_word(int node, int wid) {
+    return &g_wait_bits[(size_t)node * SHIM_WAIT_WORDS +
+                        (size_t)wid / 64u];
+}
+
+static inline uint32_t shim_waiter_count(int node) {
+    uint32_t n = 0;
+    int w;
+    if (!g_wait_bits || node < 0 || node >= (int)FR_MAX_LOGICAL_NODES)
+        return 0;
+    for (w = 0; w < (int)SHIM_WAIT_WORDS; w++) {
+        uint64_t bits = __atomic_load_n(
+            &g_wait_bits[(size_t)node * SHIM_WAIT_WORDS + (size_t)w],
+            __ATOMIC_ACQUIRE);
+        n += (uint32_t)__builtin_popcountll(bits);
+    }
+    return n;
+}
+
+/* Transition kinds, so a test can target the pause at the one transition
+ * whose window it needs to force. */
+#define SHIM_WAITER_REG 1  /* a worker registered          */
+#define SHIM_WAITER_REL 2  /* a worker released            */
+#define SHIM_WAITER_REC 3  /* recovery removed a dead wid  */
+
+/* Test-only injection point: pause between the bitmap snapshot and its
+ * publication, so a competing transition can be forced into the exact
+ * window the CAS/verify protocol exists to close.
+ *
+ *   FORKRUN_TEST_WAITER_PAUSE_MS   milliseconds to hold the snapshot
+ *   FORKRUN_TEST_WAITER_PAUSE_ON   register|release|recover (default all)
+ *   FORKRUN_TEST_WAITER_SIGNAL_FD  write 8 bytes just before the sleep,
+ *                                  so a test can tell that the pause has
+ *                                  begun instead of racing a timer
+ *
+ * Deliberately uncached (same rule as the FORKRUN_TEST_DIE_* hooks): a
+ * child sets the value after it forks, so a cached "unset" inherited
+ * across fork would disarm it.  Inert unless the variables are set. */
+static inline void shim_waiter_test_pause(int kind) {
+    const char *ms_s = getenv("FORKRUN_TEST_WAITER_PAUSE_MS");
+    const char *on;
+    int ms;
+    if (!ms_s)
+        return;
+    ms = atoi(ms_s);
+    if (ms <= 0)
+        return;
+    on = getenv("FORKRUN_TEST_WAITER_PAUSE_ON");
+    if (on && *on) {
+        if ((!strcmp(on, "register") && kind != SHIM_WAITER_REG) ||
+            (!strcmp(on, "release") && kind != SHIM_WAITER_REL) ||
+            (!strcmp(on, "recover") && kind != SHIM_WAITER_REC))
+            return;
+    }
+    {
+        const char *fd_s = getenv("FORKRUN_TEST_WAITER_SIGNAL_FD");
+        if (fd_s && *fd_s) {
+            int fd = atoi(fd_s);
+            unsigned long long one = 1;
+            if (fd >= 0)
+                (void)sys_write(fd, &one, sizeof(one));
+        }
+    }
+    usleep((useconds_t)ms * 1000);
+}
+
+/* Publish popcount(g_wait_bits[node]) into the engine's gauge.  See the
+ * protocol note above; step 4 is the part that makes it exact. */
+static inline void shim_waiter_publish(int node, int kind) {
+    uint32_t n, old;
+    uint64_t v0;
+    if (!g_wait_bits || !g_wait_seq || !state)
+        return;
+    if (node < 0 || node >= (int)global_num_nodes)
+        return;  /* nothing reads a node outside the live topology */
+    for (;;) {
+        v0 = __atomic_load_n(&g_wait_seq[node], __ATOMIC_ACQUIRE);
+        n = shim_waiter_count(node);
+        shim_waiter_test_pause(kind);
+        old = __atomic_load_n(&state[node].active_waiters,
+                              __ATOMIC_ACQUIRE);
+        if (!__atomic_compare_exchange_n(&state[node].active_waiters,
+                                         &old, n, false,
+                                         __ATOMIC_SEQ_CST,
+                                         __ATOMIC_SEQ_CST))
+            continue;
+        if (__atomic_load_n(&g_wait_seq[node], __ATOMIC_ACQUIRE) == v0 &&
+            shim_waiter_count(node) == n) {
+            __atomic_fetch_add(&g_wait_seq[node], 1, __ATOMIC_RELEASE);
+            return;
+        }
+        /* Someone moved the bitmap under us (or published a newer
+         * count); our store is not a settled snapshot.  Recompute. */
+    }
+}
+
+/* Registered as a waiter on `node`.  See the ordering note above. */
+static inline void shim_waiter_register(int wid, int node) {
+    uint32_t old;
+    if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS)
+        return;
+    if (!state || node < 0 || node >= (int)global_num_nodes)
+        return;  /* no gauge for that node, so do not claim a bit */
+    old = __atomic_load_n(&g_wait_reg[wid], __ATOMIC_ACQUIRE);
+    if ((old & 1u) && (int)(old >> 1) != node) {
+        /* Per-wid transitions are serialized by process lifetime, so a
+         * second registration cannot happen.  If it ever does, drop the
+         * old node's bit BEFORE moving the claim word: while the word
+         * still names the old node, a death in this window is still
+         * attributable, and recovery clears an already-clear bit
+         * harmlessly.  (Dropping the bit after the exchange would leave
+         * the old bit orphaned for a death in between.) */
+        int onode = (int)(old >> 1);
+        if (onode >= 0 && onode < (int)FR_MAX_LOGICAL_NODES) {
+            __atomic_fetch_and(shim_wait_word(onode, wid),
+                               ~(1ull << ((unsigned)wid % 64u)),
+                               __ATOMIC_ACQ_REL);
+            shim_waiter_publish(onode, SHIM_WAITER_REL);
+        }
+    }
+    __atomic_store_n(&g_wait_reg[wid], ((uint32_t)node << 1) | 1u,
+                     __ATOMIC_RELEASE);
+    __atomic_fetch_or(shim_wait_word(node, wid),
+                      1ull << ((unsigned)wid % 64u), __ATOMIC_ACQ_REL);
+    is_waiting_on_ring = true;  /* keep the engine's TLS view coherent */
+    shim_waiter_publish(node, SHIM_WAITER_REG);
+}
+
+/* Remove THIS wid's registration.  Idempotent: safe on a worker that
+ * never registered, and safe for recovery on an already-cleared wid.
+ * Clears the bit BEFORE dropping the claim word so that a death in
+ * between is still attributable (see the ordering note above). */
+static inline void shim_waiter_release(int wid) {
+    uint32_t old;
+    int node;
+    if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS)
+        return;
+    old = __atomic_load_n(&g_wait_reg[wid], __ATOMIC_ACQUIRE);
+    if (!(old & 1u))
+        return;
+    node = (int)(old >> 1);
+    if (node >= 0 && node < (int)FR_MAX_LOGICAL_NODES)
+        __atomic_fetch_and(shim_wait_word(node, wid),
+                           ~(1ull << ((unsigned)wid % 64u)),
+                           __ATOMIC_ACQ_REL);
+    __atomic_store_n(&g_wait_reg[wid], 0, __ATOMIC_RELEASE);
+    is_waiting_on_ring = false;
+    shim_waiter_publish(node, SHIM_WAITER_REL);
+}
+
+/* Recovery twin: remove a DEAD worker's registration and republish.
+ * Runs in the supervising process, where is_waiting_on_ring is not the
+ * dead worker's TLS, so it is deliberately untouched here.  The claim
+ * word is removed with an exchange so that two recoveries for the same
+ * wid cannot both publish a removal.
+ *
+ * Recovery republishes for EVERY death, not only a registered one.  A
+ * worker that dies after clearing its bit and storing reg=0 -- but
+ * before its own publish -- leaves a stale HIGH mirror that no later
+ * transition on that node is guaranteed to repair: the claim word no
+ * longer names the node, so the registry alone cannot say where to look.
+ * The dead worker's transaction node can (worker_init publishes it), so
+ * recovery publishes there regardless.  A recompute is harmless when
+ * the mirror was already exact; skipping it is not, and a stale high
+ * turns every later publish into an unnecessary eventfd poke. */
+static inline void shim_waiter_recover(int wid) {
+    uint32_t old;
+    int node = -1;
+    if (!g_wait_reg || wid < 0 || wid >= MAX_TXN_WORKERS)
+        return;
+    old = __atomic_load_n(&g_wait_reg[wid], __ATOMIC_ACQUIRE);
+    if (old & 1u) {
+        node = (int)(old >> 1);
+        if (node >= 0 && node < (int)FR_MAX_LOGICAL_NODES)
+            __atomic_fetch_and(shim_wait_word(node, wid),
+                               ~(1ull << ((unsigned)wid % 64u)),
+                               __ATOMIC_ACQ_REL);
+        __atomic_exchange_n(&g_wait_reg[wid], 0, __ATOMIC_ACQ_REL);
+    } else if (g_state) {
+        node = (int)__atomic_load_n(&g_state->worker_txn[wid].node,
+                                    __ATOMIC_ACQUIRE);
+    }
+    if (node >= 0)
+        shim_waiter_publish(node, SHIM_WAITER_REC);
+}
+
 /* Initialize the substrate for one UMA node. lines/bytes are mutually
  * exclusive (0 = default adaptive). Returns the engine rc (0 ok, 1 fail). */
 int fr_py_init(int lines, int bytes) {
@@ -174,7 +549,13 @@ int fr_py_init(int lines, int bytes) {
         snprintf(a1, sizeof(a1), "--bytes=%d", bytes);
         argv[argc++] = a1;
     }
-    return ring_init_main(argc, argv);
+    argv[argc] = NULL;
+    {
+        int rc = ring_init_main(argc, argv);
+        if (rc == 0 && shim_waiters_init() != 0)
+            return 1;
+        return rc;
+    }
 }
 
 /* Tear down substrate state (parent only; children os._exit without this). */
@@ -235,6 +616,20 @@ int fr_py_ingest_done(void) {
     return 0;
 }
 
+/* Bind the LOGICAL node the next fr_py_worker_init call will use.
+ *
+ * -1 clears the binding, which restores the historical behaviour: the
+ * node argument of fr_py_worker_init decides. The binding exists so the
+ * multi-node launcher can select a ring without a second copy of the
+ * worker loop body (the parity test requires the three modes to share
+ * one lifecycle, and a duplicate body would be a fourth place for a fix
+ * to miss). */
+static int g_fr_bound_node = -1;
+
+void fr_py_worker_bind_node(int node_id) {
+    g_fr_bound_node = node_id;
+}
+
 /* Initialize worker-local state in the CALLING process (call post-fork).
  * Fills g_fr_config directly — no env vars, no bash. Mirrors the
  * ring_worker inc fill point plus node resolution and active_workers
@@ -246,6 +641,10 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
     if (!state || !g_state)
         return 1;
     g_fr_config.ring_wid = wid;
+    /* A bound node (the multi-node launcher's selector) OVERRIDES the
+     * argument, and is range-checked exactly as the argument is. */
+    if (g_fr_bound_node >= 0)
+        node_id = g_fr_bound_node;
     if (node_id >= 0 && node_id < (int)global_num_nodes)
         g_fr_config.ring_node_id = node_id;
     else
@@ -262,7 +661,15 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
     /* W-PY28: fresh generation — drop any inherited output-fd naming
      * (fork inherits the value; the worker re-arms it explicitly via
      * fr_py_set_output_fd or the C loops below). */
-    fr_py_txn_out_fd = -1;
+fr_py_txn_out_fd = -1;
+    /* C0.7: same reasoning for the pending DATA count. It is thread-local
+     * and survives fork, so a value inherited by a fresh generation
+     * would be flushed into the NEW run's shared counter and report
+     * frames nobody committed in it. This is the W-PY28 hazard applied
+     * to the counter: it surfaced as a test that failed only when run
+     * after another that left a pending value behind, and passed alone.
+     * A fresh generation must carry neither name nor count. */
+    fr_py_txn_pending_data = 0;
     /* W-PY30: per-worker coredump defaults (dumps off; generous hard
      * preserved for final-attempt arming; small-dump filter). */
     worker_coredump_startup();
@@ -273,6 +680,18 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
         my_numa_node = 0;
     if (my_numa_node >= (int)global_num_nodes)
         my_numa_node = 0;
+    /* Publish this generation's node into the transaction record even
+     * before its first claim.  Recovery classifies an IDLE/WAITING
+     * death against the DEAD WORKER's node; an unpublished record
+     * otherwise reads the mapping's zero (node 0), so on a multi-node
+     * run a node-N death can be judged "node 0 is drained", the slot
+     * freed WITHOUT a respawn, and node N's work stranded.
+     * worker_txn_publish() overwrites this on every claim, so it is a
+     * floor for the never-published case, not a second identity. */
+    if (g_state && wid >= 0 && wid < MAX_TXN_WORKERS)
+        __atomic_store_n(&g_state->worker_txn[wid].node,
+                         (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0),
+                         __ATOMIC_RELEASE);
     /* W-PY21: worker self-pinning (mirrors ring_worker inc exactly:
      * pin when multi-node OR explicit map, via the engine's own
      * logical→physical map; best-effort, never fatal — UMA paths
@@ -292,9 +711,89 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
  * *out. Returns 0 success, 2 EOF, 1 failure/abort. Never touches bash
  * variables. */
 
+/* W-PY31: WAITING is the "no ticket yet" phase of a claim.
+ *
+ * `TXN_CLAIMING` is the claim-without-publish window: the ticket may
+ * have been issued, so recovery must abort rather than guess.  The
+ * original shim bracketed the WHOLE blocking `do_lockfree_claim` with
+ * that state.  A worker waiting for the first batch (or for a slow
+ * producer) therefore sat in CLAIMING for an unbounded time, and a
+ * death there -- an OOM kill, an operator kill, the supervision test's
+ * immediate-kill injection -- was misclassified as an unattributable
+ * ticket.  Measured: 47/100 slot-pressure runs aborted with recovery
+ * rc=4 while no batch was in flight at all.
+ *
+ * WAITING is deliberately a shim-side value: the engine is frozen, and
+ * its recovery core knows only 0..3.  fr_py_recover_worker() translates
+ * WAITING to IDLE before delegating, which is exactly the truth -- no
+ * ticket has been issued.  All Python and cleanroom worker loops call
+ * fr_py_claim(), so they share this phase; the bash worker retains the
+ * engine's original bracketing and is unaffected.
+ *
+ * Do not collapse WAITING into IDLE: the state is what lets recovery
+ * distinguish "waiting" from the CLAIMING window it must still abort on.
+ */
+#define TXN_WAITING 4u
+
+static inline void worker_txn_begin_wait(int wid) {
+    if (!g_state || wid < 0 || wid >= MAX_TXN_WORKERS) return;
+    __atomic_store_n(&g_state->worker_txn[wid].state, TXN_WAITING,
+                     __ATOMIC_RELEASE);
+}
+
+/* Block until a claim attempt has a reason to be retried.  The claim
+ * DECISION stays in do_lockfree_claim(); this only mirrors its wait set
+ * (data eventfd, escrow pipe, EOF eventfd) so an idle worker sleeps in
+ * poll() instead of spinning.  The transaction is in WAITING here, so a
+ * death during this wait is recoverable.
+ *
+ * Returns 1 when poll reported an event (any of the three sources) and
+ * 0 on timeout/error.  The caller does not treat that as "there is
+ * work" -- the eventfd is shared, so a sibling can consume a poke.  It
+ * is only the signal to leave WAITING and attempt a non-blocking claim;
+ * a timeout stays in WAITING and polls again. */
+static int fr_py_claim_wait_poll(void) {
+    int node = (my_numa_node >= 0) ? my_numa_node : 0;
+    struct pollfd pfds[3];
+    int pr;
+
+    pfds[0].fd = evfd_data_arr ? evfd_data_arr[node] : -1;
+    pfds[0].events = POLLIN;
+    pfds[0].revents = 0;
+    pfds[1].fd = (fd_escrow_r && fd_escrow_r[node] >= 0)
+                     ? fd_escrow_r[node] : -1;
+    pfds[1].events = POLLIN;
+    pfds[1].revents = 0;
+    pfds[2].fd = evfd_eof_arr ? evfd_eof_arr[node] : -1;
+    pfds[2].events = POLLIN;
+    pfds[2].revents = 0;
+
+    do {
+        pr = poll(pfds, 3, 100);
+    } while (pr < 0 && errno == EINTR);
+    if (pr <= 0)
+        return 0;
+
+    /* Drain the eventfds this helper owns.  The escrow pipe is left
+     * untouched: do_lockfree_claim() is its sole reader and must see
+     * the packet. */
+    if (pfds[0].fd >= 0 && (pfds[0].revents & POLLIN)) {
+        uint64_t v;
+        while (sys_read(pfds[0].fd, &v, 8) > 0) {
+        }
+    }
+    if (pfds[2].fd >= 0 && (pfds[2].revents & POLLIN)) {
+        uint64_t v;
+        while (sys_read(pfds[2].fd, &v, 8) > 0) {
+        }
+    }
+    return 1;
+}
+
 int fr_py_claim(fr_py_batch_t *out) {
     struct WorkerBatchState batch;
     int rc;
+    int waiting = 0;
 
     if (!out)
         return 1;
@@ -303,20 +802,94 @@ int fr_py_claim(fr_py_batch_t *out) {
         if (my_numa_node >= (int)global_num_nodes)
             my_numa_node = 0;
     }
-    /* W-PY29: IDLE → CLAIMING before the ticket is issued
-     * (do_lockfree_claim is untouched — the hook only brackets it). */
-    worker_txn_begin_claim(g_fr_config.ring_wid);
-    /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_CLAIM=1 makes
-     * the worker SIGKILL itself inside the claim-without-publish
-     * window (deterministic race injection). Inert unless the env var
-     * is set. Deliberately uncached: the value is read fresh so
-     * forked children observe the post-fork environment (a cached
-     * "unset" inherited across fork would disarm the hook) and
-     * set/del cycles across tests behave. Cost is one getenv per
-     * claim (~tens of ns, invisible next to batch work). */
-    if (getenv("FORKRUN_TEST_DIE_AT_CLAIM") != NULL)
-        raise(SIGKILL);
-    rc = do_lockfree_claim(&batch, true);
+    for (;;) {
+        /* Already registered as a waiter?  Recheck the engine's own
+         * wake conditions first.  A poll TIMEOUT (no data, no escrow,
+         * no EOF) keeps us in WAITING and re-polls without ever
+         * entering the claim-without-publish window -- which is what
+         * makes an idle worker's death recoverable for the whole time
+         * the source is stalled, not just between 100 ms rounds.  The
+         * recheck (rather than trusting the eventfd) mirrors the
+         * engine's blocking wait: the eventfd is shared, so a sibling
+         * may have consumed the poke meant for us. */
+        if (waiting) {
+            uint64_t w_now, r_now;
+            int done_now;
+            if (atomic_load_relaxed(&state[0].emergency_abort)) {
+                rc = 1;
+                goto claim_done;
+            }
+            w_now = atomic_load_acquire(&state[my_numa_node].write_idx);
+            r_now = atomic_load_relaxed(&state[my_numa_node].read_idx);
+            done_now = atomic_load_acquire(
+                &state[my_numa_node].scanner_finished);
+            if (r_now >= w_now && !done_now) {
+                if (!fr_py_claim_wait_poll())
+                    continue;  /* timeout: stay WAITING, no CLAIMING */
+            }
+        }
+        /* W-PY29: IDLE → CLAIMING immediately before a NON-BLOCKING
+         * claim.  The ticket can only be issued by this call, so the
+         * window stays bounded; the wait itself is WAITING. */
+        worker_txn_begin_claim(g_fr_config.ring_wid);
+        /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_CLAIM=1 makes
+         * the worker SIGKILL itself inside the claim-without-publish
+         * window (deterministic race injection). Inert unless the env var
+         * is set. Deliberately uncached: the value is read fresh so
+         * forked children observe the post-fork environment (a cached
+         * "unset" inherited across fork would disarm the hook) and
+         * set/del cycles across tests behave. Cost is one getenv per
+         * claim (~tens of ns, invisible next to batch work). */
+        if (getenv("FORKRUN_TEST_DIE_AT_CLAIM") != NULL)
+            raise(SIGKILL);
+        rc = do_lockfree_claim(&batch, false);
+        if (rc == 0)
+            break;
+
+        /* No ticket was issued (or the engine failed/aborted). */
+        worker_txn_abort_claim(g_fr_config.ring_wid);
+        if (rc != 1)
+            goto claim_done;
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {
+            rc = 1;
+            goto claim_done;
+        }
+
+        worker_txn_begin_wait(g_fr_config.ring_wid);
+        if (!waiting) {
+            int node = (my_numa_node >= 0) ? my_numa_node : 0;
+            /* W-PY31 adversarial hook: die BEFORE registering (no
+             * ticket, no waiter contribution).  Recovery must classify
+             * NO_BATCH and must not touch active_waiters.  Inert unless
+             * set. */
+            if (getenv("FORKRUN_TEST_DIE_AT_WAIT") != NULL)
+                raise(SIGKILL);
+            shim_waiter_register(g_fr_config.ring_wid, node);
+            waiting = 1;
+            /* W-PY31 adversarial hook: die AFTER registering, while
+             * other workers may be waiting too.  Recovery must remove
+             * exactly THIS wid's contribution.  Inert unless set. */
+            if (getenv("FORKRUN_TEST_DIE_AT_WAIT_REGISTERED") != NULL)
+                raise(SIGKILL);
+        }
+        /* Re-check from the top instead of polling here.  A publish
+         * that raced this registration read active_waiters == 0 and
+         * therefore did not poke the eventfd, so the data may already
+         * be claimable; the top re-reads write_idx/scanner_finished
+         * BEFORE deciding to poll, which is the engine's own blocking
+         * order (register, re-check, then poll).  A poll timeout there
+         * keeps us in WAITING and re-polls. */
+        continue;
+    }
+    if (waiting) {
+        shim_waiter_release(g_fr_config.ring_wid);
+        waiting = 0;
+    }
+    /* fall through: batch is ours and the transaction is CLAIMING */
+
+claim_done:
+    if (waiting)
+        shim_waiter_release(g_fr_config.ring_wid);
     if (rc != 0) {
         /* EOF/abort: no batch acquired — CLAIMING → IDLE. */
         worker_txn_abort_claim(g_fr_config.ring_wid);
@@ -335,6 +908,43 @@ int fr_py_claim(fr_py_batch_t *out) {
         uint32_t poisoned = 0;
         if (batch.num_kills > 0) {
             int limit = g_fr_config.retry_limit;
+            if (limit < 0) {
+                /* UNBOUNDED RETRY. A negative limit means "never declared
+                 * poisoned" (bash -E parity, frun.bash:448), so the poison
+                 * branch below is skipped entirely and the batch is
+                 * retried forever.
+                 *
+                 * That is the intended semantics -- but it was SILENT:
+                 * measured, a permanently failing batch under
+                 * FORKRUN_RETRY_LIMIT=-1 ran past a 45s timeout with no
+                 * stdout, no stderr and no diagnostic. A user who set -1
+                 * meaning "absorb transient failures" instead got an
+                 * indistinguishable hang, with no hint that the retry
+                 * budget was unbounded rather than merely large.
+                 *
+                 * Warn at each power of ten: escalating rather than
+                 * periodic. A fixed interval is wrong here because retry
+                 * cost varies by orders of magnitude between workloads --
+                 * at 1ms a "every 100" warning emits tens of thousands of
+                 * lines over an overnight hang, which is its own
+                 * undebuggable condition. Powers of ten cap the output at
+                 * O(log n) per batch however long it runs, while still
+                 * showing the growth rate. */
+                uint32_t k = batch.num_kills;
+                if (k == 10u || k == 100u || k == 1000u || k == 10000u ||
+                    k == 100000u || k == 1000000u) {
+                    fprintf(stderr,
+                            "forkrun [WARN]: batch %llu has been retried "
+                            "%lu times and retry_limit is negative "
+                            "(--unbounded); it will never be poisoned.\n"
+                            "         If this is unexpected, set "
+                            "FORKRUN_RETRY_LIMIT to a non-negative value "
+                            "to bound retries.\n",
+                            (unsigned long long)batch.batch_idx,
+                            (unsigned long)k);
+                    fflush(stderr);
+                }
+            }
             if (limit >= 0 && batch.num_kills >= (uint32_t)limit) {
                 uint32_t poison_threshold =
                     (limit > 0) ? (uint32_t)limit : 1;
@@ -538,10 +1148,288 @@ unsigned int fr_py_poisoned_count(void) {
  * ===================================================================== */
 
 /* Little-endian 16-byte emitter header shared with run.py:_HDR. */
+/* DECISION-02 section 5.1 -- TYPED terminal dispositions.
+ *
+ * Every published batch reaches exactly one of these. The field is
+ * EXPLICIT rather than inferred from `len` because `len == 0` is already
+ * spoken for: fr_py_emit's v0 contract (and test_v1_emit.py) define a
+ * zero-length payload as a real empty result. Overloading it for "this
+ * batch completed with no result" would collapse a tested distinction
+ * between None and b"".
+ *
+ *   DATA      - completed with a result. `len` may legitimately be 0.
+ *   NO_RESULT - completed successfully with no result (payload returned
+ *               None). This is the case that previously emitted NOTHING,
+ *               leaving the parent unable to tell "produced nothing" from
+ *               "has not arrived yet" -- the ambiguity that made ordered
+ *               streaming stall.
+ *
+ * SKIPPED and POISONED are NOT emitted on this channel: those batches are
+ * never emitted at all, so the worker has no emit site for them. The parent
+ * learns their INDICES from the poison relay on the stats channel, which is
+ * available after the join. See the note in run.py.
+ */
+#define FR_DISP_DATA      0u
+#define FR_DISP_NO_RESULT 1u
+/* DECISION-02 5.1: the four terminal dispositions. Every PUBLISHED batch
+ * reaches exactly one. SKIPPED and POISONED carry no payload -- their
+ * entire content is that the batch reached a terminal state which is NOT
+ * a success, so an ordered consumer can advance the prefix past it
+ * without that advance implying success. A missing payload implies
+ * neither success nor poison. */
+#define FR_DISP_SKIPPED   2u
+#define FR_DISP_POISONED  3u
+
 struct fr_py_record_hdr {
     uint64_t batch_idx;
     uint64_t len;
+    uint32_t disposition;
+    uint32_t reserved;      /* explicit tail; keeps the struct 8-aligned */
 };
+
+/* DECISION-02: the on-wire record footprint. Every rollback-frontier
+ * advance MUST use this, never a literal 16. The frontier is what
+ * recovery truncates the output fd back to, so a site that still said
+ * "16 + len" under-counted by the 8 bytes the disposition added -- and
+ * rollback would then leave 8 bytes of stale output behind for EVERY
+ * record. That is silent data corruption on the retry path, which is
+ * exactly what the exactly-once invariant forbids. */
+#define FR_PY_RECORD_FOOTPRINT(payload_len) \
+    (sizeof(struct fr_py_record_hdr) + (payload_len))
+
+/* Write one keyed "bytes are visible" signal. Defined below, declared
+ * here because the disposition emitter (earlier in this file) needs it. */
+
+/* STAGE0 TEST-ONLY: drain-forward handshake.
+ *
+ * A fault-injection test that sleeps "long enough" for the drain proves
+ * nothing: it cannot distinguish "the drain forwarded, then the worker
+ * died" from "the drain never ran, so the test never exercised the
+ * window at all". That ambiguity already cost one wrong conclusion in
+ * this codebase.
+ *
+ * When FORKRUN_TEST_DRAIN_ACK_FIFO names a FIFO, the drain writes
+ * (worker, cursor) after EVERY wakeup it processes -- including wakeups
+ * that legitimately forward nothing -- so a test can wait for proof that
+ * the drain was awake and acting at a precise moment.
+ *
+ * The write end is opened O_NONBLOCK: with no reader the open fails with
+ * ENXIO and the ack is skipped, so this is inert by default and changes
+ * no production path. */
+static void fr_drain_test_ack(uint64_t wid, uint64_t cursor)
+{
+    const char *path = getenv("FORKRUN_TEST_DRAIN_ACK_FIFO");
+    uint64_t rec[2];
+    int fd;
+
+    if (path == NULL || *path == 0)
+        return;
+    fd = open(path, O_WRONLY | O_NONBLOCK);
+    if (fd < 0)
+        return;                 /* no reader: nobody is testing */
+    rec[0] = wid;
+    rec[1] = cursor;
+    (void)!write(fd, rec, sizeof(rec));
+    close(fd);
+}
+
+/* STAGE0 TEST-ONLY: block until the drain confirms it processed a wakeup
+ * for this worker, so an injected death provably happens AFTER the drain
+ * had its chance. Bounded, so a broken build fails the test rather than
+ * hanging it. */
+static void fr_drain_test_wait_ack(uint64_t wid)
+{
+    const char *path = getenv("FORKRUN_TEST_DRAIN_ACK_FIFO");
+    uint64_t rec[2];
+    int fd, spins;
+
+    if (path == NULL || *path == 0)
+        return;
+    fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0)
+        return;
+    for (spins = 0; spins < 3000; spins++) {
+        ssize_t n = read(fd, rec, sizeof(rec));
+        if (n == (ssize_t)sizeof(rec)) {
+            if (rec[0] == wid) {
+                close(fd);
+                return;
+            }
+            continue;
+        }
+        usleep(1000);
+    }
+    close(fd);
+    /* The handshake was requested and never completed. Abort rather than
+     * fall through and die anyway: silently timing out would make the
+     * test indistinguishable from one where the drain never ran, which
+     * is precisely the vacuous case the handshake exists to rule out. */
+    {
+        static const char msg[] =
+            "forkrun: FORKRUN_TEST_DRAIN_ACK_FIFO set but no drain ack\n";
+        ssize_t ignored = write(2, msg, sizeof(msg) - 1);
+        (void)ignored;
+        _exit(97);
+    }
+}
+
+static int fr_py_signal_write(int signal_fd, uint64_t wid,
+                              uint64_t batch_idx);
+int fr_py_notify_committed(int signal_fd, int out_fd, uint64_t wid);
+
+/* Fault injection for the exactly-once tests: SIGKILL this worker
+ * after its record is framed but before it acks.
+ *
+ * That window is the only one where a rollback is both POSSIBLE and
+ * NECESSARY: the transaction is still CLAIMED and an orphan sits in the
+ * output fd. The pre-existing hooks cannot reach it --
+ * DIE_AT_CLAIM fires before any output exists, and DIE_AT_COMMIT fires
+ * after worker_txn_begin_commit, leaving the transaction COMMITTING,
+ * which recovery reports as RACE_DETECTED rather than guessing.
+ *
+ * FORKRUN_TEST_DIE_BEFORE_ACK=n kills on the n-th attempt in THIS
+ * process. Counting per process is what makes it usable under
+ * supervision: a respawned generation starts over, so each generation
+ * supplies exactly one more death to survive, rather than every worker
+ * dying on its first action forever until the respawn cap aborts the
+ * run. Inert unless the variable is set.
+ *
+ * FORKRUN_TEST_DIE_AFTER_DRAIN_MS=ms widens that same window: sleep ms
+ * after the record is signalled but before raising, so the drain has
+ * demonstrably forwarded the record downstream BEFORE the worker dies.
+ * Without it, whether the drain got there first is a scheduler race, so
+ * a passing test proves less than it appears to -- the uncommitted record
+ * can only be rolled back if it is still in the worker's memfd. */
+static void fr_py_maybe_die_before_ack(int wid, int signal_fd)
+{
+    const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_ACK");
+    if (n != NULL && *n) {
+        static unsigned seq = 0;
+        unsigned want = (unsigned)atoi(n);
+        seq++;
+
+        /* STAGE0 one-shot variant. The attempt counter above is a
+         * per-process static, so after a respawn it starts over and the
+         * first-attempt death repeats in EVERY generation until the batch
+         * poisons. That makes it impossible to observe the case that
+         * matters most for content correctness: attempt 1 dies, attempt
+         * 2 SUCCEEDS with different bytes, and the caller must receive
+         * attempt 2's payload.
+         *
+         * With FORKRUN_TEST_DIE_BEFORE_ACK_ONCE naming a path, the death
+         * fires only if that file does not yet exist, and creates it when
+         * it fires. The file outlives the process, so exactly one
+         * attempt in the whole run dies and recovery gets to succeed. */
+        if (seq == want) {
+            const char *once = getenv("FORKRUN_TEST_DIE_BEFORE_ACK_ONCE");
+            if (once != NULL && *once) {
+                int seen = open(once, O_RDONLY);
+                if (seen >= 0) {
+                    close(seen);
+                    return;         /* already fired once; let this run */
+                }
+                {
+                    int mk = open(once, O_WRONLY | O_CREAT | O_EXCL, 0600);
+                    if (mk < 0)
+                        return;     /* lost the race; do not double-fire */
+                    close(mk);
+                }
+            }
+            /* STAGE0 handshake: wake the drain with frontier 0, which
+             * EXCLUDES the record just written uncommitted. If the
+             * protocol is correct the drain wakes, sees nothing
+             * committed to move, and confirms -- proving it was awake
+             * and declined to publish without ever being told the
+             * uncommitted record exists. */
+            if (getenv("FORKRUN_TEST_DRAIN_ACK_FIFO") != NULL)
+                (void)fr_py_signal_write(signal_fd, (uint64_t)wid, 0);
+            const char *d = getenv("FORKRUN_TEST_DIE_AFTER_DRAIN_MS");
+            if (d != NULL && *d) {
+                unsigned long ms = strtoul(d, NULL, 10);
+                if (ms)
+                    usleep((useconds_t)(ms * 1000));
+            }
+            /* Prefer a real handshake over a sleep: wait until the
+             * drain confirms it processed a wakeup for this worker, so
+             * the death provably happens AFTER the drain had its chance
+             * rather than merely probably after. */
+            if (getenv("FORKRUN_TEST_DRAIN_ACK_FIFO") != NULL)
+                fr_drain_test_wait_ack((uint64_t)wid);
+            raise(SIGKILL);
+        }
+    }
+}
+
+/* Fault injection: SIGKILL this worker AFTER its payload record has been
+ * written AND signalled, but BEFORE the ack.
+ *
+ * This is the interval the before-ack hook cannot reach, and it is the
+ * one that matters. fr_py_emit_record_buf writes a DATA record WITHOUT
+ * signalling; the signal happens later, inside fr_py_complete. The
+ * before-ack hook sits between those two points, so under it a DATA
+ * record is never signalled, the drain never learns of it, and a DATA
+ * record is never forwarded -- which means a test driven by that hook
+ * exercises ONLY the disposition path and silently proves nothing about
+ * DATA publication, however many POISONED records it forwards.
+ *
+ * Gated on signal_fd >= 0, i.e. wherever a completion WILL notify the
+ * drain. Gating on payload length was wrong: the UDF and plugin loops
+ * write their record themselves and then complete with data=NULL, so a
+ * length gate left the hook unreachable there and those runs passed
+ * without any fault being injected at all.
+ *
+ * Honours FORKRUN_TEST_DIE_AFTER_DRAIN_MS to let the drain forward the
+ * record first, which is what makes the publication/commit window real
+ * rather than theoretical. */
+static void fr_py_maybe_die_before_notify(int signal_fd,
+                                              int out_fd, int wid)
+{
+    const char *n = getenv("FORKRUN_TEST_DIE_BEFORE_NOTIFY");
+    if (n != NULL && *n && signal_fd >= 0) {
+        static unsigned seq = 0;
+        unsigned want = (unsigned)atoi(n);
+        seq++;
+        if (want && seq == want) {
+            const char *d = getenv("FORKRUN_TEST_DIE_AFTER_DRAIN_MS");
+            if (d != NULL && *d) {
+                unsigned long ms = strtoul(d, NULL, 10);
+                if (ms)
+                    usleep((useconds_t)(ms * 1000));
+            }
+            /* STAGE0 handshake, NON-PUBLISHING.
+             *
+             * This hook used to publish the record's real frontier and
+             * wait for the drain to forward it. That proved an ordinary
+             * notification works -- the opposite of what this interval
+             * is for. A lost-notification test that sends the
+             * notification cannot fail when the notification is lost.
+             *
+             * Instead, wake the drain with frontier 0, which is at or
+             * below the PREVIOUS committed boundary and so excludes the
+             * record just committed. The drain wakes, has nothing new to
+             * move, and acknowledges. That proves it is alive and
+             * processing while being told nothing about this record.
+             *
+             * The worker then dies having sent no notification that
+             * reaches this record's bytes, so the supervisor's synthetic
+             * post-recovery wakeup is the ONLY path that can deliver it. */
+            if (getenv("FORKRUN_TEST_DRAIN_ACK_FIFO") != NULL) {
+                const char *m = getenv("FORKRUN_TEST_DIE_BEFORE_NOTIFY_MARK");
+                if (m != NULL && *m) {
+                    int mf = open(m, O_WRONLY | O_CREAT | O_APPEND, 0600);
+                    if (mf >= 0) {
+                        ssize_t ig = write(mf, "N\n", 2);
+                        (void)ig;
+                        close(mf);
+                    }
+                }
+                (void)fr_py_signal_write(signal_fd, (uint64_t)wid, 0);
+                fr_drain_test_wait_ack((uint64_t)wid);
+            }
+            raise(SIGKILL);
+        }
+    }
+}
 
 /* Full-write loop (regular files / memfds: no SIGPIPE, short writes only
  * on EINTR/error). Returns 0 ok, -1 on failure. */
@@ -572,13 +1460,46 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
     uint64_t left;
     off_t woff;
 
-    if (src_len == 0)
-        return 0; /* v0 parity: empty output emits no record (None). */
+    /* DECISION-02: a completed batch ALWAYS gets a record now.
+     *
+     * This used to `return 0` on src_len == 0, under the comment "v0
+     * parity: empty output emits no record (None)". The parity claim was
+     * wrong: fr_py_emit's documented v0 contract and test_v1_emit.py both
+     * say a zero-length payload IS emitted. The early return therefore
+     * matched only the None case and silently dropped a legitimate empty
+     * result.
+     *
+     * Now the disposition distinguishes them explicitly: src_len == 0 is
+     * NO_RESULT, and a real empty DATA result is carried as DATA with
+     * len == 0.
+     *
+     * NOTE (comment-only clarification, no behaviour change): the
+     * sentence above describes what the DISPOSITION FIELD can express,
+     * NOT what this function emits. THIS FUNCTION INFERS, and therefore
+     * can never produce an empty DATA frame -- it has no other input to
+     * infer from. Empty DATA is reachable only through
+     * fr_py_emit_record_buf (explicit disposition) or fr_py_emit.
+     *
+     * That inference is deliberate and correct for this function's
+     * callers. Two are the stdout-CAPTURE paths (cap_fd,
+     * fstat on the capture file); a third is the sendfile-unavailable
+     * fallback inside fr_py_worker_splice_loop. (An earlier draft of
+     * this comment said "exactly two callers" and was wrong -- the
+     * splice fallback is a third. See also the splice fast path, which
+     * frames DATA inline and therefore bypasses this function entirely.)
+     *
+     * UDF results must NOT come through here: a UDF returning None and a
+     * UDF returning b"" would produce identical records. They go through
+     * fr_py_emit_record_buf, which takes the disposition from the actual
+     * Python return value. See also fr_py_emit_record_buf's own header
+     * comment, which states the same rule. */
     woff = lseek(out_fd, 0, SEEK_END);
     if (woff == (off_t)-1)
         return -1;
     hdr.batch_idx = batch_idx;
     hdr.len = src_len;
+    hdr.disposition = (src_len == 0) ? FR_DISP_NO_RESULT : FR_DISP_DATA;
+    hdr.reserved = 0;
     if (fr_py_write_all(out_fd, &hdr, sizeof(hdr)) != 0)
         return -1;
     left = src_len;
@@ -594,6 +1515,126 @@ static int fr_py_emit_record(int out_fd, uint64_t batch_idx, int src_fd,
             return -1;
         left -= (uint64_t)n;
     }
+
+    /* W-PY29: the COMPLETE record is durable -- header AND body.
+     *
+     * Advanced HERE, not by the caller, and unconditionally. Two caller
+     * shapes got this wrong:
+     *   - one advanced only `if (cap_len > 0)` while this framer ALWAYS
+     *     writes a header, so a zero-payload NO_RESULT record left the
+     *     rollback frontier behind. Recovery then truncated to a stale
+     *     output_start and destroyed an already-committed terminal
+     *     record -- which the drain's cursor had already moved past.
+     *   - one skipped the emit entirely on cap_len == 0, so a successful
+     *     command with empty stdout produced NO terminal record at all,
+     *     and an ordered consumer waited forever on a batch that had in
+     *     fact finished.
+     *
+     * Making the framer responsible removes the whole class: a caller
+     * cannot forget an advance it no longer performs. */
+    worker_txn_advance_output(-1, FR_PY_RECORD_FOOTPRINT(src_len));
+    /* C0.7: count only the DATA case. src_len == 0 is a NO_RESULT
+     * terminal record, which the parent framer filters and which must
+     * never appear on either side of the completeness comparison --
+     * those records exist so an ordered consumer does not wait forever
+     * on a batch that finished with no output. */
+    if (src_len > 0)
+        if (fr_c07_enabled())
+            fr_py_txn_pending_data++;
+    return 0;
+}
+
+/* Emit a record whose payload is already in memory, with an EXPLICIT
+ * disposition.
+ *
+ * fr_py_emit_record cannot be used for a UDF result for two reasons: its
+ * payload comes from a src_fd, and it infers NO_RESULT from src_len == 0.
+ * Both are wrong here. The UDF's bytes are in a malloc'd buffer, and --
+ * far more importantly -- inferring the disposition from length is
+ * precisely the conflation DECISION-02 exists to remove: a UDF returning
+ * b"" and a UDF returning None would produce identical records.
+ *
+ * The disposition is therefore passed in by the caller, which got it
+ * from the helper's own return code, which got it from the actual Python
+ * return value. */
+static int fr_py_emit_record_buf(int out_fd, uint64_t batch_idx,
+                                 const char *data, uint64_t len,
+                                 uint32_t disposition) {
+    struct fr_py_record_hdr hdr;
+
+    if (lseek(out_fd, 0, SEEK_END) == (off_t)-1)
+        return -1;
+    hdr.batch_idx = batch_idx;
+    hdr.len = len;
+    hdr.disposition = disposition;
+    hdr.reserved = 0;
+    if (fr_py_write_all(out_fd, &hdr, sizeof(hdr)) != 0)
+        return -1;
+    if (len > 0 && data) {
+        if (fr_py_write_all(out_fd, data, (size_t)len) != 0)
+            return -1;
+    }
+    worker_txn_advance_output(0, FR_PY_RECORD_FOOTPRINT(len));
+    /* C0.7: the disposition is EXPLICIT here, unlike fr_py_emit_record
+     * which infers it from length. Count only DATA; SKIPPED/POISONED/
+     * NO_RESULT are control records the parent filters. A zero-length
+     * DATA (a UDF returning b"") is a real frame and IS counted. */
+    if (disposition == FR_DISP_DATA)
+        if (fr_c07_enabled())
+            fr_py_txn_pending_data++;
+    return 0;
+}
+
+
+/* Emit a terminal control disposition for a batch that produced no
+ * payload: SKIPPED (on_error=skip) or POISONED (retry limit reached).
+ *
+ * EXPORTED, not static: the worker loops call it in-process, but the
+ * exactly-once proof has to exercise the REAL emitter rather than
+ * re-implement the write in a test. A test that hand-rolls the record
+ * would skip the frontier advance -- the very thing that makes rollback
+ * remove the record -- and would pass while the shipped path leaked a
+ * duplicate on every retry.
+ *
+ * DECISION-02 5.1. Before this those two outcomes were indistinguishable
+ * from a worker that died: no record at all, so the parent's only
+ * evidence was the poison counter, and an ordered consumer could not
+ * advance the prefix -- the batch looked like a hole and the consumer
+ * waited for a record that was never coming.
+ *
+ * Zero payload BY DESIGN. An empty DATA record instead would make poison
+ * indistinguishable from a UDF that legitimately returned b"", which is
+ * exactly the conflation the disposition exists to remove.
+ *
+ * The frontier advance matters as much as the write: the record is part
+ * of the batch's output transaction, so a death before the ack rolls it
+ * back with everything else and the retry re-emits it. Emitting outside
+ * the transaction would leak a disposition for a batch about to run
+ * again. */
+int fr_py_emit_disposition(int out_fd, int signal_fd, uint64_t wid,
+                           uint64_t batch_idx, uint32_t disposition)
+{
+    /* STAGE0: WRITE ONLY -- no signal.
+     *
+     * This used to write and then signal immediately, which is the
+     * publication/commit race: the drain could forward an uncommitted
+     * disposition, and recovery's rollback could not retract it. An
+     * ordered consumer that advanced its prefix on a forwarded SKIPPED
+     * could later see the retried attempt's DATA for a batch it had
+     * already closed.
+     *
+     * The caller MUST now follow up with a post-commit notification
+     * (fr_py_complete with the real signal descriptor, or
+     * fr_py_notify_committed) once the disposition's transaction has
+     * committed. A silent ack would commit POISONED/SKIPPED and tell
+     * nobody, and an ordered consumer would wait forever on a batch that
+     * has in fact finished.
+     *
+     * signal_fd is retained for ABI stability and deliberately unused. */
+    (void)signal_fd;
+    (void)wid;
+    if (fr_py_emit_record_buf(out_fd, batch_idx, NULL, 0, disposition) != 0)
+        return -1;
     return 0;
 }
 
@@ -909,13 +1950,13 @@ int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len,
             int erc = 0;
             if (fstat(cap_fd, &st) == 0 && st.st_size > 0)
                 cap_len = (uint64_t)st.st_size;
-            /* fr_py_emit_record with len 0 emits nothing (v0 parity:
-             * empty output is no record, not an empty record). */
+            /* STAGE0: emitted unconditionally. cap_len == 0 is a real
+             * completed batch with no output, and it gets a NO_RESULT
+             * terminal record -- without one, an ordered consumer waits
+             * forever on a batch that has finished. The frontier advance
+             * lives inside the framer. */
             if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0)
                 erc = -3;
-            else if (cap_len > 0)
-                /* W-PY29: complete record durable — advance frontier. */
-                worker_txn_advance_output(-1, 16 + cap_len);
             return erc;
         }
         return code; /* retryable command failure */
@@ -1136,12 +2177,12 @@ static int fr_py_plugin_invoke(int ingress_fd, int out_fd,
 
     if (fstat(cap_fd, &st) == 0 && st.st_size > 0)
         cap_len = (uint64_t)st.st_size;
-    if (cb_ret == 0 && cap_len > 0) {
-        if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0) {
+    /* STAGE0: emitted unconditionally on success, so an empty-stdout
+     * command still gets its NO_RESULT terminal record. The frontier
+     * advance lives inside the framer. */
+    if (cb_ret == 0) {
+        if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0)
             return -1;
-        }
-        /* W-PY29: complete record durable — advance frontier. */
-        worker_txn_advance_output(wid, 16 + cap_len);
     }
 
     /* ring_call truncation rule: nonzero → &0xFF, never silent 0. */
@@ -1285,6 +2326,159 @@ uint64_t fr_py_data_ready(void) {
     return found;
 }
 
+/* Write one keyed "bytes are visible" signal (wid, batch_idx).
+ *
+ * fr_py_drain_loop blocks on this and only ever inspects the worker id
+ * it names -- so a record written WITHOUT a signal is never moved to the
+ * results stream, however correct it is in the worker's memfd. */
+/* STAGE0: signal payload is (worker, COMMITTED FRONTIER), not
+ * (worker, batch_idx).
+ *
+ * The frontier is an ABSOLUTE byte offset into the worker's output
+ * memfd, taken only after the batch has committed (worker_txn_clear's
+ * TXN_IDLE release store). The drain forwards at most up to it, so no
+ * wakeup can ever publish bytes belonging to a transaction that is still
+ * CLAIMED or COMMITTING -- which is the publication/commit race this
+ * replaces.
+ *
+ * Offsets are absolute and monotonic for the lifetime of the memfd.
+ * out_fds[] is created once by the launcher and REUSED across worker
+ * generations, so the drain's per-worker cursor is persistent and must
+ * never be reset on respawn. */
+static int fr_py_signal_write(int signal_fd, uint64_t wid, uint64_t frontier)
+{
+    uint64_t sig[2];
+    const char *sp;
+    size_t sleft;
+
+    if (signal_fd < 0)
+        return 0;
+    sig[0] = wid;
+    sig[1] = frontier;
+    sp = (const char *)sig;
+    sleft = sizeof(sig);
+    while (sleft > 0) {
+        ssize_t n = write(signal_fd, sp, sleft);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -2;
+        }
+        if (n == 0)
+            return -2;
+        sp += n;
+        sleft -= (size_t)n;
+    }
+    return 0;
+}
+
+/* STAGE0: post-commit notification.
+ *
+ * Called ONLY after the acknowledgement has succeeded, i.e. after the
+ * transaction has committed (worker_txn_clear -> TXN_IDLE). Publishes
+ * the committed frontier so the drain can forward exactly that far.
+ *
+ * The frontier is read with SEEK_END: every byte below it belongs to a
+ * committed transaction, because uncommitted output is truncated back to
+ * output_start by recovery before this worker can reach here again.
+ *
+ * Returns a DISTINCT code (-4) for "committed but not notified",
+ * separate from every pre-commit failure code. A caller that treats all
+ * nonzero returns as "worker died, retry the batch" would otherwise
+ * re-execute work the engine has already committed -- introducing a
+ * duplicate execution bug inside the fix for the publication race.
+ *
+ * -4 means: TXN_IDLE was already stored, the batch IS committed, and the
+ * drain has not been told. Permitted responses are recovery notification
+ * or aborting the run without claiming success. NEVER a plain retry.
+ *
+ * EXPORTED, not static: publication is now a separate step from emit, so
+ * a test that hand-rolled "write then signal" would not be exercising the
+ * shipped boundary. fr_py_emit_disposition is exported for the same
+ * reason. */
+#define FR_PY_ERR_NOTIFY (-4)
+
+int fr_py_notify_committed(int signal_fd, int out_fd, uint64_t wid)
+{
+    off_t frontier;
+    int rc;
+
+    if (signal_fd < 0)
+        return 0;         /* no notification requested: nothing to do */
+
+    /* STAGE0 fault injection: fail the notification once per process,
+     * AFTER the commit. This is the interval where a batch is committed
+     * but the drain was never told, and it is the one case where a
+     * caller mishandling the return value re-executes committed work --
+     * a duplicate-execution bug introduced by the fix itself. The
+     * recovery state machine must classify the worker's death as IDLE
+     * ("committed, nothing in flight") and NOT retry the batch.
+     *
+     * Inert unless the variable is set. */
+    {
+        const char *f = getenv("FORKRUN_TEST_NOTIFY_FAIL_ONCE");
+        if (f != NULL && *f) {
+            static int fired = 0;
+            if (!fired) {
+                fired = 1;
+                /* Leave positive evidence the fault fired. A test that
+                 * cannot tell whether it injected anything is the exact
+                 * vacuous shape that produced a wrong conclusion earlier
+                 * in this work. */
+                {
+                    const char *m = getenv("FORKRUN_TEST_NOTIFY_FAIL_MARK");
+                    if (m != NULL && *m) {
+                        int mf = open(m, O_WRONLY | O_CREAT | O_APPEND, 0600);
+                        if (mf >= 0) {
+                            ssize_t ig = write(mf, "F\n", 2);
+                            (void)ig;
+                            close(mf);
+                        }
+                    }
+                }
+                return FR_PY_ERR_NOTIFY;   /* committed, unnotified */
+            }
+        }
+    }
+    /* Every failure below is POST-COMMIT: the transaction is already
+     * TXN_IDLE, so each is "committed, unnotified" and must be reported
+     * as FR_PY_ERR_NOTIFY. Returning a plain -1 would let it be confused
+     * with a pre-commit failure, and a caller that retries on those would
+     * re-execute committed work. */
+    if (out_fd < 0)
+        return FR_PY_ERR_NOTIFY;
+
+    /* STAGE0 TEST-ONLY: exercise the REAL signal-write failure instead of
+     * a synthetic return. Closing only THIS process's duplicate of
+     * signal_fd makes write() fail with EBADF while the drain and the
+     * launcher's spare writer stay open -- so the supervisor can still
+     * send its synthetic recovery wakeup, which is the entire point of
+     * the case. Nothing is killed here; the real notifier runs and fails
+     * on its own.
+     *
+     * Inert unless the variable is set. */
+    if (getenv("FORKRUN_TEST_CLOSE_SIGNAL_FD") != NULL) {
+        const char *m = getenv("FORKRUN_TEST_NOTIFY_FAIL_MARK");
+        if (m != NULL && *m) {
+            int mf = open(m, O_WRONLY | O_CREAT | O_APPEND, 0600);
+            if (mf >= 0) {
+                ssize_t ig = write(mf, "C\n", 2);
+                (void)ig;
+                close(mf);
+            }
+        }
+        close(signal_fd);
+    }
+
+    frontier = lseek(out_fd, 0, SEEK_END);
+    if (frontier == (off_t)-1)
+        return FR_PY_ERR_NOTIFY;
+    rc = fr_py_signal_write(signal_fd, wid, (uint64_t)frontier);
+    if (rc != 0)
+        return FR_PY_ERR_NOTIFY;
+    return 0;
+}
+
 /* =====================================================================
  * W-PY14: C-level output emit (fr_py_emit).
  *
@@ -1312,12 +2506,16 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
     struct fr_py_record_hdr hdr;
     struct iovec iov[2];
     int niov;
-    uint64_t sig[2];
-    const char *sp;
-    size_t sleft;
 
     if (data != NULL && out_fd >= 0) {
         hdr.batch_idx = batch_idx;
+        /* This path is reached only when data != NULL, and its contract
+         * already treats a zero-length payload as a REAL empty result
+         * (test_v1_emit.py). So it is always DATA -- never NO_RESULT,
+         * which would be the case the caller signals by passing NULL and
+         * therefore not reaching here at all. */
+        hdr.disposition = FR_DISP_DATA;
+        hdr.reserved = 0;
         hdr.len = data_len;
         iov[0].iov_base = &hdr;
         iov[0].iov_len = sizeof(hdr);
@@ -1370,30 +2568,36 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
                 }
             }
         }
-        /* W-PY29: the COMPLETE record (16B framing + payload) is
+        /* W-PY29: the COMPLETE record (header framing + payload) is
          * durable — advance the rollback frontier. Partial writes
          * return -1 above before reaching here. */
-        worker_txn_advance_output((int)wid, 16 + data_len);
+        worker_txn_advance_output((int)wid, FR_PY_RECORD_FOOTPRINT(data_len));
+        /* C0.7: one DATA frame is now durable, but NOT committed. Count
+         * it against the pending total only; fr_py_ack_core transfers it
+         * to the shared field after the ack side effects succeed and
+         * just before worker_txn_clear publishes TXN_IDLE. Reached only
+         * for data != NULL, so a null emission -- which writes no record
+         * at all -- contributes nothing. A zero-length b"" DOES reach
+         * here and IS a real DATA frame. */
+        if (fr_c07_enabled())
+            fr_py_txn_pending_data++;
     }
 
-    if (signal_fd < 0)
-        return 0;
-    sig[0] = wid;
-    sig[1] = batch_idx;
-    sp = (const char *)sig;
-    sleft = sizeof(sig);
-    while (sleft > 0) {
-        ssize_t n = write(signal_fd, sp, sleft);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            return -2;
-        }
-        if (n == 0)
-            return -2;
-        sp += n;
-        sleft -= (size_t)n;
-    }
+    /* STAGE0: NO signal here.
+     *
+     * This used to signal the drain as soon as the bytes were written,
+     * which let an UNCOMMITTED record be forwarded: the drain acted on a
+     * wakeup alone and forwarded everything up to the memfd's current
+     * size, so a record written before its ack could be published and
+     * then could not be retracted when recovery rolled it back. A
+     * poisoned batch could therefore return the abandoned attempt's DATA
+     * while the run reported success.
+     *
+     * Publication is now strictly post-commit. The caller signals via
+     * fr_py_notify_committed() after the ack succeeds, carrying the
+     * committed frontier. signal_fd is retained for ABI stability and is
+     * deliberately unused here. */
+    (void)signal_fd;
     return 0;
 }
 
@@ -1446,6 +2650,9 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
     fr_py_ack_init(out_fd);
     while (1) {
         off_t end = (off_t)-1;
+        /* STAGE0: set when the sendfile sub-path fell back to the
+         * framer, which then owns the frontier advance. */
+        int via_framer = 0;
         off_t woff;
         uint64_t left;
 
@@ -1461,8 +2668,25 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
                     "(killed %u times).\n",
                     (unsigned long long)claimed.batch_idx,
                     claimed.num_kills);
+            /* DECISION-02: terminal POISONED disposition, emitted
+             * BEFORE the ack, so a death in between rolls it back
+             * with the rest of the batch. */
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                       claimed.batch_idx,
+                                       FR_DISP_POISONED) != 0)
+                return 1;
+            /* STAGE0: notify AFTER the ack. This branch uses fr_py_ack
+             * rather than fr_py_complete, so a scan keyed on
+             * fr_py_complete would not have found it -- which is exactly
+             * how the splice POISONED path shipped without a notify
+             * while the DATA path beside it was migrated. A committed
+             * POISONED record that is never announced leaves the
+             * consumer missing a terminal outcome. */
             if (fr_py_ack(fallow_fd, -1) != 0)
                 return 1;
+            if (fr_py_notify_committed(signal_fd, out_fd,
+                                      (uint64_t)wid) != 0)
+                return 2; /* committed, unnotified: must not be retried */
             continue;
         }
 
@@ -1481,6 +2705,15 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
             struct fr_py_record_hdr hdr;
             hdr.batch_idx = claimed.batch_idx;
             hdr.len = claimed.length;
+            /* DECISION-02: set disposition/reserved EXPLICITLY. Leaving
+             * them unset makes the record carry uninitialized stack bytes,
+             * which the reader then treats as a control disposition and
+             * drops -- so every record from this path vanished and splice
+             * mode returned empty output. This is the same defect as the
+             * uint64_t/4-byte mismatch in the parser, in the other
+             * direction: an unset field on the wire is undefined. */
+            hdr.disposition = FR_DISP_DATA;
+            hdr.reserved = 0;
             end = lseek(out_fd, 0, SEEK_END);
             if (end == (off_t)-1)
                 goto payload_error;
@@ -1504,43 +2737,55 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
                                           ingress_fd, claimed.offset,
                                           claimed.length) != 0)
                         goto payload_error;
+                    /* The framer advanced the frontier itself (STAGE0);
+                     * suppress the sendfile sub-path's advance below so
+                     * it is not counted twice. */
+                    via_framer = 1;
                     break;
                 }
                 if (n == 0)
                     goto payload_error; /* short: retry, don't emit */
                 left -= (uint64_t)n;
             }
-            /* W-PY29: header + full body durable (both the sendfile
-             * and the emit_record-fallback sub-paths converge here on
-             * success) — advance the rollback frontier once. */
-            worker_txn_advance_output(wid, 16 + claimed.length);
+            /* The sendfile sub-path framed its own header inline, so it
+             * advances here. The fr_py_emit_record fallback advances
+             * inside the framer since STAGE0 -- advancing again would
+             * double-count and leave the frontier pointing PAST the real
+             * end of the memfd, which is worse than the stale-frontier
+             * bug it replaced. */
+            if (!via_framer)
+                worker_txn_advance_output(wid,
+                                          FR_PY_RECORD_FOOTPRINT(claimed.length));
         }
 
-        if (signal_fd >= 0) {
-            uint64_t sig[2];
-            const char *sp;
-            size_t sleft;
-            sig[0] = (uint64_t)wid;
-            sig[1] = claimed.batch_idx;
-            sp = (const char *)sig;
-            sleft = sizeof(sig);
-            while (sleft > 0) {
-                ssize_t n = write(signal_fd, sp, sleft);
-                if (n < 0) {
-                    if (errno == EINTR)
-                        continue;
-                    return 2; /* EPIPE: parent gone — fatal */
-                }
-                if (n == 0)
-                    return 2;
-                sp += n;
-                sleft -= (size_t)n;
-            }
-        }
+        /* STAGE0: no signal here.
+         *
+         * Splice used to hand-roll its own signal carrying the BATCH
+         * INDEX, written BEFORE the ack. Both parts are wrong now: it
+         * published uncommitted bytes (the race Stage 0 removes), and a
+         * batch index is meaningless to a drain that bounds forwarding by
+         * the committed FRONTIER -- it silently forwarded almost nothing,
+         * so the C drain returned an empty stream.
+         *
+         * Splice acknowledges below and publishes through
+         * fr_notify_committed afterwards, like every other emitter. This
+         * is a THIRD emitting path that a fr_py_emit /
+         * fr_py_emit_disposition audit would not have listed, because it
+         * calls neither. */
+        /* Splice's success path: record framed and committed above.
+         * Hooked here because splice does not call fr_py_complete, and
+         * the other two fr_py_ack sites in this loop are the
+         * poison/sentinel branches. Splice is excluded from the loop
+         * parity test by design (it moves bytes rather than invoking
+         * user code), so a loop-local hook cannot desynchronise it. */
+        fr_py_maybe_die_before_ack((int)wid, signal_fd);
 
         if (fr_py_ack(fallow_fd, -1) != 0)
             return 1;
+        if (fr_py_notify_committed(signal_fd, out_fd, (uint64_t)wid) != 0)
+            return 2; /* EPIPE: parent gone -- fatal */
         continue;
+
 
     payload_error:
         /* Output failure rides escrow like a payload error (bash -E):
@@ -1761,7 +3006,12 @@ int fr_py_init_numa(int lines, int bytes, int num_nodes,
         argv[argc++] = a2;
     }
     argv[argc] = NULL;
-    return ring_init_main(argc, argv);
+    {
+        int rc = ring_init_main(argc, argv);
+        if (rc == 0 && shim_waiters_init() != 0)
+            return 1;
+        return rc;
+    }
 }
 
 /* NUMA ingest (W-PY21): born-local data distributor.
@@ -1993,6 +3243,63 @@ int fr_py_ingest_eof_posted(void) {
                            __ATOMIC_ACQUIRE) != ~(uint64_t)0 ? 1 : 0;
 }
 
+/* =====================================================================
+ * W-EXP-2 step C follow-up: PER-NODE completion evidence.
+ *
+ * The global ingest-EOF marker is NOT a per-node completion signal. It
+ * says the source was consumed; it says nothing about whether a given
+ * node's indexer consumed the chunks published for THAT node, or
+ * whether that node's scanner finished publishing its final ring
+ * state. A helper that exits cleanly after the global marker but before
+ * its own work is done has left its node short, and treating that as
+ * healthy turns a lost chunk into a hang.
+ *
+ * The two conditions are read straight out of the engine's own
+ * publication protocol:
+ *
+ *   INDEXER -- ring_indexer_numa_main (forkrun_ring.c:3701) exits
+ *   successfully when the global EOF is posted AND its node's
+ *   chunk_queue_head has not moved past the chunk it last took. Each
+ *   indexed chunk advances that node's chunk_ready_head
+ *   (forkrun_ring.c:3833). So the node is fully indexed exactly when
+ *   chunk_ready_head has caught up with chunk_queue_head -- and only
+ *   then can the global marker mean "no more chunks are coming".
+ *
+ *   SCANNER -- ring_numa_scanner_main publishes the node's final
+ *   write_idx and THEN sets scanner_finished
+ *   (forkrun_ring.c:5913-5914), with the EOF evfd blasted only after
+ *   that. scanner_finished is therefore the node's own completion
+ *   state, published after its final ring state.
+ *
+ * Both accessors are READ-ONLY. Returns 1 = complete, 0 = not
+ * complete, -1 = no verdict (bad node, no engine state). A -1 is
+ * never read as "complete": the supervisor treats an unavailable
+ * verdict as an absent one.
+ * ===================================================================== */
+int fr_py_node_index_complete(int node) {
+    if (!g_state || !state || node < 0 || node >= (int)global_num_nodes)
+        return -1;
+    /* The global marker first: without it the node could still receive
+     * another chunk, so a caught-up frontier proves nothing. */
+    if (__atomic_load_n(&g_state->ingest_eof_idx, __ATOMIC_ACQUIRE)
+        == ~(uint64_t)0)
+        return 0;
+    {
+        uint64_t head = __atomic_load_n(&state[node].chunk_queue_head,
+                                        __ATOMIC_ACQUIRE);
+        uint64_t ready = __atomic_load_n(&state[node].chunk_ready_head,
+                                         __ATOMIC_ACQUIRE);
+        return ready >= head ? 1 : 0;
+    }
+}
+
+int fr_py_node_scan_complete(int node) {
+    if (!g_state || !state || node < 0 || node >= (int)global_num_nodes)
+        return -1;
+    return __atomic_load_n(&state[node].scanner_finished,
+                           __ATOMIC_ACQUIRE) ? 1 : 0;
+}
+
 /* F-NUMA1 diagnostic snapshot (env-gated consumer in run.py; read-only).
  *
  * Per-node completion state for the NUMA drain-verification audit:
@@ -2006,6 +3313,46 @@ int fr_py_ingest_eof_posted(void) {
  * teardown destroys the engine; indices are monotonic and finished
  * is sticky, so the window is stable. Never on a hot path (once per
  * node per run, behind FORKRUN_DIAG_NUMA1=1 or the drain guard). */
+/* C0.7: committed-DATA-frame snapshot, for the ordered completeness
+ * certificate.
+ *
+ * Deliberately a SEPARATE entry point rather than a 7th element of
+ * fr_py_diag_node: existing callers allocate exactly six, so enlarging
+ * that array would overrun their buffers.
+ *
+ * *out = committed DATA frames for `node`; returns 0 ok, -1 bad node or
+ * no engine state.
+ *
+ * CALLER MUST HAVE PRODUCER QUIESCENCE. This returns a relaxed load,
+ * which is the right pairing for the writers' relaxed fetch_add, but no
+ * memory ordering can substitute for the lifecycle guarantee: a worker
+ * that has not yet reached its commit point will contribute nothing, and
+ * that is indistinguishable from a worker that committed nothing. Read
+ * it after the reactor has joined workers, before teardown.
+ *
+ * This is not the generic "complete frame" statistic, which includes
+ * non-DATA dispositions the parent framer filters. */
+/* W-EXP-2 Phase A: is the committed-frame counter LIVE for this process?
+ *
+ * Exists because "zero frames were committed" and "counting is switched
+ * off" are otherwise indistinguishable from outside, and the difference
+ * decides whether a certificate means anything. With counting disabled by
+ * FORKRUN_C07_COUNT=0 the counter never increments, so a launcher that
+ * read it without asking would see 0 while real DATA frames existed -- and
+ * a certificate comparing that against collected records would fail every
+ * COMPLETE run. The caller must treat a disabled counter as "no verdict",
+ * never as zero.
+ */
+int fr_py_c07_counting_enabled(void) { return fr_c07_enabled(); }
+
+int fr_py_committed_data_frames(int node, uint64_t *out) {
+    if (!out || !state || node < 0 || node >= (int)global_num_nodes)
+        return -1;
+    *out = __atomic_load_n(&state[node].committed_data_frames,
+                           __ATOMIC_RELAXED);
+    return 0;
+}
+
 int fr_py_diag_node(int node, uint64_t *out) {
     if (!out || !state || !g_state || node < 0 ||
         node >= (int)global_num_nodes)
@@ -2049,6 +3396,31 @@ int fr_py_diag_node(int node, uint64_t *out) {
         }
         out[5] = (uint64_t)all_empty;
     }
+    return 0;
+}
+
+/* W-PY31 read-only probes.  They exist so the waiter-accounting tests
+ * can observe the SAME state recovery reads (transaction phase, the
+ * dead generation's node, this wid's registration mirror, and the
+ * scanner gauge) instead of inferring it from timing.  Read-only; no
+ * caller in the library uses them. */
+int fr_py_active_waiters(int node) {
+    if (!state || node < 0 || node >= (int)global_num_nodes)
+        return -1;
+    return (int)__atomic_load_n(&state[node].active_waiters,
+                                __ATOMIC_ACQUIRE);
+}
+
+int fr_py_worker_probe(int wid, uint32_t *out) {
+    if (!out || !g_state || wid < 0 || wid >= MAX_TXN_WORKERS)
+        return -1;
+    out[0] = __atomic_load_n(&g_state->worker_txn[wid].state,
+                             __ATOMIC_ACQUIRE);
+    out[1] = __atomic_load_n(&g_state->worker_txn[wid].node,
+                             __ATOMIC_ACQUIRE);
+    out[2] = g_wait_reg
+                 ? __atomic_load_n(&g_wait_reg[wid], __ATOMIC_ACQUIRE)
+                 : 0;
     return 0;
 }
 
@@ -2138,12 +3510,15 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
         uint64_t sig[2];
         ssize_t n;
         uint64_t wid;
+        uint64_t frontier;
         struct stat st;
         uint64_t size, offset;
         char buf[65536];
 
-        /* 1. Signal heartbeat (blocking): one keyed record's worth
-         * of new bytes is visible in out_fds[wid] when this returns. */
+        /* 1. Notification (blocking): (worker, committed frontier). The
+         * frontier is the exclusive upper bound this worker has committed
+         * output to; it is NOT a record count and makes no claim that the
+         * memfd holds nothing beyond it. */
         n = fr_py_read_full(signal_r, sig, sizeof(sig));
         if (n == 0)
             break; /* EOF: every write end closed — drained */
@@ -2155,17 +3530,47 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
             rc = 3; /* short signal: never from a 16B atomic write */
             break;
         }
-        wid = sig[0]; /* sig[1] (batch_idx) is transport-opaque here */
+        wid = sig[0];
         if (wid >= (uint64_t)num_workers)
             continue; /* defensive: our own workers never send this */
 
-        /* 2. New bytes in this worker's memfd (fstat size vs cursor). */
+        /* STAGE0: sig[1] is the COMMITTED FRONTIER -- an absolute offset
+         * into this worker's output memfd -- not a batch index. Forward
+         * at most that far.
+         *
+         * The old code ignored sig[1] and forwarded to the memfd's
+         * current SIZE. That is what let an uncommitted record be
+         * published: bytes written before a batch's ack were in the
+         * memfd, so any wakeup for that worker forwarded them, and the
+         * rollback could not retract what had already been copied out and
+         * punched.
+         *
+         * Offsets are monotonic for the life of the memfd, which is
+         * reused across worker generations, so the cursor is deliberately
+         * NOT reset on respawn. */
+        frontier = sig[1];
+
+        /* 2. Newly COMMITTED bytes in this worker's memfd. */
         if (fstat(out_fds[wid], &st) != 0)
             continue; /* memfd went away: nothing to move, keep going */
         size = (uint64_t)st.st_size;
         offset = offsets[wid];
-        if (size <= offset)
-            continue; /* duplicate/empty wakeup: next signal */
+        if (frontier <= offset) {
+            /* Awake and processing, but nothing committed to move. The
+             * handshake still fires: proving the drain SAW this wakeup
+             * and declined to forward is exactly what makes the safety
+             * test non-vacuous. */
+            fr_drain_test_ack(wid, offset);
+            continue;
+        }
+        if (frontier > size)
+            frontier = size; /* clamp: never read past the memfd */
+        if (frontier <= offset)
+            continue;
+        /* The record loop below is bounded by `size`; retarget it at the
+         * committed frontier so every bound check downstream inherits the
+         * commit guarantee rather than the raw memfd size. */
+        size = frontier;
 
         /* 3. Move whole RECORDS, never a partial one.
          *
@@ -2283,6 +3688,7 @@ int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
          * jump to; they now fail the drain instead, so nothing branches
          * here any more and the label only drew -Wunused-label. */
         offsets[wid] = offset;
+        fr_drain_test_ack(wid, offset);
     }
 
 drain_done:
@@ -2324,7 +3730,14 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
     /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_COMMIT=1 makes
      * the worker SIGKILL itself inside the ack→clear window
      * (deterministic race injection). Inert unless set; read fresh
-     * per ack (see DIE_AT_CLAIM note on fork inheritance). */
+     * per ack (see DIE_AT_CLAIM note on fork inheritance).
+     *
+     * It fires on EVERY ack, which is correct for a race-window probe
+     * but unusable under launcher supervision: every worker would die
+     * on its first ack forever, and the run would exhaust the respawn
+     * cap before anything completed. A counted variant was tried and
+     * removed -- see P1-3 section 14 for why the launcher-level
+     * exactly-once test is still open. */
     if (getenv("FORKRUN_TEST_DIE_AT_COMMIT") != NULL)
         raise(SIGKILL);
     sa_ign.sa_handler = SIG_IGN;
@@ -2459,6 +3872,39 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
 
     worker_last_cnt = 0;
 
+    /* C0.7: COMMIT-SCOPED FLUSH. Transfer the pending DATA count into the
+     * shared per-node total HERE, and the placement is load-bearing.
+     *
+     * Every acknowledgement side effect above has already succeeded
+     * (the fallow packet and any order packet are on their pipes), so a
+     * failure before this point returns without the batch being
+     * committed and without the count moving.
+     *
+     * It must be BEFORE worker_txn_clear(), which is the store that
+     * publishes TXN_IDLE. A worker that dies in the gap leaves an
+     * ambiguous commit -- output written, count moved, TXN_IDLE not
+     * published. The engine fails such a run rather than recovering it,
+     * which is the correct outcome: a run accepted as successful must
+     * never hold committed output whose count is missing.
+     *
+     * Flushing AFTER the TXN_IDLE store would invert that: a death in
+     * the gap would leave committed output that is never counted, and
+     * the certificate would report a clean run having lost a frame --
+     * precisely the silent false success this counter exists to prevent.
+     *
+     * __atomic_fetch_add, not a store: several workers share a node's
+     * cache line, so a plain store would lose updates. */
+    if (fr_py_txn_pending_data && fr_c07_enabled()) {
+        uint32_t _sn = g_fr_config.ring_node_id < 0
+                           ? UINT32_MAX
+                           : (uint32_t)g_fr_config.ring_node_id;
+        if (_sn < global_num_nodes) {
+            __atomic_fetch_add(&state[_sn].committed_data_frames,
+                               fr_py_txn_pending_data, __ATOMIC_RELAXED);
+        }
+        fr_py_txn_pending_data = 0;
+    }
+
     /* W-PY29: COMMITTING → IDLE (pairs with the begin_commit above).
      * Runs after every ack side effect is on its pipe, so TXN_IDLE
      * means fully committed. */
@@ -2516,6 +3962,20 @@ int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx,
     target = (g_fr_config.fd_order_pipe >= 0 && out_fd >= 0) ? out_fd : -1;
     if (fr_py_ack_direct(fallow_fd, target) != EXECUTION_SUCCESS)
         return -3;
+
+    /* STAGE0: notify AFTER the commit.
+     *
+     * fr_py_ack_direct returns only after worker_txn_clear() has stored
+     * TXN_IDLE, and every fallow/order packet is already on its pipe at
+     * that point. That store -- not this function's return -- is the
+     * commit linearization point: a worker can die between the store and
+     * the return, and that batch IS committed.
+     *
+     * Publication therefore happens strictly after commit, so a record
+     * the drain forwards always belongs to a transaction the engine
+     * kept. */
+    fr_py_maybe_die_before_notify(signal_fd, out_fd, (int)wid);
+    return fr_py_notify_committed(signal_fd, out_fd, wid);
     return 0;
 }
 
@@ -2613,16 +4073,43 @@ int64_t fr_py_parse_descriptors(const char *input, uint64_t input_len,
      * data_len > input_len` wraps on huge data_len and skips the
      * truncation break (bogus giant descriptor -> caller-side OOB).
      * Subtraction form cannot wrap (off <= input_len is the loop
-     * invariant: 0 at entry, off+16+data_len <= input_len preserved). */
+     * invariant: 0 at entry, off+HDR+data_len <= input_len preserved).
+     *
+     * DECISION-02: the stride is now sizeof(struct fr_py_record_hdr) (24),
+     * not 16 -- the header carries an explicit disposition. The
+     * disposition is deliberately NOT surfaced in the descriptor array:
+     * it carries batch_idx/offset/length for slicing, and adding a field
+     * there would change a second ABI for no gain. Control dispositions
+     * are SKIPPED below rather than surfaced, which keeps this path
+     * result-for-result identical to the Python splitter. */
     while (count < max_descriptors && off <= input_len &&
-           input_len - off >= 16) {
+           input_len - off >= (uint64_t)sizeof(struct fr_py_record_hdr)) {
         uint64_t batch_idx, data_len;
+        /* uint32_t, NOT uint64_t: the memcpy below fills 4 bytes, so a
+         * wider variable leaves the top half UNINITIALIZED. That garbage
+         * then compares unequal to FR_DISP_DATA and silently skips every
+         * record -- which is what it did: the C fast path returned zero
+         * descriptors for every input, and because the garbage came from
+         * the stack it even looked nondeterministic (a large zeroed
+         * buffer happened to make it work). */
+        uint32_t disposition;
 
         memcpy(&batch_idx, input + off, 8);
         memcpy(&data_len, input + off + 8, 8);
-        off += 16;
+        memcpy(&disposition, input + off + 16, 4);
+        off += (uint64_t)sizeof(struct fr_py_record_hdr);
         if (data_len > input_len - off)
             break; /* truncated record — stop here */
+        /* DECISION-02: skip control dispositions, exactly as the Python
+         * splitter does. Without this the C fast path returns MORE
+         * records than _split_records for the same blob, so map() would
+         * yield a spurious b"" for a UDF that returned None — and only
+         * when FORKRUN_C_PARSE=1, i.e. a divergence no default test
+         * would catch. The descriptor array still needs no new field. */
+        if (disposition != (uint32_t)FR_DISP_DATA) {
+            off += data_len;
+            continue;
+        }
         descriptors[count].batch_idx = batch_idx;
         descriptors[count].offset = off;
         descriptors[count].length = data_len;
@@ -2797,8 +4284,77 @@ int fr_py_is_resume_mode(void) {
  * ===================================================================== */
 int fr_py_recover_worker(int wid, int incarnation, int output_fd,
                          int exit_code) {
-    return ring_recover_worker_core(wid, incarnation, output_fd,
-                                    exit_code);
+    /* W-PY31: a worker killed while WAITING issued no ticket.  Translate
+     * the shim-only phase to IDLE before the frozen core sees it, so the
+     * death is classified "no batch in flight" (respawn, or normal EOF)
+     * instead of RACE_DETECTED.  The worker is reaped by the caller, so
+     * no live worker can still be transitioning out of WAITING here.
+     *
+     * The waiter registry is cleared for EVERY death, not just WAITING:
+     * a worker can register, then move to CLAIMING and die before its
+     * normal release, and recovery owns that contribution from then on.
+     * Removal is idempotent and wid-scoped, so it cannot take a live
+     * sibling's slot. */
+    if (g_state && wid >= 0 && wid < MAX_TXN_WORKERS) {
+        uint32_t st = __atomic_load_n(&g_state->worker_txn[wid].state,
+                                      __ATOMIC_ACQUIRE);
+        if (st == TXN_WAITING)
+            __atomic_store_n(&g_state->worker_txn[wid].state, TXN_IDLE,
+                             __ATOMIC_RELEASE);
+        shim_waiter_recover(wid);
+    }
+    int rc = ring_recover_worker_core(wid, incarnation, output_fd,
+                                      exit_code);
+
+    /* Re-sync the worker's output cursor after a rollback.
+     *
+     * ring_recover_worker_core truncates output_fd back to
+     * txn->output_start but does NOT move the TLS `worker_output_end`
+     * cursor, which is what the NEXT claim snapshots as the new batch's
+     * rollback frontier. After a truncation that cursor is stale: it
+     * still holds the pre-truncation position, so the next batch's
+     * output_start is larger than the real file size -- and the
+     * engine's "never grow a file by truncating" guard
+     * (st_size >= output_start) then REFUSES the next rollback.
+     *
+     * Consequence, measured: only the FIRST recovery in a worker
+     * session actually rolled anything back. Every later one returned
+     * RECOVERED while leaving its orphan in the stream, so a worker
+     * that died twice produced DUPLICATE batch records -- and a
+     * duplicate desynchronises every batch after it, which is worse
+     * than losing one.
+     *
+     * This is a pre-existing defect, reproducible at HEAD (verified by
+     * stashing: `git stash && make python-substrate` shows the same
+     * [0,1,2,2,3,4,4,5] output). It is fixed here rather than in
+     * ring_recover_worker_core because forkrun_ring.c is FROZEN and
+     * _shim.c textually includes it, so this translation unit can see
+     * the TLS cursor directly. The fix is a cursor resync, not a change
+     * to the engine's state machine or its recovery decisions.
+     *
+     * Only on RECOVERED (rc 0): that is the branch that truncated. Any
+     * other return means the engine declined to roll back, and moving
+     * the cursor would then be a lie about where output ends. */
+    if (rc == 0 && output_fd >= 0) {
+        (void)worker_txn_init_output_cursor(output_fd);
+        /* C0.7: the truncated frames are uncommitted, so their pending
+         * count is discarded and never reaches the shared field. The
+         * retry accumulates afresh and is added once at ITS commit.
+         *
+         * Scope, stated honestly: this runs in the SUPERVISING process,
+         * so it clears this process's thread-local value -- it does not
+         * and cannot reach into the dead worker's TLS, which is gone.
+         * That is sufficient because the supervisor's pending count is
+         * required to be zero: nothing emits here, so a value observed
+         * now would be inherited by a future fork. The in-process
+         * harness (same process emits, then recovers) therefore
+         * exercises a different situation than a real worker death, and
+         * the process-level test is the one that establishes the real
+         * behaviour. */
+        if (fr_c07_enabled())
+            fr_py_txn_pending_data = 0;
+    }
+    return rc;
 }
 
 /* =====================================================================
@@ -2898,7 +4454,20 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
             }
             /* Ack-silent (no signal — v0 parity) but ordered: the
              * C orderer still expects its contiguous packet. */
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* DECISION-02: terminal POISONED disposition, emitted
+             * BEFORE the ack, so a death in between rolls it back
+             * with the rest of the batch. */
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                       claimed.batch_idx,
+                                       FR_DISP_POISONED) != 0)
+                return 1;
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
@@ -2922,6 +4491,21 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
             /* Success: record already framed by the invoke — signal
              * + fallow + order + ack in one call (no output: data
              * NULL skips the writev, signal still honored). */
+            /* Fault injection (exactly-once tests): this batch's record IS
+             * framed -- the invoke wrote it -- and the ack below has NOT
+             * happened. That is the orphan window recovery must handle.
+             *
+             * Placed at the success site rather than inside
+             * fr_py_complete because "success" cannot be identified by the
+             * signal argument: the in-process map() executor runs the
+             * signal pipe DISARMED (-1) on the success path as well, since
+             * there is no drain there, so a signal_fd >= 0 gate fires
+             * under the launcher but never for a plain map() call.
+             * Structural placement also keeps the injected death out of
+             * the poison/skip and sentinel branches, where firing meant a
+             * poisoned batch could never be skipped. */
+            fr_py_maybe_die_before_ack((int)wid, signal_fd);
+
             rc = fr_py_complete(signal_fd, (uint64_t)wid,
                                 claimed.batch_idx, fallow_fd, out_fd,
                                 NULL, 0);
@@ -2934,8 +4518,21 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
 
         /* --- failure path (bash -E analogue, _worker.py parity) --- */
         if (on_error == 1) {
+            /* DECISION-02: terminal SKIPPED disposition. Emitted
+             * before the ack, inside the transaction, so a death
+             * in between rolls it back and the retry re-emits it. */
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                      claimed.batch_idx,
+                                      FR_DISP_SKIPPED) != 0)
+                return 1;
             /* skip: ack-silent like poison (no signal — nothing emitted). */
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
@@ -2949,6 +4546,300 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
         /* Default retry: escrow with kills+1, no ack (the next claim
          * overwrites the armed TLS). Same-process retry on re-claim;
          * poison threshold converts loops into skips above. */
+        fflush(NULL);
+        fr_py_escrow_deposit(claimed.num_kills + 1);
+        continue;
+    }
+}
+
+/* Node-taking plugin loop (W-EXP-2 step C).
+ *
+ * The loop body is NOT duplicated: it lives in fr_py_worker_plugin_loop,
+ * and this entry point runs it with the node bound first. The three
+ * worker modes share one lifecycle (poison skip, zero-length sentinel,
+ * the whole on_error ladder) and the parity test enforces that; a
+ * fourth copy of the body would be a fourth place for a fix to miss.
+ *
+ * The node is applied by setting the ring node id BEFORE the loop's own
+ * fr_py_worker_init call, which then reads it. node_id < 0 is refused:
+ * the launcher's own validation already rejects a bad topology, and an
+ * unbound worker would silently claim the wrong ring.
+ *
+ * 0 IS NOT INTERCHANGEABLE WITH -1 for the node: fr_py_worker_init maps
+ * a node_id < 0 to ring_node_id = -1, and the C0.7 commit counter is
+ * attributed BY ring_node_id, so with -1 it is skipped entirely and
+ * every run reports ZERO committed DATA frames. */
+int fr_py_worker_plugin_loop_numa(int wid, const char *path,
+                                  const char *func_name, int ingress_fd,
+                                  int out_fd, int signal_fd, int fallow_fd,
+                                  int order_fd, int trap_ack_fd,
+                                  int wincarn, int retry_limit,
+                                  int on_error, int node_id) {
+    if (node_id < 0)
+        return 1;
+    fr_py_worker_bind_node(node_id);
+    int rc = fr_py_worker_plugin_loop(wid, path, func_name, ingress_fd,
+                                      out_fd, signal_fd, fallow_fd,
+                                      order_fd, trap_ack_fd, wincarn,
+                                      retry_limit, on_error);
+    fr_py_worker_bind_node(-1);
+    return rc;
+}
+
+
+/* =====================================================================
+ * P1-3: Python UDF worker loop (DECISION-01 Option A, external review
+ * GO WITH AMENDMENTS).
+ *
+ * The FIFTH execution-mode loop. splice / plugin / spawn / fallow all
+ * share one shape -- claim, poison/sentinel handling, invoke, then
+ * fr_py_complete / fr_py_escrow_deposit / fr_py_abort -- and differ only
+ * in the invoke body. A UDF is a fifth invoke body, not a plugin
+ * variant: a plugin takes a tokenized argv and returns whatever it
+ * wrote to stdout, a UDF takes one bytes object and returns bytes, None,
+ * or an error. Forcing both through one interface would mean parameters
+ * that are meaningless for one of them.
+ *
+ * SIGNATURE IS DELIBERATELY IDENTICAL to fr_py_worker_plugin_loop, with
+ * `path`/`func_name` reinterpreted as `module`/`attr`. That keeps
+ * spawn_wid() completely untouched: the launcher passes a different
+ * function pointer and different strings. Twelve parameters is already
+ * too many to grow.
+ *
+ * The interpreter is NOT initialised here. The launcher dlopens the
+ * helper and calls fr_udf_init() BEFORE forking; workers inherit the
+ * initialised interpreter (measured 6.8-11.3x faster than per-worker
+ * init). The bound function pointers below are likewise inherited.
+ * ===================================================================== */
+
+/* Mirror of the helper's fr_udf.h entry points. Declared here rather
+ * than included: the shim must NOT link libpython, and the helper is a
+ * separate per-minor object loaded with dlopen. Only these three
+ * symbols are needed; the rest of the API (flags, diagnostics, fork
+ * hooks) is called by the launcher itself. */
+/* Mirrors fr_udf.h's FR_UDF_* status codes. The shim deliberately does
+ * NOT include fr_udf.h: including it would drag Python.h into a
+ * translation unit that must never link libpython. These are the only
+ * two values the loop branches on, and the test suite pins them against
+ * the real header via the probe. */
+enum { FR_UDF_OK = 0, FR_UDF_NO_RESULT = 1, FR_UDF_ERR = -1 };
+
+typedef int (*fr_udf_call_fn)(const char *module, const char *attr,
+                              const char *input, size_t len,
+                              char **out, size_t *out_len);
+typedef void (*fr_udf_free_fn)(char *buf);
+
+static fr_udf_call_fn g_udf_call = NULL;
+static fr_udf_free_fn  g_udf_free = NULL;
+
+/* Bound by the launcher in main() before any fork. Returns 0 on
+ * success. Must be called before the workers start; the pointers are
+ * inherited by every worker. */
+int fr_py_udf_bind(fr_udf_call_fn call_fn, fr_udf_free_fn free_fn)
+{
+    if (!call_fn || !free_fn)
+        return -1;
+    g_udf_call = call_fn;
+    g_udf_free = free_fn;
+    return 0;
+}
+
+/* ---- the UDF invoke body ----
+ *
+ * Read the claimed batch window, hand it to the UDF, frame whatever
+ * comes back. Returns 0 on success (including a None result), non-zero
+ * on failure so the caller's on_error policy applies.
+ *
+ * Return codes mirror fr_py_plugin_invoke so the loop treats them
+ * identically: -1 bad fd, -2 helper not bound, -3 read/mapping failure,
+ * -4 the UDF itself failed. */
+static int fr_py_udf_invoke(int ingress_fd, int out_fd,
+                            uint64_t batch_off, uint64_t batch_len,
+                            uint64_t batch_idx,
+                            const char *module, const char *attr)
+{
+    if (ingress_fd < 0 || out_fd < 0)
+        return -1;
+    if (!g_udf_call || !g_udf_free)
+        return -2;
+    if (!module || !attr)
+        return -2;
+
+    /* No static buffer: it would cap batch size. malloc per batch is
+     * what the spawn loop already does with its capture staging. */
+    char *in = NULL;
+    if (batch_len > 0) {
+        if (ring_call_ensure_ingress_map(ingress_fd, batch_off,
+                                         (size_t)batch_len) != 0)
+            return -3;
+        const char *base = (const char *)tls_ingress_map + batch_off;
+        in = (char *)malloc((size_t)batch_len);
+        if (!in)
+            return -3;
+        memcpy(in, base, (size_t)batch_len);
+    }
+
+    char *out = NULL;
+    size_t out_len = 0;
+    int rc = g_udf_call(module, attr, in ? in : "", (size_t)batch_len,
+                        &out, &out_len);
+    free(in);
+    if (rc < 0)
+        return -4;              /* UDF raised / could not be resolved */
+
+    /* DECISION-02: None and b"" are different answers and must stay so.
+     * A None result emits a NO_RESULT record -- a terminal disposition
+     * carrying no payload -- so the parent can advance past it. An empty
+     * result emits a DATA record with len 0. Collapsing either into the
+     * other is the bug this protocol exists to prevent.
+     *
+     * fr_py_emit_record infers NO_RESULT from src_len == 0, which is
+     * why the None case is signalled by a zero-length READ that still
+     * writes a disposition-bearing header: see fr_py_emit_record's
+     * contract. */
+    uint32_t disp = (rc == FR_UDF_NO_RESULT) ? FR_DISP_NO_RESULT
+                                            : FR_DISP_DATA;
+    int frc = fr_py_emit_record_buf(out_fd, batch_idx,
+                                    rc == FR_UDF_NO_RESULT ? NULL : out,
+                                    rc == FR_UDF_NO_RESULT ? 0 : out_len,
+                                    disp);
+    if (out)
+        g_udf_free(out);
+
+    return frc == 0 ? 0 : -3;
+}
+
+/* ---- the fifth worker loop ----
+ *
+ * Same lifecycle as the other modes, reusing the same primitives. No
+ * separate retry, ack, or poison policy: that is the whole point of
+ * keeping the shape identical, and it is what the parity tests hold us
+ * to. */
+int fr_py_worker_udf_loop(int wid, const char *module, const char *attr,
+                          int ingress_fd, int out_fd, int signal_fd,
+                          int fallow_fd, int order_fd, int trap_ack_fd,
+                          int wincarn, int retry_limit, int on_error) {
+    fr_py_batch_t claimed;
+    int rc;
+
+    if (!module || !attr || ingress_fd < 0 || out_fd < 0)
+        return 1;
+    if (on_error < 0 || on_error > 2)
+        return 1;
+    if (fr_py_worker_init(wid, 0, wincarn, retry_limit, 0) != 0)
+        return 1;
+    if (order_fd >= 0)
+        g_fr_config.fd_order_pipe = order_fd;
+    fr_py_txn_out_fd = out_fd;
+    fr_py_ack_init(out_fd);
+
+    while (1) {
+        rc = fr_py_claim(&claimed);
+        if (rc == 2)
+            return 0; /* EOF: drained */
+        if (rc != 0)
+            return 1; /* abort/failure */
+
+        if (claimed.poisoned) {
+            char pbuf[64];
+            int plen;
+            fprintf(stderr,
+                    "forkrun [WARN]: Skipping poisoned batch %llu "
+                    "(killed %u times).\n",
+                    (unsigned long long)claimed.batch_idx,
+                    claimed.num_kills);
+            if (trap_ack_fd >= 0) {
+                plen = snprintf(pbuf, sizeof pbuf, "P:%llu:%u\n",
+                                (unsigned long long)claimed.batch_idx,
+                                claimed.num_kills);
+                if (plen > 0)
+                    (void)robust_pipe_write(trap_ack_fd, pbuf,
+                                            (size_t)plen);
+            }
+            /* DECISION-02: terminal POISONED disposition, emitted
+             * BEFORE the ack, so a death in between rolls it back
+             * with the rest of the batch. */
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                       claimed.batch_idx,
+                                       FR_DISP_POISONED) != 0)
+                return 1;
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        if (claimed.length == 0) {
+            /* EOF sentinel slot: ack but never emit (bash REPLY rule). */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        rc = fr_py_udf_invoke(ingress_fd, out_fd, claimed.offset,
+                              claimed.length, claimed.batch_idx,
+                              module, attr);
+        if (rc == 0) {
+            /* Fault injection (exactly-once tests): this batch's record IS
+             * framed -- the invoke wrote it -- and the ack below has NOT
+             * happened. That is the orphan window recovery must handle.
+             *
+             * Placed at the success site rather than inside
+             * fr_py_complete because "success" cannot be identified by the
+             * signal argument: the in-process map() executor runs the
+             * signal pipe DISARMED (-1) on the success path as well, since
+             * there is no drain there, so a signal_fd >= 0 gate fires
+             * under the launcher but never for a plain map() call.
+             * Structural placement also keeps the injected death out of
+             * the poison/skip and sentinel branches, where firing meant a
+             * poisoned batch could never be skipped. */
+            fr_py_maybe_die_before_ack((int)wid, signal_fd);
+
+            rc = fr_py_complete(signal_fd, (uint64_t)wid,
+                                claimed.batch_idx, fallow_fd, out_fd,
+                                NULL, 0);
+            if (rc == 0)
+                continue;
+            if (rc == -2)
+                return 2; /* signal EPIPE: parent gone -- fatal */
+            return 1;
+        }
+
+        /* --- failure path: the existing on_error policy, unchanged --- */
+        if (on_error == 1) {
+            /* DECISION-02: terminal SKIPPED disposition. Emitted
+             * before the ack, inside the transaction, so a death
+             * in between rolls it back and the retry re-emits it. */
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                      claimed.batch_idx,
+                                      FR_DISP_SKIPPED) != 0)
+                return 1;
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+        if (on_error == 2) {
+            fflush(NULL);
+            fr_py_abort();
+            return 1;
+        }
         fflush(NULL);
         fr_py_escrow_deposit(claimed.num_kills + 1);
         continue;
@@ -3049,7 +4940,20 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
             }
             /* Ack-silent (no signal — v0 parity) but ordered: the
              * C orderer still expects its contiguous packet. */
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* DECISION-02: terminal POISONED disposition, emitted
+             * BEFORE the ack, so a death in between rolls it back
+             * with the rest of the batch. */
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                       claimed.batch_idx,
+                                       FR_DISP_POISONED) != 0)
+                return 1;
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;
@@ -3072,6 +4976,21 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
             /* Success: record already framed by the exec — signal
              * + fallow + order + ack in one call (no output: data
              * NULL skips the writev, signal still honored). */
+            /* Fault injection (exactly-once tests): this batch's record IS
+             * framed -- the invoke wrote it -- and the ack below has NOT
+             * happened. That is the orphan window recovery must handle.
+             *
+             * Placed at the success site rather than inside
+             * fr_py_complete because "success" cannot be identified by the
+             * signal argument: the in-process map() executor runs the
+             * signal pipe DISARMED (-1) on the success path as well, since
+             * there is no drain there, so a signal_fd >= 0 gate fires
+             * under the launcher but never for a plain map() call.
+             * Structural placement also keeps the injected death out of
+             * the poison/skip and sentinel branches, where firing meant a
+             * poisoned batch could never be skipped. */
+            fr_py_maybe_die_before_ack((int)wid, signal_fd);
+
             rc = fr_py_complete(signal_fd, (uint64_t)wid,
                                 claimed.batch_idx, fallow_fd, out_fd,
                                 NULL, 0);
@@ -3086,8 +5005,21 @@ int fr_py_worker_spawn_loop(int wid, char **argv, int argc,
 
         /* --- failure path (command exit code; _worker.py parity) --- */
         if (on_error == 1) {
+            /* DECISION-02: terminal SKIPPED disposition. Emitted
+             * before the ack, inside the transaction, so a death
+             * in between rolls it back and the retry re-emits it. */
+            if (fr_py_emit_disposition(out_fd, signal_fd, (uint64_t)wid,
+                                      claimed.batch_idx,
+                                      FR_DISP_SKIPPED) != 0)
+                return 1;
             /* skip: ack (order target derived, no signal — v0 parity). */
-            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+            /* STAGE0: notify AFTER the ack, with the real signal fd.
+             * A POISONED/SKIPPED record is a real committed record, so
+             * it must be announced; a silent ack would commit it and
+             * tell nobody, stranding any ordered consumer waiting on
+             * that batch's terminal outcome. The fallow/order ack
+             * semantics are unchanged. */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid, claimed.batch_idx,
                                 fallow_fd, out_fd, NULL, 0);
             if (rc != 0)
                 return 1;

@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies  # noqa: E402
 from ml.ml_data_gen import generate_data  # noqa: E402
 
 try:
@@ -74,7 +74,7 @@ def _records(results):
 
 @unittest.skipUnless(HAVE_LIB, "substrate .so not built")
 @unittest.skipUnless(HAVE_GCC, "gcc not available")
-class TestSinglePassCorrectness(unittest.TestCase):
+class TestSinglePassCorrectness(ChildLifecycleMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="singlepass_test_")

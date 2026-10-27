@@ -27,7 +27,7 @@ import forkrun  # noqa: E402
 from forkrun._batch import Batch  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -75,7 +75,7 @@ class TestLayer1Enforced(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 @unittest.skipUnless(HAVE_NUMPY, "numpy not installed")
-class TestNumpyPastInvalidation(unittest.TestCase):
+class TestNumpyPastInvalidation(ChildLifecycleMixin, unittest.TestCase):
     def test_characterize_cross_batch_read(self):
         """Stash an np export on batch 0, read it back on batch 1.
 

@@ -27,7 +27,7 @@ import importlib as _importlib  # noqa: E402
 _run_mod = _importlib.import_module("forkrun.run")  # module, not forkrun.run()
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -66,7 +66,7 @@ def make_dirty_scanner_fork(real_fork):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestPositionIndependence(unittest.TestCase):
+class TestPositionIndependence(ChildLifecycleMixin, unittest.TestCase):
     def test_dirty_offset_still_exact(self):
         # The F-PY-UMA1 forensic shape: nonzero shared offset at
         # scanner entry must not cost a single head byte.
@@ -107,7 +107,7 @@ class TestPositionIndependence(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSequentialHeadExactness(unittest.TestCase):
+class TestSequentialHeadExactness(ChildLifecycleMixin, unittest.TestCase):
     def test_ten_sequential_maps_exact(self):
         # The original F-PY-UMA1 hunting ground: sequential
         # in-process maps must be head-exact every time.

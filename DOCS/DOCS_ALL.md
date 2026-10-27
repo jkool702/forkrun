@@ -231,6 +231,764 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## v3.6.2 — unreleased
+
+(Version bump for the 3.6.2 / 0.18.0 release; closeout notes to follow.)
+
+## Unreleased — the child-lifecycle helper stopped blaming the wrong test
+
+**Test infrastructure, no product change.** `assert_no_zombies()` did a
+single `waitpid(-1, WNOHANG)` and reported the result as a "zombie
+leak". That conflates three outcomes, and the conflation had
+consequences beyond the wording:
+
+- `waitpid` returning `(0, 0)` means "a child exists and has **not
+  terminated**". A child that is still RUNNING is not a zombie. Worse:
+  because the child stayed alive, the check kept failing **every later
+  test in the run**. One test's leftover child failed **169 unrelated
+  tests**, and the failure MOVED between runs -- so it looked like a
+  production regression in a different place each time.
+- `waitpid(-1, ...)` reaps ANY child of the test process, including
+  one an **earlier** test left behind: that misattributes the failure
+  to whichever test runs next, and destroys the evidence that the
+  earlier test left the child.
+
+The helper now takes a `/proc` census of this process's direct
+children -- every THREAD's children -- and distinguishes the three
+outcomes: no children (pass), a child that has EXITED (reaped here, by
+pid, and reported as an unreaped terminated child), and a child still
+RUNNING (reported as a lifecycle leak, and NOT reaped -- it is still
+running). The assertion is **not** weakened: both faults were failures
+before and both are failures now. What changed is that the report
+names the child (pid, state, cmdline), and that a leftover is reported
+**once**, by the test that left it, so the real culprit is the one that
+fails.
+
+`python/tests/test_child_lifecycle_helper.py` pins the behaviour on a
+deliberately live child, an exited-but-unreaped child, a fully-reaped
+process, and the reported-once property.
+
+**The suspected production regression was not one.** The SIGINT
+checkpoint path was isolated and compared directly -- `test_resume_sigint`
+in a fresh process per round, same substrate and environment, against
+the pre-change implementation and the changed one, 30 rounds each -- and
+**both were green**. The failures were the harness reporting a leftover
+child and blaming whichever test ran next.
+
+## Unreleased — the duplicated DECISIONS are now single points of truth
+
+**Architecture, no behaviour change intended.** A function-level scan
+finds duplicated code; the expensive duplication is a decision written
+out INLINE, at the point where the rule is applied, which such a scan
+does not see. `tools/ssot_scan.py` (new) compares BLOCKS -- a function
+body and the body of every if/for/while/try/with/except -- after
+canonicalisation, and it found:
+
+- the rule "a helper child's death is fatal unless an abort already
+  explained it" was consulted in **2 of 28** places that apply it;
+- the C drain's "is this a failure?" decision -- also a helper child's
+  death -- was consulted in **none** of its **10** places.
+
+Both are now single points of truth:
+
+- `_helper_death_excused()` -- consulted by **all 24** helper-death
+  raise sites, including the ten C-drain sites that consulted it
+  nowhere and the two ingest-scanner sites that consulted it in five of
+  seven copies;
+- `_raise_for_drain(status, lib)` -- the C drain's failure decision,
+  ten copies -> one, with the excuse inside it;
+- `_teardown_orderer()` -- the C orderer's teardown, six copies -> one
+  (the NUMA copy did not consult the excuse; the helper does, so all
+  six get it);
+- `_spawn_c_orderer()` -- the C orderer's setup, six copies -> one;
+- `_reap_fallow()` -- the reaper's reap and its abnormal-exit warning,
+  four copies -> one.
+
+Not folded, deliberately: the fallow child's exit handling (one copy
+calls `fr_py_fallow_phys` where the others call `fr_py_fallow_loop` --
+a genuine semantic difference, not drift), and the checkpoint-on-abort
+handler (the two sites differ in their surrounding state, and the block
+is a 9-argument call).
+
+**A configuration dimension the first fold lost, and now keeps.** The
+orderer fold initially dropped the two NUMA callers' `numa=True` --
+`numa` is not decoration: it reaches the C orderer as the "numa"
+argument of `ring_order`, selecting the orderer's NUMA mode. The NUMA
+ordered paths were therefore running the default orderer mode, and no
+test noticed: `nodes="@2"` forces two LOGICAL nodes (cycling over the
+online physicals), so the NUMA executors do run on a single-node host,
+but the orderer's NUMA MODE is not observable in the output with one
+physical node -- the ordering comes out the same either way. The
+configuration was therefore checkable but its EFFECT was not, which is
+exactly why the regression survived a green gate. `_spawn_c_orderer()`
+now takes the configuration that varies and forwards it, and
+`python/tests/test_orderer_config.py` asserts that the NUMA executors
+ask for the NUMA orderer mode and the UMA ones do not.
+
+## Unreleased — a helper child's death is now decided in ONE place
+
+**Correctness, no API change.** The front end turns a helper child's
+non-zero exit into a fatal error in **28** places. D-PORT2/D6 taught
+that such a death is *expected* when an abort is already in flight --
+the child died as the abort's consequence, and re-aborting would print a
+spurious FATAL and clobber the abort's own outcome -- and it wired that
+rule into **2** of the 28. The other 26 had the same rule written out,
+or omitted it entirely, including the materialized plain path's inline
+scanner watch.
+
+**That is the failure mode the de-duplication exists to remove**: a fix
+lands in the copies its author happened to find, and lives on in the
+execution paths nobody looked at. The D-PORT2 commit's own wording --
+"both UMA scanner watches" -- shows the author believed there were two.
+
+**One decision point now.** `_helper_death_excused()` holds the rule,
+and every one of the 28 sites asks it, so the next change to the rule
+lands everywhere by construction. The sites keep their own shape: what
+the executor does next (abort, raise) stays with the caller.
+
+**The order is part of the rule, and is now checked.** A consult placed
+AFTER the abort always sees "excuse" -- the reason the abort just
+published -- and so swallows a *genuine* helper failure silently.
+D-PORT2 says so: "query the abort reason BEFORE the handler's own
+abort -- the order is the fix". `python/tests/test_helper_death_excuse.py`
+asserts that every helper-death site asks the shared decision AND that
+the consult precedes the abort in its block. Both are mutation-checked:
+unwiring one site fails the first, moving one consult after its abort
+fails the second.
+
+## Unreleased — the cleanroom's UDF route can import a C extension again
+
+**Correctness and performance, no API change.** The cleanroom's
+`mode="udf"` route could not import **any** CPython extension module.
+The launcher loaded the per-minor helper with `RTLD_LOCAL`, so
+libpython's symbols never entered the global namespace — and since
+CPython 3.8 on Unix, extension modules resolve libpython's symbols
+(`PyFloat_Type` and friends) out of the **global** namespace at load
+time. CPython's own embedding guidance is explicit: libpython must be
+loaded with `RTLD_GLOBAL` when Python is embedded, precisely because C
+extensions no longer link libpython directly.
+
+**The mechanism.** `forkrun_cleanroom.c` now loads the real helper with
+`RTLD_GLOBAL`. The **disposable probe** load is unchanged
+(`RTLD_LOCAL` — it is a throwaway child whose only job is to prove the
+artifact loads), as are the plugin probe and the substrate load;
+neither is CPython-linked. The wider symbol scope is confined to the
+launcher's own address space: the launcher is a separate, `exec`'d
+process, so the caller's Python process is untouched.
+
+**What it broke, and how quietly.** Two consequences, and the second is
+the more dangerous one because it is **silent**:
+
+- A UDF importing `math`, `re` or `numpy` returned **ZERO records and
+  NO exception** — every batch poisoned, with nothing naming the cause
+  in the caller's visible output.
+- `json` still imported, but **without its C accelerator**, so
+  `json.loads` ran 13.19us instead of 2.88us — **4.6x slower**, with no
+  diagnostic of any kind.
+
+That second effect was the *entire* throughput gap of the route: on a
+json-per-record payload the cleanroom's `map-udf` route measured
+3.65x–4.6x slower than the in-process path, and only 1.5x slower on a
+payload that does no json at all. The route's own overhead is ~30ms of
+start-up plus a per-batch cost *smaller* than the in-process path's.
+
+**After the fix**, with the A/B arms alternating per rep, the route is
+at **parity** (0.975x–1.038x across 1–28 workers) and keeps its memory
+advantage: with a 599MB parent at 28 workers the in-process path's tree
+RSS is 16.4GB against the cleanroom's 1.1GB. The route is now strictly
+better than the path it would replace — the same speed, less memory,
+and a UDF that keeps its extensions.
+
+**Why the suite never saw it.** Two reasons, and the second is the
+worse one. Its UDF fixture is **pure Python** (`b.upper()`,
+`import sys`) and imports no extension at all, so a hundred green UDF
+tests were compatible with the route being unable to import `math`. And
+those hundred tests were **not running**: a test module restored the
+ambient `FORKRUN_CLEANROOM` by *deleting* it, so every later test that
+gated on it **skipped** — including the whole end-to-end UDF suite, in
+the gate pass that runs with the flag set. A green gate was not
+evidence.
+
+Both are closed. `python/tests/test_udf_extension_import.py` adds a
+fixture importing `math` and `re` **at module level**, a deterministic
+witness that the C accelerator is loaded
+(`json.decoder.scanstring.__module__ == "_json"`, not a timing), a
+byte-for-byte comparison of the two arms, and an explicit
+no-poisoned-batches assertion; it **owns its precondition** rather than
+gating on ambient state. The restoring test module now restores the
+saved value instead of deleting the variable. The gate counts show the
+revival: 1446 -> 1451 tests with the flag off, 1446 -> 1458 with it on,
+both passes OK. Reverting the loader flag makes all five new tests
+fail.
+
+**The loader policy is recorded, not incidental.** The helper's exported
+dynamic symbols were inspected: 15 of them, all prefixed `fr_udf_*`.
+Symbol visibility is **not** treated as a security boundary here — the
+boundary is the separate process, the interpreter's isolated config,
+and the explicit root allowlist.
+
+**This was a Python-frontend drift from the bash reference.** The bash
+side's helper runner `fr_udf_fork` is *linked* against libpython, so
+its symbols were global from the start and extension imports always
+worked there; the bash frontend does not use `_forkrun_cleanroom` at
+all. The fix restores parity with the frozen reference rather than
+inventing a policy.
+
+**Not claimed.** The `mode="udf"` **fallback** defect is separate and
+still open: with a helper built, `mode="udf"` raises
+`NotImplementedError` unless the route is explicitly selected, rather
+than taking the documented in-process fallback. The route stays
+**opt-in**, and the default-on decision stays uncommitted.
+`dev/supervisor/UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` has the full
+analysis.
+
+## Unreleased — `mode="udf"` falls back when the route is not selected
+
+**The fallback now exists in every case it is documented for.** The
+`map-udf` route is served by the cleanroom launcher; the in-process
+executors accept only `mode="python"` and `"splice"`. When the route
+is not selected for a call — the helper is not built for this minor,
+**or** the cleanroom is off (the default), **or** the call is not one
+the launcher serves — `mode="udf"` now degrades to the documented
+in-process path instead of raising:
+
+    NotImplementedError: v0 supports mode='python' only
+
+The helper's existence is not what decides this: a helper built for
+this minor says the isolated path is *possible*, not that it was
+*chosen*. Confusing the two is what made the default configuration
+raise. The decision now has one authoritative implementation
+(`_coerce_payload_inprocess`), used by every in-process call site, so a
+future caller cannot forget it.
+
+`stream()` resolves the spec only AFTER the cleanroom has had its
+chance, so the user's module is still imported in the isolated helper
+whenever the launcher serves the call — resolving it in the parent
+would put the user's state into the process that forks every worker.
+
+Tests: `python/tests/test_udf_fallback.py` (15 tests, mutation-checked).
+Work log: `dev/supervisor/WO_PY_UDF_FALLBACK_1_WORKLOG.md`.
+
+## Unreleased — the Python-UDF helper ships in a per-minor wheel
+
+**Packaging, no API change.** The cleanroom's optional Python-UDF helper
+(`_fr_udf`, a separate CPython-linked shared object) was built by the
+Makefile but **listed nowhere** in `setup.py`'s `package_data`, and the
+wheel was tagged `py3-none-<platform>`. So a wheel install silently had
+**no UDF accelerator** — the same class of bug as CR-FIX1-I, where the
+cleanroom launcher was "listed NOWHERE" and a wheel install silently had
+no cleanroom at all. And `DECISION-01` §6.2.1's warning applied
+verbatim: *"a wheel built from an sdist on one machine and tagged
+`py3-none` would carry a different minor than its tag claims, with
+nothing in the artifact to prove it."*
+
+**The wheel's python tag now follows the HELPER, not the running
+interpreter.** The helper's extension suffix *encodes* the minor it was
+compiled against (`_fr_udf.cpython-314-x86_64-linux-gnu.so` -> 3.14), so
+a helper built for a different minor has a different NAME and is simply
+not found. That is what makes a mismatched build safe: it cannot
+produce a wheel that claims the wrong minor.
+
+- helper for this interpreter present -> it ships, and the wheel is
+  tagged `cp3XX`;
+- otherwise -> no helper ships, and the tag stays `py3-none-<platform>`,
+  so the substrate wheel remains interpreter-agnostic.
+
+This satisfies "keep the source-only development path honest: do not
+advertise a locally built helper as present in a generic ABI-independent
+wheel" **by construction**: the tag is never `py3-none` while a helper
+is present. A plain `_fr_udf.so` (no suffix) is deliberately NOT
+shipped — its minor cannot be established from its name — while the
+runtime fallback still finds it in a source checkout, so the development
+path keeps working.
+
+`tools/build_wheel.sh` now accepts a `cp3XX` tag (the old glob
+`forkrun-*-none-*.whl` rejected one outright), refuses to choose between
+two wheels, and requires the python tag and the shipped helper to agree:
+a `cp3XX` wheel with a mismatched helper, or a `py3` wheel carrying
+one, is a lying tag and fails the build.
+
+**The ABI tag, which is not the same thing as the version tag.** `cp314`
+names a python VERSION; the ABI tag names the ABI. A free-threaded
+CPython 3.14 links `libpython3.14t.so.1.0` where a GIL one links
+`libpython3.14.so.1.0` — different sonames, so a helper built for one
+cannot be loaded by the other — and the free-threaded extension suffix
+(`cpython-314t-...`) *contains* the GIL one, so a substring check on
+the minor alone accepts it. Meanwhile the loose ABI tag `none` means "no
+ABI constraint", and `packaging`'s own tag generator gives a
+free-threaded 3.14 a set that includes `cp314-none-<platform>` exactly
+as a GIL 3.14's does — so a GIL-built helper in a `none`-ABI wheel
+advertises compatibility with an interpreter that cannot load it.
+
+**Free-threaded CPython is NOT supported for this helper route**, and
+**both layers now decline it**. The packaging ships no helper for such a
+build and keeps the generic `py3-none` tag — and so does the RUNTIME,
+which refuses a free-threaded interpreter's helper outright. The runtime
+has to be the one that decides: the version barrier compares only
+`major.minor` (the build stamp carries no free-threading bit), so the
+two flavours of a minor are indistinguishable to it, and a packaging-only
+refusal would have left a free-threaded source checkout using an
+unmeasured configuration. The policy now lives in ONE place —
+`forkrun/_udf.py` — and `setup.py` asks its answer rather than keeping
+a second copy of the rule; a test asserts the two agree. The reasons are structural, not
+caution — the helper links a different `libpython` soname, the
+interpreter matrix fetches GIL builds only, and the launcher has never
+been exercised against a free-threaded build. A wheel that DOES ship the
+helper now carries the **real** ABI tag (`cp314-cp314`), so its
+compatibility set is exactly the interpreters that can load it: accepted
+by a GIL 3.14, **rejected** by a free-threaded 3.14, where the old
+`cp314-none` was accepted by both. If free-threaded is supported later
+the tag becomes `cp314-cp314t`; the two directions are distinguishable,
+so today's position is a policy and not a limitation of the tagging.
+
+**Also fixed: the C0.5 interpreter matrix could not build a single
+per-minor driver.** `tools/matrix_c05.sh`'s manual gcc line was missing
+`-I"$ROOT"`, and `forkrun_udf_version.h` (the build stamp the launcher
+and the helper must agree on) lives at the REPO ROOT. Every per-minor
+build had been failing on it — and the failure was **invisible**,
+because the lifecycle sweep then measured the STALE driver left over
+from a previous run. The harness now removes the old driver before
+building, and the sweep refuses to measure a driver this run did not
+produce.
+
+With that fixed, the matrix is **green on all six minors** (3.10-3.15):
+the verdict probe passes, the control probe is DIRTY as required (so the
+probe is not vacuous), and the respawn probe is CLEAN (a respawned
+generation inherits no interpreter state). The lifecycle curves are now
+measured on fresh drivers: pre-fork faster on **48/48 configurations on
+each** of the five fetched minors, medians 2.84x-3.59x.
+
+**One naming correction.** The roadmap's prose named the launcher's
+version argument `--caller-minor=3.X`; the implemented and REVIEWED name
+is `--caller-version=MAJOR.MINOR` (`REVIEW_REQUEST_ROUND12/13` record
+it as a new required argument, added as a condition of approval). The
+implementation under review is authoritative, so the PROSE was corrected,
+not the code.
+
+## Unreleased — the stream notification pipe is a window, not a queue
+
+**Performance/memory, no API change.** The worker-completion notification
+pipe on the public `stream()` paths now asks for **4 KB** instead of 1 MB.
+The capacity of that pipe is not a tuning knob — it *is* the producer's
+run-ahead window.
+
+**The mechanism.** A worker that finishes a batch writes one 16-byte
+notification; the parent reads them. The pipe holds N notifications, so N
+is how many completions may be outstanding before a worker blocks writing
+its notification — and a blocked worker cannot claim its next batch. The
+per-worker output memfds have no backpressure of their own (a memfd does
+not push back), so this pipe is the **only** thing bounding how far a
+worker may run ahead of the consumer. At 1 MB that bound was 65536
+completions: wide enough that the bound was not a bound. At 4 KB it is
+256 — the same order of window the bash frontend's ack pipe uses
+(`ORDER_PIPE_SIZE=4096`, the H3 backpressure invariant), which is the
+conceptual reference for this change.
+
+**What changed, exactly.** `forkrun/_pipes.py` gains a named
+`STREAM_NOTIFY_PIPE_SIZE` (4096) and `make_stream_notify_pipe()`. The five
+`stream()`-reachable executors use it: `_execute_streaming`,
+`_execute_ingest_stream`, `_execute_streaming_reactor`,
+`_execute_ingest_stream_reactor`, `_execute_numa_stream`.
+
+**What did not change.** The `map()`/`run()` executors still ask for 1 MB:
+they collect every result, so there is no slow consumer to run ahead of.
+The C-drain results pipe keeps its own capacity — it is a *separate*
+backpressure stage, and shrinking it too would confound the experiment.
+Order pipes, trap-ACK pipes, fallow, spawn, death and escrow pipes are
+untouched, as is `make_pipe()`'s general default. The bash frontend is
+untouched.
+
+**Correctness fix in the same change.** `fr_py_notify_committed()` returns
+`FR_PY_ERR_NOTIFY` (-4) to mean *committed but not notified* — explicitly
+not an ordinary retryable payload error, and explicitly "NEVER a plain
+retry". The Python worker loop special-cased `-2` and `-3` but let `-4`
+fall through to the generic output-error path, which reaches the
+`on_error` ladder's **retry** branch. That branch re-arms the batch for a
+same-process re-claim: it retries work whose commit already happened.
+The shipped C worker loop treats *any* nonzero `fr_py_complete` rc as
+fatal for exactly this reason; the Python loop now does too.
+
+**Not claimed.** This is **not** a hard byte bound on a stream, and it does
+not close TD-13. A single batch can still generate large output, and
+`order="index"` can still buffer behind a poisoned or skipped head. The
+measured effect is a reduction in peak retention for a slow consumer; the
+exact figures and the residual limitations are recorded in TD-13.
+
+## Unreleased — the reactor no longer loses a poison notification on its way out
+
+**Correctness fix, no API change.** `poisoned` and `poisoned_batches` are
+read from two different places: the scalar from the engine, the index list
+from the trap-ACK pipe the worker writes its `P:<idx>:<kills>` notification
+to. When the supervision loop ended with that notification still buffered,
+the run reported a non-zero `poisoned` count beside an **empty**
+`poisoned_batches` list — two incompatible stories about one run, which is
+exactly what the index list exists to prevent.
+
+**The window.** The death pipe is the reactor's primary death detector, but
+`reap_clean_exits()` is an out-of-band `waitpid(WNOHANG)` backstop that can
+observe a worker's exit in a round whose `select()` snapshot *predates* that
+worker's write. The parent then learns of the death through `waitpid` while
+the notification arrives through the pipe, and the loop reaches its
+termination branch in between. The notification arms no trap-ACK grace
+deadline, so unlike the `<wid>` graceful-failure ACK nothing else kept the
+run alive on its behalf.
+
+The window is microseconds wide in normal operation, so this presented as a
+rare flake rather than a constant failure — one occurrence was caught by
+`test_fault.test_map_return_stats` inside a full-suite run and reproduced on
+demand only by delaying the backstop sweep. Measured with the delay in place
+and the fix absent, the notification was lost on 47–58 runs in 60 across the
+worker and line-batch combinations tried; with the fix in place it was lost
+on none of them.
+
+**The fix.** The supervision loop now drains the trap-ACK pipe before it
+leaves, so a notification that arrives in the gap between the round's
+`select()` and the out-of-band exit sweep is still accounted for. The drain
+is non-blocking by construction: readability is checked with a zero-timeout
+`select()` first, and a read is issued only when there is something to take.
+
+**Coverage.** `test_poison_accounting.TestPoisonNotificationSurvivesTeardown`
+widens the window deliberately and asserts the count and the list describe
+the same run. A companion test asserts the widener is actually in force, so
+the regression cannot go vacuously green if the sweep stops being called.
+
+## Unreleased — F6 Stage 4: `posix_spawn` is the default cleanroom launcher
+
+**Behaviour change, no API change.** The cleanroom routes now start the
+launcher with `os.posix_spawn()` instead of `os.fork()` + `os.execv()`.
+There is no new keyword and no new environment variable: the backend is not
+a caller-facing knob, and `FORKRUN_CLEANROOM` keeps exactly the meaning it
+had. `fork()` + `execv()` remains in the tree as a private fallback.
+
+**What a caller should expect.** Results, ordering, supervision, poison
+accounting, signal dispositions and the environment are unchanged — the
+descriptor contract was held to equivalence deliberately rather than
+tightened. What changes is the failure mode of a host that runs with a
+standard stream already closed, and the cost of launching from a
+large-heap process:
+
+* **Correctness fix — standard-stream descriptors.** The route now relocates
+  its own descriptors above the fd 0/1/2 gap before handing them to the
+  launcher, and does so with `fcntl(F_DUPFD, 3)` rather than `dup()`. `dup()`
+  returns the *lowest free* descriptor, so it could relocate a descriptor
+  straight back into the gap; the streaming result pipe had not been
+  relocated at all. A route descriptor landing on a standard-stream number
+  made the launcher read the wrong bytes as input — a well-formed result
+  computed from the wrong data, with no error and no non-zero exit. With a
+  stream closed, the routes now return the correct records with the correct
+  payload, where the materialised route previously could return nothing at
+  all.
+* **Performance, conditional on the caller.** `fork()` cost scales with the
+  parent's address space when that space is private anonymous memory —
+  ordinary CPython arena growth. End to end on a 200k-record `map()`:
+  −1.8% with a small parent (noise), −22.5% at 1 GiB, −32.9% at 2 GiB.
+  Those three figures are the first end-to-end measurement (5 samples, no
+  paired trials). A later controlled run — 15 paired/interleaved
+  repetitions, one process per mapping type, with the ballast's mapping
+  verified from the VMA permission word — measured **−31.6% at 2 GiB**,
+  within the same band.
+  Callers with a small parent should expect no measurable change.
+* **Compatibility.** `os.posix_spawn` is provided by libc, so it is present
+  wherever `fork`/`exec` are; the module checks for the attribute and uses
+  `fork()`+`execv()` if it is somehow absent. There is deliberately **no**
+  fallback if a spawn fails at runtime — that is reported through the
+  existing exit-127 path rather than silently re-running the work.
+
+## Unreleased — WO-CR-ROI-2: `map(plugin)` is default-on
+
+**Behaviour change.** When `FORKRUN_CLEANROOM` is unset, `map(plugin)` now
+runs through the exec-based cleanroom launcher. `udf`, `spawn`,
+`stream(plugin)` and `stream(udf)` are **unchanged** and still opt-in.
+
+To return to the previous behaviour: `FORKRUN_CLEANROOM=0`.
+
+### Per-route gate
+
+`FORKRUN_CLEANROOM` was a single boolean, so "turn it on" enabled five
+envelopes at once. It is now a **route** selector:
+
+    unset                     map-plugin only (the new default)
+    0 / no / off / false / "" disable, all routes
+    1 / yes / on / true / all every eligible route (legacy, unchanged)
+    map-plugin                one route
+    map-plugin,map-udf        a subset
+    unknown route or bad value  ValueError
+
+Route names: `map-plugin`, `map-udf`, `map-spawn`, `stream-plugin`,
+`stream-udf`. An unknown value raises rather than being treated as "on" —
+a typo must not silently widen the blast radius.
+
+The false aliases (`0`, `no`, `off`, `false`, `""`, case-insensitive and
+whitespace-tolerant) are unchanged from before, and remain the documented
+way to restore the old behaviour. They are checked **before** route
+parsing, so they keep working; `test_off_values_disable_even_the_new_default`
+pins that they disable the new default too.
+
+Note the selector is **per route, not per mode**: `plugin` would still
+have enabled both `map(plugin)` and `stream(plugin)`.
+
+Unset-on is **not** asked-on: `FORKRUN_CLEANROOM` unset reports
+`explicit=False`, so a user who never requested the cleanroom is not
+warned when a call cannot use it.
+
+### Why
+
+All four blockers in `CLEANROOM_DEFAULT_ON_DECISION.md` are closed:
+
+* **Route proof for all five routes.** `python/tests/test_cleanroom_routes.py`
+  replaces the launcher path with a wrapper that records its own `exec`
+  and then `exec`s the real binary. Output-only assertions are not
+  sufficient: they pass identically when the launcher is missing and the
+  call falls back in-process. Mutation-verified — forcing the launcher
+  to "missing" turns these red.
+* **Per-route gate** (the original structural blocker).
+* **Performance re-measured.** `benchmarks/bench_cleanroom_default_on.py`,
+  paired interleaved A/B, exactness guard, same in-repo plugin the route
+  tests build: startup **1.77x**, startup + 512 MB parent ballast
+  **2.34x**, throughput (400k records) **1.16x**, in-process/cleanroom.
+  No measured regime regresses. This falsifies the old "it is slower"
+  rationale for keeping the default off.
+* **Packaging.** `forkrun/_forkrun_cleanroom` ships inside the manylinux
+  wheel, so the default is not a no-op for installed users.
+
+### Compatibility and failure mode
+
+* Missing or unexec'able launcher → falls back in-process, i.e. the old
+  behaviour. A broken install degrades, it does not fail.
+* `mode="python"`, multi-node, `stream(spawn)`, `resume=` and
+  `checkpoint_file=` are untouched and still decline.
+* `stream(spawn)` has no route identifier, because it has no dispatch; a
+  selectable-but-dead route is indistinguishable from being ignored.
+
+## Unreleased — CR-FIX1: the Python cleanroom launcher, hardened
+
+Scope: the UMA C-plugin cleanroom only. NUMA, Python UDF, a libpython
+helper and dynamic worker spawning are explicitly NOT implemented and
+remain future work.
+
+### Python UDF: carrying vs reachability (CR-FIX1)
+
+`CLEANROOM_HANDOVER.md` recorded Python UDF as "Structurally impossible;
+do not attempt it". That ruling is **correct about carrying and incorrect
+about reachability**, and is superseded in part.
+
+A UDF callable is a live Python closure, and crossing `exec` destroys an
+object graph — so a *closure* still cannot cross, and coverage stays
+materialized + C plugin for that form. But `exec` does not prevent the far
+side from **re-creating** an interpreter and re-importing a **module
+reference**, which is exactly what `frun.bash` already does for the shell
+(`exec -c bash --norc --noprofile`, with `_FR_IN_CLEANROOM=1` as a
+recursion guard).
+
+A module function reference is therefore reachable, and is the
+`mode="python"` work item (Option A: an optional helper `.so` linking
+CPython, `dlopen`ed by the launcher only in that mode — substrate and
+launcher stay Python-free). "Reachable" is not "cheap": the seam set
+`CLEANROOM_DESIGN.md` prices is the real work.
+
+Updated `CLEANROOM_HANDOVER.md` to carry the distinction rather than the
+absolute, so the reason a closure cannot cross stays findable.
+
+
+**Opt-in structured trace of the launcher (C0.2 Phase A).** Set
+`FORKRUN_CLEANROOM_TRACE=1` and each run records a monotonic timestamp,
+pid, role, event, worker `wid`/`wincarn`, node and result code to a memfd
+inherited by every child — enough to reconstruct a stalled run as a
+pid/role/fork/reap/abort story instead of reverting the instrumentation
+that produced it. Off by default; with it off the emit path costs no
+syscall and no allocation. **No user payload bytes ever enter the
+channel**, asserted by a test that plants a marker in the input and
+searches the trace for it.
+
+The trace memfd **must** be opened `O_APPEND`, and that is measured rather
+than assumed: with `os.fork`, 16 children and one 64-byte record per
+`write`, a shared file offset recovered 25,962 of 320,000 records — 92%
+silently lost — while `O_APPEND` recovered all 320,000 with zero torn
+records. The facility exists to diagnose *concurrent* stalls, so without
+it the trace would discard most of its evidence exactly when needed, and
+discard it silently: a short well-formed file reads as "fewer events"
+rather than as data loss.
+
+Scope is the launcher only. The orderer is never forked by the launcher
+(`ring_order` has zero occurrences in `forkrun_cleanroom.c`), so its
+events cannot be produced here; the in-process path and orderer coverage
+are Phase B and require revisiting the frozen engine.
+
+### Correctness
+
+**Fatal teardown is bounded (was: an unbounded hang).** On the failure
+path the launcher killed its workers and then walked into a *blocking*
+`waitpid` for the spill child, which is never signalled and sits in
+`read()` on the caller's descriptor. A caller whose source pipe writer
+stayed open — every streaming caller mid-run, every abandoned run —
+therefore got a launcher that never returned. Fatal teardown now
+signals the whole live set (workers *and* every helper, spill included)
+and reaps non-blocking. Measured, same source and producer state:
+
+| | outcome |
+|---|---|
+| pre-fix | **still running after 20 s** |
+| post-fix | exit 1 in **0.114 s** |
+
+Reaped worker PIDs are also invalidated in `pids[wid]` at the moment they
+are reaped and refilled only on a real respawn, so fatal cleanup signals
+only known-live children.
+
+**Fallback is replay-safe (was: silent truncation).** `os.dup()` shares
+the open file description, so after the launcher ingested from a
+caller-supplied descriptor, that descriptor was advanced and the
+in-process retry resumed mid-input — returning a truncated result with
+exit 0. Fallback is now refused with an explicit error unless the source
+is a path (reopenable) or the launcher provably failed before ingestion.
+The exit codes that mean "pre-ingestion" are enumerated: 64, 69, 71, 78.
+Exit 70 (`die()`) is deliberately excluded — it fires both before the
+spill fork and after it — and signal deaths are treated as indeterminate.
+
+**The capability probe no longer forks from an unsafe process.** `dlopen`
+runs a plugin's ELF constructors in whatever process calls it. The
+launcher's probe called it in-process, so a constructor that started a
+thread left a thread behind and every subsequent fork died. Measured with
+such a plugin: **SIGSEGV**. The probe now runs in a disposable
+subprocess with a bounded wait; that plugin now completes normally
+(exit 0, full output). A probe that never completes exits **79**, which
+*suppresses* fallback — the in-process path would `dlopen` the same
+plugin in the caller and reproduce the failure with no launcher to bound
+it.
+
+**`map()` can no longer silently ignore `resume=`/`checkpoint_file=`.**
+The shared predicate's refusal for both was nested under
+`if streaming:`, and the `map()` call site never passed the arguments —
+so the check could not execute. Both are now refused unconditionally,
+above the streaming block.
+
+**Spill writes complete or fail.** A single `pwrite()` treated any
+result other than a complete write — including `-1`/`EINTR` — as fatal.
+Now a positional-write loop: `EINTR` is retried and partial writes
+advance both buffer and offset, so a legal short write no longer
+terminates a healthy run.
+
+### Correctness of the descriptor model
+
+**Every child inherits the engine descriptors.** The spill, fallow and
+scanner children kept only their own data descriptors, so
+`fr_py_ingest_data_post()` and every scanner eventfd poke were writes to
+closed descriptors — silently dropped, because `sys_write` ignores its
+return value. The keep-list policy is now a single role-aware helper.
+
+**Scrubbing covers the whole descriptor space.** The old loop ran
+`for (fd = 3; fd < 1024; fd++)`, which is not a close-all-except policy.
+Now `close_range()` over the gaps between sorted keep-list entries
+(extending to `UINT_MAX`, the syscall's own argument ceiling), falling
+back to `/proc/self/fd` enumeration. `RLIMIT_NOFILE` is a cross-check,
+never the authority.
+
+**A truncated or failed descriptor snapshot fails the run.** `snap_fds`
+stopped at a fixed 64 entries and returned a count the caller could not
+distinguish from a complete snapshot; a short snapshot meant children
+silently lost eventfds. Truncation and `readdir` failure are now
+reported and fatal. The fixed table grew to 256.
+
+A new `--fd-selfcheck` flag makes each child verify its own keep-list
+with `F_GETFD` after scrubbing, so a lost descriptor fails loudly rather
+than degrading the run to polling.
+
+### Performance
+
+The fixed ~100 ms startup overhead is **gone**. Paired interleaved A/B,
+medians, 28 workers, UMA, byte-exact output asserted identical on both
+sides (5020240 bytes every run):
+
+| variant | startup (2000 recs) | light_5M throughput |
+|---|---|---|
+| pre-fix | 107.06 ms (44 ms cpu) | 232.2 ms (858 ms cpu) |
+| scanner descriptors only | 3.30 ms (21 ms cpu) | 227.9 ms (1652 ms cpu) |
+| full fix | 3.41 ms (21 ms cpu) | 192.9 ms (1840 ms cpu) |
+
+* **startup 32.5x faster** — the scanner omission accounted for all of it
+* **throughput 1.20x faster** — the spill omission gave the scanner back
+* **CPU 858 -> 1840 ms**, which is not a regression: effective cores rose
+  from 3.7 to 9.5 while finishing 20% sooner. That is the intended
+  behaviour — workers doing work instead of sleeping on a poll timeout.
+
+The previously recorded "circular wait" diagnosis (spare signal/fallow
+pipe write ends) is **refuted**: those spares are closed only after the
+supervision loop exits, and the loop exits when `live == 0`, i.e. after
+every worker has already terminated.
+
+The symptom was both latency *and* a hot core: the scanner's pre-flight
+`poll()` over a closed descriptor returns `POLLNVAL` immediately, and
+that path does not check for it, so the pre-flight spun rather than
+sleeping.
+
+### Parent-RSS scaling, re-measured after CR-FIX1
+
+The W-CR6 figures ("parent RSS is the dimension that matters") were taken
+*before* this pass and described a launcher with a fixed ~100 ms of
+overhead. That overhead is gone, so the curve moved and is recorded here
+in both THP regimes. Method: `python/benchmarks/bench_cleanroom.py`,
+paired interleaved A/B, medians, 28 workers, UMA, `--orchestrator`,
+exact record counts asserted on every pass; i9-7940X, 14c/28t.
+
+**Startup** (2000 records), and **end-to-end** (light_5M):
+
+| parent RSS | startup, THP=never | startup, THP=always | e2e, THP=never | e2e, THP=always |
+|---|---|---|---|---|
+| 30 MB | 16.24 -> 6.34 ms (2.56x) | 17.37 -> 11.05 ms (1.57x) | 294.5 -> 203.8 ms (1.45x) | 264.0 -> 168.9 ms (1.56x) |
+| 554 MB | 118.9 -> 15.3 ms (7.78x) | 200.6 -> 27.0 ms (7.43x) | 330.6 -> 212.9 ms (1.55x) | 349.9 -> 189.4 ms (1.85x) |
+| 2127 MB | 454.7 -> 42.4 ms (10.74x) | 734.8 -> 71.7 ms (10.25x) | 665.6 -> 248.3 ms (2.68x) | 863.3 -> 228.3 ms (3.78x) |
+
+Two findings worth separating, because they point in opposite directions:
+
+* **THP costs the launcher a fixed init charge.** Absolute startup gets
+  worse under `shmem=always` at every RSS level (6.3 -> 11.1 ms at the
+  floor). Allocating and zeroing a 2 MB huge page lands inside a short
+  run's critical path, and the in-process path overlaps that charge with
+  ~17 ms of other startup work, which is why the 30 MB *ratio* compresses
+  from 2.56x to 1.57x while the 2 GB ratio barely moves.
+* **THP saves the launcher proportional work.** Throughput is better
+  under THP everywhere, and the ratio *widens* with parent size
+  (2.68x -> 3.78x at 2 GB) because the in-process arm degrades faster as
+  the address space grows.
+
+The cleanroom wins in both regimes at every RSS measured. The 30 MB row
+is not a crossover but the **floor** -- interpreter plus substrate, the
+smallest parent a real caller has -- so the crossover sits at or below
+any real Python process. That is the "negative crossover" W-CR6 claimed
+for the pre-CRFIX1 launcher; it is now reached rather than predicted.
+
+
+### Tests
+
+`python/tests/test_cleanroom.py` is self-contained. The primary fixture
+pointed at a hardcoded `/tmp/opencode/mlbench/ml_plugin_light.so` that no
+build target produces, so **37 of 58 tests skipped** by default and one
+errored. It now builds the in-repo fixture at **module scope** — not in
+`setUpModule`, because `@skipUnless` decorators evaluate at import and
+the fix would have appeared to work while still skipping everything.
+
+* **58 tests, 37 skipped, 1 error** -> **70 tests, 0 skipped, 0 failures**
+
+New coverage: the exit-status contract and replay-safety rule; the
+open-pipe fatal-teardown regression (the producer deliberately never
+closes the pipe); descendant cleanup after a fatal run; descriptor
+self-check; unrelated descriptors above 1023.
+
+### Packaging
+
+The launcher is now listed in `package_data`, so it ships in the wheel.
+It previously shipped in neither wheel nor sdist, making `pip install
+forkrun` silently different from a source checkout. The `setup.py` gcc
+fallback builds it too — it used to stop at the substrate. The tracked
+binary is now gitignored and removed by `clean`/`clean-python`; it was a
+stale copy that could be run in place of the source it was built from.
+
+Two build gates fixed: `tools/check_canary_versions.py` concatenated a
+2-tuple with a list before formatting it with two numeric specifiers, so
+every above-floor finding raised `TypeError` instead of being reported —
+a gate that crashes is not a gate. `tools/gen_shim.py` hardcoded the
+extern count as `45` while the header carried `50`; the count is now
+derived from the same data the declarations come from.
+
 ## v3.6.1 — 2026-10-06
 
 ### Verification
@@ -262,7 +1020,7 @@ producer, where the Bash frontend slept 78 times. The engine already
 signals `evfd_ingest_data` when each chunk lands; the pre-flight simply
 never waited on it, and the Python spill never signalled it either.
 
-- The wait now blocks on that eventfd for a bounded 50 ms, then drains
+- The wait now blocks on that eventfd for a **bounded 2 ms**, then drains
   it. The bound is load-bearing: one of the three exit conditions (the
   first worker spawning) is detected by re-reading `active_waiters` at
   the top of the loop, so an unbounded poll would stop noticing it. The
@@ -271,6 +1029,19 @@ never waited on it, and the Python spill never signalled it either.
 - The Python spill now signals the eventfd per chunk, at the same point
   `ring_copy` does for Bash.
 
+  **The bound was 50 ms when this first landed, and that was a
+  regression, now corrected.** On a file input the eventfd does *not*
+  wake this poll, so the timeout is what returns and the bound **is** the
+  latency: it cost a fixed ~65 ms on every run — +75.7 ms on the 5M light
+  cell (+18%), +70 ms medium, +60 ms heavy. The absolute cost was flat
+  across payloads spanning 0.41 s to 4.70 s, which is what identified it
+  as fixed overhead rather than anything proportional. Found by
+  re-running the 48-cell harness and bisecting 119 commits, then
+  confirmed by re-measuring the pre-change code *on the same day* — it
+  reproduced the old baseline within 1%, which cleared the machine of
+  blame. 2 ms restores all three payloads. A spin-then-sleep ramp was
+  also tried and reverted: identical wall time, ~7% *more* voluntary
+  context switches.
 Measured on a deliberately slow pipe (2500 lines at 3 ms, 4 workers):
 13,222 → 453 context switches and 0.14 s → 0.07 s CPU, with exact
 record counts both ways.
@@ -981,217 +1752,651 @@ once (R5 freshness gate proves embedded == current source).
 
 ### NUMA minimum 1 worker per node — parent-side enforcement (F-NUMA2, W-NUMA2)
 
-- Under-provisioned pools (`workers < nodes`) stranded
-  born-local rings. Fixed by parent-side bump to the node count
-  (one `UserWarning`, UMA exempt, single normalization point);
-  Bash already enforced coverage. Lock-in tests green; drain
-  guard stays as backstop. No engine changes.
+- **Gap:** user-supplied `workers < nodes` on a multi-node
+  topology left born-local rings permanently unworked (workers
+  claim locally only; stealing covers orphans, not healthy
+  unassigned rings). W-PY34 documented it as operator guidance;
+  F-NUMA1's drain guard made violations loud — but loud failure
+  is still failure for satisfiable config. Found in the fake-4
+  release leg: small-worker tests and benchmark sweep rows hit
+  the guard instead of completing.
+- **Fix (Python frontend only — no engine/shim changes):**
+  single normalization point
+  (`_resolve_workers_numa(workers, num_nodes)`) applied at
+  every run/map/stream dispatch site: `max(workers, num_nodes)`
+  on multi-node topologies with one `UserWarning` (requested vs
+  effective); UMA exempt; idempotent (no double-warn on
+  re-resolution). Sweep delegates to `map()`, covered
+  automatically. Bash already enforced coverage (sentinel
+  `max(nproc, nodes)` + `--nodes` reconciliation block that
+  bumps explicit maps to the node count) — documented, no Bash
+  change.
+- **Lock-in:** `test_numa_bump.py` (bump+warning+exactness,
+  equal/above-no-warning, UMA exempt, guard-quiet, stream path,
+  distribution-floor unit) 7/7 green; `test_numa.py` +
+  `test_numa_recovery.py` green; full suite 7/8 green (single
+  unidentified singleton across 8 runs — consistent with the
+  documented residual flakes; 5/5 clean hunt with full capture);
+  `make check` green (canary + suite); 5M medium `@4` sanity
+  (no warning at 28 workers, throughput within variance);
+  heavy-20M `@4` + `auto` in-proc quads clean with zero
+  mismatches.
+- **Docs:** RESILIENCE §7.3 upgraded to guarantee;
+  CONFIGURATION `workers` interaction; INVARIANTS §18;
+  DOCS_ALL mirrors; this entry.
 
 ### NUMA per-node early-exit / silent partial completion (F-NUMA1, W-NUMA1)
 
-- Heavy-20M C-plugin runs under forced-logical `@4` returned
-  silently with ~22–35% of records missing (whole orderer-key
-  suffix from one gap major; exit 0, no warnings). Root cause:
-  engine NUMA ChunkMeta lifetime — a stalled node's
-  claimed-but-unread chunks let the ingest frontier lap it by a
-  full 4096-slot ring, recycling its meta slot before it was
-  read (batches stamped with a future major; dup keys at
-  `gap + 4096`; orderer drops the tail). Fixed by an ingest
-  meta-lifetime bound (frontier within 2048 of the oldest unread
-  chunk, indexer + scanner progress markers) plus a per-chunk
-  meta snapshot in indexer/scanner, plus a parent-side per-node
-  drain assert (fail-loud). 32/32 in-proc heavy gates clean;
-  mismatch tripwire at zero. Surgical engine unfreeze; blob
-  rebuild via CI auto-build before release.
+- **Symptom:** heavy-20M C-plugin runs under forced-logical `@4`
+  (28 workers, `order="index"`, 26.9GB input) returned silently
+  with ~22–35% of records missing — always a whole orderer-key
+  suffix from one gap major — with no error, no warning, clean
+  exit; `valid ≈ total` in every run. `nodes=1` stable 5/5.
+  Observed 2 of ~10 in the v3.6.0 benchmark re-run.
+- **Reproducer (latent, not a regression — forced-logical `@4` +
+  heavy-20M was never run before v3.6.0; W-PY35 used fake-4/auto;
+  the F-PY-UMA1 diff is verified UMA-path-only): sequential
+  in-process maps (the benchmark-harness shape), or a single map
+  from a ~20GB parent (retained output fattens the parent into
+  the same helper-startup skew). Fresh-small processes never
+  fail. Pre-fix capture rate ~40–80% per in-proc call ≥1.
+- **Root cause (engine, NUMA ChunkMeta lifetime):** a stalled
+  node's claimed-but-unread chunks let the global ingest publish
+  frontier lap it by a full `META_RING_SIZE` (4096). Its ChunkMeta
+  slot (same slot mod 4096) was then recycled before it was read,
+  so batches were stamped with a future major. Key forensics
+  (env-gated ack-key log): every failing run showed ack keys
+  duplicated at exactly `gap + 4096` (ten events across runs,
+  plus hidden downstream gaps at the same offset), each dup pair
+  spanning two nodes. Live mismatch logging later caught the
+  precise shape: `steal=1` claims whose queue-major vs meta-major
+  differ by exactly 4096 with 1–2µs claim-to-snapshot latency
+  (no scheduling delay — the ticket itself was stale: a thief
+  stole a long-orphaned ticket from a stalled victim's queue and
+  read its recycled slot). Per-node queue caps cannot prevent
+  this (they bound unclaimed depth, not claimed-unread lag —
+  and the indexer can race thousands of chunks ahead of its
+  shield-stalled scanner, so indexer progress alone does not
+  bound the scanner's reads). The dup keys sat in the C
+  orderer's heap behind the gap; at pipe EOF the leftovers were
+  freed with rc 0 — silent tail loss. (The orderer has no
+  expected-total by design; it cannot distinguish a gap from a
+  slow producer. Poison/skip paths advance the sequence and are
+  unaffected.)
+- **Fix (engine, surgical):** (1) ingest meta-lifetime bound
+  (`ring_numa_ingest_main`): stall publish while
+  `frontier - min(indexer_major, scan_claim_major) >=
+  META_RING_SIZE/2` over nodes with unfinished work
+  (`head > ready` OR `head > tail` — the second clause is
+  load-bearing: an indexer-drained but scanner-stalled node
+  holds unclaimed tickets whose metas still need protection).
+  New per-node progress markers (`indexer_major`, published per
+  consumed chunk; `scan_claim_major`, published per successful
+  claim — relaxed stores, init 0, conservative on staleness;
+  abandon paths never publish). Nodes with drained queues don't
+  pin; EOF bypasses; staleness stalls more, never less; thieves
+  draining a stuck node's queue unpin it (backpressure, not
+  deadlock). (2) Per-chunk meta snapshot in indexer and
+  scanner: copy `(major_id, raw_offset, raw_length[,
+  target_node])` to stack locals at the gated point and use
+  locals thereafter (publication writes still go through
+  `meta`). Kills the mid-scan re-read class outright; first-read
+  staleness is covered by the bound. No fence/claim/CAS changes;
+  no scanner-macro restructuring; no `try_simd_scan` touch;
+  UMA paths untouched. Measured cost: zero (dt 26.1–28.6s both
+  sides across 60+ heavy runs; bound never fires in healthy
+  operation).
+- **Defense in depth (REQUIRED):** the parent's NUMA completion
+  path (`_execute_numa_locked` map/run and `_execute_numa_stream`
+  stream) now asserts per-node `read_idx == write_idx` before
+  declaring success (`_numa_drain_audit`, read-only
+  `fr_py_diag_node` + `FORKRUN_DIAG_NUMA1` telemetry). Any
+  non-empty unclaimed tail raises `RuntimeError` naming node and
+  indices. Sentinel-only nodes (empty tail, never forked,
+  complete output) are vacuous, not violations. Silent partial
+  completion is now impossible-or-loud on every NUMA path.
+- **Detection story:** benchmark re-run caught it (2/10 silent
+  partials at ~25%); Phase-1 EOF audit exonerated worker claim,
+  scanner finalization, reactor supervision, and fork gating,
+  localizing to publication vs orderer; per-node drain telemetry
+  classified all failures as orderer-side loss with fully
+  drained rings; ack-key forensics gave the +4096 signature
+  (dup + gap, cross-node slot pairs); a 4× meta-ring diagnostic
+  build went 6/6 clean (wrap confirmed); queue-vs-meta mismatch
+  logging caught nine consecutive stale first-reads live, then
+  zero in ~600k subsequent fixed claims.
+- **Gates (final code: snapshot + dual-progress bound with
+  scanner-unread qualification + drain guard):** heavy-20M `@4`
+  in-proc quads (the failing shape) **32/32 clean**
+  (pre-fix ~40–80% partials in the same shape); fresh-fat
+  parents 4/4 clean; `nodes=1` heavy-20M 2/2 exact; F-PY-UMA1
+  forensic loop 10/10 clean (unaffected path); mismatch count 0
+  across all fixed runs (~600k claims; 9 caught on the interim
+  single-qualification build, which motivated the scanner
+  marker). Interim builds: in-proc quads 32/32
+  (single-qualification), 35/35 across fix variants.
+  Fail-loud guard proven (fault-injection unit test
+  `test_numa_drain_guard.py` 5/5 green; would-be silent
+  partials raise with node+indices);
+  `test_numa.py` + `test_numa_recovery.py` green (incl. the
+  empty-tail exemption). Residual known flakes (C-drain framing,
+  reactor-ingest multiset, T10b) out of scope, unchanged.
+- **Regression tests:** `python/tests/test_numa_drain_guard.py`
+  (guard logic: violation/empty-tail/missing-symbol,
+  engine-free). No scaled-down live reproducer exists by
+  construction: the recycle needs a 4096-chunk lap (<8GB inputs
+  cannot wrap the meta ring); the heavy-20M gate above is the
+  lock-in (manual, documented here — too slow for the suite).
+- **Docs:** INVARIANTS §17 (ChunkMeta lifetime); EOF_PROTOCOL §7
+  (parent-side completion rule); DOCS_ALL mirrors; this entry.
+- **Mover thread (F-PY-UMA1b):** positional audit of the NUMA
+  ingress path is clean (explicit offsets or pre-fork only);
+  filed as follow-up; not implicated here.
+- **Engine status:** surgical unfreeze (NUMA ingest/indexer/
+  scanner + 2 relaxed u64/node; shim additive read-only entry
+  points; Python parent guard). Red lines held (no CAS loops,
+  no index rollback, no fence changes, no macro
+  restructuring, no `try_simd_scan` touch, twins in lockstep,
+  canary stub list unchanged). Blob rebuild via CI auto-build
+  (required before release: the shipped `frun.bash` still
+  carries the pre-fix engine); bash suites re-run against the
+  rebuilt blob at release time.
 
 ### UMA materialized execution race fix (F-PY-UMA1, W-PY42 v2)
 
-- UMA scanner seeded its base from fork-shared `SEEK_CUR`,
-  sporadically nonzero under sequential in-process runs
-  (head-loss with torn seams). Fixed by explicit reset to 0
-  at scanner entry (NUMA already hardcoded 0). 0/48 forensic
-  iters post-fix; comparison-doctrine test fixes alongside;
-  bash suites green. Surgical engine unfreeze (entry only).
+- **Root cause:** the UMA scanner seeded its coordinate base from
+  `lseek(SEEK_CUR)` on the fork-shared ingress memfd. Under
+  sequential in-process runs that offset was observed nonzero
+  (72–10120, 15 caught instances) although the parent verified
+  offset 0 pre-fork — the first published window started mid-line
+  and bytes `[0, K)` were never published (torn seams, head-loss).
+  W-PY39 concurrency fully preserved; no fence/claim changes.
+- **Fix:** explicit `lseek(fd, 0, SEEK_SET)` + `buf_base_offset = 0`
+  at scanner entry (NUMA already hardcoded 0; every caller starts
+  at byte 0 by contract). Minimal engine unfreeze (5 lines);
+  no blob rebuild needed beyond the normal substrate compile.
+  Python child-side `lseek` was tried first and proven
+  ineffective — the fix had to sit at/after the query.
+- **Detection:** sporadic UMA `map()` head-loss (~19–240 lines,
+  torn fragments) across 10 full-suite runs, always the UMA side
+  while NUMA/stream/recovery paths stayed complete. Forensics:
+  per-claim window logs + spill verification + a pre-reset probe
+  showing the race still fires but is neutralized.
+- **Also fixed (comparison doctrine, pre-existing):**
+  blob-identity assertions across runs in `test_stream_matches_map`,
+  `test_c_drain_vs_python_drain` (index), `test_c_drain_stream_ordered`,
+  `test_plugin_ordered`, `test_orderer_matches_reassembly` now
+  compare joined bytes (adaptive batching races run to run).
+- **Lock-in:** 0/48 forensic iters (was ~20% catch rate); 140/140
+  targeted tests; 100/100 minimal reproducer; `make check` green;
+  bash suites 91/91 + 263/263 (M8, M22, T12 green).
+  Residual: rare single-occurrence flakes in opt-in corners
+  (C-drain framing, reactor-ingest multiset) — green in isolation
+  (20–35×), tracked separately from this fix.
+- **Engine status:** surgical unfreeze (scanner entry only).
 
 ### Byte-mode M8: test bug, engine exonerated (F-BYTE1)
 
-- M8 (`-b -s` with a `while read` payload) flaked under
-  fake NUMA: engine exonerated (windows contiguous and
-  byte-exact across seams) — `read` semantics on mid-line
-  splits was the cause. M8 payload swapped to a byte-safe
-  chunked passthrough; new M22 locks multi-batch `-b -s`
-  byte-exactness. Contract: `-b` chunks split mid-line by
-  design — payloads must be byte-safe. No engine change.
+- **Finding:** M8 (`-b 1048576 -s` with a `while read` payload)
+  flaked under `numa=fake=4` (1–3 missing lines). Diagnosis
+  proved the engine innocent: batch windows are contiguous and
+  byte-exact across seams on UMA and NUMA (byte-safe payloads
+  verify `cmp`-exact); the corruption is `read` semantics on
+  mid-line splits (head fragment dropped at EOF-without-newline,
+  tail fragment emitted as a bogus line — line counts balance,
+  so only content comparison catches it).
+- **Root cause (test bug, not regression):** M8 assumed a
+  single-batch run (`-b 1MB` covers the 589KB input), true on
+  UMA but false under fake-4 (per-node fan-out → multi-batch
+  with mid-line seams). The W-PY28 HUP retiming kept the
+  assumption without accounting for NUMA multi-batching.
+- **Fix:** M8 payload swapped to byte-safe chunked
+  passthrough (`read -N 4096` + `printf '%s'`, busy-wait
+  preserves the ~4s HUP window); new M22 locks multi-batch
+  `-b -s` byte-exactness (`-b 262144`, `cmp -s`, no resume).
+- **Contract:** `-b` chunks split at arbitrary byte
+  boundaries, mid-line by design — payloads must be
+  byte-safe, not line-oriented (FLAGS.md). No engine change;
+  engine stays frozen, no blob rebuild.
 
 ### T12: poison-fill vs HUP race pinned open (F-T12-RACE)
 
-- T12 flaked ~30% (100 missing, 0 dupes) on pristine trees
-  too: the crash-looping batch poison-filled before the
-  HUP, so the checkpoint covered its bytes and resume
-  skipped it (per-spec). Test-only fix:
-  `FORKRUN_RETRY_LIMIT=-1` pins the hole open — 10/10 in
-  isolation, T2 green. No engine change.
+- **Finding:** T12 (buffered `-l 100` resume with a
+  crash-looping batch, resumed at `-l 37`) flaked ~30%
+  (`uniq=19900`, exactly 100 missing, 0 dupes) on pristine
+  and modified trees alike. Diagnostics (checkpoint +
+  pre/post-truncation snapshots on failure) showed the crash
+  batch (global lines 19474–19573 under NUMA batching)
+  poison-filling *before* the HUP: poisoned batches are
+  resolved-as-failed, so the checkpoint covers their bytes
+  and resume correctly skips them. The engine is per-spec;
+  the test's crash-vs-HUP margin was load-dependent.
+- **Fix (test-only):** `FORKRUN_RETRY_LIMIT=-1` (never
+  poison) on both T12 generations pins the hole open until
+  HUP — 10/10 PASS in isolation, full T2 section green.
+  Checkpoint now shows the designed two-interval jagged
+  shape with a genuine hole at the crash batch's bytes.
 
 ### Python user documentation set (W-PY37)
 
-- Fourteen guides under `python/docs/` (QUICKSTART through
-  COMPARISON) + `help(forkrun)` docstring; `python/README.md`
-  is the entry point, main README links in.
-- All 10+ examples executed verbatim; post-W-PY39 numbers
-  (medium C 2.3M UMA). Review caught two doc bugs pre-ship:
-  `batch.data.split` (memoryview — convert with `bytes()`
-  first) and a hand-redeclared plugin ctx struct (docs now
-  use the real `ring_loadables` header).
+- Fourteen new guides under `python/docs/` (QUICKSTART,
+  INSTALLATION, API, MODES, CONFIGURATION, FAULT_TOLERANCE,
+  NUMA, STREAMING, EXAMPLES, PLUGINS, PERFORMANCE,
+  TROUBLESHOOTING, MIGRATION, COMPARISON) plus a
+  `help(forkrun)` package docstring; `python/README.md` is
+  now an entry point and the main README links in.
+- All 10+ examples executed verbatim during review (plus
+  the PLUGINS.md C example, byte-exact vs `tr`);
+  post-W-PY39 numbers throughout (medium C 2.3M UMA,
+  UMA-faster-or-tied on single-socket).
+- Review caught and fixed two doc bugs before shipping:
+  `batch.data.split(...)` (memoryview has no `.split` —
+  convert with `bytes(...)` first) and a hand-redeclared
+  plugin ctx struct with wrong field order (docs now use
+  the real `ring_loadables` header).
 
 ### Test-suite hardening: full green under fake NUMA (91 → 0)
 
-- `nodes="auto"` follows the boot: under `numa=fake=4`
-  every default call takes the NUMA pipeline. Pinned
-  `nodes=1` on all UMA-contract calls (~25 test files).
-- Comparison doctrine: small-run batching is
-  race-dependent, so cross-run *blob* comparisons became
-  `lines_of` (multisets) / `joined_bytes` (ordered).
-- Real fixes: full `v1_available()` NO_V1 key set; dead
-  `_stream_gen` removed; splice timing test scaled out of
-  fork noise. `test_resume_sigint` pins
-  `default_int_handler` (background launchers inherit
-  SIGINT-ignored).
-- Result: 473 tests green (1 pip skip).
+- **Topology isolation** (the bulk): `nodes="auto"` follows the
+  boot, so under `numa=fake=4` every default call takes the
+  NUMA pipeline — where workers<nodes strands unworked rings
+  and UMA-only gates (resume, C loops, NO_V1-masked symbols)
+  correctly refuse. Pinned `nodes=1` on all UMA-contract
+  calls across ~25 test files (plus the 2 v1 fallback and 8
+  complete/resume ERROR sites); NUMA-intent files untouched.
+- **Comparison doctrine** (W-PY39 fallout): overlapped
+  scanning makes small-run batching race-dependent, so
+  cross-run *blob* comparisons (`sorted(a)==sorted(b)`,
+  `a==b`) were converted to split-agnostic forms — new
+  `_helpers.lines_of` (line multisets) and `joined_bytes`
+  (order-sensitive). Joined/splitlines assertions were
+  already safe and untouched.
+- **Real fixes:** `v1_available()` NO_V1 dict now carries
+  the full key set (`numa` et al. — was `KeyError`);
+  removed the shadowed `_stream_gen`; splice timing test
+  workload 20k→100k lines (fork noise decided 8ms runs).
+- **Harness artifact, not product:** `test_resume_sigint`
+  failed only under background launchers (`nohup ... &`
+  starts children with SIGINT ignored, which Python
+  inherits). The test now pins `default_int_handler`
+  explicitly (restored after) — launcher-proof.
+- Result: 473 tests green (1 pip-toolchain skip), verified
+  with zero ERRORs/FAILs on a clean full-suite run.
 
 ### Repository reorganization + v3.6.0 version sweep (W-PY38)
 
-- One benchmark home: `benchmarks/python/` + 144-file
-  `misc_python_benchmarks/` merged into
+- **Single benchmark home:** `benchmarks/python/` and the
+  144-file `misc_python_benchmarks/` merged into
   `python/benchmarks/` (`core/`, `ml/`, `tokenize/`,
   `stage0/`, `fault/`, `resume/`, `smoke/`, `streaming/`,
   `throughput/`, `validation/`, `debug/`, `data_gen/`,
-  `shell/`); plugins → `ml/plugins/`. `benchmarks/` and
-  `misc_python_benchmarks/` eliminated; `docs_port/` →
-  `dev/supervisor/`.
-- Dedupe: one byte-identical group (4 copies → 1); rest
-  verified distinct. Import/path repair throughout
-  (`run_all.py`, stage0 ROOT/REPO, plugin sources).
-- Versions: engine, `META`, `frun -V`, UNIT_TESTS gates,
-  `__engine_version__` test all read v3.6.0.
+  `shell/`; C plugins consolidated to `ml/plugins/`).
+  `benchmarks/` and `misc_python_benchmarks/` eliminated;
+  `docs_port/` → `dev/supervisor/`.
+- **Dedupe (honest):** exactly one byte-identical group
+  found (4 copies of a 262-byte streaming probe → kept
+  one); everything else verified distinct and kept. No
+  quota-driven deletions.
+- **Import/path repair:** per-subdir `sys.path` bootstraps
+  (`python/` entry restored for every moved file),
+  `repo_root` depth fixes, plugin-source paths, `run_all.py`
+  package imports, stage0 `ROOT`/`REPO` derivation, rental
+  script, `.gitignore`, Makefile csv target, and all doc
+  command paths. `test_single_pass`/`test_yyjson_plugin`
+  now import `ml.ml_data_gen` / `ml/plugins`.
+- **Versions:** engine `FORKRUN_RING_VERSION`, `META`,
+  `frun -V`, both UNIT_TESTS version gates, and the
+  `__engine_version__` test assertion all read v3.6.0
+  (verified: rebuilt `.so` reports v3.6.0, wheel installs
+  and imports). Historical v3.5.x references (archives,
+  scaffolding comments, old result tables) intentionally
+  untouched.
+- Verified: substrate rebuild, `run_all --list` + smoke
+  row, standalone entry points (`--help`), full python
+  suite green (473 tests, 0 failures — one clean run;
+  small-input NUMA tests remain intermittently load-flaky
+  at ~25%/run in full-suite context, green in isolation —
+  pre-existing, untouched paths), wheel build+install+import.
 
 ### Cleanup: dead `_stream_gen` + `v1_available` keys (W-PY40)
 
-- Removed the shadowed `_stream_gen` (behavior-neutral).
-- NO_V1 dict carries the full key set (`numa` et al.).
-- 8 ERRORs (UMA-only paths under auto-topology) resolved
-  via `nodes=1` pins; shape lock-in test extended.
+- Removed the shadowed first `_stream_gen` definition
+  (`run.py`: stale W-PY6 version without `order`/`c_drain`
+  forwarding; the W-PY7 second definition was always the live
+  one — behavior-neutral deletion, single call site intact).
+- `v1_available()` NO_V1 escape-hatch dict now carries the
+  full key set (`numa`, `orderer`, `order_pipe`,
+  `scan_spawn`, `drain` as False — previously a `KeyError`
+  where the normal path returns False). The shape lock-in
+  test (`test_no_v1_kill_switch`) was extended to match.
+- The `KeyError` fix exposed the layer beneath: 8
+  ERRORs (4 `test_complete` parity + 4 `test_resume`) were
+  UMA-only paths running under fake-NUMA auto-topology
+  (NO_V1 masking / resume gate correctly refusing
+  multi-node). Pinned `nodes=1` at those 11 call sites plus
+  the 2 v1 fallback tests — same topology-isolation doctrine
+  as W-PY34. Result: ERRORs 8 → 0 in the affected files.
+  Remaining FAILs in those files are pre-existing
+  workers<nodes coverage flakes, verified identical on the
+  pristine tree.
 
 ### UMA pre-flight overlap: forked materialized scanner (W-PY39)
 
-- Diagnosis: UMA materialized paths scanned synchronously
-  in-parent (no workers → pre-flight always to EOF, 0.36s
-  serial). Engine pre-flight verified correct; CASE B
-  cannot lose data (main loop rescans from byte 0).
-- Fix (Python only): forked scanner + immediate worker
-  fork across all four materialized executors, with
-  crash-safe join order and stray reaping.
-- Result: UMA medium 5M 1.7M → 2.3M rec/s (+35%, above
-  NUMA's 2.1M). Tier-3 suites green.
+- **Diagnosis first.** The UMA materialized paths ran the scan
+  *synchronously in the parent* (`fr_py_scan` before any worker
+  existed — neither a data_ready gate nor immediate workers,
+  but a fourth sequence the work order didn't list). With
+  `active_waiters == 0` by construction, the engine pre-flight
+  always ran to EOF: 0.36s serial on 5M medium. The C
+  pre-flight itself is correct (bail check inside the loop,
+  every iteration, relaxed atomic, `target = W_max × Lmax`);
+  CASE B cannot lose data (the main loop always rescans from
+  byte 0 — batch sizing only).
+- **Fix (Python only, engine frozen):** new
+  `_fork_materialized_scanner` helper; all four materialized
+  executors (`_execute_locked`, `_execute_reactor_locked`,
+  `_execute_streaming`, `_execute_streaming_reactor`) fork the
+  scanner over complete input, do their natural setup (the
+  1-5ms pre-flight window), then fork workers immediately.
+  Workers arriving mid-scan trip the bail (CASE B → geometric
+  ramp); zero-window arrival ramps from scratch. Scanner-first
+  join order (crash-safe), abort + fail-loud on scan failure,
+  stray-scanner reap in every teardown, pid cleared after reap
+  (no recycled-pid signals). Ingest + NUMA paths untouched
+  (already concurrent).
+- **Result:** UMA medium 5M 1.7M → **2.3M rec/s** (+35%,
+  now above NUMA's 2.1M); Python 655k → 703k. Tier-3
+  recovery suites green on the modified paths; full-suite
+  failure set compared before/after (remaining diffs are
+  pre-existing fake-NUMA flakes, verified identical on the
+  pristine tree). Stream time-to-first-blob on 5M medium:
+  UMA 0.49s (was: spill 0.53s + serial scan 0.36s stacked),
+  NUMA 0.16s — the scan phase is hidden; the remaining UMA
+  serial cost is the memfd spill (splice reduction is
+  separate future work).
+- **Not done:** the dead duplicate `_stream_gen` (`run.py`)
+  flagged in W-PY35 is still there — left for the
+  refactor pass, not this order.
 
 ### NUMA steady-state benchmarks at 5M records, fake-4 (W-PY35)
 
-- Same-boot UMA baselines, 28 workers: light 5.8M/5.6M,
-  medium 1.7M/2.1M, heavy 552k/710k (C); Python at
-  Executor parity. No NUMA software tax — per-node rings
-  relieve claim contention (mechanism corrected by
-  W-PY36/W-PY39: pipeline overlap, not contention relief).
-- forkrun C NUMA beats Executor 2.8–7.6×. Record
-  multisets proven exactly equal UMA vs NUMA (naive line
-  counts read low: blobs don't newline-terminate).
-- 20M confirmation: ratios hold/strengthen
-  (1.20×/1.29×/1.34×).
+- **Measurement only: no source changes** (new
+  `python/benchmarks/ml/bench_numa_5m.py` + results in
+  `python/benchmarks/results/numa_5m_study.md`, reference
+  table appended to `DOCS/python/AI_benchmark_results.md`).
+- **No NUMA software tax at steady state** (same-boot UMA
+  baseline, 28 workers, `order=index`): forkrun C light
+  0.93-0.97×, medium 1.12-1.24×, heavy 1.28-1.29× of UMA;
+  Python UDF 1.00-1.09×. Per-node rings relieve claim
+  contention — the gain grows with per-record cost. The only
+  regression-shaped finding is spawn-on-NUMA (0.75×,
+  spawn-cost dominated); the C spawn loop stays UMA-only by
+  gate (recorded, unchanged).
+- **forkrun C NUMA beats same-boot Executor** 3.3× / 2.8× /
+  7.6× (light/medium/heavy) and 2.2× on tokenize (342k vs
+  158k docs/s); Python UDF at Executor parity. Worker sweep
+  monotonic in NUMA mode; streaming + NUMA + slow consumer
+  bounded (+0MB RSS).
+- **Correctness note:** output record-multisets proven
+  exactly equal UMA vs NUMA at 5M (light 5.0M/5.0M, medium
+  4997892/4997892 = Pool/Executor counts). Naive line counts
+  read <0.1% low on NUMA because output blobs don't
+  newline-terminate (junction artifact); the runner judges
+  completeness against a 99% threshold, which separates this
+  from genuine workers<nodes shortfall (25%+).
+- **20M scale confirmation:** light/medium/heavy × UMA/auto
+  at 28 workers hold or strengthen the ratios (1.20× / 1.29×
+  / 1.34× C; Python 1.03-1.18×). Absolutes drift ~15-20% on
+  both topologies over the long matrix while NUMA holds —
+  single-ring contention costs UMA more the longer the run.
 
 ### Perf mechanism discovery: why NUMA wins (W-PY36)
 
-- Every efficiency hypothesis falsified (NUMA: +17.5%
-  cycles, IPC 1.3→1.1, 7× ctx switches, 67× migrations,
-  4× syscalls — yet faster). Identical payload hotspot
-  (~73% plugin `snprintf`).
-- Mechanism: pipeline overlap (UMA serialized ~0.9s
-  spill+scan; NUMA overlaps ingest/scan with compute),
-  feeding 10.1 vs 8.2 avg CPUs. Framework owns <1% —
-  no easy wins left.
+- **Measurement only** (`perf record -g --call-graph dwarf`,
+  inheritance default — perf 7.2 has no `--follow-forks`;
+  multiprocess capture verified: ~29 UMA / ~40 NUMA tasks).
+- **Every efficiency hypothesis falsified:** NUMA executes
+  +17.5% cycles at IPC 1.3→1.1, with 7× context switches,
+  67× migrations, 4× syscalls, +54% L1 misses — yet finishes
+  faster. The payload hotspot is identical (~73% in the
+  plugin's `snprintf` float path on both).
+- **The mechanism is pipeline overlap:** UMA serializes
+  ~0.9s spill+scan before workers fork; NUMA overlaps
+  ingest/index/scan with compute (publish-gated fork, 4
+  parallel scanners), feeding 10.1 vs 8.2 average CPUs.
+  Higher throughput via more aggregate parallelism despite
+  worse per-instruction efficiency everywhere.
+- **No easy wins left in the framework:** `libforkrun` self
+  time is <1%; 73% sits in payload float formatting
+  (already squeezed once in W-PY32). Full tables in
+  `python/benchmarks/results/numa_5m_study.md`.
 
 ### 20M re-profile + batch diagnostic: saturated, ship it (W-PY41)
 
-- New `diag_batch.py`: ~1ms payload compute per batch vs
-  ns framework cost (overhead ≈ 1.0). 20M counters scale
-  linearly; avg CPUs stable (8.8/11.0); no new hotspots.
-- Verdict: workers saturated; ceiling is payload
-  `snprintf`. Ship it.
+- New `python/benchmarks/ml/diag_batch.py` (blobs = batches,
+  input lines = ground-truth records). 20M medium 28w: UMA
+  10130 batches × 1974 rec (948µs/batch), NUMA 14300 ×
+  1399 (696µs/batch) — ~1ms of real compute per batch vs
+  ns-scale claim/ack, overhead factor ≈ 1.0.
+- 20M counters scale linearly (UMA cycles 4.03×, task
+  4.0× for 4× data); avg CPUs stable (UMA 8.8, NUMA 11.0);
+  20M hotspot identical shape (snprintf family,
+  framework <1%) — no new hotspots, no idle gap from
+  batch sizing.
+- Verdict: workers saturated; the ceiling is payload
+  `snprintf`. No further framework optimization.
 
 ### Streaming + NUMA Tier-3 recovery verification (W-PY34)
 
-- No engine changes: 13 new tests prove WorkerTxn covers
-  active streaming (6 tests, UMA) and multi-node NUMA
-  (7 tests, `@2`) — SIGSEGV/SIGKILL, ordered gaps,
-  multi-death, backpressure, combined stream+NUMA+crash.
-- Operating facts (`RESILIENCE_PROTOCOL.md` §7): workers
-  must cover every node; `nodes="auto"` follows the boot;
-  compare line multisets, never blob identity.
+- **Verification order, not a feature: no engine or recovery-code
+  changes.** The W-PY28/29 WorkerTxn architecture covered active
+  streaming and multi-node NUMA as designed; this order proves it
+  with 13 new tests and documents the envelope honestly.
+- **Streaming Tier-3** (`python/tests/test_streaming_recovery.py`,
+  6 tests, `orchestrator=True`, `nodes=1`): SIGSEGV/SIGKILL
+  mid-stream unordered + ordered (stream continues, complete
+  output, recovered batch exactly once — Counter plus a
+  blob-uniqueness anti-double-emit gate), two simultaneous deaths,
+  ordered reassembly gap-holding (byte-exact reconstruction),
+  slow-consumer backpressure with bounded memory.
+- **NUMA Tier-3** (`python/tests/test_numa_recovery.py`, 7 tests,
+  `nodes="@2"`): crash recovery across nodes (escrow routed by
+  `txn->node`, respawn pinned via `fr_py_worker_init`), a
+  `wid_to_node` structural lock-in (respawn keeps its node;
+  workers >= nodes covers every ring), map + stream recovery, and
+  combined streaming + NUMA + crash in both orders.
+- **Two operating facts documented** (`RESILIENCE_PROTOCOL.md`
+  §7, twinned in `DOCS_ALL.md`): workers must cover every node
+  (an unworked node's born-local ring is never claimed — size
+  the pool to the topology), and `nodes="auto"` follows the boot
+  topology (under `numa=fake=N` every default call takes the NUMA
+  pipeline; single-node-authored callers must pass `nodes=1`).
+  NUMA batch granularity varies run to run — compare line
+  multisets / joined bytes, never blob identity.
+- **Pre-existing suite state (no W-PY34 regression):** booted
+  with `numa=fake=4`, the broader suite shows failures in tests
+  that assume single-node defaults with `workers < 4` (they fan
+  out to 4 NUMA nodes via `auto`) — e.g. `workers=1` runs lose
+  unworked nodes' shares. W-PY34 adds only the two new test
+  files; no existing test or source file was modified.
 
 ### C worker loop for spawn mode (W-PY33)
 
-- New `fr_py_worker_spawn_loop` (claim→spawn→signal→ack in C, built
-  only on tested primitives; capture-then-frame, never
-  direct-to-memfd). Part A verified with strace (zero worker
-  preads — no change needed).
-- Opt-in `c_spawn_loop=True` on `map()` (mode="spawn", UMA,
-  materialized). Parity with Python loop (±4%); 2-3x premise
-  falsified (`tr` execution dominates both). 13 new tests; suite
-  460 green.
+- **New `fr_py_worker_spawn_loop`** (`_shim.c` additions only,
+  engine frozen): claim → posix_spawnp → signal → ack entirely in
+  C, zero Python per batch — the spawn analogue of the W-PY26 plugin
+  loop, built only on tested primitives (`fr_py_claim`,
+  `fr_py_exec_spawn`, `fr_py_complete`, escrow/abort). Deliberate
+  deviations from the sketched design, all frozen-ABI-driven:
+  output is capture-then-framed (direct-to-memfd would emit
+  unparseable bytes — the record length is unknowable until the
+  child exits); claims go through `fr_py_claim` (W-PY29 TXN hooks +
+  poison counting, no raw `do_lockfree_claim`, no static buffer);
+  order target derived (unordered disarms like the Python loop);
+  poison warn + trap-notify, `on_error` retry/skip/fail-fast, and
+  wincarn lineage all mirror `_worker.py`; argv marshalled as a
+  fork-inherited NUL pack (no shell re-splitting).
+- **Part A (zero-copy plugin data): verified, no change needed.**
+  The sketch assumed a malloc+pread hot path; strace shows plugin
+  workers already make zero preads (RAW borrowed window serves all
+  batch reads — the 6 observed preads are parent-side ingest
+  spill). `reserved[0]` semantics (batch slice start) confirmed by
+  the byte-identity suites.
+- **Opt-in `c_spawn_loop=True`** on `map()` (default False):
+  mode="spawn", UMA, materialized input. Anything else raises loudly
+  — never silently falls back. Reactor (`spawn_loop` ctx +
+  `_c_spawn_child_main` with death pipes/respawn) and plain
+  fork-and-wait (`_fork_c_spawn_worker`) paths both covered.
+- **Honest result — throughput premise falsified:** C loop runs at
+  parity with the Python loop (±4%: 1M medium `tr`, default
+  batching 1629k-vs-1679k at 8w; lines=100 682k-vs-656k). The
+  Python loop's v1 fast path had already removed per-batch Python
+  cost; both paths pay the same `tr` execution (~300µs+/batch), so
+  there was no 350µs to save and no 2-3x to gain. Value is
+  architectural uniformity (one engine-owned recovery path), not
+  speed. 13 new tests in `python/tests/test_spawn_loop.py`
+  (byte-identity, 256KB-batch no-deadlock, poison/skip/fail-fast,
+  worker-SIGKILL recovery); full suite 460 green.
 
 ### Single-pass extraction + exact fast formatter (W-PY32)
 
-- One foreach pass (~15 comparisons) + snprintf-free `fmt_r4`
-  (3.6M-value sweep: zero mismatches) in `ml_plugin_yyjson.c`.
-- Measured +7-11% over obj-get (5M: 2077k vs 1875k at 28w);
-  ~2M/s plateau is framework per-batch cost — 2.6x projection
-  falsified. 3-test lock-in; Python 447 green.
+(Note: the originating order numbered itself W-PY31, which is taken
+by the yyjson plugin above — filed here as W-PY32. Implemented with
+four corrections: emit matches the real trimmed `fmt_r4` semantics,
+not always-4-digits `%.4f` (which would have broken byte-identity);
+duplicate `case 11:` fixed; strings type-checked with first-wins
+seen bits; Part 3 rejected — the RAW window was already zero-copy
+and a static buffer would cap batch size.)
+
+- **`MlFields` single-pass extractor** in `ml_plugin_yyjson.c` (new
+  code, scalar file untouched, engine untouched): one
+  `yyjson_obj_foreach` pass per record (~15 comparisons) replacing
+  10+ `obj_get` linear scans; length + first-char prefilter with
+  full `memcmp` confirmation (user/item_context and price_cents/
+  num_reviews collisions handled); first occurrence wins via seen
+  bits (scalar parity on duplicates); strict
+  SINT/UINT-with-strtoll-clamp ints; verbatim `scroll_depth`/
+  `rating` still via whole-line raw spans (no float round-trips).
+- **Snprintf-free `fmt_r4` with byte-identical output** (verified by
+  a 3.6M-value differential sweep vs the `snprintf` version — zero
+  mismatches, incl. negatives, zero, halfway cases, ts_n/log ranges
+  and fuzz; `snprintf` fallback retained for inf/nan/huge).
+- **Caught by the battery:** `"days_since_signup"` is 17 chars, not
+  16 (sketch error) — `dss` silently read 0 until the differential
+  caught it. Also fixed: `yyjson_get_int` 32-bit trap (prior step).
+- **Honest result — 2.6x projection falsified:** single-pass gains
+  +7-11% over obj-get yyjson (5M medium: 8w 1602k vs 1473k, 14w
+  2023k vs 1891k, 28w 2077k vs 1875k; +25-43% over scalar), but the
+  ~2M/s plateau stands — the order's bottleneck table (extraction
+  55% of record time) contradicts the measured batch-size response
+  (lines=100: both ~1M/s; lines≥1000: both plateau). Remaining
+  ceiling is framework per-batch cost; parser work is now
+  diminishing returns. Keep as the medium default (free, exact).
+- Correctness: `python/tests/test_single_pass.py` (3 tests,
+  record-set comparison — batch blobs shift with adaptive
+  batching); full suite Python 447 green.
 
 ### yyjson-accelerated C plugin, medium workload (W-PY31)
 
-- Vendored yyjson (as-is) + new `ml_plugin_yyjson.c` (frozen ABI,
-  no-INSITU, byte-identical output locked in by 7 tests).
-- Measured: +13-32% medium (5M: 1875k vs 1664k at 28w); plateau at
-  ~2M/s is framework per-batch cost, not parsing — the 3,500k goal
-  is falsified as stated (needs framework work, future). Keep as
-  the medium default: free +20%, zero risk. Python 444 green.
+- **Vendored yyjson** (`python/benchmarks/ml/plugins/yyjson.{h,c}`,
+  as-is, zero deps, compiles warning-free) — the fastest C JSON
+  library instead of a hand-rolled SIMD parser.
+- **New `ml_plugin_yyjson.c`** (new file; scalar file untouched,
+  engine untouched): same frozen-ABI entry, same RAW-window input,
+  same stdout framing, same validation semantics and exact output
+  format — only the field-lookup core uses yyjson (NO INSITU: the
+  shared memfd stays immutable; per-record stack pool + heap
+  fallback so no input size is refused). Verbatim float slices
+  (`scroll_depth`, `rating`) use raw spans, never float round-trips.
+- **Byte-identity locked in** (`python/tests/test_yyjson_plugin.py`,
+  7 tests): generator clean + 5%/50% malformed mixes, 30-line edge
+  battery, quality-filter and nesting spot-checks, plus two
+  generator-impossible residuals pinned explicitly (backslash
+  escapes: raw vs unescaped; trailing garbage: scalar accepts,
+  yyjson rejects). Also caught and fixed a real bug the battery
+  exposed (`yyjson_is_int` covers uint64 and `yyjson_get_int` is
+  32-bit — the 64-bit path needs `is_sint`/`get_sint`).
+- **Honest result — target falsified as stated:** yyjson wins
+  +13-32% on medium (5M: 8w 1473k vs 1117k, 14w 1891k vs 1533k,
+  28w 1875k vs 1664k; +~20% at batch sizes where parsing matters),
+  but plateaus at ~2M/s alongside scalar — the ceiling is framework
+  per-batch cost, not parse speed (lines=100: both ~1M/s; lines≥1000:
+  both plateau). The 3,500k goal (and Polars' 2,936k) is unreachable
+  by parser swap alone; it needs framework batch-throughput work,
+  which is future work (engine stays frozen). Keep the yyjson plugin
+  as the medium default: free +20% at zero risk.
+- Benchmark harness: `bench_forkrun_yyjson` in
+  `bench_ml_pipeline.py` (medium only), `note_best` tracked.
+- Full suites: Python 444 green (437 + 7).
 
 ### Final-attempt coredump policy (W-PY30)
 
-- **Coredumps off by default** (soft `RLIMIT_CORE` 0 at worker
-  startup, hard preserved); **armed only for the final allowed
-  escrow attempt** (`num_kills + 1 == retry_limit`, both claim
-  wrappers); disarm at ack entries + worker-side escrow deposit.
-  `coredump_filter` pinned to `0x31` (drops multi-GB shared
-  arenas). 7 new tests; Python 437 + bash 89/262 green.
+- **Coredumps off by default on all workers** (soft `RLIMIT_CORE` 0
+  at worker startup via both inits — `ring_worker inc` and
+  `fr_py_worker_init`; inherited hard limit preserved, never
+  lowered, so re-enabling later needs no privilege).
+- **Armed for exactly one batch execution**: the final allowed
+  escrow attempt (running with `num_kills + 1 == retry_limit` and
+  not poison-skipped). Hooks in both claim wrappers; disarm at both
+  ack entries and at worker-side escrow deposit (soft-fail
+  continuation), so the enabled limit never leaks into later
+  batches. A death in the armed window dumps via normal OS handling;
+  the next generation reads `kills == limit` and poisons (existing
+  logic). `limit < 0` (infinite retries) never arms. Fresh and
+  poison-skip claims cost one branch, no syscall.
+- **`coredump_filter` pinned to `0x31`** (anon-private + ELF headers
+  + hugetlb-private)
+  at worker startup: drops file-backed and anon-shared arenas — the
+  multi-GB ingress memfds that cost systemd-coredump ~10s per SEGV
+  — so a dump that fires stays small and fast.
+- **Accepted side effect (documented):** `do_coredump` delays death
+  becoming visible on the death pipe, so recovery-detection latency
+  is higher specifically on final-attempt crashes. Acceptable: the
+  batch is being poisoned regardless — the latency delays only the
+  already-final outcome, never a save.
+- 7 new tests (`python/tests/test_recovery_coredump.py`); full
+  suites: Python 437 green, bash 89 + 262 green (engine blobs
+  re-embedded for x86-64 v2/v3/v4).
 
 ### WorkerTxn hardening: 4-state machine + output cursor (W-PY29)
 
 - **4-state transaction machine** (`IDLE → CLAIMING → CLAIMED →
-  COMMITTING → IDLE`, `WorkerTxn.state` 0/1/2/3): `TXN_CLAIMING`
-  brackets `do_lockfree_claim` (claim-window death → RACE/abort);
-  `TXN_COMMITTING` brackets ack side effects (ack-window death →
-  RACE/abort, never a re-execution double-emit). Both hooks on BOTH
-  entry paths; `do_lockfree_claim` untouched, no CAS (release stores
-  + defensive check in `begin_commit`). Only backward edge:
-  `CLAIMING → IDLE` on failed/EOF claim.
-- **Per-batch `lseek` removed**: TLS `worker_output_end` cursor
-  (init once per worker, snapshot at claim, advance only after
-  COMPLETE emits via `fr_py_emit`, spawn/plugin sites, splice loop,
-  ordered-ack sync, `fr_py_output_advanced` for the v0 path). Four
-  stores (~2ns) replace a ~250ns syscall.
-- **Python FD ordering fixed** (init → set_output_fd → ack_init);
-  both reactors recover ALL deaths incl. exit 0 (C classifies).
-- **12 adversarial tests** (`test_recovery_adversarial.py`); full
-  suite 430 green. Recovery keeps `S_ISREG` + `size >= start`
-  guards (first-batch rollback to 0 intact).
+  COMMITTING → IDLE`, engine `WorkerTxn.state` renumbered
+  0/1/2/3): `TXN_CLAIMING` brackets `do_lockfree_claim` (death in
+  the claim-without-publish window → RACE/abort instead of a silent
+  lost ticket); `TXN_COMMITTING` brackets the ack side effects
+  (death in the ack→clear window → RACE/abort instead of a
+  re-execution double-emit). Both hooks exist on BOTH entry paths
+  (`ring_claim_main` + `fr_py_claim`, `ring_ack_main` +
+  `fr_py_ack_core`); `do_lockfree_claim` untouched, no CAS anywhere
+  (plain release stores + a defensive state check in
+  `begin_commit`). Only legal backward edge: `CLAIMING → IDLE` on
+  failed/EOF claim.
+- **Per-batch `lseek` removed from publication**: new TLS
+  `worker_output_end` cursor (rollback frontier), initialized once
+  per worker via `worker_txn_init_output_cursor` (shared with the
+  existing ack-offset sync lseek — zero new syscalls), snapshotted
+  at claim, advanced only after COMPLETE emits (`fr_py_emit`,
+  spawn/plugin emit-record sites, splice loop, ordered-ack sync,
+  new `fr_py_output_advanced` for the Python v0 direct-write path).
+  Four state stores (~2ns) replace a ~250ns syscall; 5M benchmarks
+  must show no statistically significant regression.
+- **Python worker FD ordering fixed** (`_worker.py`: `init →
+  set_output_fd → ack_init`; the old order reset the txn fd to -1
+  and silently disarmed rollback). Both reactors now call recovery
+  for ALL deaths including exit 0 (the C machine classifies;
+  `CLAIMED + exit 0` stays FATAL/worker-bug).
+- **12 adversarial tests** (`python/tests/test_recovery_adversarial.py`):
+  forced claim/commit-window deaths (env-injected SIGKILL, unit +
+  orchestrator-abort), ordered/unordered SIGKILL rollback, exact
+  output_start across simulated respawn, publish→payload boundary,
+  2/3/back-to-back deaths, no-lseek-in-claim white-box lock-in.
+- Full suites: Python 430 green (418 + 12), bash unaffected
+  (reactor verified by syntax + existing resume coverage).
+- Documented deviation from the work-order sketch: recovery keeps
+  the existing `S_ISREG` + `size >= start` truncation guards (the
+  sketch's `output_start > 0` snippet would have skipped legitimate
+  first-batch rollbacks to 0).
 
 ### Universal WorkerTxn recovery: engine-wide, all failure types (W-PY28)
 
@@ -1516,242 +2721,6 @@ E16 (LEGACY/history, registered-not-executed).
   `NotImplementedError`/`OSError`/`FileNotFoundError`/
   `RuntimeError`; no tests, not in the gate) and its
   `python/README.md` bullet.
-
-### Python behavioral correctness (W-REL5-B)
-
-Bite-then-green wave over the shipped Python API surface (no C
-changes — C-diff empty; full suite ×3, release_check, and the perf
-band are coordinator-executed post-merge).
-
-- **B1:** `map()`/`stream()`/`sweep()` reject unknown keyword
-  arguments (`TypeError` whitelist, shared
-  `_reject_unknown_kwargs`) — a `wokers=` typo no longer silently
-  runs a different pipeline. `sink=` is REJECTED on the collecting
-  frontends (`ValueError`, same wording as sweep's pre-existing
-  gate): the payload return value IS the result there; the
-  worker-side sink lives only on `run()`. Honoring it would have
-  meant threading a side channel through every collect path for
-  no composable use; rejecting matches the sweep precedent and
-  fails closed. Lock-in `python/tests/test_wrel5b.py` (×5).
-- **B2:** `SIGINT` mid-`stream()` now raises `ForkrunInterrupted`
-  (still a `KeyboardInterrupt`) on all four stream executors (+
-  the NUMA twin in lockstep), uniform with the six blocking
-  executors and `MIGRATION.md`'s taxonomy presentation. Lock-in
-  (×5, all four executors).
-- **B3:** the ingest-reactor spill (`_execute_ingest_reactor_locked`)
-  sets `O_NONBLOCK` on the source (dup'd when borrowed) and
-  drains to `EAGAIN` per quantum, so worker/helper deaths and the
-  stall-fork rule are observed while the source is slow (sibling
-  pattern of the two streaming pumps). Finding: pre-fix workers
-  never fork during a stall at all; a SIGKILL landing while
-  pre-gate workers claim-spin is the honest claim-without-publish
-  abort (rc==4), not a respawn case — the bite asserts prompt
-  observation/termination, not recovery. Lock-in (×10).
-- **B4:** helper joins (scanner, fallow reaper, C drain, C orderer,
-  NUMA ingest/indexers/scanners) are bounded via
-  `_join_helper_bounded` (`_resume._waitpid_bounded` + SIGKILL on
-  expiry + stderr alarm naming the helper). Timeouts: helpers
-  10s, orderer `ORDERER_REAP_TIMEOUT`, post-abort worker reaps
-  `WORKER_REAP_TIMEOUT`. Worker COMPLETION joins stay unbounded
-  (the run IS the wait — bounding them would SIGKILL healthy
-  slow workers). Unit lock-in (×5) + checker across all ten
-  executors.
-- **B5:** `ReactorState.worker_died_poll` (WNOHANG + bounded
-  0.5s confirm spin, then defer to the `reap_clean_exits`
-  sweep) replaces the blocking `worker_died` in `reactor_loop`
-  and `reactor_poll_once` (lockstep); `worker_died` itself is
-  unchanged for direct/test use. `reactor_poll_once`'s docstring
-  now states the bounded spin honestly. Lock-in (×10).
-- **B6 (verify-only):** the single `_api._validate` call (with
-  the R9-hoisted CUDA guard) covers all ten executor paths —
-  `run`/`map`/`stream` validate before any engine contact or
-  fork, `sweep` rides `map()`; no per-path CUDA calls exist
-  (that would revert R9); no bypass found. Evidence: checker
-  I1 probe (all ten routings refuse) + `test_cuda_guard`.
-- **B7 (verify-only):** every `stream()` return (all eight UMA
-  branches + NUMA) rides `_guarded_gen`, which holds the
-  process-wide `RLock` across the generator lifetime;
-  same-thread nesting re-enters (no lock-type change).
-  Documented-but-unenforced gap: none — checker I2 probes
-  (exhaust + abandon, all ten incl. NUMA stream) and
-  `test_stream_lock` (serialization + nested RLock) enforce it.
-- **B8:** worker-failure raises carry `.signo` (first signal
-  death, `None` for plain exits) via the shared
-  `_raise_worker_failure` (four plain paths, message
-  byte-identical) and `_reactor_failure_check` (reactor path).
-  Class stays plain `RuntimeError` (Bash exit-1 contract —
-  `test_taxonomy.TestCrashStaysRuntimeError` still passes).
-  Bite: SIGSEGV'd worker ⇒ `.signo == 11` on both paths (×5).
-
-### Python robustness & security posture (W-REL5-C)
-
-Security-posture + robustness wave over the Python frontend (no C
-changes — C-diff empty; bites in `python/tests/test_wrel5c.py`).
-
-- **C1:** `find_substrate` no longer searches CWD (D10-class
-  library-load hijack: a planted `libforkrun_python.so` loaded
-  before any validation). Co-located candidates only, via
-  `_substrate_candidates()`; explicit `$FORKRUN_LIB` opt-in kept.
-  Bite (×5): hostile CWD `.so` refused with `FileNotFoundError`.
-- **C2:** `signal_policy="checkpoint"` off the main thread now
-  raises `RuntimeError` naming the thread and the remedy, instead
-  of running the whole job unguarded (every per-sig install raised
-  `ValueError` into the swallow). Bite (×5 threads + control).
-- **C3:** `sweep()` rejects `resume=`/`checkpoint_file=` outright
-  (one stateful resume replayed over N combinations silently
-  skips the committed prefix in combos 2..N). Per-combination
-  `map()` resume is the remedy. Bite (×5).
-- **C4:** sidecar lifecycle is deliver-then-unlink. `consume_sidecar`
-  no longer deletes on read (a crash between unlink and durable
-  delivery lost the prefix permanently — exactly when resume
-  chains matter); `_publish_sidecar` removes the source sidecar
-  only after durably publishing the cumulative superset
-  (same-path resume needs no removal — atomic rename supersedes).
-  Bite (×5): consume keeps, merge exact, publish folds, GC'd.
-- **C5:** three stream-reactor `finally` blocks now null
-  `spare_signal_w` after close (stale number reached teardown =
-  double-close). `order_w` audit: all 6 sites already nulled with
-  zero fd-creating calls between close and teardown (verified,
-  no change). Bite (×5, slow-payload abandon + teardown spy).
-- **C6:** signal handler is allocation-free and engine-only: record
-  goes to preallocated 32-slot array (saturate-and-drop,
-  documented), the handler calls only the pre-resolved
-  `fr_py_abort` (single `write()`), never arbitrary `abort_fn`
-  callables (honored at drain/`check()` time instead). Prompt
-  abort preserved (end-to-end HUP timing requires it). Bite +
-  `test_signals.py` 10/10 ×10.
-- **C7:** torn trailing signals (1-15 bytes at EOF, nobody left to
-  complete) are discarded loudly in both drain loops instead of
-  hanging forever. Bite: 3-byte signal + EOF (10s watchdog;
-  pre-fix hung, post-fix instant).
-- **C8:** `load_plugin` docstring states the parent-side dlopen
-  constraint (ELF initializers/threads pre-fork hazard; probe
-  rework deferred). No behavior change.
-- **C9:** jittered backoff (`uniform(0.05, 0.2)s`) before respawn
-  on SIGKILL/OOM-class deaths only (cap enforced first, so
-  persistent killers still terminate). Deterministic crashes keep
-  immediate respawn (escrow/poison converges fast). Bite (×10):
-  transient 2-kill payload completes byte-exact past a 0.09s
-  floor; persistent killer raises bounded with clean fds.
-
-### Python surface truthfulness (W-REL5-E-PYTHON)
-
-Docs-adjacent Python surface: exports, annotations, dead code, fd
-hygiene (no C changes — C-diff empty; bites in
-`python/tests/test_wrel5e.py` + `test_wrel5c.py`).
-
-- **E5:** `RunConfig` dropped from `__all__` (imported a phantom
-  contract — no public entry returns it; class stays in `_api`
-  for the `_validate_config` seam). `signal_policy: Any` →
-  `Optional[str]` (D-PORT1 union). `bytes` field KEPT with a
-  shadowing-contained comment (rename would churn constructor +
-  seam asserts for zero function). Bite: import raises (×5).
-- **E6:** `run`/`map`/`stream`/`sweep` annotated (post-B1
-  signatures matched exactly; `Mode`/`Order`/`OnError`/`Nodes`
-  wired; internals unannotated by scope). `py.typed` marker added
-  and packaged (wheel verified to contain it + the `.so`).
-  `get_type_hints` resolves all four; B1 tests green untouched.
-- **E7:** dead code deleted with grep evidence each: duplicate
-  `def _watch_live` (identical, shadowed); duplicated mode-check
-  in `_execute_streaming` (entry single-guards kept as
-  fail-closed backstops); redundant inner `wid_to_node` import;
-  `rc==127` sites kept deliberately (defensive child
-  terminators, not dead); ten unreachable `memfd→tempfile`
-  fallbacks + both `_tmp_hold` lists (order cited six — same
-  `AttributeError`-on-existing-API class in ten spots);
-  `_forkrun_file_to_base64` self-guard made unconditional
-  (inert in all repo paths — both callers are `$()` subshells;
-  twins identical, syntax + functional probe green).
-- **E15:** teardown close-audit complete: every `os.close` in
-  `run.py` classifies nulled / flag-nulled / member-nulled /
-  rebind-before-use / terminal, with zero fd-creating calls
-  between any close and its teardown (script-verified all six
-  `order_w` paths). Remainder already closed by C5/R11/DEDUP —
-  no product change. Lock-ins: `order_w`-None-at-teardown (×5)
-  + fd stability across 10 mixed runs.
-
-### Bash loadable compatibility (W-BASHCOMPAT fix phase)
-
-Bootstrap-side fix (the `.so` needed nothing — Phase 0 proved the
-symbol floor 4.4-clean). Load path verified 4.4→5.3; worker runtime
-on ≤5.1 segfaults pre-existing and wave-independent (proven on
-pristine `main:frun.bash` too — see report; floor matrix below is
-shaped by that finding).
-
-- **BC-1:** the 0.9MB single-line `declare` (proximate CI killer,
-  dies pre-`enable`) replaced by `declare -A b64=()` + 32KiB
-  appends framed by `START..END` markers (max line 32,798B).
-  Values byte-identical per key (7/7 md5). New
-  `_forkrun_b64_emit_chunked` helper + both blob emitters use the
-  same algorithm; runtime backup copies the region via sed (~5ms,
-  helper fallback for curl-idiom/marker-less sources). Bring-up
-  0.12s → 0.07s.
-- **BC-2:** two `-e` deaths closed in `_forkrun_base64_to_file`
-  (`rm` on live memfd → `|| true`; NUL-less-payload `read` →
-  `|| [[ -n out ]]`, EOF-empty stays fail-closed). No-e behavior
-  identical. Bite: source under `-e` + `ring_version` (pre rc=1,
-  post rc=0).
-- **BC-3:** supported-version matrix in README (+ `DOCS_ALL`
-  mirror); floor stays 4.4 with per-version verification status.
-- **BC-4:** `bashcompat-smoke.yml` (5 legs: full round-trip on
-  5.2/5.3, bootstrap-only on 4.4–5.1 pending the worker finding).
-- **BC-5:** canary stubs version-annotated (14× `since 4.4`, 5×
-  unexported markers) + `make canary-versions` gate over the
-  shipped prebuilts (12 stub-matches each, `add_builtin` noted
-  lazy-never-bound).
-- **BC-6:** blob-build container pin documented (informational) +
-  toolchain provenance recorded in build logs (no image change —
-  no blob cycle).
-
-### C engine hardening, TLS rebuild, and the ≤5.1 segfault resolution (W-REL5-D)
-
-Final product wave (one blob cycle carries the engine sites, the TLS
-rebuild, the segfault fix, and the `add_builtin` retirement). Full
-record: `dev/supervisor/WREL5_D_REPORT.md`.
-
-- **D-SEGFIX (≤5.1 worker segfault: bisected, root-caused, fixed).**
-  W-MAPAPI exonerated the bind API + `struct builtin` + registration
-  (all correct, all insufficient): the hazard is `struct array` —
-  5.1→5.2 moved `head` 24→16, so the new-header engine misread old
-  bash as small-int-as-pointer and faulted at NULL+0x11
-  (SEGV_MAPERR, deterministic, first `ring_poll`, empty input
-  reproduces; `enable`-only green, toy green, Python green).
-  Fix: the frontend flattens fd watch-arrays to `"id:fd"` pair lists
-  (shell-side `"${!arr[@]}"`, ascending, version-proof) and
-  `ring_poll_main` parses pairs (malformed fail-safe, `max_poll`
-  drop-tail kept); the feeder-child scrub reads `FD_WORKER_W` from
-  environ (also removes bash API post-fork there). No ARRAY-struct
-  read remains in the engine (3 sites). Bite: pre-fix crash chain
-  (strace/core/disasm). Green: 200-line byte-exact round-trips on
-  4.4/5.0/5.1/5.2/5.3 (source + extracted), zero new cores. Floor
-  back to bash ≥4.4 (ships in this wave's blob cycle).
-- **D2 coherence (spec fix caught by bite-then-green).** Resetting
-  `last_ack_offset` on fd change broke respawn-onto-same-file flows:
-  `ack_init` synced the offset but left the cached fd behind, so the
-  first post-init ack zeroed it (invariant-gate §6/§9 + bash poison
-  suites caught duplicates). Fix: init adopts the full trio
-  (offset + fd + mode).
-- **D-STRICT:** dead `add_builtin` path retired (Exp-3-proven
-  vestigial); stub list shrinks 12→11 (U-set is exactly the 11
-  exported bash symbols). No `builtins[]` conversion.
-- **D-TLS:** x86-64 blobs rebuilt with `-mtls-dialect=gnu`
-  (drops `GLIBC_ABI_GNU2_TLS`). Floor stays glibc 2.38 via
-  gcc-16 `__isoc23_strto*` aliasing (unblocks ≥2.38; Debian
-  12/RHEL ≤9 need a `-std=gnu17` follow-up, not this wave).
-- **D1–D12, D14–D15:** hole-punch cap + `size_t` (D1); ack-offset
-  reset (D2); revert S_ISREG/size guards (D3); emit `niov = 0`
-  (D4 — a bare break would regress `b""`); descriptor subtraction
-  form (D5); format buffers 32 (D6); heap doubling guards (D7);
-  escrow fail-loud (D8); dup2 checked (D9); copy state guards (D10);
-  shim 512 ceilings (D12); SIGBUS comment truth (D14, mechanism
-  declined with analysis); post-fork fd hoist (D15).
-  **Deferred:** D13 (`%lu`→`PRIu64`, 3.6.1 with sanitizer legs);
-  D11 master switch (halt-and-report: no safe saving — caching OFF
-  poisons cross-module runs, caching ON/compile-out save nothing or
-  break suites; ~150ns/batch is negligible).
-- **D-LEGS:** compat legs run `frun -k` round-trips ×10 (fresh shell
-  each), not loads — 5.3 binds; UBI8/4.4/5.0/5.1/5.2 amber till the
-  blob cycle (causes cited); the 5.1 leg is the permanent guard.
 
 ## v3.5.14 (unreleased)
 
@@ -2178,9 +3147,9 @@ record: `dev/supervisor/WREL5_D_REPORT.md`.
   /proc/stat rejected as noise on shared boxes); v0.5 reads
   overhead-bound at 10M (parent collect serial), documented honestly.
 - New: `python/benchmarks/run_all.py` (table + CSV, --scale/--trials/
-  --filter/--list), `make bench[-small|-large|-csv]` targets, CPU%
-  column, `python/benchmarks/results/large.{md,csv}`, README
-  side-by-side tables + "What These Benchmarks Do NOT Measure".
+  --filter/--list), `make bench[-small|-large|-csv]`, CPU% column,
+  `python/benchmarks/results/large.{md,csv}`, README side-by-side
+  tables + "What These Benchmarks Do NOT Measure".
 - Python `0.2.0` → `0.3.0`. 121 tests green; engine frozen (zero C
   changes since v3.5.2). Tag message ready (owner creates the tag).
 
@@ -2436,18 +3405,6 @@ record: `dev/supervisor/WREL5_D_REPORT.md`.
   1MB boundary): 113 green. v1 unifies via `ring_call`; zero-copy input
   and dialect negotiation ride along.
 
-- **W-PY10: Python packaging (Python-only, no engine/library changes):**
-  `pyproject.toml` + `setup.py` (`pip install .` / `pip wheel .`), no
-  `src/` restructure (`package_dir={"": "python"}`, tests never ship),
-  version single-sourced from `__version__` (0.2.0), build_py compiles
-  the substrate via `Makefile.substrate` (single flag source; gcc
-  fallback), Linux-only fail-fast import (plan §4), no PyPI upload.
-  Two corrections: the order's `src/` move is churn without function,
-  and its `0.1.0` contradicts the shipped `0.2.0`. 5 tests (Linux
-  import, faked-platform guard refusal, setup.py--version parity,
-   in-place .so, full wheel→isolated-target→subprocess-run cycle):
-   118 green.
-
 - **W-PY11: Python benchmark suite (measurement-only, no lib/engine
   changes):** `python/benchmarks/` (harness + throughput/memory/fault/
   baselines/niches + `run_all.py` CLI with --scale/--trials/--filter/
@@ -2464,6 +3421,18 @@ record: `dev/supervisor/WREL5_D_REPORT.md`.
   on 50MB output. Fault inversion documented: faulty runs score higher
   lines/s because poisoned batches skip payload work. 8 harness tests:
   126 green.
+
+- **W-PY10: Python packaging (Python-only, no engine/library changes):**
+  `pyproject.toml` + `setup.py` (`pip install .` / `pip wheel .`), no
+  `src/` restructure (`package_dir={"": "python"}`, tests never ship),
+  version single-sourced from `__version__` (0.2.0), build_py compiles
+  the substrate via `Makefile.substrate` (single flag source; gcc
+  fallback), Linux-only fail-fast import (plan §4), no PyPI upload.
+  Two corrections: the order's `src/` move is churn without function,
+  and its `0.1.0` contradicts the shipped `0.2.0`. 5 tests (Linux
+  import, faked-platform guard refusal, setup.py--version parity,
+  in-place .so, full wheel→isolated-target→subprocess-run cycle):
+  118 green.
 
 - **W-PY5: spawn-time CUDA hazard guard (Stage 4 final item, Python-only,
   C frozen):** `python/forkrun/_cuda_guard.py` (tri-state detection:
@@ -2822,6 +3791,242 @@ be silently lost when appending.
 - No sole-path data movement: every zero-copy syscall has an exercised fallback.
 - Gates inspect text, never live state derived from executing that text.
 - Sanitize by construction (`env -i` + explicit values), not by clearing.
+
+### Python behavioral correctness (W-REL5-B)
+
+Bite-then-green wave over the shipped Python API surface (no C
+changes — C-diff empty; full suite ×3, release_check, and the perf
+band are coordinator-executed post-merge).
+
+- **B1:** `map()`/`stream()`/`sweep()` reject unknown keyword
+  arguments (`TypeError` whitelist, shared
+  `_reject_unknown_kwargs`) — a `wokers=` typo no longer silently
+  runs a different pipeline. `sink=` is REJECTED on the collecting
+  frontends (`ValueError`, same wording as sweep's pre-existing
+  gate): the payload return value IS the result there; the
+  worker-side sink lives only on `run()`. Honoring it would have
+  meant threading a side channel through every collect path for
+  no composable use; rejecting matches the sweep precedent and
+  fails closed. Lock-in `python/tests/test_wrel5b.py` (×5).
+- **B2:** `SIGINT` mid-`stream()` now raises `ForkrunInterrupted`
+  (still a `KeyboardInterrupt`) on all four stream executors (+
+  the NUMA twin in lockstep), uniform with the six blocking
+  executors and `MIGRATION.md`'s taxonomy presentation. Lock-in
+  (×5, all four executors).
+- **B3:** the ingest-reactor spill (`_execute_ingest_reactor_locked`)
+  sets `O_NONBLOCK` on the source (dup'd when borrowed) and
+  drains to `EAGAIN` per quantum, so worker/helper deaths and the
+  stall-fork rule are observed while the source is slow (sibling
+  pattern of the two streaming pumps). Finding: pre-fix workers
+  never fork during a stall at all; a SIGKILL landing while
+  pre-gate workers claim-spin is the honest claim-without-publish
+  abort (rc==4), not a respawn case — the bite asserts prompt
+  observation/termination, not recovery. Lock-in (×10).
+- **B4:** helper joins (scanner, fallow reaper, C drain, C orderer,
+  NUMA ingest/indexers/scanners) are bounded via
+  `_join_helper_bounded` (`_resume._waitpid_bounded` + SIGKILL on
+  expiry + stderr alarm naming the helper). Timeouts: helpers
+  10s, orderer `ORDERER_REAP_TIMEOUT`, post-abort worker reaps
+  `WORKER_REAP_TIMEOUT`. Worker COMPLETION joins stay unbounded
+  (the run IS the wait — bounding them would SIGKILL healthy
+  slow workers). Unit lock-in (×5) + checker across all ten
+  executors.
+- **B5:** `ReactorState.worker_died_poll` (WNOHANG + bounded
+  0.5s confirm spin, then defer to the `reap_clean_exits`
+  sweep) replaces the blocking `worker_died` in `reactor_loop`
+  and `reactor_poll_once` (lockstep); `worker_died` itself is
+  unchanged for direct/test use. `reactor_poll_once`'s docstring
+  now states the bounded spin honestly. Lock-in (×10).
+- **B6 (verify-only):** the single `_api._validate` call (with
+  the R9-hoisted CUDA guard) covers all ten executor paths —
+  `run`/`map`/`stream` validate before any engine contact or
+  fork, `sweep` rides `map()`; no per-path CUDA calls exist
+  (that would revert R9); no bypass found. Evidence: checker
+  I1 probe (all ten routings refuse) + `test_cuda_guard`.
+- **B7 (verify-only):** every `stream()` return (all eight UMA
+  branches + NUMA) rides `_guarded_gen`, which holds the
+  process-wide `RLock` across the generator lifetime;
+  same-thread nesting re-enters (no lock-type change).
+  Documented-but-unenforced gap: none — checker I2 probes
+  (exhaust + abandon, all ten incl. NUMA stream) and
+  `test_stream_lock` (serialization + nested RLock) enforce it.
+- **B8:** worker-failure raises carry `.signo` (first signal
+  death, `None` for plain exits) via the shared
+  `_raise_worker_failure` (four plain paths, message
+  byte-identical) and `_reactor_failure_check` (reactor path).
+  Class stays plain `RuntimeError` (Bash exit-1 contract —
+  `test_taxonomy.TestCrashStaysRuntimeError` still passes).
+  Bite: SIGSEGV'd worker ⇒ `.signo == 11` on both paths (×5).
+
+### Python robustness & security posture (W-REL5-C)
+
+Security-posture + robustness wave over the Python frontend (no C
+changes — C-diff empty; bites in `python/tests/test_wrel5c.py`).
+
+- **C1:** `find_substrate` no longer searches CWD (D10-class
+  library-load hijack: a planted `libforkrun_python.so` loaded
+  before any validation). Co-located candidates only, via
+  `_substrate_candidates()`; explicit `$FORKRUN_LIB` opt-in kept.
+  Bite (×5): hostile CWD `.so` refused with `FileNotFoundError`.
+- **C2:** `signal_policy="checkpoint"` off the main thread now
+  raises `RuntimeError` naming the thread and the remedy, instead
+  of running the whole job unguarded (every per-sig install raised
+  `ValueError` into the swallow). Bite (×5 threads + control).
+- **C3:** `sweep()` rejects `resume=`/`checkpoint_file=` outright
+  (one stateful resume replayed over N combinations silently
+  skips the committed prefix in combos 2..N). Per-combination
+  `map()` resume is the remedy. Bite (×5).
+- **C4:** sidecar lifecycle is deliver-then-unlink. `consume_sidecar`
+  no longer deletes on read (a crash between unlink and durable
+  delivery lost the prefix permanently — exactly when resume
+  chains matter); `_publish_sidecar` removes the source sidecar
+  only after durably publishing the cumulative superset
+  (same-path resume needs no removal — atomic rename supersedes).
+  Bite (×5): consume keeps, merge exact, publish folds, GC'd.
+- **C5:** three stream-reactor `finally` blocks now null
+  `spare_signal_w` after close (stale number reached teardown =
+  double-close). `order_w` audit: all 6 sites already nulled with
+  zero fd-creating calls between close and teardown (verified,
+  no change). Bite (×5, slow-payload abandon + teardown spy).
+- **C6:** signal handler is allocation-free and engine-only: record
+  goes to preallocated 32-slot array (saturate-and-drop,
+  documented), the handler calls only the pre-resolved
+  `fr_py_abort` (single `write()`), never arbitrary `abort_fn`
+  callables (honored at drain/`check()` time instead). Prompt
+  abort preserved (end-to-end HUP timing requires it). Bite +
+  `test_signals.py` 10/10 ×10.
+- **C7:** torn trailing signals (1-15 bytes at EOF, nobody left to
+  complete) are discarded loudly in both drain loops instead of
+  hanging forever. Bite: 3-byte signal + EOF (10s watchdog;
+  pre-fix hung, post-fix instant).
+- **C8:** `load_plugin` docstring states the parent-side dlopen
+  constraint (ELF initializers/threads pre-fork hazard; probe
+  rework deferred). No behavior change.
+- **C9:** jittered backoff (`uniform(0.05, 0.2)s`) before respawn
+  on SIGKILL/OOM-class deaths only (cap enforced first, so
+  persistent killers still terminate). Deterministic crashes keep
+  immediate respawn (escrow/poison converges fast). Bite (×10):
+  transient 2-kill payload completes byte-exact past a 0.09s
+  floor; persistent killer raises bounded with clean fds.
+
+### Python surface truthfulness (W-REL5-E-PYTHON)
+
+Docs-adjacent Python surface: exports, annotations, dead code, fd
+hygiene (no C changes — C-diff empty; bites in
+`python/tests/test_wrel5e.py` + `test_wrel5c.py`).
+
+- **E5:** `RunConfig` dropped from `__all__` (imported a phantom
+  contract — no public entry returns it; class stays in `_api`
+  for the `_validate_config` seam). `signal_policy: Any` →
+  `Optional[str]` (D-PORT1 union). `bytes` field KEPT with a
+  shadowing-contained comment (rename would churn constructor +
+  seam asserts for zero function). Bite: import raises (×5).
+- **E6:** `run`/`map`/`stream`/`sweep` annotated (post-B1
+  signatures matched exactly; `Mode`/`Order`/`OnError`/`Nodes`
+  wired; internals unannotated by scope). `py.typed` marker added
+  and packaged (wheel verified to contain it + the `.so`).
+  `get_type_hints` resolves all four; B1 tests green untouched.
+- **E7:** dead code deleted with grep evidence each: duplicate
+  `def _watch_live` (identical, shadowed); duplicated mode-check
+  in `_execute_streaming` (entry single-guards kept as
+  fail-closed backstops); redundant inner `wid_to_node` import;
+  `rc==127` sites kept deliberately (defensive child
+  terminators, not dead); ten unreachable `memfd→tempfile`
+  fallbacks + both `_tmp_hold` lists (order cited six — same
+  `AttributeError`-on-existing-API class in ten spots);
+  `_forkrun_file_to_base64` self-guard made unconditional
+  (inert in all repo paths — both callers are `$()` subshells;
+  twins identical, syntax + functional probe green).
+- **E15:** teardown close-audit complete: every `os.close` in
+  `run.py` classifies nulled / flag-nulled / member-nulled /
+  rebind-before-use / terminal, with zero fd-creating calls
+  between any close and its teardown (script-verified all six
+  `order_w` paths). Remainder already closed by C5/R11/DEDUP —
+  no product change. Lock-ins: `order_w`-None-at-teardown (×5)
+  + fd stability across 10 mixed runs.
+
+### Bash loadable compatibility (W-BASHCOMPAT fix phase)
+
+Bootstrap-side fix (the `.so` needed nothing — Phase 0 proved the
+symbol floor 4.4-clean). Load path verified 4.4→5.3; worker runtime
+on ≤5.1 segfaults pre-existing and wave-independent (proven on
+pristine `main:frun.bash` too — see report; floor matrix below is
+shaped by that finding).
+
+- **BC-1:** the 0.9MB single-line `declare` (proximate CI killer,
+  dies pre-`enable`) replaced by `declare -A b64=()` + 32KiB
+  appends framed by `START..END` markers (max line 32,798B).
+  Values byte-identical per key (7/7 md5). New
+  `_forkrun_b64_emit_chunked` helper + both blob emitters use the
+  same algorithm; runtime backup copies the region via sed (~5ms,
+  helper fallback for curl-idiom/marker-less sources). Bring-up
+  0.12s → 0.07s.
+- **BC-2:** two `-e` deaths closed in `_forkrun_base64_to_file`
+  (`rm` on live memfd → `|| true`; NUL-less-payload `read` →
+  `|| [[ -n out ]]`, EOF-empty stays fail-closed). No-e behavior
+  identical. Bite: source under `-e` + `ring_version` (pre rc=1,
+  post rc=0).
+- **BC-3:** supported-version matrix in README (+ `DOCS_ALL`
+  mirror); floor stays 4.4 with per-version verification status.
+- **BC-4:** `bashcompat-smoke.yml` (5 legs: full round-trip on
+  5.2/5.3, bootstrap-only on 4.4–5.1 pending the worker finding).
+- **BC-5:** canary stubs version-annotated (14× `since 4.4`, 5×
+  unexported markers) + `make canary-versions` gate over the
+  shipped prebuilts (12 stub-matches each, `add_builtin` noted
+  lazy-never-bound).
+- **BC-6:** blob-build container pin documented (informational) +
+  toolchain provenance recorded in build logs (no image change —
+  no blob cycle).
+
+### C engine hardening, TLS rebuild, and the ≤5.1 segfault resolution (W-REL5-D)
+
+Final product wave (one blob cycle carries the engine sites, the TLS
+rebuild, the segfault fix, and the `add_builtin` retirement). Full
+record: `dev/supervisor/WREL5_D_REPORT.md`.
+
+- **D-SEGFIX (≤5.1 worker segfault: bisected, root-caused, fixed).**
+  W-MAPAPI exonerated the bind API + `struct builtin` + registration
+  (all correct, all insufficient): the hazard is `struct array` —
+  5.1→5.2 moved `head` 24→16, so the new-header engine misread old
+  bash as small-int-as-pointer and faulted at NULL+0x11
+  (SEGV_MAPERR, deterministic, first `ring_poll`, empty input
+  reproduces; `enable`-only green, toy green, Python green).
+  Fix: the frontend flattens fd watch-arrays to `"id:fd"` pair lists
+  (shell-side `"${!arr[@]}"`, ascending, version-proof) and
+  `ring_poll_main` parses pairs (malformed fail-safe, `max_poll`
+  drop-tail kept); the feeder-child scrub reads `FD_WORKER_W` from
+  environ (also removes bash API post-fork there). No ARRAY-struct
+  read remains in the engine (3 sites). Bite: pre-fix crash chain
+  (strace/core/disasm). Green: 200-line byte-exact round-trips on
+  4.4/5.0/5.1/5.2/5.3 (source + extracted), zero new cores. Floor
+  back to bash ≥4.4 (ships in this wave's blob cycle).
+- **D2 coherence (spec fix caught by bite-then-green).** Resetting
+  `last_ack_offset` on fd change broke respawn-onto-same-file flows:
+  `ack_init` synced the offset but left the cached fd behind, so the
+  first post-init ack zeroed it (invariant-gate §6/§9 + bash poison
+  suites caught duplicates). Fix: init adopts the full trio
+  (offset + fd + mode).
+- **D-STRICT:** dead `add_builtin` path retired (Exp-3-proven
+  vestigial); stub list shrinks 12→11 (U-set is exactly the 11
+  exported bash symbols). No `builtins[]` conversion.
+- **D-TLS:** x86-64 blobs rebuilt with `-mtls-dialect=gnu`
+  (drops `GLIBC_ABI_GNU2_TLS`). Floor stays glibc 2.38 via
+  gcc-16 `__isoc23_strto*` aliasing (unblocks ≥2.38; Debian
+  12/RHEL ≤9 need a `-std=gnu17` follow-up, not this wave).
+- **D1–D12, D14–D15:** hole-punch cap + `size_t` (D1); ack-offset
+  reset (D2); revert S_ISREG/size guards (D3); emit `niov = 0`
+  (D4 — a bare break would regress `b""`); descriptor subtraction
+  form (D5); format buffers 32 (D6); heap doubling guards (D7);
+  escrow fail-loud (D8); dup2 checked (D9); copy state guards (D10);
+  shim 512 ceilings (D12); SIGBUS comment truth (D14, mechanism
+  declined with analysis); post-fork fd hoist (D15).
+  **Deferred:** D13 (`%lu`→`PRIu64`, 3.6.1 with sanitizer legs);
+  D11 master switch (halt-and-report: no safe saving — caching OFF
+  poisons cross-module runs, caching ON/compile-out save nothing or
+  break suites; ~150ns/batch is negligible).
+- **D-LEGS:** compat legs run `frun -k` round-trips ×10 (fresh shell
+  each), not loads — 5.3 binds; UBI8/4.4/5.0/5.1/5.2 amber till the
+  blob cycle (causes cited); the 5.1 leg is the permanent guard.
 
 -----------------------------------------
 # C_PLUGIN.md
@@ -3876,7 +5081,7 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
 
 ### EXECUTION BACKENDS
 
-- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. Implemented via `posix_spawnp` — on glibc this uses `CLONE_VFORK` internally, so 'vfork engine' and 'posix_spawnp' describe the same fast path. *(NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).*
+- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. Implemented via `posix_spawnp` — on glibc this uses `CLONE_VFORK` internally, so 'vfork engine' and 'posix_spawnp' describe the same fast path. *(NOTE: If -U or -i are used, the ultra-fast-path is disabled, and this flag has no effect; -I stays on the fast path).*
 - `-C`, `--plugin <so:fn>`    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. See [`C_PLUGIN.md`](C_PLUGIN.md) for additional info.
 
 ### OUTPUT MODES
@@ -3909,13 +5114,31 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
 ### LIMITS & TOPOLOGY
 
 - `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed. (In byte mode `-b`, `-n` specifies the exact byte limit).
-- `--nodes`, `--numa <map>`   : Control NUMA topology mapping. Nodes that do not exist will be skipped (excluding for `@N`).
+- `--nodes`, `--numa <map>`   : Control NUMA topology mapping.
   - `auto` (default): Autodetect all physical online nodes.
-  - `@N` : Oversubscribe / force `N` logical nodes (N ≤ 512; larger values are rejected to preserve internal ring bounds).
+  - `@N` : Oversubscribe / force `N` logical nodes, cycling the online
+    physicals (N ≤ 512; larger values are rejected to preserve internal
+    ring bounds). `@N` is how you exercise a multi-node path on a
+    single-node host: `@2` on a UMA box is two LOGICAL nodes, both on
+    physical 0.
   - `0,1`: Explicitly bind to physical NUMA nodes 0 and 1.
   - `0:3`: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
+  - **A physical count that exceeds the machine is a DELIBERATE
+    divergence between the two frontends.** The bash frontend *skips*
+    nodes that do not exist; the Python frontend **raises** instead:
+
+    ```
+    ValueError: nodes=2 requested but only 1 NUMA node(s) online ([0])
+                — use '@2' to force logical nodes for testing
+    ```
+
+    The Python behaviour is intentional: silently running UMA after
+    `nodes=4` was requested would benchmark a different configuration
+    than the caller asked for, and the number would be a lie. Use
+    `@N` when you mean "force N logical nodes". Pinned by
+    `python/tests/test_numa.py::TestNodesSpecification`.
 - `-N`, `--dry-run`           : Dry run. Print the generated command strings instead of executing them.
-- `-v`, `--verbose`           : Increase verbosity (prints timing and flag summaries to `stderr`). Implies --stats.
+- `-v`, `--verbose`           : Increase verbosity (prints the worker-spawn summary, plugin-compile notes, and NUMA stats to `stderr`). Implies --stats.
 - `+v`, `--no-verbose`        : Decrease verbosity. Disables --stats.
 - `-V`, `--version`           : Prints forkrun version number
 -  `--stats`                  : Prints NUMA statistics to stderr (currently ignored for UMA)
@@ -3978,6 +5201,13 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
   - `auto` (default): Automatically detects SLURM environment via `SLURM_JOB_ID`.
   - `0` / `false`: Disable preemption handling entirely.
   - `1` / `true`: Force-enable preemption handling. When enabled, forkrun catches `SIGTERM` (scancel/preemption) and `SIGUSR1` (SLURM `--signal=B:USR1@<time>`) to instantly freeze the pipeline and generate a checkpoint for perfect resume capability.
+- `FORKRUN_DEBUG`: Engine diagnostics flag (read by the C substrate; forwarded into the cleanroom). Off by default.
+- `FORKRUN_TRUST_RESUME`: `=1` bypasses the interactive resume consent gate for unattended resumption (see `--resume` above). Prefer confirming.
+- `FORKRUN_C_STDIN`: Internal ambient mode flag for `-C` with `-s`/`-b` (plugin reads its batch from fd 0). Managed by the wrapper.
+- `FORKRUN_SWEEP_ARGS`: Internal sweep plumbing (serialized sweep dimensions). Managed by the wrapper.
+- `FORKRUN_TMPDIR`: Bootstrap override: preferred directory for the transient `.so` extraction (ahead of the XDG/runtime/shm/tmp fallbacks).
+- `FORKRUN_NUM_NODES`: Nodes in play, computed by the wrapper from `--nodes`/`--numa` (default 1). Read-only signal, not a knob — presetting it has no effect.
+- `FORKRUN_TEST_FALLOW_PIDFILE` / `FORKRUN_TEST_INDEXER_PIDFILE` / `FORKRUN_TEST_CLEANROOM_PIDFILE`: Test-only hooks (pidfile targeting for signal/chaos tests). No effect on production runs.
 
 -----------------------------------------
 # FORKRUN_OVERVIEW.md
@@ -3988,7 +5218,7 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
 
 **forkrun achieves:**
 
-- **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across mixed benchmarks
+- **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across 396 mixed benchmarks
 - **Born-local NUMA placement**: file ingest measures a median of 0.0% cross-socket chunks (tail up to ~20% on small-chunk and byte-mode runs). Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **Automatic recovery and retry** when a worker unexpectedly dies processing a batch
 
@@ -4486,7 +5716,7 @@ count are raised, not honored.
 **Origin**
 User-supplied `workers < nodes` left born-local rings permanently
 unworked (workers claim locally only; stealing covers orphans,
-not healthy unassigned rings). The F-NUMA1 drain guard made
+not healthy-but-unassigned rings). The F-NUMA1 drain guard made
 the resulting shortfall loud (RuntimeError at completion), but
 loud failure is still failure for a configuration the parent
 could have satisfied. Correctness of exactly-once delivery
@@ -4498,7 +5728,7 @@ Single normalization point
 (`_resolve_workers_numa(workers, num_nodes)`): `max(workers,
 num_nodes)` on multi-node topologies with one `UserWarning`
 (requested vs effective); UMA exempt; idempotent (effective
-counts pass through silently, downstream re-resolution never
+counts pass through silently, so downstream re-resolution never
 double-warns). Per-node distribution is round-robin from node 0,
 so `workers >= nodes` covers all nodes by construction. The
 F-NUMA1 drain guard stays as the backstop for genuine runtime
@@ -4783,12 +6013,16 @@ We maintain two dedicated branches specifically configured for sanitizer testing
 1. Checkout the desired testing branch and copy your modified `forkrun_ring.c` into it.
 2. Push, wait for the CI workflow, and merge the PR.
 3. **CRITICAL GOTCHA #1 (The `exec -c` Trap):**
-   Before running the tests, you must open `frun.bash` and modify the initial bash `exec` call.
-   Change:
-   `exec -c "${BASH:-bash}" --norc --noprofile -c ...`
-   To:
-   `exec "${BASH:-bash}" --norc --noprofile -c ...`
-   *(Removing the `-c` from the `exec` command is mandatory. If you leave it in, it clears the environment variables required by the sanitizers, silently disabling them).*
+   Never hand-edit the release `frun.bash` itself — hand edits are how the `-V` echo, `FORKRUN_RING_VERSION`, and `META` drift apart. The version is single-sourced: `frun --version` reads the engine `ring_version` builtin first, then `META`, so a version bump touches `META` (and the C default) only, never the wrapper text. For sanitizer runs, copy the wrapper to a scratch path and modify the copy:
+   ```bash
+   cp frun.bash /tmp/frun.san.bash
+   # In /tmp/frun.san.bash ONLY, change the initial bash exec call:
+   #   exec -c "${BASH:-bash}" --norc --noprofile -c ...
+   # To:
+   #   exec "${BASH:-bash}" --norc --noprofile -c ...
+   # Then run the suites against the copy (e.g. FRUN_SOURCE=/tmp/frun.san.bash).
+   ```
+   *(Dropping that first `-c` in the scratch copy is mandatory. If you leave it in, it clears the environment variables required by the sanitizers, silently disabling them. Discard the copy when done — never merge it back into the release file.)*
 
 4. **CRITICAL GOTCHA #2 (TSan Execution):**
    When testing on the `TESTING/TSAN` branch, you must force `LD_PRELOAD` to inject the TSan library. Run the test scripts like this:
@@ -5006,6 +6240,49 @@ Welcome to the physics department. The CS department is across the hall — they
 - The C source – the actual riverbed geometry
 
 -----------------------------------------
+# PYTHON_BEHAVIOR.md
+
+# forkrun Python frontend — behavioral notes
+
+Frontend contracts that are not derivable from `INVARIANTS.md` (which
+states the engine laws) or from the Bash frontend (which has no Python
+equivalent for these).
+
+**Provenance.** This content previously existed ONLY inside the generated
+aggregate `DOCS/DOCS_ALL.md`, with no source document owning it. That is
+exactly the drift `tools/gen_docs_all.py --check` exists to prevent, so
+the content was given a home here rather than deleted when the
+aggregate started being regenerated from sources.
+
+### W-REL5-B: Python behavioral correctness (behavioral notes)
+
+- `sink=` ownership: only `run()` owns a worker-side sink. The
+  collecting frontends (`map`/`stream`/`sweep`) reject it loudly
+  instead of ignoring it — the payload return value is the result
+  there, and a second result channel would be a silent-drop trap.
+- Stream taxonomy is uniform now: `SIGINT` during `stream()`
+  iteration raises `ForkrunInterrupted` (catchable as either
+  `forkrun.ForkrunInterrupted` or `KeyboardInterrupt`), exactly
+  like the blocking paths.
+- Ingest-reactor liveness: the spill supervises (death pipes,
+  trap-ACK deadlines, stall fork) per quantum even when the
+  source yields nothing for seconds. A pre-gate SIGKILL that
+  lands mid-claim still aborts loudly (claim-without-publish
+  race, rc==4) — observation is prompt; attribution limits are
+  engine semantics, unchanged by this wave.
+- Helper joins are bounded (10s; orderer 10s via
+  `ORDERER_REAP_TIMEOUT`; post-abort worker reaps 3s via
+  `WORKER_REAP_TIMEOUT`) with a naming alarm; worker completion
+  joins are unbounded by design.
+- `reactor_poll_once` blocks at most `poll_timeout` plus a
+  bounded 0.5s death-confirm spin; longer absences mean the
+  child is alive, not that the poll hung.
+- Worker-failure `RuntimeError`s carry `.signo` (first signal
+  death or `None`); the class contract is unchanged (signal
+  causes with taxonomy classes, engine faults plain
+  `RuntimeError`).
+
+-----------------------------------------
 # README.md
 
 # forkrun — NUMA-Aware Contention-Free Streaming Parallelization
@@ -5069,6 +6346,53 @@ frun -s -I bash -c 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique o
 - **forkrun:** ~90% aggregate (27.1 / 28 cores in steady-state default mode = 97%; 27.6/28 = 98.6% for default-mode sustained runs at ≥1B-line scale (100M-scale measures 24.5–25.5/28 for default -X); `-U` unsafe runs hit 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28) — *No centralized dispatcher; all cores do actual work when work exists.*
 - **GNU Parallel:** 9.6% total (2.68 / 28 cores), 6% useful work (1.68 / 28) — *1 full core used strictly for dispatching work; 1.68 cores doing actual work.*
 
+### Python Frontend (forkrun 0.18.0 — `python/`)
+
+*10M lines (large), median of 5, same i9-7940X class hardware. Method: `python/benchmarks/` (`run_all.py --scale large`). CPU% = attributable process-tree CPU (self + reaped children) over wall × cores — not system-wide. Full record: `python/benchmarks/results/large.md` + `large.csv`.*
+
+| Workload | forkrun Python | Baseline | Speedup | CPU% | Notes |
+|----------|---------------|----------|---------|------|-------|
+| Python no-op (map) | **182 M lines/s** | — | — | 6% | claim/ack via ctypes; overhead-bound at 10M, not compute-bound |
+| Python transform (upper) | **63 M lines/s** | 9.8 M/s serial | **6.4×** | 7% | `bytes(batch.data).upper()`; parent collect is the serial bottleneck |
+| Python compute (sum) | **53 M lines/s** | — | — | 21% | `sum(memoryview)` |
+| C plugin callback | **54 M lines/s** | — | — | 11% | ctypes → C function |
+| Spawn external (`cat`) | **15.1 M lines/s** | — | — | 12% | subprocess amortized by batching |
+| JSONL ingestion | **3.6 M records/s** | — | — | 27% | `json.loads` per record; highest CPU (payload-bound) |
+| Filter + transform | **31 M lines/s** | — | — | — | grep-like + upper |
+| Aggregation (sum) | **50 M lines/s** | — | — | — | int parse + sum |
+
+*Unmeasured cells show "—" (pool baselines are small-scale-only by design; per-row CPU was sampled on headline rows). No-op/upper/sum hold or improve from 1M (102→182M), i.e. fixed bring-up amortizes.*
+
+| Scenario | Input | Output | Peak RSS | Notes |
+|----------|-------|--------|----------|-------|
+| No output (discard) | 1→8MB | 0 | **+0MB** | perfectly flat, both scales |
+| map (collect-all) | 1→8MB | 1→8MB | **output-sized** | v0.5 design |
+| stream, slow consumer | 10MB | 50MB | **~40–175MB peak** | bounded by window, not stream; spread across runs under investigation (see `large.md`) |
+| stream, 5× amplification | 2MB | 10MB | **bounded** | backpressure active |
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| stream() vs map() | **1.8× faster** | drain overlaps produce (no collect); 1.4× at 1M |
+| ordered vs unordered | **1.34×** | reassembly cost grows with batch count (1.01× at 1M) |
+| First yield latency | **~7ms** | on a 0.5s job |
+
+> New to the Python frontend? Start at [`python/docs/QUICKSTART.md`](python/docs/QUICKSTART.md) — full guides (API, modes, fault tolerance, NUMA, streaming, examples, plugins, performance, troubleshooting, migration) live in [`python/docs/`](python/docs/).
+
+### What These Benchmarks Do NOT Measure
+
+- **NUMA multi-node scaling** — the headline table is UMA single-node
+  (`nodes=1`). NUMA exists and has its own leg (fake-NUMA, `numa=fake=N`),
+  but that is a separate measurement, not this table.
+- **Streamed input** — the headline table ingests from files. Streaming
+  ingest over pipes/sockets is implemented and has its own study
+  ([`benchmarks/results/streaming_vs_file_2026-10-02.md`](benchmarks/results/streaming_vs_file_2026-10-02.md)).
+- **aarch64** — x86_64 only; ARM legs are run manually on hardware.
+- **GPU workloads** — workers are CPU-only by design; GPU work belongs in the parent.
+- **Sub-100k-line jobs** — fixed ~30ms bring-up dominates; use serial Python.
+- **Spawn vs bash `-X`** — Python `subprocess` (~1–5ms/batch) vs `posix_spawnp` (~10µs); bash wins for external binaries by design.
+- **Cold I/O** — inputs are page-cached/tmpfs; cold disk adds a floor both sides.
+- **Pool baselines at scale** — `multiprocessing.Pool` rows are small-scale only (per-line pickling would blow the budget proving nothing new).
+
 ---
 
 ## 🧠 How It Works: The Physics of forkrun
@@ -5092,24 +6416,31 @@ forkrun is designed to run anywhere with zero friction:
 **Supported bash versions** (v3.6.0 verification status — bootstrap = source + load + `ring_version`; suites = 96 + 264):
 
 > **Two-axis reality (read both):** the *bash* axis below was verified on
-> new-glibc iron. Independently, the shipped x86-64 loadables carry **no**
-> `GLIBC_ABI_GNU2_TLS` requirement (D-TLS: rebuilt with
-> `-mtls-dialect=gnu`, dropping the gcc-16 TLSDESC codegen; verified
-> zero references, max `GLIBC_2.38` across all shipped blobs). So glibc
-> ≥2.38 loads (Ubuntu 24.04's 2.39 OK); Debian 12 (2.36) and RHEL ≤9
-> remain below the floor. Non-x86 blobs never carried the requirement.
-> Pure-shell parsing works everywhere regardless, but that is not a
-> usable state without the engine.
+> new-glibc iron. Independently, the shipped loadables (x86-64 v2/v3/v4,
+> aarch64, ppc64le, s390x) are now built in the `manylinux_2_28`
+> environment and carry **no** `GLIBC_ABI_GNU2_TLS` requirement (D-TLS)
+> and a maximum `GLIBC_2.28` symbol requirement (verified by
+> `tools/check_glibc_versions.py`). So glibc ≥2.28 loads on those arches
+> (RHEL 8's 2.28, Debian 10+, Ubuntu 20.04+). The riscv64 blob is built
+> on a newer glibc and remains at `GLIBC_2.38` (riscv64 is an advisory
+> architecture). Pure-shell parsing works everywhere regardless, but that
+> is not a usable state without the engine.
 
 | Bash | Bootstrap + smoke ×10 | Full suites | Status (on new glibc) |
 |------|----------------------|-------------|----------------------|
-| 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; RHEL8 glibc (2.28) still below the 2.38 floor |
+| 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; glibc 2.28 floor now satisfied |
 | 5.0 | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable |
 | 5.1 | ✅ 10/10 incl. round-trips (D-SEGFIX, source-built 5.1.0 + extracted 5.1.16, byte-exact) | — (suites run on 5.2/5.3 only) | ✅ usable |
-| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 96 + 264, zero failures | **fully verified** |
-| 5.3 | ✅ 10/10 incl. round-trips | ✅ 96 + 264, zero failures | **fully verified** |
+| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+| 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
 
-> **Effective floor (W-REL5-D): bash ≥4.4.** D-SEGFIX landed (worker segfault root-caused to the engine's `ARRAY`-struct walk + fixed via pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in the v3.6.0 blob cycle. glibc ≥2.38 (D-TLS rebuild, this cycle).
+> **Effective floor (W-REL5-D + WO-COMPAT-03): bash ≥4.4, glibc ≥2.28** on
+> x86-64/aarch64/ppc64le/s390x (riscv64 ≥2.38). D-SEGFIX landed (worker
+> segfault root-caused to the engine's `ARRAY`-struct walk + fixed via
+> pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in
+> the v3.6.0 blob cycle. glibc floor lowered from 2.38 to 2.28 by
+> rebuilding every non-riscv64 blob in `manylinux_2_28` (verified by
+> `tools/check_glibc_versions.py` and an end-to-end round-trip on glibc 2.28).
 
 ---
 
@@ -5155,24 +6486,66 @@ This guarantees absolute, immediate failure detection without requiring the orch
 
 ---
 
-## §2. Transient Failure: Graceful Recovery & Self-Healing
+## §2. Transient Failure: Parent-Side Transaction Recovery (W-PY29)
 
-When a worker dies gracefully (e.g., a command returns a non-zero exit code while `-E` is active), the worker's `EXIT` trap executes a multi-step rollback and recovery protocol.
+Every batch runs inside a per-worker transaction record (`WorkerTxn`,
+one 128B cache line per worker in MAP_SHARED `GlobalState`). The
+worker publishes at claim and clears at ack; the PARENT recovers on
+any death. The worker's EXIT trap is cleanup-only (it must never
+escrow — that would double-deposit).
 
-### 2.1 Output Reversion (Transaction Rollback)
-To preserve Exactly-Once semantics, any partial data the failing worker wrote to its output buffer must be erased before the batch is retried. 
-The worker calls `ring_revert_output`, which uses `ftruncate` and `lseek` to roll the worker's output `memfd` back to the exact byte offset recorded prior to the batch starting. 
+### 2.1 The 4-State Machine
 
-### 2.2 The Escrow Deposit
-The worker calls `ring_escrow_put`, dropping the metadata for the failed batch (byte offset, number of lines) into the lock-free Escrow side-channel. Crucially, it increments the `num_kills` counter for this specific batch.
+```
+                    claim
+IDLE ─────────────→ CLAIMING ────── claim failed (EOF/abort) ─────→ IDLE
+                       │                      (only legal backward edge)
+                       │ successful publication (release store, LAST)
+                       ▼
+                    CLAIMED
+                       │
+                       │ begin ack side effects
+                       ▼
+                 COMMITTING
+                       │
+                       │ all ack side effects complete
+                       ▼
+                     IDLE
+```
 
-### 2.3 The `TRAP_ACK` Handshake
-The dying worker sends its `wID` down the `TRAP_ACK` pipe to the parent orchestrator, signaling: *"I have safely rolled back my state and secured the data."* The worker then exits.
+Happy-path cost is four cache-local release stores (~2ns total). No
+CAS, no fences beyond the publish/clear release-acquire pair, no
+syscalls on the claim path.
 
-### 2.4 The Orchestrator Respawn
-The `ring_poll` reactor observes the `WORKER_DEATH` event. Because the exit was non-zero, it instantly spawns a replacement worker on the same NUMA node to maintain pipeline capacity. Due to the **Escrow Priority Inversion** rule, the first thing the new (or any idle) worker does is check the Escrow pipe, claim the abandoned batch, and execute it. 
+### 2.2 Output Rollback Without lseek
 
-If the failure was transient, the replacement worker succeeds, and the pipeline continues with zero data loss and zero sequence corruption.
+Each worker holds a TLS `worker_output_end` cursor: the byte position
+right after the most recently completed batch. It is initialized once
+per worker (fresh or respawned) from the output fd's live position
+(the only cursor `lseek`), snapshotted as `output_start` at claim,
+and advanced only after a COMPLETE emit succeeds — never during
+partial emission. Recovery truncates regular files to `output_start`
+(`ftruncate` + `lseek`); pipes are at-least-once (guarded by
+`S_ISREG`, never grown).
+
+### 2.3 The Escrow Deposit (Parent-Side)
+
+Recovery deposits the orphan batch metadata into the lock-free Escrow
+side-channel with `num_kills + 1`, routed to the dead worker's NUMA
+node (locality survives death). The first idle worker re-claims it
+(Escrow Priority Inversion); the poison threshold converts loops
+into skips (§3). Both reactors call recovery for EVERY death,
+including exit 0 — the C state machine classifies:
+
+| State + death | Decision |
+|---|---|
+| `IDLE` + exit 0, or error at EOF | NORMAL_EXIT (free slot) |
+| `IDLE` + error mid-stream | NO_BATCH (respawn, nothing lost) |
+| `CLAIMING` + any death | RACE → abort/resume (ticket unattributable) |
+| `CLAIMED`, already committed | ALREADY_DONE (clear, respawn/free) |
+| `CLAIMED`, orphan, error exit | RECOVERED (revert + escrow + respawn) |
+| `CLAIMED`, orphan, exit 0 | FATAL (worker bug — abort) |
+| `COMMITTING` + any death | RACE → abort/resume (commit ambiguous) |
 
 ---
 
@@ -5185,15 +6558,38 @@ If a specific batch of data is fundamentally malformed, it will persistently kil
 3. **The Safe Skip:** The worker skips processing the batch entirely. It acknowledges (`ring_ack`) the batch to ensure global pipeline ordering continues, prints a warning to `stderr`, and alerts the orchestrator.
 4. **The Global State:** The orchestrator records the poisoned batch index and alters the final pipeline exit code to `3` to explicitly notify the user of partial data loss. 
 
+### 3.1 Final-Attempt Coredumps (W-PY30)
+
+Coredumps are disabled by default on every worker (soft
+`RLIMIT_CORE` 0 at startup; the generous hard limit is preserved so
+re-enabling needs no privilege). They are armed for exactly one
+batch execution: the final allowed escrow attempt — the running
+attempt with `num_kills + 1 == RETRY_LIMIT`, whose failure poisons
+the batch. Success, poison-skip, and soft-fail (escrow deposit)
+paths disarm, so the enabled limit never leaks into later batches.
+A death in the armed window produces exactly one core per poisoned
+batch; batches the auto-retry saves never dump. `coredump_filter`
+is pinned to `0x31` (anonymous-private + ELF headers + hugetlb-private) so the dump
+excludes the multi-GB shared ingress arenas. Accepted cost: the
+dump delays death-pipe visibility on final-attempt crashes — but
+that batch is being poisoned regardless, so the latency never
+delays a save. 
+
 ---
 
-## §4. Catastrophic Failure: The Seqlock Ledger & Checkpoints
+## §4. Catastrophic Failure: Conservative Abort + Seqlock Ledger
 
-If a worker suffers a catastrophic death (e.g., `SIGKILL`), it cannot execute its `EXIT` trap. It cannot revert its output, and it cannot deposit the batch into Escrow.
+A `CLAIMING` or `COMMITTING` death (§2.3, RACE) cannot be recovered
+locally: the ticket is unattributable (claim race) or the commit is
+ambiguous (ack race — re-execution could double-emit). The reactor
+aborts the run and the Seqlock ledger below carries the resume.
 
-### 4.1 The 3-Second Grace Period
-When the `ring_poll` reactor catches a `WORKER_DEATH` event, it increments a `trap_ack_pending` counter for that `wID`. If a corresponding `TRAP_ACK` arrives, the counter decrements to 0. 
-If the counter is > 0, an asynchronous 3,000-millisecond countdown begins. If the timer expires and the counter is still > 0, the orchestrator declares a **Catastrophic Failure** and triggers a global `ring_abort`. 
+### 4.1 No Grace Period
+
+There is no trap-ACK wait and no timeout: recovery runs
+synchronously in the death handler (revert + escrow deposit are a few
+microseconds), so every death is classified the moment the death pipe
+fires. `TRAP_ACK` carries poison-skip notices only.
 
 ### 4.2 The Seqlock Ledger
 The `ring_order` thread acts as a deterministic observer. As batches successfully complete, `ring_order` merges them. Because batches finish out of order, the leading edge of completed work is "jagged." 
@@ -5227,7 +6623,11 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
 *Preconditions:* output must go to a seekable file (truncation is impossible on pipes/terminals — those downgrade to at-least-once); the user must truncate to the byte count in the crash message before resuming; and the orchestrator must survive long enough to write the checkpoint (SIGKILL to `frun` itself yields no checkpoint — SIGTERM/SIGINT/SIGHUP and SLURM USR1 with `FORKRUN_PREEMPT_MODE` are trapped and checkpointed).
 
 * **Ordered (`-k`) & Buffered (`--buffered`) Modes: EXACTLY-ONCE DELIVERY.**
-  Because partial output is physically reverted (`ftruncate`) inside the per-worker `memfd` upon a graceful crash, and because catastrophic crashes trigger a mathematically absolute byte-coordinate resumption, surviving data is guaranteed to be committed to the final output stream exactly once. 
+  Because partial output is physically reverted (`ftruncate` to the
+  transaction cursor) by parent-side recovery on any crash, and
+  because ambiguous-window crashes abort into a mathematically
+  absolute byte-coordinate resumption, surviving data is guaranteed
+  to be committed to the final output stream exactly once. 
 * **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
   Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
 
@@ -5242,6 +6642,8 @@ Because resume files dictate commands and environment restoration, `forkrun` enf
 3. **Layer 3 (Authorization Decision Gate):** Double-token frame split; custom setup commands and functions are evaluated only after interactive user authorization.
 
 See [`SECURITY.md`](SECURITY.md) for the complete security specification.
+
+---
 
 ## §7. Verified Envelopes: Streaming + NUMA Tier-3 Recovery (W-PY34)
 
@@ -5321,7 +6723,6 @@ the dead worker's node (`txn->node`), never the parent's:
 - Realtime (`-u`) delivery (at-least-once by physics, §5.2).
 - Scheduling work onto unworked nodes (see 7.3.1 — documented
   constraint, not a tested path).
-
 
 -----------------------------------------
 # SECURITY.md
@@ -5444,7 +6845,6 @@ what will run.
    attacker with same-UID file-write can already do strictly worse. The
    sandbox contains the code's *effects* (dead PATH, restricted shell,
    re-render); it does not contain process-signal effects.
-
 
 -----------------------------------------
 # SHAPES.md
@@ -5648,31 +7048,3 @@ Check: MAINTAINERS.md §5. Match.
 ---
 
 *See also: INVARIANTS.md (the laws, as audit rules) · PHYSICS.md (the metaphor) · EOF_PROTOCOL.md (Shapes 3 & 5 in their purest form) · ARCHITECTURE.md §Core Invariant (§0's short form).*
-
-### W-REL5-B: Python behavioral correctness (behavioral notes)
-
-- `sink=` ownership: only `run()` owns a worker-side sink. The
-  collecting frontends (`map`/`stream`/`sweep`) reject it loudly
-  instead of ignoring it — the payload return value is the result
-  there, and a second result channel would be a silent-drop trap.
-- Stream taxonomy is uniform now: `SIGINT` during `stream()`
-  iteration raises `ForkrunInterrupted` (catchable as either
-  `forkrun.ForkrunInterrupted` or `KeyboardInterrupt`), exactly
-  like the blocking paths.
-- Ingest-reactor liveness: the spill supervises (death pipes,
-  trap-ACK deadlines, stall fork) per quantum even when the
-  source yields nothing for seconds. A pre-gate SIGKILL that
-  lands mid-claim still aborts loudly (claim-without-publish
-  race, rc==4) — observation is prompt; attribution limits are
-  engine semantics, unchanged by this wave.
-- Helper joins are bounded (10s; orderer 10s via
-  `ORDERER_REAP_TIMEOUT`; post-abort worker reaps 3s via
-  `WORKER_REAP_TIMEOUT`) with a naming alarm; worker completion
-  joins are unbounded by design.
-- `reactor_poll_once` blocks at most `poll_timeout` plus a
-  bounded 0.5s death-confirm spin; longer absences mean the
-  child is alive, not that the poll hung.
-- Worker-failure `RuntimeError`s carry `.signo` (first signal
-  death or `None`); the class contract is unchanged (signal
-  causes with taxonomy classes, engine faults plain
-  `RuntimeError`).

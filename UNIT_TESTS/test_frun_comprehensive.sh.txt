@@ -19,7 +19,8 @@
 #
 # USAGE:
 #   Run from repo root:           bash UNIT_TESTS/test_frun_comprehensive.sh
-#   Run with verbose failure info: VERBOSE=true bash UNIT_TESTS/test_frun_comprehensive.sh
+#   Failure diagnostics are always printed; VERBOSE=true raises the
+#   per-stream line cap from 20 to 200.
 #   Run single section:           SECTION=B bash UNIT_TESTS/test_frun_comprehensive.sh
 # ============================================================================
 
@@ -58,8 +59,8 @@ fi
 
 # Version Pin & Run Stamp at top of comprehensive suite:
 FRUN_VER="$(bash -c "source '$FRUN_SOURCE' && frun -V" 2>/dev/null || echo 'unknown')"
-if [[ "$FRUN_VER" != "forkrun v3.6.0" ]]; then
-    echo "FATAL: Comprehensive suite requires 'forkrun v3.6.0', got '$FRUN_VER'" >&2
+if [[ "$FRUN_VER" != "forkrun v3.6.2" ]]; then
+    echo "FATAL: Comprehensive suite requires 'forkrun v3.6.2', got '$FRUN_VER'" >&2
     exit 1
 fi
 echo "==================================================================" >&2
@@ -99,6 +100,26 @@ _print_result() {
     esac
 }
 
+# Failure diagnostics are ALWAYS printed. The old gate on VERBOSE meant CI
+# (which does not set it) reported a bare "output mismatch" with no actual,
+# expected, or stderr — exactly the evidence needed to tell a product bug
+# from harness noise. VERBOSE now only widens the per-stream line cap.
+_print_failure_diag() {
+    local cmd="$1" reason="$2" expected="$3" actual="$4" err="${5:-}"
+    local _n=20
+    [[ "${VERBOSE:-}" == "true" ]] && _n=200
+    echo -e "    ${YELLOW}cmd:${NC} $cmd"
+    echo -e "    ${YELLOW}reason:${NC} $reason"
+    echo -e "    ${YELLOW}expected (first ${_n} lines):${NC}"
+    printf '%s\n' "$expected" | head -n "$_n" | sed 's/^/      /'
+    echo -e "    ${YELLOW}actual (first ${_n} lines):${NC}"
+    printf '%s\n' "$actual" | head -n "$_n" | sed 's/^/      /'
+    if [[ -n "$err" ]]; then
+        echo -e "    ${YELLOW}stderr (first ${_n} lines):${NC}"
+        printf '%s\n' "$err" | head -n "$_n" | sed 's/^/      /'
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # run_test_exact: exact stdout comparison (both sides compared as-is)
 # Use for: ordered output, single-line outputs, version strings
@@ -125,12 +146,7 @@ run_test_exact() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
-            echo -e "    ${YELLOW}cmd:${NC} $cmd"
-            echo -e "    ${YELLOW}expected:${NC} $(echo "$expected" | head -3 | sed 's/^/      /')"
-            echo -e "    ${YELLOW}actual:${NC}   $(echo "$out" | head -3 | sed 's/^/      /')"
-            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC}   $(echo "$err" | head -3 | sed 's/^/      /')"
-        fi
+        _print_failure_diag "$cmd" "$reason" "$expected" "$out" "$err"
     fi
 }
 
@@ -178,11 +194,7 @@ run_test_sorted() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
-            echo -e "    ${YELLOW}cmd:${NC} $cmd"
-            echo -e "    ${YELLOW}reason:${NC} $reason"
-            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC} $(echo "$err" | head -3 | sed 's/^/      /')"
-        fi
+        _print_failure_diag "$cmd" "$reason" "$expected" "$out" "$err"
     fi
 }
 
@@ -213,11 +225,7 @@ run_test_regex() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
-            echo -e "    ${YELLOW}cmd:${NC}     $cmd"
-            echo -e "    ${YELLOW}regex:${NC}   $regex"
-            echo -e "    ${YELLOW}content:${NC} $(echo "$content" | head -3 | sed 's/^/      /')"
-        fi
+        _print_failure_diag "$cmd" "$reason" "regex: $regex" "$content" "$err"
     fi
 }
 
@@ -249,11 +257,7 @@ run_test_line_count() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
-            echo -e "    ${YELLOW}cmd:${NC} $cmd"
-            echo -e "    ${YELLOW}$reason${NC}"
-            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC} $(echo "$err" | head -3 | sed 's/^/      /')"
-        fi
+        _print_failure_diag "$cmd" "$reason" "expected lines: $expected_lines" "actual lines: $actual_lines" "$err"
     fi
 }
 
@@ -3744,103 +3748,57 @@ FUNCEOF
 fi
 
 # --- R5: Sweep inline args (:::) with {1}-{2} substitution ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo {1}-{2} ::: a b c ::: 1 2 2>&1 | sort")
-    _REXP="a-1
+# Application stdout is compared independently of stderr: the helper
+# captures stderr separately, so engine advisories (e.g. the THP hint)
+# can never be sorted into the data and reported as an output mismatch.
+run_test_sorted R "R5: Sweep inline args (:::) with {1}-{2}" \
+    "frun echo {1}-{2} ::: a b c ::: 1 2" \
+    "a-1
 a-2
 b-1
 b-2
 c-1
 c-2"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R5: Sweep inline args (:::) with {1}-{2}"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R5: Sweep inline args (:::) with {1}-{2}"
-    else
-        TEST_RESULTS["R5: Sweep inline args (:::) with {1}-{2}"]="FAIL"
-        TEST_ERRORS["R5: Sweep inline args (:::) with {1}-{2}"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R5: Sweep inline args (:::) with {1}-{2}" "output mismatch"
-    fi
-fi
 
 # --- R6: Sweep inline args (:::) default args ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo ::: a b c ::: 1 2 2>&1 | sort")
-    _REXP="a 1
+run_test_sorted R "R6: Sweep inline args (:::) default args" \
+    "frun echo ::: a b c ::: 1 2" \
+    "a 1
 a 2
 b 1
 b 2
 c 1
 c 2"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R6: Sweep inline args (:::) default args"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R6: Sweep inline args (:::) default args"
-    else
-        TEST_RESULTS["R6: Sweep inline args (:::) default args"]="FAIL"
-        TEST_ERRORS["R6: Sweep inline args (:::) default args"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R6: Sweep inline args (:::) default args" "output mismatch"
-    fi
-fi
 
 # --- R7: Sweep file args (::::) default args ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/R_SWEEP2"; mkdir -p "$_MD"
-    printf "x\ny\nz\n" > "$_MD/f1.txt"
-    printf "100\n200\n" > "$_MD/f2.txt"
-
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo :::: '$_MD/f1.txt' :::: '$_MD/f2.txt' 2>&1 | sort")
-    _REXP="x 100
+_MD="$TEST_DIR/R_SWEEP2"; mkdir -p "$_MD"
+printf "x\ny\nz\n" > "$_MD/f1.txt"
+printf "100\n200\n" > "$_MD/f2.txt"
+run_test_sorted R "R7: Sweep file args (::::) default args" \
+    "frun echo :::: '$_MD/f1.txt' :::: '$_MD/f2.txt'" \
+    "x 100
 x 200
 y 100
 y 200
 z 100
 z 200"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R7: Sweep file args (::::) default args"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R7: Sweep file args (::::) default args"
-    else
-        TEST_RESULTS["R7: Sweep file args (::::) default args"]="FAIL"
-        TEST_ERRORS["R7: Sweep file args (::::) default args"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R7: Sweep file args (::::) default args" "output mismatch"
-    fi
-fi
 
 # --- R8: Sweep --link zip mode ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun --link echo ::: a b c ::: 1 2 3 2>&1 | sort")
-    _REXP="a 1
+run_test_sorted R "R8: Sweep --link zip mode" \
+    "frun --link echo ::: a b c ::: 1 2 3" \
+    "a 1
 b 2
 c 3"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R8: Sweep --link zip mode"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R8: Sweep --link zip mode"
-    else
-        TEST_RESULTS["R8: Sweep --link zip mode"]="FAIL"
-        TEST_ERRORS["R8: Sweep --link zip mode"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R8: Sweep --link zip mode" "output mismatch"
-    fi
-fi
 
 # --- R9: Sweep with bash function ---
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(bash -c "source '$FRUN_SOURCE' && my_func() { echo \"\$1:\$2\"; }; frun my_func ::: a b ::: 1 2 2>&1 | sort" 2>/dev/null)
-    _REXP="a:1
+# Single-quoted: $1/$2 must reach the worker function definition, not be
+# expanded by the test process.
+run_test_sorted R "R9: Sweep with bash function" \
+    'my_func() { echo "$1:$2"; }; frun my_func ::: a b ::: 1 2' \
+    "a:1
 a:2
 b:1
 b:2"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R9: Sweep with bash function"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R9: Sweep with bash function"
-    else
-        TEST_RESULTS["R9: Sweep with bash function"]="FAIL"
-        TEST_ERRORS["R9: Sweep with bash function"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R9: Sweep with bash function" "output mismatch"
-    fi
-fi
 
 # --- R10: SLURM SIGTERM triggers checkpoint and exit 143 ---
 # Verifies that standard SLURM scancel/preemption (SIGTERM) is caught and handled identically to SIGUSR1
@@ -3900,25 +3858,16 @@ FUNCEOF
 fi
 
 # --- R12: Sweep file args from stdin (:::: -) ---
-# Verifies the mapfile /dev/stdin branch works perfectly
-if in_section R; then
-    ((TOTAL_TESTS++))
-    _ROUT=$(printf "x\ny\nz\n" | bash -c "source '$FRUN_SOURCE' && frun echo ::: a b :::: - 2>&1 | sort")
-    _REXP="a x
+# Verifies the mapfile /dev/stdin branch works perfectly. The pipeline is
+# part of the command, so stderr remains separately captured by the helper.
+run_test_sorted R "R12: Sweep file args from stdin (:::: -)" \
+    "printf 'x\ny\nz\n' | frun echo ::: a b :::: -" \
+    "a x
 a y
 a z
 b x
 b y
 b z"
-    if [[ "$_ROUT" == "$_REXP" ]]; then
-        TEST_RESULTS["R12: Sweep file args from stdin (:::: -)"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "R12: Sweep file args from stdin (:::: -)"
-    else
-        TEST_RESULTS["R12: Sweep file args from stdin (:::: -)"]="FAIL"
-        TEST_ERRORS["R12: Sweep file args from stdin (:::: -)"]="out: $_ROUT"
-        ((FAILED_TESTS++)); _print_result FAIL "R12: Sweep file args from stdin (:::: -)" "output mismatch"
-    fi
-fi
 
 # --- R13: Sweep --link zip mode truncates uneven arrays safely ---
 # Verifies the bash orchestrator safely truncates to the shortest length and warns the user
@@ -4902,12 +4851,44 @@ FUNCEOF
     fi
 fi
 
+# Independent post-driver cleanup verifier for the T12 teardown.  Reads
+# a .t12_gate_diag and prints every PID it names that is still a live
+# (non-zombie) process.  The driver's own `cleanup:` verdict is computed
+# INSIDE the driver, after ITS teardown; this is the parent-side check
+# that the same evidence supports it.  The two teardown modes stay
+# distinct:
+#   - a safe process group is the unit, and its live members are the
+#     survivors;
+#   - without one, the captured set is the wrapper, the cleanroom and
+#     EVERY serialized fallback victim.
+# A zombie is not a survivor (kill -0 would call it one).
+_t12_diag_survivors() {
+    local _diag="$1" _pgid _pid _st
+    _pgid=$(sed -n 's/^process_group: //p' "$_diag" 2>/dev/null | head -n 1)
+    if [[ "$_pgid" =~ ^[0-9]+$ ]] && (( _pgid > 1 )); then
+        ps -eo pgid=,stat=,pid= 2>/dev/null |
+            awk -v p="$_pgid" '$1==p && $2 !~ /^Z/ && !seen[$3]++ {print $3}'
+        return 0
+    fi
+    sed -n -e 's/^wrapper_pid: //p' \
+           -e 's/^cleanroom_pid: //p' \
+           -e 's/^fallback_victims: //p' "$_diag" 2>/dev/null |
+        tr ' ' '\n' |
+        awk 'NF && !seen[$0]++' |
+        while read -r _pid; do
+            [[ "$_pid" =~ ^[0-9]+$ ]] || continue
+            _st=$(ps -o stat= -p "$_pid" 2>/dev/null | tr -d '[:space:]')
+            [[ -n "$_st" && "$_st" != Z* ]] && printf '%s\n' "$_pid"
+        done
+}
+
 # --- T12 (v2): jagged-straddle resume — buffered mode + batch-membership stall ---
 # BUFFERED mode (not -k): the tracker records every COMPLETED batch, so the
 # checkpoint has real jagged intervals (in ordered mode, un-emitted completed
-# batches are untracked — see note). HUP lands mid-drain (size-gated);
-# batches completing out of order around the frontier become the jagged
-# edge (W-PY28: crashes recover instead of aborting, so the checkpoint
+# batches are untracked — see note). HUP lands only after the crash hole is
+# open AND the buffered drain has gone quiet (size-stable gate), so batches
+# completing out of order around the frontier are guaranteed to be in the
+# checkpoint (W-PY28: crashes recover instead of aborting, so the checkpoint
 # comes from an operator HUP, not a kill).
 # Resume with -l 37: run-2 batches straddle those intervals.
 # F-T12-RACE: the crash batch (holding line 19500) kill-loops until HUP.
@@ -4921,34 +4902,303 @@ fi
 if in_section T2; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/T12"; mkdir -p "$_MD"
-    seq 20000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 20000 > "$_MD/input.txt"
+    rm -f "$_MD/.forkrun_resume" "$_MD/.t12_crash_hole" \
+          "$_MD/.t12_gate_timeout" "$_MD/.t12_gate_diag"
 
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_batch6() {
     # W-PY28: per-line burn (busy first: each cascade re-execution also
     # burns, delaying poison-fill well past the HUP below), then a
     # crash-once kill for the batch holding line 19500 (~97.5%): the
-    # kill opens a genuine hole with completed batches beyond it, and
-    # the HUP lands ~0.2s later — long before the ~3s poison cascade
-    # could fill it. That hole + backlog is the jagged edge. On resume
-    # (checkpoint exists) the batch runs normally to completion.
+    # kill opens a genuine hole with completed batches beyond it. On
+    # resume (checkpoint exists) the batch runs normally to completion.
     for a in "$@"; do for ((j=0;j<2000;j++)); do :; done; done
     if [[ " $* " == *" 19500 "* ]] && ! [[ -f ./.forkrun_resume ]]; then
+        # Dedicated marker: the kill below is the crash hole. The HUP gate
+        # waits for this file before it will call the hole established.
+        : > .t12_crash_hole
         kill -9 $BASHPID
     fi
     printf '%s\n' "$@"
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_RETRY_LIMIT='-1' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 crash_batch6 > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
-        > /dev/null 2>&1
+    # At least two workers are required for a completed batch to exist
+    # beyond the crash hole; use the host's CPU count otherwise.
+    _T12_JOBS=$(nproc 2>/dev/null || echo 2)
+    (( _T12_JOBS < 2 )) && _T12_JOBS=2
 
-    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+    # HUP trigger: a byte threshold alone is not sufficient. 100000 bytes
+    # is reached ~500 batches before the hole on a fast host, so the HUP
+    # could land before line 19500 was ever claimed — CI then checkpointed
+    # with jagged=0 (a false failure; the data itself was exact). Gate on
+    # the crash signature instead: the self-kill writes .t12_crash_hole
+    # immediately before dying and pins `-l 100` batch [19401..19500]
+    # forever under retry=-1, so once every batch beyond it has completed
+    # the output size stops advancing. Require the marker, the floor, AND
+    # 8 consecutive unchanged samples (1.6s) before signalling. The gate
+    # is mandatory: exhausting the poll loop without it is a test failure,
+    # never a silent HUP.
+    cat > "$_MD/hup.sh" <<EOF
+#!/usr/bin/env bash
+cd '$_MD'
+source '$FRUN_SOURCE'
+source funcs.sh
+rm -f .hup_ready
+# Job control gives this pipeline its own process group. That group is
+# the test-scoped teardown unit: wrapper, cleanroom, workers, helpers
+# and the input cat are all members. \$! is the pipeline wrapper (the
+# last-command subshell), NOT the cleanroom -- the pidfile identifies
+# the cleanroom reactor separately.
+set -m
+cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_RETRY_LIMIT='-1' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 -j $_T12_JOBS crash_batch6 > output1.txt 2>err1.txt &
+_frun_pid=\$!
+set +m
+_frun_pgid=\$(ps -o pgid= -p "\$_frun_pid" 2>/dev/null | tr -d '[:space:]')
+_t12_self_pgid=\$(ps -o pgid= -p \$\$ 2>/dev/null | tr -d '[:space:]')
+if [[ ! "\${_frun_pgid:-}" =~ ^[0-9]+\$ ]] || (( \${_frun_pgid:-0} <= 1 )) || [[ "\${_frun_pgid:-}" == "\${_t12_self_pgid:-}" ]]; then
+    _frun_pgid=
+fi
+# Test-only: pretend no safe process group exists so the snapshot-based
+# fallback teardown is exercised on hosts where job control always
+# yields one.  Does nothing else -- the kill sequence, the survivor
+# check and the parent-side verification all run their real code.
+if [[ -n "\${FORKRUN_T12_FORCE_FALLBACK:-}" ]]; then _frun_pgid=; fi
+_hup_target=
+for _i in \$(seq 1 100); do
+    if [[ -s .hup_ready ]]; then _hup_target=\$(cat .hup_ready); break; fi
+    sleep 0.2
+done
+_THRESH=100000
+# 1000 samples = 200s. The gate must actually be reached now, so leave
+# headroom over the ~78 samples observed on a 4-CPU host; a stuck gate
+# still fails (with diagnostics) instead of signalling.
+#
+# FORKRUN_T12_GATE_MAX overrides the sample budget. It exists so the
+# NOT-REACHED branch -- and therefore the teardown/cleanup evidence
+# below -- can be exercised deterministically (e.g. =3) instead of
+# waiting for a real stall.
+_MAX=\${FORKRUN_T12_GATE_MAX:-1000}
+# True only for a live (non-zombie) process. kill -0 still succeeds for
+# an unreaped zombie, which must not be treated as a survivor.
+_t12_pid_running() {
+    local _st
+    _st=\$(ps -o stat= -p "\${1:-}" 2>/dev/null | tr -d '[:space:]')
+    [[ -n "\$_st" && "\$_st" != Z* ]]
+}
+# True while the pipeline's process group still contains a live process.
+_t12_group_running() {
+    [[ -n "\${_frun_pgid:-}" ]] || return 1
+    ps -eo pgid=,stat= 2>/dev/null | awk -v p="\$_frun_pgid" '\$1==p && \$2 !~ /^Z/ {found=1} END{exit(found?0:1)}'
+}
+# Fallback when no safe process group could be established: recursively
+# enumerate the wrapper's descendants BEFORE signalling, because after
+# the wrapper dies its children are reparented and no longer discoverable.
+_t12_tree_pids() {
+    local _p
+    printf '%s\n' "\$1"
+    for _p in \$(pgrep -P "\$1" 2>/dev/null); do
+        _t12_tree_pids "\$_p"
+    done
+}
+# Direct children of THIS shell, read from /proc.  Under job control the
+# pipeline's first element (the input \`cat\`) is a SIBLING of the wrapper
+# -- bash forks each element directly -- so the wrapper's subtree alone
+# does not describe the job.  Reading /proc instead of \`pgrep -P \$\$\`
+# also keeps the scan from listing its own helper: a \$(pgrep ...)
+# subshell becomes the pgrep process and shows up as a child of this
+# shell, whereas here the only processes are the ones we may need to
+# kill.
+_t12_direct_children() {
+    local _d _f _stat
+    for _d in /proc/[0-9]*; do
+        _stat=
+        { read -r _stat < "\$_d/stat"; } 2>/dev/null
+        [[ -n "\$_stat" ]] || continue
+        _stat="\${_stat##*) }"   # drop "pid (comm) "
+        _stat="\${_stat#* }"     # drop state, leaving "ppid ..."
+        [[ "\${_stat%% *}" == "\$\$" ]] || continue
+        _f="\${_d#/proc/}"
+        printf '%s\n' "\$_f"
+    done
+}
+_t12_any_running() {
+    local _p
+    for _p in "\$@"; do
+        _t12_pid_running "\$_p" && return 0
+    done
+    return 1
+}
+_t12_gate_fail() {
+    local _reason="\$1"
+    # Snapshot the teardown set BEFORE signalling: once the wrapper dies
+    # its children are reparented and no longer discoverable.  With a
+    # safe process group the group is the unit; without one, take the
+    # wrapper's subtree AND this shell's direct children (see
+    # _t12_direct_children for why the subtree is not the whole job).
+    local -a _victims=()
+    if [[ -z "\${_frun_pgid:-}" ]]; then
+        mapfile -t _victims < <(
+            {
+                if [[ -n "\${_frun_pid:-}" ]]; then
+                    _t12_tree_pids "\$_frun_pid"
+                fi
+                _t12_direct_children
+            } | awk 'NF && !seen[\$0]++'
+        )
+    fi
+    {
+        echo "reason: \$_reason"
+        echo "attempt: \${_j:-0}/\${_MAX:-1000}"
+        echo "output_size: \${_last:-0} (floor \${_THRESH:-0})"
+        echo "stable_samples: \${_stable:-0}/8"
+        echo "crash_marker: \$([[ -e .t12_crash_hole ]] && echo present || echo missing)"
+        echo "hup_pidfile: \$([[ -n "\${_hup_target:-}" ]] && echo present || echo missing)"
+        echo "wrapper_pid: \${_frun_pid:-missing}"
+        echo "cleanroom_pid: \${_hup_target:-missing}"
+        echo "process_group: \${_frun_pgid:-unavailable}"
+        # The exact set the fallback teardown signalled.  Recorded even
+        # when empty so the parent can tell "no fallback" from "fallback
+        # that captured nothing".
+        echo "fallback_victims: \${_victims[*]:-}"
+        echo "err1.txt tail:"
+        tail -n 5 err1.txt 2>/dev/null
+    } > .t12_gate_diag
+    : > .t12_gate_timeout
+
+    # TERM the actual cleanroom first so frun's trap can reap workers and
+    # helpers. Then TERM the whole test-scoped process group, which also
+    # covers the missing-pidfile case.
+    if _t12_pid_running "\${_hup_target:-}"; then
+        kill -TERM "\$_hup_target" 2>/dev/null
+    fi
+    if [[ -n "\${_frun_pgid:-}" ]]; then
+        kill -TERM -- "-\$_frun_pgid" 2>/dev/null
+    else
+        for _p in "\${_victims[@]}"; do
+            _t12_pid_running "\$_p" && kill -TERM "\$_p" 2>/dev/null
+        done
+    fi
+
+    # Bounded grace (5s). Escalate only for a target still running.
+    for _k in \$(seq 1 50); do
+        if [[ -n "\${_frun_pgid:-}" ]]; then
+            _t12_group_running || break
+        else
+            _t12_any_running "\${_victims[@]}" || break
+        fi
+        sleep 0.1
+    done
+
+    if [[ -n "\${_frun_pgid:-}" ]]; then
+        _t12_group_running && kill -KILL -- "-\$_frun_pgid" 2>/dev/null
+    else
+        for _p in "\${_victims[@]}"; do
+            _t12_pid_running "\$_p" && kill -KILL "\$_p" 2>/dev/null
+        done
+    fi
+    # Covers a target that somehow escaped the group; still conditional.
+    if _t12_pid_running "\${_hup_target:-}"; then
+        kill -KILL "\$_hup_target" 2>/dev/null
+    fi
+    if _t12_pid_running "\$_frun_pid"; then
+        kill -KILL "\$_frun_pid" 2>/dev/null
+    fi
+
+    # SIGKILL is immediate, but a target can still be in the kernel's exit
+    # path when the verdict is computed.  Give the teardown UNIT -- the
+    # process group, or every captured PID when there is no safe group --
+    # a bounded chance to leave.  Zombies already count as "not running"
+    # (see _t12_pid_running), so this is about exit, not about reaping.
+    # The bound cannot weaken the verdict: the loop only ends early when
+    # the unit is EMPTY.
+    for _k in \$(seq 1 10); do
+        if [[ -n "\${_frun_pgid:-}" ]]; then
+            _t12_group_running || break
+        else
+            _t12_any_running "\${_victims[@]}" || break
+        fi
+        sleep 0.1
+    done
+
+    wait "\$_frun_pid" 2>/dev/null
+
+    # Cleanup evidence for the caller and for post-mortem diagnostics.
+    # EVERY captured PID is checked, not just the wrapper and the
+    # cleanroom: a helper in the fallback snapshot that survived the kill
+    # must make a "cleanup: complete" verdict impossible.
+    local _left="" _p
+    if [[ -n "\${_frun_pgid:-}" ]] && _t12_group_running; then
+        _left="process-group \${_frun_pgid}"
+    fi
+    for _p in "\${_victims[@]}" "\${_hup_target:-}" "\$_frun_pid"; do
+        [[ "\$_p" =~ ^[0-9]+\$ ]] || continue
+        _t12_pid_running "\$_p" || continue
+        case " \$_left " in
+            *" \$_p "*) ;;
+            *) _left="\${_left:+\$_left }\$_p" ;;
+        esac
+    done
+    if [[ -n "\$_left" ]]; then
+        echo "cleanup_leftover: \$_left" >> .t12_gate_diag
+    else
+        echo "cleanup: complete" >> .t12_gate_diag
+    fi
+    exit 1
+}
+[[ -n "\$_hup_target" ]] || _t12_gate_fail "cleanroom pidfile never appeared"
+_stable=0
+_last=0
+_gate=0
+for _j in \$(seq 1 \$_MAX); do
+    _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0)
+    if [[ -e .t12_crash_hole ]] && (( _sz >= _THRESH )) && (( _sz == _last )); then
+        _stable=\$((_stable + 1))
+    else
+        _stable=0
+    fi
+    _last=\$_sz
+    if (( _stable >= 8 )); then _gate=1; break; fi
+    sleep 0.2
+done
+(( _gate == 1 )) || _t12_gate_fail "stability gate not reached"
+kill -HUP "\$_hup_target"
+wait "\$_frun_pid"
+true
+EOF
+    _T12_HUP_RC=0
+    bash "$_MD/hup.sh" > /dev/null 2>&1 || _T12_HUP_RC=$?
+
+    if [[ -f "$_MD/.t12_gate_timeout" ]] || (( _T12_HUP_RC != 0 )); then
+        TEST_RESULTS["T12: jagged-straddle resume (buffered, differing -l)"]="FAIL"
+        TEST_ERRORS["T12: jagged-straddle resume (buffered, differing -l)"]="HUP gate not satisfied (driver rc=$_T12_HUP_RC)"
+        ((FAILED_TESTS++)); _print_result FAIL "T12: jagged-straddle resume (buffered, differing -l)" "HUP gate not satisfied (driver rc=$_T12_HUP_RC)"
+        # Independent post-driver check: the timeout path must have removed
+        # the wrapper, cleanroom, workers and helpers. The driver records
+        # the process group and (when available) the two target PIDs.
+        if [[ -f "$_MD/.t12_gate_timeout" ]]; then
+            _T12_SURVIVORS=$(_t12_diag_survivors "$_MD/.t12_gate_diag" | tr '\n' ' ')
+            if [[ -n "${_T12_SURVIVORS// /}" ]]; then
+                echo "cleanup_leftover_after_driver:${_T12_SURVIVORS}" >> "$_MD/.t12_gate_diag"
+            fi
+        fi
+        if [[ -f "$_MD/.t12_gate_diag" ]]; then
+            echo -e "    ${YELLOW}T12 gate diagnostics:${NC}"
+            sed 's/^/      /' "$_MD/.t12_gate_diag"
+        fi
+    elif [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["T12: jagged-straddle resume (buffered, differing -l)"]="FAIL"
         TEST_ERRORS["T12: jagged-straddle resume (buffered, differing -l)"]="no checkpoint (crash condition never fired?)"
         ((FAILED_TESTS++)); _print_result FAIL "T12: jagged-straddle resume (buffered, differing -l)" "no checkpoint"
     else
-        _TJAG=$(grep -c 'FORKRUN_RESUME_JAGGED=("' "$_MD/.forkrun_resume" 2>/dev/null || echo 0)
+        # grep -c prints "0" AND exits 1 on no match. The old
+        # `|| echo 0` therefore produced "0\n0", and (( _TJAG >= 1 ))
+        # rejected the trailing token with a syntax error — reported as
+        # jagged=0 even when the capture was legitimate. Keep grep's
+        # count; default only a genuinely empty capture (unreadable file).
+        _TJAG=$(grep -c 'FORKRUN_RESUME_JAGGED=("' "$_MD/.forkrun_resume" 2>/dev/null) || true
+        _TJAG=${_TJAG:-0}
 
         _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
         if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
@@ -4972,6 +5222,204 @@ FUNCEOF
             ((FAILED_TESTS++)); _print_result FAIL "T12: jagged-straddle resume (buffered, differing -l)" "uniq=$_MUNIQ dupes=$_MDUP jagged=$_TJAG"
         fi
     fi
+
+    # --- T12c: the parent-side verifier's OWN controls ---
+    # Every arm above passes trivially if _t12_diag_survivors() always
+    # reports nothing, because the teardown leaves no survivors to find.
+    # So the verifier gets a positive control (a live PID must be
+    # reported) and a negative control (a ZOMBIE must not be -- kill -0
+    # would say it lives).  The zombie is held by a python helper
+    # because THIS shell reaps its own children: a fork whose parent
+    # does not wait is the only way to keep one in Z state.
+    ((TOTAL_TESTS++))
+    _t12c_name="T12c: teardown verifier controls (live, zombie, group)"
+    _t12c_ok=1
+    _t12c_detail=""
+    _t12c_live=""
+    _t12c_zombie=""
+    _t12c_zparent=""
+    sleep 30 &
+    _t12c_live=$!
+    python3 - "$_MD/.t12c_zombie" <<'PYZ' &
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+with open(sys.argv[1], "w") as f:
+    f.write(str(pid))
+time.sleep(30)
+PYZ
+    _t12c_zparent=$!
+    for _k in $(seq 1 100); do
+        [[ -s "$_MD/.t12c_zombie" ]] && break
+        sleep 0.02
+    done
+    _t12c_zombie=$(cat "$_MD/.t12c_zombie" 2>/dev/null)
+    # It only counts as a zombie once it has EXITED; before that it is a
+    # live process and reporting it would be correct.
+    _t12c_zstate=""
+    for _k in $(seq 1 100); do
+        [[ -n "$_t12c_zombie" ]] || break
+        _t12c_zstate=$(ps -o stat= -p "$_t12c_zombie" 2>/dev/null | tr -d '[:space:]')
+        [[ "$_t12c_zstate" == Z* ]] && break
+        sleep 0.02
+    done
+    printf 'process_group: unavailable\nwrapper_pid: %s\ncleanroom_pid: missing\nfallback_victims: %s %s\n' \
+        "$_t12c_live" "$_t12c_live" "$_t12c_zombie" > "$_MD/.t12c_diag"
+    _t12c_found=$(_t12_diag_survivors "$_MD/.t12c_diag" | tr '\n' ' ')
+    # The group branch is a different scan; this script's own process
+    # group is live by definition, so it must name this script.
+    _t12c_self_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')
+    printf 'process_group: %s\n' "$_t12c_self_pgid" > "$_MD/.t12c_gdiag"
+    _t12c_gfound=$(_t12_diag_survivors "$_MD/.t12c_gdiag" | tr '\n' ' ')
+    if [[ " $_t12c_found " != *" $_t12c_live "* ]]; then
+        _t12c_ok=0
+        _t12c_detail="live pid $_t12c_live not reported (found:${_t12c_found:-none})"
+    elif [[ "$_t12c_zstate" != Z* ]]; then
+        # No negative control means the zombie rule was not exercised;
+        # say so instead of passing on the positive control alone.
+        _t12c_ok=0
+        _t12c_detail="could not hold a zombie control (state:${_t12c_zstate:-gone})"
+    elif [[ " $_t12c_found " == *" $_t12c_zombie "* ]]; then
+        _t12c_ok=0
+        _t12c_detail="zombie pid $_t12c_zombie counted as a survivor"
+    elif [[ " $_t12c_gfound " != *" $$ "* ]]; then
+        _t12c_ok=0
+        _t12c_detail="group scan missed this script (pgid ${_t12c_self_pgid:-?}, found:${_t12c_gfound:-none})"
+    else
+        _t12c_detail="live + group reported, zombie ignored"
+    fi
+    kill -KILL "$_t12c_live" 2>/dev/null
+    kill -KILL "$_t12c_zparent" 2>/dev/null
+    wait "$_t12c_live" 2>/dev/null
+    wait "$_t12c_zparent" 2>/dev/null
+    if (( _t12c_ok )); then
+        TEST_RESULTS["$_t12c_name"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "$_t12c_name" "$_t12c_detail"
+    else
+        TEST_RESULTS["$_t12c_name"]="FAIL"
+        TEST_ERRORS["$_t12c_name"]="$_t12c_detail"
+        ((FAILED_TESTS++)); _print_result FAIL "$_t12c_name" "$_t12c_detail"
+    fi
+
+    # --- T12b: forced-timeout teardown (the FAILURE branch) ---
+    # The arm above must PASS on the normal path.  This one forces the
+    # NOT-REACHED branch (GATE_MAX=3 < the 8 stable samples) and checks
+    # the teardown it performs.  The timeout is EXPECTED here: an arm
+    # passes only when the driver's own verdict AND the independent
+    # parent-side survivor scan agree that every process captured by the
+    # teardown is gone.  Run twice -- once with the pipeline's real
+    # process group, once with FORKRUN_T12_FORCE_FALLBACK=1, which is the
+    # snapshot-based fallback the fallback_victims list exists for.
+    _t12_teardown_arm() {
+        # $1 = arm label; $2 = non-empty to force the fallback.
+        # Sets _T12B_STATUS and _T12B_DETAIL.
+        local _force="$2" _rc=0 _diag="$_MD/.t12_gate_diag"
+        local _pgid="" _victims="" _local="" _survivors=""
+        _T12B_STATUS=FAIL
+        _T12B_DETAIL=""
+        # A previous arm's state must not be mistaken for this one's:
+        # .forkrun_resume would make the pipeline resume instead of run,
+        # and a stale .hup_ready would satisfy the pidfile wait before
+        # the new pipeline exists.
+        rm -f "$_MD/.forkrun_resume" "$_MD/.t12_crash_hole" \
+              "$_MD/.t12_gate_timeout" "$_MD/.t12_gate_diag" \
+              "$_MD/.hup_ready" "$_MD/output1.txt" "$_MD/err1.txt"
+        if [[ -n "$_force" ]]; then
+            FORKRUN_T12_FORCE_FALLBACK=1 FORKRUN_T12_GATE_MAX=3 \
+                bash "$_MD/hup.sh" > /dev/null 2>&1 || _rc=$?
+        else
+            FORKRUN_T12_GATE_MAX=3 \
+                bash "$_MD/hup.sh" > /dev/null 2>&1 || _rc=$?
+        fi
+        if (( _rc == 0 )) || [[ ! -f "$_MD/.t12_gate_timeout" ]]; then
+            _T12B_DETAIL="forced gate did not time out (rc=$_rc, marker=$([[ -f "$_MD/.t12_gate_timeout" ]] && echo present || echo missing))"
+            return 0
+        fi
+        if [[ ! -f "$_diag" ]]; then
+            _T12B_DETAIL="timed out without diagnostics ($_diag missing)"
+            return 0
+        fi
+        if ! grep -qx 'reason: stability gate not reached' "$_diag"; then
+            _T12B_DETAIL="unexpected gate reason: $(sed -n 's/^reason: //p' "$_diag" | head -n 1)"
+            return 0
+        fi
+        _pgid=$(sed -n 's/^process_group: //p' "$_diag" | head -n 1)
+        _victims=$(sed -n 's/^fallback_victims: //p' "$_diag" | head -n 1)
+        _survivors=$(_t12_diag_survivors "$_diag" | tr '\n' ' ')
+        if grep -qx 'cleanup: complete' "$_diag"; then
+            _local="complete"
+        else
+            _local="leftover:$(sed -n 's/^cleanup_leftover: //p' "$_diag" | head -n 1)"
+        fi
+        if [[ "$_local" != "complete" ]]; then
+            _T12B_DETAIL="driver reported leftover after its teardown (${_local})"
+            return 0
+        fi
+        if [[ -n "${_survivors// /}" ]]; then
+            _T12B_DETAIL="driver said complete but these are still live:${_survivors}"
+            return 0
+        fi
+        if [[ -n "$_force" ]]; then
+            # Non-vacuity: the fallback arm must actually have taken the
+            # snapshot path and captured a set.  "cleanup: complete" over
+            # an empty victim list would prove nothing.
+            if [[ "$_pgid" != "unavailable" ]]; then
+                _T12B_DETAIL="fallback arm kept a process group ('${_pgid}')"
+                return 0
+            fi
+            if [[ -z "${_victims// /}" ]]; then
+                _T12B_DETAIL="fallback captured no victims (vacuous teardown check)"
+                return 0
+            fi
+            _T12B_DETAIL="$(echo "$_victims" | wc -w | tr -d ' ') fallback victims, all gone"
+        else
+            # A host with no safe process group cannot exercise this
+            # arm; say so instead of passing it vacuously.
+            if [[ ! "$_pgid" =~ ^[0-9]+$ ]] || (( _pgid <= 1 )); then
+                _T12B_STATUS=SKIP
+                _T12B_DETAIL="host produced no safe process group"
+                return 0
+            fi
+            _T12B_DETAIL="process group ${_pgid} empty"
+        fi
+        _T12B_STATUS=PASS
+    }
+
+    for _t12b_arm in group fallback; do
+        if [[ "$_t12b_arm" == "fallback" ]]; then
+            _t12b_name="T12b: forced-timeout teardown (fallback survivors)"
+            _t12_teardown_arm "$_t12b_arm" 1
+        else
+            _t12b_name="T12b: forced-timeout teardown (process group)"
+            _t12_teardown_arm "$_t12b_arm" ""
+        fi
+        ((TOTAL_TESTS++))
+        TEST_RESULTS["$_t12b_name"]="$_T12B_STATUS"
+        case "$_T12B_STATUS" in
+            PASS)
+                ((PASSED_TESTS++))
+                _print_result PASS "$_t12b_name" "$_T12B_DETAIL"
+                ;;
+            SKIP)
+                ((SKIPPED_TESTS++))
+                _print_result SKIP "$_t12b_name" "$_T12B_DETAIL"
+                ;;
+            *)
+                TEST_ERRORS["$_t12b_name"]="$_T12B_DETAIL"
+                ((FAILED_TESTS++))
+                _print_result FAIL "$_t12b_name" "$_T12B_DETAIL"
+                echo -e "    ${YELLOW}T12b gate diagnostics:${NC}"
+                sed 's/^/      /' "$_MD/.t12_gate_diag" 2>/dev/null
+                ;;
+        esac
+        # Keep THIS arm's diagnostics.  The driver always writes
+        # .t12_gate_diag, so without a copy the fallback arm overwrites
+        # the group arm's evidence.
+        if [[ -f "$_MD/.t12_gate_diag" ]]; then
+            cp "$_MD/.t12_gate_diag" "$_MD/.t12_gate_diag.${_t12b_arm}"
+        fi
+    done
 fi
 
 # --- T13: mid-claim worker death under ordered mode (stress form) ---

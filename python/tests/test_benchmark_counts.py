@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies  # noqa: E402
 from ml.ml_data_gen import generate_data  # noqa: E402
 from ml.ml_payload import (  # noqa: E402
     forkrun_payload_heavy,
@@ -84,7 +84,7 @@ def _nonblank_lines(path):
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 @unittest.skipUnless(HAVE_GCC, "gcc not available")
-class TestExactTotals(unittest.TestCase):
+class TestExactTotals(ChildLifecycleMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="fr_exact_totals_")

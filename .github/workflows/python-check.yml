@@ -5,24 +5,38 @@ on:
     paths:
       - "python/**"
       - "forkrun_ring.c"
+      - "forkrun_cleanroom.c"
       - "forkrun_substrate.h"
       - "substratestubs.c"
       - "ring_loadables/forkrun_plugin.h"
       - "Makefile.substrate"
       - "pyproject.toml"
       - "setup.py"
+      - "tools/build_wheel.sh"
+      - "tools/wheel_matrix.py"
+      - "tools/check_glibc_versions.py"
+      - "tools/gen_python_matrix.py"
+      - "tools/acceptance_installed_wheel.py"
+      - "tools/ci_udf_acceptance.sh"
       - ".github/workflows/python-check.yml"
   pull_request:
     branches: [ "main" ]
     paths:
       - "python/**"
       - "forkrun_ring.c"
+      - "forkrun_cleanroom.c"
       - "forkrun_substrate.h"
       - "substratestubs.c"
       - "ring_loadables/forkrun_plugin.h"
       - "Makefile.substrate"
       - "pyproject.toml"
       - "setup.py"
+      - "tools/build_wheel.sh"
+      - "tools/wheel_matrix.py"
+      - "tools/check_glibc_versions.py"
+      - "tools/gen_python_matrix.py"
+      - "tools/acceptance_installed_wheel.py"
+      - "tools/ci_udf_acceptance.sh"
       - ".github/workflows/python-check.yml"
 
   workflow_dispatch:
@@ -33,22 +47,134 @@ permissions:
 jobs:
   python-v0:
     # W-PY1 Stage 4 Phase 1 (+W-PY10 packaging): build the Python-facing
-    # substrate and run the full python suite (incl. the pip-install
-    # cycle test, which needs the pip toolchain). Fedora for everything
-    # (bash-devel exists there; ubuntu runners carry no bash headers
-    # package) — same rule as the canary step in forkrun_release.yml.
-    # Build artifacts are gitignored, so the workspace stays PR-clean.
+    # substrate AND the per-minor UDF helper, then run the full python
+    # suite (incl. the pip-install cycle test, which needs the pip
+    # toolchain). python3-devel supplies the headers/libpython the
+    # helper embeds; without it the suite's UDF/cleanroom tests skip
+    # with "udf helper / launcher not built", i.e. the job would report
+    # a full-suite pass over a partially exercised suite. Fedora for
+    # everything (bash-devel exists there; ubuntu runners carry no bash
+    # headers package) — same rule as the canary step in
+    # forkrun_release.yml. Build artifacts are gitignored, so the
+    # workspace stays PR-clean.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      # fetch-depth: 0 is REQUIRED here, not a preference. This job runs
+      # release_check, whose frozen-engine check asks git which commit
+      # last touched forkrun_ring.c and refuses if that is HEAD. On a
+      # depth-1 checkout the merge commit has no parents, so `git log -1
+      # -- forkrun_ring.c` sees HEAD as the only commit that contains the
+      # file and reports "touched by HEAD commit" -- a false refusal
+      # about history the clone never fetched. Observed on 0303a00
+      # (refs/pull/585/merge): the tree check passed and only the history
+      # half failed.
       - uses: actions/checkout@v3
-      - name: Build Python substrate + run v0 tests
+        with:
+          fetch-depth: 0
+      - name: Build substrate + helper + run v0 tests
+        run: |
+          # bash -s with a QUOTED here-document, not `bash -c '...'`:
+          # the script contains apostrophes (in prose comments and in
+          # shell literals like 'packaging>=23'), and a single-quoted
+          # -c argument ends at the first one. That defect ran the
+          # tail of this script on the HOST instead of in the
+          # container. A quoted delimiter passes the body through
+          # verbatim, so apostrophes need no auditing.
+          docker run --rm -i \
+            -v $PWD:/src \
+            -w /src \
+            fedora:44 \
+            bash -s <<'CONTAINER'
+          set -euo pipefail
+          dnf install -y git bash-devel gcc make file diffutils \
+            python3 python3-devel python3-pip python3-setuptools \
+            python3-wheel python3-packaging
+          # WO-COMPAT-08: record WHICH bash-devel supplied the engine's
+          # headers. A stale/missing package used to surface as a bare
+          # "config.h: No such file or directory" from inside the
+          # engine; the Makefile now names the package, and this line
+          # makes the version part of the job log either way.
+          rpm -q bash-devel
+          test -f /usr/include/bash/config.h
+          # The suite execs setup.py to test the values it computes, so
+          # the interpreter needs BOTH of setup.py's non-stdlib imports:
+          # packaging (test module, import time) and
+          # setuptools.command.bdist_wheel (setup.py:23). The latter
+          # lands in setuptools 70.1 -- Fedora 44 has 80.10.2, and this
+          # line turns a regression of that floor into a setup failure
+          # instead of an ImportError half-way through the suite.
+          python3 -c 'import packaging, setuptools, setuptools.command.bdist_wheel; print("packaging", packaging.__version__, "setuptools", setuptools.__version__)'
+          # /src is a host-owned mount and this container runs as root;
+          # git >= 2.35 refuses to operate on a repository it considers
+          # owned by another user ("dubious ownership"). release_check's
+          # clean-tree/frozen-file checks shell out to git, so without
+          # this they fail for a reason that has nothing to do with the
+          # tree.
+          git config --global --add safe.directory /src
+          # "udf", not "udf-lib": the suite exercises the probe and fork
+          # driver too, and those skip with "udf artifacts not built" if
+          # only the shared helper is present.
+          make -f Makefile.substrate python-substrate udf
+          # Fail the SETUP if an artifact the suite needs is absent. A
+          # skipUnless would otherwise turn a broken build into a
+          # silently partial "full suite" pass.
+          ls python/forkrun/_fr_udf*.so \
+             python/forkrun/fr_udf_helper \
+             python/forkrun/fr_udf_fork \
+             python/forkrun/_forkrun_cleanroom >/dev/null
+          python3 -m unittest discover -s python/tests -v
+          CONTAINER
+
+  generic-acceptance:
+    needs: [build-wheel, generate-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: forkrun-wheel
+          path: wheelhouse
+      - name: Acceptance on Python ${{ matrix.py }}
         run: |
           docker run --rm \
             -v $PWD:/src \
             -w /src \
-            fedora:latest \
-            bash -c 'dnf install -y git bash-devel gcc make file diffutils python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -c '
+              set -euo pipefail
+              WHL=$(ls /src/wheelhouse/*.whl | head -1)
+              # manylinux interpreter for this minor: 3.10 -> cp310-cp310
+              PY=/opt/python/${{ matrix.tag }}-${{ matrix.tag }}/bin/python${{ matrix.py }}
+              if [ ! -x "$PY" ]; then
+                echo "no interpreter for ${{ matrix.py }} at $PY" >&2; exit 1
+              fi
+              "$PY" /src/tools/acceptance_installed_wheel.py \
+                --wheel "$WHL" --interpreter "$PY" --mode generic \
+                --expect-minor "${{ matrix.py }}"
+            '
+
+  udf-acceptance:
+    needs: [generate-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Per-minor UDF acceptance on Python ${{ matrix.py }}
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash /src/tools/ci_udf_acceptance.sh "${{ matrix.py }}"
 
   sanitizer-asan-ubsan:    # W-REL1/R6: ASan+UBSan legs — ADVISORY for v3.6.0
     # (continue-on-error: red here never blocks the tag) flipping to
@@ -72,11 +198,11 @@ jobs:
           docker run --rm \
             -v $PWD:/src \
             -w /src \
-            fedora:latest \
-            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file diffutils python3 libasan libubsan && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print \$NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
+            fedora:44 \
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file diffutils python3 libasan libubsan && rpm -q bash-devel && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print \$NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
 
   build-wheel:
-    # W-REL5-F (F2): single Fedora wheel build feeding the version
+    # W-REL5-F (F2): single manylinux_2_28 wheel build feeding the version
     # cells below. bash-devel exists only on Fedora (same rule as the
     # canary step); the wheel carries a py3-none platform .so
     # (ctypes-loaded, version-agnostic by construction), so one wheel
@@ -86,51 +212,59 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v3
-      - name: Build substrate + wheel in Fedora
+      - name: Build substrate + wheel in manylinux_2_28
         run: |
           docker run --rm \
             -v $PWD:/src \
             -w /src \
-            fedora:latest \
-            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && mkdir -p /src/wheelhouse && python3 -m pip wheel . --no-deps -w /tmp/wheelhouse && ls /tmp/wheelhouse/*.whl && cp /tmp/wheelhouse/*.whl /src/wheelhouse/'
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file && make -f Makefile.substrate python-substrate && PY=/opt/python/cp314-cp314/bin/python3.14 && $PY -m pip install --quiet build && mkdir -p /src/wheelhouse && $PY -m build --wheel --outdir /tmp/wheelhouse . && ls /tmp/wheelhouse/*.whl && cp /tmp/wheelhouse/*.whl /src/wheelhouse/'
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
           name: forkrun-wheel
           path: wheelhouse/*.whl
 
+  generate-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v3
+      - id: gen
+        run: echo "matrix=$(python3 tools/gen_python_matrix.py)" >> "$GITHUB_OUTPUT"
+
   version-matrix:
-    # W-REL5-F (F2): interpreter compatibility over the settled floor
-    # (3.10; E2 verified, not re-litigated). Ubuntu cells (mainstream
-    # coverage): 3.10 system on 22.04, 3.11 via deadsnakes, 3.12
-    # system on 24.04, 3.13 via deadsnakes. Each cell installs the
-    # Fedora-built wheel (FORKRUN_LIB points at its .so — the tree is
-    # never compiled here, bash-devel doesn't exist on Ubuntu) and
-    # runs the full suite. Packaging tests are EXCLUDED per cell
-    # (they compile the substrate = need bash headers; covered by
-    # the Fedora source cell + release_check, not version-gated).
+    needs: [build-wheel, generate-matrix]
+    # W-REL5-F (F2) + WO-COMPAT-07: interpreter compatibility over the
+    # settled floor (3.10; E2 verified, not re-litigated). Ubuntu cells
+    # (mainstream coverage): 3.10 system on 22.04, 3.11 via deadsnakes,
+    # 3.12 system on 24.04, 3.13/3.14/3.15 via deadsnakes.
+    #
+    # CONTRACT (WO-COMPAT-07): this lane runs the FULL SOURCE SUITE
+    # that is runnable without bash headers. The tests import the
+    # checkout's python/forkrun (they prepend ../ to sys.path), so the
+    # wheel's substrate .so is staged beside that package and cmp'd
+    # against the installed copy: the engine under test is provably
+    # the wheel's artifact, the frontend is the checkout. The generic
+    # wheel deliberately ships no UDF helper, so the per-minor
+    # artifacts the suite requires are built here: python$PYVER-dev
+    # supplies the headers/libpython for the UDF helper, probe and
+    # fork driver, and the launcher is built from source. The launcher
+    # dlopens the staged .so at runtime, so no engine build (and no
+    # bash headers) is needed. Packaging AND reproducibility tests are
+    # EXCLUDED per cell (both compile the substrate = need bash
+    # headers; covered by the Fedora source cell + release_check, not
+    # version-gated).
     # A version-conditional skip differing across cells is a FINDING.
-    # The 3.13 cell is the genuinely-unknown one: a real failure
-    # there halts (named) instead of trimming the matrix.
-    needs: build-wheel
+    # The newest cell (3.15) is the genuinely-unknown one: a real
+    # failure there halts (named) instead of trimming the matrix.
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - py: "3.10"
-            image: ubuntu:22.04
-            setup: system
-          - py: "3.11"
-            image: ubuntu:22.04
-            setup: deadsnakes
-          - py: "3.12"
-            image: ubuntu:24.04
-            setup: system
-          - py: "3.13"
-            image: ubuntu:24.04
-            setup: deadsnakes
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v3
       - name: Download wheel
@@ -140,36 +274,93 @@ jobs:
           path: wheelhouse
       - name: Suite on Python ${{ matrix.py }} (${{ matrix.image }})
         run: |
-          docker run --rm \
+          # bash -s with a QUOTED here-document: this script contains
+          # apostrophes (prose and shell literals such as
+          # 'packaging>=23'), and `bash -c '...'` ends its argument at
+          # the first one -- which ran the tail on the HOST. The quoted
+          # delimiter keeps the body verbatim.
+          docker run --rm -i \
             -v $PWD:/src \
             -w /src \
             -e PYVER=${{ matrix.py }} \
             -e PYSETUP=${{ matrix.setup }} \
             ${{ matrix.image }} \
-            bash -c '
-              set -euo pipefail
-              apt-get update
-              if [ "$PYSETUP" = "system" ]; then
-                apt-get install -y "python$PYVER" "python$PYVER-venv" gcc file
-                PYBIN="python$PYVER"
-              else
-                apt-get install -y software-properties-common gcc file
-                add-apt-repository -y ppa:deadsnakes/ppa
-                apt-get update
-                apt-get install -y "python$PYVER" "python$PYVER-venv"
-                PYBIN="python$PYVER"
-              fi
-              $PYBIN --version
-              # Loud substrate assertion (a missing .so would pass
-              # vacuously via skipUnless — never silently).
-              WHL=$(ls wheelhouse/*.whl | head -1)
-              test -f "$WHL"
-              $PYBIN -m venv /tmp/venv
-              /tmp/venv/bin/pip install -q "$WHL"
-              /tmp/venv/bin/python -c "import forkrun; print(forkrun.__version__, forkrun.__engine_version__)"
-              export FORKRUN_LIB=$(/tmp/venv/bin/python -c "import forkrun, os; print(os.path.join(os.path.dirname(forkrun.__file__), \"libforkrun_python.so\"))")
-              test -f "$FORKRUN_LIB"
-              cd python/tests
-              MODS=$(ls test_*.py | grep -v "^test_packaging" | sed "s/\.py$//")
-              /tmp/venv/bin/python -m unittest $MODS
-            '
+            bash -s <<'CONTAINER'
+          set -euo pipefail
+          # NONINTERACTIVE IS LOAD-BEARING. Installing python3.11
+          # from deadsnakes pulls tzdata, whose postinst otherwise
+          # blocks on the geographic-area prompt until the 45-minute
+          # job timeout (observed: prompt at 04:12:32, cancelled
+          # 44m23s later). TZ pins the answer deterministically.
+          export DEBIAN_FRONTEND=noninteractive
+          export TZ=Etc/UTC
+          apt-get update
+          if [ "$PYSETUP" = "system" ]; then
+            apt-get install -y "python$PYVER" "python$PYVER-venv" "python$PYVER-dev" gcc make file
+            PYBIN="python$PYVER"
+          else
+            apt-get install -y software-properties-common gcc make file
+            add-apt-repository -y ppa:deadsnakes/ppa
+            apt-get update
+            apt-get install -y "python$PYVER" "python$PYVER-venv" "python$PYVER-dev"
+            PYBIN="python$PYVER"
+          fi
+          $PYBIN --version
+          # Loud substrate assertion (a missing .so would pass
+          # vacuously via skipUnless -- never silently).
+          WHL=$(readlink -f "$(ls wheelhouse/*.whl | head -1)")
+          test -f "$WHL"
+          $PYBIN -m venv /tmp/venv
+          # WO-COMPAT-08: packaging is an IMPORT-TIME dependency of
+          # the UDF packaging tests (their in-module SkipTest is
+          # unreachable when the import itself raises), and
+          # setuptools>=70.1 is setup.py's OWN floor: it imports
+          # setuptools.command.bdist_wheel, which 70.0.0 does not
+          # provide (verified by installing both). A venv on 3.12+ ships
+          # no setuptools at all, and Ubuntu 22.04's system one is
+          # older, so both are installed rather than assumed.
+          # FORKRUN_RELEASE_WHEEL points release_check at the wheel
+          # this lane actually downloaded; without it the check
+          # rebuilds the substrate, which needs bash headers Ubuntu
+          # does not carry.
+          /tmp/venv/bin/pip install -q "$WHL" 'packaging>=23' \
+            'setuptools>=70.1'
+          export FORKRUN_RELEASE_WHEEL="$WHL"
+          /tmp/venv/bin/python -c 'import forkrun; print(forkrun.__version__, forkrun.__engine_version__)'
+          INSTALLED_SO=$(/tmp/venv/bin/python -c 'import forkrun, os; print(os.path.join(os.path.dirname(forkrun.__file__), "libforkrun_python.so"))')
+          test -f "$INSTALLED_SO"
+          # Stage the wheel-built engine beside the CHECKOUT package
+          # the tests import, and prove the copy is the installed
+          # artifact (cmp, not a claim).
+          cp "$INSTALLED_SO" python/forkrun/libforkrun_python.so
+          cmp "$INSTALLED_SO" python/forkrun/libforkrun_python.so
+          export FORKRUN_LIB="$PWD/python/forkrun/libforkrun_python.so"
+          # Per-minor artifacts the source suite requires. The
+          # generic wheel ships no UDF helper by design, so build
+          # it against THIS cell interpreter. "udf" (not just
+          # "udf-lib") also builds the probe and fork driver,
+          # which the helper tests exercise. The launcher only
+          # needs gcc and the staged .so (-o stops make from
+          # trying to rebuild the engine, which needs bash headers
+          # Ubuntu does not have).
+          make -f Makefile.substrate udf \
+            PYTHON="$PYBIN" PYCONFIG="$PYBIN-config"
+          make -f Makefile.substrate \
+            -o python/forkrun/libforkrun_python.so cleanroom-launcher
+          # Fail the SETUP if a required artifact is absent, so a
+          # skipUnless cannot turn a broken build into a silently
+          # partial "full suite" pass.
+          ls python/forkrun/_fr_udf*.so \
+             python/forkrun/fr_udf_helper \
+             python/forkrun/fr_udf_fork \
+             python/forkrun/_forkrun_cleanroom >/dev/null
+          cd python/tests
+          # test_reproducible also runs `make python-substrate`,
+          # exactly like test_packaging: both need bash headers,
+          # which Ubuntu does not carry. They are covered by the
+          # Fedora source cell and release_check.
+          MODS=$(ls test_*.py \
+            | grep -v -E "^(test_packaging|test_reproducible)" \
+            | sed "s/\.py$//")
+          /tmp/venv/bin/python -m unittest $MODS
+          CONTAINER

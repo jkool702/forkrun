@@ -27,6 +27,7 @@ from forkrun.run import _parse_records_c, _spill_to_memfd  # noqa: E402
 from forkrun.run import _split_records  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -35,7 +36,10 @@ try:
 except FileNotFoundError:
     HAVE_LIB = False
 
-_HDR = struct.Struct("<QQ")
+# DECISION-02: import the REAL header rather than redeclaring it. This
+# module duplicated the layout, which is why the disposition change broke
+# its parity tests instead of being picked up automatically.
+from forkrun._worker import _HDR  # noqa: E402
 
 
 def _up(batch):
@@ -89,7 +93,7 @@ class _LegacyPath:
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCompleteSymbols(unittest.TestCase):
+class TestCompleteSymbols(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -120,7 +124,7 @@ class TestCompleteSymbols(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCompleteReturnCodes(unittest.TestCase):
+class TestCompleteReturnCodes(ChildLifecycleMixin, unittest.TestCase):
     """fr_py_complete codes without engine state (returns before ack)."""
 
     def tearDown(self):
@@ -135,7 +139,14 @@ class TestCompleteReturnCodes(unittest.TestCase):
         rc = lib.fr_py_complete(-1, 0, 0, -1, fd, b"xyz", 3)
         self.assertEqual(rc, -1)
 
-    def test_signal_failure_is_minus_two(self):
+    def test_ack_failure_precedes_notification(self):
+        """STAGE0: the notification moved AFTER the commit.
+
+        With a broken signal pipe, this now reports -3 (ack failure)
+        rather than -2, because the ack runs first and fails before any
+        notification is attempted. The old -2 came from a signal write
+        that happened before the ack -- exactly the ordering Stage 0
+        reversed."""
         lib = get()
         if not hasattr(lib, "fr_py_complete"):
             self.skipTest("fr_py_complete missing")
@@ -145,7 +156,30 @@ class TestCompleteReturnCodes(unittest.TestCase):
             rc = lib.fr_py_complete(w, 0, 0, -1, -1, None, 0)
         finally:
             os.close(w)
-        self.assertEqual(rc, -2)
+        self.assertEqual(rc, -3)
+
+    def test_post_commit_notification_failure_has_its_own_code(self):
+        """A notification failure is POST-commit and must be
+        distinguishable from every pre-commit failure, so a caller cannot
+        mistake it for "worker died, retry" and re-execute a batch the
+        engine already committed."""
+        lib = get()
+        if not hasattr(lib, "fr_py_notify_committed"):
+            self.skipTest("fr_py_notify_committed missing")
+        out = os.memfd_create("nc")
+        r, w = os.pipe()
+        os.close(r)                      # EPIPE on write
+        try:
+            rc = lib.fr_py_notify_committed(w, out, 0)
+        finally:
+            os.close(w)
+            os.close(out)
+        self.assertEqual(rc, -4,
+                         "post-commit notification failure must be its own "
+                         "code, distinct from pre-commit failures")
+        # ...and it must NOT be confusable with the pre-commit codes.
+        for pre_commit in (-1, -2, -3):
+            self.assertNotEqual(rc, pre_commit)
 
     def test_ack_without_state_is_minus_three(self):
         lib = get()
@@ -157,14 +191,14 @@ class TestCompleteReturnCodes(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestDescriptorParsing(unittest.TestCase):
+class TestDescriptorParsing(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
     def _blob(self, sizes, tail=b""):
         parts = []
         for i, s in enumerate(sizes):
-            parts.append(_HDR.pack(i, s) + b"x" * s)
+            parts.append(_HDR.pack(i, s, 0, 0) + b"x" * s)
         return b"".join(parts) + tail
 
     def test_parity_basic(self):
@@ -173,7 +207,7 @@ class TestDescriptorParsing(unittest.TestCase):
                          _split_records(blob)[0])
 
     def test_parity_truncated_tail(self):
-        blob = self._blob([5, 10]) + _HDR.pack(2, 100) + b"short"
+        blob = self._blob([5, 10]) + _HDR.pack(2, 100, 0, 0) + b"short"
         self.assertEqual(_parse_records_c(blob),
                          _split_records(blob)[0])
 
@@ -195,10 +229,17 @@ class TestDescriptorParsing(unittest.TestCase):
         arr = (RD * 8)()
         cnt = lib.fr_py_parse_descriptors(blob, len(blob), arr, 8)
         self.assertEqual(cnt, 3)
+        # Offsets are DERIVED from the header size, not written out. The
+        # previous literal [(0,16,4),(1,36,0),(2,52,9)] encoded the 16-byte
+        # stride in the test itself, which is how the disposition change
+        # broke this test instead of being absorbed here.
+        h = _HDR.size
         self.assertEqual(
             [(arr[i].batch_idx, arr[i].offset, arr[i].length)
              for i in range(cnt)],
-            [(0, 16, 4), (1, 36, 0), (2, 52, 9)])
+            [(0, h, 4),                      # hdr@0,  data@h
+             (1, 2 * h + 4, 0),               # hdr@h+4, data after it
+             (2, 3 * h + 4, 9)])
 
     def test_max_bound_truncates_descriptors_not_input(self):
         from forkrun._bindings import RecordDescriptor as RD
@@ -220,7 +261,7 @@ class TestDescriptorParsing(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSequentialSpill(unittest.TestCase):
+class TestSequentialSpill(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -272,7 +313,7 @@ class TestSequentialSpill(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCompleteParity(unittest.TestCase):
+class TestCompleteParity(ChildLifecycleMixin, unittest.TestCase):
     """Same workload, legacy vs commit path: byte-identical results."""
 
     def tearDown(self):

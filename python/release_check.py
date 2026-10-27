@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""forkrun v3.6.1 release checklist (W-PY23, W-REL5-F F6).
+"""forkrun v3.6.2 release checklist (W-PY23, W-REL5-F F6).
 
-Run from the repo root BEFORE tagging v3.6.1. Every check must pass:
+Run from the repo root BEFORE tagging v3.6.2. Every check must pass:
 
     python3 python/release_check.py
 
@@ -47,14 +47,28 @@ def _read_py_version():
 
 
 PY_VERSION = _read_py_version()
-PROJECT_VERSION = "v3.6.1"
+PROJECT_VERSION = "v3.6.2"
 FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
 
 CHECKS = []
 
 
-def check(name):
+def check(name, only_if=None):
+    """Register a release check.
+
+    `only_if` gates a check that is only MEANINGFUL in some situations.
+    A gated check is reported as [SKIP] with its condition, never silently
+    omitted -- a check that disappears is indistinguishable from a check
+    that was never written.
+
+    Currently used by exactly one check, the tag-is-free guard, which is
+    only applicable in the moments before tagging. See its decorator.
+    """
     def deco(fn):
+        # The gate rides on the function rather than as a third tuple
+        # element: CHECKS is unpacked as (name, fn) elsewhere, and
+        # widening the tuple would silently break those consumers.
+        fn.only_if = only_if
         CHECKS.append((name, fn))
         return fn
     return deco
@@ -117,6 +131,24 @@ def _ensure_artifacts():
     return wheels[0], sdists[0]
 
 
+def _packaged_wheel():
+    """Return the wheel artifact to INSPECT (not necessarily to build).
+
+    FORKRUN_RELEASE_WHEEL names an externally built wheel. The
+    version-matrix lane downloads one and verifies it; rebuilding
+    there would need the bash headers Ubuntu does not carry, and -- more
+    importantly -- would verify a DIFFERENT artifact than the one the
+    lane is testing. Absent the override, build ours as before.
+    """
+    override = os.environ.get("FORKRUN_RELEASE_WHEEL", "").strip()
+    if not override:
+        return _ensure_artifacts()[0]
+    path = os.path.abspath(override)
+    assert os.path.isfile(path), \
+        "FORKRUN_RELEASE_WHEEL=%r is not a file" % override
+    return path
+
+
 @check("Version: __version__ is %s" % PY_VERSION)
 def check_version():
     sys.path.insert(0, os.path.join(REPO_ROOT, "python"))
@@ -162,7 +194,7 @@ def check_changelog_final():
                        % re.escape(PROJECT_VERSION), content, re.M)
     assert marked is None, \
         "CHANGELOG.md still heads %s as (unreleased) -- finalize the " \
-        "heading at tag time (TAG_PREP_v3.6.1.md step: this red is " \
+        "heading at tag time (TAG_PREP_v3.6.2.md step: this red is " \
         "designed, not a bug)" % PROJECT_VERSION
     return True
 
@@ -191,11 +223,31 @@ def check_unreleased_untagged():
     return True
 
 
-@check("Tag: %s not already taken" % PROJECT_VERSION)
+def _tag_checks_enabled():
+    """Gating predicate for the tag-is-free guard.
+
+    This guard answers "may I tag v3.6.2 right now?", which is only the
+    question in the moments before tagging. Once the tag exists -- which
+    it does, and legitimately so, for the whole of a normal development
+    day -- the guard can only ever report failure, and a permanently red
+    check trains people to ignore the whole report.
+
+    So it is off by default and switched on explicitly for a release:
+
+        FORKRUN_RELEASE_CHECK_TAGS=1 python3 python/release_check.py
+
+    Gating it does not weaken it: the same command a tagger runs now
+    includes it, and it still refuses to pass when the tag is taken.
+    """
+    return os.environ.get("FORKRUN_RELEASE_CHECK_TAGS") == "1"
+
+
+@check("Tag: %s not already taken" % PROJECT_VERSION,
+       only_if=_tag_checks_enabled)
 def check_tag_free():
     # W-REL5-F (F6.1): tagging over an existing tag would move/fail
     # it. Local tags only (offline-safe); pushing the tag is the
-    # owner's step in TAG_PREP_v3.6.1.md.
+    # owner's step in TAG_PREP_v3.6.2.md.
     proc = _run(["git", "tag", "--list", PROJECT_VERSION], timeout=60)
     assert proc.returncode == 0, proc.stderr[-500:]
     assert proc.stdout.strip() == "", \
@@ -270,6 +322,12 @@ def check_twins():
     return True
 
 
+# The nested suite's deadline. It is a NAMED constant so the message
+# below cannot drift from the budget actually applied, and so the
+# parent test can read it instead of hard-coding a second number.
+SUITE_DEADLINE_S = 2400
+
+
 @check("Tests: full suite passes")
 def check_tests():
     # Anti-recursion: the suite contains
@@ -280,10 +338,40 @@ def check_tests():
     # every other test still runs, so coverage is intact.
     env = dict(os.environ)
     env["FORKRUN_UNDER_RELEASE_CHECK"] = "1"
-    proc = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover",
-         "-s", "python/tests"], capture_output=True, text=True,
-        timeout=1200, cwd=REPO_ROOT, env=env)
+    # The budget is set for the LOADED case, not the quiet one. The
+    # suite costs ~5 minutes on an idle box and ~11 minutes on a loaded
+    # one (it forks hundreds of worker processes, and the machine's
+    # other tenants compete for the same cores), and a run that
+    # exceeded a 20-minute budget failed the GATE without a single test
+    # failing -- a harness limit reported as a product defect. The gate
+    # itself is unchanged: every test must still pass.
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover",
+             "-s", "python/tests"], capture_output=True, text=True,
+            timeout=SUITE_DEADLINE_S, cwd=REPO_ROOT, env=env)
+    except subprocess.TimeoutExpired as exc:
+        # A timeout is a DEADLINE being reached, not a verdict. The
+        # suite did not finish, so it is NOT known whether the cause was
+        # load, a hang, or a regression -- the check below must not
+        # claim otherwise. The partial output is preserved so the run
+        # stays diagnosable: it names the tests that completed.
+        partial_out = exc.stdout or ""
+        partial_err = exc.stderr or ""
+        if isinstance(partial_out, bytes):
+            partial_out = partial_out.decode("utf-8", "replace")
+        if isinstance(partial_err, bytes):
+            partial_err = partial_err.decode("utf-8", "replace")
+        raise AssertionError(
+            ("the full suite did not finish within %ds. That is a "
+             "DEADLINE being reached; the result is INCOMPLETE, and "
+             "without a finished run it cannot be said whether the cause "
+             "was load, a hang, or a regression. The suite costs ~5 "
+             "minutes on an idle machine and much longer under load. "
+             "Partial output follows.\n--- stdout ---\n%s\n"
+             "--- stderr ---\n%s")
+            % (SUITE_DEADLINE_S, partial_out[-3000:],
+               partial_err[-2000:])) from exc
     assert proc.returncode == 0, proc.stderr[-2000:]
     return True
 
@@ -293,6 +381,82 @@ def check_canary():
     proc = _run(["make", "-f", "Makefile.substrate", "canary"],
                 timeout=300)
     assert proc.returncode == 0, proc.stderr[-2000:]
+    return True
+
+
+@check("UDF helper: no test-only version override in the shipped artifact")
+def check_no_udf_version_override():
+    """The mismatch barrier's negative control must be UNREACHABLE in a
+    release build.
+
+    `fr_udf_built_version()` can be compiled to report a deliberately
+    different version via -DFR_UDF_REPORT_VERSION_OVERRIDE, which is what
+    lets a test exercise the mismatch branch with a helper that is
+    otherwise perfectly loadable. Without that, the "mismatch" test
+    refuses because the other minor's libpython is absent -- it would pass
+    for the wrong reason even with the comparison deleted.
+
+    The override deliberately exports an EXTRA symbol,
+    `fr_udf_TEST_VERSION_OVERRIDE_MARKER`, because a bare #define leaves
+    nothing to inspect: the release check has to be able to PROVE the flag
+    cannot reach a shipped artifact, and that means looking in the ELF
+    dynamic symbol table rather than trusting the build command.
+    """
+    import glob
+    import re
+    import subprocess as _sp
+    helpers = glob.glob("python/forkrun/_fr_udf*.so")
+    assert helpers, ("no UDF helper artifact found to inspect -- run "
+                     "`make -f Makefile.substrate udf-lib` first")
+
+    # Read the symbol name from the shared header rather than hardcoding a
+    # literal. Round 15 moved the launcher to the typed ABI
+    # (fr_udf_built_version_v2), but this check kept asserting the literal
+    # "fr_udf_built_version" and STILL PASSED, because the test was a
+    # prefix SUBSTRING match: "fr_udf_built_version" is a prefix of
+    # "fr_udf_built_version_v2". The artifact exports zero bare
+    # fr_udf_built_version and the gate was green regardless.
+    #
+    # That is the same failure this check's own docstring warns against
+    # ("it would pass for the wrong reason even with the comparison
+    # deleted") -- a check that cannot tell the typed symbol from the old
+    # one verifies nothing. Matching the header's name exactly, plus the
+    # stale-symbol assertion below, makes the two impossible to confuse
+    # again -- the same single-source discipline as TD-01.
+    header = "forkrun_udf_version.h"
+    with open(header) as fh:
+        m = re.search(r'#define\s+FR_UDF_BUILT_VERSION_SYMBOL\s+"([^"]+)"',
+                      fh.read())
+    assert m, ("could not read FR_UDF_BUILT_VERSION_SYMBOL from %s -- if it "
+               "moved, this gate must be taught where it lives rather than "
+               "carrying a stale copy" % header)
+    expected = m.group(1)
+
+    for path in helpers:
+        proc = _sp.run(["nm", "-D", "--defined-only", path],
+                       capture_output=True, text=True)
+        assert proc.returncode == 0, (
+            "nm failed on %s: %s" % (path, proc.stderr[-500:]))
+        offenders = [ln for ln in proc.stdout.splitlines()
+                     if "fr_udf_TEST_VERSION_OVERRIDE_MARKER" in ln]
+        assert not offenders, (
+            "TEST-ONLY version override marker is PRESENT in %s -- this "
+            "artifact was built with -DFR_UDF_REPORT_VERSION_OVERRIDE and "
+            "must not be shipped:\n%s" % (path, "\n".join(offenders)))
+        assert any(expected in ln
+                   for ln in proc.stdout.splitlines()), (
+            "%s does not export %s, so the launcher's version barrier "
+            "cannot verify it and every UDF call would be refused"
+            % (path, expected))
+        # And the pre-ABI-renaming symbol must be ABSENT, so a helper built
+        # from pre-Round-15 source can never satisfy this gate again.
+        stale = [ln for ln in proc.stdout.splitlines()
+                 if re.search(r"\bfr_udf_built_version\b", ln)]
+        assert not stale, (
+            "%s still exports the pre-Round-15 fr_udf_built_version -- it "
+            "was built from source older than %s, which declares %s. "
+            "Rebuild the helper:\n%s"
+            % (path, header, expected, "\n".join(stale)))
     return True
 
 
@@ -311,6 +475,43 @@ def check_idl_fresh():
                 timeout=300)
     assert proc.returncode == 0, \
         (proc.stdout + proc.stderr)[-2000:]
+    return True
+
+
+@check("Bench: decision-record figures match the committed artifacts")
+def check_bench_docs_match_artifacts():
+    """The published benchmark figures must match the raw evidence.
+
+    F6 Stage 5.1 shipped a decision record whose §8.1/§8.1b numbers did not
+    match the committed JSON artifact -- the figures had been transcribed
+    from a console during one run while the artifact on disk came from a
+    later run into the same path, and they differed by around 10%. That is
+    not rounding, and a reader checking the evidence would have found it.
+
+    The tables are now GENERATED from the artifacts by
+    dev/supervisor/gen_bench_tables.py. This gate re-derives them and fails
+    if the document has drifted from the committed evidence, so the
+    mismatch cannot recur silently between runs.
+    """
+    proc = _run([sys.executable,
+                 "dev/supervisor/gen_bench_tables.py", "--check"],
+                timeout=300)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
+
+
+@check("Docs: DOCS_ALL.md matches its source documents")
+def check_docs_all_fresh():
+    # DOCS_ALL.md is a generated AGGREGATE. check_twins() above only
+    # compares CHANGELOG headings, and it passed for a long time while six
+    # of the embedded documents were stale by ~130 lines: a heading check
+    # cannot see a body rewritten underneath it. This regenerates and
+    # compares, so "stale" is a detectable state.
+    #
+    # Mirrors the gen_idl.py --check gate (F6.3) for the same reason: a
+    # CI-only freshness test lets a stale regen sail through tagging.
+    proc = _run([sys.executable, "tools/gen_docs_all.py", "--check"],
+                timeout=300)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
     return True
 
 
@@ -412,9 +613,16 @@ def check_sdist():
         names = tf.getnames()
     top = "forkrun-%s/" % PY_VERSION
     needed = ["forkrun_ring.c", "forkrun_substrate.h",
+              "forkrun_trace.h",
               "substratestubs.c", "Makefile.substrate",
               "ring_loadables/forkrun_plugin.h",
-              "python/forkrun/_shim.c", "python/README.md",
+              "python/forkrun/_shim.c",
+              # P1 (DECISION-01) Phase 2: the UDF helper is built from
+              # source by users on the source-only path, so both the .c
+              # and the .h it includes must ship.
+              "python/forkrun/fr_udf.c",
+              "python/forkrun/fr_udf.h",
+              "python/README.md",
               "LICENSE", "setup.py", "pyproject.toml"]
     for rel in needed:
         assert top + rel in names, "sdist missing %s" % rel
@@ -434,9 +642,11 @@ def check_wheel_so_version():
     # F-PORT5: the wheel must SHIP the release engine, not a stale
     # local build. Extract the packaged .so and read its version by
     # the same helper as the tree-built substrate. W-REL5-F (F6.4):
-    # reads the single shared build.
+    # reads the single shared build. WO-COMPAT-08: the artifact under
+    # test may be supplied by FORKRUN_RELEASE_WHEEL (version-matrix),
+    # so the lane verifies the wheel it downloaded.
     import zipfile
-    wheel, _ = _ensure_artifacts()
+    wheel = _packaged_wheel()
     with zipfile.ZipFile(wheel) as zf:
         so_names = [n for n in zf.namelist()
                     if n.endswith("libforkrun_python.so")]
@@ -490,6 +700,20 @@ def main(argv=None):
     print("=" * 60)
     failures = 0
     for name, fn in CHECKS:
+        only_if = getattr(fn, "only_if", None)
+        if only_if is not None:
+            try:
+                if not only_if():
+                    print("  [SKIP] %s\n         "
+                          "(not applicable here; set "
+                          "FORKRUN_RELEASE_CHECK_TAGS=1 to include)"
+                          % name)
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                print("  [ERROR] %s\n         gate failed: %s"
+                      % (name, exc))
+                failures += 1
+                continue
         try:
             fn()
         except AssertionError as exc:

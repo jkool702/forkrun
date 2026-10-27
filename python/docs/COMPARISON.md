@@ -6,6 +6,21 @@ each system runs its idiomatic best.
 
 ## Headline (medium, 2.2GB)
 
+> **Note on the competitor rows in this table.** They are older than
+> the rest of this file and come from a different study
+> (`numa_5m_study.md`), so their absolute numbers should not be mixed
+> with the forkrun rows here -- that is the error this note exists to
+> prevent. The current, like-for-like figures, measured with static file
+> partitioning (the standard Python idiom), are in
+> `python/benchmarks/results/RELEASE_v3.6.0.md` section 0: medium
+> `ProcessPoolExecutor` 778k and `multiprocessing.Pool` 775k. Batching on
+> the fly would make both faster and is available to them; it is
+> deliberately not quoted, because on-the-fly batching is one of the
+> things forkrun does automatically -- and on a stream the competitors
+> are forced into it and still lose by 3.94-10.76x.
+> this note exists to prevent. For a single-study, like-for-like table
+> see `python/benchmarks/results/RELEASE_v3.6.0.md` §0.
+
 | System | records/s | Notes |
 |---|---|---|
 | forkrun C plugin | 2,023k–2,300k | yyjson single-pass, frozen ABI |

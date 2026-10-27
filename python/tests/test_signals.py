@@ -24,7 +24,7 @@ from forkrun._signals import validate_signal_policy  # noqa: E402
 from forkrun.exceptions import (ForkrunPreempted,  # noqa: E402
                                 ForkrunTerminated)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -82,7 +82,7 @@ class TestPolicyValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestDefaultPolicy(unittest.TestCase):
+class TestDefaultPolicy(ChildLifecycleMixin, unittest.TestCase):
     def test_installs_nothing(self):
         before = {s: _signal.getsignal(s) for s in
                   (_signal.SIGHUP, _signal.SIGTERM, _signal.SIGUSR1)}
@@ -118,7 +118,7 @@ class TestDefaultPolicy(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCheckpointPolicy(unittest.TestCase):
+class TestCheckpointPolicy(ChildLifecycleMixin, unittest.TestCase):
     def test_hup_aborts_checkpoints_raises(self):
         path = _make_input()
         fd, ckpt = tempfile.mkstemp(suffix=".ckpt")
