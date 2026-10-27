@@ -42,7 +42,7 @@ else
 fi
 
 # Path to frun.bash (assume script is in same directory as test suite)
-FRUN_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/frun.bash"
+FRUN_SOURCE="${FRUN_SOURCE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/frun.bash}"
 if [[ ! -f "$FRUN_SOURCE" ]]; then
   echo -e "${RED}ERROR: frun.bash not found at $FRUN_SOURCE${NC}"
   echo "Please run this test suite from the forkrun repository root."

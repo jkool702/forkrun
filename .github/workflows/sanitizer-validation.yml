@@ -19,6 +19,8 @@ on:
       - 'python/**'
       - 'forkrun_cleanroom.c'
       - 'Makefile.substrate'
+      - 'UNIT_TESTS/test_frun.sh'
+
 permissions:
   contents: read
 
@@ -71,17 +73,17 @@ jobs:
             bash -s -- "${{ matrix.mode }}" <<'CONTAINER'
           set -euo pipefail
           MODE="$1"
-          dnf install -y bash-devel gcc make file diffutils
+          dnf install -y bash-devel gcc make file diffutils >/dev/null 2>&1
           rpm -q bash-devel
-          if [ "$MODE" = "tsan" ]; then dnf install -y libtsan libtsan-static; fi
-          if [ "$MODE" = "asan-ubsan" ]; then dnf install -y libasan libasan-static libubsan libubsan-static; fi
+          if [ "$MODE" = "tsan" ]; then dnf install -y libtsan libtsan-static >/dev/null 2>&1; fi
+          if [ "$MODE" = "asan-ubsan" ]; then dnf install -y libasan libasan-static libubsan libubsan-static >/dev/null 2>&1; fi
           for arch in x86-64-v2 x86-64-v3 x86-64-v4; do
             tools/build_sanitizer_blob.sh "$MODE" "$arch" "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so"
           done
           # Embed into a SCRATCH wrapper (not the release frun.bash).
+          cp frun.bash frun.san.bash
           set +u
           set +o pipefail
-          cp frun.bash frun.san.bash
           cd ring_loadables
           source update_frun_base64.bash
           cd forkrun-libs
@@ -93,7 +95,6 @@ jobs:
           test -f frun.san.bash
           grep -q 'exec .*bash.*norc' frun.san.bash
           CONTAINER
-          echo "embedded scratch wrapper ready"
 
       - name: Verify embedded payload matches sanitizer blobs
         run: |
@@ -109,7 +110,7 @@ jobs:
           ! grep -q 'exec -c' frun.san.bash
           echo "provenance OK: embedded payload == freshly built sanitizer .so"
 
-      - name: Run basic Bash suite under sanitizer
+      - name: Preflight: verify Bash sanitizer load
         run: |
           set -euo pipefail
           docker run --rm -i \
@@ -119,8 +120,7 @@ jobs:
             fedora:44 \
             bash -s <<'CONTAINER'
           set -euo pipefail
-          dnf install -y bash-devel gcc make file diffutils libtsan libasan libubsan
-          # Determine mode from env passed via -e
+          dnf install -y bash-devel gcc make file diffutils libtsan libasan libubsan >/dev/null 2>&1
           if [ "$SAN_MODE" = "tsan" ]; then
             export LD_PRELOAD="$(ldconfig -p | grep libtsan | awk 'NR==1{print $NF}')"
           else
@@ -128,13 +128,42 @@ jobs:
             export ASAN_OPTIONS=detect_leaks=0
             export UBSAN_OPTIONS=print_stacktrace=1
           fi
-          grep -q 'FRUN_SOURCE=".*/frun.san.bash"' /tmp/test_frun.san.sh 2>/dev/null || true
-          # Build patched suite pointing at the scratch wrapper (shared volume).
-          sed "s#FRUN_SOURCE=\\"\\$(cd \\"\\$(dirname \\"\\${BASH_SOURCE\\[0\\]}\\")\\" \\&\\& pwd)/frun.bash\\"#FRUN_SOURCE=\\"/src/frun.san.bash\\"#" /src/UNIT_TESTS/test_frun.sh > /tmp/test_frun.san.sh
-          chmod +x /tmp/test_frun.san.sh
-          grep -q 'FRUN_SOURCE="/src/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
-          # Probe
-          bash /tmp/test_frun.san.sh
+          test -f /src/frun.san.bash || { echo "PREFLIGHT FAIL: scratch wrapper missing"; exit 1; }
+          bash -c '
+            set -euo pipefail
+            source /src/frun.san.bash
+            if [[ "$(type -t ring_version 2>/dev/null)" != "builtin" ]]; then
+              echo "PREFLIGHT FAIL: ring_version not registered"; exit 1
+            fi
+            v="$(ring_version)"
+            echo "PREFLIGHT: ring_version=$v"
+            [[ "$v" == "v3.6.2" ]] || { echo "PREFLIGHT FAIL: expected v3.6.2, got $v"; exit 1; }
+            echo "PREFLIGHT OK"
+          '
+          CONTAINER
+
+      - name: Run basic Bash suite under sanitizer
+        run: |
+          set -euo pipefail
+          docker run --rm -i \
+            -v $PWD:/src \
+            -w /src/UNIT_TESTS \
+            -e SAN_MODE="${{ matrix.mode }}" \
+            -e FRUN_SOURCE="/src/frun.san.bash" \
+            fedora:44 \
+            bash -s <<'CONTAINER'
+          set -euo pipefail
+          dnf install -y bash-devel gcc make file diffutils libtsan libasan libubsan >/dev/null 2>&1
+          if [ "$SAN_MODE" = "tsan" ]; then
+            export LD_PRELOAD="$(ldconfig -p | grep libtsan | awk 'NR==1{print $NF}')"
+          else
+            export LD_PRELOAD="$(ldconfig -p | grep libasan | awk 'NR==1{print $NF}')"
+            export ASAN_OPTIONS=detect_leaks=0
+            export UBSAN_OPTIONS=print_stacktrace=1
+          fi
+          test -f /src/frun.san.bash || { echo "FAIL: scratch wrapper missing"; exit 1; }
+          test "$FRUN_SOURCE" = "/src/frun.san.bash" || { echo "FAIL: FRUN_SOURCE not set"; exit 1; }
+          FRUN_SOURCE="$FRUN_SOURCE" bash /src/UNIT_TESTS/test_frun.sh
           CONTAINER
 
       - name: Upload scratch wrapper + blobs
@@ -168,7 +197,7 @@ jobs:
             bash -s -- "${{ matrix.mode }}" <<'CONTAINER'
           set -euo pipefail
           MODE="$1"
-          dnf install -y git bash-devel gcc make file diffutils python3 python3-devel python3-pip libtsan libasan libubsan
+          dnf install -y git bash-devel gcc make file diffutils python3 python3-devel python3-pip libtsan libasan libubsan >/dev/null 2>&1
           rpm -q bash-devel
           git config --global --add safe.directory /src
           if [ "$MODE" = "tsan" ]; then
