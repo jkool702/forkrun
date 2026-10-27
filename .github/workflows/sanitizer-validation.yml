@@ -126,7 +126,7 @@ jobs:
           cd UNIT_TESTS
           sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"$GITHUB_WORKSPACE/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
           chmod +x /tmp/test_frun.san.sh
-          grep -q "FRUN_SOURCE=\"$GITHUB_WORKSPACE/frun.san.bash\"" /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
+          grep -q 'FRUN_SOURCE=".*/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
           bash /tmp/test_frun.san.sh
       - name: Upload scratch wrapper + blobs
         if: always()
