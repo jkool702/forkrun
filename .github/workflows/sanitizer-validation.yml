@@ -112,23 +112,31 @@ jobs:
       - name: Run basic Bash suite under sanitizer
         run: |
           set -euo pipefail
-          # Ensure sanitizer runtime libs on the host runner.
-          sudo apt-get update -qq
-          if [ "${{ matrix.mode }}" = "tsan" ]; then
-            sudo apt-get install -y -qq libtsan2 2>/dev/null || sudo apt-get install -y -qq libtsan0 2>/dev/null || true
+          docker run --rm -i \
+            -v $PWD:/src \
+            -w /src/UNIT_TESTS \
+            -e SAN_MODE="${{ matrix.mode }}" \
+            fedora:44 \
+            bash -s <<'CONTAINER'
+          set -euo pipefail
+          dnf install -y bash-devel gcc make file diffutils libtsan libasan libubsan
+          # Determine mode from env passed via -e
+          if [ "$SAN_MODE" = "tsan" ]; then
             export LD_PRELOAD="$(ldconfig -p | grep libtsan | awk 'NR==1{print $NF}')"
           else
-            sudo apt-get install -y -qq libasan8 libubsan1 2>/dev/null || true
             export LD_PRELOAD="$(ldconfig -p | grep libasan | awk 'NR==1{print $NF}')"
             export ASAN_OPTIONS=detect_leaks=0
             export UBSAN_OPTIONS=print_stacktrace=1
           fi
-          cd UNIT_TESTS
-          sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"$GITHUB_WORKSPACE/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
+          grep -q 'FRUN_SOURCE=".*/frun.san.bash"' /tmp/test_frun.san.sh 2>/dev/null || true
+          # Build patched suite pointing at the scratch wrapper (shared volume).
+          sed "s#FRUN_SOURCE=\\"\\$(cd \\"\\$(dirname \\"\\${BASH_SOURCE\\[0\\]}\\")\\" \\&\\& pwd)/frun.bash\\"#FRUN_SOURCE=\\"/src/frun.san.bash\\"#" /src/UNIT_TESTS/test_frun.sh > /tmp/test_frun.san.sh
           chmod +x /tmp/test_frun.san.sh
-          grep -q 'FRUN_SOURCE=".*/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
-          bash -c "source \"$GITHUB_WORKSPACE/frun.san.bash\" 2>&1; echo \"ring_version type: [\$(type -t ring_version)]\"; frun -V" 2>&1 || true
+          grep -q 'FRUN_SOURCE="/src/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
+          # Probe
+          bash -c "source /src/frun.san.bash 2>&1; echo \\"ring_version type: [\\$(type -t ring_version)]\\"; frun -V" 2>&1 || true
           bash /tmp/test_frun.san.sh
+          CONTAINER
 
       - name: Upload scratch wrapper + blobs
         if: always()
