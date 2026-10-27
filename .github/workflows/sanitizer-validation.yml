@@ -16,8 +16,6 @@ on:
       - 'META'
       - 'tools/build_sanitizer_blob.sh'
       - '.github/workflows/sanitizer-validation.yml'
-  workflow_call:
-
 permissions:
   contents: read
 
@@ -33,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         mode: [tsan, asan-ubsan]
-    if: ${{ github.event.inputs.mode == '' || github.event.inputs.mode == 'all' || github.event.inputs.mode == matrix.mode }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.mode == '' || github.event.inputs.mode == 'all' || github.event.inputs.mode == matrix.mode }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -86,7 +84,7 @@ jobs:
       fail-fast: false
       matrix:
         mode: [tsan, asan-ubsan]
-    if: ${{ github.event.inputs.mode == '' || github.event.inputs.mode == 'all' || github.event.inputs.mode == matrix.mode }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.mode == '' || github.event.inputs.mode == 'all' || github.event.inputs.mode == matrix.mode }}
     steps:
       - uses: actions/checkout@v3
         with:
