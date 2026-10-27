@@ -38,33 +38,44 @@ jobs:
       - name: Build + embed sanitizer blobs (x86-64 v2/v3/v4)
         run: |
           set -euo pipefail
+          docker run --rm -i \
+            -v $PWD:/src \
+            -w /src \
+            fedora:44 \
+            bash -s -- "${{ matrix.mode }}" <<'CONTAINER'
+          set -euo pipefail
+          MODE="$1"
+          dnf install -y bash-devel gcc make file diffutils
+          rpm -q bash-devel
           for arch in x86-64-v2 x86-64-v3 x86-64-v4; do
-            key="${arch//-/_}"
-            tools/build_sanitizer_blob.sh "${{ matrix.mode }}" "$arch" "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so"
+            tools/build_sanitizer_blob.sh "$MODE" "$arch" "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so"
           done
           bash ring_loadables/update_frun_base64.bash
-          # Scratch wrapper: remove exec -c so LD_PRELOAD survives (MAINTAINERS §5).
+          cp frun.bash /tmp/frun.san.bash
+          sed -i 's/exec -c "${BASH:-bash}"/exec "${BASH:-bash}"/' /tmp/frun.san.bash
+          CONTAINER
+          # Bring scratch wrapper out of container (it's on the same volume mount, /tmp is container-local though).
+          # Re-create scratch wrapper on host from the freshly embedded frun.bash:
           cp frun.bash /tmp/frun.san.bash
           sed -i 's/exec -c "${BASH:-bash}"/exec "${BASH:-bash}"/' /tmp/frun.san.bash
           grep -n 'exec .*bash.*norc' /tmp/frun.san.bash | head -1
       - name: Run basic Bash suite under sanitizer
         run: |
           set -euo pipefail
-          export FRUN_SOURCE=/tmp/frun.san.bash
-          # The suite hard-codes ../frun.bash; symlink the scratch wrapper in place.
-          cp /tmp/frun.san.bash frun.bash.san-scratch 2>/dev/null || true
-          # Run from UNIT_TESTS with a patched source path via sed (test reads FRUN_SOURCE? no). Instead run a version-tolerant invocation.
-          cd UNIT_TESTS
-          # Patch the suite's FRUN_SOURCE resolution by env is not supported; use a temp copy of the suite pointing at scratch wrapper.
-          sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"/tmp/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
-          chmod +x /tmp/test_frun.san.sh
+          # Ensure sanitizer runtime libs on the host runner.
+          sudo apt-get update -qq
           if [ "${{ matrix.mode }}" = "tsan" ]; then
+            sudo apt-get install -y -qq libtsan2 2>/dev/null || sudo apt-get install -y -qq libtsan0 2>/dev/null || true
             export LD_PRELOAD="$(ldconfig -p | grep libtsan | awk 'NR==1{print $NF}')"
           else
+            sudo apt-get install -y -qq libasan8 libubsan1 2>/dev/null || true
             export LD_PRELOAD="$(ldconfig -p | grep libasan | awk 'NR==1{print $NF}')"
             export ASAN_OPTIONS=detect_leaks=0
             export UBSAN_OPTIONS=print_stacktrace=1
           fi
+          cd UNIT_TESTS
+          sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"/tmp/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
+          chmod +x /tmp/test_frun.san.sh
           bash /tmp/test_frun.san.sh
       - name: Upload scratch wrapper + blobs
         if: always()
@@ -96,7 +107,7 @@ jobs:
             bash -s -- "${{ matrix.mode }}" <<'CONTAINER'
           set -euo pipefail
           MODE="$1"
-          dnf install -y git bash-devel gcc make file diffutils python3 python3-devel python3-pip
+          dnf install -y git bash-devel gcc make file diffutils python3 python3-devel python3-pip libtsan libasan libubsan
           rpm -q bash-devel
           git config --global --add safe.directory /src
           if [ "$MODE" = "tsan" ]; then
