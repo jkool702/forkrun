@@ -128,7 +128,8 @@ push touching `forkrun_ring.c`/`forkrun_substrate.h`/`ring_loadables/forkrun_plu
 `tools/build_sanitizer_blob.sh`/the workflow).
 
 It builds instrumented blobs from the checked-out commit using the shared
-`tools/build_sanitizer_blob.sh` (mode: normal/tsan/asan-ubsan), embeds them into a
+`tools/build_sanitizer_blob.sh` (mode: tsan/asan-ubsan; normal mode removed —
+unsanitized builds use the release workflow), embeds them into a
 scratch `frun.bash` (NOT the release file), removes `exec -c` in that scratch copy
 so `LD_PRELOAD` survives, and runs the Bash basic suite + the Python canary subset
 (`test_v0 test_fault test_reactor test_spawn`) under the appropriate sanitizer

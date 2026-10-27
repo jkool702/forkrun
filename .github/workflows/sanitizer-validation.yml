@@ -16,6 +16,9 @@ on:
       - 'META'
       - 'tools/build_sanitizer_blob.sh'
       - '.github/workflows/sanitizer-validation.yml'
+      - 'python/**'
+      - 'forkrun_cleanroom.c'
+      - 'Makefile.substrate'
 permissions:
   contents: read
 
@@ -75,15 +78,34 @@ jobs:
           for arch in x86-64-v2 x86-64-v3 x86-64-v4; do
             tools/build_sanitizer_blob.sh "$MODE" "$arch" "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so"
           done
-          bash ring_loadables/update_frun_base64.bash
+          # Embed into a SCRATCH wrapper (not the release frun.bash).
           cp frun.bash /tmp/frun.san.bash
+          cd ring_loadables
+          source update_frun_base64.bash
+          cd forkrun-libs
+          update_frun_base64 /tmp/frun.san.bash
+          cd /src
+          # Scratch-only: remove exec -c so LD_PRELOAD survives (MAINTAINERS §5).
           sed -i 's/exec -c "${BASH:-bash}"/exec "${BASH:-bash}"/' /tmp/frun.san.bash
+          test -f /tmp/frun.san.bash
+          grep -q 'exec .*bash.*norc' /tmp/frun.san.bash
           CONTAINER
-          # Bring scratch wrapper out of container (it's on the same volume mount, /tmp is container-local though).
-          # Re-create scratch wrapper on host from the freshly embedded frun.bash:
-          cp frun.bash /tmp/frun.san.bash
-          sed -i 's/exec -c "${BASH:-bash}"/exec "${BASH:-bash}"/' /tmp/frun.san.bash
-          grep -n 'exec .*bash.*norc' /tmp/frun.san.bash | head -1
+          echo "embedded scratch wrapper ready"
+
+      - name: Verify embedded payload matches sanitizer blobs
+        run: |
+          set -euo pipefail
+          for arch in x86-64-v2 x86-64-v3 x86-64-v4; do
+            key="${arch//-/_}"
+            ring_loadables/verify_blob_freshness.bash \
+              "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so" \
+              /tmp/frun.san.bash "$key"
+          done
+          test -f /tmp/frun.san.bash
+          grep -q 'exec .*bash.*norc' /tmp/frun.san.bash
+          ! grep -q 'exec -c' /tmp/frun.san.bash
+          echo "provenance OK: embedded payload == freshly built sanitizer .so"
+
       - name: Run basic Bash suite under sanitizer
         run: |
           set -euo pipefail
@@ -101,6 +123,7 @@ jobs:
           cd UNIT_TESTS
           sed "s#FRUN_SOURCE=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")\" \&\& pwd)/frun.bash\"#FRUN_SOURCE=\"/tmp/frun.san.bash\"#" test_frun.sh > /tmp/test_frun.san.sh
           chmod +x /tmp/test_frun.san.sh
+          grep -q 'FRUN_SOURCE="/tmp/frun.san.bash"' /tmp/test_frun.san.sh || { echo "FRUN_SOURCE substitution failed"; exit 1; }
           bash /tmp/test_frun.san.sh
       - name: Upload scratch wrapper + blobs
         if: always()
