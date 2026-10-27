@@ -1,5 +1,9 @@
 # forkrun Changelog
 
+## v3.6.2 — unreleased
+
+(Version bump for the 3.6.2 / 0.18.0 release; closeout notes to follow.)
+
 ## Unreleased — the child-lifecycle helper stopped blaming the wrong test
 
 **Test infrastructure, no product change.** `assert_no_zombies()` did a

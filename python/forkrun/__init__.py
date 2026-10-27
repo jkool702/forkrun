@@ -58,7 +58,7 @@ from forkrun.run import last_run_stats  # noqa: F401
 # copy-per-record representation moves to the explicit output="bytes".
 # Bumped rather than reused so a 0.16.0 wheel and a 0.17.0 wheel never
 # claim the same version while behaving differently.
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 
 def materialize(blob):

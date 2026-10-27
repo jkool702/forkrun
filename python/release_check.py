@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""forkrun v3.6.1 release checklist (W-PY23, W-REL5-F F6).
+"""forkrun v3.6.2 release checklist (W-PY23, W-REL5-F F6).
 
-Run from the repo root BEFORE tagging v3.6.1. Every check must pass:
+Run from the repo root BEFORE tagging v3.6.2. Every check must pass:
 
     python3 python/release_check.py
 
@@ -47,7 +47,7 @@ def _read_py_version():
 
 
 PY_VERSION = _read_py_version()
-PROJECT_VERSION = "v3.6.1"
+PROJECT_VERSION = "v3.6.2"
 FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
 
 CHECKS = []
@@ -194,7 +194,7 @@ def check_changelog_final():
                        % re.escape(PROJECT_VERSION), content, re.M)
     assert marked is None, \
         "CHANGELOG.md still heads %s as (unreleased) -- finalize the " \
-        "heading at tag time (TAG_PREP_v3.6.1.md step: this red is " \
+        "heading at tag time (TAG_PREP_v3.6.2.md step: this red is " \
         "designed, not a bug)" % PROJECT_VERSION
     return True
 
@@ -226,7 +226,7 @@ def check_unreleased_untagged():
 def _tag_checks_enabled():
     """Gating predicate for the tag-is-free guard.
 
-    This guard answers "may I tag v3.6.1 right now?", which is only the
+    This guard answers "may I tag v3.6.2 right now?", which is only the
     question in the moments before tagging. Once the tag exists -- which
     it does, and legitimately so, for the whole of a normal development
     day -- the guard can only ever report failure, and a permanently red
@@ -247,7 +247,7 @@ def _tag_checks_enabled():
 def check_tag_free():
     # W-REL5-F (F6.1): tagging over an existing tag would move/fail
     # it. Local tags only (offline-safe); pushing the tag is the
-    # owner's step in TAG_PREP_v3.6.1.md.
+    # owner's step in TAG_PREP_v3.6.2.md.
     proc = _run(["git", "tag", "--list", PROJECT_VERSION], timeout=60)
     assert proc.returncode == 0, proc.stderr[-500:]
     assert proc.stdout.strip() == "", \

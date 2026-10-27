@@ -1,4 +1,4 @@
-# forkrun Python frontend — v0.17.0 (W-PY23 release prep)
+# forkrun Python frontend — v0.18.0 (W-PY23 release prep)
 
 > **New here?** Start with [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
 > (5 minutes to your first parallel job). Full user guides:
@@ -19,7 +19,7 @@
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.17.0"`; `forkrun.__engine_version__` reports the
+`forkrun.__version__` is `"0.18.0"`; `forkrun.__engine_version__` reports the
 substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
