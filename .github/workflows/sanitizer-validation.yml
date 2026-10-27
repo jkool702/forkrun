@@ -79,12 +79,15 @@ jobs:
             tools/build_sanitizer_blob.sh "$MODE" "$arch" "ring_loadables/forkrun-libs/forkrun_ring.${arch}.so"
           done
           # Embed into a SCRATCH wrapper (not the release frun.bash).
+          set +u
+          set +o pipefail
           cp frun.bash /tmp/frun.san.bash
           cd ring_loadables
           source update_frun_base64.bash
           cd forkrun-libs
           update_frun_base64 /tmp/frun.san.bash
           cd /src
+          set -euo pipefail
           # Scratch-only: remove exec -c so LD_PRELOAD survives (MAINTAINERS §5).
           sed -i 's/exec -c "${BASH:-bash}"/exec "${BASH:-bash}"/' /tmp/frun.san.bash
           test -f /tmp/frun.san.bash
