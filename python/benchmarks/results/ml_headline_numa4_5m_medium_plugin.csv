@@ -1,0 +1,3 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+forkrun-plugin-medium-28w,plugin,c-callback,3223790.613262804,1082.90625,-1.0,"out=4997892/5000000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
+forkrun-yyjson-medium-28w,plugin,c-callback-yyjson,4496608.326600558,1083.6484375,-1.0,"out=4997892/5000000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.10-200.numa_emu.fc44.x86_64
