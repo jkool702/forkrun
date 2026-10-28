@@ -676,39 +676,42 @@ class RayBench:
         self.ray.shutdown()
 
 
-def bench_native(ctx, path, n_records, input_bytes, variant, trials):
+def bench_native(ctx, path, n_records, input_bytes, variant, trials,
+                 run_polars=True, run_duckdb=True):
     """Polars/DuckDB native expressions (medium variant only)."""
     if variant != "medium":
         return {}
     rates = {}
-    try:
-        from ml_native import polars_medium
+    if run_polars:
+        try:
+            from ml_native import polars_medium
 
-        def run_pl():
-            return polars_medium(path)
+            def run_pl():
+                return polars_medium(path)
 
-        t, _ = time_it(run_pl, trials=trials, warmup=1)
-        n_out = len(run_pl())
-        ctx.record("polars-native", "polars", "native",
-                   n_records / t, rss_mb(),
-                   "out=%d rows, lazy/streaming NDJSON" % n_out)
-        rates["polars"] = n_records / t
-    except ImportError:
-        pass
-    try:
-        from ml_native import duckdb_medium
+            t, _ = time_it(run_pl, trials=trials, warmup=1)
+            n_out = len(run_pl())
+            ctx.record("polars-native", "polars", "native",
+                       n_records / t, rss_mb(),
+                       "out=%d rows, lazy/streaming NDJSON" % n_out)
+            rates["polars"] = n_records / t
+        except ImportError:
+            pass
+    if run_duckdb:
+        try:
+            from ml_native import duckdb_medium
 
-        def run_dd():
-            return duckdb_medium(path)
+            def run_dd():
+                return duckdb_medium(path)
 
-        t, _ = time_it(run_dd, trials=trials, warmup=1)
-        n_out = len(run_dd())
-        ctx.record("duckdb-native", "duckdb", "native",
-                   n_records / t, rss_mb(),
-                   "out=%d rows, SQL/JSON" % n_out)
-        rates["duckdb"] = n_records / t
-    except ImportError:
-        pass
+            t, _ = time_it(run_dd, trials=trials, warmup=1)
+            n_out = len(run_dd())
+            ctx.record("duckdb-native", "duckdb", "native",
+                       n_records / t, rss_mb(),
+                       "out=%d rows, SQL/JSON" % n_out)
+            rates["duckdb"] = n_records / t
+        except ImportError:
+            pass
     return rates
 
 
@@ -1182,6 +1185,7 @@ def main(argv=None):
     os.makedirs(tmpdir, exist_ok=True)
     ctx = BenchContext(scale="small", trials=args.trials)
     best = {}
+    input_bytes_by_variant = {}
 
     def _want(system):
         """True if this system should run under --only-system."""
@@ -1215,6 +1219,7 @@ def main(argv=None):
                     generate_data(path, args.records, variant=variant,
                                   malformed_pct=args.malformed)
                 input_bytes = os.path.getsize(path)
+                input_bytes_by_variant[variant] = input_bytes
                 print("--- %s: %d records, %.1fMB ---"
                       % (variant, args.records, input_bytes / 2**20),
                       flush=True)
@@ -1322,8 +1327,11 @@ def main(argv=None):
                     except Exception as exc:  # noqa: BLE001
                         print("ray failed: %s" % str(exc)[:200],
                               flush=True)
-                bench_native(ctx, path, args.records, input_bytes,
-                             variant, args.trials)
+                if _want("polars") or _want("duckdb"):
+                    bench_native(ctx, path, args.records, input_bytes,
+                                 variant, args.trials,
+                                 run_polars=_want("polars"),
+                                 run_duckdb=_want("duckdb"))
                 # Incremental table: results survive later crashes.
                 print("--- %s results (this variant) ---" % variant)
                 print(format_table(ctx.results[base:]), flush=True)
@@ -1365,9 +1373,10 @@ def main(argv=None):
     print()
     print("BEST (worker sweep):")
     for (system, variant), (rate, _) in sorted(best.items()):
+        ib = input_bytes_by_variant.get(variant)
+        mb_s = (rate * ib / args.records / 1e6) if ib else 0.0
         print("  %-12s %-6s %10.0f records/s (%5.1f MB/s input)" % (
-            system, variant, rate,
-            rate * _avg_bytes(variant) / 1e6))
+            system, variant, rate, mb_s))
     print()
     print("NOTES:")
     print("- Worker sweep %s; each system's best rate shown above."
@@ -1406,10 +1415,6 @@ def main(argv=None):
         write_csv(ctx.results, args.csv)
         print("CSV: %s" % args.csv)
     return 0
-
-
-def _avg_bytes(variant):
-    return {"light": 120, "medium": 460, "heavy": 1300}[variant]
 
 
 if __name__ == "__main__":
