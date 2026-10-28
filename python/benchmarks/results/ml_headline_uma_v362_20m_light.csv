@@ -1,0 +1,2 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+forkrun-light-28w,forkrun,udf,1845630.665626788,1369.23046875,-1.0,"out=20000000/20000000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64

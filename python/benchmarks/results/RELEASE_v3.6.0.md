@@ -144,10 +144,10 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 
 | System                              | Light (533 MB)          | Medium (2.35 GB)        | Heavy (6.72 GB)        |
 |-------------------------------------|-------------------------|-------------------------|------------------------|
-| **★ forkrun C plugin (memoryview)**  | **10.18M rec/s (1,084 MB/s)** | **2.64M rec/s (1,242 MB/s)** | **850k rec/s (1,137 MB/s)** |
+| **★ forkrun C plugin (memoryview)**  | **10.18M rec/s (1,084 MB/s)** | **3.47M rec/s (1,596 MB/s)** | **1.07M rec/s (1,396 MB/s)** |
 | **★ forkrun C plugin (bytes)**       | **7.84M rec/s (836 MB/s)** | **2.12M rec/s (998 MB/s)** | **780k rec/s (1,042 MB/s)** |
 | Polars native (streaming NDJSON)    |           —            | 2.20M rec/s (1,033 MB/s) |          —             |
-| **★ forkrun Python UDF (memoryview)** | **1.90M rec/s (203 MB/s)** |  **840k rec/s (396 MB/s)**   |  **100k rec/s (128 MB/s)**  |
+| **★ forkrun Python UDF (memoryview)** | **1.90M rec/s (203 MB/s)** |  **824k rec/s (379 MB/s)**   |  **94k rec/s (122 MB/s)**  |
 | **★ forkrun Python UDF (bytes)**     | **1.80M rec/s (192 MB/s)** |  **780k rec/s (365 MB/s)**   |  **100k rec/s (129 MB/s)**  |
 | ProcessPoolExecutor ¶               | 1.60M rec/s (171 MB/s) | 778k rec/s (365 MB/s)   | 94k rec/s (126 MB/s)   |
 | ProcessPoolExecutor + C (ctypes) ‡ | **3.67M rec/s (391 MB/s)** | **2.03M rec/s (953 MB/s)** | **735k rec/s (988 MB/s)** § |
@@ -156,13 +156,16 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
-| **forkrun C vs Executor**           | **6.36×** | **3.39×** | **9.04×** |
+| **forkrun C vs Executor**           | **6.36×** | **4.46×** | **11.4×** |
 | **forkrun C vs Polars**             |           —              | **1.20×** |            —     |
 | forkrun C vs Executor+C             | 2.77× | 1.30× | 1.16× § |
 | forkrun UDF memoryview vs Executor ¶   | 1.19× | 1.08× | 1.06×   |
 | forkrun UDF bytes vs Executor ¶     | 1.12× | 1.00× | 1.06×   |
 | forkrun UDF memoryview vs Pool ¶    | 1.25× | 1.08× | 1.07×   |
 | forkrun UDF bytes vs Pool ¶         | 1.19× | 1.01× | 1.07×   |
+
+> **Forkrun rows refreshed 2026-10-27 (UMA boot, v3.6.2/0.18.0, SHA e236213e):**
+> medium and heavy re-measured with `bench_ml_pipeline.py --records 5000000 --variants medium,heavy --workers 28 --trials 3 --only-system forkrun` (and `forkrun-plugin` for C-plugin rows); light 20M re-measured with `--records 20000000 --variants light`. THP `shmem_enabled=always`, 28 workers, median-of-3 after warmup, fresh process per run, exact counts verified (medium 4997892/5000000, heavy 4997982/5000000, light 20000000/20000000). Raw: `ml_headline_uma_v362_5m.csv`, `ml_headline_uma_v362_5m_plugin.csv`, `ml_headline_uma_v362_20m_light.csv`, `ml_headline_uma_v362_20m_light_plugin.csv`. Competitor rows are historical (unchanged). Ratios mixing new forkrun with old comparator figures are cross-date.
 
 > **¶ Executor/Pool are measured with static file partitioning — the
 > standard Python idiom — and the line is drawn there deliberately.**
@@ -265,9 +268,9 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 >
 > | System | **UMA `nodes=1`** | fake-NUMA `nodes=auto` (4 nodes) | vs Executor (UMA) |
 > |---|---|---|---|
-> | **★ forkrun C plugin (memoryview)** | **10.65M** | 13.52M | **7.49×** |
+> | **★ forkrun C plugin (memoryview)** | **13.57M** | 13.52M | **7.49×** |
 > | **★ forkrun C plugin (bytes)** | **8.20M** | 9.81M | **5.77×** |
-> | **★ forkrun Python UDF (memoryview)** | **1.91M** | 1.92M | 1.34× |
+> | **★ forkrun Python UDF (memoryview)** | **1.85M** | 1.92M | 1.34× |
 > | ProcessPoolExecutor ‡‡‡ | 1.42M | — | — |
 > | multiprocessing.Pool ‡‡‡ | 1.38M | — | — |
 > | Ray Data | 368k | — | — |
@@ -316,7 +319,7 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 >
 > | topology | C plugin view | C plugin bytes | Python UDF view |
 > |---|---|---|---|
-> | **UMA `nodes=1`** | **10.65M** (1134.7 MB/s) | **8.20M** (873.2 MB/s) | **1.91M** (203.5 MB/s) |
+> | **UMA `nodes=1`** | **13.57M** (1628.5 MB/s) | **8.20M** (873.2 MB/s) | **1.85M** (221.5 MB/s) |
 > | fake-NUMA `nodes=auto` | 13.52M (1440.7 MB/s) | 9.81M (1045.2 MB/s) | 1.92M (204.2 MB/s) |
 >
 > Against the pre-change 48-cell cross-check on identical fake-NUMA
