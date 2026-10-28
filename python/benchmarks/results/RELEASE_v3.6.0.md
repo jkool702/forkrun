@@ -156,7 +156,7 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 | Ray Data (†)                        |  250k rec/s (27 MB/s)  |  184k rec/s (86 MB/s)   |  56k rec/s (75 MB/s)   |
 | HuggingFace Datasets                |  120k rec/s (13 MB/s)  |   90k rec/s (42 MB/s)   |  44k rec/s (59 MB/s)   |
 |-------------------------------------|---------------------------|---------------------------|---------------------------|
-| **forkrun C vs Executor**           | **6.36×** | **4.46×** | **11.4×** |
+| **forkrun C vs Executor**           | **6.36×** | **4.42×** | **11.4×** |
 | **forkrun C vs Polars**             |           —              | **1.56×** |            —     |
 | forkrun C vs Executor+C             | 2.77× | 1.69× | 1.46× § |
 | forkrun UDF memoryview vs Executor ¶   | 1.19× | 1.05× | 0.99×   |
@@ -219,11 +219,12 @@ Throughput is steady-state after warmup. MB/s uses decimal units (1 MB = 10⁶ b
 > its best count.)
 >
 > So the honest summary of §0 is: against statically-partitioned Python
-> process pools, forkrun's C plugin path is **6.36× / 3.39× / 9.04×** and
-> its Python UDF path is **1.19× / 1.08× / 1.06×** on light / medium /
-> heavy. The UDF path wins, but by single digits — it should be presented
-> as parity-plus, carrying ordered output and automatic failure recovery
-> that static partitioning gives you neither of. The C plugin path is
+> process pools, forkrun's C plugin path is **6.36× / 4.42× / 11.4×** and
+> its Python UDF path is **1.19× / 1.05× / 0.99×** on light / medium /
+> heavy (cross-date: new forkrun measurements vs. historical Executor
+> figures). The UDF path is essentially at parity on medium/heavy, carrying
+> ordered output and automatic failure recovery that static partitioning
+> gives you neither of. The C plugin path is
 > where the speed argument lives, and it is not close.
 >
 > Provenance: re-measured 2026-10-08 on the v3.6.1 release branch, 28
