@@ -98,8 +98,17 @@ def _build(tmpdir):
 _CHILD = r"""
 import os, sys, tempfile
 sys.path.insert(0, PYTHON_DIR)
+# The matrix deliberately closes standard descriptors, including stderr.
+# Python exits 120 if any warning is emitted to a closed stderr, which
+# would mask the descriptor-placement assertions under test. Silence
+# warnings in this child only; production code is unaffected.
+import warnings as _w
+_w.simplefilter("ignore")
 os.environ['FORKRUN_CLEANROOM'] = '1'
+os.environ['FORKRUN_CLEANROOM_NUMA'] = '1'
 os.environ['FORKRUN_RETRY_LIMIT'] = '1'
+import warnings as _w
+_w.filterwarnings('ignore', message='.*raised to.*cover.*NUMA nodes.*')
 import forkrun
 R = sys.modules['forkrun.run']
 R._set_cleanroom_launch_backend(BACKEND)
@@ -130,6 +139,8 @@ def _spy(launcher, argv, actions):
 R._spawn_or_fork = _spy
 
 def check(shape):
+    if not _cap:
+        raise RuntimeError('no launcher call captured; cleanroom route did not run')
     argv, actions = _cap[-1]
     for key in ('--src', '--result', '--stats-fd'):
         log('%s %s %s' % (shape, key, argv[argv.index(key) + 1]))
@@ -138,7 +149,7 @@ def check(shape):
         log('%s action %d %d %d' % (shape, act[0], act[1], act[2]))
 
 try:
-    out = forkrun.map(SPEC, _src, mode='plugin', workers=2, lines=1)
+    out = forkrun.map(SPEC, _src, mode='plugin', workers=2, lines=1, nodes=1)
     blob = b''.join(bytes(b) for b in out)
     log('MAP records %d' % len(out))
     log('MAP tokens %s' % ','.join(
@@ -149,8 +160,9 @@ except BaseException as _e:
     log('MAP raised %s %s' % (type(_e).__name__, str(_e)[:120]))
 
 try:
+    _cap.clear()
     gen = forkrun.stream(SPEC, _src, mode='plugin', workers=2, lines=1,
-                         streaming=True)
+                         streaming=True, nodes=1)
     recs = list(gen)
     gen.close()
     blob = b''.join(recs)

@@ -51,14 +51,27 @@ def _parse_id_list(raw):
 
 
 def detect_numa_nodes():
-    """Online physical NUMA node IDs (e.g. [0, 1]). [0] when unknown."""
+    """Online physical NUMA node IDs (e.g. [0, 1]). [0] when unknown.
+
+    Fake-NUMA boots (``numa=fake=N``) expose N nodes that all share the
+    same CPU set. Such a topology is functionally UMA -- pinning and
+    per-node placement have no effect -- so collapse it to a single node
+    for auto-detection. Explicit multi-node requests (@N, '0,1', N>1)
+    are still honoured.
+    """
     try:
         with open("/sys/devices/system/node/online") as fh:
             raw = fh.read()
     except OSError:
         return [0]
     nodes = _parse_id_list(raw)
-    return nodes or [0]
+    if not nodes:
+        return [0]
+    if len(nodes) > 1:
+        cpusets = [tuple(get_node_cpus(n)) for n in nodes]
+        if len(set(cpusets)) == 1:
+            return [nodes[0]]
+    return nodes
 
 
 def get_node_cpus(node_id):

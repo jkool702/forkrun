@@ -538,6 +538,13 @@ class TestCleanroomExecutes(unittest.TestCase):
         # -- so the test ERRORed on UMA while passing on fake-4. @2
         # expresses the same multi-node intent on any topology, still
         # trips the envelope refusal, and still returns right answers.
+        # Multi-node cleanroom stays opt-in (Decision 3); force it off so
+        # the refusal path is exercised.
+        _old = os.environ.pop("FORKRUN_CLEANROOM_NUMA", None)
+        os.environ["FORKRUN_CLEANROOM_NUMA"] = "0"
+        self.addCleanup(lambda old=_old: (
+            os.environ.pop("FORKRUN_CLEANROOM_NUMA", None)
+            if old is None else os.environ.__setitem__("FORKRUN_CLEANROOM_NUMA", old)))
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             out = forkrun.map(_spec(), self.path, workers=2, nodes="@2",

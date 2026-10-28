@@ -517,7 +517,7 @@ class TestCallerOwnedDescriptorsSurviveTheRoute(unittest.TestCase):
             _before = os.fstat(_t)
             try:
                 _out = forkrun.map(SPEC, _t, mode='plugin',
-                                   workers=2, lines=64)
+                                   workers=2, lines=64, nodes=1)
                 try:
                     _after = os.fstat(_t)
                     _same = ((_after.st_dev, _after.st_ino)

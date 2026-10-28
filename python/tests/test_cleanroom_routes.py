@@ -334,11 +334,22 @@ class TestUnservedRoutesStayUnserved(_Fixtures):
                          "run() has no cleanroom dispatch at all")
 
     def test_numa_never_launches(self):
+        # Multi-node stays opt-in (Decision 3): with the NUMA switch off
+        # the launcher must never run, even under FORKRUN_CLEANROOM=1.
+        _old_numa = os.environ.pop("FORKRUN_CLEANROOM_NUMA", None)
+        os.environ["FORKRUN_CLEANROOM_NUMA"] = "0"
+        self.addCleanup(self._restore_numa_gate, _old_numa)
         with LauncherExecProbe() as probe:
             forkrun.map(self.spec, self.src, mode="plugin", nodes="@2",
                         workers=2, order="none", output="bytes")
         self.assertEqual(0, probe.read(),
                          "multi-node routes around the cleanroom entirely")
+
+    def _restore_numa_gate(self, old):
+        if old is None:
+            os.environ.pop("FORKRUN_CLEANROOM_NUMA", None)
+        else:
+            os.environ["FORKRUN_CLEANROOM_NUMA"] = old
 
     def test_resume_never_launches(self):
         """resume is refused by the shared envelope, so no launcher runs.

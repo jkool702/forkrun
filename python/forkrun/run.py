@@ -760,12 +760,18 @@ def _warn_cleanroom_multinode(num_nodes):
     if not (_cleanroom_enabled() and _cleanroom_explicit()):
         return
     import warnings as _warnings
-    _warnings.warn(
-        "forkrun: FORKRUN_CLEANROOM ignored -- multi-node (nodes=%r) "
-        "runs the dedicated NUMA pipeline. The launcher serves the "
-        "multi-node plugin envelope only when FORKRUN_CLEANROOM_NUMA=1 "
-        "is set (Decision 3 is not passed yet)." % (num_nodes,),
-        UserWarning, stacklevel=3)
+    try:
+        _warnings.warn(
+            "forkrun: FORKRUN_CLEANROOM ignored -- multi-node (nodes=%r) "
+            "runs the dedicated NUMA pipeline. The launcher serves the "
+            "multi-node plugin envelope only when FORKRUN_CLEANROOM_NUMA=1 "
+            "is set (Decision 3 is not passed yet)." % (num_nodes,),
+            UserWarning, stacklevel=3)
+    except (OSError, ValueError, RuntimeError):
+        # stderr may be closed (e.g. the low-FD matrix deliberately
+        # closes descriptor 2); a non-essential warning must not crash
+        # the run or corrupt a closed descriptor.
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -4510,12 +4516,15 @@ def _resolve_workers_numa(workers, num_nodes=1):
         num_nodes = 1
     if num_nodes > 1 and base < num_nodes:
         import warnings as _warnings
-        _warnings.warn(
-            "forkrun: workers=%d raised to %d to cover %d NUMA "
-            "nodes (an uncovered node's born-local ring is never "
-            "claimed — pass workers>=nodes or nodes=1 for "
-            "single-node work)" % (base, num_nodes, num_nodes),
-            UserWarning, stacklevel=3)
+        try:
+            _warnings.warn(
+                "forkrun: workers=%d raised to %d to cover %d NUMA "
+                "nodes (an uncovered node's born-local ring is never "
+                "claimed — pass workers>=nodes or nodes=1 for "
+                "single-node work)" % (base, num_nodes, num_nodes),
+                UserWarning, stacklevel=3)
+        except (OSError, ValueError, RuntimeError):
+            pass
         return num_nodes
     return base
 

@@ -134,7 +134,7 @@ class _CleanroomC07Base(unittest.TestCase):
 
     def _run_cleanroom(self):
         out = forkrun.map(self.spec, self.corpus, mode="plugin",
-                          workers=2, lines=self.BATCH)
+                          workers=2, lines=self.BATCH, nodes=1)
         self.assertEqual(
             len(out), self.expected_records,
             "fixture changed shape: %d records, expected %d"
@@ -335,7 +335,7 @@ class TestRecoveryDoesNotDoubleCount(_CleanroomC07Base):
         self._set_env("FORKRUN_TEST_DIE_BEFORE_ACK_ONCE", once)
 
         out = forkrun.map(self.spec, self.corpus, mode="plugin",
-                          workers=2, lines=self.BATCH)
+                          workers=2, lines=self.BATCH, nodes=1)
         self.assertEqual(len(out), self.expected_records - 1,
                          "fixture no longer produces the truncated run this "
                          "test is about (%d records)" % len(out))
