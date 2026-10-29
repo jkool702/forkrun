@@ -292,7 +292,7 @@ class TestRouteDescriptorsAboveStdioBothShapes(unittest.TestCase):
             try:
                 if %r == 'map':
                     _n = len(forkrun.map(_so, _src, mode='plugin',
-                                         workers=2, lines=64))
+                                         workers=2, lines=64, nodes=1))
                 else:
                     _n = 0
                     for _c in forkrun.stream(_so, _src, streaming=True,

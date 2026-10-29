@@ -137,6 +137,10 @@ class TestUDFExtensionImport(unittest.TestCase):
                 TestUDFExtensionImport._old_env
 
     def _map(self, attr, **kw):
+        # The cleanroom UDF envelope is single-node; nodes="auto" would
+        # select the multi-node engine on a fake-NUMA host and silently
+        # decline the very route this suite is about.
+        kw.setdefault("nodes", 1)
         return self.forkrun.map(
             "forkrun_ext_fixture:" + attr, self.src,
             mode="udf", output="bytes", **kw)

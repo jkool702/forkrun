@@ -89,6 +89,12 @@ class _UDFFixture(unittest.TestCase):
         cls._tmp.cleanup()
 
     def map(self, attr, **kw):
+        # Explicit single-node: the cleanroom's UDF envelope is UMA (a
+        # multi-node UDF route is not served), and on a fake-NUMA host
+        # nodes="auto" would silently decline the cleanroom and run the
+        # NUMA in-process path instead. The NUMA fallback tests pass
+        # nodes="@2" explicitly, which overrides this default.
+        kw.setdefault("nodes", 1)
         return self.forkrun.map(
             "forkrun_udf_fixture:" + attr, self.src,
             mode="udf", output="bytes", **kw)
@@ -126,7 +132,7 @@ class TestUDFModeEndToEnd(_UDFFixture):
     def test_streaming_udf_also_works(self):
         got = list(self.forkrun.stream(
             "forkrun_udf_fixture:up", self.src, mode="udf",
-            workers=2, lines=5, streaming=True))
+            workers=2, lines=5, nodes=1, streaming=True))
         self.assertTrue(got, "streaming UDF produced no records")
 
     # -- DECISION-02: None and b"" stay distinct -----------------------

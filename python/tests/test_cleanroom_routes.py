@@ -464,5 +464,78 @@ class TestSelectorControlsRealDispatch(_Fixtures):
         self.assertTrue(out)
 
 
+class TestMultinodeOptInContract(unittest.TestCase):
+    """The multi-node cleanroom switch is EXPLICIT and independent.
+
+    CLEANROOM_EXPANSION_ROADMAP.md (W-EXP-2 step C): the multi-node
+    envelope is served through FORKRUN_CLEANROOM_NUMA=1, "a separate
+    switch from the FORKRUN_CLEANROOM route selector". Folding topology
+    into the route namespace would silently change what an existing
+    FORKRUN_CLEANROOM=map-plugin means, which is precisely the
+    divergence the two switches exist to prevent.
+
+    These are contract tests, not implementation tests: they pin the
+    documented answer for unset, false, truthy and other non-false
+    values, and they pin that an explicit false wins so a caller can
+    opt out of the topology without changing its route selection.
+    """
+
+    def _set(self, name, value):
+        old = os.environ.get(name)
+
+        def restore():
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+
+        self.addCleanup(restore)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+    def _enabled(self):
+        return sys.modules["forkrun.run"]._cleanroom_multinode_enabled()
+
+    def test_route_selector_alone_does_not_opt_in(self):
+        for selector in ("1", "yes", "on", "true", "all", "map-plugin"):
+            with self.subTest(selector=selector):
+                self._set("FORKRUN_CLEANROOM_NUMA", None)
+                self._set("FORKRUN_CLEANROOM", selector)
+                self.assertFalse(
+                    self._enabled(),
+                    "FORKRUN_CLEANROOM=%r must not imply the multi-node "
+                    "cleanroom; FORKRUN_CLEANROOM_NUMA is a separate "
+                    "switch" % (selector,))
+
+    def test_explicit_truthy_opt_in(self):
+        self._set("FORKRUN_CLEANROOM", None)
+        self._set("FORKRUN_CLEANROOM_NUMA", "1")
+        self.assertTrue(self._enabled())
+
+    def test_explicit_false_wins_over_the_route_selector(self):
+        self._set("FORKRUN_CLEANROOM", "1")
+        for value in ("0", "no", "off", "false", "none", "auto", ""):
+            with self.subTest(value=value):
+                self._set("FORKRUN_CLEANROOM_NUMA", value)
+                self.assertFalse(self._enabled())
+
+    def test_any_non_false_value_opts_in(self):
+        """Only an explicit false disables; the selectors are truthy-style.
+
+        This matches _cleanroom_explicit and _cleanroom_enabled: unset
+        is off, an explicit false wins, any other value opts in. The
+        old docstring claimed "garbage is off", which the
+        implementation never did; the docstring was corrected rather
+        than changing behaviour.
+        """
+        self._set("FORKRUN_CLEANROOM", None)
+        for value in ("yes", "on", "true", "sometimes"):
+            with self.subTest(value=value):
+                self._set("FORKRUN_CLEANROOM_NUMA", value)
+                self.assertTrue(self._enabled())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

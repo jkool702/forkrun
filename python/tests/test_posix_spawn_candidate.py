@@ -164,7 +164,7 @@ class TestBothBackendsProduceCorrectResults(_Base):
         for backend in BACKENDS:
             self._use(backend)
             out = forkrun.map(self.spec, self.corpus, mode="plugin",
-                              workers=2, lines=1)
+                              workers=2, lines=1, nodes=1)
             results[backend] = (len(out), self._payload_tokens(out))
         self.assertEqual(results["forkexec"], (8, [b"PAYLOAD_%02d" % i
                                                    for i in range(8)]))
@@ -189,7 +189,7 @@ class TestBothBackendsProduceCorrectResults(_Base):
             self._use(backend)
             for _ in range(3):
                 forkrun.map(self.spec, self.corpus, mode="plugin",
-                            workers=2, lines=1)
+                            workers=2, lines=1, nodes=1)
             gen = forkrun.stream(self.spec, self.corpus, mode="plugin",
                                  workers=2, lines=1, streaming=True, nodes=1)
             try:
@@ -384,7 +384,8 @@ for fd in [int(x) for x in %(close)r.split(',')]:
         pass
 res = []
 try:
-    out = forkrun.map(%(spec)r, src, mode='plugin', workers=2, lines=1)
+    out = forkrun.map(%(spec)r, src, mode='plugin', workers=2, lines=1,
+                      nodes=1)
     joined = b''.join(bytes(b) for b in out)
     toks = sorted(set(t for t in joined.split() if t.startswith(b'PAYLOAD')))
     res.append('MAP records=%%d tokens=%%d %%s' %% (
@@ -393,7 +394,7 @@ except Exception as e:
     res.append('MAP raised %%s: %%s' %% (type(e).__name__, str(e)[:80]))
 try:
     g = forkrun.stream(%(spec)r, src, mode='plugin', workers=2, lines=1,
-                       streaming=True)
+                       streaming=True, nodes=1)
     recs = list(g); g.close()
     joined = b''.join(recs)
     toks = sorted(set(t for t in joined.split() if t.startswith(b'PAYLOAD')))

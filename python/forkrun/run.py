@@ -730,24 +730,24 @@ def _cleanroom_multinode_enabled():
     change what an existing FORKRUN_CLEANROOM=map-plugin means. So it
     has its own explicit switch, and it stays OFF until Decision 3.
 
-    Returns False for an unset/garbage value; only an explicit truthy
-    value turns it on.
+    FORKRUN_CLEANROOM=1 does NOT imply this switch. That is the
+    documented contract (CLEANROOM_EXPANSION_ROADMAP.md, W-EXP-2 step
+    C): "The multi-node envelope is served through
+    FORKRUN_CLEANROOM_NUMA=1, a separate switch from the
+    FORKRUN_CLEANROOM route selector." A caller that wants both sets
+    both.
+
+    Returns False for an unset value or an explicit false value. Any
+    other value opts in, matching the truthiness convention of the
+    other cleanroom selectors. An explicit false value wins, so a test
+    can force multi-node off without also changing its route
+    selection.
     """
     v = os.environ.get("FORKRUN_CLEANROOM_NUMA")
-    if v is not None:
-        v = v.strip().lower()
-        # An explicit (even false) value wins: do not fall through to
-        # FORKRUN_CLEANROOM, so tests can force multi-node off.
-        return v not in ("", "0", "no", "off", "false", "none", "auto")
-    # FORKRUN_CLEANROOM=1 (legacy all-routes) also opts into the
-    # multi-node envelope, so the test suite and explicit all-routes
-    # users get cleanroom coverage on fake NUMA without a second switch.
-    cr = os.environ.get("FORKRUN_CLEANROOM")
-    if cr is not None:
-        cr = cr.strip().lower()
-        if cr in ("1", "yes", "on", "true", "all", "*"):
-            return True
-    return False
+    if v is None:
+        return False
+    v = v.strip().lower()
+    return v not in ("", "0", "no", "off", "false", "none", "auto")
 
 
 def _warn_cleanroom_multinode(num_nodes):
@@ -3618,6 +3618,42 @@ def _open_source(source):
     if isinstance(fileno, int) and fileno >= 0:
         return fileno, False
     raise TypeError("unreachable: source validated by _validate")
+
+
+def _init_engine_source(source, *, lines, bytes_, spec, num_nodes=None,
+                        numa_map=None):
+    """Open the source BEFORE allocating the process-global engine.
+
+    ORDER IS THE DECISION. `_open_source` raises on ordinary USER input
+    (a missing path, a source with no usable fileno), and every executor
+    calls it before entering its try/finally. When the engine was
+    initialized first, such a failure left it live: the executor's
+    teardown never ran because the try had not been entered. The next
+    call in the process then failed -- but only when it asked for a
+    different node count, because ring_init_main refuses "change --nodes
+    without calling ring_destroy first". That is why a bad source in one
+    test surfaced as "substrate init failed" in a later, unrelated one.
+
+    Opening first means the engine is acquired only after the input has
+    been accepted, so this class cannot leak at all. It also closes the
+    source fd if engine init itself fails, preserving the old
+    no-fd-leak-on-init-failure behaviour.
+
+    Returns (lib, engine_fds, src_fd, must_close).
+    """
+    src_fd, must_close = _open_source(source)
+    try:
+        lib, engine_fds = _init_engine_and_fds(
+            lines=lines, bytes_=bytes_, spec=spec,
+            num_nodes=num_nodes, numa_map=numa_map)
+    except BaseException:
+        if must_close:
+            try:
+                os.close(src_fd)
+            except OSError:
+                pass
+        raise
+    return lib, engine_fds, src_fd, must_close
 
 
 def _spill_to_memfd(src_fd) -> tuple[int, int]:
@@ -6524,10 +6560,8 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                          supervision="plain", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec)
-
-    src_fd, must_close = _open_source(source)
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec)
     memfd = None
     out_fds: list = []
     out_hold: list = []
@@ -6908,10 +6942,8 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                          supervision="plain", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec)
-
-    src_fd, must_close = _open_source(source)
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec)
     memfd = None
     mem_hold: list = []
     out_fds: list = []
@@ -7410,10 +7442,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                          supervision="plain", shape="blocking",
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec)
-
-    src_fd, must_close = _open_source(source)
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec)
     memfd = None
     mem_hold: list = []
     out_fds: list = []
@@ -7434,6 +7464,11 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
     t_start = _time.monotonic()
     pids: list = []
     try:
+        # W-PYINGESTPIPE: same setup as every other spill executor --
+        # own a private fd (never mutate flags on the caller's) and ask
+        # for the _CHUNK-sized pipe so a FIFO source spills in 1 MiB
+        # reads, not the 64 KiB default.
+        src_fd, must_close = _prepare_ingest_source(src_fd, must_close)
         memfd, mem_hold = _new_ingress_memfd()
         try:
             os.lseek(memfd, 0, os.SEEK_SET)
@@ -7828,10 +7863,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order, c_worker_loop=c_worker_loop,
                          c_spawn_loop=c_spawn_loop)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec)
-
-    src_fd, must_close = _open_source(source)
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec)
     memfd = None
     signal_r = None
     signal_w = None
@@ -8729,8 +8762,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order, c_worker_loop=c_worker_loop,
                          c_spawn_loop=c_spawn_loop)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec)
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec)
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. Raises before any
     # child exists. engine_live gates the abort choreography below.
@@ -8761,7 +8794,6 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     _c07_runs_at_start = _C07_RUNS_STARTED[0]
     engine_live = True
 
-    src_fd, must_close = _open_source(source)
     memfd = None
     out_fds: list = []
     out_hold: list = []
@@ -9352,8 +9384,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                          supervision="reactor", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec)
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec)
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
@@ -9371,7 +9403,6 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     # on early failures (spill/scan, before assignment below).
     use_orderer = False
 
-    src_fd, must_close = _open_source(source)
     memfd = None
     out_fds: list = []
     out_hold: list = []
@@ -9860,8 +9891,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                          supervision="reactor", shape="blocking",
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec)
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec)
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
@@ -9880,7 +9911,6 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     _zc = bool(views)
     use_orderer = False
 
-    src_fd, must_close = _open_source(source)
     memfd = None
     mem_hold: list = []
     out_fds: list = []
@@ -10383,8 +10413,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                          supervision="reactor", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec)
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec)
     # W-PY22 resume: parse + gate + engine state AFTER init (which
     # zeroes the ledger) and BEFORE any fork. engine_live gates the
     # abort choreography below.
@@ -10402,7 +10432,6 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     # on early failures (before assignment below).
     use_orderer = False
 
-    src_fd, must_close = _open_source(source)
     memfd = None
     mem_hold: list = []
     out_fds: list = []
@@ -11612,8 +11641,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                          collect=collect, splice=splice, c_drain=c_drain,
                          order=order)
     _zc = bool(views)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec,
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec,
         num_nodes=num_nodes, numa_map=numa_map)
 
     # C0.7 expected-side baseline -- see the UMA reactor executor for
@@ -11628,7 +11657,6 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
     # it before would make every run trip its own check.
     _c07_runs_at_start = _C07_RUNS_STARTED[0]
 
-    src_fd, must_close = _open_source(source)
     memfd = None
     mem_hold: list = []
     out_fds: list = []
@@ -12146,11 +12174,10 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                          supervision="reactor", shape="generator",
                          collect=True, splice=splice, c_drain=c_drain,
                          order=order)
-    lib, engine_fds = _init_engine_and_fds(
-        lines=lines, bytes_=bytes_, spec=_spec,
+    lib, engine_fds, src_fd, must_close = _init_engine_source(
+        source, lines=lines, bytes_=bytes_, spec=_spec,
         num_nodes=num_nodes, numa_map=numa_map)
 
-    src_fd, must_close = _open_source(source)
     memfd = None
     mem_hold: list = []
     out_fds: list = []

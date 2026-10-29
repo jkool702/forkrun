@@ -109,6 +109,10 @@ class _UDFFallbackFixture(unittest.TestCase):
         kw.setdefault("output", "bytes")
         kw.setdefault("workers", 1)
         kw.setdefault("lines", 3)
+        # The UMA-named paths below assert the single-node contract; on a
+        # fake-NUMA host auto would exercise the NUMA path and make those
+        # names false. The NUMA tests pass nodes="@2" explicitly.
+        kw.setdefault("nodes", 1)
         return self.forkrun.map(
             "forkrun_udf_fb_fixture:" + attr, self.src, mode="udf", **kw)
 
@@ -303,7 +307,7 @@ class TestEveryInProcessPathFallsBack(_UDFFallbackFixture):
     def test_stream_uma_falls_back(self):
         got = list(self.forkrun.stream(
             "forkrun_udf_fb_fixture:up", self.src, mode="udf",
-            output="bytes", workers=1, lines=3))
+            output="bytes", workers=1, lines=3, nodes=1))
         self.assertTrue(got, "stream() did not fall back")
 
     def test_stream_numa_falls_back(self):

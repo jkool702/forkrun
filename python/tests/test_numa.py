@@ -85,6 +85,28 @@ class TestNumaTopology(unittest.TestCase):
             self.assertEqual(num_nodes, n)
         self.assertEqual(len(cpus), num_nodes)
 
+    def test_identical_cpu_masks_do_not_collapse_nodes(self):
+        """Fake-NUMA nodes share a CPU mask and are STILL distinct nodes.
+
+        `numa=fake=N` exposes N online nodes whose CPU masks are all the
+        same. Treating that as UMA collapsed the topology: a default
+        `nodes="auto"` call silently stopped exercising the per-node
+        machinery (and on the cleanroom route, whether the multi-node
+        envelope was requested changed with it). Topology detection
+        reports what the kernel reports; it does not infer placement
+        from mask equality.
+        """
+        online = detect_numa_nodes()
+        if len(online) < 2:
+            self.skipTest("single-node host: nothing to collapse")
+        masks = {tuple(get_node_cpus(n)) for n in online}
+        if len(masks) != 1:
+            self.skipTest("distinct CPU masks: not a fake-NUMA topology")
+        self.assertEqual(online, sorted(set(online)))
+        self.assertEqual(build_numa_map("auto")[1], len(online),
+                         "identical CPU masks must not collapse online "
+                         "nodes to one")
+
     def test_int_over_online_rejected(self):
         online = detect_numa_nodes()
         with self.assertRaises(ValueError):
