@@ -121,7 +121,7 @@ class TestConcurrentMapLaunches(_ConcurrentBase):
 
         def fn(i):
             out = forkrun.map(self.spec, paths[i], mode="plugin",
-                              workers=2, lines=64)
+                              workers=2, lines=64, nodes=1)
             # 512 lines of "tN-payload NNNNNN" -> 8 records of 64 lines.
             self.assertEqual(len(out), 8)
             # map() yields memoryviews; str() on one is its repr, not the
@@ -169,7 +169,7 @@ class TestConcurrentMapLaunches(_ConcurrentBase):
             def launcher(i):
                 path = _corpus(self._tmp, "mix%d" % i)
                 out = forkrun.map(self.spec, path, mode="plugin",
-                                  workers=2, lines=64)
+                                  workers=2, lines=64, nodes=1)
                 with lock:
                     seen.append(len(out))
 
@@ -242,11 +242,11 @@ class TestRepeatedLaunchDoesNotLeakDescriptors(_ConcurrentBase):
         prev = _RUN._set_cleanroom_launch_backend(backend)
         path = _corpus(self._tmp, "leak")
         # Warm up so one-off allocations are not counted as growth.
-        forkrun.map(self.spec, path, mode="plugin", workers=2, lines=64)
+        forkrun.map(self.spec, path, mode="plugin", workers=2, lines=64, nodes=1)
         before = self._fd_count()
         for _ in range(rounds):
             out = forkrun.map(self.spec, path, mode="plugin",
-                              workers=2, lines=64)
+                              workers=2, lines=64, nodes=1)
             self.assertEqual(len(out), 8)
         after = self._fd_count()
         self.assertLessEqual(
@@ -267,13 +267,13 @@ class TestRepeatedLaunchDoesNotLeakDescriptors(_ConcurrentBase):
         try:
             for _ in range(3):
                 list(forkrun.stream(self.spec, path, streaming=True,
-                                    mode="plugin", workers=2, lines=64,
-                                    nodes=1, output="bytes"))
+                                    mode="plugin", workers=2, lines=64, nodes=1,
+                                    output="bytes"))
             before = self._fd_count()
             for _ in range(8):
                 list(forkrun.stream(self.spec, path, streaming=True,
-                                    mode="plugin", workers=2, lines=64,
-                                    nodes=1, output="bytes"))
+                                    mode="plugin", workers=2, lines=64, nodes=1,
+                                    output="bytes"))
             after = self._fd_count()
             self.assertLessEqual(
                 after, before + 2,
@@ -314,7 +314,7 @@ class TestConcurrentCleanupIsolation(_ConcurrentBase):
         def fn(i):
             if i < good:
                 out = forkrun.map(self.spec, paths[i], mode="plugin",
-                                  workers=2, lines=64)
+                                  workers=2, lines=64, nodes=1)
                 self.assertEqual(len(out), 8,
                                  "a neighbouring failure disturbed this call")
                 blob = b"".join(bytes(r) if not isinstance(r, bytes) else r
@@ -325,7 +325,7 @@ class TestConcurrentCleanupIsolation(_ConcurrentBase):
             # and either way must clean up after itself.
             try:
                 forkrun.map(self.spec, missing[i - good], mode="plugin",
-                            workers=2, lines=64)
+                            workers=2, lines=64, nodes=1)
             except BaseException:
                 return "failed-as-expected"
             return "no-error"
@@ -381,7 +381,7 @@ class TestConcurrentLaunchesTerminate(_ConcurrentBase):
         def fn(i):
             if i % 2 == 0:
                 out = forkrun.map(self.spec, paths[i], mode="plugin",
-                                  workers=2, lines=64)
+                                  workers=2, lines=64, nodes=1)
                 return len(out)
             recs = list(forkrun.stream(self.spec, paths[i], mode="plugin",
                                        workers=2, lines=64, nodes=1,

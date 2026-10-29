@@ -462,7 +462,7 @@ class TestPartiallyOccupiedStandardStreams(unittest.TestCase):
             _n = -1
             try:
                 _n = len(forkrun.map(%r, _src, mode='plugin',
-                                     workers=2, lines=64))
+                                     workers=2, lines=64, nodes=1))
             except BaseException as _e:
                 log('FAILED ' + type(_e).__name__ + ': ' + str(_e)[:160])
                 _n = -1

@@ -544,7 +544,7 @@ class MinorMismatchBarrier(unittest.TestCase):
         sys.path.insert(0, self.tmp)
         self.addCleanup(sys.path.remove, self.tmp)
         self._force_mismatch()
-        forkrun.map("bm:up", self.src, mode="udf", workers=1,
+        forkrun.map("bm:up", self.src, mode="udf", workers=1, nodes=1,
                     on_error="retry", output="bytes")
         # A conclusive refusal is remembered against the artifact.
         self.assertIsNotNone(_udf.known_incompatible(_HELPER),
@@ -665,7 +665,7 @@ class MinorMismatchBarrier(unittest.TestCase):
                         original)
 
         before = _udf.fingerprint_now(_HELPER)
-        forkrun.map("bm:up", self.src, mode="udf", workers=1,
+        forkrun.map("bm:up", self.src, mode="udf", workers=1, nodes=1,
                     on_error="retry", output="bytes")
 
         compat_calls = [fp for fp in seen if fp is not None]

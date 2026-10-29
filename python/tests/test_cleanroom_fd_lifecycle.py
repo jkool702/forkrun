@@ -141,11 +141,11 @@ class _FdLifecycleBase(unittest.TestCase):
 
     def _map_ok(self):
         return forkrun.map(self.spec, self.corpus, mode="plugin",
-                           workers=2, lines=1)
+                           workers=2, lines=1, nodes=1)
 
     def _stream_all(self):
         gen = forkrun.stream(self.spec, self.corpus, mode="plugin",
-                             workers=2, lines=1, streaming=True)
+                             workers=2, lines=1, nodes=1, streaming=True)
         try:
             return list(gen)
         finally:
@@ -156,7 +156,7 @@ class _FdLifecycleBase(unittest.TestCase):
 
     def _stream_abandon(self):
         gen = forkrun.stream(self.spec, self.corpus, mode="plugin",
-                             workers=2, lines=1, streaming=True)
+                             workers=2, lines=1, nodes=1, streaming=True)
         it = iter(gen)
         next(it, None)
         gen.close()
@@ -173,7 +173,7 @@ class _FdLifecycleBase(unittest.TestCase):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             return forkrun.map(self.spec, self.corpus, mode="plugin",
-                               workers=2, lines=1)
+                               workers=2, lines=1, nodes=1)
 
 
 class TestMaterializedErrfdLifecycle(_FdLifecycleBase):

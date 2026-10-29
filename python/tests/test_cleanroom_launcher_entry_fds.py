@@ -172,10 +172,10 @@ class TestRealLauncherEntryDescriptors(unittest.TestCase):
             warnings.simplefilter("ignore")
             if shape == "materialized":
                 forkrun.map(self.spec, self.corpus, mode="plugin",
-                            workers=2, lines=1)
+                            workers=2, lines=1, nodes=1)
             else:
                 gen = forkrun.stream(self.spec, self.corpus,
-                                     mode="plugin", workers=2, lines=1,
+                                     mode="plugin", workers=2, lines=1, nodes=1,
                                      streaming=True)
                 try:
                     list(gen)

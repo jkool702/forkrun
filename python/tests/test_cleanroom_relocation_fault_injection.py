@@ -325,7 +325,7 @@ _ROUTE_CHILD = textwrap.dedent("""
 
     R.fcntl = FailingFcntl(fcntl)
     try:
-        out = forkrun.map(SPEC, SRC, mode='plugin', workers=2, lines=1)
+        out = forkrun.map(SPEC, SRC, mode='plugin', workers=2, lines=1, nodes=1)
         log('RETURNED ' + str(len(out)))
     except BaseException as e:
         log('RAISED ' + type(e).__name__)
@@ -409,7 +409,7 @@ class TestRouteSurfacesRelocationFailure(unittest.TestCase):
             R.fcntl = FailingFcntl(fcntl)
             try:
                 recs = list(forkrun.stream(SPEC, SRC, mode='plugin',
-                                           workers=2, lines=1,
+                                           workers=2, lines=1, nodes=1,
                                            streaming=True))
                 log('RETURNED ' + str(len(recs)))
             except BaseException as e:

@@ -102,7 +102,7 @@ class TestMapDeclinesToInProcess(_RouteFixture):
             self.addCleanup(p.stop)
         with self.assertWarns(UserWarning) as caught:
             out = forkrun.map("libpython_fixture:up", self.src,
-                              mode="udf", workers=2, order="index",
+                              mode="udf", workers=2, order="index", nodes=1,
                               output="bytes")
         self.assertIn("map UDF route", str(caught.warning))
         self.assertEqual(self.expected, b"".join(bytes(x) for x in out))
@@ -125,7 +125,7 @@ class TestStreamDeclinesBeforeYielding(_RouteFixture):
             wfd = -1
             with self.assertWarns(UserWarning) as caught:
                 chunks = list(forkrun.stream("libpython_fixture:up", rfd,
-                                             mode="udf", workers=2))
+                                             mode="udf", workers=2, nodes=1))
         finally:
             if wfd >= 0:
                 os.close(wfd)

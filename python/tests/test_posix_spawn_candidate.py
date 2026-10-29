@@ -176,7 +176,7 @@ class TestBothBackendsProduceCorrectResults(_Base):
         for backend in BACKENDS:
             self._use(backend)
             gen = forkrun.stream(self.spec, self.corpus, mode="plugin",
-                                 workers=2, lines=1, streaming=True)
+                                 workers=2, lines=1, streaming=True, nodes=1)
             try:
                 recs = list(gen)
             finally:
@@ -191,7 +191,7 @@ class TestBothBackendsProduceCorrectResults(_Base):
                 forkrun.map(self.spec, self.corpus, mode="plugin",
                             workers=2, lines=1)
             gen = forkrun.stream(self.spec, self.corpus, mode="plugin",
-                                 workers=2, lines=1, streaming=True)
+                                 workers=2, lines=1, streaming=True, nodes=1)
             try:
                 list(gen)
             finally:
@@ -211,7 +211,7 @@ class TestFailureContractIsBackendIndependent(_Base):
             warnings.simplefilter("always")
             try:
                 forkrun.map(self.spec, self.corpus, mode="plugin",
-                            workers=2, lines=1)
+                            workers=2, lines=1, nodes=1)
                 return None, None, [str(w.message) for w in caught]
             except Exception as e:
                 return type(e), str(e), [str(w.message) for w in caught]
@@ -220,7 +220,7 @@ class TestFailureContractIsBackendIndependent(_Base):
         with warnings.catch_warnings(record=True):
             warnings.simplefilter("ignore")
             gen = forkrun.stream(self.spec, self.corpus, mode="plugin",
-                                 workers=2, lines=1, streaming=True)
+                                 workers=2, lines=1, streaming=True, nodes=1)
             try:
                 list(gen)
                 return None, None
@@ -311,10 +311,10 @@ class TestCandidateActionAndSignalContract(_Base):
         self._use("posix_spawn")
         if shape == "materialized":
             forkrun.map(self.spec, self.corpus, mode="plugin",
-                        workers=2, lines=1)
+                        workers=2, lines=1, nodes=1)
         else:
             gen = forkrun.stream(self.spec, self.corpus, mode="plugin",
-                                 workers=2, lines=1, streaming=True)
+                                 workers=2, lines=1, streaming=True, nodes=1)
             try:
                 list(gen)
             finally:

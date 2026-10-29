@@ -734,11 +734,20 @@ def _cleanroom_multinode_enabled():
     value turns it on.
     """
     v = os.environ.get("FORKRUN_CLEANROOM_NUMA")
-    if v is None:
-        return False
-    v = v.strip().lower()
-    return v not in ("", "0", "no", "off", "false") and v not in (
-        "none", "auto")
+    if v is not None:
+        v = v.strip().lower()
+        # An explicit (even false) value wins: do not fall through to
+        # FORKRUN_CLEANROOM, so tests can force multi-node off.
+        return v not in ("", "0", "no", "off", "false", "none", "auto")
+    # FORKRUN_CLEANROOM=1 (legacy all-routes) also opts into the
+    # multi-node envelope, so the test suite and explicit all-routes
+    # users get cleanroom coverage on fake NUMA without a second switch.
+    cr = os.environ.get("FORKRUN_CLEANROOM")
+    if cr is not None:
+        cr = cr.strip().lower()
+        if cr in ("1", "yes", "on", "true", "all", "*"):
+            return True
+    return False
 
 
 def _warn_cleanroom_multinode(num_nodes):

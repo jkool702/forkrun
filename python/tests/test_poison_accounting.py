@@ -175,6 +175,7 @@ class _PoisonBase(unittest.TestCase):
     def run_map(self, src, *, boom_orch=True, **kw):
         kw.setdefault("workers", 1)
         kw.setdefault("lines", 1)
+        kw.setdefault("nodes", 1)
         kw.setdefault("on_error", "retry")
         kw.setdefault("mode", "plugin")
         out, stats = forkrun.map(self.spec, src, output="bytes",
@@ -267,7 +268,7 @@ class TestPlainPathIndices(_PoisonBase):
         """
         src = self.corpus(5, boom=set())
         out, stats = forkrun.map(
-            ["/bin/false"], src, workers=1, lines=1, mode="spawn",
+            ["/bin/false"], src, workers=1, lines=1, nodes=1, mode="spawn",
             on_error="retry", output="bytes", return_stats=True,
             orchestrator=False, c_spawn_loop=True)
         self.assertGreater(stats["poisoned"], 0)
@@ -461,7 +462,7 @@ class TestStreamingPlainPath(_PoisonBase):
         # rather than masked by a stale identical list.
         self.run_map(self.corpus(8, boom={7}))
         gen = forkrun.stream(
-            self.spec, src, mode="plugin", workers=1, lines=1,
+            self.spec, src, mode="plugin", workers=1, lines=1, nodes=1,
             streaming=streaming, on_error="retry", output="bytes",
             order="none", orchestrator=orchestrator)
         try:
@@ -608,7 +609,7 @@ class TestFailurePolicies(_PoisonBase):
         for orch in (False, True):
             with self.subTest(orchestrator=orch):
                 with self.assertRaises(Exception):
-                    forkrun.map(self.spec, src, workers=1, lines=1,
+                    forkrun.map(self.spec, src, workers=1, lines=1, nodes=1,
                                 mode="plugin", on_error="retry",
                                 strict_poison=True, output="bytes",
                                 orchestrator=orch)
@@ -746,8 +747,8 @@ class TestPoisonNotificationSurvivesTeardown(unittest.TestCase):
             return bytes(batch.data)
 
         self._widen_the_window()
-        out, stats = forkrun.map(poison_last, src, workers=1, lines=1,
-                                 nodes=1, return_stats=True)
+        out, stats = forkrun.map(poison_last, src, workers=1, lines=1, nodes=1,
+                                 return_stats=True)
         self.assertGreater(
             stats["poisoned"], 0,
             "fixture must actually poison, or this proves nothing")
@@ -784,8 +785,7 @@ class TestPoisonNotificationSurvivesTeardown(unittest.TestCase):
         self.addCleanup(setattr, _reactor.ReactorState,
                         "reap_clean_exits", orig)
         src = self._corpus(4)
-        forkrun.map(lambda b: bytes(b.data), src, workers=1, lines=1,
-                    nodes=1)
+        forkrun.map(lambda b: bytes(b.data), src, workers=1, lines=1, nodes=1)
         self.assertTrue(
             seen,
             "the out-of-band exit sweep did not run, so the race window "

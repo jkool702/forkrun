@@ -83,7 +83,7 @@ class StreamFallbackLiveness(unittest.TestCase):
         t.start()
         try:
             t0 = time.time()
-            gen = forkrun.stream("sl:up", r, mode="udf", workers=1,
+            gen = forkrun.stream("sl:up", r, mode="udf", workers=1, nodes=1,
                                  output="bytes")
             elapsed = time.time() - t0
             self.assertLess(
@@ -115,7 +115,7 @@ class StreamFallbackLiveness(unittest.TestCase):
         try:
             sys.stderr = buf
             for _ in range(3):
-                forkrun.map("sl:up", self.src(), mode="udf", workers=1,
+                forkrun.map("sl:up", self.src(), mode="udf", workers=1, nodes=1,
                             on_error="retry", output="bytes")
         finally:
             sys.stderr = real_stderr
@@ -139,7 +139,7 @@ class StreamFallbackLiveness(unittest.TestCase):
         self.addCleanup(setattr, _udf, "caller_version_arg", orig)
 
         expected = [b"LINE0\n", b"LINE1\n", b"LINE2\n", b"LINE3\n"]
-        out = forkrun.map("sl:up", self.src4(), mode="udf", workers=1,
+        out = forkrun.map("sl:up", self.src4(), mode="udf", workers=1, nodes=1,
                           on_error="retry", output="bytes")
         self.assertEqual(out, expected,
                          "map() under a forced mismatch must return every "
@@ -172,7 +172,7 @@ class StreamFallbackLiveness(unittest.TestCase):
         t.start()
         try:
             t0 = time.time()
-            gen = forkrun.stream("sl:up", r, mode="udf", workers=1,
+            gen = forkrun.stream("sl:up", r, mode="udf", workers=1, nodes=1,
                                  output="bytes")
             self.assertLess(time.time() - t0, 0.3,
                             "stream() must return before data exists")
