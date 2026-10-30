@@ -3774,34 +3774,42 @@ def _new_output_memfds(n) -> tuple[list, list]:
 
 
 def _resume_begin_after_init(lib, resume, *, order, mode, collect,
-                             splice, source):
-    """resume_begin, guaranteeing the pre-fork engine destroy on failure.
+                             splice, source, src_fd, must_close):
+    """resume_begin: the pre-try continuation of ``_init_engine_source``.
 
-    resume_begin raises BEFORE the caller's try/finally is entered (it is
-    pre-fork by design) but AFTER fr_py_init. So when it raises, the
-    initialized engine is still live and nothing else owns tearing it
-    down: without an explicit destroy it leaks into the next call in the
-    same process. That was observed as total output loss on the
-    following run, which is a spectacular way to learn the rule.
+    SOURCE OWNERSHIP SPANS THIS CALL. ``_init_engine_source`` acquires
+    TWO resources -- the process-global engine AND (when the caller
+    named a path) an internally opened source descriptor -- and the
+    outer executor ``try``/``finally`` does not own either until it is
+    entered. Resume validation runs in that gap (it is pre-fork by
+    design) and raises on ordinary user input, so a failure here must
+    release BOTH or the run leaks exactly what the source-first
+    ordering was meant to stop leaking.
 
-    No children or fds exist at this point, so a bare destroy is
-    complete teardown.
+    The release is the executor's OWN teardown, not a second
+    close-and-destroy sequence: ``_teardown_reactor`` is the one
+    mechanism that knows how to release an engine and an owned source
+    (and it defers interrupts, so SIGINT cannot replace the resume
+    error this handler is re-raising). A bare ``fr_py_destroy`` here
+    was the earlier version and it left the source fd open -- measured
+    as +1 fd per failed resume, unbounded across repeated calls.
 
-    Four executors carried this try/except by hand. The invariant is
-    exactly the kind that must not have four independent copies: the
-    failure mode is a leak that only manifests on a LATER, unrelated
-    call, so it is invisible in the test that provoked it.
+    ``src_fd``/``must_close`` are required, not optional: every call
+    site is immediately downstream of ``_init_engine_source``. A new
+    caller must decide where ownership lies rather than silently
+    inherit a leak.
     """
     try:
         return resume_begin(lib, resume, order=order, orchestrator=True,
                            mode=mode, collect=collect, splice=splice,
                            source=source)
     except BaseException:
-        # W-REL6-3.4b
-        try:
-            lib.fr_py_destroy()
-        except Exception:
-            pass
+        # W-REL6-3.4b: nothing has been forked yet, so state=None is
+        # the complete reactor state. This closes an owned source fd,
+        # destroys the engine, and reconciles the (empty) child
+        # registry in the one order the teardown already defines.
+        _teardown_reactor(lib, None, src_fd=src_fd,
+                          must_close=must_close)
         raise
 
 
@@ -8769,7 +8777,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # child exists. engine_live gates the abort choreography below.
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
-        collect=collect, splice=splice, source=source)
+        collect=collect, splice=splice, source=source,
+        src_fd=src_fd, must_close=must_close)
     # C0.7 expected-side baseline. Captured HERE: after the engine exists,
     # after resume-begin has folded in any sidecar, and BEFORE any fork --
     # so no worker of THIS run has committed anything yet.
@@ -9391,7 +9400,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     # abort choreography below.
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
-        collect=True, splice=splice, source=source)
+        collect=True, splice=splice, source=source,
+        src_fd=src_fd, must_close=must_close)
     # C0.7: count this run in the nesting depth. This executor does
     # NOT certify, but its workers commit to the same engine counter,
     # so a nested run must see depth > 0 and refuse. Omitting it here
@@ -9898,7 +9908,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     # abort choreography below.
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
-        collect=collect, splice=splice, source=source)
+        collect=collect, splice=splice, source=source,
+        src_fd=src_fd, must_close=must_close)
     # C0.7: count this run in the nesting depth. This executor does
     # NOT certify, but its workers commit to the same engine counter,
     # so a nested run must see depth > 0 and refuse. Omitting it here
@@ -10420,7 +10431,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     # abort choreography below.
     resume_state = _resume_begin_after_init(
         lib, resume, order=order, mode=mode,
-        collect=True, splice=splice, source=source)
+        collect=True, splice=splice, source=source,
+        src_fd=src_fd, must_close=must_close)
     # C0.7: count this run in the nesting depth. This executor does
     # NOT certify, but its workers commit to the same engine counter,
     # so a nested run must see depth > 0 and refuse. Omitting it here

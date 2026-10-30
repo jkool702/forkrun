@@ -235,6 +235,30 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 (Version bump for the 3.6.2 / 0.18.0 release; closeout notes to follow.)
 
+## Unreleased — a failed resume releases the source it opened
+
+**Correctness, resource lifetime.** `_init_engine_source()` opens the
+source before initializing the process-global engine, so a rejected
+source cannot leave an engine behind. That ordering moved source-fd
+ownership ahead of every executor's outer `try`/`finally`, and resume
+validation runs in that gap (before any fork, by design): a malformed
+or missing checkpoint raised while the internally opened descriptor was
+still unowned. The old handler destroyed only the engine, leaking one
+fd per failed call -- unbounded in a long-lived process.
+
+`_resume_begin_after_init()` now takes `src_fd`/`must_close` as
+required arguments and, on any failure, routes cleanup through
+`_teardown_reactor()` -- the executor's existing single teardown, which
+closes the owned source, destroys the engine, and defers interrupts so
+the resume error is not replaced. All four resume-capable shapes
+(map/stream x materialized/streaming ingest) are covered by
+`TestResumeInitFailureReleasesSource`: five consecutive failures each
+hold the `/proc/self/fd` count at baseline and leave no live engine, and
+a following valid run is byte-exact.
+
+Measured before the fix: +1 descriptor per failed resume (5 failures ->
+5 leaked fds); after: 0 across all four shapes.
+
 ## Unreleased — the child-lifecycle helper stopped blaming the wrong test
 
 **Test infrastructure, no product change.** `assert_no_zombies()` did a

@@ -33,7 +33,7 @@ from forkrun._checkpoint import (CheckpointState,  # noqa: E402
                                  serialize_checkpoint,
                                  snapshot_from_engine, write_checkpoint)
 
-from _helpers import ChildLifecycleMixin, assert_no_zombies  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, nfd  # noqa: E402
 
 try:
     find_substrate()
@@ -800,6 +800,104 @@ class TestResumeStream(ChildLifecycleMixin, unittest.TestCase):
         resumed_lines = _lines_of(b"".join(resumed))
         self.assertTrue(tail_lines <= resumed_lines,
                         "resumed stream lost uncommitted bytes")
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestResumeInitFailureReleasesSource(ChildLifecycleMixin,
+                                          unittest.TestCase):
+    """A failed resume gate releases BOTH acquisitions, every time.
+
+    The source is opened BEFORE the engine (the ordering that stopped a
+    rejected source leaving a live engine behind). That moves source
+    ownership ahead of the executor's try/finally, and resume validation
+    runs in that gap -- before any fork, by design -- so a malformed
+    checkpoint raises while the source fd is already open and unowned.
+    The earlier handler destroyed only the engine and leaked exactly one
+    descriptor per failed call: unbounded across a long-lived process,
+    and invisible in a test that makes one call.
+
+    All four resume-capable executor shapes are exercised: map/stream x
+    materialized/streaming ingest. A path source makes the descriptor
+    internally opened (``must_close=True``); an fd source would be
+    caller-owned and legitimately left open, so it cannot detect this
+    leak.
+    """
+
+    def tearDown(self):
+        assert_no_zombies(self)
+
+    def _input(self, n):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        _write_input(path, n)
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def _bad_checkpoint(self):
+        fd, path = tempfile.mkstemp(suffix=".ckpt")
+        os.close(fd)
+        _write_file(path, "garbage\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def _shapes(self, bad):
+        """(name, callable(source)) for every resume-capable executor."""
+        def _map(src, **kw):
+            return forkrun.map(_up, src, workers=2, order="index",
+                               resume=bad, nodes=1, **kw)
+
+        def _stream(src, **kw):
+            return list(forkrun.stream(_up, src, workers=2, order="index",
+                                       resume=bad, nodes=1, **kw))
+
+        return (
+            ("map-materialized", lambda src: _map(src)),
+            ("map-ingest", lambda src: _map(src, streaming=True)),
+            ("stream-materialized", lambda src: _stream(src)),
+            ("stream-ingest", lambda src: _stream(src, streaming=True)),
+        )
+
+    def test_repeated_failures_leave_fd_count_and_engine_clean(self):
+        path = self._input(n=200)
+        bad = self._bad_checkpoint()
+        lib = get()
+
+        for name, run in self._shapes(bad):
+            with self.subTest(shape=name):
+                # Warm imports (and the first engine init) outside the
+                # measured baseline so lazy module loading cannot read
+                # as a leak.
+                with self.assertRaises(ValueError):
+                    run(path)
+                self.assertEqual(lib.fr_py_abort_reason(), -1,
+                                 "%s left the engine live after a failed "
+                                 "resume" % (name,))
+                baseline = nfd()
+                for attempt in range(5):
+                    with self.assertRaises(ValueError):
+                        run(path)
+                    self.assertEqual(
+                        nfd(), baseline,
+                        "%s leaked a descriptor on failed resume "
+                        "attempt %d" % (name, attempt + 1))
+                    self.assertEqual(
+                        lib.fr_py_abort_reason(), -1,
+                        "%s left the engine live on failed resume "
+                        "attempt %d" % (name, attempt + 1))
+
+                # A later, VALID run in the same process still works and
+                # still leaves nothing behind.
+                out = forkrun.map(_up, path, workers=2, order="index",
+                                  nodes=1, output="bytes")
+                got = sorted(b"".join(out).splitlines())
+                with open(path, "rb") as fh:
+                    want = sorted(fh.read().upper().splitlines())
+                self.assertEqual(got, want,
+                                 "%s: a failed resume corrupted the next "
+                                 "run" % (name,))
+                self.assertEqual(nfd(), baseline,
+                                 "%s left a descriptor behind after the "
+                                 "recovery run" % (name,))
 
 
 if __name__ == "__main__":
