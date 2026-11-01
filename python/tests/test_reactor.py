@@ -215,7 +215,22 @@ class TestWorkerRespawn(ChildLifecycleMixin, unittest.TestCase):
         assert_no_zombies(self)
 
     def test_segfault_respawn_completes(self):
-        """Segfault on batch 0: respawned, others complete (31/32)."""
+        """Segfault on batch 0: respawned, others complete (19/20).
+
+        ``lines=100`` is LOAD-BEARING, not a speed knob. This test
+        compares a crash run against a separate healthy run batch by
+        batch, which is only meaningful when both runs split the input
+        the same way. The default adaptive batching does not promise
+        that: the crash and its respawn change the timing, so the
+        recovered run legitimately used different boundaries (measured:
+        31 healthy vs 31 recovered, where the recovered run had 32
+        batches and lost one -- a CORRECT run the old assertion
+        rejected; and 32 vs 30, where 32 healthy also differed). Under
+        the old test that demanded equality of counts, 7-10 of 20 runs
+        failed while every run had lost exactly the first batch.
+        Pinning the split makes the content assertion test the product
+        rather than the batching heuristic.
+        """
         path = _make_input(2000)
         plugin_dir = tempfile.mkdtemp(prefix="w19segv_")
         mod_path = os.path.join(plugin_dir, "w19segv_mod.py")
@@ -243,11 +258,16 @@ class TestWorkerRespawn(ChildLifecycleMixin, unittest.TestCase):
                 # and the rest of the assertion becomes meaningful.
                 res = forkrun.map("w19segv_mod:payload", path,
                                   workers=2, orchestrator=True, nodes=1,
-                                  order="index")
+                                  order="index", lines=100)
             finally:
                 sys.path.remove(plugin_dir)
-            # The crashed batch is best-effort (no escrow possible
-            # for a death that runs no code); everything else lands.
+            # The crashed batch is lost through the POISON path, not
+            # through a claim-time hole: the engine escrows a CLAIMED
+            # batch when the parent recovers the death, the respawned
+            # worker re-claims the same batch, the payload segfaults
+            # again (batch_index is still 0), and once its kill count
+            # reaches the retry limit the claim loop poisons it and the
+            # rest of the pipeline continues without it.
             #
             # Was: assertEqual(len(res), len(healthy) - 1) plus
             # assertIn(b"LINE 1999\n", ...). The count says ONE blob is
@@ -259,9 +279,12 @@ class TestWorkerRespawn(ChildLifecycleMixin, unittest.TestCase):
             # Now asserts the CONTENT: exactly the first record of the
             # healthy run is absent, and every other record is present
             # byte-identical. That names the loss and proves the tail,
-            # which a count cannot.
+            # which a count cannot. Both runs pin `lines=100` (see the
+            # docstring): the content comparison is only valid when the
+            # two runs split the input identically, which adaptive
+            # batching does not promise.
             healthy = forkrun.map(_up, path, workers=2, nodes=1,
-                                  order="index")
+                                  order="index", lines=100)
             healthy_recs = [bytes(x) for x in healthy if x is not None]
             res_recs = [bytes(x) for x in res if x is not None]
             self.assertEqual(
@@ -270,8 +293,8 @@ class TestWorkerRespawn(ChildLifecycleMixin, unittest.TestCase):
                 "recovered)" % (len(healthy_recs), len(res_recs)))
             self.assertNotIn(
                 healthy_recs[0], res_recs,
-                "batch 0 should be the LOST one -- a crash on the first "
-                "batch cannot escrow, so it is dropped")
+                "batch 0 should be the LOST one -- the poison path drops "
+                "the batch that keeps crashing, not a healthy batch")
             self.assertEqual(
                 healthy_recs[1:], res_recs,
                 "every batch after the lost one must arrive byte-identical "
