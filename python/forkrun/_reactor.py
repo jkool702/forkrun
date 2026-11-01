@@ -1584,6 +1584,18 @@ def check_scanner_death(scan_pid, death_r):
     Returns ("running", None) while alive, ("clean", 0) on clean
     exit, ("error", code) on failure. Consumes (closes) death_r on a
     definitive answer. Never raises.
+
+    A definitive answer must consume the descriptor exactly once: the
+    caller stops polling as soon as this returns non-running, so a
+    descriptor left open on a definitive path leaks for the life of
+    the process (and a later descriptor-number reuse would make the
+    leak look like something else entirely).
+
+    ChildProcessError means the exit status is no longer obtainable
+    through this wait -- some other reaper got there first, or the
+    status was otherwise lost. There is no authoritative record of
+    that status elsewhere, so it is NOT safe to report a clean exit:
+    an unknown helper outcome is classified as an error (fail closed).
     """
     try:
         readable, _, _ = _select.select([death_r], [], [], 0)
@@ -1594,7 +1606,12 @@ def check_scanner_death(scan_pid, death_r):
         try:
             wpid, status = os.waitpid(scan_pid, os.WNOHANG)
         except ChildProcessError:
-            return ("clean", 0)
+            # The status was reaped elsewhere: unknown, not clean.
+            try:
+                os.close(death_r)
+            except OSError:
+                pass
+            return ("error", 1)
         except OSError:
             return ("running", None)
         if wpid != scan_pid:
@@ -1618,7 +1635,10 @@ def check_scanner_death(scan_pid, death_r):
     try:
         _, status = os.waitpid(scan_pid, 0)
     except ChildProcessError:
-        return ("clean", 0)
+        # Pipe EOF proved the child is gone, but its status was reaped
+        # elsewhere. The descriptor is already closed above; the
+        # outcome remains unknown, so fail closed.
+        return ("error", 1)
     except OSError:
         return ("error", 1)
     code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1

@@ -81,9 +81,18 @@ jobs:
           # tail of this script on the HOST instead of in the
           # container. A quoted delimiter passes the body through
           # verbatim, so apostrophes need no auditing.
+          # Diagnostics live OUTSIDE /src on purpose: release_check's
+          # clean-tree check runs AFTER the nested suite, so a diag
+          # directory created inside the checkout when the suite fails
+          # would itself register as an uncommitted change and add a
+          # SECOND failure to the report. A host temp path is mounted in
+          # and uploaded from there.
+          mkdir -p "$RUNNER_TEMP/release-diag"
           docker run --rm -i \
             -v $PWD:/src \
+            -v "$RUNNER_TEMP/release-diag:/diag" \
             -w /src \
+            -e FORKRUN_RELEASE_DIAG_DIR=/diag \
             fedora:44 \
             bash -s <<'CONTAINER'
           set -euo pipefail
@@ -125,6 +134,19 @@ jobs:
              python/forkrun/_forkrun_cleanroom >/dev/null
           python3 -m unittest discover -s python/tests -v
           CONTAINER
+      # The nested release_check suite's COMPLETE stdout/stderr, and the
+      # gate's own report, land in this directory. A failure in that
+      # nested suite is the case where the outer assertion alone says only
+      # "SOME CHECKS FAILED (N)"; the artifact is what makes it
+      # diagnosable after the fact. `if: always()` because the upload is
+      # most valuable on the failing path.
+      - name: Upload release-check diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-diag-python-v0
+          path: ${{ runner.temp }}/release-diag
+          if-no-files-found: ignore
 
   generic-acceptance:
     needs: [build-wheel, generate-matrix]
@@ -279,11 +301,18 @@ jobs:
           # 'packaging>=23'), and `bash -c '...'` ends its argument at
           # the first one -- which ran the tail on the HOST. The quoted
           # delimiter keeps the body verbatim.
+          # Diagnostics outside /src: a diag directory created inside
+          # the checkout while the suite runs would register as an
+          # uncommitted change in release_check's later clean-tree
+          # check, turning one failure into two.
+          mkdir -p "$RUNNER_TEMP/release-diag"
           docker run --rm -i \
             -v $PWD:/src \
+            -v "$RUNNER_TEMP/release-diag:/diag" \
             -w /src \
             -e PYVER=${{ matrix.py }} \
             -e PYSETUP=${{ matrix.setup }} \
+            -e FORKRUN_RELEASE_DIAG_DIR=/diag \
             ${{ matrix.image }} \
             bash -s <<'CONTAINER'
           set -euo pipefail
@@ -364,3 +393,16 @@ jobs:
             | sed "s/\.py$//")
           /tmp/venv/bin/python -m unittest $MODS
           CONTAINER
+      # Packaging/reproducibility are excluded from this lane, so the
+      # release gate itself does not run here -- but the path is still
+      # wired and uploaded under `if: always()`, so a future test that
+      # DOES invoke the gate leaves its full nested logs behind instead
+      # of a clipped tail. `if-no-files-found: ignore` keeps the absent
+      # case from turning a green cell red.
+      - name: Upload release-check diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-diag-vm-${{ matrix.py }}
+          path: ${{ runner.temp }}/release-diag
+          if-no-files-found: ignore

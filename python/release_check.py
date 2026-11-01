@@ -327,6 +327,118 @@ def check_twins():
 # parent test can read it instead of hard-coding a second number.
 SUITE_DEADLINE_S = 2400
 
+# Where the nested suite's COMPLETE stdout/stderr are preserved. CI
+# points this OUTSIDE the checkout (a diag directory created inside it
+# while the suite runs would register as an uncommitted change in
+# release_check's own clean-tree check, turning one failure into two)
+# and uploads it under `if: always()`. Locally an unset value gets a
+# fresh temp directory whose path is printed in the failure text. A
+# fixed filename contract (`suite.*`) is what makes the CI artifact
+# layout stable.
+DIAG_DIR_ENV = "FORKRUN_RELEASE_DIAG_DIR"
+_SUITE_FAIL_LINES = 40
+_SUITE_HEAD_CHARS = 4000
+_SUITE_TAIL_CHARS = 8000
+
+
+def _decode_stream(stream):
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", "replace")
+    return stream
+
+
+def _clip_head(text, limit=_SUITE_HEAD_CHARS):
+    if len(text) <= limit:
+        return text
+    return (text[:limit]
+            + "\n...[head clipped; %d chars total]..." % len(text))
+
+
+def _clip_tail(text, limit=_SUITE_TAIL_CHARS):
+    if len(text) <= limit:
+        return text
+    return ("...[tail clipped; %d chars total]...\n" % len(text)
+            + text[-limit:])
+
+
+def _suite_failure_report(stdout, stderr, *, reason, diag_dir=None):
+    """Persist the nested suite's FULL streams and return a bounded report.
+
+    Why this exists: a fixed stderr tail is a losing diagnostic. The
+    one failure the tail does not reach is exactly the one that needs
+    explaining, and the outer suite's own assertion then reports only
+    "SOME CHECKS FAILED (2)" with no way to see the second failure.
+    The complete streams are therefore written to files, and the
+    report carries the three things a reader needs:
+
+      * every `FAIL:`/`ERROR:` header in the unittest summary (so a
+        failure whose traceback is outside any window is still NAMED);
+      * the absolute paths of the verbatim `suite.stdout.txt` /
+        `suite.stderr.txt` files (the CI artifact surface);
+      * a head and tail of stdout plus a stderr tail, so the message
+        is useful even when the files cannot be retrieved.
+
+    Diagnostics are best-effort. If the directory cannot be created or
+    written, the report says so and still carries the streams' bounded
+    views; a diagnostics failure must never replace the check verdict.
+    """
+    out = _decode_stream(stdout)
+    err = _decode_stream(stderr)
+    paths = {}
+    diag_note = None
+    try:
+        directory = (diag_dir if diag_dir is not None
+                     else os.environ.get(DIAG_DIR_ENV) or None)
+        if not directory:
+            directory = tempfile.mkdtemp(prefix="forkrun-release-diag-")
+        else:
+            os.makedirs(directory, exist_ok=True)
+        for name, text in (("suite.stdout.txt", out),
+                           ("suite.stderr.txt", err)):
+            path = os.path.join(directory, name)
+            with open(path, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write(text)
+            paths[name] = path
+    except Exception as exc:                 # noqa: BLE001 - best effort
+        diag_note = ("could not preserve full logs (%s: %s); set %s "
+                     "to a writable directory" %
+                     (type(exc).__name__, exc, DIAG_DIR_ENV))
+
+    headers = []
+    for line in out.splitlines():
+        text = line.strip()
+        if text.startswith(("FAIL:", "ERROR:")) and text not in headers:
+            headers.append(text)
+    summary = next(
+        (line.strip() for line in reversed(out.splitlines())
+         if line.strip().startswith(("FAILED (", "OK ("))), None)
+
+    lines = [reason]
+    if headers:
+        lines.append("Failing tests named by the nested summary:")
+        lines.extend("  " + h for h in headers[:_SUITE_FAIL_LINES])
+        if len(headers) > _SUITE_FAIL_LINES:
+            lines.append("  ...(%d more)" % (len(headers) - _SUITE_FAIL_LINES))
+    if summary:
+        lines.append("Nested result line: %s" % summary)
+    if paths:
+        lines.append("Complete nested stdout/stderr preserved at:")
+        lines.extend("  " + paths[name] for name in
+                     ("suite.stdout.txt", "suite.stderr.txt") if name in paths)
+        lines.append("  (set %s to choose this location; CI uploads it)"
+                     % DIAG_DIR_ENV)
+    if diag_note:
+        lines.append(diag_note)
+    lines.append("--- nested stdout (head) ---")
+    lines.append(_clip_head(out))
+    lines.append("--- nested stdout (tail) ---")
+    lines.append(_clip_tail(out))
+    lines.append("--- nested stderr (tail) ---")
+    lines.append(_clip_tail(err))
+    return "\n".join(lines)
+
 
 @check("Tests: full suite passes")
 def check_tests():
@@ -354,25 +466,25 @@ def check_tests():
         # A timeout is a DEADLINE being reached, not a verdict. The
         # suite did not finish, so it is NOT known whether the cause was
         # load, a hang, or a regression -- the check below must not
-        # claim otherwise. The partial output is preserved so the run
-        # stays diagnosable: it names the tests that completed.
-        partial_out = exc.stdout or ""
-        partial_err = exc.stderr or ""
-        if isinstance(partial_out, bytes):
-            partial_out = partial_out.decode("utf-8", "replace")
-        if isinstance(partial_err, bytes):
-            partial_err = partial_err.decode("utf-8", "replace")
-        raise AssertionError(
-            ("the full suite did not finish within %ds. That is a "
-             "DEADLINE being reached; the result is INCOMPLETE, and "
-             "without a finished run it cannot be said whether the cause "
-             "was load, a hang, or a regression. The suite costs ~5 "
-             "minutes on an idle machine and much longer under load. "
-             "Partial output follows.\n--- stdout ---\n%s\n"
-             "--- stderr ---\n%s")
-            % (SUITE_DEADLINE_S, partial_out[-3000:],
-               partial_err[-2000:])) from exc
-    assert proc.returncode == 0, proc.stderr[-2000:]
+        # claim otherwise. The complete partial output is preserved, not
+        # just a tail: the test that was running when time ran out is
+        # the one a reader needs to see.
+        raise AssertionError(_suite_failure_report(
+            getattr(exc, "stdout", None), getattr(exc, "stderr", None),
+            reason=(
+                "the full suite did not finish within %ds. That is a "
+                "DEADLINE being reached; the result is INCOMPLETE, and "
+                "without a finished run it cannot be said whether the "
+                "cause was load, a hang, or a regression. The suite "
+                "costs ~5 minutes on an idle machine and much longer "
+                "under load." % SUITE_DEADLINE_S))) from exc
+    if proc.returncode != 0:
+        raise AssertionError(_suite_failure_report(
+            proc.stdout, proc.stderr,
+            reason=("the full suite failed (nested unittest exit %d); "
+                    "every failure below must be diagnosed from the "
+                    "preserved output, not from a clipped stream"
+                    % proc.returncode)))
     return True
 
 

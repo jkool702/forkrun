@@ -3874,6 +3874,23 @@ def _watch_ingest_helpers(lib, *, fallow_pid, scan_pid, helpers,
     return scan_death_r
 
 
+def _numa_ingest_eof_posted(lib):
+    """Read the engine's ingest-EOF sentinel; unreadable means "not yet".
+
+    ONE reader for the NUMA helper-death classification. The value is
+    meaningful only for a helper whose clean exit is GATED on it (the
+    indexer); see `_watch_numa_pipeline` for why scanners must not have
+    their pre-observation sample refreshed. A substrate that predates
+    the accessor (or a transient ctypes failure) yields 0, which keeps
+    the classification conservative: an unproven EOF is never treated
+    as published.
+    """
+    try:
+        return int(lib.fr_py_ingest_eof_posted())
+    except Exception:
+        return 0
+
+
 def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
     """Classify NUMA helper deaths for one supervision step. Raises on fatal.
 
@@ -3901,6 +3918,28 @@ def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
     # flushing") from tail loss ("helper done before EOF
     # was even posted" -- fatal).
     #
+    # W-NUMA-STALE-EOF: the EOF value used to classify an INDEXER
+    # must be sampled AFTER the definitive death observation, not
+    # before it. check_scanner_death() can BLOCK while it drains the
+    # death pipe and waitpid()s, so a sample taken before it can
+    # predate the very EOF publication that made the indexer's clean
+    # exit legitimate. Observed sequence: sample=0 -> waitpid shows a
+    # clean indexer exit -> reread=1 -> the old code classified a
+    # healthy completion as fatal tail loss. A clean indexer exit is
+    # gated on ingest EOF in the engine (ring_indexer_numa_main
+    # returns EXECUTION_SUCCESS only after ingest_eof_idx is posted),
+    # so a re-read is the faithful observation point.
+    #
+    # SCANNERS ARE DELIBERATELY EXEMPT. A clean scanner exit does NOT
+    # carry that invariant: unified_scanner_eof() is also reachable
+    # from emergency_abort and the limit_reached paths, so "EOF is
+    # visible now" does not prove the scanner consumed its node's
+    # chunks. Refreshing the scanner's sample after a blocking death
+    # observation would turn a premature clean exit into an accepted
+    # completion exactly when EOF landed during the wait -- the
+    # tail-loss case the check exists to catch. Scanners therefore
+    # keep the pre-observation sample, preserving existing policy.
+    #
     # Imported here, not at module scope, for the same reason every
     # executor imports it locally: _reactor resolves run.py-owned
     # symbols lazily, so a top-level import would close the cycle. This
@@ -3924,10 +3963,9 @@ def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
                     "forkrun: NUMA reaper failed (status %r)"
                     % (st,))
     _poll_ingest_once(lib, helpers, pipe)
-    try:
-        eof_posted = lib.fr_py_ingest_eof_posted()
-    except Exception:
-        eof_posted = 0
+    # Scanner policy keeps the sample taken BEFORE the death
+    # observation (see the W-NUMA-STALE-EOF note above).
+    scan_eof_posted = _numa_ingest_eof_posted(lib)
     for pids, deaths, key in (
             (pipe["indexer_pids"], pipe["indexer_deaths"],
              "index"),
@@ -3940,6 +3978,11 @@ def _watch_numa_pipeline(lib, pipe, helpers, num_nodes):
                 pids[node], deaths[node])
             if kind == "running":
                 continue
+            # Indexer: re-read AFTER the definitive observation (the
+            # observation may have blocked past the publication).
+            # Scanner: classify on the pre-observation sample.
+            eof_posted = (_numa_ingest_eof_posted(lib)
+                          if key == "index" else scan_eof_posted)
             # D-PORT2/D6: query the abort reason BEFORE our
             # own abort — an abort already in flight makes
             # this death an expected emergency exit, not a

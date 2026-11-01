@@ -2,12 +2,20 @@
 
 Verifies the universal parent-side recovery (W-PY28/29) when workers
 live on non-parent nodes. The tests use FORCED-LOGICAL nodes="@2" on
-whatever hardware is present; they do not require a multi-socket boot:
+whatever hardware is present; they do not require a multi-socket boot.
+The routing contract they exercise is:
 
-  worker on node 1 crashes -> parent (node 0) reads WorkerTxn[wid]
-  from MAP_SHARED GlobalState -> txn->node routes the escrow deposit
-  to fd_escrow_w[1] -> respawned worker pinned to node 1 claims the
-  batch from node 1's escrow -> output flows to the parent.
+  a worker on a non-parent node crashes -> the parent reads
+  WorkerTxn[wid] from MAP_SHARED GlobalState -> txn->node routes the
+  escrow deposit to fd_escrow_w[node] -> a respawned worker for that
+  node claims the batch from its node's escrow -> output flows to the
+  parent.
+
+The integration tests do NOT infer a worker's logical node from
+`batch.batch_index` (it is a per-node claim ticket) or from payload
+state: a payload cannot observe its node or wid. Node-level routing is
+established structurally by test_escrow_routing_per_node, and by
+completeness checks that would fail if a batch were stranded.
 
 Kill-injection: file-gated payload modules (same pattern as
 test_recovery_adversarial.py). Each crashing batch fires exactly
@@ -178,6 +186,39 @@ def _assert_injection_fired(testcase, plugin_dir, name, where):
         "%s, so this was a HEALTHY run and its output comparisons "
         "prove nothing" % (where, marker))
 
+
+def _attach_injection_evidence(exc, plugin_dir, name, where):
+    """Record fault-injection state on a propagating exception.
+
+    A failure path must not replace the exception it is explaining: an
+    `assertTrue` inside `except` raises a NEW AssertionError and hides
+    the original diagnosis. This attaches the evidence to the original
+    exception via `add_note` (3.11+) and writes it to stderr so it also
+    survives on 3.10, where `add_note` does not exist. Returns the note
+    text so a caller can use it without re-deriving the path.
+    """
+    marker = os.path.join(plugin_dir, name + ".dead")
+    note = ("%s: fault-injection evidence: .dead marker %s at %s"
+            % (where, "EXISTS" if os.path.exists(marker) else "MISSING",
+               marker))
+    add_note = getattr(exc, "add_note", None)
+    if add_note is not None:
+        try:
+            add_note(note)
+        except Exception:
+            pass
+    try:
+        setattr(exc, "forkrun_injection_evidence", note)
+    except Exception:
+        pass
+    try:
+        sys.stderr.write("forkrun-test: %s\n" % note)
+        sys.stderr.flush()
+    except Exception:
+        pass
+    return note
+
+
 def _assert_deaths_occurred(testcase, plugin_dir, name, expect, where):
     """At least `expect` DISTINCT workers actually died.
 
@@ -247,23 +288,50 @@ class TestNumaRecovery(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
-    def test_sigsegv_on_node_1(self):
-        """Worker crash under nodes="@2" -> recovery from the node-0
-        parent, complete output (byte-exact vs healthy @2 run)."""
+    def test_sigsegv_worker_recovery_under_forced_numa(self):
+        """A real SIGSEGV in a worker under nodes="@2" is recovered.
+
+        RENAMED from `test_sigsegv_on_node_1`. The old name claimed a
+        node placement this test cannot observe: the payload runs
+        inside a worker, `Batch` exposes neither node nor wid, and
+        `batch.batch_index` is a PER-NODE claim ticket (ring.c:6385),
+        so index 0 exists on every node rather than identifying node 1.
+        Forced-logical `@N` on a UMA host also has no physical binding
+        to inspect.
+
+        What IS established: the self-SIGSEGV fired (the .dead marker),
+        the run completed, and its byte sequence equals a healthy @2
+        run on the same input. A stranded or misdeposited batch would
+        break that equality. Per-node escrow routing itself is
+        established structurally by test_escrow_routing_per_node and
+        end-to-end by the completeness checks that do not depend on
+        naming a node.
+
+        On a FAILING run the marker state is attached to the original
+        exception (and echoed to stderr) before re-raising it; the
+        assertion helper is only used on the success path, so a missing
+        marker cannot mask the real failure.
+        """
         path = _make_input(2000)
-        plugin_dir = tempfile.mkdtemp(prefix="w34n1_")
+        plugin_dir = tempfile.mkdtemp(prefix="w34sig_")
+        name = "w34sig_mod"
+        where = "test_sigsegv_worker_recovery_under_forced_numa"
         try:
             spec = _write_kill_module(
-                plugin_dir, "w34n1_mod", "batch.batch_index == 0",
+                plugin_dir, name, "batch.batch_index == 0",
                 sig="SIGSEGV")
             sys.path.insert(0, plugin_dir)
             try:
                 t0 = time.monotonic()
-                res = forkrun.map(spec, path, workers=4,
-                                  nodes=NODES_2, order="index")
+                try:
+                    res = forkrun.map(spec, path, workers=4,
+                                      nodes=NODES_2, order="index")
+                except BaseException as exc:
+                    _attach_injection_evidence(
+                        exc, plugin_dir, name, where)
+                    raise
                 dt = time.monotonic() - t0
-                _assert_injection_fired(self, 
-                    plugin_dir, "w34n1_mod", "test_sigsegv_on_node_1")
+                _assert_injection_fired(self, plugin_dir, name, where)
             finally:
                 sys.path.remove(plugin_dir)
             healthy = forkrun.map(_up, path, workers=4,
