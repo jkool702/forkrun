@@ -443,6 +443,98 @@ class TestReleaseCheckDiagnostics(unittest.TestCase):
         self._diag = tempfile.mkdtemp(prefix="rc-diag-test-")
         self.addCleanup(shutil.rmtree, self._diag, ignore_errors=True)
 
+    @staticmethod
+    def _unittest_stderr():
+        """Realistic unittest output, written to the stream it uses.
+
+        TextTestRunner writes progress, failure headers and the result
+        line to stderr. The filler makes the headers fall outside the
+        bounded stderr tail as well, so the report can only name them
+        by extracting them -- not by echoing a clipped view.
+        """
+        return (
+            "".join("test_progress_%05d ... ok\n" % i
+                    for i in range(1000))
+            + "\n"
+            "======================================================================\n"
+            "FAIL: test_beta (test_mod.TestB)\n"
+            "----------------------------------------------------------------------\n"
+            "Traceback (most recent call last):\n"
+            '  File "test_mod.py", line 10, in test_beta\n'
+            "AssertionError: beta broke\n"
+            "\n"
+            "======================================================================\n"
+            "ERROR: test_gamma (test_mod.TestC)\n"
+            "----------------------------------------------------------------------\n"
+            "Traceback (most recent call last):\n"
+            '  File "test_mod.py", line 20, in test_gamma\n'
+            "RuntimeError: gamma exploded\n"
+            "\n"
+            "----------------------------------------------------------------------\n"
+            "Ran 3 tests in 0.012s\n"
+            "\n"
+            "FAILED (failures=1, errors=1)\n")
+
+    def test_report_names_stderr_only_failures_and_summary(self):
+        """The defect: unittest writes its diagnostics to stderr.
+
+        Assertions target the EXTRACTED section (two-space-indented
+        headers and the explicit result line), not a substring that
+        the raw stderr tail would also satisfy.
+        """
+        stdout = "a test printed this on stdout\n"
+        stderr = self._unittest_stderr()
+        self.assertNotIn("FAIL:", stdout)
+        report = self._rc._suite_failure_report(
+            stdout, stderr, reason="reason-marker", diag_dir=self._diag)
+
+        named = [line for line in report.splitlines()
+                 if line.startswith(("  FAIL:", "  ERROR:"))]
+        self.assertEqual(named, [
+            "  FAIL: test_beta (test_mod.TestB)",
+            "  ERROR: test_gamma (test_mod.TestC)",
+        ])
+        self.assertIn("Failing tests named by the nested summary:", report)
+        self.assertEqual(
+            [line for line in report.splitlines()
+             if line.startswith("Nested result line:")],
+            ["Nested result line: FAILED (failures=1, errors=1)"],
+            "the stderr result line was not extracted")
+        self.assertIn("a test printed this on stdout", report)
+        with open(os.path.join(self._diag, "suite.stdout.txt"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), stdout)
+        with open(os.path.join(self._diag, "suite.stderr.txt"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), stderr,
+                             "the complete stderr must stay verbatim")
+
+    def test_report_deduplicates_headers_and_summary_across_streams(self):
+        """Identical information in both streams is named once."""
+        shared = "FAIL: test_shared (test_mod.TestShared)\n"
+        stdout = (shared
+                  + "FAIL: test_stdout_only (test_mod.TestS)\n"
+                  + "FAILED (failures=2)\n")
+        stderr = (shared
+                  + "ERROR: test_stderr_only (test_mod.TestE)\n"
+                  + "FAILED (failures=2)\n")
+        report = self._rc._suite_failure_report(
+            stdout, stderr, reason="reason-marker", diag_dir=self._diag)
+
+        named = [line for line in report.splitlines()
+                 if line.startswith(("  FAIL:", "  ERROR:"))]
+        self.assertEqual(named, [
+            "  FAIL: test_shared (test_mod.TestShared)",
+            "  FAIL: test_stdout_only (test_mod.TestS)",
+            "  ERROR: test_stderr_only (test_mod.TestE)",
+        ])
+        self.assertEqual(
+            [line for line in report.splitlines()
+             if line.startswith("Nested result line:")],
+            ["Nested result line: FAILED (failures=2)"],
+            "an identical result line present in both streams was "
+            "reported twice")
+
     def test_report_preserves_full_streams_and_names_every_failure(self):
         # The early failure is > 20 KB from the end, so any fixed tail
         # window (the bug) cannot contain it. The late one is an ERROR,
@@ -513,6 +605,28 @@ class TestReleaseCheckDiagnostics(unittest.TestCase):
                   encoding="utf-8") as fh:
             self.assertEqual(fh.read(), stdout)
         # Anti-recursion must still mark the child run.
+        child_env = fake.call_args.kwargs["env"]
+        self.assertEqual(child_env["FORKRUN_UNDER_RELEASE_CHECK"], "1")
+
+    def test_check_tests_reports_stderr_only_unittest_output(self):
+        """The gate's own path must surface stderr-written failures."""
+        stdout = "only test prints land here\n"
+        stderr = self._unittest_stderr()
+        msg, fake = self._run_check_tests(
+            return_value=mock.Mock(returncode=1, stdout=stdout,
+                                   stderr=stderr))
+        self.assertIn("the full suite failed (nested unittest exit 1)",
+                      msg)
+        self.assertIn("  FAIL: test_beta (test_mod.TestB)", msg)
+        self.assertIn("  ERROR: test_gamma (test_mod.TestC)", msg)
+        self.assertIn("Nested result line: FAILED (failures=1, errors=1)",
+                      msg)
+        with open(os.path.join(self._diag, "suite.stdout.txt"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), stdout)
+        with open(os.path.join(self._diag, "suite.stderr.txt"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), stderr)
         child_env = fake.call_args.kwargs["env"]
         self.assertEqual(child_env["FORKRUN_UNDER_RELEASE_CHECK"], "1")
 

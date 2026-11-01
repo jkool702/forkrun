@@ -363,6 +363,37 @@ def _clip_tail(text, limit=_SUITE_TAIL_CHARS):
             + text[-limit:])
 
 
+def _last_result_line(text):
+    """The final unittest result line in one stream, or None."""
+    return next(
+        (line.strip() for line in reversed(text.splitlines())
+         if line.strip().startswith(("FAILED (", "OK ("))), None)
+
+
+def _unittest_diagnostics(stdout, stderr):
+    """Failure identities and result line from captured unittest output.
+
+    ONE reader for both streams. unittest's TextTestRunner writes its
+    progress, ``FAIL:``/``ERROR:`` headers and final result line to
+    STDERR; anything the tests themselves print goes to stdout. Reading
+    only stdout -- the original defect -- therefore omits the actual
+    failing test identities in the normal case. Headers are collected
+    from both streams with exact duplicates collapsed, so a stream that
+    was forwarded into the other does not name a test twice. The result
+    line is taken from stderr when present (the runner's own stream),
+    falling back to stdout for callers that captured it there.
+    """
+    headers = []
+    for text in (stdout, stderr):
+        for line in text.splitlines():
+            stripped = line.strip()
+            if (stripped.startswith(("FAIL:", "ERROR:"))
+                    and stripped not in headers):
+                headers.append(stripped)
+    summary = _last_result_line(stderr) or _last_result_line(stdout)
+    return headers, summary
+
+
 def _suite_failure_report(stdout, stderr, *, reason, diag_dir=None):
     """Persist the nested suite's FULL streams and return a bounded report.
 
@@ -374,7 +405,9 @@ def _suite_failure_report(stdout, stderr, *, reason, diag_dir=None):
     report carries the three things a reader needs:
 
       * every `FAIL:`/`ERROR:` header in the unittest summary (so a
-        failure whose traceback is outside any window is still NAMED);
+        failure whose traceback is outside any window is still NAMED),
+        read from BOTH streams because unittest normally writes them
+        to stderr;
       * the absolute paths of the verbatim `suite.stdout.txt` /
         `suite.stderr.txt` files (the CI artifact surface);
       * a head and tail of stdout plus a stderr tail, so the message
@@ -406,14 +439,7 @@ def _suite_failure_report(stdout, stderr, *, reason, diag_dir=None):
                      "to a writable directory" %
                      (type(exc).__name__, exc, DIAG_DIR_ENV))
 
-    headers = []
-    for line in out.splitlines():
-        text = line.strip()
-        if text.startswith(("FAIL:", "ERROR:")) and text not in headers:
-            headers.append(text)
-    summary = next(
-        (line.strip() for line in reversed(out.splitlines())
-         if line.strip().startswith(("FAILED (", "OK ("))), None)
+    headers, summary = _unittest_diagnostics(out, err)
 
     lines = [reason]
     if headers:
