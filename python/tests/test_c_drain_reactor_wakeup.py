@@ -406,8 +406,8 @@ class TestCDrainFunctional(ChildLifecycleMixin, unittest.TestCase):
         # independent runs of this fixture produced 31 and 32 batches
         # (a difference of exactly one 300 KiB record) depending on
         # scheduling. Fixed lines=500 batching makes 2000 lines exactly
-        # 4 batches in both paths, so the totals are comparable and a
-        # real loss still changes them.
+        # 4 batches in both paths, so each run's output is known
+        # exactly: four copies of `big`.
         big = b"z" * (300 * 1024)
         legacy = list(forkrun.stream(lambda b: big, self.src, workers=2,
                                      nodes=1, orchestrator=True,
@@ -423,12 +423,21 @@ class TestCDrainFunctional(ChildLifecycleMixin, unittest.TestCase):
         self.assertEqual(len(drained), 4,
                          "fixed batching did not yield 4 C-drain batches; "
                          "the byte differential below is not comparable")
-        self.assertTrue(all(len(blob) >= 300 * 1024 for blob in drained),
-                        "an amplified record was split or lost")
-        self.assertEqual(sum(len(b) for b in legacy),
-                         sum(len(b) for b in drained),
-                         "the C drain delivered a different number of bytes "
-                         "than the legacy drain for the same workload")
+        # The payload returns the SAME 300 KiB constant for every batch,
+        # so the exact expected output is known: four blobs, each equal
+        # to `big`. A >= size check plus an aggregate byte comparison
+        # would still pass on a run that split one record and duplicated
+        # another (same total, wrong framing), or that truncated one and
+        # padded another. Exact per-batch equality rules those out.
+        # stream() yields bytes, one item per batch record.
+        self.assertEqual(
+            [bytes(blob) for blob in legacy], [big] * 4,
+            "the legacy drain did not deliver exactly four complete "
+            "300 KiB records")
+        self.assertEqual(
+            [bytes(blob) for blob in drained], [big] * 4,
+            "the C drain did not deliver exactly four complete 300 KiB "
+            "records")
 
     def test_empty_input(self):
         empty = os.path.join(self.d, "empty.txt")
