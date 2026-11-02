@@ -16,6 +16,7 @@ logical identity/protocol model, which is all step B claims.
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -96,13 +97,23 @@ class TestSupervisionSubstrate(unittest.TestCase):
 
     def _run(self, extra_env=None, kill_ingest_delay=None,
              kill_worker_after=None, kill_worker_immediately=False,
-             kill_budget=0, workers=2, respawn_cap=None, timeout=30,
-             lines=None, retry=3):
+             kill_budget=0, killed_pids=None, workers=2, respawn_cap=None,
+             timeout=30, lines=None, retry=3):
         """Run the launcher, optionally killing families mid-run.
 
         `kill_worker_after` is `(wid, delay_s)`. `kill_worker_immediately`
         SIGKILLs each worker generation as soon as it registers, up to
-        `kill_budget` kills -- the slot-pressure regression.
+        `kill_budget` SUCCESSFUL deliveries -- the slot-pressure
+        regression.
+
+        `killed_pids`, when supplied, is a caller-owned list that
+        receives the pid of every generation whose SIGKILL was actually
+        delivered, in registration order. A `ProcessLookupError` means
+        the target was already gone: the signal was NOT delivered, so
+        nothing is recorded and the injection does not count toward
+        `kill_budget`. That distinction is load-bearing -- counting
+        attempts would let a budget of "30 kills" be satisfied by 30
+        targets that had already exited.
 
         `retry` is the launcher's per-batch poison threshold (`--retry`).
         A kill that lands while a batch is in flight increments that
@@ -115,6 +126,8 @@ class TestSupervisionSubstrate(unittest.TestCase):
 
         Returns (rc, elapsed, lines, ingest_pid, worker_pids).
         """
+        if killed_pids is None:
+            killed_pids = []
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("FORKRUN_TEST_")
                and k != "FORKRUN_SUPERVISE_TYPED"}
@@ -159,6 +172,7 @@ class TestSupervisionSubstrate(unittest.TestCase):
         killed_ingest = False
         killed_worker = False
         kills = 0
+        missed_kills = 0
         t0 = time.time()
         deadline = t0 + timeout
         try:
@@ -189,8 +203,15 @@ class TestSupervisionSubstrate(unittest.TestCase):
                         self._kill(int(m.group(4)))
                         killed_worker = True
                     if (kill_worker_immediately and kills < kill_budget):
-                        self._kill(int(m.group(4)))
-                        kills += 1
+                        pid = int(m.group(4))
+                        if self._kill(pid):
+                            killed_pids.append(pid)
+                            kills += 1
+                        else:
+                            # The generation exited before the signal.
+                            # It is not evidence for the injection, so
+                            # leave the budget unfilled and keep going.
+                            missed_kills += 1
 
             try:
                 rc = proc.wait(timeout=max(1.0, deadline - time.time()))
@@ -212,16 +233,25 @@ class TestSupervisionSubstrate(unittest.TestCase):
             self.assertGreaterEqual(
                 kills, kill_budget,
                 "the respawn injection stopped firing before the budget: "
-                "%d of %d kills (rc=%r; last launcher lines: %r)"
-                % (kills, kill_budget, rc, lines[-8:]))
+                "%d of %d kills DELIVERED (%d targets were already gone; "
+                "rc=%r; last launcher lines: %r)"
+                % (kills, kill_budget, missed_kills, rc, lines[-8:]))
         return rc, time.time() - t0, lines, ingest_pid, worker_pids
 
     @staticmethod
     def _kill(pid):
+        """Deliver SIGKILL to `pid`; report whether it was delivered.
+
+        `ProcessLookupError` means the target was already gone (exited
+        and reaped, or reaped by the launcher) before the signal, so
+        nothing was injected. Reporting that as a kill would let the
+        budget be satisfied by attempts against dead targets.
+        """
         try:
-            os.kill(pid, 9)
+            os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
-            pass
+            return False
+        return True
 
     def _result(self):
         with open(self.result, "rb") as fh:
@@ -423,14 +453,16 @@ class TestSupervisionSubstrate(unittest.TestCase):
         #
         # This is a per-invocation launcher argument only. The production
         # default is untouched (`forkrun_cleanroom.c`: `o.retry_limit = 3`).
-        # `_run` also asserts `kills >= kill_budget` before returning, so
-        # all 30 injections are proven to have fired; the complete-output
-        # assertion below cannot pass on a run that silently skipped one.
+        # `_run` also asserts that the kill budget was filled by DELIVERED
+        # signals before returning, so all 30 injections are proven to
+        # have reached a live generation; the complete-output assertion
+        # below cannot pass on a run that silently skipped one.
+        killed = []
         rc, _dt, lines, ingest_pid, worker_pids = self._run(
             extra_env={"FORKRUN_TEST_SUP_MAX": "8"},
             kill_worker_immediately=True, kill_budget=budget,
-            workers=1, respawn_cap=10000, timeout=120, lines=8,
-            retry=budget + 1)
+            killed_pids=killed, workers=1, respawn_cap=10000,
+            timeout=120, lines=8, retry=budget + 1)
         regs = [line for line in lines if "register role=worker" in line]
         reuses = [line for line in lines if "reuse role=worker" in line]
         self.assertGreaterEqual(
@@ -441,6 +473,69 @@ class TestSupervisionSubstrate(unittest.TestCase):
             len(reuses), 6,
             "only %d slot reuses; generations consumed new slots"
             % len(reuses))
+
+        # The budget counts DELIVERED signals, so prove each one landed
+        # on a registered generation and that the supervisor subsequently
+        # observed THAT generation die BY SIGNAL. Both halves are needed:
+        # a delivered signal that the supervisor never reaped would mean
+        # the process outlived the run, and a death that was not
+        # signal-terminated would mean the generation died on its own and
+        # the kill proves nothing about the respawn path.
+        #
+        # `status=` is NOT the raw wait status. The launcher logs
+        # `death_cause(status)` (forkrun_cleanroom.c), which is
+        # WEXITSTATUS for a normal exit and 128 + WTERMSIG for a signal
+        # death, so 137 is 128 + SIGKILL. `class=abnormal` is the field
+        # that distinguishes a signal death from a clean exit that merely
+        # returned 137.
+        signaled = 128 + signal.SIGKILL
+        reg_by_pid = {}
+        death_by_pid = {}
+        for line in lines:
+            m = _REGISTER.search(line)
+            if m and m.group(1) == "worker":
+                reg_by_pid[int(m.group(4))] = m
+            m = _DEATH.search(line)
+            if m and m.group(1) == "worker":
+                death_by_pid[int(m.group(4))] = m
+        self.assertGreaterEqual(
+            len(killed), budget,
+            "only %d of %d SIGKILLs were delivered to a live worker"
+            % (len(killed), budget))
+        self.assertEqual(
+            len(killed), len(set(killed)),
+            "the same generation was counted as killed more than once")
+        self.assertGreaterEqual(
+            len(reuses), len(killed) - 1,
+            "only %d slot reuses for %d killed generations; a replacement "
+            "generation consumed a new slot instead of the retired one"
+            % (len(reuses), len(killed)))
+        for pid in killed:
+            reg = reg_by_pid.get(pid)
+            self.assertIsNotNone(
+                reg,
+                "pid %d received SIGKILL but was never registered; the "
+                "signal did not reach a supervised generation" % pid)
+            death = death_by_pid.get(pid)
+            self.assertIsNotNone(
+                death,
+                "pid %d received SIGKILL but the supervisor recorded no "
+                "definitive death for it" % pid)
+            self.assertEqual(
+                int(death.group(6)), signaled,
+                "pid %d died with logged cause %s, not 128+SIGKILL=%d; "
+                "the injected signal did not kill this generation"
+                % (pid, death.group(6), signaled))
+            self.assertEqual(
+                death.group(7), "abnormal",
+                "pid %d was recorded as a clean exit, so its death was "
+                "not signal-terminated" % pid)
+            for group, field in ((2, "wid"), (3, "node"),
+                                 (5, "incarnation")):
+                self.assertEqual(
+                    death.group(group), reg.group(group),
+                    "pid %d's death record names a different %s than its "
+                    "registration" % (pid, field))
         self.assertNotIn("supervision registry full", "\n".join(lines),
                          "the registry ran out of slots")
         self.assertEqual(rc, 0, "the run failed under slot pressure")
