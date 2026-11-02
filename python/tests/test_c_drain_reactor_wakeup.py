@@ -399,17 +399,30 @@ class TestCDrainFunctional(ChildLifecycleMixin, unittest.TestCase):
 
     def test_amplified_record_larger_than_a_chunk(self):
         # A record bigger than the 64 KiB read chunk must survive the
-        # chunked read. The payload runs once per BATCH, so the total is
-        # batches x payload -- the differential against the legacy drain
-        # is the real assertion, not a count computed from input lines.
+        # chunked read. The payload runs once per BATCH, so the output
+        # total is batches x payload. The differential against the
+        # legacy drain is only meaningful when both runs have the SAME
+        # number of batches, and auto batching is dynamic: two
+        # independent runs of this fixture produced 31 and 32 batches
+        # (a difference of exactly one 300 KiB record) depending on
+        # scheduling. Fixed lines=500 batching makes 2000 lines exactly
+        # 4 batches in both paths, so the totals are comparable and a
+        # real loss still changes them.
         big = b"z" * (300 * 1024)
         legacy = list(forkrun.stream(lambda b: big, self.src, workers=2,
                                      nodes=1, orchestrator=True,
-                                     order="none", c_drain=False))
+                                     order="none", c_drain=False,
+                                     lines=500))
         drained = list(forkrun.stream(lambda b: big, self.src, workers=2,
                                       nodes=1, orchestrator=True,
-                                      order="none", c_drain=True))
-        self.assertTrue(drained)
+                                      order="none", c_drain=True,
+                                      lines=500))
+        self.assertEqual(len(legacy), 4,
+                         "fixed batching did not yield 4 legacy batches; "
+                         "the byte differential below is not comparable")
+        self.assertEqual(len(drained), 4,
+                         "fixed batching did not yield 4 C-drain batches; "
+                         "the byte differential below is not comparable")
         self.assertTrue(all(len(blob) >= 300 * 1024 for blob in drained),
                         "an amplified record was split or lost")
         self.assertEqual(sum(len(b) for b in legacy),
