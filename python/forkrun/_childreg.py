@@ -81,7 +81,17 @@ def fork_child(owner):
     """
     with _signals.defer_interrupts():
         pid = os.fork()
-        if pid > 0:
+        if pid == 0:
+            # THE CHILD'S FIRST ACT: stop being the parent. Pending
+            # signals are not inherited, so replaying the parent's
+            # recorded state here would delay a signal the child never
+            # received; keeping the handler would leave the recording
+            # handler installed for the child's whole life. The reset
+            # also bumps the generation, so the copied scope's
+            # __exit__ (run as the child leaves this `with`) is a
+            # no-op instead of decrementing the parent's depth.
+            _signals.after_fork_child()
+        else:
             adopt(pid, owner)
     return pid
 

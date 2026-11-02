@@ -87,6 +87,10 @@ from ._resume import (ORDERER_REAP_TIMEOUT, WORKER_REAP_TIMEOUT,
                        resume_begin)
 from ._signals import guard as _signal_guard
 from ._signals import interrupt_safe as _interrupt_safe
+from ._signals import (defer_interrupts as _defer_interrupts,
+                       defer_interrupts_for_cleanup
+                       as _defer_interrupts_for_cleanup,
+                       uninterruptible as _uninterruptible)
 from ._spawn import make_spawn_payload
 from ._udf import (roots_spec as _udf_roots_spec,
                    udf_payload as _make_udf_payload)
@@ -3574,6 +3578,79 @@ _C07_RUN_DEPTH = [0]
 # A run that sees this counter advance during its own lifetime knows
 # that some other run committed inside its measurement window.
 _C07_RUNS_STARTED = [0]
+
+
+class _RunDepthToken:
+    """One run's acquisition of the C0.7 nesting depth.
+
+    THE DEFECT THIS CLOSES. The depth used to be incremented OUTSIDE the
+    executor's ``try`` and decremented as the first statement of its
+    ``finally``. A SIGINT between the increment and the ``try`` therefore
+    skipped the ``finally`` entirely: the depth stayed elevated, so every
+    later top-level run believed it was nested and silently stopped
+    certifying (a failure that looks like a pass), and the run skipped
+    its abort choreography and teardown on the way out.
+
+    THE RULE. Acquisition happens INSIDE the ``try`` and inside a
+    deferral, and release is the SAME object's job. A token that was
+    never acquired releases as a no-op, so the acquisition cannot happen
+    without a live ``finally`` to undo it. One class, five executors.
+
+    ``nested`` is read at construction -- before acquisition -- because
+    it answers "was another run already live when THIS one started",
+    which is the enclosing run, not this one.
+    """
+
+    __slots__ = ("_held", "nested")
+
+    def __init__(self):
+        self._held = False
+        self.nested = _C07_RUN_DEPTH[0] > 0
+
+    def acquire(self):
+        if self._held:
+            raise RuntimeError(
+                "forkrun: run-depth token acquired twice; the engine "
+                "session is process-global and one run owns it once")
+        _C07_RUN_DEPTH[0] += 1
+        _C07_RUNS_STARTED[0] += 1
+        self._held = True
+        return self
+
+    def release(self):
+        if not self._held:
+            return False
+        self._held = False
+        _C07_RUN_DEPTH[0] -= 1
+        return True
+
+
+def _begin_run_depth(token):
+    """The ONE acquisition path for the C0.7 run depth.
+
+    Called at the top of an executor's ``try``, inside a deferral, so a
+    SIGINT cannot land between the increment and the ``finally`` that
+    releases it. The token is constructed BEFORE the ``try`` -- it owns
+    no resource yet, and constructing it there means the ``finally``
+    can always name it; an unacquired token releases as a no-op. The
+    acquisition itself must never be separated from recording the
+    token in a local, which is why this helper returns the SAME object
+    it acquired rather than a new one.
+    """
+    with _defer_interrupts():
+        token.acquire()
+    return token
+
+
+def _finish_run(token):
+    """Release the run depth inside the caller's teardown region.
+
+    The release is NOT a deferred section of its own: the executor's
+    whole finally (depth + descriptor/child cleanup + reconciliation)
+    runs inside ONE non-abandonable region, so the depth cannot be
+    released while the cleanup can still be skipped.
+    """
+    token.release()
 
 # C0.7 test hook state: the Nth DATA frame to drop on the observed side,
 # read once from FORKRUN_C07_DROP_FRAME. 0 (the default) drops nothing.
@@ -8835,15 +8912,16 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     # read succeeds would compare against the CUMULATIVE count and raise
     # on a correct run. None disables the certificate instead.
     _c07_base = _c07_read_committed(lib, 1) if _c07_enabled() else None
-    # C0.7: is another run live in this process? Recorded BEFORE the
-    # increment below, so it refers to the enclosing run, not this one.
-    _c07_nested = _C07_RUN_DEPTH[0] > 0
-    _C07_RUN_DEPTH[0] += 1
-    _C07_RUNS_STARTED[0] += 1
-    # Recorded AFTER our own increment: from here on, any further change
-    # means ANOTHER run started inside our measurement window. Recording
-    # it before would make every run trip its own check.
-    _c07_runs_at_start = _C07_RUNS_STARTED[0]
+    # C0.7: is another run live in this process? The token reads the
+    # depth at construction -- BEFORE this run acquires it -- so it
+    # refers to the enclosing run, not this one.
+    #
+    # The token is constructed before the `try` (it owns nothing yet)
+    # and ACQUIRED as the first statement inside it: a signal between
+    # the increment and the `finally` that releases it used to leak the
+    # depth and skip the abort choreography entirely.
+    _depth = _RunDepthToken()
+    _c07_nested = _depth.nested
     engine_live = True
 
     memfd = None
@@ -8867,6 +8945,12 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     use_orderer = False
     _zc = bool(views)
     try:
+        _begin_run_depth(_depth)
+        # Recorded AFTER our own acquisition: from here on, any further
+        # change means ANOTHER run started inside our measurement
+        # window. Recording it before would make every run trip its own
+        # check.
+        _c07_runs_at_start = _C07_RUNS_STARTED[0]
         memfd, size = _spill_to_memfd(src_fd)
         try:
             os.lseek(memfd, 0, os.SEEK_SET)
@@ -9116,20 +9200,23 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             pass
         raise
     finally:
-        # C0.7: leave the nesting depth on EVERY exit path, including
-        # aborts and exceptions. A leaked depth would make every later
-        # top-level run believe it is nested and silently stop
-        # certifying -- a failure that looks like a pass.
-        _C07_RUN_DEPTH[0] -= 1
-        _teardown_reactor(lib, state, out_fds=out_fds,
-                          out_hold=out_hold, memfd=memfd,
-                          src_fd=src_fd, must_close=must_close,
-                          extra_pids=[scan_pid] if scan_pid else [],
-                          orderer_pid=orderer_pid, order_r=order_r,
-                          order_w=order_w, trap_r=trap_r, trap_w=trap_w,
-                          coll_fd=coll_fd, coll_hold=coll_hold,
-                          drain_pid=drain_pid, results_fd=results_fd,
-                          spare_signal_w=signal_w)
+        # C0.7 depth accounting AND the complete teardown run inside ONE
+        # non-abandonable region. Splitting them (the old shape released
+        # the depth first, then called the teardown) left a window in
+        # which a SIGINT skipped the teardown after the depth had
+        # already been released -- children leaked and the next run no
+        # longer knew it was nested.
+        with _defer_interrupts_for_cleanup():
+            _depth.release()
+            _teardown_reactor(lib, state, out_fds=out_fds,
+                              out_hold=out_hold, memfd=memfd,
+                              src_fd=src_fd, must_close=must_close,
+                              extra_pids=[scan_pid] if scan_pid else [],
+                              orderer_pid=orderer_pid, order_r=order_r,
+                              order_w=order_w, trap_r=trap_r, trap_w=trap_w,
+                              coll_fd=coll_fd, coll_hold=coll_hold,
+                              drain_pid=drain_pid, results_fd=results_fd,
+                              spare_signal_w=signal_w)
 
 
 def _suppliers_finished(helpers, num_nodes):
@@ -9449,8 +9536,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     # NOT certify, but its workers commit to the same engine counter,
     # so a nested run must see depth > 0 and refuse. Omitting it here
     # is exactly what let a map() inside a stream() certify silently.
-    _C07_RUN_DEPTH[0] += 1
-    _C07_RUNS_STARTED[0] += 1
+    #
+    # The token is constructed before the `try` (it owns nothing yet)
+    # and ACQUIRED as the first statement inside it: a signal between
+    # the increment and the `finally` that releases it used to leak the
+    # depth and skip the teardown entirely.
+    _depth = _RunDepthToken()
     engine_live = True
     # W-PY22: pre-try default so the abort handler never NameErrors
     # on early failures (spill/scan, before assignment below).
@@ -9476,6 +9567,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     scan_pid = None
     scan_rc = None
     try:
+        _begin_run_depth(_depth)
         memfd, size = _spill_to_memfd(src_fd)
         try:
             os.lseek(memfd, 0, os.SEEK_SET)
@@ -9896,19 +9988,23 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         # abort handler above must not fire on the way out.
         _stream_ok = True
     finally:
-        # C0.7: leave the nesting depth on every exit path.
-        _C07_RUN_DEPTH[0] -= 1
-        spare_signal_w = _close_spare_fd(state, spare_signal_w)
-        _teardown_reactor(lib, state, signal_r=signal_r,
-                          out_fds=out_fds, out_hold=out_hold,
-                          memfd=memfd, src_fd=src_fd,
-                          must_close=must_close,
-                          extra_pids=[scan_pid] if scan_pid else [],
-                          orderer_pid=orderer_pid, order_r=order_r,
-                          order_w=order_w, trap_r=trap_r, trap_w=trap_w,
-                          coll_fd=coll_fd, coll_hold=coll_hold,
-                          drain_pid=drain_pid, results_fd=results_r,
-                          spare_signal_w=spare_signal_w)
+        # C0.7 depth accounting AND the complete teardown run inside ONE
+        # non-abandonable region: releasing the depth first left a
+        # window in which a SIGINT skipped the cleanup after the depth
+        # had already been released.
+        with _defer_interrupts_for_cleanup():
+            _depth.release()
+            spare_signal_w = _close_spare_fd(state, spare_signal_w)
+            _teardown_reactor(lib, state, signal_r=signal_r,
+                              out_fds=out_fds, out_hold=out_hold,
+                              memfd=memfd, src_fd=src_fd,
+                              must_close=must_close,
+                              extra_pids=[scan_pid] if scan_pid else [],
+                              orderer_pid=orderer_pid, order_r=order_r,
+                              order_w=order_w, trap_r=trap_r, trap_w=trap_w,
+                              coll_fd=coll_fd, coll_hold=coll_hold,
+                              drain_pid=drain_pid, results_fd=results_r,
+                              spare_signal_w=spare_signal_w)
 
 
 def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
