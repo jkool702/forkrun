@@ -262,11 +262,28 @@ def _steal_explains_gaps(gap_report):
     queue (`chunk_tail < chunk_head`) is also not stealing -- the node's
     scanner stopped with work still queued, which is a scanner failure.
     Both must fail immediately rather than be retried away.
+
+    An EMPTY report is not evidence of stealing either. It means no
+    audit observation explained the missing activity at all (no probe
+    recorded, or no gap named), and absence of evidence cannot be
+    classified as a legal outcome: the policy retries only a POSITIVE
+    legal-steal observation. Returning True here would spend retries on
+    a condition the policy calls immediately fatal and would let a
+    missing-diagnostic regression hide behind the attempt bound, so it
+    fails CLOSED.
     """
+    if not gap_report:
+        return False
     for entry in gap_report:
+        gaps = entry.get("gaps") or {}
+        # An entry with no named gap explains nothing. The caller only
+        # builds entries for non-empty gaps, so this is a guard against
+        # a malformed/incomplete report, not a normal shape.
+        if not gaps:
+            return False
         rows = entry["rows"] or []
         by_node = {r[0]: r for r in rows}
-        for node in entry["gaps"]:
+        for node in gaps:
             row = by_node.get(node)
             if row is None:
                 return False
@@ -387,6 +404,58 @@ class TestLivenessGate(unittest.TestCase):
         self.assertFalse(
             _steal_explains_gaps([{"rows": rows, "gaps": gaps}]))
 
+    def test_empty_gap_report_is_not_retryable(self):
+        """No observation at all is not an observation of stealing.
+
+        The classifier used `all()`-style semantics over the report, so
+        an empty report vacuously passed. That spends retries on a
+        condition the policy calls immediately fatal and would let a
+        missing-diagnostic regression hide behind the attempt bound.
+        """
+        self.assertFalse(
+            _steal_explains_gaps([]),
+            "an empty gap report was classified as legal stealing")
+        self.assertFalse(
+            _steal_explains_gaps([{"rows": [], "gaps": {}}]),
+            "an audit entry that names no gap was classified as legal "
+            "stealing")
+
+    def test_missing_audits_are_not_retryable(self):
+        """A run with no audit records has no evidence to explain a gap."""
+        active, gap_report = _liveness_state([], 2)
+        self.assertEqual(active, set())
+        self.assertEqual(gap_report, [])
+        self.assertFalse(
+            _steal_explains_gaps(gap_report),
+            "a missing audit was classified as legal stealing")
+
+    def test_missing_node_row_is_not_retryable(self):
+        """A report that omits a node cannot prove that node was stolen."""
+        rows = [(0, 0, 150, 150, 1, 4, 4, 1)]     # node 1 row missing
+        gaps = _row_activity_gaps(rows, 2)
+        self.assertIn(1, gaps)
+        self.assertFalse(
+            _steal_explains_gaps([{"rows": rows, "gaps": gaps}]),
+            "an absent node row was classified as legal stealing")
+
+    def test_mixed_gap_report_is_not_retryable(self):
+        """One legal steal does not excuse an unrelated failure."""
+        legal = [(0, 0, 150, 150, 1, 4, 4, 1),
+                 (1, 0, 1, 1, 1, 3, 3, 1)]          # legal-steal victim
+        broken = [(0, 0, 150, 150, 1, 4, 4, 1),
+                  (1, 0, 1, 1, 0, 3, 3, 1)]         # unfinished scanner
+        self.assertTrue(
+            _steal_explains_gaps(
+                [{"rows": legal, "gaps": _row_activity_gaps(legal, 2)}]),
+            "the legal-steal fixture is no longer recognised")
+        gap_report = [
+            {"rows": legal, "gaps": _row_activity_gaps(legal, 2)},
+            {"rows": broken, "gaps": _row_activity_gaps(broken, 2)},
+        ]
+        self.assertFalse(
+            _steal_explains_gaps(gap_report),
+            "a mixed report was accepted because one entry looked legal")
+
 
 class TestNumaOrderingIdentity(unittest.TestCase):
     """Ordering identity under logical multi-node NUMA."""
@@ -486,6 +555,11 @@ class TestNumaOrderingIdentity(unittest.TestCase):
         queue was not fully consumed is a scanner failure. Neither is
         retried: `_assert_two_logical_nodes_live` reports them
         immediately with the standard per-node diagnostics.
+
+        Neither is a MISSING audit: a run that produced no per-node
+        observation at all has no legal-steal evidence, so it fails
+        immediately too (`_steal_explains_gaps` fails closed on an
+        empty report). Absence of evidence is not an explanation.
 
         The gate itself is not relaxed. Every attempt is judged by the
         same `_row_activity_gaps`, and the returned run is one that
@@ -762,6 +836,38 @@ class TestNumaOrderingIdentity(unittest.TestCase):
         self.assertEqual(len(calls), 1,
                          "an incomplete attempt was retried")
         self.assertIn("attempt 1 lines=4096", str(cm.exception))
+
+    def test_map_live_never_retries_a_missing_audit(self):
+        """A complete run with no audit observation fails at once.
+
+        The retry is for a POSITIVE legal-steal observation. `_map_live`
+        must not read a missing audit as "nothing to report, therefore
+        fine": with no per-node rows there is no evidence that any node
+        did work, so it is a precondition failure on the first attempt.
+        """
+        calls = []
+
+        def no_audit(**_kw):
+            calls.append(_kw)
+            return list(self.want_lines), [], []
+
+        real_map = self._map
+        try:
+            self._map = no_audit
+            with self.assertRaises(AssertionError) as cm:
+                self._map_live(
+                    lines=4096, nodes="@2", order="none",
+                    workers=WORKERS_2_NODES, num_nodes=2,
+                    require_all=True)
+        finally:
+            self._map = real_map
+
+        self.assertEqual(
+            len(calls), 1,
+            "a run with no audit observations was retried; missing "
+            "evidence must fail closed")
+        self.assertIn("fewer than 2 logical node(s) did real work",
+                      str(cm.exception))
 
 
 def _format_gaps(gap_report):
