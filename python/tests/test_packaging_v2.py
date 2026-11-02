@@ -448,9 +448,14 @@ class TestReleaseCheckDiagnostics(unittest.TestCase):
         """Realistic unittest output, written to the stream it uses.
 
         TextTestRunner writes progress, failure headers and the result
-        line to stderr. The filler makes the headers fall outside the
-        bounded stderr tail as well, so the report can only name them
-        by extracting them -- not by echoing a clipped view.
+        line to stderr. This fixture puts the headers near the end; the
+        "failure is far beyond a fixed tail window" case is covered
+        separately by
+        `test_report_preserves_full_streams_and_names_every_failure`.
+        What this fixture pins is that the report NAMES the headers from
+        stderr and that the assertions target the extracted,
+        two-space-indented section and the explicit result line -- a raw
+        stderr echo would not satisfy either shape.
         """
         return (
             "".join("test_progress_%05d ... ok\n" % i

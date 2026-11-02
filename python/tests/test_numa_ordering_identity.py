@@ -46,6 +46,18 @@ publishes on a different path whose chunking differs (observed: 86
 chunks on node 0, 1 on node 1 -- the synthetic EOF marker), which is
 exactly the single-real-node shape this test must not accept.
 
+SCANNER STEALING IS A SEPARATE, LEGAL EFFECT. A starved scanner may
+claim from a peer's chunk queue (the engine's distance-charged
+stealing). On a loaded UMA host it can take ALL of one node's chunks,
+leaving that node's own scanner with only its EOF marker to publish.
+The liveness gate correctly refuses such a run -- it cannot exercise
+cross-node batch claims -- but that is legal load balancing, not a
+product failure. `_map_live` therefore retries that exact shape a
+bounded number of times and accepts only a run that passes the gate.
+A node that never received a real chunk (`chunk_head <= 1`) is the UMA
+fallback the gate exists to reject, and a node whose queue was not
+fully consumed is a scanner failure; neither is retried.
+
 WHY THE GATE IS STRONGER THAN `rc == 0`. `fr_py_diag_node` returns
 rc==0 even for a node whose counters are all zero (it is a bounds/
 serviceability return, not a liveness claim). The earlier version of
@@ -105,6 +117,15 @@ LINES_GRANULARITIES = (4096, 512)
 # One worker per logical node: a node's own claims cannot be taken by
 # another node's worker, so real per-node publication is preserved.
 WORKERS_2_NODES = 2
+
+# Bounded retries for a fixture run whose node liveness was lost to
+# LEGAL scanner-side chunk stealing (see `_map_live`). Each retry is a
+# fresh run; the gate is re-evaluated, never relaxed. Eight attempts
+# make the residual probability of an all-stolen set of runs negligible
+# even on a heavily loaded 4-vCPU runner, and a systematic single-node
+# regression still fails after the last attempt with every attempt's
+# per-node rows.
+_MAP_LIVE_ATTEMPTS = 8
 
 
 def _plugin(tmpdir):
@@ -185,6 +206,77 @@ def _row_activity_gaps(rows, num_nodes):
     return gaps
 
 
+def _liveness_threshold(num_nodes, require_all):
+    """How many distinct logical nodes must be active for this fixture."""
+    return int(num_nodes) if require_all else 2
+
+
+def _liveness_state(audits, num_nodes):
+    """Per-node activity across every captured audit.
+
+    Returns `(active, gap_report)`. A node is active only when
+    `_row_activity_gaps` reports no gap for it. `gap_report` keeps the
+    rows and the named reasons for every audit that had a gap, so the
+    caller can either fail with the standard diagnostic or classify the
+    gap before deciding whether another run is warranted.
+    """
+    active = set()
+    gap_report = []
+    for a in audits:
+        rows = a["rows"] or []
+        gaps = _row_activity_gaps(rows, int(a["num_nodes"]))
+        active.update(n for n in range(int(a["num_nodes"]))
+                      if n not in gaps)
+        if gaps:
+            gap_report.append({"rows": rows, "gaps": gaps})
+    return active, gap_report
+
+
+def _liveness_ok(active, num_nodes, require_all):
+    """Does `active` satisfy the fixture's liveness requirement?"""
+    needed = _liveness_threshold(num_nodes, require_all)
+    if len(active) < needed:
+        return False
+    return (not require_all) or active == set(range(int(num_nodes)))
+
+
+def _steal_explains_gaps(gap_report):
+    """Is every liveness gap the legal scanner-side stealing shape?
+
+    A starved scanner may claim from a peer's chunk queue (the engine's
+    distance-charged stealing, `forkrun_ring.c`). When it takes ALL of a
+    node's chunks, that node's own scanner publishes only its EOF
+    marker, so its row is:
+
+        write_idx == read_idx == 1, scanner_finished == 1,
+        chunk_head >= 2, chunk_tail == chunk_head
+
+    That is a legal scheduling outcome, not a UMA fallback: the ingest
+    DID route real chunks to the node and every one was consumed. The
+    ordering assertions are only meaningful when both nodes PUBLISHED,
+    so a run of this shape is worth retrying.
+
+    The UMA fallback this gate exists to reject looks different: the
+    node receives only the synthetic EOF marker (`chunk_head <= 1`), so
+    no peer could have taken real work from it. A partially consumed
+    queue (`chunk_tail < chunk_head`) is also not stealing -- the node's
+    scanner stopped with work still queued, which is a scanner failure.
+    Both must fail immediately rather than be retried away.
+    """
+    for entry in gap_report:
+        rows = entry["rows"] or []
+        by_node = {r[0]: r for r in rows}
+        for node in entry["gaps"]:
+            row = by_node.get(node)
+            if row is None:
+                return False
+            (_n, rc, w, r, sf, ch, ct, _te) = row
+            if not (rc == 0 and w == 1 and r == 1 and sf == 1
+                    and ch >= 2 and ct == ch):
+                return False
+    return True
+
+
 class TestLivenessGate(unittest.TestCase):
     """The gate must reject an all-zero node, or it proves nothing."""
 
@@ -229,6 +321,71 @@ class TestLivenessGate(unittest.TestCase):
         gaps = _row_activity_gaps(rows, 2)
         self.assertIn(0, gaps)
         self.assertTrue(any("unclaimed published" in g for g in gaps[0]))
+
+    def test_scanner_stealing_is_classified_retryable(self):
+        """The exact CI shape: node 1 received 3 chunks, published EOF.
+
+        Node 0's starved scanner claimed all three of node 1's chunks
+        (legal distance-charged stealing), so node 1's own scanner
+        published only its EOF marker. The ingest still routed real work
+        to node 1, which distinguishes this from the UMA fallback the
+        gate exists to reject.
+        """
+        rows = [(0, 0, 150, 150, 1, 4, 4, 1),
+                (1, 0, 1, 1, 1, 3, 3, 1)]
+        gaps = _row_activity_gaps(rows, 2)
+        self.assertIn(1, gaps)
+        self.assertTrue(
+            _steal_explains_gaps([{"rows": rows, "gaps": gaps}]),
+            "the CI row shape is legal scanner stealing and must be "
+            "retryable, not reported as a UMA fallback")
+
+    def test_eof_marker_only_node_is_not_retryable(self):
+        """A node that never received a real chunk is the UMA fallback."""
+        rows = [(0, 0, 172, 172, 1, 86, 86, 1),
+                (1, 0, 1, 1, 1, 1, 1, 1)]
+        gaps = _row_activity_gaps(rows, 2)
+        self.assertFalse(
+            _steal_explains_gaps([{"rows": rows, "gaps": gaps}]),
+            "retrying this shape would hide the single-node fallback "
+            "the liveness gate exists to catch")
+
+    def test_partially_consumed_queue_is_not_retryable(self):
+        """A scanner that stops with chunks queued is a failure, not a
+        steal: stealing leaves the victim's queue fully consumed."""
+        rows = [(0, 0, 150, 150, 1, 4, 4, 1),
+                (1, 0, 1, 1, 1, 3, 2, 1)]
+        gaps = _row_activity_gaps(rows, 2)
+        self.assertFalse(
+            _steal_explains_gaps([{"rows": rows, "gaps": gaps}]))
+
+    def test_unfinished_scanner_is_not_retryable(self):
+        """A scanner that never published its final ring state failed."""
+        rows = [(0, 0, 150, 150, 1, 4, 4, 1),
+                (1, 0, 1, 1, 0, 3, 3, 1)]
+        gaps = _row_activity_gaps(rows, 2)
+        self.assertIn(1, gaps)
+        self.assertFalse(
+            _steal_explains_gaps([{"rows": rows, "gaps": gaps}]))
+
+    def test_unclaimed_eof_is_not_retryable(self):
+        """write_idx=read_idx=1 is part of the signature; an unclaimed
+        EOF slot is a drain failure, not a steal."""
+        rows = [(0, 0, 150, 150, 1, 4, 4, 1),
+                (1, 0, 1, 0, 1, 3, 3, 1)]
+        gaps = _row_activity_gaps(rows, 2)
+        self.assertIn(1, gaps)
+        self.assertFalse(
+            _steal_explains_gaps([{"rows": rows, "gaps": gaps}]))
+
+    def test_probe_failure_is_not_retryable(self):
+        """A failed diagnostic probe proves nothing about stealing."""
+        rows = [(0, 0, 150, 150, 1, 4, 4, 1),
+                (1, -1, -1, -1, -1, -1, -1, -1)]
+        gaps = _row_activity_gaps(rows, 2)
+        self.assertIn(1, gaps)
+        self.assertFalse(
+            _steal_explains_gaps([{"rows": rows, "gaps": gaps}]))
 
 
 class TestNumaOrderingIdentity(unittest.TestCase):
@@ -311,6 +468,63 @@ class TestNumaOrderingIdentity(unittest.TestCase):
             _RUN._numa_drain_audit = real_audit
         return out, frames, audits
 
+    def _map_live(self, *, lines, nodes, order, workers,
+                  num_nodes, require_all=False):
+        """Run `_map` until the liveness gate holds.
+
+        Scanner-side chunk stealing is LEGAL load balancing
+        (`forkrun_ring.c`: a starved scanner may claim from a peer's
+        chunk queue). When a peer takes ALL of a node's chunks, that
+        node's own scanner publishes only its EOF marker, so the
+        per-node rows look like a single-real-node run even though the
+        ingest DID route real work there. The ordering claims this
+        class makes are only meaningful on a run where both nodes
+        published, so retry -- but ONLY that shape.
+
+        A node that never received a real chunk (`chunk_head <= 1`) is
+        the UMA fallback the gate exists to reject, and a node whose
+        queue was not fully consumed is a scanner failure. Neither is
+        retried: `_assert_two_logical_nodes_live` reports them
+        immediately with the standard per-node diagnostics.
+
+        The gate itself is not relaxed. Every attempt is judged by the
+        same `_row_activity_gaps`, and the returned run is one that
+        passed it. Exhausting the attempts fails with every attempt's
+        rows, so a systematic single-node regression cannot pass.
+        """
+        attempts = []
+        for attempt in range(1, _MAP_LIVE_ATTEMPTS + 1):
+            out, frames, audits = self._map(
+                lines=lines, nodes=nodes, order=order, workers=workers)
+            # Completeness is a precondition on EVERY attempt, not just
+            # the accepted one. A retry must never discard a run that
+            # lost records and then pass because a later run happened to
+            # be complete: lost output is a failure regardless of which
+            # node scanned the chunk.
+            self._assert_output_complete(
+                out, "attempt %d lines=%d" % (attempt, lines))
+            active, gap_report = _liveness_state(audits, num_nodes)
+            if _liveness_ok(active, num_nodes, require_all):
+                return out, frames, audits
+            if not _steal_explains_gaps(gap_report):
+                # Not the legal stealing shape: report it as the
+                # precondition failure it is, with the standard message.
+                self._assert_two_logical_nodes_live(
+                    audits, num_nodes, require_all)
+            attempts.append({"attempt": attempt,
+                             "gap_report": gap_report})
+        self.fail(
+            "the @%d fixture did not produce %s live node(s) in %d "
+            "attempts; every failed attempt was scanner-side chunk "
+            "stealing (legal load balancing), so the per-node ordering "
+            "behaviour was never exercised. Attempts:\n%s"
+            % (num_nodes,
+               "both" if require_all else "at least 2",
+               _MAP_LIVE_ATTEMPTS,
+               "\n".join("attempt %d:\n%s"
+                         % (a["attempt"], _format_gaps(a["gap_report"]))
+                         for a in attempts)))
+
     def _assert_two_logical_nodes_live(self, audits, num_nodes,
                                        require_all=False):
         """A3 gate: no UMA fallback may make these tests pass.
@@ -325,16 +539,8 @@ class TestNumaOrderingIdentity(unittest.TestCase):
         only two nodes, "at least two" and "both" are the same
         requirement, and naming it makes a one-node run unambiguous.
         """
-        active = set()
-        gap_report = []
-        for a in audits:
-            rows = a["rows"] or []
-            gaps = _row_activity_gaps(rows, int(a["num_nodes"]))
-            active.update(n for n in range(int(a["num_nodes"]))
-                          if n not in gaps)
-            if gaps:
-                gap_report.append({"rows": rows, "gaps": gaps})
-        needed = int(num_nodes) if require_all else 2
+        active, gap_report = _liveness_state(audits, num_nodes)
+        needed = _liveness_threshold(num_nodes, require_all)
         self.assertGreaterEqual(
             len(active), needed,
             "fewer than %d logical node(s) did real work -- the run "
@@ -384,16 +590,22 @@ class TestNumaOrderingIdentity(unittest.TestCase):
         requires >=2 of four active nodes (with one CPU per logical
         node on a small runner, demanding all four would be a
         topology claim, not an ordering claim).
+
+        A run whose liveness was lost to legal scanner-side chunk
+        stealing is retried by `_map_live`; the run this test accepts
+        must still pass the gate, and a systematic single-node fallback
+        still fails after the last attempt.
         """
         for lines in LINES_GRANULARITIES:
-            _out, _frames, audits = self._map(
+            _out, _frames, audits = self._map_live(
                 lines=lines, nodes="@2", order="none",
-                workers=WORKERS_2_NODES)
+                workers=WORKERS_2_NODES, num_nodes=2, require_all=True)
             self._assert_two_logical_nodes_live(
                 audits, num_nodes=2, require_all=True)
         for lines in LINES_GRANULARITIES:
-            _out, _frames, audits = self._map(
-                lines=lines, nodes="@4", order="none", workers=8)
+            _out, _frames, audits = self._map_live(
+                lines=lines, nodes="@4", order="none", workers=8,
+                num_nodes=4)
             self._assert_two_logical_nodes_live(audits, num_nodes=4)
 
     def test_batch_idx_is_not_globally_unique(self):
@@ -409,9 +621,9 @@ class TestNumaOrderingIdentity(unittest.TestCase):
         records rather than as an ordering-precondition failure.
         """
         for lines in LINES_GRANULARITIES:
-            out, frames, audits = self._map(
+            out, frames, audits = self._map_live(
                 lines=lines, nodes="@2", order="none",
-                workers=WORKERS_2_NODES)
+                workers=WORKERS_2_NODES, num_nodes=2, require_all=True)
             self._assert_two_logical_nodes_live(
                 audits, num_nodes=2, require_all=True)
             self._assert_output_complete(out, "collision lines=%d" % lines)
@@ -427,9 +639,9 @@ class TestNumaOrderingIdentity(unittest.TestCase):
     def test_orderer_path_is_byte_exact(self):
         """Production ordering: the C orderer's (major, minor) key."""
         for lines in LINES_GRANULARITIES:
-            out, _frames, audits = self._map(
+            out, _frames, audits = self._map_live(
                 lines=lines, nodes="@2", order="index",
-                workers=WORKERS_2_NODES)
+                workers=WORKERS_2_NODES, num_nodes=2, require_all=True)
             self._assert_two_logical_nodes_live(
                 audits, num_nodes=2, require_all=True)
             got = b"".join(bytes(r) for r in out)
@@ -466,9 +678,9 @@ class TestNumaOrderingIdentity(unittest.TestCase):
         try:
             _bindings.v1_available = no_orderer
             for lines in LINES_GRANULARITIES:
-                out, _frames, audits = self._map(
+                out, _frames, audits = self._map_live(
                     lines=lines, nodes="@2", order="index",
-                    workers=WORKERS_2_NODES)
+                    workers=WORKERS_2_NODES, num_nodes=2, require_all=True)
                 self._assert_two_logical_nodes_live(
                     audits, num_nodes=2, require_all=True)
                 got = b"".join(bytes(r) for r in out)
@@ -480,6 +692,76 @@ class TestNumaOrderingIdentity(unittest.TestCase):
                     "hazard case is no longer demonstrated")
         finally:
             _bindings.v1_available = real_v1a
+
+    def test_map_live_fails_after_bounded_steal_attempts(self):
+        """A steal-only fixture must fail after the bound, not loop.
+
+        The retry tolerates a legal scheduling outcome on a FIXTURE
+        run; it must not turn a systematic single-node regression into
+        an eventual success. Feed the exact legal-steal shape on every
+        attempt and assert that the helper stops at the bound and keeps
+        every attempt's diagnostic rows.
+        """
+        steal_audit = {"num_nodes": 2,
+                       "rows": [(0, 0, 150, 150, 1, 4, 4, 1),
+                                (1, 0, 1, 1, 1, 3, 3, 1)]}
+        calls = []
+
+        def always_steal(**_kw):
+            calls.append(_kw)
+            return list(self.want_lines), [], [steal_audit]
+
+        real_map = self._map
+        try:
+            self._map = always_steal
+            with self.assertRaises(AssertionError) as cm:
+                self._map_live(
+                    lines=4096, nodes="@2", order="none",
+                    workers=WORKERS_2_NODES, num_nodes=2,
+                    require_all=True)
+        finally:
+            self._map = real_map
+
+        self.assertEqual(
+            len(calls), _MAP_LIVE_ATTEMPTS,
+            "the retry bound was not honoured: %d attempts" % len(calls))
+        msg = str(cm.exception)
+        self.assertIn("scanner-side chunk stealing", msg)
+        for attempt in range(1, _MAP_LIVE_ATTEMPTS + 1):
+            self.assertIn("attempt %d:" % attempt, msg,
+                          "attempt %d's diagnostics were not retained"
+                          % attempt)
+
+    def test_map_live_never_retries_an_incomplete_attempt(self):
+        """A run that lost records fails at once, not on a later retry.
+
+        The retry exists only for a complete run whose node liveness
+        was lost to legal stealing. Discarding an incomplete run would
+        let a data-loss defect hide behind a later, complete attempt.
+        """
+        steal_audit = {"num_nodes": 2,
+                       "rows": [(0, 0, 150, 150, 1, 4, 4, 1),
+                                (1, 0, 1, 1, 1, 3, 3, 1)]}
+        calls = []
+
+        def incomplete(**_kw):
+            calls.append(_kw)
+            return list(self.want_lines[:-1]), [], [steal_audit]
+
+        real_map = self._map
+        try:
+            self._map = incomplete
+            with self.assertRaises(AssertionError) as cm:
+                self._map_live(
+                    lines=4096, nodes="@2", order="none",
+                    workers=WORKERS_2_NODES, num_nodes=2,
+                    require_all=True)
+        finally:
+            self._map = real_map
+
+        self.assertEqual(len(calls), 1,
+                         "an incomplete attempt was retried")
+        self.assertIn("attempt 1 lines=4096", str(cm.exception))
 
 
 def _format_gaps(gap_report):

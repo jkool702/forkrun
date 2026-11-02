@@ -97,13 +97,23 @@ class TestSupervisionSubstrate(unittest.TestCase):
     def _run(self, extra_env=None, kill_ingest_delay=None,
              kill_worker_after=None, kill_worker_immediately=False,
              kill_budget=0, workers=2, respawn_cap=None, timeout=30,
-             lines=None):
+             lines=None, retry=3):
         """Run the launcher, optionally killing families mid-run.
 
         `kill_worker_after` is `(wid, delay_s)`. `kill_worker_immediately`
         SIGKILLs each worker generation as soon as it registers, up to
-        `kill_budget` kills -- the slot-pressure regression. Returns
-        (rc, elapsed, lines, ingest_pid, worker_pids).
+        `kill_budget` kills -- the slot-pressure regression.
+
+        `retry` is the launcher's per-batch poison threshold (`--retry`).
+        A kill that lands while a batch is in flight increments that
+        batch's `num_kills`; once `num_kills >= retry` the batch is
+        SKIPPED by contract and the run still exits 0. A test that
+        injects more kills than its retry budget therefore cannot also
+        demand complete output: the two requirements contradict. Callers
+        that need every record must pass a retry budget above the number
+        of kills that can land on one batch.
+
+        Returns (rc, elapsed, lines, ingest_pid, worker_pids).
         """
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("FORKRUN_TEST_")
@@ -118,7 +128,7 @@ class TestSupervisionSubstrate(unittest.TestCase):
             str(_LAUNCHER), "--so", str(_SUBSTRATE),
             "--workers", str(workers), "--lines",
             str(BATCH if lines is None else lines), "--bytes", "0",
-            "--on-error", "0", "--retry", "3",
+            "--on-error", "0", "--retry", str(retry),
             "--src", str(src_fd), "--result", str(out_fd),
             "--stats-fd", "-1",
             "--plugin", self.plugin, "--func", "copy_slow",
@@ -399,10 +409,28 @@ class TestSupervisionSubstrate(unittest.TestCase):
         # only 8 batches at the default 64, so a fast 4-CPU runner can
         # finish the work before 8 generations have been killed, leaving
         # the registration/reuse assertions below unexercised.
+        #
+        # retry=budget+1 is load-bearing, not padding. The harness kills
+        # every worker generation, and a kill that lands while batch N is
+        # in flight increments N's num_kills. The launcher's documented
+        # contract SKIPS a batch once num_kills >= --retry (and exits 0),
+        # so the default retry=3 lets a batch killed three times vanish
+        # from a run that is otherwise healthy. That is exactly what
+        # happened on the 3.13 CI cell: the first 8-line batch was
+        # poisoned and skipped. This test's subject is SLOT REUSE, not
+        # the poison contract, so give it a retry budget the injection
+        # cannot exhaust and keep the full-output assertion intact.
+        #
+        # This is a per-invocation launcher argument only. The production
+        # default is untouched (`forkrun_cleanroom.c`: `o.retry_limit = 3`).
+        # `_run` also asserts `kills >= kill_budget` before returning, so
+        # all 30 injections are proven to have fired; the complete-output
+        # assertion below cannot pass on a run that silently skipped one.
         rc, _dt, lines, ingest_pid, worker_pids = self._run(
             extra_env={"FORKRUN_TEST_SUP_MAX": "8"},
             kill_worker_immediately=True, kill_budget=budget,
-            workers=1, respawn_cap=10000, timeout=120, lines=8)
+            workers=1, respawn_cap=10000, timeout=120, lines=8,
+            retry=budget + 1)
         regs = [line for line in lines if "register role=worker" in line]
         reuses = [line for line in lines if "reuse role=worker" in line]
         self.assertGreaterEqual(
