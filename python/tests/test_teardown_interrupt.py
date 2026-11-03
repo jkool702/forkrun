@@ -53,6 +53,7 @@ _run = __import__("importlib").import_module("forkrun.run")
 
 from _helpers import (ChildLifecycleMixin, DefaultSigint as _DefaultSigint,
                       child_census, redirect_fd, restore_fd,
+                      run_on_background_thread,
                       sigint_action_addr as _sigint_action_addr,
                       sigint_from_thread, write_lines)
 
@@ -1045,6 +1046,67 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
             "the child did not start clean: it kept the recorder, or "
             "kept the parent's depth, or could not take a SIGINT")
 
+    def test_a_copied_parent_scope_cannot_release_a_child_section(self):
+        """The child's generation makes the parent's scope a no-op.
+
+        The child inherits a COPY of any open scope object. If that
+        copied scope could release the child's deferral, it would
+        decrement the CHILD's depth and disarm a section the child had
+        just opened -- delivering a later SIGINT inside it. The
+        generation check is what distinguishes "my section" from "a
+        section copied from another process". The child opens its own
+        section, runs the stale parent exit, and proves the section is
+        still armed (depth 1, recorder installed) before closing it
+        normally.
+        """
+        from forkrun import _childreg, _signals
+
+        r, w = os.pipe()
+        with _DefaultSigint():
+            host = _sigint_action_addr()
+            parent_scope = _signals.defer_interrupts()
+            parent_scope.__enter__()
+            try:
+                pid = _childreg.fork_child("test")
+                if pid == 0:
+                    ok = False
+                    try:
+                        os.close(r)
+                        child_scope = _signals.defer_interrupts()
+                        child_scope.__enter__()
+                        # The copied parent scope must NOT touch this
+                        # process's section.
+                        parent_scope.__exit__(None, None, None)
+                        st = _signals.deferral_state()
+                        ok = (st["depth"] == 1
+                              and _sigint_action_addr() != host)
+                        child_scope.__exit__(None, None, None)
+                        ok = (ok
+                              and _signals.deferral_state()["depth"] == 0
+                              and _sigint_action_addr() == host)
+                    except BaseException:
+                        ok = False
+                    try:
+                        os.write(w, b"1" if ok else b"0")
+                    except OSError:
+                        pass
+                    os._exit(0)
+                os.close(w)
+                data = os.read(r, 1)
+                os.close(r)
+                try:
+                    os.waitpid(pid, 0)
+                except (ChildProcessError, OSError):
+                    pass
+                _childreg.reconcile()
+            finally:
+                parent_scope.__exit__(None, None, None)
+        self.assertEqual(
+            b"1", data,
+            "a scope copied from the parent released the child's own "
+            "deferral: the stale exit disarmed a section that was open "
+            "in the child, so a SIGINT there would not be deferred")
+
     def test_a_pending_parent_signal_survives_the_fork_and_is_not_replayed(self):
         """The parent's deferral belongs to the PARENT, not the child.
 
@@ -1105,6 +1167,250 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
             parent_raised,
             "the parent's deferred SIGINT was lost across the fork: it "
             "must still be delivered through the parent's disposition")
+
+
+class TestBackgroundThreadRun(ChildLifecycleMixin, unittest.TestCase):
+    """A run may execute on a background thread; delivery follows it there.
+
+    CPython dispatches a Python-level signal handler on the MAIN thread
+    no matter which thread the kernel delivered the signal to. The
+    process-wide recorder deliberately cannot do that: it restores the
+    host disposition and invokes the handler DIRECTLY on the thread that
+    closes the outermost deferral, because a kernel re-raise would land
+    at an arbitrary later bytecode -- the late-interrupt defect the
+    deferral exists to prevent (see _signals.py "DELIVERY THREAD").
+
+    ``_RUN_LOCK`` permits a run from a worker thread, so that thread is
+    the delivery thread. These tests pin the consequences: a deferred
+    SIGINT raises ``KeyboardInterrupt`` on the RUN's thread, a custom
+    host handler runs there, and the run's cleanup still completes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        fd, self.path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        write_lines(self.path, 2000)
+        self.addCleanup(os.unlink, self.path)
+        self._base = _run._C07_RUN_DEPTH[0]
+
+    def _expected(self):
+        with open(self.path, "rb") as fh:
+            return b"".join(line.upper() for line in fh)
+
+    def _run(self, body):
+        """Run ``body`` on a background thread and capture the marker.
+
+        ``_RUN_LOCK._local.active`` is PER THREAD, so it must be read
+        inside the worker; reading it after the thread has exited would
+        always report the main thread's (false) value.
+        """
+        return run_on_background_thread(
+            body,
+            finally_fn=lambda: getattr(
+                _run._RUN_LOCK._local, "active", False))
+
+    def _assert_clean(self, result, expected_exc=None):
+        self.assertTrue(
+            result.get("finished"),
+            "the background run did not finish (a deadlock or a lost "
+            "interrupt would both look like this)")
+        self.assertNotIn(
+            "finally_exc", result,
+            "reading the session marker on the worker failed: %r"
+            % (result.get("finally_exc"),))
+        self.assertIs(
+            False, result.get("finally"),
+            "the run left the process-wide session marker set: every "
+            "later run in this process would be refused as nested")
+        self.assertEqual(
+            self._base, _run._C07_RUN_DEPTH[0],
+            "the run depth leaked on the background thread")
+        self.assertEqual(
+            {}, child_census(),
+            "the background run left a child behind")
+        if expected_exc is None:
+            self.assertIsNone(
+                result.get("exc"),
+                "the background run failed: %r" % (result.get("exc"),))
+        else:
+            self.assertIsInstance(result.get("exc"), expected_exc)
+
+    def test_a_background_run_completes_and_clears_the_session(self):
+        """The baseline: a plain run on a worker thread is supported."""
+        def body():
+            return forkrun.map(_up, self.path, workers=2, nodes=1,
+                               order="index")
+
+        result = self._run(body)
+        self._assert_clean(result)
+        self.assertEqual(self._expected(), b"".join(result["value"]))
+
+    def test_a_sigint_inside_a_background_deferral_raises_on_that_thread(self):
+        """Delivery is synchronous on the RUN's thread, not the main one.
+
+        The signal is sent from inside ``_RunDepthToken.acquire`` -- the
+        deferral that owns the acquisition -- so it is recorded by the
+        process-wide recorder and delivered when that deferral closes,
+        still on the worker. A kernel re-raise would instead set the
+        MAIN thread's trip flag and land at an arbitrary later bytecode.
+        """
+        real_acquire = _run._RunDepthToken.acquire
+
+        def _acquire_then_sigint(token):
+            held = real_acquire(token)
+            os.kill(os.getpid(), signal.SIGINT)
+            return held
+
+        def body():
+            return forkrun.map(_up, self.path, workers=2, nodes=1,
+                               order="index")
+
+        with _DefaultSigint(), _Patch(_run._RunDepthToken, "acquire",
+                                      _acquire_then_sigint):
+            result = self._run(body)
+        self._assert_clean(result, expected_exc=KeyboardInterrupt)
+        self.assertEqual(
+            result["ident"], result.get("exc_ident"),
+            "the KeyboardInterrupt was delivered on a different thread "
+            "than the one that closed the deferral")
+        # The session must be usable afterwards, on the main thread.
+        again = forkrun.map(_up, self.path, workers=2, nodes=1,
+                            order="index")
+        self.assertEqual(self._expected(), b"".join(again))
+
+    def test_a_custom_handler_absorbs_the_interrupt_on_the_background_thread(self):
+        """A host callable receives ``(signo, frame)`` on the run's thread.
+
+        The deferral restores the host disposition before invoking it,
+        so the handler is the host's own callable -- just not on the
+        main thread. Returning from it must let the run complete.
+        """
+        seen = []
+
+        def handler(signo, _frame):
+            seen.append((signo, threading.get_ident()))
+
+        real_acquire = _run._RunDepthToken.acquire
+
+        def _acquire_then_sigint(token):
+            held = real_acquire(token)
+            os.kill(os.getpid(), signal.SIGINT)
+            return held
+
+        def body():
+            return forkrun.map(_up, self.path, workers=2, nodes=1,
+                               order="index")
+
+        old = signal.signal(signal.SIGINT, handler)
+        try:
+            with _Patch(_run._RunDepthToken, "acquire",
+                        _acquire_then_sigint):
+                result = self._run(body)
+        finally:
+            signal.signal(signal.SIGINT, old)
+        self._assert_clean(result)
+        self.assertEqual(
+            [(signal.SIGINT, result["ident"])], seen,
+            "the host handler did not run exactly once on the run's "
+            "thread: %r" % (seen,))
+        self.assertEqual(self._expected(), b"".join(result["value"]))
+
+    def test_a_background_teardown_signal_keeps_the_run_error(self):
+        """A signal while the cleanup unwinds must not replace the error."""
+        state = {"fired": False, "torn_down": False}
+        real_release = _run._RunDepthToken.release
+        real_teardown = _run._teardown_reactor
+
+        def _release_then_signal(token):
+            held = real_release(token)
+            if not state["fired"]:
+                state["fired"] = True
+                os.kill(os.getpid(), signal.SIGINT)
+            return held
+
+        def _teardown(*args, **kwargs):
+            state["torn_down"] = True
+            return real_teardown(*args, **kwargs)
+
+        def _boom(_batch):
+            raise RuntimeError("synthetic worker failure")
+
+        def body():
+            return forkrun.map(_boom, self.path, workers=2, nodes=1,
+                               order="index", on_error="fail-fast")
+
+        with _DefaultSigint(), \
+                _Patch(_run._RunDepthToken, "release",
+                       _release_then_signal), \
+                _Patch(_run, "_teardown_reactor", _teardown):
+            result = self._run(body)
+        self.assertTrue(state["fired"],
+                        "the release-boundary signal was never delivered")
+        self.assertTrue(
+            state["torn_down"],
+            "the signal after the depth release SKIPPED the teardown")
+        self._assert_clean(result, expected_exc=RuntimeError)
+        self.assertNotIsInstance(
+            result.get("exc"), KeyboardInterrupt,
+            "the deferred signal replaced the run's own error")
+
+    def test_a_background_fork_window_signal_still_adopts_the_child(self):
+        """The fork window is protected on a worker thread too.
+
+        A child forked but not yet adopted is invisible to every
+        teardown. The deferral is process-wide and thread-agnostic, so
+        the adoption must still happen before the interrupt is delivered
+        -- on whichever thread runs the fork.
+        """
+        from forkrun import _childreg
+
+        real_fork = os.fork
+        holder = {}
+
+        def _fork_then_sigint():
+            pid = real_fork()
+            holder["pid"] = pid
+            if pid > 0:
+                os.kill(os.getpid(), signal.SIGINT)
+            return pid
+
+        def body():
+            pid = _childreg.fork_child("bg-test")
+            if pid == 0:
+                os._exit(0)      # the child: no Python past the fork
+            return pid
+
+        _childreg.reset()
+        try:
+            with _DefaultSigint(), _Patch(os, "fork", _fork_then_sigint):
+                result = self._run(body)
+            pid = holder.get("pid")
+            self.assertTrue(result.get("finished"))
+            self.assertIsInstance(
+                result.get("exc"), KeyboardInterrupt,
+                "the fork-window signal was not delivered on the run's "
+                "thread: %r" % (result.get("exc"),))
+            self.assertEqual(
+                result["ident"], result.get("exc_ident"))
+            self.assertIn(
+                pid, _childreg.pending(),
+                "the child was forked but NOT adopted: an interrupt in "
+                "the fork window orphaned it")
+        finally:
+            pid = holder.get("pid")
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    os.waitpid(pid, 0)
+                except (ChildProcessError, OSError):
+                    pass
+            _childreg.reset()
+        self.assertEqual(self._base, _run._C07_RUN_DEPTH[0])
+        self.assertEqual({}, child_census())
 
 
 class TestChildRegistry(unittest.TestCase):

@@ -73,6 +73,58 @@ def sigint_from_thread(delay=0.05):
     return t
 
 
+def run_on_background_thread(body, finally_fn=None, timeout=120.0):
+    """Run ``body()`` on a worker thread with SIGINT masked on MAIN.
+
+    The worker is created BEFORE the main thread masks SIGINT, because a
+    thread inherits its creator's signal mask. Masking main afterwards
+    leaves the worker as the only SIGINT-eligible thread, which makes the
+    delivery thread deterministic instead of "whichever thread the kernel
+    picked". The previous mask is restored exactly.
+
+    Returns a dict with ``ident`` (the worker's thread id), ``value``
+    (what ``body`` returned), ``exc``/``exc_ident`` (what it raised, and
+    where), ``finished`` (the thread did not outlive the timeout) and
+    ``finally`` (``finally_fn()`` run inside the worker, after body).
+    The caller decides which outcome is expected.
+    """
+    ready = threading.Event()
+    go = threading.Event()
+    result = {"value": None, "exc": None}
+
+    def _worker():
+        result["ident"] = threading.get_ident()
+        ready.set()
+        if not go.wait(timeout):
+            result["exc"] = RuntimeError(
+                "the background worker was never released")
+            return
+        try:
+            result["value"] = body()
+        except BaseException as exc:  # noqa: BLE001 - reported to caller
+            result["exc"] = exc
+            result["exc_ident"] = threading.get_ident()
+        finally:
+            if finally_fn is not None:
+                try:
+                    result["finally"] = finally_fn()
+                except BaseException as exc:  # noqa: BLE001
+                    result["finally_exc"] = exc
+
+    thread = threading.Thread(target=_worker, name="forkrun-test-bg")
+    thread.start()
+    if not ready.wait(timeout):
+        raise RuntimeError("the background worker never started")
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        go.set()
+        thread.join(timeout)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+    result["finished"] = not thread.is_alive()
+    return result
+
+
 def wait_until(predicate, timeout=2.0, interval=0.01):
     """Poll ``predicate`` until true. Returns whether it became true."""
     deadline = time.monotonic() + timeout

@@ -39,7 +39,7 @@ from forkrun._checkpoint import (CheckpointState,  # noqa: E402
                                  snapshot_from_engine, write_checkpoint)
 
 from _helpers import (ChildLifecycleMixin, DefaultSigint,  # noqa: E402
-                      assert_no_zombies, nfd)
+                      assert_no_zombies, nfd, run_on_background_thread)
 
 try:
     find_substrate()
@@ -707,7 +707,16 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
         self.assertEqual(b"".join(res), b"".join(expect))
 
     def test_resume_sigint(self):
-        """SIGINT mid-pipeline checkpoints; resume completes."""
+        """SIGINT mid-pipeline checkpoints; resume completes.
+
+        The abort must be observably MID-PIPELINE, not after it: the
+        entry snapshot (taken before ``fr_py_abort``) must show committed
+        progress, and the published horizon must be at least that
+        frontier and still short of the whole input. That is the
+        evidence the old per-thread mask could not provide -- it
+        delivered the KeyboardInterrupt at an arbitrary bytecode, often
+        after the pipeline had already finished.
+        """
         n = 20000
         path = self._input(n=n)
         counter = path + ".count"
@@ -734,13 +743,55 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
                             lines=500)
         finally:
             _signal.signal(_signal.SIGINT, _old_int)
+        total_input_bytes = os.path.getsize(path)
+        self.assertTrue(
+            os.path.exists(fired),
+            "the single-shot SIGINT trigger never fired")
         self.assertTrue(os.path.exists(ckpt),
                         "SIGINT abort must checkpoint")
+        self.assertTrue(
+            os.path.exists(ckpt + ".coll"),
+            "the collected-output sidecar was not published; a resume "
+            "would skip output the caller never saw")
+        state = parse_checkpoint(ckpt)
+        self.assertGreater(
+            state.horizon, 0,
+            "the published checkpoint records no committed frontier")
+        diag = _resume.abort_diagnostics()
+        self.assertTrue(diag["entered"],
+                        "the abort choreography was never entered")
+        self.assertEqual(
+            "published", diag["category"],
+            "the abort choreography declined: %r" % (diag,))
+        self.assertTrue(diag["published"])
+        self.assertEqual(
+            state.horizon, diag["horizon"],
+            "the checkpoint on disk disagrees with the published "
+            "diagnosis")
+        self.assertIsNotNone(
+            diag["horizon_at_entry"],
+            "the entry snapshot was unavailable, so 'mid-pipeline' is "
+            "asserted rather than measured")
+        self.assertGreater(
+            diag["horizon_at_entry"], 0,
+            "the SIGINT was delivered before any batch committed: the "
+            "trigger was not mid-pipeline")
+        self.assertLessEqual(
+            diag["horizon_at_entry"], state.horizon,
+            "the published horizon is BEHIND the frontier already "
+            "committed when the abort began; resume would duplicate "
+            "output")
+        self.assertLess(
+            diag["horizon_at_entry"], total_input_bytes,
+            "the pipeline had already consumed the whole input when the "
+            "abort began, so this run did not exercise a mid-pipeline "
+            "interrupt")
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
                           order="index", resume=ckpt, nodes=1)
         expect = forkrun.map(_up, path, workers=4, orchestrator=True,
                              order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
+        assert_no_zombies(self)
 
     def _armed_checkpoint_paths(self, suffix=""):
         path = self._input()
@@ -790,6 +841,55 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
         diag = _resume.abort_diagnostics()
         self.assertEqual("published", diag["category"])
         self.assertTrue(diag["published"])
+
+    def test_background_sigint_during_publication_cannot_abandon_the_checkpoint(self):
+        """The same contract when the RUN itself is on a worker thread.
+
+        Delivery is synchronous on the thread that closes the deferral,
+        which for a background run is the run's own thread (see
+        ``_signals.py`` "DELIVERY THREAD"). The publication deferral is
+        process-wide, so it must protect a background run exactly as it
+        protects a main-thread one: the signal is recorded, the
+        checkpoint is written, and the run's own error survives.
+        """
+        path, counter, ckpt = self._armed_checkpoint_paths(".bg")
+        real_write = _resume.write_checkpoint
+        fired = []
+
+        def _write_then_sigint(dest, snap):
+            if not fired:
+                fired.append(True)
+                os.kill(os.getpid(), signal.SIGINT)
+            return real_write(dest, snap)
+
+        def body():
+            return forkrun.map(self._counter_payload(counter, 8), path,
+                               workers=2, orchestrator=True,
+                               order="index", on_error="fail-fast",
+                               checkpoint_file=ckpt, nodes=1, lines=500)
+
+        with DefaultSigint(), mock.patch.object(
+                _resume, "write_checkpoint", _write_then_sigint):
+            result = run_on_background_thread(body)
+        self.assertTrue(result["finished"],
+                        "the background publication run did not finish")
+        self.assertTrue(fired, "the second SIGINT was never delivered")
+        self.assertIsInstance(
+            result.get("exc"), RuntimeError,
+            "expected the run's own abort, got %r" % (result.get("exc"),))
+        self.assertNotIsInstance(
+            result.get("exc"), KeyboardInterrupt,
+            "the deferred signal replaced the run's own error")
+        self.assertTrue(
+            os.path.exists(ckpt),
+            "a SIGINT during write_checkpoint abandoned publication")
+        self.assertGreater(
+            parse_checkpoint(ckpt).horizon, 0,
+            "the published checkpoint records no committed frontier")
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("published", diag["category"])
+        self.assertTrue(diag["published"])
+        assert_no_zombies(self)
 
     def test_second_sigint_during_sidecar_cannot_abandon_publication(self):
         """Same contract for the sidecar (the output half of a resume)."""

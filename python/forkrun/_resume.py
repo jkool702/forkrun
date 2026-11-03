@@ -371,8 +371,9 @@ _LAST_ABORT = [None]
 
 _ABORT_DIAG_DEFAULT = {
     "entered": False, "category": "never-entered", "dest": None,
-    "horizon": None, "jagged": None, "published": False,
-    "attempted_publication": False, "error": None,
+    "horizon": None, "jagged": None,
+    "horizon_at_entry": None, "jagged_at_entry": None,
+    "published": False, "attempted_publication": False, "error": None,
 }
 
 
@@ -413,8 +414,10 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
     (the original exception keeps propagating).
     """
     diag = {"entered": True, "category": None, "dest": None,
-            "horizon": None, "jagged": None, "published": False,
-            "attempted_publication": False, "error": None}
+            "horizon": None, "jagged": None,
+            "horizon_at_entry": None, "jagged_at_entry": None,
+            "published": False, "attempted_publication": False,
+            "error": None}
     _LAST_ABORT[0] = diag
     if not engine_live or not use_orderer:
         diag["category"] = "unarmed-engine"
@@ -424,6 +427,22 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
         return False
     dest = resolve_checkpoint_dest(checkpoint_file, resume_src)
     diag["dest"] = dest
+    # ENTRY SNAPSHOT, BEFORE THE ABORT. The committed frontier at the
+    # moment the choreography begins is what distinguishes "the signal
+    # arrived mid-pipeline with progress already durable" from "the
+    # abort produced the only progress". It is read BEFORE
+    # fr_py_abort(): the abort is what quiesces the workers, and a
+    # reading taken after it could be attributed to the abort itself
+    # (SSoT 4.1 -- a check that reads state another step produces must
+    # come first). Diagnostic only: a failed read must not change the
+    # choreography's decision.
+    try:
+        entry = snapshot_from_engine(lib)
+    except Exception:
+        entry = None
+    if entry is not None:
+        diag["horizon_at_entry"] = entry.horizon
+        diag["jagged_at_entry"] = len(entry.jagged)
     try:
         try:
             lib.fr_py_abort()

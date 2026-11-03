@@ -17,8 +17,11 @@ allocates and never calls arbitrary code (W-REL5-C6). The run's
 existing abort teardown then reaps, and the armed W-PY22
 checkpoint choreography publishes, before the wrapper translates
 the pending signal into ``ForkrunTerminated`` / ``ForkrunPreempted``.
-SIGINT is NEVER captured (stays ``KeyboardInterrupt`` →
-``ForkrunInterrupted``).
+SIGINT is NEVER captured by that policy (it stays ``KeyboardInterrupt``
+→ ``ForkrunInterrupted``). Separately, the process-wide deferral below
+installs a short-lived recorder around critical sections; it does not
+convert SIGINT either -- it delivers ``KeyboardInterrupt`` at the
+section boundary (see "SIGINT deferral" below).
 
 **Handler restoration is a correctness invariant, not cleanup
 nicety** (W-PORTDEFER red line): previous dispositions are saved
@@ -276,16 +279,57 @@ class SignalGuard:
 #     reason for stopping. The context manager cannot see an exception
 #     propagating through a ``finally``, hence ``unwinding``.
 #
+# DELIVERY THREAD: A DELIBERATE DEPARTURE FROM CPYTHON'S CONVENTION.
+# CPython runs a Python-level signal handler on the MAIN thread of the
+# main interpreter no matter which thread the kernel delivered the
+# signal to. The deferral cannot do that: it has already restored the
+# kernel disposition, and re-raising through the kernel to regain
+# main-thread dispatch is exactly the late-interrupt bug above. So the
+# handler runs SYNCHRONOUSLY on the thread that closes the outermost
+# section -- which may be a background thread, because ``_RUN_LOCK``
+# permits a run from one. Consequences, all tested:
+#
+#   * ``default_int_handler`` raises ``KeyboardInterrupt`` on THAT
+#     thread. A run started from a background thread therefore raises
+#     there, not on the main thread. This is the supported contract.
+#   * A custom host callable receives ``(signo, frame)`` on that thread.
+#     A host that requires main-thread dispatch must marshal itself; the
+#     deferral will not move the callback.
+#   * ``SIG_IGN`` drops the signal and ``SIG_DFL`` (or a C-level
+#     disposition CPython cannot see, reported as ``None``) re-raises
+#     through the kernel so the kernel's default action applies.
+#
+# The same thread contract covers BOTH delivery paths. A signal recorded
+# while the section was open is delivered by ``_disarm`` returning True.
+# A recorder invocation that was already running when the section closed
+# parks a HANDOFF in C and ``_disarm`` reports it the same way; it is not
+# re-raised through the kernel. A signal that arrived after the previous
+# section closed is parked and delivered by ``_arm`` BEFORE the next
+# section opens, also on the entering thread. The only kernel re-raise
+# left is the broken-state last resort (SIG_DFL), which is the point at
+# which the process must remain interruptible.
+#
 # FORK. Pending signals are not inherited across fork, and neither is the
 # parent's reason for deferring. ``after_fork_child`` restores the saved
-# disposition, clears the armed/seen flags, resets the depth, and bumps
-# the generation so the copied scope's ``__exit__`` is a no-op instead of
-# decrementing the parent's depth. It MUST NOT take the state lock: a
-# sibling thread may have held it at the moment of the fork, and the
-# child has no thread to release it.
+# disposition, clears the armed/seen/pending flags, resets the depth, and
+# bumps the generation so the copied scope's ``__exit__`` is a no-op
+# instead of decrementing the parent's depth. It MUST NOT take the state
+# lock: a sibling thread may have held it at the moment of the fork, and
+# the child has no thread to release it.
 #
 # The recorder never takes the lock: a signal can interrupt the main
 # thread while it holds it.
+
+
+class DeferralError(RuntimeError):
+    """The C recorder could not establish a clean deferral boundary.
+
+    Raised when arming, disarming, or the forked-child reset fails. It
+    always means the process's SIGINT disposition is not provably the
+    one the caller asked for, so the state is reported rather than
+    assumed. A subclass of RuntimeError so existing callers that catch
+    RuntimeError keep working.
+    """
 
 
 class _DeferState:
@@ -305,6 +349,10 @@ class _DeferState:
 
 _STATE = _DeferState()
 
+# The last boundary failure that could not be raised (because an
+# exception was already unwinding). Diagnostics/tests only.
+_LAST_DEFERRAL_FAILURE = None
+
 
 def _shim():
     """The substrate lib (deferral is a C facility); fail closed."""
@@ -321,17 +369,72 @@ def _shim():
     return lib
 
 
+# The C layer's positive return codes (python/forkrun/_shim.c). Negative
+# codes are errors and are mapped in _RC_TEXT.
+_RC_OK = 0
+_RC_SEEN = 1
+_RC_HANDOFF = 2
+_RC_STALE = 3
+
+
 def _arm():
-    """Arm the outermost section (idempotent at the kernel layer)."""
-    if _shim().fr_py_sigint_defer_begin() != 0:
-        raise RuntimeError(
-            "forkrun: cannot arm process-wide SIGINT deferral "
-            "(sigaction(SIGINT) failed)")
+    """Arm the outermost section (idempotent at the kernel layer).
+
+    Fail closed: every negative return means the recorder is not provably
+    installed, so the section is not opened at all.
+
+    STALE means the recorder parked a SIGINT that arrived after the
+    previous section closed (the kernel had already dequeued it). There
+    is no open interval for it to belong to, so it is delivered NOW,
+    before this section opens, through the host disposition; then the
+    arm is retried. Delivering it inside the section, or clearing it,
+    would each violate the contract in a different direction.
+    """
+    lib = _shim()
+    while True:
+        rc = lib.fr_py_sigint_defer_begin()
+        if rc == _RC_OK:
+            return
+        if rc == _RC_STALE:
+            _deliver(_signal.SIGINT)
+            continue
+        raise DeferralError(
+            "forkrun: cannot arm process-wide SIGINT deferral (C rc=%d: %s)"
+            % (rc, _RC_TEXT.get(rc, "unknown")))
+
+
+# The C layer's return codes (python/forkrun/_shim.c). Kept as a table
+# rather than an if-chain so a new code cannot be reported as "unknown"
+# by accident: the mapping is data, and an unmapped code still names the
+# number.
+_RC_TEXT = {
+    -1: "could not read the host SIGINT disposition",
+    -2: "could not install the SIGINT recorder",
+    -3: ("could not restore the host SIGINT disposition; the recorder may "
+         "still be installed and deferral is disabled until the process "
+         "is restarted or the state is reset"),
+    -4: ("an in-flight SIGINT recorder invocation did not finish; the "
+         "pending state cannot be proven complete"),
+    -5: ("a previous SIGINT disposition failure left the deferral state "
+         "unsafe"),
+}
 
 
 def _disarm():
-    """Restore the host disposition; True iff a SIGINT was recorded."""
-    return _shim().fr_py_sigint_defer_end() != 0
+    """Restore the host disposition; True iff a SIGINT must be delivered.
+
+    True covers both a signal recorded while the section was open and an
+    in-flight recorder invocation that parked a HANDOFF at the boundary.
+    Raises DeferralError when the C layer could not establish a clean
+    boundary. The caller must NOT report success in that case: the
+    recorder may still be installed, and the pending state is unknown.
+    """
+    rc = _shim().fr_py_sigint_defer_end()
+    if rc < 0:
+        raise DeferralError(
+            "forkrun: SIGINT deferral could not be closed cleanly (C "
+            "rc=%d: %s)" % (rc, _RC_TEXT.get(rc, "unknown")))
+    return rc != _RC_OK
 
 
 def _deliver(signo):
@@ -404,6 +507,7 @@ class _DeferredInterrupt:
     def __exit__(self, exc_type, exc, tb):
         st = _STATE
         signo = None
+        failure = None
         with st.lock:
             # A forked child reset the state: the parent's section is not
             # this process's section, so leave it alone.
@@ -417,10 +521,24 @@ class _DeferredInterrupt:
                 return False
             # OUTERMOST exit.
             unwinding = exc_type is not None or self._unwinding
-            seen = _disarm()
+            try:
+                deliver = _disarm()
+            except DeferralError as err:
+                failure = err
+                deliver = False
             st.generation += 1
-            if seen and not unwinding:
+            if deliver and not unwinding:
                 signo = _signal.SIGINT
+        if failure is not None:
+            if not unwinding:
+                raise failure
+            # An exception is already propagating. It is the run's reason
+            # for stopping, and a teardown failure must never replace it
+            # (the diagnosis would be lost). The failure is reported on
+            # stderr and recorded, and every later section fails closed
+            # because the C layer is left in its broken state.
+            _record_deferral_failure(failure)
+            return False
         if signo is not None:
             # Outside the lock: the host handler may call back into
             # forkrun (and on the main thread it raises immediately).
@@ -477,6 +595,28 @@ def interrupt_safe(fn):
     return wrapper
 
 
+def _record_deferral_failure(err):
+    """Record (and report) a boundary failure that could not be raised.
+
+    Called when the failure happens while an exception is already
+    unwinding. The exception keeps propagating -- it is the run's
+    reason for stopping -- but the deferral failure must not vanish:
+    it is written to stderr and kept for diagnostics/tests.
+    """
+    global _LAST_DEFERRAL_FAILURE
+    _LAST_DEFERRAL_FAILURE = err
+    try:
+        _sys.stderr.write("forkrun [FATAL]: %s\n" % (err,))
+        _sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def deferral_failure():
+    """The last boundary failure that could not be raised, or None."""
+    return _LAST_DEFERRAL_FAILURE
+
+
 def after_fork_child():
     """Reset SIGINT-deferral state in a freshly forked child.
 
@@ -504,16 +644,22 @@ def after_fork_child():
     st.depth = 0
     st.generation += 1
     try:
-        _shim().fr_py_sigint_defer_cancel()
+        rc = _shim().fr_py_sigint_defer_cancel()
     except Exception as exc:
         # A child that keeps the recorder would defer SIGINT forever and
         # never honour the host's disposition. Fail closed: the caller
         # turns this into a failed worker, never a silently
         # mis-signalled one.
-        raise RuntimeError(
+        raise DeferralError(
             "forkrun: a forked child could not restore the parent's "
             "SIGINT disposition (%r); refusing to run with a stale "
             "deferral handler" % (exc,)) from exc
+    if rc < 0:
+        raise DeferralError(
+            "forkrun: a forked child could not restore the parent's "
+            "SIGINT disposition (C rc=%d: %s); refusing to run with a "
+            "stale deferral handler"
+            % (rc, _RC_TEXT.get(rc, "unknown")))
 
 
 def deferral_state():
@@ -532,4 +678,4 @@ __all__ = ["POLICY_DEFAULT", "POLICY_CHECKPOINT",
            "validate_signal_policy", "SignalGuard", "guard",
            "defer_interrupts", "defer_interrupts_for_cleanup",
            "uninterruptible", "interrupt_safe", "after_fork_child",
-           "deferral_state"]
+           "deferral_state", "DeferralError", "deferral_failure"]

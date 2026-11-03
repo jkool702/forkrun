@@ -7,6 +7,8 @@ taxonomy error, and restores prior handlers (restoration is a
 release-blocking invariant).
 """
 
+import contextlib
+import io
 import os
 import signal as _signal
 import subprocess
@@ -16,7 +18,6 @@ import threading
 import time
 import unittest
 from unittest import mock
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -66,6 +67,16 @@ def _kill_me_later(sig, delay):
     t.daemon = True
     t.start()
     return t
+
+
+# The C recorder's test-only knobs (python/forkrun/_shim.c). A test that
+# sets one must restore the previous value, or a later test inherits it.
+_ENV_KNOBS = (
+    "FORKRUN_SIGINT_HANDLER_DELAY_US",
+    "FORKRUN_SIGINT_DRAIN_BUDGET_US",
+    "FORKRUN_SIGINT_FAULT_RESTORE",
+    "FORKRUN_SIGINT_FAULT_STALE",
+)
 
 
 class TestPolicyValidation(unittest.TestCase):
@@ -234,7 +245,18 @@ class TestProcessWideDeferral(unittest.TestCase):
         self.addCleanup(_signal.signal, _signal.SIGINT, self._old)
         boom = AssertionError(
             "a Python-level disposition was re-raised through the kernel")
-        with mock.patch.object(_signals.os, "kill", side_effect=boom):
+        # Patch the MODULE ATTRIBUTE _signals.os, not _signals.os.kill:
+        # `_signals.os` IS the os module, so patching `.kill` on it also
+        # patches the sender's os.kill and the SIGINT is never sent --
+        # the test then fails for the opposite of the reason it names.
+        class _NoKill:
+            def __getattr__(self, name):
+                return getattr(os, name)
+
+            def kill(self, *a, **k):
+                raise boom
+
+        with mock.patch.object(_signals, "os", _NoKill()):
             with defer_interrupts():
                 sigint_from_thread(0.02)
                 time.sleep(0.15)
@@ -418,6 +440,388 @@ with open(marker, "a") as fh:
         self.assertEqual(calls, [_signal.SIGINT])
         self.assertEqual(deferral_state()["depth"], 0)
         self.assertEqual(sigint_action_addr(), host)
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestRecorderConcurrency(unittest.TestCase):
+    """The C recorder's boundary protocol, exercised deterministically.
+
+    The recorder is a RUNNING FUNCTION, not a queued message: a handler
+    the kernel has already entered can still be executing when the
+    section closes. The test-only delay hook puts an invocation provably
+    in flight at that moment; the fault hooks cover the two states that
+    cannot be provoked through the public API (a failed restore and a
+    parked stale signal).
+    """
+
+    def setUp(self):
+        self._old_int = _signal.getsignal(_signal.SIGINT)
+        self._old_failure = _signals._LAST_DEFERRAL_FAILURE
+        self._old_env = {k: os.environ.get(k) for k in _ENV_KNOBS}
+        self._siblings = []
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        for _th, stop in self._siblings:
+            stop.set()
+        for th, _stop in self._siblings:
+            th.join(5)
+        try:
+            _signal.pthread_sigmask(_signal.SIG_SETMASK, set())
+        except (OSError, ValueError):
+            pass
+        try:
+            _signals._shim().fr_py_sigint_defer_cancel()
+        except Exception:
+            pass
+        try:
+            _signal.signal(_signal.SIGINT, self._old_int)
+        except (OSError, ValueError):
+            pass
+        for key, value in self._old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        _signals._LAST_DEFERRAL_FAILURE = self._old_failure
+        depth = _signals.deferral_state()["depth"]
+        if depth:
+            # Never poison the rest of the suite with a test's leak;
+            # the assertion below still fails this test.
+            _signals._STATE.depth = 0
+            _signals._STATE.generation += 1
+        self.assertEqual(depth, 0,
+                         "a recorder test left a deferral section open")
+
+    def _env(self, **kw):
+        for key, value in kw.items():
+            os.environ[key] = str(value)
+
+    def _busy_sibling(self):
+        """An eligible receiver, created UNMASKED (before _mask_main)."""
+        ready = threading.Event()
+        stop = threading.Event()
+
+        def run():
+            ready.set()
+            while not stop.is_set():
+                time.sleep(0.002)
+
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        self.assertTrue(ready.wait(5), "the sibling never started")
+        self._siblings.append((th, stop))
+        return th, stop
+
+    def _mask_main(self):
+        old = _signal.pthread_sigmask(
+            _signal.SIG_BLOCK, {_signal.SIGINT})
+        self.addCleanup(
+            _signal.pthread_sigmask, _signal.SIG_SETMASK, old)
+        return old
+
+    def _send(self):
+        # Created while the main thread is masked: the timer inherits
+        # that mask and cannot receive, so the busy sibling is the
+        # eligible receiver.
+        timer = threading.Timer(
+            0.0, os.kill, (os.getpid(), _signal.SIGINT))
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    def test_a_recorded_signal_is_reported_once_and_cleared(self):
+        lib = _signals._shim()
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        sigint_from_thread(0.02)
+        time.sleep(0.15)
+        self.assertEqual(
+            lib.fr_py_sigint_defer_end(), _signals._RC_SEEN,
+            "the recorder did not report the signal it saw")
+        self.assertEqual(
+            lib.fr_py_sigint_defer_begin(), _signals._RC_OK,
+            "a signal from the previous generation was replayed as a "
+            "stale handoff")
+        self.assertEqual(lib.fr_py_sigint_defer_end(), _signals._RC_OK)
+
+    def test_an_inflight_recorder_hands_off_and_end_waits(self):
+        self._env(FORKRUN_SIGINT_HANDLER_DELAY_US=400000,
+                  FORKRUN_SIGINT_DRAIN_BUDGET_US=2000000)
+        calls = []
+        _signal.signal(_signal.SIGINT,
+                       lambda s, f: calls.append(threading.get_ident()))
+        self._busy_sibling()
+        self._mask_main()
+        lib = _signals._shim()
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        self._send()
+        time.sleep(0.10)
+        started = time.monotonic()
+        rc = lib.fr_py_sigint_defer_end()
+        elapsed = time.monotonic() - started
+        self.assertEqual(
+            rc, _signals._RC_HANDOFF,
+            "an invocation that was in flight at the boundary did not "
+            "park a handoff (rc=%r)" % (rc,))
+        self.assertGreaterEqual(
+            elapsed, 0.15,
+            "end() did not wait for the in-flight invocation (%.3fs)"
+            % elapsed)
+        self.assertLess(
+            elapsed, 1.0,
+            "end() waited for the whole handler delay instead of the "
+            "drain budget (%.3fs)" % elapsed)
+        self.assertEqual(
+            calls, [],
+            "the in-flight invocation re-raised through the kernel "
+            "instead of handing off: a Python-level handler would then "
+            "run asynchronously on the main thread")
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        self.assertEqual(lib.fr_py_sigint_defer_end(), _signals._RC_OK)
+
+    def test_the_handoff_is_delivered_synchronously_on_the_closing_thread(
+            self):
+        self._env(FORKRUN_SIGINT_HANDLER_DELAY_US=400000,
+                  FORKRUN_SIGINT_DRAIN_BUDGET_US=2000000)
+        calls = []
+
+        def handler(signo, frame):
+            calls.append((signo, threading.get_ident()))
+
+        _signal.signal(_signal.SIGINT, handler)
+        self._busy_sibling()
+        self._mask_main()
+        started = time.monotonic()
+        with defer_interrupts():
+            self._send()
+            time.sleep(0.10)
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(
+            elapsed, 0.15,
+            "the section did not wait for the in-flight invocation")
+        self.assertEqual(
+            calls, [(_signal.SIGINT, threading.get_ident())],
+            "the handoff was not delivered exactly once, synchronously, "
+            "on the thread that closed the section")
+        self.assertEqual(_signals.deferral_state()["depth"], 0)
+
+    def test_a_drain_timeout_fails_closed_and_can_be_reset(self):
+        self._env(FORKRUN_SIGINT_HANDLER_DELAY_US=600000,
+                  FORKRUN_SIGINT_DRAIN_BUDGET_US=100000)
+        _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+        self._busy_sibling()
+        self._mask_main()
+        lib = _signals._shim()
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        self._send()
+        time.sleep(0.15)
+        started = time.monotonic()
+        rc = lib.fr_py_sigint_defer_end()
+        elapsed = time.monotonic() - started
+        self.assertEqual(rc, -4, "a drain timeout was not reported")
+        self.assertLess(
+            elapsed, 0.45,
+            "end() waited for the whole handler delay instead of its "
+            "budget (%.3fs)" % elapsed)
+        self.assertEqual(
+            lib.fr_py_sigint_defer_begin(), -5,
+            "a drain timeout did not make later sections fail closed")
+        # Let the delayed invocation finish and park, then reset the
+        # test-only broken state through the child-side reset.
+        time.sleep(0.55)
+        self.assertGreaterEqual(lib.fr_py_sigint_defer_cancel(), 0)
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        self.assertEqual(lib.fr_py_sigint_defer_end(), _signals._RC_OK)
+
+    def test_a_restore_failure_is_fail_closed_and_leaves_the_recorder_visible(
+            self):
+        self._env(FORKRUN_SIGINT_FAULT_RESTORE=1)
+        calls = []
+        _signal.signal(_signal.SIGINT, lambda s, f: calls.append(s))
+        host = _signal.getsignal(_signal.SIGINT)
+        host_addr = sigint_action_addr()
+        lib = _signals._shim()
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        self.assertEqual(
+            lib.fr_py_sigint_defer_end(), -3,
+            "a failed restore was not reported")
+        self.assertNotEqual(
+            sigint_action_addr(), host_addr,
+            "a failed restore pretended the recorder was gone")
+        self.assertEqual(
+            lib.fr_py_sigint_defer_begin(), -5,
+            "a failed restore did not make later sections fail closed")
+        self.assertIs(_signal.getsignal(_signal.SIGINT), host)
+        self.assertGreaterEqual(lib.fr_py_sigint_defer_cancel(), 0)
+        self.assertEqual(
+            sigint_action_addr(), host_addr,
+            "cancel() did not restore the host disposition")
+        os.environ.pop("FORKRUN_SIGINT_FAULT_RESTORE", None)
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        self.assertEqual(lib.fr_py_sigint_defer_end(), _signals._RC_OK)
+
+    def test_the_python_layer_raises_and_refuses_later_sections(self):
+        self._env(FORKRUN_SIGINT_FAULT_RESTORE=1)
+        _signal.signal(_signal.SIGINT, lambda s, f: None)
+        with self.assertRaises(_signals.DeferralError) as ctx:
+            with defer_interrupts():
+                pass
+        self.assertIn("could not restore", str(ctx.exception))
+        with self.assertRaises(_signals.DeferralError) as ctx2:
+            with defer_interrupts():
+                self.fail("a broken deferral state opened a section")
+        self.assertIn("rc=-5", str(ctx2.exception))
+        _signals._shim().fr_py_sigint_defer_cancel()
+        os.environ.pop("FORKRUN_SIGINT_FAULT_RESTORE", None)
+        with defer_interrupts():
+            self.assertEqual(_signals.deferral_state()["depth"], 1)
+        self.assertEqual(_signals.deferral_state()["depth"], 0)
+
+    def test_an_unwinding_failure_keeps_the_run_error_and_is_recorded(self):
+        self._env(FORKRUN_SIGINT_FAULT_RESTORE=1)
+        _signal.signal(_signal.SIGINT, lambda s, f: None)
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            with self.assertRaises(ValueError):
+                with defer_interrupts():
+                    raise ValueError("the run's own error")
+        failure = _signals.deferral_failure()
+        self.assertIsInstance(failure, _signals.DeferralError)
+        self.assertIn("could not restore", str(failure))
+        self.assertIn("forkrun [FATAL]", captured.getvalue())
+        _signals._shim().fr_py_sigint_defer_cancel()
+        os.environ.pop("FORKRUN_SIGINT_FAULT_RESTORE", None)
+        with defer_interrupts():
+            pass
+
+    def test_a_host_disposition_change_mid_section_wins(self):
+        calls = []
+
+        def host_a(signo, frame):
+            calls.append("a")
+
+        def host_b(signo, frame):
+            calls.append("b")
+
+        _signal.signal(_signal.SIGINT, host_a)
+        lib = _signals._shim()
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+        self.assertEqual(
+            lib.fr_py_sigint_defer_end(), _signals._RC_OK,
+            "the newer host disposition was reported as a deferred signal")
+        self.assertIs(_signal.getsignal(_signal.SIGINT), _signal.SIG_IGN)
+        self.assertEqual(
+            sigint_action_addr(), 1,
+            "the recorder clobbered the host's SIG_IGN")
+
+        _signal.signal(_signal.SIGINT, host_a)
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        _signal.signal(_signal.SIGINT, host_b)
+        self.assertEqual(lib.fr_py_sigint_defer_end(), _signals._RC_OK)
+        self.assertIs(_signal.getsignal(_signal.SIGINT), host_b)
+        os.kill(os.getpid(), _signal.SIGINT)
+        self.assertTrue(
+            wait_until(lambda: calls == ["b"], 2.0),
+            "the newer host handler was not the live one")
+
+    def test_multiple_signals_coalesce_to_one_delivery(self):
+        calls = []
+        _signal.signal(_signal.SIGINT, lambda s, f: calls.append(s))
+        with defer_interrupts():
+            for _ in range(5):
+                os.kill(os.getpid(), _signal.SIGINT)
+                time.sleep(0.01)
+            self.assertEqual(calls, [], "delivered inside the section")
+        self.assertEqual(
+            calls, [_signal.SIGINT],
+            "one interval with several SIGINTs must deliver at least "
+            "once; the boolean contract is exactly one")
+        with defer_interrupts():
+            pass
+        self.assertEqual(
+            calls, [_signal.SIGINT],
+            "a signal from the previous generation reappeared")
+
+    def test_boundary_race_never_loses_or_duplicates_a_signal(self):
+        self._env(FORKRUN_SIGINT_HANDLER_DELAY_US=5000)
+        calls = []
+        in_section = [False]
+
+        def handler(signo, frame):
+            calls.append((signo, in_section[0]))
+
+        _signal.signal(_signal.SIGINT, handler)
+        self._busy_sibling()
+        self._mask_main()
+        n = 60
+        for i in range(n):
+            with defer_interrupts():
+                in_section[0] = True
+                self._send()
+                if i % 4:
+                    time.sleep(0.002)
+                in_section[0] = False
+            # A late invocation parks the signal for the next begin();
+            # flush until it is delivered. The invariant is exactly one
+            # delivery per send, never inside a section.
+            for _ in range(4):
+                if len(calls) > i:
+                    break
+                with defer_interrupts():
+                    pass
+            self.assertTrue(
+                wait_until(lambda: len(calls) > i, 1.0),
+                "signal %d was LOST (calls=%d)" % (i, len(calls)))
+            self.assertEqual(
+                len(calls), i + 1,
+                "signal %d was delivered %d times"
+                % (i, len(calls) - i))
+            self.assertFalse(
+                calls[-1][1],
+                "signal %d was delivered INSIDE a protected section" % i)
+
+    def test_a_stale_handoff_is_delivered_before_the_section_opens(self):
+        self._env(FORKRUN_SIGINT_FAULT_STALE=1)
+        seen = []
+
+        def handler(signo, frame):
+            seen.append((signo, _signals.deferral_state()["depth"]))
+            os.environ.pop("FORKRUN_SIGINT_FAULT_STALE", None)
+
+        _signal.signal(_signal.SIGINT, handler)
+        with defer_interrupts():
+            self.assertEqual(
+                seen, [(_signal.SIGINT, 0)],
+                "the parked signal was not delivered BEFORE the section "
+                "opened")
+            self.assertEqual(_signals.deferral_state()["depth"], 1)
+        self.assertEqual(_signals.deferral_state()["depth"], 0)
+        with defer_interrupts():
+            pass
+        self.assertEqual(seen, [(_signal.SIGINT, 0)],
+                         "the parked signal was replayed")
+
+    def test_a_stale_handoff_that_raises_prevents_the_section(self):
+        self._env(FORKRUN_SIGINT_FAULT_STALE=1)
+        calls = []
+
+        def handler(signo, frame):
+            calls.append(signo)
+            os.environ.pop("FORKRUN_SIGINT_FAULT_STALE", None)
+            raise KeyboardInterrupt("stale")
+
+        _signal.signal(_signal.SIGINT, handler)
+        with self.assertRaises(KeyboardInterrupt):
+            with defer_interrupts():
+                self.fail("the section opened despite a delivered stale "
+                          "signal")
+        self.assertEqual(calls, [_signal.SIGINT])
+        self.assertEqual(
+            _signals.deferral_state()["depth"], 0,
+            "the failed arm left the section open")
+        with defer_interrupts():
+            pass
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
