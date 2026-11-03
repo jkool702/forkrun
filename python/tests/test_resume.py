@@ -18,14 +18,19 @@ byte ranges map exactly to line sets.
 
 import gc
 import os
+import signal
 import sys
 import tempfile
+import time
+import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import forkrun  # noqa: E402
+from forkrun import _resume  # noqa: E402
 from forkrun._bindings import find_substrate, get  # noqa: E402
 from forkrun._checkpoint import (CheckpointState,  # noqa: E402
                                  check_checkpoint_safety,
@@ -33,7 +38,8 @@ from forkrun._checkpoint import (CheckpointState,  # noqa: E402
                                  serialize_checkpoint,
                                  snapshot_from_engine, write_checkpoint)
 
-from _helpers import ChildLifecycleMixin, assert_no_zombies, nfd  # noqa: E402
+from _helpers import (ChildLifecycleMixin, DefaultSigint,  # noqa: E402
+                      assert_no_zombies, nfd)
 
 try:
     find_substrate()
@@ -495,6 +501,17 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
                         return bytes(batch.data).upper()
                     import signal
                     os.kill(os.getppid(), signal.SIGINT)
+                    # Keep the batch IN FLIGHT after the signal. Signal
+                    # DELIVERY is asynchronous: without this hold the
+                    # parent can finish the whole corpus before it
+                    # processes the pending interrupt, so the run
+                    # completes successfully and there is no abort to
+                    # checkpoint. That was the original full-suite
+                    # failure (no checkpoint + a teardown interrupted
+                    # by the late signal). Sleeping here makes the
+                    # trigger genuinely mid-pipeline without changing
+                    # the eight-execution premise.
+                    time.sleep(0.25)
             return bytes(batch.data).upper()
         return _payload
 
@@ -724,6 +741,195 @@ class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
         expect = forkrun.map(_up, path, workers=4, orchestrator=True,
                              order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
+
+    def _armed_checkpoint_paths(self, suffix=""):
+        path = self._input()
+        ckpt = path + ".ckpt" + suffix
+        counter = path + ".count" + suffix
+        for f in (counter, ckpt, ckpt + ".coll"):
+            if os.path.exists(f):
+                os.unlink(f)
+            self.addCleanup(
+                lambda f=f: os.path.exists(f) and os.unlink(f))
+        return path, counter, ckpt
+
+    def test_second_sigint_during_publication_cannot_abandon_the_checkpoint(self):
+        """A signal inside write_checkpoint is deferred, not obeyed.
+
+        The abort choreography runs while the run's own exception is
+        unwinding. An operator pressing Ctrl-C again (or a terminal
+        delivering a second SIGINT) must not abandon publication
+        half-way, and must not replace the exception that caused the
+        abort. The signal is therefore recorded, the checkpoint is
+        written, and the original error propagates.
+        """
+        path, counter, ckpt = self._armed_checkpoint_paths()
+        real_write = _resume.write_checkpoint
+        fired = []
+
+        def _write_then_sigint(dest, snap):
+            if not fired:
+                fired.append(True)
+                os.kill(os.getpid(), signal.SIGINT)
+            return real_write(dest, snap)
+
+        with DefaultSigint(), mock.patch.object(
+                _resume, "write_checkpoint", _write_then_sigint):
+            with self.assertRaises(RuntimeError):
+                forkrun.map(self._counter_payload(counter, 8), path,
+                            workers=2, orchestrator=True, order="index",
+                            on_error="fail-fast", checkpoint_file=ckpt,
+                            nodes=1, lines=500)
+        self.assertTrue(fired, "the second SIGINT was never delivered")
+        self.assertTrue(
+            os.path.exists(ckpt),
+            "a SIGINT during write_checkpoint abandoned publication")
+        self.assertGreater(
+            parse_checkpoint(ckpt).horizon, 0,
+            "the published checkpoint records no committed frontier")
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("published", diag["category"])
+        self.assertTrue(diag["published"])
+
+    def test_second_sigint_during_sidecar_cannot_abandon_publication(self):
+        """Same contract for the sidecar (the output half of a resume)."""
+        path, counter, ckpt = self._armed_checkpoint_paths()
+        real_publish = _resume._publish_sidecar
+        fired = []
+
+        def _publish_then_sigint(dest, resume_src, coll_fd):
+            if not fired:
+                fired.append(True)
+                os.kill(os.getpid(), signal.SIGINT)
+            return real_publish(dest, resume_src, coll_fd)
+
+        with DefaultSigint(), mock.patch.object(
+                _resume, "_publish_sidecar", _publish_then_sigint):
+            with self.assertRaises(RuntimeError):
+                forkrun.map(self._counter_payload(counter, 8), path,
+                            workers=2, orchestrator=True, order="index",
+                            on_error="fail-fast", checkpoint_file=ckpt,
+                            nodes=1, lines=500)
+        self.assertTrue(fired, "the second SIGINT was never delivered")
+        self.assertTrue(os.path.exists(ckpt + ".coll"),
+                        "the sidecar was abandoned after its publication "
+                        "began")
+        self.assertTrue(os.path.exists(ckpt),
+                        "the checkpoint was abandoned after the sidecar")
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("published", diag["category"])
+
+
+class TestAbortDiagnostics(unittest.TestCase):
+    """The abort-choreography decision is observable, category by category.
+
+    The original full-suite failure reported "SIGINT abort must
+    checkpoint" with no diagnosis of WHICH decision declined. These
+    tests pin every outcome the choreography can produce, including the
+    ones that must publish and the ones that legitimately decline.
+    """
+
+    def setUp(self):
+        self._saved = _resume._LAST_ABORT[0]
+        _resume._LAST_ABORT[0] = None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        _resume._LAST_ABORT[0] = self._saved
+
+    @staticmethod
+    def _lib():
+        return types.SimpleNamespace(fr_py_abort=lambda: None)
+
+    def _call(self, **overrides):
+        kwargs = dict(lib=self._lib(), state=None, orderer_pid=None,
+                      order_w=None, coll_fd=None, use_orderer=True,
+                      collect=False, resume_src="/tmp/forkrun-diag.ckpt",
+                      checkpoint_file=None, engine_live=True)
+        kwargs.update(overrides)
+        return _resume.checkpoint_on_abort(**kwargs)
+
+    def test_never_entered_is_the_default(self):
+        diag = _resume.abort_diagnostics()
+        self.assertFalse(diag["entered"])
+        self.assertEqual("never-entered", diag["category"])
+        self.assertFalse(diag["published"])
+
+    def test_unarmed_engine_declines(self):
+        self.assertFalse(self._call(engine_live=False))
+        self.assertEqual("unarmed-engine",
+                         _resume.abort_diagnostics()["category"])
+
+    def test_unarmed_checkpoint_declines(self):
+        self.assertFalse(self._call(resume_src=None, checkpoint_file=None))
+        self.assertEqual("unarmed-checkpoint",
+                         _resume.abort_diagnostics()["category"])
+
+    def test_snapshot_unavailable_declines(self):
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               return_value=None):
+            self.assertFalse(self._call())
+        self.assertEqual("snapshot-unavailable",
+                         _resume.abort_diagnostics()["category"])
+
+    def test_no_progress_declines_and_says_so(self):
+        snap = types.SimpleNamespace(horizon=0, jagged=[])
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               return_value=snap):
+            self.assertFalse(self._call())
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("no-progress", diag["category"])
+        self.assertEqual(0, diag["horizon"])
+        self.assertFalse(diag["attempted_publication"])
+
+    def test_published_reports_the_frontier(self):
+        snap = types.SimpleNamespace(horizon=123, jagged=[(7, 9)])
+        written = []
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               return_value=snap), \
+                mock.patch.object(_resume, "write_checkpoint",
+                                  side_effect=lambda d, s: written.append(
+                                      (d, s.horizon))):
+            self.assertTrue(self._call())
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("published", diag["category"])
+        self.assertTrue(diag["published"])
+        self.assertTrue(diag["attempted_publication"])
+        self.assertEqual(123, diag["horizon"])
+        self.assertEqual(1, diag["jagged"])
+        self.assertEqual([("/tmp/forkrun-diag.ckpt", 123)], written)
+
+    def test_sidecar_failure_fails_closed_without_writing(self):
+        snap = types.SimpleNamespace(horizon=123, jagged=[])
+        written = []
+        fd, coll = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(os.unlink, coll)
+        coll_fd = os.open(coll, os.O_RDONLY)
+        self.addCleanup(os.close, coll_fd)
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               return_value=snap), \
+                mock.patch.object(_resume, "_publish_sidecar",
+                                  side_effect=OSError("disk full")), \
+                mock.patch.object(_resume, "write_checkpoint",
+                                  side_effect=lambda d, s: written.append(d)):
+            self.assertFalse(self._call(collect=True, coll_fd=coll_fd))
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("sidecar-failed", diag["category"])
+        self.assertFalse(diag["published"])
+        self.assertEqual([], written,
+                         "the checkpoint was written after its sidecar "
+                         "failed: it would skip output the caller can "
+                         "never recover")
+        self.assertIn("disk full", diag["error"])
+
+    def test_unexpected_failure_is_reported_not_raised(self):
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               side_effect=RuntimeError("boom")):
+            self.assertFalse(self._call())
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("error", diag["category"])
+        self.assertIn("boom", diag["error"])
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")

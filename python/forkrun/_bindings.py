@@ -101,6 +101,16 @@ def _setup_signatures(lib) -> None:
     lib.fr_py_escrow_deposit.restype = ctypes.c_int
     lib.fr_py_abort.argtypes = []
     lib.fr_py_abort.restype = ctypes.c_int
+    # WO-SIGINT-PROCESS-WIDE: process-wide deferral of SIGINT. begin()
+    # swaps the kernel disposition (saving the host's), end() restores
+    # it and reports whether a signal was recorded, cancel() is the
+    # forked-child reset. See _signals.py for the one state machine.
+    lib.fr_py_sigint_defer_begin.argtypes = []
+    lib.fr_py_sigint_defer_begin.restype = ctypes.c_int
+    lib.fr_py_sigint_defer_end.argtypes = []
+    lib.fr_py_sigint_defer_end.restype = ctypes.c_int
+    lib.fr_py_sigint_defer_cancel.argtypes = []
+    lib.fr_py_sigint_defer_cancel.restype = ctypes.c_int
     lib.fr_py_poisoned_count.argtypes = []
     lib.fr_py_poisoned_count.restype = ctypes.c_uint
     # Poison-index relay (cleanroom stats channel). Not called from Python

@@ -355,6 +355,45 @@ def _publish_sidecar(dest_coll, resume_src, coll_fd):
     return True
 
 
+# The last abort-checkpoint decision, for tests and post-mortems. A
+# one-slot list so assignment is atomic (a run is serialized by
+# _RUN_LOCK anyway, but a diagnostic must never be the thing that
+# corrupts a teardown). Categories:
+#   never-entered        checkpoint_on_abort was not called at all
+#   unarmed-engine       engine dead / no C orderer
+#   unarmed-checkpoint   no resume= / checkpoint_file=
+#   snapshot-unavailable snapshot_from_engine returned None
+#   no-progress          horizon 0 and no jagged intervals
+#   sidecar-failed       collected output could not be published
+#   published            checkpoint durably written
+#   error                an unexpected exception (reported, not raised)
+_LAST_ABORT = [None]
+
+_ABORT_DIAG_DEFAULT = {
+    "entered": False, "category": "never-entered", "dest": None,
+    "horizon": None, "jagged": None, "published": False,
+    "attempted_publication": False, "error": None,
+}
+
+
+def abort_diagnostics():
+    """The last abort-checkpoint decision (a copy, so callers can't mutate)."""
+    rec = _LAST_ABORT[0]
+    return dict(_ABORT_DIAG_DEFAULT if rec is None else rec)
+
+
+def reset_abort_diagnostics():
+    """Start a fresh diagnosis for a new run.
+
+    Every executor shape constructs one ``_RunDepthToken`` at run start,
+    so that is the one authoritative place this is called from. Without
+    it, a run that never reaches the choreography would report the
+    PREVIOUS run's decision -- the failure mode this diagnostic exists
+    to make impossible.
+    """
+    _LAST_ABORT[0] = None
+
+
 def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
                          coll_fd, use_orderer, collect,
                          resume_src, checkpoint_file, engine_live):
@@ -373,11 +412,18 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
     abort path must not turn a sick pipeline into a second failure
     (the original exception keeps propagating).
     """
+    diag = {"entered": True, "category": None, "dest": None,
+            "horizon": None, "jagged": None, "published": False,
+            "attempted_publication": False, "error": None}
+    _LAST_ABORT[0] = diag
     if not engine_live or not use_orderer:
+        diag["category"] = "unarmed-engine"
         return False
     if resume_src is None and checkpoint_file is None:
+        diag["category"] = "unarmed-checkpoint"
         return False
     dest = resolve_checkpoint_dest(checkpoint_file, resume_src)
+    diag["dest"] = dest
     try:
         try:
             lib.fr_py_abort()
@@ -404,9 +450,16 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
         if orderer_pid:
             _waitpid_bounded(orderer_pid, ORDERER_REAP_TIMEOUT)
         snap = snapshot_from_engine(lib)
-        if snap is None or (snap.horizon == 0 and not snap.jagged):
+        if snap is None:
+            diag["category"] = "snapshot-unavailable"
+            return False
+        diag["horizon"] = snap.horizon
+        diag["jagged"] = len(snap.jagged)
+        if snap.horizon == 0 and not snap.jagged:
+            diag["category"] = "no-progress"
             return False
         if collect and coll_fd is not None and coll_fd >= 0:
+            diag["attempted_publication"] = True
             try:
                 _publish_sidecar(dest + SIDECAR_SUFFIX, resume_src,
                                  coll_fd)
@@ -415,6 +468,8 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
                 # would skip output the caller can never recover
                 # (map/collect paths). The previous checkpoint
                 # survives (atomicity) — report and stop.
+                diag["category"] = "sidecar-failed"
+                diag["error"] = repr(exc)
                 try:
                     print("forkrun: checkpoint sidecar failed "
                           "(%s); previous checkpoint preserved"
@@ -422,7 +477,10 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
                 except Exception:
                     pass
                 return False
+        diag["attempted_publication"] = True
         write_checkpoint(dest, snap)
+        diag["published"] = True
+        diag["category"] = "published"
         try:
             print("forkrun: checkpoint written to %s "
                   "(engine committed frontier: %d bytes%s)" % (
@@ -436,6 +494,8 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
             pass
         return True
     except Exception as exc:
+        diag["category"] = "error"
+        diag["error"] = repr(exc)
         try:
             print("forkrun: checkpoint unavailable (%s)" % (exc,),
                   file=sys.stderr)
@@ -499,4 +559,5 @@ def consume_sidecar(resume_src, records):
 __all__ = ["SIDECAR_SUFFIX", "WORKER_REAP_TIMEOUT",
            "ORDERER_REAP_TIMEOUT", "path_has_c_orderer",
            "require_resume_path", "resolve_checkpoint_dest",
-           "resume_begin", "checkpoint_on_abort", "consume_sidecar"]
+           "resume_begin", "checkpoint_on_abort", "abort_diagnostics",
+           "reset_abort_diagnostics", "consume_sidecar"]

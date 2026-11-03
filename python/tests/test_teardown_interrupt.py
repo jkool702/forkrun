@@ -37,6 +37,8 @@ import os
 import signal
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -49,39 +51,18 @@ from forkrun import _childreg  # noqa: E402
 # it), so the module has to be fetched explicitly.
 _run = __import__("importlib").import_module("forkrun.run")
 
-from _helpers import (ChildLifecycleMixin, child_census,  # noqa: E402
-                    redirect_fd, restore_fd, write_lines)
+from _helpers import (ChildLifecycleMixin, DefaultSigint as _DefaultSigint,
+                      child_census, redirect_fd, restore_fd,
+                      sigint_action_addr as _sigint_action_addr,
+                      sigint_from_thread, write_lines)
 
 
 def _up(batch):
     return bytes(batch.data).upper()
 
 
-class _DefaultSigint:
-    """Pin SIGINT's disposition to the default handler for a block.
-
-    A background launcher (nohup/setsid, a CI supervisor without job
-    control) starts its children with SIGINT IGNORED, and Python
-    inherits that disposition instead of installing
-    ``default_int_handler``. A delivered SIGINT would then do
-    nothing at all -- so the test would fail (or, worse, pass for the
-    wrong reason) for a reason that has nothing to do with the code
-    under test. Pinned explicitly, and restored afterwards.
-    """
-
-    def __enter__(self):
-        self._old = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, signal.default_int_handler)
-        return self
-
-    def __exit__(self, *exc):
-        signal.signal(signal.SIGINT, self._old)
-        return False
-
-
 class _Patch:
     """Restore a module attribute on exit."""
-
     def __init__(self, module, name, value):
         self.module = module
         self.name = name
@@ -125,6 +106,18 @@ class TestTeardownInterruptSafety(ChildLifecycleMixin, unittest.TestCase):
             {}, census,
             "the run left children behind: %s" % (
                 {p: s for p, s in census.items()},))
+        # The run-lock session marker is the other half of "the run
+        # finished". A late deferred delivery could land inside
+        # __exit__ before the marker was cleared; that leaves every
+        # later run in this thread refused as a nested run. It passed
+        # here once while poisoning every test after it, so it is
+        # asserted where the other lifecycle invariants are.
+        local = _run._RUN_LOCK._local
+        self.assertFalse(
+            getattr(local, "active", False),
+            "the run left this thread marked as having a live forkrun "
+            "session: every later run in this thread will be refused as "
+            "nested")
 
     # -- 1. the fork window ------------------------------------------
 
@@ -258,6 +251,56 @@ class TestTeardownInterruptSafety(ChildLifecycleMixin, unittest.TestCase):
                         "reached were left behind")
         self._assert_no_children()
 
+    def test_a_sibling_thread_signal_cannot_abandon_the_teardown(self):
+        """The ORIGINAL failure shape: delivered to an eligible sibling.
+
+        The old ``pthread_sigmask`` deferred only the MAIN thread. In a
+        multi-threaded host the kernel delivered the worker's SIGINT to
+        an eligible sibling, and CPython raised KeyboardInterrupt in the
+        main thread anyway -- inside the cleanup, abandoning the reaps.
+        This test masks the main thread and keeps an unmasked sibling
+        alive, so the signal MUST go to the sibling. The process-wide
+        recorder is the only thing that can defer it.
+
+        The run itself is normal (no abort): this is the late-signal
+        case. The run had already completed when the interrupt arrived,
+        so there is no checkpoint to write; what must survive is the
+        cleanup. The original failure reported exactly this signature --
+        no checkpoint, one killed-but-unreaped child, three still live.
+        """
+        ready = threading.Event()
+        stop = threading.Event()
+
+        def _spin():
+            ready.set()
+            while not stop.is_set():
+                time.sleep(0.005)
+
+        sibling = threading.Thread(target=_spin, daemon=True)
+        sibling.start()
+        self.assertTrue(ready.wait(5), "the sibling thread never started")
+        oldmask = signal.pthread_sigmask(
+            signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            state, patches = self._fire_sigint_during_the_teardown()
+            with _DefaultSigint(), patches[0], patches[1], patches[2]:
+                with self.assertRaises(KeyboardInterrupt):
+                    forkrun.map(_up, self.path, workers=2,
+                                orchestrator=True, order="index", nodes=1)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, oldmask)
+            stop.set()
+            sibling.join(5)
+        self.assertTrue(state["fired"],
+                        "the SIGINT was never delivered -- the test would "
+                        "pass without exercising the cleanup window")
+        self.assertTrue(
+            state["reconciled"],
+            "the cleanup was ABANDONED by a signal delivered to a sibling "
+            "thread: the last step never ran, so the children it had not "
+            "reached were left behind")
+        self._assert_no_children()
+
     def test_a_signal_during_the_teardown_keeps_the_runs_own_error(self):
         """Exception precedence: a cleanup interrupted by a second
         signal must not replace the error the run was already raising.
@@ -358,6 +401,346 @@ class TestTeardownInterruptSafety(ChildLifecycleMixin, unittest.TestCase):
                         "the interrupt during the cleanup cost the run "
                         "its checkpoint")
         self._assert_no_children()
+
+
+class TestRunDepthBoundaries(ChildLifecycleMixin, unittest.TestCase):
+    """The run-depth token owns BOTH edges of every executor's window.
+
+    The old shape incremented BEFORE the ``try`` and decremented as the
+    first statement of ``finally``. A SIGINT in either window leaked the
+    depth (every later run believes it is nested and stops certifying)
+    or skipped the teardown after the depth was already released.
+
+    Both edges are exercised: a REAL signal at the acquisition boundary
+    and at the release boundary, plus a deterministic before-acquire
+    failure and an unwinding release where the signal must be dropped.
+    """
+
+    def setUp(self):
+        super().setUp()
+        fd, self.path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        write_lines(self.path, 200)
+        self.addCleanup(os.unlink, self.path)
+
+    def _assert_clean(self, base):
+        self.assertEqual(
+            _run._C07_RUN_DEPTH[0], base,
+            "the run depth leaked: every later top-level run would "
+            "believe it is nested and silently stop certifying")
+        self.assertEqual({}, child_census(),
+                         "the interrupted run left children behind")
+
+    def test_an_interrupt_before_acquisition_leaves_no_depth(self):
+        """No token was acquired, so release must be a harmless no-op."""
+        base = _run._C07_RUN_DEPTH[0]
+
+        def _fail(_token):
+            raise KeyboardInterrupt("injected before acquisition")
+
+        with _Patch(_run, "_begin_run_depth", _fail):
+            with self.assertRaises(KeyboardInterrupt):
+                forkrun.map(_up, self.path, workers=2, nodes=1)
+        self._assert_clean(base)
+
+    def test_an_interrupt_after_acquisition_is_released_by_the_finally(self):
+        """A REAL signal in the acquire -> try-body gap still cleans up."""
+        base = _run._C07_RUN_DEPTH[0]
+        real = _run._begin_run_depth
+
+        def _acquire_then_signal(token):
+            token = real(token)
+            # Delivered immediately (we are on the main thread), i.e.
+            # between acquisition and the rest of the try body -- the
+            # exact window the old increment-before-try shape leaked.
+            os.kill(os.getpid(), signal.SIGINT)
+            return token
+
+        with _DefaultSigint(), _Patch(_run, "_begin_run_depth",
+                                      _acquire_then_signal):
+            with self.assertRaises(KeyboardInterrupt):
+                forkrun.map(_up, self.path, workers=2, nodes=1)
+        self._assert_clean(base)
+
+    def test_a_signal_during_release_does_not_skip_the_teardown(self):
+        """Release and teardown are ONE non-abandonable region."""
+        base = _run._C07_RUN_DEPTH[0]
+        state = {"fired": False, "torn_down": False}
+        real_release = _run._RunDepthToken.release
+        real_teardown = _run._teardown_reactor
+
+        def _release_then_signal(token):
+            held = real_release(token)
+            if not state["fired"]:
+                state["fired"] = True
+                os.kill(os.getpid(), signal.SIGINT)
+            return held
+
+        def _teardown(*args, **kwargs):
+            state["torn_down"] = True
+            return real_teardown(*args, **kwargs)
+
+        with _DefaultSigint(), \
+                _Patch(_run._RunDepthToken, "release",
+                       _release_then_signal), \
+                _Patch(_run, "_teardown_reactor", _teardown):
+            with self.assertRaises(KeyboardInterrupt):
+                forkrun.map(_up, self.path, workers=2, nodes=1)
+        self.assertTrue(state["fired"],
+                        "the release-boundary signal was never delivered")
+        self.assertTrue(
+            state["torn_down"],
+            "the signal after the depth release SKIPPED the teardown: "
+            "the depth and the cleanup were not one region")
+        self._assert_clean(base)
+
+    def test_a_signal_during_an_unwinding_release_keeps_the_run_error(self):
+        """A second signal while already failing must not replace the error."""
+        base = _run._C07_RUN_DEPTH[0]
+        state = {"fired": False, "torn_down": False}
+        real_release = _run._RunDepthToken.release
+        real_teardown = _run._teardown_reactor
+
+        def _boom(_batch):
+            raise RuntimeError("synthetic worker failure")
+
+        def _release_then_signal(token):
+            held = real_release(token)
+            if not state["fired"]:
+                state["fired"] = True
+                os.kill(os.getpid(), signal.SIGINT)
+            return held
+
+        def _teardown(*args, **kwargs):
+            state["torn_down"] = True
+            return real_teardown(*args, **kwargs)
+
+        with _DefaultSigint(), \
+                _Patch(_run._RunDepthToken, "release",
+                       _release_then_signal), \
+                _Patch(_run, "_teardown_reactor", _teardown):
+            with self.assertRaises(RuntimeError) as cm:
+                forkrun.map(_boom, self.path, workers=2, nodes=1,
+                            on_error="fail-fast")
+        self.assertNotIsInstance(
+            cm.exception, KeyboardInterrupt,
+            "the deferred signal replaced the run's own error")
+        self.assertTrue(state["fired"])
+        self.assertTrue(state["torn_down"])
+        self._assert_clean(base)
+
+
+class TestRunDepthArchitecture(unittest.TestCase):
+    """Every executor shape routes through the ONE token.
+
+    The SSoT invariant is structural: a new executor that grows its own
+    increment/decrement, or a checkpoint call that forgets the deferral,
+    must fail here rather than only at runtime under a signal race.
+    """
+
+    RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "forkrun", "run.py")
+    CHILDREG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "forkrun", "_childreg.py")
+
+    def _tree(self, path):
+        with open(path, encoding="utf-8") as fh:
+            return ast.parse(fh.read())
+
+    @staticmethod
+    def _call_name(node):
+        if isinstance(node, ast.Expr):
+            node = node.value
+        if not isinstance(node, ast.Call):
+            return None
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return None
+
+    def _parent_map(self, tree):
+        parents = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        return parents
+
+    def test_every_executor_uses_the_one_token(self):
+        tree = self._tree(self.RUN)
+        found = 0
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            calls = [n for n in ast.walk(fn)
+                     if self._call_name(n) == "_begin_run_depth"]
+            if not calls:
+                continue
+            found += 1
+            # The token is constructed before the outer try that
+            # acquires it, so the finally can always name it.
+            token_assign = [
+                n for n in ast.walk(fn)
+                if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "_depth"
+                        for t in n.targets)
+                and self._call_name(n.value) == "_RunDepthToken"]
+            self.assertTrue(token_assign,
+                            "%s has no `_depth = _RunDepthToken()`" % fn.name)
+            outer = None
+            for try_node in [n for n in ast.walk(fn)
+                             if isinstance(n, ast.Try)]:
+                if any(self._call_name(s) == "_begin_run_depth"
+                       for s in try_node.body):
+                    outer = try_node
+                    break
+            self.assertIsNotNone(
+                outer, "%s acquires the depth outside a try" % fn.name)
+            self.assertEqual(
+                "_begin_run_depth", self._call_name(outer.body[0]),
+                "%s does not acquire the depth as the FIRST protected "
+                "statement; an interrupt can land between acquisition "
+                "and the finally that releases it" % fn.name)
+            self.assertLess(
+                token_assign[0].lineno, outer.lineno,
+                "%s constructs the token after the try" % fn.name)
+            protected = [
+                n for n in ast.walk(outer)
+                if isinstance(n, ast.With)
+                and self._call_name(n.items[0].context_expr)
+                == "_defer_interrupts_for_cleanup"]
+            self.assertTrue(
+                protected,
+                "%s's finally has no _defer_interrupts_for_cleanup "
+                "region" % fn.name)
+            region = protected[0]
+            first = region.body[0]
+            self.assertEqual(
+                "release", self._call_name(first),
+                "%s releases the depth outside the protected cleanup "
+                "region (or not first)" % fn.name)
+            self.assertEqual(
+                "_depth", getattr(first.value.func.value, "id", None)
+                if isinstance(first, ast.Expr) and isinstance(
+                    first.value, ast.Call) else None,
+                "%s releases a different token than the one it acquired"
+                % fn.name)
+            self.assertTrue(
+                any(self._call_name(n) == "_teardown_reactor"
+                    for n in ast.walk(region)),
+                "%s calls the teardown outside the protected cleanup "
+                "region" % fn.name)
+        self.assertEqual(
+            found, 6,
+            "expected six executor shapes with a run depth (UMA reactor, "
+            "UMA stream reactor, UMA ingest reactor, UMA ingest stream "
+            "reactor, NUMA blocking, NUMA stream); found %d -- a new "
+            "executor shape was added without the token" % found)
+
+    def test_no_direct_depth_mutation_outside_the_token(self):
+        tree = self._tree(self.RUN)
+        token_cls = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and \
+                    node.name == "_RunDepthToken":
+                token_cls = node
+        self.assertIsNotNone(token_cls, "_RunDepthToken is gone")
+        lo, hi = token_cls.lineno, max(
+            getattr(n, "lineno", 0) for n in ast.walk(token_cls))
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.AugAssign, ast.Assign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) \
+                else [node.target]
+            for target in targets:
+                if not (isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "_C07_RUN_DEPTH"):
+                    continue
+                if not (lo <= node.lineno <= hi):
+                    offenders.append("%s:%d" % (self.RUN, node.lineno))
+        self.assertEqual(
+            [], offenders,
+            "direct depth accounting outside _RunDepthToken: %s"
+            % ", ".join(offenders))
+
+    def test_every_checkpoint_call_is_uninterruptible(self):
+        tree = self._tree(self.RUN)
+        direct = []
+        wrapped = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = self._call_name(node)
+            if name == "checkpoint_on_abort":
+                direct.append("%s:%d" % (self.RUN, node.lineno))
+            elif (name == "_uninterruptible" and node.args
+                  and isinstance(node.args[0], ast.Name)
+                  and node.args[0].id == "checkpoint_on_abort"):
+                wrapped += 1
+        self.assertGreaterEqual(
+            wrapped, 4,
+            "expected the four abort-choreography call sites, found %d"
+            % wrapped)
+        self.assertEqual(
+            [], direct,
+            "checkpoint choreography called WITHOUT _uninterruptible(): %s"
+            % ", ".join(direct))
+
+    def test_every_teardown_is_inside_a_deferral(self):
+        tree = self._tree(self.RUN)
+        parents = self._parent_map(tree)
+        offenders = []
+        for node in ast.walk(tree):
+            if self._call_name(node) != "_teardown_reactor":
+                continue
+            cur = node
+            protected = False
+            while cur in parents:
+                cur = parents[cur]
+                if isinstance(cur, ast.With) and \
+                        self._call_name(cur.items[0].context_expr) == \
+                        "_defer_interrupts_for_cleanup":
+                    protected = True
+                    break
+            if not protected:
+                offenders.append("%s:%d" % (self.RUN, node.lineno))
+        self.assertEqual(
+            [], offenders,
+            "teardown outside _defer_interrupts_for_cleanup(): %s"
+            % ", ".join(offenders))
+
+    def test_fork_child_protects_and_adopts_inside_the_window(self):
+        tree = self._tree(self.CHILDREG)
+        fn = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and \
+                    node.name == "fork_child":
+                fn = node
+        self.assertIsNotNone(fn, "fork_child is gone")
+        forks = [n for n in ast.walk(fn)
+                 if self._call_name(n) == "fork"]
+        self.assertEqual(1, len(forks), "fork_child must fork exactly once")
+        parents = self._parent_map(tree)
+        cur = forks[0]
+        protected = False
+        while cur in parents:
+            cur = parents[cur]
+            if isinstance(cur, ast.With) and \
+                    self._call_name(cur.items[0].context_expr) == \
+                    "defer_interrupts":
+                protected = True
+                break
+        self.assertTrue(
+            protected,
+            "fork_child forks OUTSIDE defer_interrupts(): an interrupt "
+            "between os.fork() and adoption orphans the child")
+        self.assertTrue(
+            any(self._call_name(n) == "after_fork_child"
+                for n in ast.walk(fn)),
+            "fork_child never resets the child's deferral state")
 
 
 class TestBoundedReap(unittest.TestCase):
@@ -504,19 +887,29 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
     the cleanup protects the fork too.
     """
 
-    def test_the_fork_runs_with_sigint_deferred(self):
-        """SIGINT is blocked for the duration of the fork."""
+    def test_the_fork_window_arms_the_process_wide_recorder(self):
+        """The KERNEL disposition is the recorder for the whole window.
+
+        The contract changed from "SIGINT is blocked in the forking
+        thread's mask" to "the process-wide kernel disposition is a
+        recorder". The mask was the defect: it is per thread, so a
+        process-directed SIGINT delivered to any sibling still raised
+        KeyboardInterrupt on the main thread inside the window.
+
+        Assert the kernel handler CHANGES for the window and is restored
+        exactly afterwards -- read with sigaction(), not getsignal():
+        the latter only reports CPython's Python-level table, which the
+        deferral deliberately leaves untouched so a host's callable is
+        preserved across an off-main section.
+        """
         from forkrun import _childreg
 
         real_fork = os.fork
+        before = _sigint_action_addr()
         seen = {}
 
         def _probe():
-            # pthread_sigmask returns the OLD mask, so this says
-            # whether SIGINT was already blocked when the fork ran.
-            old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
-            seen["blocked"] = signal.SIGINT in old
-            signal.pthread_sigmask(signal.SIG_SETMASK, old)
+            seen["during"] = _sigint_action_addr()
             return real_fork()
 
         pid = None
@@ -525,12 +918,17 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
         try:
             if pid == 0:
                 os._exit(0)
-            self.assertTrue(seen.get("blocked"),
-                            "the fork ran with SIGINT NOT deferred: an "
-                            "async exception in the fork's window leaves "
-                            "the interpreter's logging lock held forever, "
-                            "and every later fork in the process blocks "
-                            "inside logging._prepareFork")
+            self.assertIsNotNone(before)
+            self.assertNotEqual(
+                before, seen.get("during"),
+                "the fork window ran WITHOUT the process-wide recorder: "
+                "an async exception between os.fork() and the logging "
+                "lock release leaves that lock held forever, and a "
+                "sibling thread makes a pthread mask useless")
+            self.assertEqual(
+                before, _sigint_action_addr(),
+                "the host's SIGINT disposition was not restored exactly "
+                "after the fork window")
         finally:
             if pid:
                 try:
@@ -594,24 +992,43 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
         finally:
             _childreg.reset()
 
-    def test_the_child_does_not_inherit_the_block(self):
+    def test_the_child_starts_with_the_host_disposition(self):
         """The child must behave as if the deferral had not happened.
 
-        A child that inherited a blocked SIGINT would ignore the
-        operator's interrupt for the rest of its life.
+        A child that kept the recorder would defer SIGINT forever and
+        never honour the operator's interrupt. The child proves three
+        things: its depth is 0 (the copied scope did not survive), its
+        KERNEL handler is the host's again, and a real SIGINT raises
+        KeyboardInterrupt in the child.
         """
         from forkrun import _childreg
+        from forkrun._signals import deferral_state as _state
 
         r, w = os.pipe()
-        pid = _childreg.fork_child("test")
+        with _DefaultSigint():
+            host = _sigint_action_addr()
+            pid = _childreg.fork_child("test")
         if pid == 0:
+            ok = False
             try:
                 os.close(r)
-                old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
-                blocked = signal.SIGINT in old
-                signal.pthread_sigmask(signal.SIG_SETMASK, old)
-                os.write(w, b"1" if blocked else b"0")
+                st = _state()
+                addr = _sigint_action_addr()
+                got = False
+                try:
+                    os.kill(os.getpid(), signal.SIGINT)
+                    # CPython runs the handler on the main thread at the
+                    # next bytecode boundary.
+                    for _ in range(10000):
+                        pass
+                except KeyboardInterrupt:
+                    got = True
+                ok = (st["depth"] == 0 and addr == host and got)
             except BaseException:
+                ok = False
+            try:
+                os.write(w, b"1" if ok else b"0")
+            except OSError:
                 pass
             os._exit(0)
         os.close(w)
@@ -623,8 +1040,71 @@ class TestForkIsACriticalSection(ChildLifecycleMixin, unittest.TestCase):
                 os.waitpid(pid, 0)
             except (ChildProcessError, OSError):
                 pass
-        self.assertEqual(b"0", data,
-                         "the child inherited a blocked SIGINT")
+        self.assertEqual(
+            b"1", data,
+            "the child did not start clean: it kept the recorder, or "
+            "kept the parent's depth, or could not take a SIGINT")
+
+    def test_a_pending_parent_signal_survives_the_fork_and_is_not_replayed(self):
+        """The parent's deferral belongs to the PARENT, not the child.
+
+        A SIGINT recorded before the fork is pending in the parent's
+        recorder. The child must start with depth 0, the host's kernel
+        disposition, and NO replay of the parent's signal -- otherwise
+        it would interrupt a worker whose parent never received that
+        interrupt. The parent's signal must still be delivered through
+        the parent's restored disposition after the section.
+        """
+        from forkrun import _childreg, _signals
+
+        r, w = os.pipe()
+        parent_raised = False
+        data = b""
+        with _DefaultSigint():
+            host = _sigint_action_addr()
+            try:
+                with _signals.defer_interrupts():
+                    # Recorded by the PARENT's process-wide recorder
+                    # before any fork. 120ms is far longer than signal
+                    # delivery needs; this is not a timing race.
+                    sigint_from_thread(0.02)
+                    time.sleep(0.12)
+                    pid = _childreg.fork_child("test")
+                    if pid == 0:
+                        ok = False
+                        try:
+                            os.close(r)
+                            # Any inherited/replayed delivery would have
+                            # fired before this sleep finished.
+                            time.sleep(0.10)
+                            st = _signals.deferral_state()
+                            ok = (st["depth"] == 0
+                                  and _sigint_action_addr() == host)
+                        except BaseException:
+                            ok = False
+                        try:
+                            os.write(w, b"1" if ok else b"0")
+                        except OSError:
+                            pass
+                        os._exit(0)
+                    os.close(w)
+                    data = os.read(r, 1)
+                    os.close(r)
+                    try:
+                        os.waitpid(pid, 0)
+                    except (ChildProcessError, OSError):
+                        pass
+                    _childreg.reconcile()
+            except KeyboardInterrupt:
+                parent_raised = True
+        self.assertEqual(
+            b"1", data,
+            "the child did not start clean: it kept the parent's depth, "
+            "kept the recorder, or replayed the parent's pending SIGINT")
+        self.assertTrue(
+            parent_raised,
+            "the parent's deferred SIGINT was lost across the fork: it "
+            "must still be delivered through the parent's disposition")
 
 
 class TestChildRegistry(unittest.TestCase):

@@ -314,6 +314,21 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_sigint_defer_begin": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_sigint_defer_cancel": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
+  "fr_py_sigint_defer_end": {
+    "args": "void",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_signal_write": {
     "args": "int signal_fd, uint64_t wid, uint64_t frontier",
     "linkage": "static",

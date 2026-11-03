@@ -32,7 +32,6 @@ import os
 import signal as _signal
 import sys as _sys
 import threading as _threading
-import warnings as _warnings
 
 POLICY_DEFAULT = "default"
 POLICY_CHECKPOINT = "checkpoint"
@@ -219,172 +218,156 @@ class SignalGuard:
 
 
 # ---------------------------------------------------------------------------
-# SIGINT deferral: PROCESS-WIDE, not thread-local
+# SIGINT deferral: PROCESS-WIDE, kernel-level, thread-agnostic
 # ---------------------------------------------------------------------------
 #
-# THE DEFECT THIS REPLACES. The previous implementation blocked SIGINT
-# with ``signal.pthread_sigmask``. A mask is PER THREAD, but CPython
-# runs a Python-level signal handler in the MAIN thread regardless of
-# which thread received the signal. So in a process with any other
-# thread that had SIGINT unblocked, a process-directed SIGINT (a worker
-# calling ``os.kill(getppid(), SIGINT)`` -- the real shape) was
-# delivered to that thread, and CPython raised ``KeyboardInterrupt`` in
-# the MAIN thread at an arbitrary bytecode boundary -- including inside
-# the very section the mask was supposed to protect. Measured on a
-# probe: 0/10 raised inside the section with no sibling thread, 10/10
-# with one.
+# THE DEFECT THIS REPLACES, IN TWO STAGES.
 #
-# THE MODEL. One process-wide state object, protected by one lock:
+# 1. The original implementation blocked SIGINT with
+#    ``signal.pthread_sigmask``. A mask is PER THREAD, but CPython runs a
+#    Python-level signal handler in the MAIN thread regardless of which
+#    thread received the signal. With any sibling thread eligible, a
+#    process-directed SIGINT (a worker calling
+#    ``os.kill(getppid(), SIGINT)`` -- the real shape) was delivered to
+#    that sibling, and CPython raised ``KeyboardInterrupt`` in the MAIN
+#    thread at an arbitrary bytecode boundary, including inside the
+#    "protected" section. Measured: 0/10 inside with no sibling thread,
+#    10/10 with one.
 #
-#   * The OUTERMOST section entered on the main thread installs a
-#     Python handler for SIGINT. The handler only records ``(signo,
-#     frame)`` into preallocated slots and returns -- it never
-#     allocates and never calls host code.
-#   * Nested sections (same thread or other threads) only increment a
-#     process-wide depth. The handler records while depth > 0.
-#   * The OUTERMOST exit restores the saved disposition FIRST, then
-#     delivers the recorded signal through it: a callable is called
-#     (``default_int_handler`` raises ``KeyboardInterrupt``), SIG_IGN
-#     drops it, SIG_DFL re-raises it so the kernel's default action
-#     applies.
-#   * When the caller was already unwinding, the recorded signal is
-#     dropped: that exception is the run's reason for stopping and must
-#     survive. This is the same precedence the old implementation had.
+# 2. A Python-level handler fixes that for main-thread callers, but
+#    ``signal.signal`` is main-thread-only. A run invoked from a worker
+#    thread -- a supported shape, serialised by ``_RUN_LOCK`` -- could
+#    not arm it at all, and the host's callable could only be restored
+#    from the main thread. A warning there is not a guarantee.
 #
-# WHY NOTKEEP THE MASK. A mask can never be process-wide, so it can
-# never make the guarantee this section exists for. The handler can.
+# THE MODEL: ONE KERNEL DISPOSITION, SWAPPED IN C.
 #
-# OFF THE MAIN THREAD. ``signal.signal`` is main-thread-only, so a
-# section whose OUTERMOST entry is on another thread cannot install the
-# handler. That case is not silently declared equivalent: it is a
-# distinct, weaker mode (the process-wide handler is simply not
-# installed, and CPython raises the interrupt on the main thread -- so
-# the section is still not abandoned, but delivery is not delayed to
-# this section's exit). One RuntimeWarning names the limitation the
-# first time it happens. The realistic host shape -- runs in worker
-# threads, serialised by _RUN_LOCK -- therefore keeps working, and the
-# limitation is explicit rather than a silent no-op.
+#   * ``_shim.c`` owns the kernel state. ``fr_py_sigint_defer_begin``
+#     saves the host's ``struct sigaction`` and installs a recorder that
+#     only sets a ``sig_atomic_t`` (async-signal-safe: no allocation, no
+#     Python, no locks). ``fr_py_sigint_defer_end`` restores the saved
+#     disposition FIRST and then reports whether a signal arrived.
+#     ``fr_py_sigint_defer_cancel`` is the forked-child reset.
+#   * This module owns the process-wide DEPTH and GENERATION. The
+#     outermost section arms the recorder; nested sections (same thread
+#     or another) only increment the depth; the outermost exit disarms
+#     and delivers.
+#   * Delivery honours the restored disposition SYNCHRONOUSLY on the
+#     thread that closes the outermost section. ``SIG_IGN`` drops it and
+#     ``SIG_DFL`` re-raises through the kernel so the default action
+#     applies. A Python-level disposition (``default_int_handler`` or a
+#     host callable) is invoked DIRECTLY, on this thread, after the
+#     kernel disposition has been restored.
 #
-# FORK. Pending signals are not inherited across fork, and neither is
-# the parent's reason for deferring. ``after_fork_child`` resets the
-# child to depth 0, clears the parent's recorded state, restores the
-# disposition the parent saved, and bumps a GENERATION so the copied
-# ``_DeferredInterrupt`` object's ``__exit__`` (which the child runs as
-# it leaves the ``with``) is a no-op instead of decrementing the
-# parent's depth below zero.
+#     THAT LAST POINT IS LOAD-BEARING, AND A KERNEL RE-RAISE IS WRONG.
+#     ``os.kill(getpid(), SIGINT)`` with the main thread's SIGINT masked
+#     hands the kernel delivery to an eligible sibling. CPython's C
+#     handler then sets the main thread's trip flag, and the Python-level
+#     ``KeyboardInterrupt`` is raised at whatever bytecode the main
+#     thread reaches next -- potentially inside the NEXT protected
+#     section, or inside ``_RUN_LOCK.__exit__`` before it can clear the
+#     session marker. Measured: the sibling-teardown test passed in
+#     isolation and then left every later run in the process refused as
+#     a "nested run". A pending Python-level trip is not something a
+#     kernel disposition can defer; only delivering it here, before
+#     returning to the caller, can guarantee the section boundary.
+#   * A caller already unwinding keeps ITS exception: the recorded signal
+#     is dropped (never delivered), because that exception is the run's
+#     reason for stopping. The context manager cannot see an exception
+#     propagating through a ``finally``, hence ``unwinding``.
 #
-# The handler never takes the lock: a signal can interrupt the main
-# thread while it holds it. The handler only touches integers and
-# preallocated slots, whose stores the GIL already serialises.
-
-_MAX_DEFERRED = 32
+# FORK. Pending signals are not inherited across fork, and neither is the
+# parent's reason for deferring. ``after_fork_child`` restores the saved
+# disposition, clears the armed/seen flags, resets the depth, and bumps
+# the generation so the copied scope's ``__exit__`` is a no-op instead of
+# decrementing the parent's depth. It MUST NOT take the state lock: a
+# sibling thread may have held it at the moment of the fork, and the
+# child has no thread to release it.
+#
+# The recorder never takes the lock: a signal can interrupt the main
+# thread while it holds it.
 
 
 class _DeferState:
-    __slots__ = ("lock", "depth", "process_wide", "installed", "old",
-                 "slots", "frames", "npending", "overflow", "generation",
-                 "exiting", "warned")
+    __slots__ = ("lock", "depth", "generation")
 
     def __init__(self):
         self.lock = _threading.RLock()
+        # Number of open sections PROCESS-WIDE. Only the transition 0->1
+        # arms the kernel recorder, and 1->0 disarms it, so nesting and
+        # overlapping groups cannot deliver twice or restore early.
         self.depth = 0
-        # True when the outermost section installed the handler (it was
-        # entered on the main thread). False for an off-main group.
-        self.process_wide = False
-        self.installed = False
-        self.old = None
-        # Handler-side storage, preallocated: indexed stores never
-        # allocate, unlike list.append.
-        self.slots = [0] * _MAX_DEFERRED
-        self.frames = [None] * _MAX_DEFERRED
-        self.npending = 0
-        self.overflow = 0
-        # Bumped when a forked child resets the state and when a group
-        # closes, so a scope object from a previous group cannot mutate
-        # the current one.
+        # Bumped when a group closes and when a forked child resets, so a
+        # scope object from a previous group/process cannot mutate the
+        # current one.
         self.generation = 0
-        # True between "depth reached zero" and "handler restored": a
-        # signal in that window must still be RECORDED, not raised.
-        self.exiting = False
-        self.warned = False
 
 
 _STATE = _DeferState()
 
 
-def _is_main_thread():
-    return _threading.current_thread() is _threading.main_thread()
+def _shim():
+    """The substrate lib (deferral is a C facility); fail closed."""
+    from ._bindings import get as _get  # noqa: PLC0415
+
+    lib = _get()
+    try:
+        lib.fr_py_sigint_defer_begin
+    except AttributeError:
+        raise RuntimeError(
+            "forkrun: the substrate predates process-wide SIGINT "
+            "deferral (fr_py_sigint_defer_* missing); rebuild it with "
+            "'make -f Makefile.substrate python-substrate'") from None
+    return lib
 
 
-def _handler(signo, _frame):
-    """Record a deferred SIGINT; never allocate, never call host code.
+def _arm():
+    """Arm the outermost section (idempotent at the kernel layer)."""
+    if _shim().fr_py_sigint_defer_begin() != 0:
+        raise RuntimeError(
+            "forkrun: cannot arm process-wide SIGINT deferral "
+            "(sigaction(SIGINT) failed)")
 
-    Handler context (main thread, between bytecodes). An indexed store
-    into the preallocated slots is the whole body -- arbitrary host
-    callables are honoured at the outermost exit instead.
+
+def _disarm():
+    """Restore the host disposition; True iff a SIGINT was recorded."""
+    return _shim().fr_py_sigint_defer_end() != 0
+
+
+def _deliver(signo):
+    """Deliver a deferred signal through the restored disposition.
+
+    Python-level dispositions are invoked SYNCHRONOUSLY. A kernel
+    re-raise cannot be used for them: with the main thread masked, the
+    kernel delivers the signal to an eligible sibling, CPython then sets
+    the main thread's trip flag, and the resulting ``KeyboardInterrupt``
+    lands at an arbitrary later bytecode -- after the section boundary
+    this whole facility exists to enforce. ``SIG_IGN`` is a no-op;
+    ``SIG_DFL`` (or a disposition not installed from Python, reported as
+    ``None``) is re-raised so the default action applies.
     """
-    st = _STATE
-    if st.depth > 0 or st.exiting:
-        n = st.npending
-        if n < _MAX_DEFERRED:
-            st.slots[n] = signo
-            st.frames[n] = _frame
-            st.npending = n + 1
-        else:
-            # Saturation cannot lose the FACT of the signal: the run
-            # still aborts on the first one. Counted so the exit path
-            # can report multiplicity instead of pretending it did not
-            # happen.
-            st.overflow += 1
+    handler = _signal.getsignal(signo)
+    if handler is _signal.SIG_IGN:
         return
-    # The handler is only installed while a group is open, and the
-    # group is closed only by a thread that restores it. Reaching here
-    # means the signal module still points at us with no group open:
-    # behave like the default disposition rather than swallowing it.
-    raise KeyboardInterrupt
-
-
-def _deliver(old, signo, frame, extra):
-    """Honour the host's saved SIGINT disposition AFTER restoration.
-
-    Called in normal context, with our handler already uninstalled.
-    """
-    if old is _signal.SIG_IGN:
-        return
-    if old is _signal.SIG_DFL:
-        # Restored: re-raise the signal and let the kernel's default
-        # action (terminate) happen with the process-wide disposition
-        # the host asked for.
+    if handler is _signal.SIG_DFL or handler is None:
         os.kill(os.getpid(), signo)
         return
-    if old is None:
-        # getsignal() cannot represent a C-installed handler. The
-        # install path refuses that case, so this is defensive only.
-        raise KeyboardInterrupt
-    # ``default_int_handler`` raises; a host callable may return.
-    old(signo, frame)
-    for _ in range(extra):
-        # A returning host handler was called once per recorded signal
-        # above only for the first; re-raise the rest through the
-        # restored disposition so multiplicity is preserved rather
-        # than silently collapsed.
-        os.kill(os.getpid(), signo)
+    handler(signo, _sys._getframe(1))
 
 
 class _DeferredInterrupt:
     """Defer SIGINT across a critical section (process-wide).
 
-    The signal is NOT swallowed. It is delivered through the host's
-    prior disposition as the outermost section exits -- ``default_int_handler``
-    raises ``KeyboardInterrupt`` there, a custom callable receives
+    The signal is NOT swallowed. It is delivered through the host's prior
+    disposition as the outermost section exits: ``default_int_handler``
+    raises ``KeyboardInterrupt``, a custom callable receives
     ``(signo, frame)``, ``SIG_IGN`` drops it, and ``SIG_DFL`` re-raises
     it so the default action applies.
 
-    When an exception is already propagating, that exception is the
-    run's reason for stopping and it must survive: the deferred SIGINT
-    is redundant then, so it is dropped (never delivered) and the
-    original is preserved. The context manager cannot see that by
-    itself when the section runs in a ``finally``, hence ``unwinding``.
+    When an exception is already propagating, that exception is the run's
+    reason for stopping and it must survive: the deferred SIGINT is
+    redundant then, so it is dropped (never delivered) and the original
+    is preserved.
 
     SIGHUP/SIGTERM are NOT deferred: under the checkpoint policy
     forkrun's own handler records them without raising, so they cannot
@@ -394,6 +377,12 @@ class _DeferredInterrupt:
     """
 
     def __init__(self, unwinding=False):
+        # The caller was already unwinding when this section was entered.
+        # The context manager cannot see that by itself: an exception
+        # propagating THROUGH the section (a teardown runs in a finally)
+        # is not raised inside the `with` block, so __exit__ sees no
+        # exception at all. The caller has to say so, or the deferred
+        # interrupt would replace the run's own error.
         self._unwinding = unwinding
         self._gen = None
         self._active = False
@@ -402,76 +391,22 @@ class _DeferredInterrupt:
         st = _STATE
         with st.lock:
             if st.depth == 0:
-                st.exiting = False
-                st.process_wide = _is_main_thread()
-                st.installed = False
-                st.old = None
-                st.npending = 0
-                st.overflow = 0
-                if st.process_wide:
-                    old = _signal.getsignal(_signal.SIGINT)
-                    if old is None:
-                        raise RuntimeError(
-                            "forkrun: cannot defer SIGINT -- the host's "
-                            "SIGINT disposition was installed outside "
-                            "Python (getsignal returned None), so it "
-                            "cannot be saved and restored faithfully. "
-                            "Install the handler with signal.signal(), or "
-                            "run without interrupting the library.")
-                    if old is _handler:
-                        raise RuntimeError(
-                            "forkrun: SIGINT is already deferred by a "
-                            "section whose state was lost; refusing to "
-                            "nest on top of a stale handler")
-                    st.old = old
-                    # Raise depth BEFORE the install so a signal that
-                    # arrives in the install window is recorded rather
-                    # than raised inside __enter__.
-                    st.depth = 1
-                    try:
-                        _signal.signal(_signal.SIGINT, _handler)
-                    except BaseException:
-                        # The host's handler may have raised (a signal
-                        # arrived before the install landed). Leave no
-                        # half-installed state and no elevated depth.
-                        try:
-                            if _signal.getsignal(_signal.SIGINT) is _handler:
-                                _signal.signal(_signal.SIGINT, st.old)
-                        except (OSError, ValueError):
-                            pass
-                        st.depth = 0
-                        st.process_wide = False
-                        st.old = None
-                        raise
-                    st.installed = True
-                else:
-                    st.depth = 1
-                    if not st.warned:
-                        st.warned = True
-                        _warnings.warn(
-                            "forkrun: SIGINT deferral was entered on a "
-                            "non-main thread (%r). signal.signal is "
-                            "main-thread-only, so the process-wide handler "
-                            "cannot be installed; the protected section is "
-                            "still not abandoned (CPython raises the "
-                            "interrupt on the main thread), but delivery is "
-                            "not delayed to this section's exit. Run "
-                            "forkrun on the main thread for full "
-                            "deferral semantics."
-                            % (_threading.current_thread().name,),
-                            RuntimeWarning, stacklevel=3)
-            else:
-                st.depth += 1
+                # Arm BEFORE publishing the depth: a signal arriving in
+                # this window is recorded by the kernel recorder, and the
+                # section is not considered open until the recorder can
+                # actually catch it.
+                _arm()
+            st.depth += 1
             self._gen = st.generation
             self._active = True
         return self
 
     def __exit__(self, exc_type, exc, tb):
         st = _STATE
-        pending = None
+        signo = None
         with st.lock:
-            # A forked child reset the state: the parent's section is
-            # not this process's section, so leave it alone.
+            # A forked child reset the state: the parent's section is not
+            # this process's section, so leave it alone.
             if not self._active or self._gen != st.generation:
                 return False
             self._active = False
@@ -482,61 +417,14 @@ class _DeferredInterrupt:
                 return False
             # OUTERMOST exit.
             unwinding = exc_type is not None or self._unwinding
-            if st.process_wide:
-                if not _is_main_thread():
-                    # The installing thread must be the last to leave.
-                    # Production is serialised by _RUN_LOCK, so this can
-                    # only be a caller nesting sections across threads
-                    # improperly. Fail loudly instead of restoring a
-                    # process-wide disposition from a thread that is
-                    # not allowed to.
-                    st.exiting = False
-                    raise RuntimeError(
-                        "forkrun: the outermost SIGINT-deferral section "
-                        "was entered on the main thread but is exiting "
-                        "on %r. A process-wide disposition can only be "
-                        "restored from the main thread; nest sections "
-                        "so the installing thread exits last."
-                        % (_threading.current_thread().name,))
-                # Freeze recording while the handler is restored, so a
-                # signal in the restore window is still captured by our
-                # handler rather than raised between the two operations.
-                st.exiting = True
-                n = st.npending
-                first_signo = st.slots[0] if n else None
-                first_frame = st.frames[0] if n else None
-                extra = (n - 1 if n > 0 else 0) + st.overflow
-                st.npending = 0
-                st.overflow = 0
-                st.installed = False
-                old = st.old
-                st.old = None
-                try:
-                    _signal.signal(_signal.SIGINT, old)
-                finally:
-                    st.exiting = False
-                # Leave the group before delivery: the host handler may
-                # call back into forkrun.
-                st.depth = 0
-                st.process_wide = False
-                st.generation += 1
-                if first_signo is not None and not unwinding:
-                    pending = (old, first_signo, first_frame, extra)
-                # Slots must not retain frame references.
-                for i in range(n):
-                    st.slots[i] = 0
-                    st.frames[i] = None
-            else:
-                # Off-main group: nothing was installed, so there is
-                # nothing to restore and no recorded signal to deliver
-                # (CPython raised it on the main thread).
-                st.depth = 0
-                st.process_wide = False
-                st.npending = 0
-                st.overflow = 0
-                st.generation += 1
-        if pending is not None:
-            _deliver(*pending)
+            seen = _disarm()
+            st.generation += 1
+            if seen and not unwinding:
+                signo = _signal.SIGINT
+        if signo is not None:
+            # Outside the lock: the host handler may call back into
+            # forkrun (and on the main thread it raises immediately).
+            _deliver(signo)
         return False
 
 
@@ -544,11 +432,11 @@ def defer_interrupts(unwinding=False):
     """Defer SIGINT for the duration of the block.
 
     The ONE place that defers an interrupt, so every critical section
-    (the teardown's cleanup sequence, the fork-adoption window) has the
-    same semantics. Process-wide: see ``_DeferredInterrupt``.
+    (the teardown's cleanup sequence, the fork-adoption window, the
+    checkpoint choreography) has the same semantics.
 
-    `unwinding` says the CALLER was already propagating an exception
-    when the section was entered; see _DeferredInterrupt.
+    `unwinding` says the CALLER was already propagating an exception when
+    the section was entered; see _DeferredInterrupt.
     """
     return _DeferredInterrupt(unwinding=unwinding)
 
@@ -568,11 +456,11 @@ def defer_interrupts_for_cleanup():
 def uninterruptible(fn, /, *args, **kwargs):
     """Run ``fn`` with SIGINT deferred, returning its result.
 
-    A cleanup sequence that can be interrupted half-way is not a
-    cleanup: the children it had not reached are left behind. This is
-    the ONE callable wrapper for that property; `interrupt_safe` is its
-    decorator form, and the checkpoint choreography uses it directly so
-    an operator interrupt cannot abandon a half-published checkpoint.
+    A cleanup sequence that can be interrupted half-way is not a cleanup:
+    the children it had not reached are left behind. This is the ONE
+    callable wrapper for that property; `interrupt_safe` is its decorator
+    form, and the checkpoint choreography uses it directly so an operator
+    interrupt cannot abandon a half-published checkpoint.
     """
     with defer_interrupts_for_cleanup():
         return fn(*args, **kwargs)
@@ -595,49 +483,44 @@ def after_fork_child():
     Pending signals are NOT inherited across fork, and neither is the
     parent's reason for deferring. The child:
 
-      * starts at depth 0 (the copied scope's ``__exit__`` is a no-op
-        via the generation check),
-      * discards the parent's recorded signals (they belong to the
-        parent process and must not be replayed here),
-      * restores the disposition the PARENT saved, so the child does
-        not keep forkrun's recording handler installed, and
-      * keeps the parent's depth untouched (separate process).
+      * restores the disposition the PARENT saved, so the child does not
+        keep the recorder installed,
+      * starts at depth 0 (the copied scope's ``__exit__`` is a no-op via
+        the generation check),
+      * discards the parent's recorded signal (it belongs to the parent
+        process and must not be replayed here).
 
     Called by ``_childreg.fork_child`` in the child branch, BEFORE any
     other Python statement can raise: the child's first act must be to
     stop being the parent.
+
+    THE LOCK IS REPLACED, NOT ACQUIRED. A sibling thread may have held
+    ``st.lock`` at the instant of the fork; the child has only the
+    forking thread, so acquiring it could block forever. With one thread
+    alive the direct assignments below are race-free.
     """
     st = _STATE
-    with st.lock:
-        old = st.old if st.installed else None
-        st.depth = 0
-        st.process_wide = False
-        st.installed = False
-        st.old = None
-        st.npending = 0
-        st.overflow = 0
-        st.exiting = False
-        st.generation += 1
-    if old is not None:
-        try:
-            _signal.signal(_signal.SIGINT, old)
-        except (OSError, ValueError) as exc:
-            # A child that keeps the recording handler would defer
-            # SIGINT forever and never honour the host's disposition.
-            # Fail closed: the child's caller turns this into a failed
-            # worker, never a silently mis-signalled one.
-            raise RuntimeError(
-                "forkrun: a forked child could not restore the parent's "
-                "SIGINT disposition (%r); refusing to run with a stale "
-                "deferral handler" % (exc,)) from exc
+    st.lock = _threading.RLock()
+    st.depth = 0
+    st.generation += 1
+    try:
+        _shim().fr_py_sigint_defer_cancel()
+    except Exception as exc:
+        # A child that keeps the recorder would defer SIGINT forever and
+        # never honour the host's disposition. Fail closed: the caller
+        # turns this into a failed worker, never a silently
+        # mis-signalled one.
+        raise RuntimeError(
+            "forkrun: a forked child could not restore the parent's "
+            "SIGINT disposition (%r); refusing to run with a stale "
+            "deferral handler" % (exc,)) from exc
 
 
 def deferral_state():
     """Diagnostics: the one authoritative deferral state (tests use it)."""
     st = _STATE
-    return {"depth": st.depth, "process_wide": st.process_wide,
-            "installed": st.installed, "pending": st.npending,
-            "overflow": st.overflow, "generation": st.generation}
+    return {"depth": st.depth, "generation": st.generation,
+            "armed": st.depth > 0}
 
 
 def guard(policy, abort_fn=None):

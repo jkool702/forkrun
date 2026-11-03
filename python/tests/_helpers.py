@@ -3,7 +3,84 @@
 Discover pattern is test*.py, so this module is never collected directly.
 """
 
+import ctypes
 import os
+import signal
+import threading
+import time
+
+
+class DefaultSigint:
+    """Pin SIGINT's disposition to the default handler for a block.
+
+    A background launcher (nohup/setsid/CI supervisor without job
+    control) starts its children with SIGINT IGNORED, and Python then
+    inherits that disposition instead of installing
+    ``default_int_handler``. A delivered SIGINT would then do nothing
+    at all -- so a test would fail (or, worse, pass for the wrong
+    reason) for a reason that has nothing to do with the code under
+    test. Pinned explicitly, restored afterwards.
+    """
+
+    def __enter__(self):
+        self._old = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        return self
+
+    def __exit__(self, *exc):
+        signal.signal(signal.SIGINT, self._old)
+        return False
+
+
+class Sigaction(ctypes.Structure):
+    """x86-64 glibc ``struct sigaction``, layout-compatible for reading.
+
+    Used to observe the KERNEL disposition. ``signal.getsignal`` only
+    reports CPython's Python-level table, which the process-wide
+    deferral deliberately does not touch (that is how a host's callable
+    survives an off-main section).
+    """
+
+    _fields_ = [("handler", ctypes.c_void_p),
+                ("mask", ctypes.c_ubyte * 128),
+                ("flags", ctypes.c_int),
+                ("restorer", ctypes.c_void_p)]
+
+
+def sigint_action_addr():
+    """The live kernel SIGINT handler address, or None on failure."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.sigaction.argtypes = [ctypes.c_int, ctypes.c_void_p,
+                               ctypes.POINTER(Sigaction)]
+    libc.sigaction.restype = ctypes.c_int
+    cur = Sigaction()
+    if libc.sigaction(signal.SIGINT, None, ctypes.byref(cur)) != 0:
+        return None
+    return cur.handler
+
+
+def sigint_from_thread(delay=0.05):
+    """Deliver a real PROCESS-DIRECTED SIGINT from a non-main thread.
+
+    The receiving thread is chosen by the kernel, which is the whole
+    point: a per-thread pthread mask cannot defer this, and CPython
+    raises the Python-level KeyboardInterrupt on the MAIN thread even
+    when a sibling received it.
+    """
+    t = threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT))
+    t.daemon = True
+    t.start()
+    return t
+
+
+def wait_until(predicate, timeout=2.0, interval=0.01):
+    """Poll ``predicate`` until true. Returns whether it became true."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
 
 
 def redirect_fd(fd, path):

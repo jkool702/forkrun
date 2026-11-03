@@ -334,7 +334,21 @@ class TestShimBindings(unittest.TestCase):
         # Both are inert diagnostics: no library caller, nothing
         # written, no existing signature or struct layout changed.
         # Extern 60 -> 62; static stays 17.
-        self.assertEqual((n_ext, n_st), (62, 17),
+        # WO-SIGINT-PROCESS-WIDE: THREE extern entries, the process-wide
+        # SIGINT deferral primitive:
+        #   fr_py_sigint_defer_begin   save the host sigaction, install a
+        #                              recorder (async-signal-safe)
+        #   fr_py_sigint_defer_end     restore first, then report whether
+        #                              a signal was recorded
+        #   fr_py_sigint_defer_cancel  the forked-child reset
+        # Why C: signal.signal is main-thread-only, and a thread-local
+        # mask cannot defer a process-directed signal once a sibling
+        # thread exists. sigaction is process-wide and callable from any
+        # thread. Purely additive: no existing signature or struct
+        # layout changed. Extern 62 -> 65; static stays 17 (the recorder
+        # is named frk_* deliberately -- it is not part of the
+        # fr_py_* ABI).
+        self.assertEqual((n_ext, n_st), (65, 17),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

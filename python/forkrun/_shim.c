@@ -40,6 +40,107 @@ void fr_py_poison_relay(unsigned int batch_idx);
  * already ran, and writev is POSIX — no feature-test dependency. */
 #include <sys/uio.h>
 
+/* ---------------------------------------------------------------------------
+ * WO-SIGINT-PROCESS-WIDE: process-wide SIGINT deferral.
+ *
+ * WHY THIS IS IN C AND NOT signal.signal().  signal.signal() is
+ * MAIN-THREAD-ONLY, and CPython runs a Python-level handler on the main
+ * thread no matter which thread received the signal. A thread-local
+ * pthread mask therefore cannot protect a critical section once any
+ * sibling thread exists, and a run invoked from a worker thread cannot
+ * install a Python handler at all. sigaction() has neither limitation:
+ * the disposition is per PROCESS, so it can be swapped from any thread
+ * and applies to every thread.
+ *
+ * CONTRACT.
+ *   begin()  saves the host's struct sigaction and installs a recorder
+ *            that only sets a sig_atomic_t. Async-signal-safe: no
+ *            allocation, no Python, no locks. Nesting is Python's job;
+ *            begin() is a no-op while already armed.
+ *   end()    restores the host disposition FIRST, then reports whether
+ *            a signal was recorded. Restoring first closes the window
+ *            the other order leaves open: a signal racing the swap is
+ *            handled either by our recorder (still armed) or by the
+ *            restored host disposition, and is never discarded.
+ *   cancel() is the child-side reset: a forked child must not inherit
+ *            the parent's armed section or replay its pending signal.
+ *
+ * The Python layer (forkrun._signals) owns nesting, generation and the
+ * DELIVERY decision; this layer owns only the process-wide kernel
+ * state. One authoritative state, two thin consumers.
+ * ------------------------------------------------------------------------- */
+static struct sigaction frk_sigint_saved;
+static volatile sig_atomic_t frk_sigint_armed = 0;
+static volatile sig_atomic_t frk_sigint_seen = 0;
+
+static void frk_sigint_note(int signo)
+{
+    (void)signo;
+    frk_sigint_seen = 1;
+}
+
+int fr_py_sigint_defer_begin(void)
+{
+    struct sigaction sa;
+
+    if (frk_sigint_armed)
+        return 0;
+    if (sigaction(SIGINT, NULL, &frk_sigint_saved) != 0)
+        return -1;
+    /* Clear BEFORE installing the recorder. Clearing afterwards leaves
+     * a window in which a signal can be recorded and then erased --
+     * a lost interrupt, which is exactly what "deferred, not dropped"
+     * forbids. */
+    frk_sigint_seen = 0;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = frk_sigint_note;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGINT, &sa, NULL) != 0)
+        return -1;
+    frk_sigint_armed = 1;
+    return 0;
+}
+
+/* True when the live disposition is still OUR recorder. A host that
+ * called signal.signal(SIGINT, ...) mid-section has replaced it, and
+ * that newer choice must win: we must not clobber it on the way out. */
+static int frk_sigint_still_ours(void)
+{
+    struct sigaction cur;
+
+    if (sigaction(SIGINT, NULL, &cur) != 0)
+        return 0;
+    return cur.sa_handler == frk_sigint_note;
+}
+
+int fr_py_sigint_defer_end(void)
+{
+    int seen;
+
+    if (!frk_sigint_armed)
+        return 0;
+    if (frk_sigint_still_ours())
+        sigaction(SIGINT, &frk_sigint_saved, NULL);
+    /* Read AFTER the restore: a signal delivered during the swap was
+     * either recorded here or handled by the restored disposition. */
+    seen = frk_sigint_seen ? 1 : 0;
+    frk_sigint_seen = 0;
+    frk_sigint_armed = 0;
+    return seen;
+}
+
+int fr_py_sigint_defer_cancel(void)
+{
+    int was = (int)frk_sigint_armed;
+
+    if (was && frk_sigint_still_ours())
+        sigaction(SIGINT, &frk_sigint_saved, NULL);
+    frk_sigint_armed = 0;
+    frk_sigint_seen = 0;
+    return was;
+}
+
 void fr_py_poison_relay(uint32_t batch_idx) {
     /* The fd is RE-READ on every call, deliberately, with no caching.
      *
