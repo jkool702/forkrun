@@ -508,7 +508,14 @@ def validate_sdist(sdist_path, version):
             problems.append("sdist missing %s" % rel)
     for rel in sorted(members):
         base = os.path.basename(rel)
-        if base.endswith(".so") or base in SDIST_FORBIDDEN_BASENAMES:
+        data = members[rel]
+        # Name AND content. The name rule catches the artifacts this
+        # repository builds; the ELF rule catches a versioned or
+        # renamed binary the name rule would miss (`libfoo.so.1`,
+        # a copied executable). A source file is never ELF, so this
+        # cannot reject a legitimate member.
+        if (base.endswith(".so") or base in SDIST_FORBIDDEN_BASENAMES
+                or data.startswith(b"\x7fELF")):
             problems.append(
                 "sdist carries the build product %s: a source "
                 "distribution must not contain binaries (setup.py "

@@ -51,4 +51,5 @@ include MANIFEST.in
 # Enforced by tools/wheel_matrix.py::validate_sdist (release gate +
 # release-bundle validator), not by this comment.
 global-exclude *.so
+global-exclude *.so.*
 exclude python/forkrun/_forkrun_cleanroom

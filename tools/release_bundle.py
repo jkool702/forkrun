@@ -545,7 +545,12 @@ def _provenance_problems(info, report, wheels, sdists, version,
             "describe this bundle"
             % (recorded_fp, report["source_tree_sha256"]))
 
-    recorded = {row["minor"]: row for row in info.get("wheel", [])}
+    wheel_rows = info.get("wheel", [])
+    recorded = {row["minor"]: row for row in wheel_rows}
+    if len(recorded) != len(wheel_rows):
+        problems.append(
+            "provenance has more than one wheel record for a minor "
+            "(the record must describe exactly the bundle's six wheels)")
     actual = {minor: os.path.basename(path)
               for minor, path in
               ((_wheel_minor(p), p) for p in wheels) if minor}

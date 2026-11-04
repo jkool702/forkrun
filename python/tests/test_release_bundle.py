@@ -140,6 +140,18 @@ class TestSdistContentRule(_Tmp):
         self.assertEqual(
             3, len([p for p in problems if "build product" in p]))
 
+    def test_an_elf_binary_with_an_innocent_name_is_rejected(self):
+        # A renamed or versioned binary is still a binary. The name
+        # rules would miss both of these.
+        sdist = _make_sdist(self.tmp, extra={
+            "python/forkrun/not_a_build_product": b"\x7fELF\x02\x01",
+            "python/forkrun/libfoo.so.1": b"\x7fELF\x02\x01",
+        })
+        problems = wheel_matrix.validate_sdist(sdist, VERSION)
+        joined = "\n".join(problems)
+        self.assertIn("not_a_build_product", joined)
+        self.assertIn("libfoo.so.1", joined)
+
     def test_a_missing_required_source_is_named(self):
         sdist = _make_sdist(self.tmp, drop=("forkrun_ring.c",))
         problems = wheel_matrix.validate_sdist(sdist, VERSION)
@@ -207,7 +219,7 @@ class TestBundleIntegrity(_Tmp):
     def _assemble_one(self):
         wheels = os.path.join(self.tmp, "wheels")
         os.makedirs(wheels)
-        wheel = _make_wheel(wheels)
+        _make_wheel(wheels)
         sdist = _make_sdist(self.tmp)
         out = os.path.join(self.tmp, "out")
         report, problems = release_bundle.assemble(
@@ -243,6 +255,18 @@ class TestBundleIntegrity(_Tmp):
         _report, problems = release_bundle.validate_bundle(
             out, expect_source_commit="b" * 40)
         self.assertTrue(any("expected" in p and "b" * 40 in p
+                            for p in problems), problems)
+
+    def test_duplicate_provenance_rows_are_rejected(self):
+        out, _report, _problems = self._assemble_one()
+        info = os.path.join(out, release_bundle.BUILD_INFO)
+        with open(info) as fh:
+            lines = fh.readlines()
+        row = next(line for line in lines if line.startswith("wheel: "))
+        with open(info, "a") as fh:
+            fh.write(row)
+        _report, problems = release_bundle.validate_bundle(out)
+        self.assertTrue(any("more than one wheel record" in p
                             for p in problems), problems)
 
     def test_a_wheel_from_another_source_is_rejected(self):
