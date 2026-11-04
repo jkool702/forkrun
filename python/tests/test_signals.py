@@ -844,14 +844,11 @@ class TestRecorderConcurrency(unittest.TestCase):
                 if i % 4:
                     time.sleep(0.002)
                 in_section[0] = False
-            # A late invocation parks the signal for the next begin();
-            # flush until it is delivered. The invariant is exactly one
-            # delivery per send, never inside a section.
-            for _ in range(4):
-                if len(calls) > i:
-                    break
-                with defer_interrupts():
-                    pass
+            # A recorder invocation that was already running when this
+            # section closed forwards the signal through the restored
+            # host disposition (late, never lost); it does NOT park for
+            # the next begin(). Wait for that forwarding. The invariant
+            # is exactly one delivery per send, never inside a section.
             self.assertTrue(
                 wait_until(lambda: len(calls) > i, 1.0),
                 "signal %d was LOST (calls=%d)" % (i, len(calls)))

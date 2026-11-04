@@ -8,6 +8,7 @@ timing-sensitive (B3/B5) ×10 — see tambura runs in the report.
 
 import os
 import signal as _signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -143,21 +144,36 @@ class TestB2StreamTaxonomy(ChildLifecycleMixin, unittest.TestCase):
         kw = dict(kw, lines=64)
         old = _signal.getsignal(_signal.SIGINT)
         _signal.signal(_signal.SIGINT, _signal.default_int_handler)
-        # Deliver SIGINT from the kernel via setitimer, NOT a
-        # threading.Timer. forkrun forks ~21 times, so a timer thread makes
-        # the parent multi-threaded at exactly the moment it forks -- the
-        # hazard forkrun warns about in its own RuntimeWarning. That race is
-        # what made this test flaky (~1 in 3) once worker fork timing moved:
-        # the SIGINT could land inside the fork sequence and be swallowed,
-        # so `caught` came back None. A SIGALRM handler runs in the MAIN
-        # thread and raises nothing itself, so the parent stays
-        # single-threaded and the only signal in play is the SIGINT under
-        # test. setitimer is also more precise than Timer, which matters when
-        # the thing being timed is a half-second window.
-        def _fire_sigint(_signum, _frame):
-            os.kill(os.getpid(), _signal.SIGINT)
-
-        old_alrm = _signal.signal(_signal.SIGALRM, _fire_sigint)
+        # Deliver a real kernel SIGINT from a SEPARATE PROCESS, not a
+        # threading.Timer and not a SIGALRM handler that calls os.kill.
+        # The history is worth keeping:
+        #
+        # * A threading.Timer makes the parent multi-threaded at exactly
+        #   the moment forkrun forks its workers -- the hazard forkrun
+        #   warns about in its own RuntimeWarning. That race made this
+        #   test flaky (~1 in 3) once worker fork timing moved: the
+        #   SIGINT could land inside the fork sequence and be swallowed,
+        #   so `caught` came back None.
+        # * A SIGALRM handler that calls os.kill keeps the parent
+        #   single-threaded, but it delivers SIGINT INSIDE a Python
+        #   signal handler. On CPython 3.13 a KeyboardInterrupt raised
+        #   there can bypass the interrupted frame's
+        #   `except BaseException` and escape the test entirely --
+        #   measured 1/60 under load, with the traceback pointing at
+        #   os.kill inside the SIGALRM handler. That is a CPython
+        #   signal-handler quirk, not a forkrun taxonomy failure, and it
+        #   killed the whole test process (exit 130).
+        # * A sender process delivers the signal from outside any Python
+        #   handler, so the exception is raised at a normal bytecode and
+        #   the taxonomy assertion below observes it. The parent stays
+        #   single-threaded (a child PROCESS, not a thread), and the
+        #   signal is still process-directed through the kernel.
+        _sender_src = (
+            "import os,signal,sys,time\n"
+            "time.sleep(float(sys.argv[1]))\n"
+            "if os.getppid() == int(sys.argv[2]):\n"
+            "    os.kill(int(sys.argv[2]), signal.SIGINT)\n")
+        sender = None
         caught = None
         _nb = 0
         _t0 = time.monotonic()
@@ -168,7 +184,14 @@ class TestB2StreamTaxonomy(ChildLifecycleMixin, unittest.TestCase):
                     _nb += 1
                     if _nb == 1:
                         # Stream is demonstrably live; now start the clock.
-                        _signal.setitimer(_signal.ITIMER_REAL, 0.05)
+                        # 0.05 s is short against _slow's 0.05 s per batch,
+                        # and the sender's own startup still lands the
+                        # signal comfortably inside the ~4 s run.
+                        sender = subprocess.Popen(
+                            [sys.executable, "-c", _sender_src, "0.05",
+                             str(os.getpid())],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
             except BaseException as exc:  # noqa: BLE001
                 # Catch KI itself: pre-fix the bare
                 # KeyboardInterrupt lands here (bite); post-fix the
@@ -176,13 +199,15 @@ class TestB2StreamTaxonomy(ChildLifecycleMixin, unittest.TestCase):
                 caught = exc
         finally:
             _elapsed = time.monotonic() - _t0
-            _signal.setitimer(_signal.ITIMER_REAL, 0)
-            _signal.signal(_signal.SIGALRM, old_alrm)
+            if sender is not None:
+                if sender.poll() is None:
+                    sender.kill()
+                sender.wait()
             _signal.signal(_signal.SIGINT, old)
         self.assertIsInstance(
             caught, ForkrunInterrupted,
             "stream SIGINT taxonomy: got %r after %d batch(s) in %.3fs "
-            "(SIGINT scheduled at 0.500s) kw=%r"
+            "(SIGINT scheduled 0.05s after the first blob) kw=%r"
             % (caught, _nb, _elapsed, kw))
         self.assertEqual(caught.signo, _signal.SIGINT)
         self.assertEqual(caught.bash_code, 130)
