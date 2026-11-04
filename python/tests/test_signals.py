@@ -76,6 +76,7 @@ _ENV_KNOBS = (
     "FORKRUN_SIGINT_DRAIN_BUDGET_US",
     "FORKRUN_SIGINT_FAULT_RESTORE",
     "FORKRUN_SIGINT_FAULT_STALE",
+    "FORKRUN_SIGINT_FAULT_LATE",
 )
 
 
@@ -529,6 +530,87 @@ class TestRecorderConcurrency(unittest.TestCase):
         timer.daemon = True
         timer.start()
         return timer
+
+    def test_a_kernel_pending_sigint_is_claimed_at_the_boundary(self):
+        """A signal still pending in the KERNEL must be claimed, not lost.
+
+        The recorder can only see a signal the kernel has delivered to a
+        thread. With SIGINT blocked on every thread, it stays in the
+        process pending set: no recorder invocation exists to drain, so
+        an in-flight drain alone cannot see it. Restoring the host
+        disposition in that state hands it to CPython's handler and it
+        surfaces at an arbitrary later bytecode -- the exact CI failure.
+        ``end()`` must claim it with ``sigtimedwait()`` and report SEEN.
+        """
+        calls = []
+
+        def handler(signo, frame):
+            calls.append((signo, threading.get_ident()))
+
+        _signal.signal(_signal.SIGINT, handler)
+        old = _signal.pthread_sigmask(
+            _signal.SIG_BLOCK, {_signal.SIGINT})
+        try:
+            with defer_interrupts():
+                os.kill(os.getpid(), _signal.SIGINT)
+                self.assertIn(
+                    _signal.SIGINT, _signal.sigpending(),
+                    "the test premise failed: another thread was eligible, "
+                    "so the signal was delivered to the recorder instead "
+                    "of staying kernel-pending")
+                self.assertEqual(
+                    calls, [], "delivered inside the protected section")
+            self.assertEqual(
+                calls, [(_signal.SIGINT, threading.get_ident())],
+                "the kernel-pending SIGINT was not claimed and delivered "
+                "synchronously on the closing thread")
+            self.assertNotIn(
+                _signal.SIGINT, _signal.sigpending(),
+                "the signal is still pending after the boundary")
+        finally:
+            _signal.pthread_sigmask(_signal.SIG_SETMASK, old)
+
+    def test_a_late_recorder_invocation_is_forwarded_not_parked(self):
+        """A handler that misses the FINAL boundary must not park forever.
+
+        The kernel can dequeue a signal and be preempted before the
+        recorder's first instruction; no userspace state observes that
+        window. The fault hook closes the generation while an invocation
+        is provably in flight, so the invocation's CAS must fail, it must
+        observe IDLE, and it must forward the signal through the restored
+        host disposition. Parking it for a begin() that never comes would
+        silently swallow the interrupt.
+        """
+        self._env(FORKRUN_SIGINT_HANDLER_DELAY_US=400000,
+                  FORKRUN_SIGINT_FAULT_LATE=1)
+        calls = []
+
+        def handler(signo, frame):
+            calls.append((signo, threading.get_ident()))
+
+        _signal.signal(_signal.SIGINT, handler)
+        self._busy_sibling()
+        self._mask_main()
+        lib = _signals._shim()
+        self.assertEqual(lib.fr_py_sigint_defer_begin(), _signals._RC_OK)
+        self._send()
+        time.sleep(0.10)          # the recorder is now inside the delay
+        self.assertEqual(
+            lib.fr_py_sigint_defer_end(), _signals._RC_OK,
+            "the fault hook was supposed to close the generation while "
+            "the recorder was still in flight")
+        self.assertEqual(_signals.deferral_state()["depth"], 0)
+        self.assertTrue(
+            wait_until(lambda: calls, 2.0),
+            "the late recorder invocation parked the SIGINT for a "
+            "begin() that never came: the signal was silently lost")
+        self.assertEqual(len(calls), 1)
+        # The forwarded signal must not be replayed by the next section.
+        with defer_interrupts():
+            pass
+        self.assertEqual(
+            len(calls), 1,
+            "the forwarded signal was recorded into the next generation")
 
     def test_a_recorded_signal_is_reported_once_and_cleared(self):
         lib = _signals._shim()

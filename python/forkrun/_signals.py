@@ -301,13 +301,23 @@ class SignalGuard:
 #
 # The same thread contract covers BOTH delivery paths. A signal recorded
 # while the section was open is delivered by ``_disarm`` returning True.
+# A SIGINT still pending in the KERNEL at the boundary is claimed by
+# end() (sigtimedwait) and reported the same way: a process-directed
+# signal whose eligible thread was never scheduled must not be left to
+# surface through CPython's handler at an arbitrary later bytecode.
 # A recorder invocation that was already running when the section closed
 # parks a HANDOFF in C and ``_disarm`` reports it the same way; it is not
-# re-raised through the kernel. A signal that arrived after the previous
-# section closed is parked and delivered by ``_arm`` BEFORE the next
-# section opens, also on the entering thread. The only kernel re-raise
-# left is the broken-state last resort (SIG_DFL), which is the point at
-# which the process must remain interruptible.
+# re-raised through the kernel. A signal that arrives after the previous
+# section closed has no open interval: a recorder invocation that sees
+# the closed generation forwards it through the restored host
+# disposition (late, but never lost). The STALE path in ``_arm`` is
+# defensive for a park left by an older substrate, and is exercised by
+# the test-only fault hook. A recorder invocation that starts after the
+# FINAL boundary has closed (the unobservable "kernel dequeued it,
+# handler not entered yet" residual) takes the same forwarding path
+# rather than parking for a begin() that may never come. The only other
+# kernel re-raise is the broken-state last resort (SIG_DFL), which is
+# the point at which the process must remain interruptible.
 #
 # FORK. Pending signals are not inherited across fork, and neither is the
 # parent's reason for deferring. ``after_fork_child`` restores the saved
@@ -383,12 +393,16 @@ def _arm():
     Fail closed: every negative return means the recorder is not provably
     installed, so the section is not opened at all.
 
-    STALE means the recorder parked a SIGINT that arrived after the
-    previous section closed (the kernel had already dequeued it). There
-    is no open interval for it to belong to, so it is delivered NOW,
-    before this section opens, through the host disposition; then the
-    arm is retried. Delivering it inside the section, or clearing it,
-    would each violate the contract in a different direction.
+    STALE means the recorder has a parked SIGINT from a closed
+    generation. This is a defensive path: the CAS protocol forwards a
+    late recorder invocation through the host disposition instead of
+    parking it for a begin() that may never come, so in normal operation
+    STALE is unreachable. The test-only fault hook exercises it, and an
+    older substrate could still leave a park. There is no open interval
+    for it to belong to, so it is delivered NOW, before this section
+    opens, through the host disposition; then the arm is retried.
+    Delivering it inside the section, or clearing it, would each violate
+    the contract in a different direction.
     """
     lib = _shim()
     while True:
@@ -423,11 +437,13 @@ _RC_TEXT = {
 def _disarm():
     """Restore the host disposition; True iff a SIGINT must be delivered.
 
-    True covers both a signal recorded while the section was open and an
-    in-flight recorder invocation that parked a HANDOFF at the boundary.
-    Raises DeferralError when the C layer could not establish a clean
-    boundary. The caller must NOT report success in that case: the
-    recorder may still be installed, and the pending state is unknown.
+    True covers a signal recorded while the section was open, a SIGINT
+    still pending in the kernel at the boundary (claimed by end() before
+    it restores), and an in-flight recorder invocation that parked a
+    HANDOFF at the boundary. Raises DeferralError when the C layer could
+    not establish a clean boundary. The caller must NOT report success in
+    that case: the recorder may still be installed, and the pending state
+    is unknown.
     """
     rc = _shim().fr_py_sigint_defer_end()
     if rc < 0:

@@ -58,101 +58,106 @@ void fr_py_poison_relay(unsigned int batch_idx);
  *            allocation, no Python, no locks, no libatomic call.
  *            Nesting is Python's job; begin() is a no-op while already
  *            armed.
- *   end()    restores the host disposition, CLOSES the generation, waits
- *            for every recorder invocation that had already started,
- *            and only then reports whether a signal was recorded.
+ *   end()    takes ownership of the boundary, CLAIMS a SIGINT that is
+ *            still pending in the kernel, restores the host
+ *            disposition, waits for every recorder invocation that had
+ *            already started, closes the generation atomically, and
+ *            reports whether a signal was recorded.
  *   cancel() is the child-side reset: a forked child must not inherit
  *            the parent's armed section or replay its pending signal.
  *
- * THE IN-FLIGHT-HANDLER RACE, WHICH IS THE WHOLE POINT OF THIS BLOCK.
- * A signal handler is a RUNNING FUNCTION, not a queued message. POSIX
- * gives no "wait for the handler" primitive, and sigaction() restoring
- * the disposition does not abort a handler the kernel has already
- * entered. The naive protocol --
+ * TWO DISTINCT RACES, BOTH CLOSED HERE.
  *
- *      restore(); seen = flag; flag = 0;
+ * 1. THE IN-FLIGHT HANDLER. A signal handler is a RUNNING FUNCTION, not
+ *    a queued message. POSIX gives no "wait for the handler" primitive,
+ *    and sigaction() restoring the disposition does not abort a handler
+ *    the kernel has already entered. The naive protocol --
  *
- * -- is broken in both directions. A sibling thread that is inside the
- * recorder but has not yet executed its store makes end() read 0 (the
- * signal is LOST), and the same store lands after end() cleared the
- * flag (the signal reappears as a phantom in the NEXT generation). A
- * volatile sig_atomic_t is not a synchronisation primitive and does not
- * help: the problem is the ORDERING, not the width of the store.
+ *         restore(); seen = flag; flag = 0;
  *
- * THE PROTOCOL. Lock-free atomics, all accessed with memory_order_seq_cst,
- * plus one rule: THE RECORDER NEVER RECORDS INTO A CLOSED GENERATION. It
- * either HANDS OFF to the end() that is closing, or PARKS the signal for
- * the next begin().
+ *    -- is broken in both directions. A sibling thread that is inside
+ *    the recorder but has not yet executed its store makes end() read 0
+ *    (the signal is LOST), and the same store lands after end() cleared
+ *    the flag (the signal reappears as a phantom in the NEXT
+ *    generation). A volatile sig_atomic_t is not a synchronisation
+ *    primitive and does not help: the problem is the ORDERING, not the
+ *    width of the store.
+ *
+ * 2. THE KERNEL-PENDING SIGNAL. The recorder can only see a signal the
+ *    kernel has already delivered to a thread. A process-directed
+ *    SIGINT whose every eligible thread has it blocked, or whose
+ *    eligible sibling simply has not been scheduled, lives in the
+ *    process pending set. There is no recorder invocation to drain.
+ *    Restoring the host disposition in that state hands the signal to
+ *    CPython's handler, which sets the main thread's trip flag, and the
+ *    KeyboardInterrupt surfaces at an arbitrary later bytecode -- the
+ *    CI failure this protocol closes. end() therefore blocks SIGINT on
+ *    the closing thread and claims the pending signal with
+ *    sigtimedwait() BEFORE restoring, then claims again after the
+ *    drain, before the mask is restored.
+ *
+ * THE PROTOCOL. ONE atomic word carries the generation: ARMED, CLOSING,
+ * SEEN, PENDING, BROKEN. Every transition is a compare-and-swap on that
+ * word, on both sides:
  *
  *   recorder:  inflight++
- *              if (broken)   { inflight-- ; SIG_DFL + raise ; }
- *              if (closing)  { pending = 1 ; inflight-- ; }  hand off
- *              if (!armed)   { pending = 1 ; inflight-- ; }  park
- *              else          { seen = 1 ;    inflight-- ; }  record
- *   end():     restore ; closing = 1 ; drain(inflight == 0) ;
- *              seen = exchange(seen) ; pending = exchange(pending) ;
- *              closing = 0 ; armed = 0
- *   begin():   broken -> fail ; armed -> no-op ;
- *              seen or pending -> STALE (consume; Python delivers) ;
- *              save ; armed = 1 ; install (on failure armed = 0)
+ *              if (broken at entry) { inflight-- ; SIG_DFL + raise ; }
+ *              if (CLOSING)  CAS(PENDING)   hand off to the end()
+ *              else if (BROKEN)             SIG_DFL + raise
+ *              else if (ARMED)  CAS(SEEN)   record
+ *              else (IDLE)                  forward through host
+ *              inflight--
+ *   end():     CAS(ARMED -> ARMED|CLOSING) ; block SIGINT ;
+ *              claim pending ; restore ; drain(inflight == 0) ;
+ *              claim pending ; CAS(close + consume SEEN/PENDING) ;
+ *              claim pending ; restore mask
+ *   begin():   BROKEN -> fail ; ARMED -> no-op ; CLOSING -> fail ;
+ *              drain inflight ; consume a defensive STALE park ;
+ *              save ; CAS(IDLE -> ARMED) ; install
  *
  * Why no handler can be lost. If a recorder invocation incremented
  * inflight before end() drained, end() waits for its decrement and then
- * reads `seen`/`pending` -- so the store is visible. If it incremented
- * after end() drained, the two seq_cst accesses cannot both miss: in the
- * single total order of seq_cst operations, end()'s store(closing)
- * precedes its load(inflight), so if the load did not observe the
- * recorder's increment then the recorder's load(closing) is ordered
- * after the store and must observe closing == 1 -- and it parks a
- * handoff instead of recording. That is the Dekker/store-buffer
- * pattern, and it is exactly why the order is
- * restore -> closing=1 -> drain -> exchange.
+ * consumes SEEN/PENDING. If it incremented after the drain, its CAS
+ * races end()'s close CAS on the same word: if the recorder's CAS wins,
+ * end()'s close CAS fails and retries, so it must observe the park; if
+ * end()'s close wins, the recorder's CAS fails, it retries, observes
+ * IDLE, and forwards the signal through the restored host disposition.
+ * There is no interleaving in which a park is invisible to the end()
+ * that owns it.
  *
- * THE HANDOFF IS SYNCHRONOUS, NOT A KERNEL RE-RAISE. `pending` set while
- * `closing` is live is consumed by that same end(), which returns
- * HANDOFF; the Python layer then invokes the restored disposition on the
- * thread that closed the section. Re-raising here would hand a
+ * THE HANDOFF IS SYNCHRONOUS, NOT A KERNEL RE-RAISE. PENDING set while
+ * CLOSING is live is consumed by that same end(), which returns
+ * HANDOFF; the Python layer then invokes the restored disposition on
+ * the thread that closed the section. Re-raising here would hand a
  * Python-level handler back to CPython's asynchronous main-thread
  * dispatch -- the late-interrupt bug this facility exists to prevent.
  *
- * Why no phantom in the next generation. `seen` is only written by an
- * invocation that observed closing == 0 AND armed == 1, i.e. one that
- * belongs to the open generation; end() consumes it. An invocation that
- * observes closing == 1 parks a handoff. An invocation that observes
- * armed == 0 (the kernel had dequeued the signal before the restore but
- * this is its first instruction) parks the same flag with no end() left
- * to consume it, so the NEXT begin() consumes it and returns STALE: the
- * Python layer delivers it BEFORE opening the new section. begin()
- * refuses to arm while inflight != 0, so a generation can only start
- * from a fully drained state.
+ * THE UNOBSERVABLE RESIDUAL. The kernel can dequeue a signal and be
+ * preempted before the recorder's first instruction; the handler then
+ * runs after end() has closed the generation. That state is invisible
+ * to userspace (sigpending() cannot see a dequeued signal, and there is
+ * no "handler running" syscall). It is NOT parked for a begin() that
+ * may never come: the recorder observes IDLE, and forwards the signal
+ * through the restored host disposition. That delivery is late and on
+ * whichever thread ran the handler, but the signal is never silently
+ * dropped. A park for the next begin() remains only as a defensive
+ * path (and as the STALE fault hook).
  *
- * THE ONE CASE THIS CANNOT COVER, STATED RATHER THAN ASSUMED. The
- * kernel can copy the disposition in get_signal() and then be preempted
- * before the handler's first instruction; the handler then runs after
- * the restore even though it was "dispatched" before it. That state is
- * invisible to userspace (sigpending() cannot see a dequeued signal, and
- * there is no "handler running" syscall), so no userspace protocol can
- * enumerate it. The protocol above makes it harmless: the late
- * invocation observes closing == 1 (handoff) or armed == 0 (park), so it
- * is never recorded into a closed generation and never dropped. The only
- * residual is an invocation that starts after a SUBSEQUENT begin() has
- * already consumed the parked flag; it then records into that new
- * generation and is delivered at its end -- a LATE delivery at a later
- * section boundary, never a silent drop and never an interrupt inside
- * the section it arrived in.
- *
- * FORWARDING IS NOW ONLY THE BROKEN-STATE LAST RESORT. "Forward" means
- * install SIG_DFL and raise: the process must stay interruptible when
- * the deferral machinery itself has failed. The signal is blocked for
- * the duration of the handler (the default sa_mask), so raise() makes it
- * pending and the kernel delivers it on the handler's return. Both
- * signal() and raise() are async-signal-safe.
+ * FORWARDING. "Forward" means re-raise through the live host
+ * disposition. The signal is blocked for the duration of the handler
+ * (the default sa_mask), so raise() makes it pending and the kernel
+ * delivers it on the handler's return. The broken-state last resort
+ * installs SIG_DFL first, because the process must stay interruptible
+ * when the deferral machinery itself has failed; the late path
+ * restores the saved host action only if the recorder is somehow still
+ * installed, to avoid recursing into itself. sigaction(), signal() and
+ * raise() are async-signal-safe.
  *
  * RESTORATION FAILURE. sigaction() return values are checked at every
- * site. A failed restore sets `broken` and leaves `armed` set, because
- * the recorder may still be installed and pretending otherwise is the
+ * site. A failed restore sets BROKEN and leaves ARMED set, because the
+ * recorder may still be installed and pretending otherwise is the
  * failure this check exists to prevent. begin() then refuses to arm
- * (fail closed), and the recorder's own last resort -- when `broken` is
+ * (fail closed), and the recorder's own last resort -- when BROKEN is
  * set -- is to install SIG_DFL and re-raise, so an operator can still
  * interrupt a process whose deferral machinery is wedged. Python raises
  * a diagnosable RuntimeError; nothing is reported as success.
@@ -177,6 +182,30 @@ void fr_py_poison_relay(unsigned int batch_idx);
 #define FRK_SIGINT_E_DRAIN   (-4)  /* an in-flight recorder never finished */
 #define FRK_SIGINT_E_BROKEN  (-5)  /* an earlier failure left state unsafe */
 
+/* ONE ATOMIC WORD CARRIES THE WHOLE GENERATION.
+ *
+ * The recorder and end() must agree on three things at once: whether a
+ * generation is open, whether one is closing, and whether a signal was
+ * recorded or handed off. Split across separate atomics, a handler can
+ * read "closing == 1", be preempted, and store its handoff AFTER end()
+ * has already exchanged the pending flag -- a park no future begin()
+ * will ever see if this was the final section.
+ *
+ * With one word, both sides CAS the SAME location. A handler that parks
+ * wins the CAS only if end() has not closed the generation; end()'s
+ * close CAS then fails and it retries, so it MUST observe the park. If
+ * end()'s close wins first, the handler's CAS fails and it retries,
+ * observes IDLE, and forwards the signal through the restored host
+ * disposition instead of parking it for a begin() that may never come.
+ * There is no interleaving in which a park is invisible to the end()
+ * that owns it, and no park survives a final section.
+ */
+#define FRK_SIGINT_ARMED    0x01u  /* a section is open                  */
+#define FRK_SIGINT_CLOSING  0x02u  /* end() owns the boundary            */
+#define FRK_SIGINT_SEEN_B   0x04u  /* recorder saw a signal this gen     */
+#define FRK_SIGINT_PENDING  0x08u  /* handoff parked for this end()      */
+#define FRK_SIGINT_BROKEN   0x10u  /* disposition state is not provable  */
+
 /* Default budget for the in-flight drain. A recorder invocation is a
  * handful of atomics wide, so this is ~5 orders of magnitude of
  * headroom; it only expires when the signalled thread is stopped or
@@ -185,13 +214,9 @@ void fr_py_poison_relay(unsigned int batch_idx);
 #define FRK_SIGINT_DRAIN_BUDGET_US 250000
 
 static struct sigaction frk_sigint_saved;
-static int frk_sigint_armed = 0;      /* atomic */
-static int frk_sigint_seen = 0;       /* atomic; recorded in this gen  */
-static int frk_sigint_pending = 0;    /* atomic; handoff or parked sig */
-static int frk_sigint_closing = 0;    /* atomic */
-static int frk_sigint_inflight = 0;   /* atomic */
-static int frk_sigint_broken = 0;     /* atomic */
-static int frk_sigint_forwarded = 0;  /* atomic; broken last resorts   */
+static unsigned int frk_sigint_state = 0;  /* atomic; FRK_SIGINT_* bits */
+static int frk_sigint_inflight = 0;        /* atomic; recorder entries  */
+static int frk_sigint_forwarded = 0;       /* atomic; broken last resorts */
 
 /* Test-only knobs. Read from begin() (never from the recorder) into
  * plain statics so the handler's steady state stays a handful of
@@ -207,12 +232,16 @@ static int frk_sigint_forwarded = 0;  /* atomic; broken last resorts   */
  * not testable without a fault hook. FORKRUN_SIGINT_FAULT_STALE makes
  * begin() report a parked signal once, so the Python STALE handoff can
  * be exercised deterministically; the test's host handler clears the
- * variable, and the retry then arms normally. All are inert unless
- * set. */
+ * variable, and the retry then arms normally. FORKRUN_SIGINT_FAULT_LATE
+ * makes end() skip its in-flight drain, so a recorder invocation that
+ * was provably inside the handler is left to run after the generation
+ * closes -- the otherwise unobservable "kernel dequeued it, handler not
+ * entered yet" residual, made deterministic. All are inert unless set. */
 static int frk_sigint_test_delay_us = 0;
 static int frk_sigint_drain_budget_us = FRK_SIGINT_DRAIN_BUDGET_US;
 static int frk_sigint_fault_restore = 0;
 static int frk_sigint_fault_stale = 0;
+static int frk_sigint_fault_late = 0;
 
 static void frk_sigint_read_test_env(void)
 {
@@ -228,6 +257,8 @@ static void frk_sigint_read_test_env(void)
     frk_sigint_fault_restore = (e && e[0] && e[0] != '0') ? 1 : 0;
     e = getenv("FORKRUN_SIGINT_FAULT_STALE");
     frk_sigint_fault_stale = (e && e[0] && e[0] != '0') ? 1 : 0;
+    e = getenv("FORKRUN_SIGINT_FAULT_LATE");
+    frk_sigint_fault_late = (e && e[0] && e[0] != '0') ? 1 : 0;
 }
 
 /* Busy-wait used ONLY by the deterministic boundary tests: it holds the
@@ -262,11 +293,18 @@ static void frk_sigint_forward_now(void)
     raise(SIGINT);
 }
 
+static void frk_sigint_forward_late(void);
+
+/* The recorder. Async-signal-safe: no allocation, no Python, no locks,
+ * no libatomic call. Every decision is a CAS on the one state word. */
 static void frk_sigint_note(int signo)
 {
+    unsigned int s, want;
+
     (void)signo;
     __atomic_add_fetch(&frk_sigint_inflight, 1, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&frk_sigint_broken, __ATOMIC_SEQ_CST)) {
+    if (__atomic_load_n(&frk_sigint_state, __ATOMIC_SEQ_CST)
+            & FRK_SIGINT_BROKEN) {
         __atomic_sub_fetch(&frk_sigint_inflight, 1, __ATOMIC_SEQ_CST);
         signal(SIGINT, SIG_DFL);
         frk_sigint_forward_now();
@@ -275,25 +313,63 @@ static void frk_sigint_note(int signo)
     frk_sigint_test_delay();
     /* The decision is taken as late as possible, so a boundary that
      * closed while this invocation was inside the handler is handed to
-     * that end() (or parked for the next begin()) instead of being
-     * recorded into a generation that no longer exists. */
-    if (__atomic_load_n(&frk_sigint_closing, __ATOMIC_SEQ_CST)) {
-        __atomic_store_n(&frk_sigint_pending, 1, __ATOMIC_SEQ_CST);
+     * that end() (or forwarded if the generation is already gone). */
+    for (;;) {
+        s = __atomic_load_n(&frk_sigint_state, __ATOMIC_SEQ_CST);
+        if (s & FRK_SIGINT_CLOSING) {
+            /* Hand off to the end() that owns this boundary. The CAS is
+             * what makes the handoff visible: if end() closes the
+             * generation first, this CAS fails and we fall through to
+             * the IDLE case below instead of parking a signal forever. */
+            want = s | FRK_SIGINT_PENDING;
+            if (__atomic_compare_exchange_n(
+                    &frk_sigint_state, &s, want, 0,
+                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+                break;
+            continue;
+        }
+        if (s & FRK_SIGINT_BROKEN) {
+            __atomic_sub_fetch(&frk_sigint_inflight, 1, __ATOMIC_SEQ_CST);
+            signal(SIGINT, SIG_DFL);
+            frk_sigint_forward_now();
+            return;
+        }
+        if (s & FRK_SIGINT_ARMED) {
+            want = s | FRK_SIGINT_SEEN_B;
+            if (__atomic_compare_exchange_n(
+                    &frk_sigint_state, &s, want, 0,
+                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+                break;
+            continue;
+        }
+        /* IDLE. There is no open interval and no closing end() to hand
+         * this signal to: it was dispatched before the restore but its
+         * first instruction ran after the generation closed. Do not
+         * park it for a begin() that may never come -- forward it
+         * through the restored host disposition. */
         __atomic_sub_fetch(&frk_sigint_inflight, 1, __ATOMIC_SEQ_CST);
+        frk_sigint_forward_late();
         return;
     }
-    if (!__atomic_load_n(&frk_sigint_armed, __ATOMIC_SEQ_CST)) {
-        /* The kernel had already dequeued this signal when the previous
-         * end() restored the host disposition, but this invocation's
-         * first instruction ran after it returned. There is no end() to
-         * hand off to, so park it for the next begin(), which delivers
-         * it BEFORE opening a new section. */
-        __atomic_store_n(&frk_sigint_pending, 1, __ATOMIC_SEQ_CST);
-        __atomic_sub_fetch(&frk_sigint_inflight, 1, __ATOMIC_SEQ_CST);
-        return;
-    }
-    __atomic_store_n(&frk_sigint_seen, 1, __ATOMIC_SEQ_CST);
     __atomic_sub_fetch(&frk_sigint_inflight, 1, __ATOMIC_SEQ_CST);
+}
+
+/* Forward a signal whose generation is already closed. The recorder is
+ * normally gone by then (end() restored the host action), but be
+ * defensive: if it is somehow still installed, restore the saved host
+ * action first or raise() would recurse into this handler forever.
+ * sigaction() and raise() are async-signal-safe. */
+static void frk_sigint_forward_late(void)
+{
+    struct sigaction cur;
+
+    if (sigaction(SIGINT, NULL, &cur) == 0
+            && cur.sa_handler == frk_sigint_note) {
+        if (sigaction(SIGINT, &frk_sigint_saved, NULL) != 0)
+            signal(SIGINT, SIG_DFL);
+    }
+    __atomic_add_fetch(&frk_sigint_forwarded, 1, __ATOMIC_SEQ_CST);
+    raise(SIGINT);
 }
 
 /* Read the live disposition. 0 on success, -1 if sigaction() failed
@@ -316,6 +392,12 @@ static int frk_sigint_now_us(long long *out)
         return -1;
     *out = (long long)ts.tv_sec * 1000000LL + (long long)ts.tv_nsec / 1000LL;
     return 0;
+}
+
+static void frk_sigint_mark_broken(void)
+{
+    __atomic_fetch_or(&frk_sigint_state, FRK_SIGINT_BROKEN,
+                      __ATOMIC_SEQ_CST);
 }
 
 /* Wait until no recorder invocation is running. 1 drained, 0 timed out.
@@ -351,60 +433,112 @@ static int frk_sigint_drain_inflight(void)
     }
 }
 
+/* Dequeue a process-directed SIGINT that is still pending in the KERNEL.
+ *
+ * A signal the kernel has not yet chosen a thread for lives in the
+ * process pending set, not in this recorder. Restoring the host
+ * disposition while it is there hands it to the host's handler and it
+ * surfaces at an arbitrary later bytecode -- the CI failure this
+ * closes. sigtimedwait() accepts it synchronously, without running a
+ * handler, so end() can account for it exactly like one the recorder
+ * saw.
+ *
+ * SIGINT MUST be blocked on the calling thread (sigtimedwait() returns
+ * EINVAL otherwise). Returns 1 if at least one signal was claimed, 0 if
+ * none was pending, -1 on an unexpected error. */
+static int frk_sigint_claim_pending(void)
+{
+    sigset_t set;
+    struct timespec zero;
+    int rc, claimed = 0;
+
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    zero.tv_sec = 0;
+    zero.tv_nsec = 0;
+    for (;;) {
+        rc = sigtimedwait(&set, NULL, &zero);
+        if (rc == SIGINT) {
+            claimed = 1;
+            continue;
+        }
+        if (rc < 0 && errno == EAGAIN)
+            return claimed;
+        if (rc < 0 && errno == EINTR)
+            continue;
+        return -1;
+    }
+}
+
 int fr_py_sigint_defer_begin(void)
 {
     struct sigaction sa;
+    unsigned int s;
     int stale_seen, stale_pending;
 
-    if (__atomic_load_n(&frk_sigint_broken, __ATOMIC_SEQ_CST))
-        return FRK_SIGINT_E_BROKEN;
-    if (__atomic_load_n(&frk_sigint_armed, __ATOMIC_SEQ_CST))
-        return FRK_SIGINT_OK;
-    /* A generation may only start from a fully drained state. A late
-     * recorder invocation from the PREVIOUS generation (the kernel had
-     * already dequeued the signal before the restore, but its first
-     * instruction ran after end() returned) is not a failure: it cannot
-     * belong to the generation we are about to open, so wait for it and
-     * let the stale check below consume whatever it parked. Only a
-     * timeout is a failure -- the state cannot then be proven clean. */
-    if (__atomic_load_n(&frk_sigint_inflight, __ATOMIC_SEQ_CST) != 0
-            && !frk_sigint_drain_inflight())
-        return FRK_SIGINT_E_DRAIN;
-    if (__atomic_load_n(&frk_sigint_closing, __ATOMIC_SEQ_CST) != 0)
-        return FRK_SIGINT_E_DRAIN;
+retry:
+    for (;;) {
+        s = __atomic_load_n(&frk_sigint_state, __ATOMIC_SEQ_CST);
+        if (s & FRK_SIGINT_BROKEN)
+            return FRK_SIGINT_E_BROKEN;
+        if (s & FRK_SIGINT_ARMED)
+            return FRK_SIGINT_OK;
+        if (s & FRK_SIGINT_CLOSING)
+            return FRK_SIGINT_E_DRAIN;
+        /* A generation may only start from a fully drained state. A
+         * recorder invocation from the previous generation that was
+         * preempted before its CAS will observe IDLE and forward; wait
+         * for it so this generation is not installed underneath it. */
+        if (__atomic_load_n(&frk_sigint_inflight, __ATOMIC_SEQ_CST) != 0
+                && !frk_sigint_drain_inflight())
+            return FRK_SIGINT_E_DRAIN;
+        s = __atomic_load_n(&frk_sigint_state, __ATOMIC_SEQ_CST);
+        if (s & FRK_SIGINT_BROKEN)
+            return FRK_SIGINT_E_BROKEN;
+        if (s & (FRK_SIGINT_ARMED | FRK_SIGINT_CLOSING))
+            continue;
+        /* Defensive: the CAS protocol makes a park after the owning
+         * end() impossible, but a signal parked by an older build (or
+         * the STALE fault hook) is delivered BEFORE the new section
+         * opens, never recorded into it. */
+        stale_seen = (s & FRK_SIGINT_SEEN_B) != 0;
+        stale_pending = (s & FRK_SIGINT_PENDING) != 0;
+        if (stale_seen || stale_pending) {
+            unsigned int want = s & ~(FRK_SIGINT_SEEN_B
+                                      | FRK_SIGINT_PENDING);
+            if (__atomic_compare_exchange_n(
+                    &frk_sigint_state, &s, want, 0,
+                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+                return FRK_SIGINT_STALE;
+            continue;
+        }
+        break;
+    }
     frk_sigint_read_test_env();
     /* Test-only: report a parked signal once so the Python STALE
      * handoff is reachable without winning a sub-microsecond race. The
      * test's host handler clears the variable, so the retry arms. */
     if (frk_sigint_fault_stale)
         return FRK_SIGINT_STALE;
-    /* A signal that arrived after the previous generation closed has no
-     * open interval to belong to. Deliver it BEFORE the new section
-     * opens rather than recording it into this generation (which would
-     * delay it to this section's end) or clearing it (which would drop
-     * it). The Python layer calls the host disposition and retries. */
-    stale_seen = __atomic_load_n(&frk_sigint_seen, __ATOMIC_SEQ_CST);
-    stale_pending = __atomic_load_n(&frk_sigint_pending, __ATOMIC_SEQ_CST);
-    if (stale_seen || stale_pending) {
-        __atomic_exchange_n(&frk_sigint_seen, 0, __ATOMIC_SEQ_CST);
-        __atomic_exchange_n(&frk_sigint_pending, 0, __ATOMIC_SEQ_CST);
-        return FRK_SIGINT_STALE;
-    }
     if (sigaction(SIGINT, NULL, &frk_sigint_saved) != 0)
         return FRK_SIGINT_E_SAVE;
-    /* Publish "armed" BEFORE installing the recorder, and never clear it
-     * again on this path. The recorder can then never observe the
-     * installed-but-not-yet-armed state and park a signal that arrived
-     * after the section was effectively open. A signal delivered to the
-     * host disposition in this short window is handled normally (the
-     * section has not opened yet). */
-    __atomic_store_n(&frk_sigint_armed, 1, __ATOMIC_SEQ_CST);
+    /* Publish "armed" BEFORE installing the recorder. A signal delivered
+     * to the host disposition in this short window is handled normally
+     * (the section has not opened yet); a recorder invocation can only
+     * happen after the install, and it will see ARMED. The CAS also
+     * detects a late handler that changed the state while we were
+     * deciding, so we never arm over a boundary another invocation owns. */
+    s = 0;
+    if (!__atomic_compare_exchange_n(&frk_sigint_state, &s,
+                                     FRK_SIGINT_ARMED, 0,
+                                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+        goto retry;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = frk_sigint_note;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     if (sigaction(SIGINT, &sa, NULL) != 0) {
-        __atomic_store_n(&frk_sigint_armed, 0, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&frk_sigint_state, 0, __ATOMIC_SEQ_CST);
         return FRK_SIGINT_E_INSTALL;
     }
     return FRK_SIGINT_OK;
@@ -412,14 +546,56 @@ int fr_py_sigint_defer_begin(void)
 
 int fr_py_sigint_defer_end(void)
 {
-    int seen, pending, ours = 0;
+    unsigned int s, want;
+    sigset_t block, oldmask;
+    int ours = 0, claimed = 0, seen = 0, pending = 0;
 
-    if (!__atomic_load_n(&frk_sigint_armed, __ATOMIC_SEQ_CST))
-        return FRK_SIGINT_OK;
-    if (__atomic_load_n(&frk_sigint_broken, __ATOMIC_SEQ_CST))
-        return FRK_SIGINT_E_BROKEN;
+    /* Take ownership of the boundary atomically. A recorder that sees
+     * CLOSING hands its signal to this end(); one that sees IDLE (this
+     * CAS already won) forwards instead of parking. */
+    for (;;) {
+        s = __atomic_load_n(&frk_sigint_state, __ATOMIC_SEQ_CST);
+        if (s & FRK_SIGINT_BROKEN)
+            return FRK_SIGINT_E_BROKEN;
+        if (!(s & FRK_SIGINT_ARMED))
+            return FRK_SIGINT_OK;
+        if (s & FRK_SIGINT_CLOSING)
+            return FRK_SIGINT_E_DRAIN;
+        want = s | FRK_SIGINT_CLOSING;
+        if (__atomic_compare_exchange_n(&frk_sigint_state, &s, want, 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+            break;
+    }
+
+    /* Block SIGINT on the closing thread for the whole boundary. This is
+     * what makes the kernel-pending signal claimable, and it keeps a
+     * signal that arrives while the disposition is being restored from
+     * running the host handler before the boundary is decided. */
+    sigemptyset(&block);
+    sigaddset(&block, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &block, &oldmask) != 0) {
+        frk_sigint_mark_broken();
+        return FRK_SIGINT_E_DRAIN;
+    }
+
+    /* CLAIM BEFORE RESTORE. The kernel can still hold the signal in the
+     * process pending set: no thread has accepted it, so no recorder
+     * invocation exists to drain. Restoring first would hand it to the
+     * host disposition (the observed CI failure). */
+    {
+        int c = frk_sigint_claim_pending();
+        if (c < 0) {
+            frk_sigint_mark_broken();
+            sigprocmask(SIG_SETMASK, &oldmask, NULL);
+            return FRK_SIGINT_E_DRAIN;
+        }
+        if (c > 0)
+            claimed = 1;
+    }
+
     if (frk_sigint_disposition(&ours) != 0) {
-        __atomic_store_n(&frk_sigint_broken, 1, __ATOMIC_SEQ_CST);
+        frk_sigint_mark_broken();
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
         return FRK_SIGINT_E_RESTORE;
     }
     if (ours) {
@@ -430,7 +606,8 @@ int fr_py_sigint_defer_end(void)
                  ? -1 : sigaction(SIGINT, &frk_sigint_saved, NULL);
         if (rc != 0) {
             /* Do NOT clear `armed`: the recorder may still be live. */
-            __atomic_store_n(&frk_sigint_broken, 1, __ATOMIC_SEQ_CST);
+            frk_sigint_mark_broken();
+            sigprocmask(SIG_SETMASK, &oldmask, NULL);
             return FRK_SIGINT_E_RESTORE;
         }
     }
@@ -438,19 +615,62 @@ int fr_py_sigint_defer_end(void)
      * was already running parks a handoff instead of re-raising, so the
      * Python layer delivers it synchronously on the thread that closes
      * this section. */
-    __atomic_store_n(&frk_sigint_closing, 1, __ATOMIC_SEQ_CST);
-    if (!frk_sigint_drain_inflight()) {
+    if (!frk_sigint_fault_late && !frk_sigint_drain_inflight()) {
         /* A recorder invocation is still running after the budget. We
          * cannot prove the pending state, so leave `closing` set (it will
          * park that invocation) and fail closed. */
-        __atomic_store_n(&frk_sigint_broken, 1, __ATOMIC_SEQ_CST);
+        frk_sigint_mark_broken();
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
         return FRK_SIGINT_E_DRAIN;
     }
-    seen = __atomic_exchange_n(&frk_sigint_seen, 0, __ATOMIC_SEQ_CST);
-    pending = __atomic_exchange_n(&frk_sigint_pending, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&frk_sigint_closing, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&frk_sigint_armed, 0, __ATOMIC_SEQ_CST);
-    if (seen)
+    /* A signal that arrived while the disposition was being restored or
+     * the in-flight drain was running is still blocked on this thread. */
+    {
+        int c = frk_sigint_claim_pending();
+        if (c < 0) {
+            frk_sigint_mark_broken();
+            sigprocmask(SIG_SETMASK, &oldmask, NULL);
+            return FRK_SIGINT_E_DRAIN;
+        }
+        if (c > 0)
+            claimed = 1;
+    }
+
+    /* ONE CAS closes the generation and consumes what the recorder
+     * recorded. If a recorder CASes PENDING between this load and this
+     * CAS, the CAS fails and the loop retries with the new state -- so a
+     * park can never be exchanged away unseen. If the CAS wins first,
+     * the recorder's own CAS fails, it observes IDLE, and it forwards. */
+    for (;;) {
+        s = __atomic_load_n(&frk_sigint_state, __ATOMIC_SEQ_CST);
+        seen = (s & FRK_SIGINT_SEEN_B) != 0;
+        pending = (s & FRK_SIGINT_PENDING) != 0;
+        want = s & ~(FRK_SIGINT_ARMED | FRK_SIGINT_CLOSING
+                     | FRK_SIGINT_SEEN_B | FRK_SIGINT_PENDING);
+        if (__atomic_compare_exchange_n(&frk_sigint_state, &s, want, 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+            break;
+    }
+
+    /* Final claim: a signal that arrived during the close is delivered
+     * synchronously through the host disposition by the caller, rather
+     * than surfacing at an arbitrary later bytecode.
+     *
+     * A failure HERE is deliberately not fatal. The generation is
+     * already closed and the host disposition is already live, so the
+     * recorder cannot be left installed; if a signal is still pending,
+     * restoring the mask below delivers it through the host disposition
+     * -- the documented late-forward residual. Failing closed would
+     * instead discard the SEEN/PENDING signal this boundary already
+     * accounted for, which is strictly worse. */
+    {
+        int c = frk_sigint_claim_pending();
+        if (c > 0)
+            claimed = 1;
+    }
+
+    sigprocmask(SIG_SETMASK, &oldmask, NULL);
+    if (claimed || seen)
         return FRK_SIGINT_SEEN;
     if (pending)
         return FRK_SIGINT_HANDOFF;
@@ -459,10 +679,12 @@ int fr_py_sigint_defer_end(void)
 
 int fr_py_sigint_defer_cancel(void)
 {
-    int was = __atomic_load_n(&frk_sigint_armed, __ATOMIC_SEQ_CST);
-    int ours = 0;
+    unsigned int s;
+    int was, ours = 0;
     int rc = FRK_SIGINT_OK;
 
+    s = __atomic_load_n(&frk_sigint_state, __ATOMIC_SEQ_CST);
+    was = (s & (FRK_SIGINT_ARMED | FRK_SIGINT_CLOSING)) != 0;
     if (was) {
         if (frk_sigint_disposition(&ours) != 0)
             rc = FRK_SIGINT_E_RESTORE;
@@ -472,15 +694,9 @@ int fr_py_sigint_defer_cancel(void)
     /* The child must never inherit the parent's pending state, whatever
      * happened above: a fork copies these values from whichever thread
      * forked, and a sibling's in-flight count has no meaning here. */
-    __atomic_store_n(&frk_sigint_seen, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&frk_sigint_pending, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&frk_sigint_closing, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&frk_sigint_state, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&frk_sigint_inflight, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&frk_sigint_forwarded, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&frk_sigint_armed, 0, __ATOMIC_SEQ_CST);
-    if (was)
-        __atomic_store_n(&frk_sigint_broken, rc != FRK_SIGINT_OK,
-                         __ATOMIC_SEQ_CST);
     if (!was)
         return FRK_SIGINT_OK;
     return rc != FRK_SIGINT_OK ? rc : FRK_SIGINT_SEEN;
