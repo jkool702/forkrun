@@ -36,7 +36,8 @@ changelog heading that the owner finalizes at step 5.
    python3 tools/release_bundle.py validate \
      dist/release-candidate --expect-tree
    ( cd dist/release-candidate && sha256sum -c SHA256SUMS )
-   python3 -m twine check --strict dist/release-candidate/*
+   python3 -m twine check --strict \
+     dist/release-candidate/*.whl dist/release-candidate/*.tar.gz
    ```
 5. **Finalize the CHANGELOG heading** in `DOCS/CHANGELOG.md`:
    `## v3.6.2 — unreleased` → `## v3.6.2 — <release date>` (the v3.6.1
