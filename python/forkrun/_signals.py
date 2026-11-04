@@ -247,10 +247,13 @@ class SignalGuard:
 #
 #   * ``_shim.c`` owns the kernel state. ``fr_py_sigint_defer_begin``
 #     saves the host's ``struct sigaction`` and installs a recorder that
-#     only sets a ``sig_atomic_t`` (async-signal-safe: no allocation, no
-#     Python, no locks). ``fr_py_sigint_defer_end`` restores the saved
-#     disposition FIRST and then reports whether a signal arrived.
-#     ``fr_py_sigint_defer_cancel`` is the forked-child reset.
+#     only touches lock-free atomics (async-signal-safe: no allocation,
+#     no Python, no locks). ``fr_py_sigint_defer_end`` blocks SIGINT on
+#     the closing thread, claims a SIGINT still pending in the kernel,
+#     restores the saved disposition, drains any recorder invocation
+#     already in flight, and reports whether a signal was recorded,
+#     claimed or handed off. ``fr_py_sigint_defer_cancel`` is the
+#     forked-child reset.
 #   * This module owns the process-wide DEPTH and GENERATION. The
 #     outermost section arms the recorder; nested sections (same thread
 #     or another) only increment the depth; the outermost exit disarms
