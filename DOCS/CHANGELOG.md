@@ -502,7 +502,7 @@ runs through the exec-based cleanroom launcher. `udf`, `spawn`,
 
 To return to the previous behaviour: `FORKRUN_CLEANROOM=0`.
 
-### Per-route gate
+#### Per-route gate
 
 `FORKRUN_CLEANROOM` was a single boolean, so "turn it on" enabled five
 envelopes at once. It is now a **route** selector:
@@ -531,7 +531,7 @@ Unset-on is **not** asked-on: `FORKRUN_CLEANROOM` unset reports
 `explicit=False`, so a user who never requested the cleanroom is not
 warned when a call cannot use it.
 
-### Why
+#### Why
 
 All four blockers in `CLEANROOM_DEFAULT_ON_DECISION.md` are closed:
 
@@ -551,7 +551,7 @@ All four blockers in `CLEANROOM_DEFAULT_ON_DECISION.md` are closed:
 * **Packaging.** `forkrun/_forkrun_cleanroom` ships inside the manylinux
   wheel, so the default is not a no-op for installed users.
 
-### Compatibility and failure mode
+#### Compatibility and failure mode
 
 * Missing or unexec'able launcher → falls back in-process, i.e. the old
   behaviour. A broken install degrades, it does not fail.
@@ -566,7 +566,7 @@ Scope: the UMA C-plugin cleanroom only. NUMA, Python UDF, a libpython
 helper and dynamic worker spawning are explicitly NOT implemented and
 remain future work.
 
-### Python UDF: carrying vs reachability (CR-FIX1)
+#### Python UDF: carrying vs reachability (CR-FIX1)
 
 `CLEANROOM_HANDOVER.md` recorded Python UDF as "Structurally impossible;
 do not attempt it". That ruling is **correct about carrying and incorrect
@@ -614,7 +614,7 @@ Scope is the launcher only. The orderer is never forked by the launcher
 events cannot be produced here; the in-process path and orderer coverage
 are Phase B and require revisiting the frozen engine.
 
-### Correctness
+#### Correctness
 
 **Fatal teardown is bounded (was: an unbounded hang).** On the failure
 path the launcher killed its workers and then walked into a *blocking*
@@ -667,7 +667,7 @@ Now a positional-write loop: `EINTR` is retried and partial writes
 advance both buffer and offset, so a legal short write no longer
 terminates a healthy run.
 
-### Correctness of the descriptor model
+#### Correctness of the descriptor model
 
 **Every child inherits the engine descriptors.** The spill, fallow and
 scanner children kept only their own data descriptors, so
@@ -692,7 +692,7 @@ A new `--fd-selfcheck` flag makes each child verify its own keep-list
 with `F_GETFD` after scrubbing, so a lost descriptor fails loudly rather
 than degrading the run to polling.
 
-### Performance
+#### Performance
 
 The fixed ~100 ms startup overhead is **gone**. Paired interleaved A/B,
 medians, 28 workers, UMA, byte-exact output asserted identical on both
@@ -720,7 +720,7 @@ The symptom was both latency *and* a hot core: the scanner's pre-flight
 that path does not check for it, so the pre-flight spun rather than
 sleeping.
 
-### Parent-RSS scaling, re-measured after CR-FIX1
+#### Parent-RSS scaling, re-measured after CR-FIX1
 
 The W-CR6 figures ("parent RSS is the dimension that matters") were taken
 *before* this pass and described a launcher with a fixed ~100 ms of
@@ -757,7 +757,7 @@ any real Python process. That is the "negative crossover" W-CR6 claimed
 for the pre-CRFIX1 launcher; it is now reached rather than predicted.
 
 
-### Tests
+#### Tests
 
 `python/tests/test_cleanroom.py` is self-contained. The primary fixture
 pointed at a hardcoded `/tmp/opencode/mlbench/ml_plugin_light.so` that no
@@ -773,7 +773,7 @@ open-pipe fatal-teardown regression (the producer deliberately never
 closes the pipe); descendant cleanup after a fatal run; descriptor
 self-check; unrelated descriptors above 1023.
 
-### Packaging
+#### Packaging
 
 The launcher is now listed in `package_data`, so it ships in the wheel.
 It previously shipped in neither wheel nor sdist, making `pip install
