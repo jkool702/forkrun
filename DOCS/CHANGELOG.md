@@ -803,9 +803,12 @@ survived the first fix:
   `SEEN`, `PENDING`, `BROKEN`) and every transition is a CAS on it. A
   recorder invocation never records into a closed generation: it either
   hands off to the `end()` that is closing, or forwards through the
-  restored host disposition. `end()` restores the disposition, sets
-  `closing`, drains the in-flight invocation, exchanges the seen and
-  pending words, and clears the state; `begin()` consumes a defensive
+  restored host disposition. `end()` takes the boundary atomically,
+  blocks SIGINT on the closing thread, claims a kernel-pending signal
+  *before* restoring, restores the host disposition, drains an in-flight
+  recorder invocation, claims again, and closes the generation with one
+  CAS that consumes the seen and pending words; a final claim catches a
+  signal that arrived during the close. `begin()` consumes a defensive
   `STALE` park by delivering it *before* opening the next section.
 - The recorder can only observe a signal the kernel has **delivered**.
   A process-directed SIGINT whose eligible thread has not been

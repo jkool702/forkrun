@@ -61,10 +61,16 @@ changelog heading that the owner finalizes at step 5.
    git tag -a v3.6.2 -m "forkrun v3.6.2"
    git push origin v3.6.2
    ```
-8. **Re-run the tag-visible gate on `main`** now that the tag exists.
-   `FORKRUN_RELEASE_CHECK_TAGS=1` must still pass (the check refuses an
-   already-taken tag only when the tag points at a different commit; the
-   pre-tag run on the same tree is the authoritative one).
+8. **Verify the tag points at the release commit** and re-run the gate
+   **without** `FORKRUN_RELEASE_CHECK_TAGS=1`:
+   ```bash
+   git tag --points-at HEAD          # must print v3.6.2
+   FORKRUN_RELEASE_BUNDLE=dist/release-candidate \
+     python3 python/release_check.py
+   ```
+   Do **not** re-run with `FORKRUN_RELEASE_CHECK_TAGS=1` once the tag
+   exists: that gate correctly refuses to pass over an already-taken
+   tag, so the pre-tag run in step 6 is the authoritative one.
 9. **Publish to PyPI** (owner credentials; this repository never holds
    them):
    ```bash
