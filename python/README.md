@@ -1,4 +1,4 @@
-# forkrun Python frontend — v0.18.0 (W-PY23 release prep)
+# forkrun Python frontend — v0.18.0 (v3.6.2 release)
 
 > **New here?** Start with [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
 > (5 minutes to your first parallel job). Full user guides:
@@ -20,7 +20,7 @@ Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
 `forkrun.__version__` is `"0.18.0"`; `forkrun.__engine_version__` reports the
-substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
+substrate build (e.g. `"v3.6.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
 
@@ -33,22 +33,45 @@ The `.so` is built from `python/forkrun/_shim.c`, which textually includes
 `forkrun_ring.c` (same TU, so the engine's statics/TLS are visible) and adds
 non-static `fr_py_*` entry points. `forkrun_ring.c` itself is unmodified.
 
-## Install (W-PY10)
+## Install
 
 ```bash
-pip install .            # builds the substrate, installs the wheel
+pip install forkrun      # from PyPI, no compiler needed
+pip install .            # from a checkout; builds the substrate
 ```
+
+The release set is **six wheels plus one sdist**:
+
+- one wheel per supported CPython minor — **3.10, 3.11, 3.12, 3.13,
+  3.14, 3.15** (GIL builds) — tagged `cp3XX-cp3XX-manylinux_2_28_<arch>`;
+- each wheel carries the UDF helper compiled for **that** minor (the
+  helper links `libpython3.XX.so`, so the minor is a hard constraint,
+  not a preference);
+- one source distribution, which contains no binaries: `setup.py`
+  rebuilds the substrate and launcher on install, and the UDF helper is
+  built per-minor by `tools/wheel_matrix.py` for wheel builds.
+
+Free-threaded CPython is deliberately not served by the helper route.
+`setup.py` and the runtime ask the same detector and both decline it:
+the free-threaded build links `libpython3.XXt.so`, the artifacts are
+mutually load-incompatible, and that configuration has no measured
+evidence. A free-threaded interpreter can still use the generic
+substrate-only path.
 
 - No `src/` move: `package_dir={"": "python"}` maps `python/forkrun/`
   to the wheel top-level; tests never ship (no `__init__.py` under
   `python/tests/`). Version single-sources from `__version__`.
-- System build deps: `gcc make bash-devel` (Fedora; same rule as the
-  canary — Debian has no bash-headers package). `setup.py` drives
-  `Makefile.substrate` (single source of flags) with a documented
-  gcc fallback.
+- System build deps for a source install: `gcc make bash-devel`
+  (Fedora; Debian has no bash-headers package). `setup.py` drives
+  `Makefile.substrate` (single source of flags) with a documented gcc
+  fallback.
 - Linux-only: import raises `ImportError` off Linux (plan §4).
-- No PyPI upload in this work order — local wheel (`pip wheel .`)
-  only; reproducible-builds/signing gate the first PyPI release.
+- Release artifacts are assembled and validated by
+  `tools/release_bundle.py`: exactly one wheel per supported minor,
+  byte-identical `forkrun/*.py` in every wheel and the sdist, a
+  `SHA256SUMS` manifest, and `BUILD-INFO.txt` provenance naming the
+  source commit. `python/release_check.py` validates that bundle when
+  `FORKRUN_RELEASE_BUNDLE=<dir>` is set.
 
 ## Use
 

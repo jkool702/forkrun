@@ -36,3 +36,19 @@ include LICENSE
 include pyproject.toml
 include setup.py
 include MANIFEST.in
+
+# A source distribution is SOURCE. setup.py's package_data lists the
+# substrate .so, the cleanroom launcher and (when present) the UDF
+# helper because those are what a WHEEL ships -- but setuptools also
+# collects package_data into the sdist, so a packager who has built the
+# tree would otherwise publish their own host-built binaries inside a
+# "source" artifact. That makes the sdist's CONTENTS depend on build
+# state (it is not reproducible), puts an untraceable glibc-specific
+# binary in a source release, and can carry a helper built for the
+# packager's interpreter. setup.py rebuilds the substrate and launcher
+# on install, and the UDF helper is built per-minor by
+# tools/wheel_matrix.py, so nothing here is needed from the sdist.
+# Enforced by tools/wheel_matrix.py::validate_sdist (release gate +
+# release-bundle validator), not by this comment.
+global-exclude *.so
+exclude python/forkrun/_forkrun_cleanroom

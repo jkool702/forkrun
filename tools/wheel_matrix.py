@@ -347,6 +347,257 @@ def validate_wheel(wheel_path, minor):
     return problems
 
 
+# --- distribution-content rules (shared by the release gate and the
+# --- release-bundle validator) -----------------------------------------
+#
+# These are RELEASE rules, not build steps: the release gate
+# (python/release_check.py) and the bundle validator
+# (tools/release_bundle.py) must agree about what a shippable wheel
+# METADATA section and a shippable sdist CONTAIN, so the rule lives
+# here once and both consume it. Two copies is how they drift.
+
+# Every field a shippable wheel's METADATA must carry. `Version:` is
+# formatted with the expected version, so a wheel built for another
+# release cannot pass by naming itself.
+REQUIRED_METADATA_FIELDS = (
+    "Name: forkrun",
+    "Version: %s",
+    "Summary:",
+    "Home-page:",
+    "Requires-Python: >=3.10",
+    "License:",
+    "Classifier:",
+    "Development Status :: 4 - Beta",
+)
+
+# Build products that must NEVER appear in a source distribution. The
+# sdist is source: setup.py rebuilds the substrate and launcher on
+# install, and the UDF helper is built per-minor by this module's
+# matrix. A host-built copy in the sdist makes the artifact's CONTENTS
+# depend on whether the packager's tree happened to be built, and puts
+# an unreproducible binary inside a "source" artifact.
+SDIST_FORBIDDEN_BASENAMES = ("libforkrun_python.so", "_forkrun_cleanroom")
+
+# Source files the sdist must carry for an install from source to work:
+# the substrate build needs the engine TU, the shim, the stubs, the
+# plugin ABI header and the makefile, and the UDF helper compiles from
+# fr_udf.c + fr_udf.h.
+SDIST_REQUIRED_FILES = (
+    "forkrun_ring.c",
+    "forkrun_substrate.h",
+    "forkrun_trace.h",
+    "substratestubs.c",
+    "Makefile.substrate",
+    "ring_loadables/forkrun_plugin.h",
+    "python/forkrun/_shim.c",
+    "python/forkrun/fr_udf.c",
+    "python/forkrun/fr_udf.h",
+    "python/README.md",
+    "LICENSE",
+    "setup.py",
+    "pyproject.toml",
+)
+
+
+def validate_metadata(wheel_path, version):
+    """The wheel METADATA rule. Returns a list of problems.
+
+    Reads the ONE `forkrun-*.dist-info/METADATA` member: a wheel with
+    zero or several is malformed, and picking one silently would make
+    the check depend on zip ordering.
+    """
+    import zipfile
+    problems = []
+    try:
+        with zipfile.ZipFile(wheel_path) as zf:
+            names = [n for n in zf.namelist()
+                     if n.endswith(".dist-info/METADATA")
+                     and n.startswith("forkrun-")]
+            if len(names) != 1:
+                return ["wheel must contain exactly one forkrun "
+                        "dist-info/METADATA, found %d" % len(names)]
+            meta = zf.read(names[0]).decode("utf-8", "replace")
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        return ["cannot read wheel METADATA: %s" % (exc,)]
+    for field in REQUIRED_METADATA_FIELDS:
+        want = field % version if "%s" in field else field
+        if want not in meta:
+            problems.append("METADATA missing %r" % (want,))
+    return problems
+
+
+def sdist_source_members(sdist_path):
+    """The sdist members that are REAL repo files, with their bytes.
+
+    Returns (top, members) where `top` is the `forkrun-<ver>/` prefix and
+    `members` maps the REPO-RELATIVE path to the member's bytes.
+
+    setuptools always writes a few files that have no repo counterpart
+    (PKG-INFO, setup.cfg, and the egg-info directory). They are excluded
+    by NAME, so a genuinely missing source file cannot hide behind the
+    exclusion: every other member must exist in the tree, which is what
+    makes the tree-fingerprint check in tools/release_bundle.py
+    meaningful.
+    """
+    import tarfile
+    generated = ("PKG-INFO", "setup.cfg")
+    generated_dirs = ("python/forkrun.egg-info", "forkrun.egg-info")
+    members = {}
+    with tarfile.open(sdist_path) as tf:
+        entries = tf.getmembers()
+        if not entries:
+            raise ValueError("empty sdist: %s" % sdist_path)
+        top = entries[0].name.split("/")[0] + "/"
+        for entry in entries:
+            name = entry.name
+            # A directory is NOT a source member. Tar writes directory
+            # names without a trailing slash, so `name.endswith("/")`
+            # does not identify them -- and keeping one would make the
+            # tree fingerprint claim the sdist ships a file called
+            # `python`, which no checkout has. `isdir()` is the property,
+            # not a guess from the spelling.
+            if entry.isdir() or not name.startswith(top):
+                continue
+            rel = name[len(top):]
+            if (rel in generated
+                    or rel in generated_dirs
+                    or rel.startswith("python/forkrun.egg-info/")
+                    or rel.startswith("forkrun.egg-info/")):
+                continue
+            fh = tf.extractfile(entry)
+            members[rel] = fh.read() if fh is not None else b""
+    return top, members
+
+
+def validate_sdist(sdist_path, version):
+    """The source-distribution content rule. Returns a list of problems.
+
+    Three properties, in one place:
+
+    * it is THIS release (top-level directory and PKG-INFO version);
+    * it carries every source the source-only install path needs;
+    * it carries NO build products -- a "source" artifact whose contents
+      depend on whether the packager's tree was built is not reproducible
+      and its binaries are not traceable to a release build.
+    """
+    import tarfile
+    problems = []
+    want_top = "forkrun-%s/" % version
+    try:
+        top, members = sdist_source_members(sdist_path)
+        with tarfile.open(sdist_path) as tf:
+            pkg_info = None
+            for name in tf.getnames():
+                if name == top + "PKG-INFO":
+                    fh = tf.extractfile(name)
+                    pkg_info = fh.read().decode("utf-8", "replace")
+                    break
+    except (OSError, KeyError, ValueError, tarfile.TarError) as exc:
+        return ["cannot read sdist %s: %s"
+                % (os.path.basename(sdist_path), exc)]
+    if top != want_top:
+        problems.append("sdist top-level directory is %r, expected %r"
+                        % (top, want_top))
+    if pkg_info is None:
+        problems.append("sdist has no PKG-INFO")
+    elif ("Version: %s" % version) not in pkg_info:
+        problems.append("sdist PKG-INFO does not name version %s"
+                        % version)
+    for rel in SDIST_REQUIRED_FILES:
+        if rel not in members:
+            problems.append("sdist missing %s" % rel)
+    for rel in sorted(members):
+        base = os.path.basename(rel)
+        if base.endswith(".so") or base in SDIST_FORBIDDEN_BASENAMES:
+            problems.append(
+                "sdist carries the build product %s: a source "
+                "distribution must not contain binaries (setup.py "
+                "rebuilds them on install; the UDF helper is built "
+                "per-minor). MANIFEST.in must exclude it." % (rel,))
+    return problems
+
+
+def helper_symbol_problems(helper_path, header=None):
+    """The UDF helper's symbol rule. Returns a list of problems.
+
+    The mismatch barrier's negative control compiles
+    -DFR_UDF_REPORT_VERSION_OVERRIDE, which exports an EXTRA marker
+    symbol; a shipped helper must not carry it. The typed version symbol
+    must be present (or the launcher's barrier refuses every call), and
+    the pre-Round-15 symbol must be absent (or the helper predates the
+    header it claims to implement).
+
+    ONE implementation: python/release_check.py checks the tree's
+    helpers with it and tools/release_bundle.py checks each wheel's
+    helper with it.
+    """
+    import re as _re
+    if header is None:
+        header = os.path.join(REPO_ROOT, "forkrun_udf_version.h")
+    with open(header) as fh:
+        m = _re.search(r'#define\s+FR_UDF_BUILT_VERSION_SYMBOL\s+"([^"]+)"',
+                       fh.read())
+    if not m:
+        return ["could not read FR_UDF_BUILT_VERSION_SYMBOL from %s -- if "
+                "it moved, this rule must be taught where it lives rather "
+                "than carrying a stale copy" % header]
+    expected = m.group(1)
+    problems = []
+    proc = subprocess.run(["nm", "-D", "--defined-only", helper_path],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return ["nm failed on %s: %s"
+                % (helper_path, proc.stderr[-500:])]
+    lines = proc.stdout.splitlines()
+    offenders = [ln for ln in lines
+                 if "fr_udf_TEST_VERSION_OVERRIDE_MARKER" in ln]
+    if offenders:
+        problems.append(
+            "TEST-ONLY version override marker is PRESENT in %s -- this "
+            "artifact was built with -DFR_UDF_REPORT_VERSION_OVERRIDE and "
+            "must not be shipped: %s"
+            % (os.path.basename(helper_path), "; ".join(offenders)))
+    if not any(expected in ln for ln in lines):
+        problems.append(
+            "%s does not export %s, so the launcher's version barrier "
+            "cannot verify it and every UDF call would be refused"
+            % (os.path.basename(helper_path), expected))
+    stale = [ln for ln in lines
+             if _re.search(r"\bfr_udf_built_version\b", ln)]
+    if stale:
+        problems.append(
+            "%s still exports the pre-Round-15 fr_udf_built_version -- it "
+            "was built from source older than %s, which declares %s: %s"
+            % (os.path.basename(helper_path), header, expected,
+               "; ".join(stale)))
+    return problems
+
+
+def helper_libpython_problems(helper_path, minor):
+    """Does this helper LINK the libpython of `minor`?
+
+    The extension SUFFIX is a name; the NEEDED entry is what the loader
+    will actually resolve. A helper renamed (or copied) to look like
+    another minor's would pass a suffix-only check and fail at dlopen,
+    so the bundle validator checks the linkage too.
+    """
+    want = "libpython%s.so" % minor
+    proc = subprocess.run(["objdump", "-p", helper_path],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return ["objdump failed on %s: %s"
+                % (helper_path, proc.stderr[-500:])]
+    needed = [ln.split()[-1] for ln in proc.stdout.splitlines()
+              if "NEEDED" in ln and ln.split()]
+    if not any(n.startswith(want) for n in needed):
+        return ["%s does not link %s (NEEDED: %s) -- the helper's "
+                "extension suffix claims %s but the artifact was not "
+                "built against that interpreter"
+                % (os.path.basename(helper_path), want,
+                   ", ".join(needed), minor)]
+    return []
+
+
 def auditwheel_repair(wheel_path, out_dir, interpreter):
     """Run auditwheel repair for one wheel, in place.
 

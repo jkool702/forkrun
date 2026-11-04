@@ -7,8 +7,8 @@
 |---|---|
 | Linux (any recent kernel) | Uses `memfd_create`, `splice`, `fallocate` — import raises `ImportError` anywhere else |
 | Python 3.10+ | Pure-Python frontend + ctypes (no Cython, no extensions to compile yourself) |
-| `gcc` + `make` | Builds the C substrate at install time |
-| bash headers | Fedora/RHEL: `dnf install -y gcc make bash-devel python3-devel`. Debian/Ubuntu do **not** package bash headers — use the Fedora container (same rule as the substrate Makefile) |
+| `gcc` + `make` | Needed only for a **source** install; the release wheels carry the prebuilt substrate |
+| bash headers | Source install only: Fedora/RHEL `dnf install -y gcc make bash-devel python3-devel`. Debian/Ubuntu do **not** package bash headers — use the Fedora container (same rule as the substrate Makefile) |
 
 ## The optional Python-UDF helper (`_fr_udf`)
 
@@ -92,12 +92,15 @@ the wheel must not claim a minor it cannot prove.
 pip install forkrun
 ```
 
-This builds the C substrate (`python/forkrun/libforkrun_python.so`)
-during install and places it next to the package. Verify:
+PyPI serves six per-minor wheels (CPython 3.10-3.15, GIL builds), each
+carrying the prebuilt substrate and the UDF helper for that minor, plus
+one source distribution. A wheel install needs no compiler; a source
+install builds `python/forkrun/libforkrun_python.so` during install and
+places it next to the package. Verify:
 
 ```bash
 python3 -c "import forkrun; print(forkrun.__engine_version__)"
-# e.g. "v3.5.2" — "unknown" means the .so didn't build
+# e.g. "v3.6.2" — "unknown" means the .so didn't build
 ```
 
 ## From source

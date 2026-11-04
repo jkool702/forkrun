@@ -14,10 +14,12 @@ on:
       - "setup.py"
       - "tools/build_wheel.sh"
       - "tools/wheel_matrix.py"
+      - "tools/release_bundle.py"
       - "tools/check_glibc_versions.py"
       - "tools/gen_python_matrix.py"
       - "tools/acceptance_installed_wheel.py"
       - "tools/ci_udf_acceptance.sh"
+      - "MANIFEST.in"
       - ".github/workflows/python-check.yml"
   pull_request:
     branches: [ "main" ]
@@ -33,10 +35,12 @@ on:
       - "setup.py"
       - "tools/build_wheel.sh"
       - "tools/wheel_matrix.py"
+      - "tools/release_bundle.py"
       - "tools/check_glibc_versions.py"
       - "tools/gen_python_matrix.py"
       - "tools/acceptance_installed_wheel.py"
       - "tools/ci_udf_acceptance.sh"
+      - "MANIFEST.in"
       - ".github/workflows/python-check.yml"
 
   workflow_dispatch:
@@ -197,6 +201,96 @@ jobs:
             -w /src \
             quay.io/pypa/manylinux_2_28_x86_64 \
             bash /src/tools/ci_udf_acceptance.sh "${{ matrix.py }}"
+      # The wheel this job built and TESTED is the only wheel any release
+      # may ship. Until v3.6.2 it was deleted with the job: `dist/` is
+      # gitignored build space and nothing uploaded it, so a green matrix
+      # proved wheels CAN be built but produced no artifact to publish --
+      # and the wheels a later job might rebuild are NOT the wheels that
+      # passed acceptance. Upload the REPAIRED wheel only (`raw/` holds
+      # the intermediate linux_x86_64 wheel, which PyPI rejects and which
+      # auditwheel exists to replace). 90 days outlives a release cycle.
+      - name: Upload repaired UDF wheel (cp${{ matrix.tag }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: forkrun-udf-wheel-${{ matrix.tag }}
+          path: dist/udf/${{ matrix.py }}/repaired/*.whl
+          if-no-files-found: error
+          retention-days: 90
+
+  release-bundle:
+    # THE RELEASE SET. The six wheels are the ones udf-acceptance built
+    # AND installed-tested; this job only assembles, validates and seals
+    # them. `needs: udf-acceptance` waits for every matrix cell, so a
+    # single failed minor means no bundle exists at all (an incomplete
+    # matrix must never look like a release).
+    needs: [udf-acceptance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download the six repaired wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: forkrun-udf-wheel-cp3*
+          path: bundle/wheels
+          merge-multiple: true
+      - name: Build the sdist from this commit
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --upgrade build
+          python3 -m build --sdist --outdir bundle/sdist .
+          ls -l bundle/sdist
+      # auditwheel show is the reference tool's own statement about the
+      # manylinux floor; the bundle validator RE-DERIVES that floor from
+      # the ELF and fails if the tag promises less than the binaries
+      # need, so this is corroborating evidence in the run log rather
+      # than the only check.
+      - name: auditwheel show on every repaired wheel
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --upgrade auditwheel
+          for whl in bundle/wheels/*.whl; do
+            echo "=== $(basename "$whl")"
+            python3 -m auditwheel show "$whl"
+          done
+      - name: Assemble and validate the release candidate
+        run: |
+          set -euo pipefail
+          python3 tools/release_bundle.py assemble \
+            --wheels bundle/wheels \
+            --sdist bundle/sdist \
+            --out dist/release-candidate \
+            --source-commit "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF" \
+            --source-workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - name: Validate the assembled bundle (independent pass)
+        run: |
+          set -euo pipefail
+          python3 tools/release_bundle.py validate dist/release-candidate \
+            --expect-tree --expect-source-commit "$GITHUB_SHA"
+          # The manifest must be checkable by the tool every user has:
+          # `sha256sum -c` inside the bundle directory, no help from us.
+          ( cd dist/release-candidate && sha256sum -c SHA256SUMS )
+      - name: twine check (wheel + sdist metadata renders)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --upgrade twine
+          python3 -m twine check --strict \
+            dist/release-candidate/*.whl \
+            dist/release-candidate/*.tar.gz
+      - name: Show the release candidate
+        run: |
+          set -euo pipefail
+          ls -l dist/release-candidate
+          cat dist/release-candidate/BUILD-INFO.txt
+          cat dist/release-candidate/SHA256SUMS
+      - name: Upload the release-candidate bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: forkrun-release-candidate-${{ github.sha }}
+          path: dist/release-candidate
+          if-no-files-found: error
+          retention-days: 90
 
   sanitizer-asan-ubsan:    # W-REL1/R6: ASan+UBSan legs — ADVISORY for v3.6.0
     # (continue-on-error: red here never blocks the tag) flipping to

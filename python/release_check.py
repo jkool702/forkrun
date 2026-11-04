@@ -9,8 +9,9 @@ Checks: version coherence, tag freedom (F6.1), changelog finality
 (F6.2, DESIGNED RED until the owner finalizes the heading at tag
 time), full test suite, canary link check, IDL schema + freshness
 (F6.3) checks, reproducible builds, single-artifact wheel/sdist
-build with recorded checksums (F6.4), doc twins, clean tree, frozen
-engine.
+build with recorded checksums (F6.4), the release bundle
+(FORKRUN_RELEASE_BUNDLE: six per-minor UDF wheels + sdist, checksums
+and provenance), doc twins, clean tree, frozen engine.
 
 Exit 0 + "ALL CHECKS PASSED" means ready to tag. Anything else means
 DO NOT TAG. (The tree-clean and frozen-engine checks require a
@@ -52,8 +53,13 @@ FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
 
 CHECKS = []
 
+# The default reason a gated check is not applicable. Kept as one string
+# so the message cannot drift from the gate it describes.
+_TAGS_SKIP = ("not applicable here; set FORKRUN_RELEASE_CHECK_TAGS=1 "
+              "to include")
 
-def check(name, only_if=None):
+
+def check(name, only_if=None, skip_message=None):
     """Register a release check.
 
     `only_if` gates a check that is only MEANINGFUL in some situations.
@@ -61,14 +67,20 @@ def check(name, only_if=None):
     omitted -- a check that disappears is indistinguishable from a check
     that was never written.
 
-    Currently used by exactly one check, the tag-is-free guard, which is
-    only applicable in the moments before tagging. See its decorator.
+    `skip_message` names the condition for the gated check. Two checks
+    are gated for opposite reasons (the tag guard applies only in the
+    moments before tagging; the bundle check applies only when a bundle
+    was produced), so one shared message would be actively misleading.
+
+    Currently used by the tag-is-free guard and the release-bundle
+    validator. See their decorators.
     """
     def deco(fn):
         # The gate rides on the function rather than as a third tuple
         # element: CHECKS is unpacked as (name, fn) elsewhere, and
         # widening the tuple would silently break those consumers.
         fn.only_if = only_if
+        fn.skip_message = skip_message or _TAGS_SKIP
         CHECKS.append((name, fn))
         return fn
     return deco
@@ -522,6 +534,20 @@ def check_canary():
     return True
 
 
+def _wheel_matrix():
+    """tools/wheel_matrix.py -- the one wheel/sdist artifact authority.
+
+    Both this gate and tools/release_bundle.py import it, so the
+    tag/helper rule, the METADATA rule, the sdist-content rule and the
+    helper-symbol rule each have exactly one implementation.
+    """
+    tools = os.path.join(REPO_ROOT, "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import wheel_matrix
+    return wheel_matrix
+
+
 @check("UDF helper: no test-only version override in the shipped artifact")
 def check_no_udf_version_override():
     """The mismatch barrier's negative control must be UNREACHABLE in a
@@ -539,62 +565,23 @@ def check_no_udf_version_override():
     nothing to inspect: the release check has to be able to PROVE the flag
     cannot reach a shipped artifact, and that means looking in the ELF
     dynamic symbol table rather than trusting the build command.
+
+    The RULE lives in tools/wheel_matrix.py::helper_symbol_problems --
+    the bundle validator checks each wheel's helper with the same
+    function, so a shipped helper cannot pass one gate and fail the
+    other. Round 15 moved the launcher to the typed ABI
+    (fr_udf_built_version_v2) while this check still asserted the bare
+    literal, and it passed as a prefix substring; reading the symbol
+    name from the header is what prevents that class of rot.
     """
     import glob
-    import re
-    import subprocess as _sp
     helpers = glob.glob("python/forkrun/_fr_udf*.so")
     assert helpers, ("no UDF helper artifact found to inspect -- run "
                      "`make -f Makefile.substrate udf-lib` first")
-
-    # Read the symbol name from the shared header rather than hardcoding a
-    # literal. Round 15 moved the launcher to the typed ABI
-    # (fr_udf_built_version_v2), but this check kept asserting the literal
-    # "fr_udf_built_version" and STILL PASSED, because the test was a
-    # prefix SUBSTRING match: "fr_udf_built_version" is a prefix of
-    # "fr_udf_built_version_v2". The artifact exports zero bare
-    # fr_udf_built_version and the gate was green regardless.
-    #
-    # That is the same failure this check's own docstring warns against
-    # ("it would pass for the wrong reason even with the comparison
-    # deleted") -- a check that cannot tell the typed symbol from the old
-    # one verifies nothing. Matching the header's name exactly, plus the
-    # stale-symbol assertion below, makes the two impossible to confuse
-    # again -- the same single-source discipline as TD-01.
-    header = "forkrun_udf_version.h"
-    with open(header) as fh:
-        m = re.search(r'#define\s+FR_UDF_BUILT_VERSION_SYMBOL\s+"([^"]+)"',
-                      fh.read())
-    assert m, ("could not read FR_UDF_BUILT_VERSION_SYMBOL from %s -- if it "
-               "moved, this gate must be taught where it lives rather than "
-               "carrying a stale copy" % header)
-    expected = m.group(1)
-
+    wm = _wheel_matrix()
     for path in helpers:
-        proc = _sp.run(["nm", "-D", "--defined-only", path],
-                       capture_output=True, text=True)
-        assert proc.returncode == 0, (
-            "nm failed on %s: %s" % (path, proc.stderr[-500:]))
-        offenders = [ln for ln in proc.stdout.splitlines()
-                     if "fr_udf_TEST_VERSION_OVERRIDE_MARKER" in ln]
-        assert not offenders, (
-            "TEST-ONLY version override marker is PRESENT in %s -- this "
-            "artifact was built with -DFR_UDF_REPORT_VERSION_OVERRIDE and "
-            "must not be shipped:\n%s" % (path, "\n".join(offenders)))
-        assert any(expected in ln
-                   for ln in proc.stdout.splitlines()), (
-            "%s does not export %s, so the launcher's version barrier "
-            "cannot verify it and every UDF call would be refused"
-            % (path, expected))
-        # And the pre-ABI-renaming symbol must be ABSENT, so a helper built
-        # from pre-Round-15 source can never satisfy this gate again.
-        stale = [ln for ln in proc.stdout.splitlines()
-                 if re.search(r"\bfr_udf_built_version\b", ln)]
-        assert not stale, (
-            "%s still exports the pre-Round-15 fr_udf_built_version -- it "
-            "was built from source older than %s, which declares %s. "
-            "Rebuild the helper:\n%s"
-            % (path, header, expected, "\n".join(stale)))
+        problems = wm.helper_symbol_problems(path)
+        assert not problems, "\n".join(problems)
     return True
 
 
@@ -662,13 +649,18 @@ def check_reproducible():
 
 
 def _wheel_glibc_floor(wheel):
-    """Highest GLIBC_x.y the wheel's .so references, or None.
+    """Highest GLIBC_x.y the wheel's binaries reference, or None.
 
     The manylinux tag in a wheel filename is a claim about the libc the
     binary needs. It is metadata — nothing validates it at build time —
     so the release gate re-derives the floor from the ELF. Returns None
     when the toolchain to do so (binutils) is unavailable, so the gate
     degrades to tag-shape validation rather than failing spuriously.
+
+    EVERY .so member is inspected and the MAXIMUM taken: a wheel can
+    carry the substrate AND a per-minor UDF helper, and checking only
+    the first member (zip order) would let the other one need a newer
+    glibc than the tag claims.
     """
     import zipfile
     try:
@@ -676,16 +668,18 @@ def _wheel_glibc_floor(wheel):
             names = [n for n in zf.namelist() if n.endswith(".so")]
             if not names:
                 return None
-            blob = zf.read(names[0])
+            blobs = [zf.read(n) for n in names]
     except (OSError, KeyError, zipfile.BadZipFile):
         return None
-    proc = subprocess.run(["objdump", "-T", "-"], input=blob,
-                          capture_output=True)
-    if proc.returncode != 0:
-        return None
-    vers = {(int(a), int(b)) for a, b in
-            re.findall(r"GLIBC_(\d+)\.(\d+)", proc.stdout.decode(
-                "utf-8", "replace"))}
+    vers = set()
+    for blob in blobs:
+        proc = subprocess.run(["objdump", "-T", "-"], input=blob,
+                              capture_output=True)
+        if proc.returncode != 0:
+            return None
+        vers |= {(int(a), int(b)) for a, b in
+                 re.findall(r"GLIBC_(\d+)\.(\d+)", proc.stdout.decode(
+                     "utf-8", "replace"))}
     return max(vers) if vers else None
 
 
@@ -724,19 +718,13 @@ def check_wheel():
 
 @check("Wheel: METADATA is complete")
 def check_metadata():
-    import zipfile
+    # The field list is RELEASE metadata, not a wheel-build detail: the
+    # bundle validator checks each of the six release wheels against the
+    # same rule (tools/wheel_matrix.py::validate_metadata), so a field
+    # dropped here cannot survive there.
     wheel, _ = _ensure_artifacts()
-    with zipfile.ZipFile(wheel) as zf:
-        meta_names = [n for n in zf.namelist()
-                      if n.endswith(".dist-info/METADATA")]
-        assert meta_names, "no METADATA in wheel"
-        meta = zf.read(meta_names[0]).decode("utf-8")
-    for field in ("Name: forkrun", "Version: " + PY_VERSION,
-                  "Summary:", "Home-page:",
-                  "Requires-Python: >=3.10",
-                  "License:", "Classifier:"):
-        assert field in meta, "METADATA missing %r" % field
-    assert "Development Status :: 4 - Beta" in meta
+    problems = _wheel_matrix().validate_metadata(wheel, PY_VERSION)
+    assert not problems, "\n".join(problems)
     return True
 
 
@@ -745,25 +733,17 @@ def check_sdist():
     # W-REL5-F (F6.4): uses the exact fresh sdist from the shared
     # build (stale tarballs are removed first -- the old glob could
     # pass on leftovers).
-    import tarfile
+    #
+    # The content rule (required sources + no build products) lives in
+    # tools/wheel_matrix.py::validate_sdist, which the release-bundle
+    # validator applies to the bundle's sdist as well. The "no build
+    # products" half is why MANIFEST.in excludes the substrate .so, the
+    # launcher and any UDF helper: an sdist whose payload depends on
+    # whether the packager's tree was built is not reproducible, and
+    # its binaries are not traceable to a release build.
     _, sdist = _ensure_artifacts()
-    with tarfile.open(sdist) as tf:
-        names = tf.getnames()
-    top = "forkrun-%s/" % PY_VERSION
-    needed = ["forkrun_ring.c", "forkrun_substrate.h",
-              "forkrun_trace.h",
-              "substratestubs.c", "Makefile.substrate",
-              "ring_loadables/forkrun_plugin.h",
-              "python/forkrun/_shim.c",
-              # P1 (DECISION-01) Phase 2: the UDF helper is built from
-              # source by users on the source-only path, so both the .c
-              # and the .h it includes must ship.
-              "python/forkrun/fr_udf.c",
-              "python/forkrun/fr_udf.h",
-              "python/README.md",
-              "LICENSE", "setup.py", "pyproject.toml"]
-    for rel in needed:
-        assert top + rel in names, "sdist missing %s" % rel
+    problems = _wheel_matrix().validate_sdist(sdist, PY_VERSION)
+    assert not problems, "\n".join(problems)
     return True
 
 
@@ -772,6 +752,53 @@ def check_readme_version():
     with open(os.path.join(REPO_ROOT, "python", "README.md")) as fh:
         content = fh.read()
     assert PY_VERSION in content, "README lacks %s" % PY_VERSION
+    return True
+
+
+BUNDLE_ENV = "FORKRUN_RELEASE_BUNDLE"
+_BUNDLE_SKIP = ("no release bundle supplied; set FORKRUN_RELEASE_BUNDLE="
+                "<dir> to validate the six-wheel matrix + sdist")
+
+
+def _bundle_path():
+    return os.environ.get(BUNDLE_ENV, "").strip()
+
+
+@check("Bundle: six CPython wheels + sdist, checksums and provenance",
+       only_if=lambda: bool(_bundle_path()), skip_message=_BUNDLE_SKIP)
+def check_release_bundle():
+    """Validate the ACTUAL distribution set, not a build of it.
+
+    A green wheel matrix and a green installed-wheel acceptance prove
+    that wheels CAN be produced; they do not prove that the files being
+    released are the ones that were tested. This check reads the bundle
+    the release will publish and re-derives every claim from its bytes:
+    exactly one wheel per supported minor, the tag/helper/METADATA rules,
+    the engine version inside each wheel, one sdist with no build
+    products, the SHA-256 manifest, and a provenance record that
+    describes THIS bundle.
+
+    The rule implementations are shared, not copied:
+    tools/release_bundle.py imports tools/wheel_matrix.py (tags, helper,
+    METADATA, sdist) and this module (versions, glibc floor, engine
+    version), so the bundle cannot pass here and fail its own assembly.
+
+    `--expect-tree` compares the sdist's SOURCE PAYLOAD with this
+    checkout byte for byte. That is deliberately stricter than comparing
+    the recorded commit SHA: the owner's final release commit changes
+    only release documentation, which is not part of the sdist, and a
+    content comparison is the property that actually matters (the
+    artifacts were built from this source). The commit that produced the
+    bundle is still recorded, format-checked, and reported in
+    TAG_PREP.
+    """
+    path = _bundle_path()
+    assert os.path.isdir(path), \
+        "%s=%r is not a directory" % (BUNDLE_ENV, path)
+    proc = _run([sys.executable, "tools/release_bundle.py", "validate",
+                 path, "--expect-tree"], timeout=900)
+    assert proc.returncode == 0, \
+        (proc.stdout + proc.stderr)[-6000:]
     return True
 
 
@@ -842,10 +869,8 @@ def main(argv=None):
         if only_if is not None:
             try:
                 if not only_if():
-                    print("  [SKIP] %s\n         "
-                          "(not applicable here; set "
-                          "FORKRUN_RELEASE_CHECK_TAGS=1 to include)"
-                          % name)
+                    print("  [SKIP] %s\n         (%s)"
+                          % (name, getattr(fn, "skip_message", _TAGS_SKIP)))
                     continue
             except Exception as exc:  # noqa: BLE001
                 print("  [ERROR] %s\n         gate failed: %s"

@@ -2,9 +2,16 @@
 
 ## v3.6.2 — unreleased
 
-(Version bump for the 3.6.2 / 0.18.0 release; closeout notes to follow.)
+Python frontend 0.18.0; engine `v3.6.2` (frozen). This release closes
+the SIGINT deferral boundary, seals the distribution as a validated
+release bundle (six per-minor CPython wheels plus one sdist), and lands
+the accumulated correctness and Single-Source-of-Truth work below.
 
-## Unreleased — a failed resume releases the source it opened
+The heading deliberately still says `unreleased`. Finalizing it is an
+owner act at tag time; until then `python/release_check.py` reports
+exactly that one expected failure and nothing else.
+
+### a failed resume releases the source it opened
 
 **Correctness, resource lifetime.** `_init_engine_source()` opens the
 source before initializing the process-global engine, so a rejected
@@ -28,7 +35,7 @@ a following valid run is byte-exact.
 Measured before the fix: +1 descriptor per failed resume (5 failures ->
 5 leaked fds); after: 0 across all four shapes.
 
-## Unreleased — the child-lifecycle helper stopped blaming the wrong test
+### the child-lifecycle helper stopped blaming the wrong test
 
 **Test infrastructure, no product change.** `assert_no_zombies()` did a
 single `waitpid(-1, WNOHANG)` and reported the result as a "zombie
@@ -68,7 +75,7 @@ the pre-change implementation and the changed one, 30 rounds each -- and
 **both were green**. The failures were the harness reporting a leftover
 child and blaming whichever test ran next.
 
-## Unreleased — the duplicated DECISIONS are now single points of truth
+### the duplicated DECISIONS are now single points of truth
 
 **Architecture, no behaviour change intended.** A function-level scan
 finds duplicated code; the expensive duplication is a decision written
@@ -118,7 +125,7 @@ now takes the configuration that varies and forwards it, and
 `python/tests/test_orderer_config.py` asserts that the NUMA executors
 ask for the NUMA orderer mode and the UMA ones do not.
 
-## Unreleased — a helper child's death is now decided in ONE place
+### a helper child's death is now decided in ONE place
 
 **Correctness, no API change.** The front end turns a helper child's
 non-zero exit into a fatal error in **28** places. D-PORT2/D6 taught
@@ -149,7 +156,7 @@ the consult precedes the abort in its block. Both are mutation-checked:
 unwiring one site fails the first, moving one consult after its abort
 fails the second.
 
-## Unreleased — the cleanroom's UDF route can import a C extension again
+### the cleanroom's UDF route can import a C extension again
 
 **Correctness and performance, no API change.** The cleanroom's
 `mode="udf"` route could not import **any** CPython extension module.
@@ -235,7 +242,7 @@ than taking the documented in-process fallback. The route stays
 `dev/supervisor/UDF_ROUTE_EXTENSION_IMPORT_DEFECT.md` has the full
 analysis.
 
-## Unreleased — `mode="udf"` falls back when the route is not selected
+### `mode="udf"` falls back when the route is not selected
 
 **The fallback now exists in every case it is documented for.** The
 `map-udf` route is served by the cleanroom launcher; the in-process
@@ -262,7 +269,7 @@ would put the user's state into the process that forks every worker.
 Tests: `python/tests/test_udf_fallback.py` (15 tests, mutation-checked).
 Work log: `dev/supervisor/WO_PY_UDF_FALLBACK_1_WORKLOG.md`.
 
-## Unreleased — the Python-UDF helper ships in a per-minor wheel
+### the Python-UDF helper ships in a per-minor wheel
 
 **Packaging, no API change.** The cleanroom's optional Python-UDF helper
 (`_fr_udf`, a separate CPython-linked shared object) was built by the
@@ -358,7 +365,7 @@ it as a new required argument, added as a condition of approval). The
 implementation under review is authoritative, so the PROSE was corrected,
 not the code.
 
-## Unreleased — the stream notification pipe is a window, not a queue
+### the stream notification pipe is a window, not a queue
 
 **Performance/memory, no API change.** The worker-completion notification
 pipe on the public `stream()` paths now asks for **4 KB** instead of 1 MB.
@@ -407,7 +414,7 @@ not close TD-13. A single batch can still generate large output, and
 measured effect is a reduction in peak retention for a slow consumer; the
 exact figures and the residual limitations are recorded in TD-13.
 
-## Unreleased — the reactor no longer loses a poison notification on its way out
+### the reactor no longer loses a poison notification on its way out
 
 **Correctness fix, no API change.** `poisoned` and `poisoned_batches` are
 read from two different places: the scalar from the engine, the index list
@@ -445,7 +452,7 @@ widens the window deliberately and asserts the count and the list describe
 the same run. A companion test asserts the widener is actually in force, so
 the regression cannot go vacuously green if the sweep stops being called.
 
-## Unreleased — F6 Stage 4: `posix_spawn` is the default cleanroom launcher
+### F6 Stage 4: `posix_spawn` is the default cleanroom launcher
 
 **Behaviour change, no API change.** The cleanroom routes now start the
 launcher with `os.posix_spawn()` instead of `os.fork()` + `os.execv()`.
@@ -487,7 +494,7 @@ large-heap process:
   fallback if a spawn fails at runtime — that is reported through the
   existing exit-127 path rather than silently re-running the work.
 
-## Unreleased — WO-CR-ROI-2: `map(plugin)` is default-on
+### WO-CR-ROI-2: `map(plugin)` is default-on
 
 **Behaviour change.** When `FORKRUN_CLEANROOM` is unset, `map(plugin)` now
 runs through the exec-based cleanroom launcher. `udf`, `spawn`,
@@ -553,7 +560,7 @@ All four blockers in `CLEANROOM_DEFAULT_ON_DECISION.md` are closed:
 * `stream(spawn)` has no route identifier, because it has no dispatch; a
   selectable-but-dead route is indistinguishable from being ignored.
 
-## Unreleased — CR-FIX1: the Python cleanroom launcher, hardened
+### CR-FIX1: the Python cleanroom launcher, hardened
 
 Scope: the UMA C-plugin cleanroom only. NUMA, Python UDF, a libpython
 helper and dynamic worker spawning are explicitly NOT implemented and
@@ -781,6 +788,121 @@ every above-floor finding raised `TypeError` instead of being reported —
 a gate that crashes is not a gate. `tools/gen_shim.py` hardcoded the
 extern count as `45` while the header carried `50`; the count is now
 derived from the same data the declarations come from.
+
+### SIGINT deferral: the boundary is a handshake, not a flag
+
+**Correctness, no API change.** The process-wide SIGINT deferral had
+two races at the moment a critical section closed, and the second one
+survived the first fix:
+
+- A recorder invocation already running when `end()` read its flag
+  could store *after* the read (the signal was lost) or after the flag
+  was cleared (it became a phantom in the next generation). A
+  `volatile sig_atomic_t` cannot fix an ordering problem, so the C
+  recorder is now a single `seq_cst` state word (`ARMED`, `CLOSING`,
+  `SEEN`, `PENDING`, `BROKEN`) and every transition is a CAS on it. A
+  recorder invocation never records into a closed generation: it either
+  hands off to the `end()` that is closing, or forwards through the
+  restored host disposition. `end()` restores the disposition, sets
+  `closing`, drains the in-flight invocation, exchanges the seen and
+  pending words, and clears the state; `begin()` consumes a defensive
+  `STALE` park by delivering it *before* opening the next section.
+- The recorder can only observe a signal the kernel has **delivered**.
+  A process-directed SIGINT whose eligible thread has not been
+  scheduled stays in the kernel pending set, so restoring the host
+  disposition let CPython's handler fire later at an arbitrary bytecode.
+  `end()` now blocks SIGINT on the closing thread and claims a still
+  pending signal with `sigtimedwait()` before restoring, again after
+  the in-flight drain, and once more after the generation closes. A
+  claimed signal is reported as `SEEN` and delivered synchronously on
+  the closing thread, exactly like a recorded one.
+
+**Failure is explicit.** A failed restore sets `broken`, leaves the
+recorder armed, and every later `begin()` fails closed; the recorder's
+last resort is `SIG_DFL` plus a re-raise so the process stays
+interruptible. A host disposition changed mid-section is never
+clobbered. On the Python side `DeferralError` reports arming, disarming
+and forked-child reset failures; `_arm()` handles `STALE` by delivering
+and retrying; a failed disarm while an exception is already unwinding
+records the failure **without replacing** that exception; and
+`after_fork_child()` bumps the generation so a copied parent scope is a
+no-op in the child (and never takes the state lock).
+
+**Delivery thread is part of the contract.** The host handler and
+`KeyboardInterrupt` run synchronously on the thread that closes the
+outermost section — which may be a background thread, because
+`_RUN_LOCK` permits a background run. Re-raising through the kernel to
+regain main-thread dispatch would reintroduce exactly the late-interrupt
+bug this facility exists to prevent.
+
+**Resume diagnosis.** `checkpoint_on_abort()` now records
+`horizon_at_entry`/`jagged_at_entry` *before* `fr_py_abort()`, so
+"mid-pipeline" is measured rather than asserted; `test_resume_sigint`
+pins the entry frontier, the published frontier, the sidecar, and the
+published category.
+
+Coverage: `TestRecorderConcurrency` (12), `TestBackgroundThreadRun`
+(5), a mutation-checked fork-generation test, a background publication
+test, plus deterministic tests for both halves of the boundary — one
+keeps a SIGINT in `sigpending()` and asserts synchronous delivery on
+the closing thread; the other closes the final section with a recorder
+invocation provably in flight and asserts forwarding rather than a park.
+`test_wrel5b` now sends taxonomy SIGINT from a short-lived **sender
+process** instead of a `SIGALRM` handler: a `KeyboardInterrupt` raised
+inside a nested Python handler can bypass the interrupted frame's
+`except BaseException` (measured 1/60 under load), which was a test
+defect, not a product defect.
+
+### The release set is a bundle, not a green matrix
+
+**Packaging and release integrity.** A green wheel matrix proved wheels
+*could* be built; it produced no artifact to publish, and the wheels a
+later job might rebuild were not the wheels that passed acceptance.
+v3.6.2 makes the distribution itself the checked object:
+
+- **CI keeps the tested wheels.** Each `udf-acceptance` cell uploads
+  its repaired per-minor wheel (`forkrun-udf-wheel-cp3XX`, 90-day
+  retention, `if-no-files-found: error`). A new `release-bundle` job
+  waits for the whole matrix, downloads all six, builds the sdist from
+  the same commit, runs `auditwheel show`, assembles the bundle,
+  validates it, verifies `SHA256SUMS` with plain `sha256sum -c`, runs
+  `twine check --strict`, and uploads the consolidated candidate.
+- **The release gate validates the actual files.**
+  `python/release_check.py` gains a `FORKRUN_RELEASE_BUNDLE=<dir>` check:
+  mandatory when the variable is set, reported not-applicable otherwise
+  (with its own reason, not the tag gate's). It re-derives every claim
+  from the bundle's bytes.
+- **One rule, two consumers.** `tools/wheel_matrix.py` now owns the
+  release-content rules — supported minors, wheel tags, METADATA
+  fields, sdist required sources and forbidden build products, the UDF
+  helper's symbol set, and the helper's real `libpython` linkage. Both
+  the release gate and the new `tools/release_bundle.py` import them, so
+  a wheel cannot pass one gate and fail the other. The glibc-floor check
+  now scans **every** `.so` in a wheel and takes the maximum, not the
+  first member in zip order.
+- **Same-source proof, by content.** Every wheel's `forkrun/*.py` must
+  be byte-identical to the same file in the sdist, and the sdist's
+  source payload is fingerprinted; `validate --expect-tree` recomputes
+  that fingerprint from the checkout. That is stricter than comparing a
+  commit SHA for the property that matters: the owner's final release
+  commit changes only release documentation, which is not part of the
+  sdist, and the artifacts were built from exactly this source. The
+  commit, ref and workflow URL are still recorded in `BUILD-INFO.txt`.
+- **The sdist is source again.** setuptools copies `package_data` into
+  the sdist, so a packager who had built the tree published host-built
+  `libforkrun_python.so`, `_forkrun_cleanroom`, and the packager's
+  minor-specific UDF helper inside a "source" artifact. `MANIFEST.in`
+  now excludes them (`global-exclude *.so`, plus the launcher), and
+  `validate_sdist` fails closed if a binary appears. Verified: the
+  pre-fix sdist is rejected with all three products named; the fixed
+  sdist contains 42 real source members and no `.so`/launcher member.
+
+The set is exactly one wheel per supported CPython minor (3.10–3.15,
+GIL builds), each carrying the UDF helper built for **that** minor, plus
+one sdist. Free-threaded CPython remains deliberately unsupported by
+the helper route: `setup.py` and the runtime use the same detector and
+both decline it, because the sonames differ and there is no measured
+evidence for that configuration.
 
 ## v3.6.1 — 2026-10-06
 
