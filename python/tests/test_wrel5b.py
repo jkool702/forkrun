@@ -346,7 +346,8 @@ class TestB4BoundedHelperJoin(ChildLifecycleMixin, unittest.TestCase):
         if pid == 0:
             time.sleep(30)
             os._exit(0)
-        cap = tempfile.mktemp(suffix=".err")
+        fd, cap = tempfile.mkstemp(suffix=".err")
+        os.close(fd)
         self.addCleanup(lambda: os.path.exists(cap)
                         and os.unlink(cap))
         saved = redirect_fd(2, cap)

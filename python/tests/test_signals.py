@@ -323,7 +323,8 @@ class TestProcessWideDeferral(unittest.TestCase):
         written, and the deferred signal then kills the process with
         the default action.
         """
-        marker = tempfile.mktemp(prefix="forkrun-sigint-")
+        fd, marker = tempfile.mkstemp(prefix="forkrun-sigint-")
+        os.close(fd)
         self.addCleanup(lambda: os.path.exists(marker) and os.unlink(marker))
         pkg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
         script = r"""
