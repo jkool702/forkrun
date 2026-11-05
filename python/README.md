@@ -44,9 +44,17 @@ The release set is **six wheels plus one sdist**:
 
 - one wheel per supported CPython minor — **3.10, 3.11, 3.12, 3.13,
   3.14, 3.15** (GIL builds) — tagged `cp3XX-cp3XX-manylinux_2_28_<arch>`;
-- each wheel carries the UDF helper compiled for **that** minor (the
-  helper links `libpython3.XX.so`, so the minor is a hard constraint,
-  not a preference);
+- each wheel carries the UDF helper **compiled for that** GIL CPython
+  minor. The wheel's tags name the intended minor, but the tags alone do
+  not prove what the helper was compiled against: at run time the
+  cleanroom launcher preloads the calling interpreter's own `libpython`
+  (resolved via `sysconfig`) before loading the helper, and the helper's
+  typed build-version symbol is checked against the interpreter's
+  declared version — a mismatch is refused, never executed. Repaired
+  manylinux wheels are not required to retain a `libpython` `DT_NEEDED`
+  entry (auditwheel strips it; the launcher's explicit preload supplies
+  the library), so the compiled minor is proven per-wheel by the
+  installed-wheel acceptance run rather than by linkage bytes;
 - one source distribution, which contains no binaries: `setup.py`
   rebuilds the substrate and launcher on install, and the UDF helper is
   built per-minor by `tools/wheel_matrix.py` for wheel builds.

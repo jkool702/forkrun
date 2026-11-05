@@ -1,8 +1,10 @@
 # forkrun v3.6.2 — release notes
 
 **Python frontend 0.17.0 → 0.18.0.** Engine tag `v3.6.2`.
-Prepared 2026-11-04. Promotion, changelog finalization, tagging and PyPI
-publication are owner acts; this branch is release-ready, not released.
+Prepared 2026-11-05. PR #588 (the release branch) has been **merged to
+`main`**; changelog finalization, PyPI publication, tagging and the
+GitHub Release remain owner actions in the order recorded in
+`dev/supervisor/TAG_PREP_v3.6.2.md` (PyPI first, then tag).
 
 | gate | result |
 |---|---|
@@ -12,8 +14,8 @@ publication are owner acts; this branch is release-ready, not released.
 | `python/release_check.py` | exactly one designed-red failure pre-finalization: `Docs: CHANGELOG v3.6.2 heading is final (no (unreleased))` |
 
 The exact workflow run URLs and the release HEAD SHA are recorded in the
-closeout report that accompanies this branch. Any release-gate failure
-other than the changelog-finality check means do not tag.
+closeout report for the final `main` commit. Any release-gate failure
+other than the changelog-finality check means do not publish or tag.
 
 ---
 

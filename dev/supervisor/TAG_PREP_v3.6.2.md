@@ -1,96 +1,116 @@
 # TAG_PREP_v3.6.2 — owner's keypress kit
 
-**Do not tag. Do not push to `main`. Do not finalize the CHANGELOG
-heading. Do not upload to PyPI.** Those are owner acts, staged here.
-The working branch `NEW/REFACTOR4.8-SIGINT` is release-ready: everything
-below has been run on it, and the only designed-red gate is the
-changelog heading that the owner finalizes at step 5.
+**Do not finalize the CHANGELOG heading. Do not upload to PyPI. Do not
+tag. Do not create the GitHub Release** — until the steps below say so,
+in this order. PR #588 is MERGED; `main` carries the release. The
+publication order is owner-selected and intentional: **finalize the
+changelog → release gate → PyPI → tag → GitHub Release.** PyPI first:
+once PyPI accepts a distribution file, the same version/file cannot be
+replaced with different bytes, so every artifact-changing correction
+must be resolved before upload.
 
 ## 1. State this kit was prepared from
 
 | item | value |
 |---|---|
-| branch | `NEW/REFACTOR4.8-SIGINT` |
-| release HEAD | the tip at closeout; exact SHA is in the closeout report (a commit cannot name itself) |
-| engine | `v3.6.2` (frozen: `forkrun_ring.c`, `forkrun_substrate.h`, `substratestubs.c` untouched by closeout) |
+| PR #588 | MERGED; merge commit `ec1cad87dbdfaf645eb1976cc3713f6edbe3afcf` (initial post-merge reference) |
+| branch | `main` |
+| final source + docs commits | recorded in the closeout report of WO-POST-MERGE-RELEASE-FINALIZATION-362 (a commit cannot name itself; later commits may have landed after the merge — do not assume the merge SHA is the release commit) |
+| engine | `v3.6.2` (frozen: `forkrun_ring.c`, `forkrun_substrate.h`, `substratestubs.c` untouched) |
 | Python frontend | `0.18.0` (`python/forkrun/__init__.py`) |
 | `META` | `v3.6.2` |
 | tag `v3.6.2` | does not exist locally or on the remote |
-| CHANGELOG heading | `## v3.6.2 — unreleased` (deliberately red) |
+| CHANGELOG heading | `## v3.6.2 — unreleased` (deliberately red until step 2) |
 | release set | 6 wheels (CPython 3.10–3.15, GIL) + 1 sdist |
 
 ## 2. The sequence, in order
 
-1. **Promote `NEW/REFACTOR4.8-SIGINT` to `main`** (owner act). Do not
-   squash away the release-bundle/tooling commits: the wheel artifacts
-   are traceable to the source commit recorded in `BUILD-INFO.txt`.
-2. **CI green on `main`**, including the new `release-bundle` job. The
-   six `udf-acceptance` cells upload the repaired wheels; the bundle job
-   waits for all six, builds the sdist from the same commit, and uploads
-   `forkrun-release-candidate-<sha>`.
-3. **Download the candidate bundle** from that run (Actions artifact,
-   90-day retention). Do not rebuild the wheels by hand: a rebuilt wheel
-   is not the wheel that passed installed-wheel acceptance.
-   Operational note learned on this branch: if one matrix cell needs a
-   reload, re-dispatch the **whole** workflow as a fresh single-attempt
-   run — do not use "re-run failed jobs". A partial re-run is a new
-   attempt whose `download-artifact` merges see only that attempt's
-   uploads, so the bundle job fails closed on an incomplete set (and
-   `python/README.md` is part of the sdist payload, so a post-bundle
-   README edit would break `--expect-tree`; release-documentation
-   commits must stay outside the sdist — see step 5).
-4. **Validate the bundle on a clean checkout of `main`:**
-   ```bash
-   python3 tools/release_bundle.py validate \
-     dist/release-candidate --expect-tree
-   ( cd dist/release-candidate && sha256sum -c SHA256SUMS )
-   python3 -m twine check --strict \
-     dist/release-candidate/*.whl dist/release-candidate/*.tar.gz
-   ```
-5. **Finalize the CHANGELOG heading** in `DOCS/CHANGELOG.md`:
+1. **Finalize the CHANGELOG heading** in `DOCS/CHANGELOG.md`:
    `## v3.6.2 — unreleased` → `## v3.6.2 — <release date>` (the v3.6.1
    convention is `## v3.6.1 — 2026-10-06`). Regenerate the twin:
    ```bash
    python3 tools/gen_docs_all.py
    python3 tools/gen_docs_all.py --check
    ```
-   Commit on `main` (documentation only; the sdist source payload is
-   unchanged, so the bundle still validates with `--expect-tree`).
-6. **Run the release gate on that committed tree:**
+   Commit on `main` (documentation only). The changelog and the
+   generated `DOCS/DOCS_ALL.md` are OUTSIDE the sdist payload, so the
+   validated bundle still matches this tree under `--expect-tree` —
+   that is why this documentation-only edit is deliberately staged
+   after bundle validation.
+2. **Run the release gate on the finalized `main` tree with the
+   verified candidate bundle:**
    ```bash
    FORKRUN_RELEASE_CHECK_TAGS=1 \
    FORKRUN_RELEASE_BUNDLE=dist/release-candidate \
    python3 python/release_check.py
    ```
-   Expected: **ALL CHECKS PASSED**. Before step 5, the same command
+   Expected: **ALL CHECKS PASSED**. Before step 1, the same command
    reports exactly one failure — the changelog heading — and nothing
-   else. Any other failure means DO NOT TAG.
-7. **Tag `v3.6.2`** on the committed `main` and push the tag:
+   else. Any other failure means DO NOT PUBLISH and DO NOT TAG.
+3. **Publish the validated bundle to PyPI** (owner credentials; this
+   repository never holds them):
+   ```bash
+   python3 -m twine upload dist/release-candidate/*.whl \
+                               dist/release-candidate/*.tar.gz
+   ```
+   Upload exactly the seven files in the validated bundle — the six
+   per-minor wheels and the sdist. The generic `py3-none` wheel is CI
+   coverage only and must NOT be uploaded. If an upload fails
+   partway, record exactly which files PyPI accepted before any
+   further action: an accepted file cannot be replaced with different
+   bytes.
+4. **Verify all seven published distributions** match the candidate:
+   `pip download --no-deps --only-binary=:all: forkrun==0.18.0`
+   resolves the per-minor wheel for the host minor (not the sdist);
+   `pip download --no-deps --no-binary=:all: forkrun==0.18.0` fetches
+   the sdist; compare the downloaded bytes' SHA-256 against the
+   bundle's `SHA256SUMS`. Spot-check
+   `forkrun.__version__ == "0.18.0"` and
+   `forkrun.__engine_version__ == "v3.6.2"` on an installed
+   interpreter.
+5. **Tag the exact final release commit** (the post-finalization docs
+   commit) and push the tag:
    ```bash
    git tag -a v3.6.2 -m "forkrun v3.6.2"
    git push origin v3.6.2
    ```
-8. **Verify the tag points at the release commit** and re-run the gate
-   **without** `FORKRUN_RELEASE_CHECK_TAGS=1`:
+6. **Create the GitHub Release from that tag** (owner act).
+7. **Verify the tag, release, and published package:**
+   `git tag --points-at HEAD` prints `v3.6.2`; the GitHub Release
+   exists and names the seven assets or links PyPI; a fresh
+   `pip install forkrun==0.18.0` works.
+8. **Re-run the gate WITHOUT `FORKRUN_RELEASE_CHECK_TAGS=1`** after the
+   tag exists:
    ```bash
-   git tag --points-at HEAD          # must print v3.6.2
    FORKRUN_RELEASE_BUNDLE=dist/release-candidate \
      python3 python/release_check.py
    ```
    Do **not** re-run with `FORKRUN_RELEASE_CHECK_TAGS=1` once the tag
    exists: that gate correctly refuses to pass over an already-taken
-   tag, so the pre-tag run in step 6 is the authoritative one.
-9. **Publish to PyPI** (owner credentials; this repository never holds
-   them):
-   ```bash
-   python3 -m twine upload dist/release-candidate/*.whl \
-                               dist/release-candidate/*.tar.gz
-   ```
-10. **Verify the published set:** `pip install forkrun==0.18.0` on at
-    least one GIL interpreter per wheel tag family, then confirm
-    `forkrun.__version__ == "0.18.0"`, `forkrun.__engine_version__ ==
-    "v3.6.2"`, and `pip download --no-deps --only-binary=:all: forkrun==0.18.0`
-    resolves the wheel for the host minor (not the sdist).
+   tag, so the pre-tag run in step 2 is the authoritative one.
+
+### The candidate bundle (produced before this kit applies)
+
+The bundle this kit consumes was assembled on `main` by the
+`release-bundle` job: the six repaired wheels that passed the six
+installed-wheel UDF acceptance jobs, the sdist built from the same
+commit, `SHA256SUMS`, `BUILD-INFO.txt`, and the six acceptance
+receipts under `acceptance/`. Download it as
+`forkrun-release-candidate-<sha>` (Actions artifact, 90-day
+retention). Do not rebuild the wheels by hand: a rebuilt wheel is not
+the wheel that passed installed-wheel acceptance.
+
+Operational note: if one matrix cell needs a reload, re-dispatch the
+**whole** workflow as a fresh single-attempt run — do not use
+"re-run failed jobs". A partial re-run is a new attempt whose
+`download-artifact` merges see only that attempt's uploads, so the
+bundle job fails closed on an incomplete set.
+
+Sdist-payload rule: `python/README.md` IS part of the sdist payload,
+so a post-bundle README edit would break `--expect-tree`. The README's
+helper/libpython correction was therefore made BEFORE the final bundle
+was built; after validation, only documentation outside the sdist
+(`DOCS/*`, `RELEASE_NOTES_*`, `dev/supervisor/*`) may change.
 
 ## 3. What the bundle validator proves
 
@@ -133,12 +153,14 @@ files, not a replacement for the build/install checks.
 
 ## 4. Verification receipts
 
-The closeout report for this branch carries the full receipts: the local
-suite counts in both cleanroom modes, the four GitHub Actions run URLs
-at the release HEAD, the release-candidate artifact name and SHA-256
-digests, and the release-check transcript. The durable claims in this
-kit are the commands and their expected results; the run IDs are
-evidence for the specific HEAD, not a second source of truth.
+The closeout report for WO-POST-MERGE-RELEASE-FINALIZATION-362 carries
+the full receipts: main-branch workflow URLs and conclusions at the
+exact final source commit, the six UDF acceptance job results, the
+release-candidate artifact name and SHA-256 digests, the independent
+validation results, and the release-check transcript. The durable
+claims in this kit are the commands and their expected results; the
+run IDs are evidence for the specific HEAD, not a second source of
+truth.
 
 ## 5. Known-open items recorded into the tag
 
@@ -146,6 +168,16 @@ evidence for the specific HEAD, not a second source of truth.
   NUMA tests that require it skip locally and run in CI where the
   topology is available. This is a test-environment limit, not a
   claimed pass.
+- **Intermittent CI flake (documented, unfixed):** three CI runs have
+  hit `RuntimeError: forkrun: NUMA scan 0 failed (status 0)` from
+  `_watch_numa_pipeline`, each time in a DIFFERENT `test_numa` method
+  (`test_numa_basic`, `test_numa_empty_input`,
+  `test_numa_orchestrator_flag_accepted`) — the scan helper exits 0
+  before its completion is observed and the death is misread as
+  failure. Load/timing-dependent; the same runs' other NUMA tests
+  pass. Establish non-reproduction with a fresh run; do not silently
+  count a failed run as green. A dedicated work order should make the
+  scan-death handling tolerate a completed scan.
 - **Free-threaded CPython** is deliberately unsupported for the UDF
   helper route (different libpython soname, no measured evidence). The
   wheel matrix is GIL-only by design; the generic substrate path still
@@ -158,12 +190,12 @@ evidence for the specific HEAD, not a second source of truth.
   scoped to the hardware in `DOCS/CHANGELOG.md`; no EPYC measurement is
   claimed for this release.
 
-## 6. What this branch deliberately did NOT do
+## 6. What the release work deliberately did NOT do
 
-- no merge/push to `main`;
+- no changelog heading/date finalization (owner act, step 1);
+- no PyPI upload and no use of PyPI credentials;
 - no tag creation or push;
 - no GitHub release;
-- no PyPI upload and no use of PyPI credentials;
 - no change to the frozen engine files;
 - no weakening or skipping of tests (the one expected red gate is the
   designed changelog finality check).
