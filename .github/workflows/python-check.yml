@@ -209,13 +209,22 @@ jobs:
       # passed acceptance. Upload the REPAIRED wheel only (`raw/` holds
       # the intermediate linux_x86_64 wheel, which PyPI rejects and which
       # auditwheel exists to replace). 90 days outlives a release cycle.
+      # ONE glob, not two: the acceptance receipt is written INTO the
+      # repaired/ directory beside its wheel (ci_udf_acceptance.sh),
+      # so a single `repaired/*` uploads wheel + receipt together and
+      # keeps the artifact FLAT -- download puts both at the top level
+      # of the merge directory. (The earlier two-glob form
+      # `repaired/*.whl` + `receipt/*.json` matched the receipt with
+      # NEITHER pattern, so receipts never shipped, and the extra
+      # literal path changed upload-artifact's root, nesting the
+      # wheels under repaired/ on download -- the release-bundle job
+      # then failed closed on 0-of-6 receipts. Pinned by
+      # TestReceiptWiring in python/tests/test_release_bundle.py.)
       - name: Upload repaired UDF wheel (cp${{ matrix.tag }})
         uses: actions/upload-artifact@v4
         with:
           name: forkrun-udf-wheel-${{ matrix.tag }}
-          path: |
-            dist/udf/${{ matrix.py }}/repaired/*.whl
-            dist/udf/${{ matrix.py }}/receipt/*.json
+          path: dist/udf/${{ matrix.py }}/repaired/*
           if-no-files-found: error
           retention-days: 90
 
@@ -237,11 +246,12 @@ jobs:
           path: bundle/wheels
           merge-multiple: true
       # Receipts prove each wheel's *compiled* minor (see
-      # wheel_matrix.acceptance_receipt_problems). Each acceptance
-      # job wrote its receipt INTO its repaired/ directory, so the
-      # merged download has wheel and receipt side by side; select
-      # the receipts into their own directory for the seal. Fail if
-      # any of the six is missing rather than sealing without it.
+      # wheel_matrix.acceptance_receipt_problems). The upload step
+      # ships wheel + receipt flat from repaired/ (single glob), so
+      # after the merged download both sit at the top of bundle/wheels;
+      # the receipts are selected into their own directory for the
+      # seal. Fail if any of the six is missing rather than sealing
+      # without it.
       - name: Collect the six UDF acceptance receipts
         run: |
           set -euo pipefail
@@ -251,7 +261,12 @@ jobs:
             mv "$f" bundle/receipts/
           done
           ls -l bundle/receipts bundle/wheels
-          n=$(ls bundle/receipts/*.json 2>/dev/null | wc -l)
+          # find, not `ls ...*.json`: an unmatched glob makes ls exit
+          # 2, and pipefail+set -e would abort on the assignment --
+          # losing this guard's own diagnostic (observed as exit 2 in
+          # run 41954795016 attempt 2 instead of the message below).
+          # find exits 0 with no matches, so the guard decides.
+          n=$(find bundle/receipts -maxdepth 1 -name '*.json' | wc -l)
           echo "receipts: $n"
           if [ "$n" -lt 6 ]; then
             echo "expected one UDF acceptance receipt per supported minor (6), found $n" >&2

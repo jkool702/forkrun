@@ -536,6 +536,79 @@ class TestRepairedHelperReceipts(_Tmp):
                 for p in self._receipt_problems(problems)), problems)
 
 
+class TestReceiptWiring(unittest.TestCase):
+    """The CI wiring that carries receipts from acceptance to bundle.
+
+    This defect shipped twice (GHA runs 41954795016 attempt 2 and
+    41957089845): ci_udf_acceptance.sh wrote the receipt into
+    repaired/ beside its wheel, but the workflow uploaded
+    `repaired/*.whl` + `receipt/*.json` -- two globs that matched the
+    receipt with NEITHER pattern, so receipts never shipped and the
+    bundle job failed closed on 0-of-6. There is no runtime seam for
+    GitHub Actions plumbing, so this is a wiring test: it pins the
+    CONTRACT (receipt beside wheel, single-glob upload, flat
+    download, collect into acceptance/) so a re-split of the paths
+    fails here instead of in CI.
+    """
+
+    def _script(self):
+        with open(os.path.join(_ROOT, "tools", "ci_udf_acceptance.sh"),
+                  encoding="utf-8") as fh:
+            return fh.read()
+
+    def _workflow(self):
+        with open(os.path.join(_ROOT, ".github", "workflows",
+                               "python-check.yml"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_receipt_is_written_beside_the_wheel(self):
+        script = self._script()
+        self.assertIn('rep_dir="$REPO/dist/udf/$minor/repaired"',
+                      script, "the repaired-wheel directory moved")
+        self.assertIn('receipt="$rep_dir/udf-acceptance-${minor}.json"',
+                      script,
+                      "the receipt must be written INTO the repaired "
+                      "directory, beside the wheel it proves")
+
+    def test_the_upload_is_one_flat_glob_of_that_directory(self):
+        yml = self._workflow()
+        # The udf-acceptance upload step: exactly ONE dist/udf path
+        # line, globbing the same directory the script writes into.
+        # A second path entry is the defect: it changes upload-
+        # artifact's root (nesting the wheel on download) and, when
+        # it points at a directory the script never writes, drops
+        # the receipt entirely.
+        upload = yml.split("Upload repaired UDF wheel")[1]
+        upload = upload.split("retention-days")[0]
+        paths = [ln.strip("- \n") for ln in upload.splitlines()
+                 if "dist/udf/" in ln]
+        self.assertEqual(
+            1, len(paths),
+            "the upload must be a single path glob (found %r); a "
+            "second path entry changes the artifact root and is how "
+            "receipts were silently dropped" % (paths,))
+        self.assertTrue(paths[0].endswith("/repaired/*"),
+                        "the upload glob must be <minor>/repaired/* so "
+                        "wheel AND receipt ship flat, got %r" % (paths[0],))
+        # No receipt/ path may remain in the upload step itself (the
+        # step's comment legitimately documents the old defect; the
+        # with: block must not carry it).
+        self.assertFalse(
+            [ln for ln in upload.splitlines()
+             if "receipt/" in ln and not ln.lstrip().startswith("#")],
+            "the receipt/ glob matches nothing -- the receipt lives "
+            "in repaired/ beside its wheel")
+
+    def test_the_bundle_job_collects_the_flat_layout(self):
+        yml = self._workflow()
+        self.assertIn("pattern: forkrun-udf-wheel-cp3*", yml)
+        self.assertIn("path: bundle/wheels", yml)
+        self.assertIn("mv \"$f\" bundle/receipts/", yml,
+                      "receipts must be selected out of bundle/wheels")
+        self.assertIn("for f in bundle/wheels/*.json", yml)
+        self.assertIn("--acceptance-receipts bundle/receipts", yml)
+
+
 class TestReleaseGateWiring(unittest.TestCase):
     def test_the_bundle_gate_is_optional_until_a_bundle_is_supplied(self):
         self.assertTrue(hasattr(release_check.check_release_bundle,
