@@ -34,13 +34,29 @@ builds the sdist from the same commit, validates the assembled bundle,
 checks `SHA256SUMS` with plain `sha256sum -c`, runs `twine check
 --strict`, and uploads the consolidated candidate with 90-day retention.
 
+Each acceptance cell also writes a **UDF acceptance receipt** beside its
+wheel: a structured record, bound to the wheel's SHA-256, that its
+installed helper ran a real UDF through the cleanroom launcher's typed
+version barrier — isolated, separate-process, byte-exact, at the
+expected minor. The bundle seals the six receipts into
+`acceptance/` and records them per wheel in `BUILD-INFO.txt`
+(`acc-sha256` / `acc-result` / `acc-minor`). This matters because
+auditwheel strips the helper's `libpython` `DT_NEEDED` entry during
+manylinux repair, so the repaired wheel's **filename** is a claim, not
+proof: the receipt is the durable evidence of the helper's **compiled**
+minor, and the bundle validator refuses a repaired helper that cannot
+produce one.
+
 `python/release_check.py` validates the bundle itself when
 `FORKRUN_RELEASE_BUNDLE=<dir>` is set (mandatory when supplied; reported
 not-applicable otherwise). It proves:
 
 - exactly one wheel per supported minor, and no missing minor;
 - every wheel's tag, METADATA, embedded engine version, glibc floor,
-  UDF helper symbol set and real `libpython` linkage;
+  UDF helper symbol set, and libpython-linkage/acceptance-receipt rule
+  (a repaired wheel carries no `libpython` `DT_NEEDED` entry —
+  auditwheel strips it — so its compiled minor must be proven by the
+  sealed acceptance receipt bound to the wheel's SHA-256);
 - every wheel's `forkrun/*.py` is byte-identical to the same file in the
   sdist (the components came from one source, not two builds);
 - the sdist carries the required source files and no `.so`/launcher;

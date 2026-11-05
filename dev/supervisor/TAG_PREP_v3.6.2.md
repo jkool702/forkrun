@@ -31,6 +31,14 @@ changelog heading that the owner finalizes at step 5.
 3. **Download the candidate bundle** from that run (Actions artifact,
    90-day retention). Do not rebuild the wheels by hand: a rebuilt wheel
    is not the wheel that passed installed-wheel acceptance.
+   Operational note learned on this branch: if one matrix cell needs a
+   reload, re-dispatch the **whole** workflow as a fresh single-attempt
+   run — do not use "re-run failed jobs". A partial re-run is a new
+   attempt whose `download-artifact` merges see only that attempt's
+   uploads, so the bundle job fails closed on an incomplete set (and
+   `python/README.md` is part of the sdist payload, so a post-bundle
+   README edit would break `--expect-tree`; release-documentation
+   commits must stay outside the sdist — see step 5).
 4. **Validate the bundle on a clean checkout of `main`:**
    ```bash
    python3 tools/release_bundle.py validate \
@@ -96,8 +104,20 @@ cannot disagree:
 - each wheel's filename tags match its artifact and its minor, its
   METADATA is complete, its embedded substrate reports `v3.6.2`, its
   glibc floor is re-derived from **every** `.so` and does not exceed the
-  tag, and its UDF helper exports the typed version symbol and links
-  `libpython3.XX.so`;
+  tag, and its UDF helper exports the typed version symbol with no
+  test-only override marker. The helper's `libpython` linkage follows
+  the runtime contract (`forkrun_cleanroom.c::setup_udf_helper`): the
+  launcher preloads the caller's libpython and refuses version
+  mismatches, so auditwheel's strip of the `DT_NEEDED` entry in the
+  repaired wheel is expected. A **present** entry must name the wheel's
+  minor; an **absent** entry is accepted only with the wheel's sealed
+  installed-wheel UDF acceptance receipt (`acceptance/*.json`, bound to
+  the wheel SHA-256 and cross-recorded in `BUILD-INFO.txt`
+  `acc-sha256` / `acc-result` / `acc-minor`), which is what proves the
+  helper's **compiled** minor through the launcher's own version
+  barrier — a filename suffix alone is never accepted. A bundle with no
+  receipts, a receipt for another wheel, a wrong marker minor, or a
+  failed acceptance run fails closed;
 - every wheel's `forkrun/*.py` is byte-identical to the same file in the
   sdist; the sdist's source payload matches the checkout under
   `--expect-tree`;

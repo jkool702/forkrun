@@ -1109,11 +1109,12 @@ v3.6.2 makes the distribution itself the checked object:
 - **One rule, two consumers.** `tools/wheel_matrix.py` now owns the
   release-content rules — supported minors, wheel tags, METADATA
   fields, sdist required sources and forbidden build products, the UDF
-  helper's symbol set, and the helper's real `libpython` linkage. Both
-  the release gate and the new `tools/release_bundle.py` import them, so
-  a wheel cannot pass one gate and fail the other. The glibc-floor check
-  now scans **every** `.so` in a wheel and takes the maximum, not the
-  first member in zip order.
+  helper's symbol set, and the helper's libpython-linkage /
+  acceptance-receipt rule. Both the release gate and the new
+  `tools/release_bundle.py` import them, so a wheel cannot pass one
+  gate and fail the other. The glibc-floor check now scans **every**
+  `.so` in a wheel and takes the maximum, not the first member in zip
+  order.
 - **Same-source proof, by content.** Every wheel's `forkrun/*.py` must
   be byte-identical to the same file in the sdist, and the sdist's
   source payload is fingerprinted; `validate --expect-tree` recomputes
@@ -1137,6 +1138,62 @@ one sdist. Free-threaded CPython remains deliberately unsupported by
 the helper route: `setup.py` and the runtime use the same detector and
 both decline it, because the sonames differ and there is no measured
 evidence for that configuration.
+
+### the bundle validator proves the helper's compiled minor, not a linkage auditwheel strips
+
+**Release tooling, no product change.** The new bundle validator
+rejected all six repaired CPython wheels on first contact (GHA run
+41888943036): `helper_libpython_problems` demanded a `libpython`
+`DT_NEEDED` entry that auditwheel **strips** during manylinux repair.
+That stripping is the runtime's own documented contract, not a defect —
+the launcher preloads the caller's exact libpython (resolved via
+`sysconfig` in `python/forkrun/_udf.py::caller_libpython_arg`) with
+`RTLD_NOW | RTLD_GLOBAL` before it ever dlopen's the helper, and refuses
+on any version mismatch through the typed build-version symbol
+(`forkrun_cleanroom.c::setup_udf_helper`). Demanding the entry back
+contradicted the architecture the entry's absence exists to serve.
+
+The corrected rule has one implementation
+(`tools/wheel_matrix.py::helper_libpython_problems` +
+`acceptance_receipt_problems`), and it does not trade the linkage check
+for a suffix-only one:
+
+- an **absent** `DT_NEEDED` entry is the repaired shape and is accepted
+  only with the installed-wheel UDF acceptance receipt bound to the
+  exact wheel SHA-256 — the record of a real UDF executed through the
+  launcher's version barrier in an isolated, separate helper process,
+  byte-exact, at the expected minor. That receipt, not the filename, is
+  what proves the helper's **compiled** minor;
+- a **present** entry must still name the expected minor (a wrong-minor
+  linkage is rejected on the artifact, receipt or no receipt);
+- `assemble` seals the six receipts into `<bundle>/acceptance/` and
+  records `acc-sha256` / `acc-result` / `acc-minor` per wheel row in
+  `BUILD-INFO.txt`; `validate` re-derives every claim and fails closed
+  on a bundle with no receipts, a receipt for a different wheel, a wrong
+  marker minor, a failed run, or a legacy provenance row that carries no
+  evidence.
+
+Proving it surfaced a second defect, in the CI wiring rather than the
+validator: `ci_udf_acceptance.sh` writes the receipt **into**
+`repaired/` beside its wheel, but the upload step globbed
+`repaired/*.whl` plus `receipt/*.json` — matching the receipt with
+**neither** pattern, so receipts never shipped in any attempt, and the
+extra literal path changed upload-artifact's root, nesting the wheels on
+download. The bundle job's six-receipt guard failed closed on 0-of-6
+(runs 41954795016 attempt 2 and 41957089845) — the right outcome with an
+unhelpful report, because an unmatched `ls *.json` under
+`pipefail` + `set -e` aborted with exit 2 before the guard could print
+its own message. The upload is now **one flat glob** (`repaired/*`, so
+wheel and receipt ship together and download top-level) and the guard
+counts with `find`. `TestReceiptWiring` pins the whole chain so the
+paths cannot be re-split silently.
+
+Tests: `TestHelperLibpython` (9 — the absent/present `DT_NEEDED` shapes
+are produced by editing a **real** helper's linkage bytes, since the
+rule fails closed on unreadable ELFs), `TestRepairedHelperReceipts`
+(6 — six-wheel bundles assembled and validated with valid, tampered,
+and missing receipts), and the three wiring tests. Full suite: 1728
+tests.
 
 ## v3.6.1 — 2026-10-06
 
