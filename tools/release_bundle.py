@@ -22,8 +22,15 @@ There is no second implementation of any packaging rule here:
 * the sdist content rule is ``wheel_matrix.validate_sdist``;
 * the UDF helper symbol rule is
   ``wheel_matrix.helper_symbol_problems``;
-* the helper's real libpython linkage is
-  ``wheel_matrix.helper_libpython_problems``;
+* the helper's libpython linkage + the acceptance-receipt rule is
+  ``wheel_matrix.helper_libpython_problems`` /
+  ``wheel_matrix.acceptance_receipt_problems``. The repaired shape
+  (no libpython DT_NEEDED entry -- auditwheel strips it; see
+  forkrun_cleanroom.c setup_udf_helper()) is accepted ONLY when the
+  installed-wheel acceptance receipt binds this exact wheel to a
+  barrier-verified, isolated, byte-exact execution at the expected
+  minor. The receipt is recorded in BUILD-INFO.txt (acc-* fields)
+  and re-verified here; a suffix-only claim is never accepted.
 * the wheel's glibc floor is
   ``python/release_check.py::_wheel_glibc_floor``;
 * the release versions are ``release_check.PY_VERSION`` /
@@ -183,8 +190,19 @@ def _wheel_sources(wheel):
     return out
 
 
-def wheel_problems(wheel, minor, version, engine_version):
-    """Everything that must be true of ONE release wheel."""
+def wheel_problems(wheel, minor, version, engine_version, *,
+                   acceptance=None):
+    """Everything that must be true of ONE release wheel.
+
+    `acceptance` is the installed-wheel UDF acceptance receipt for
+    this exact wheel (wheel_matrix.load_acceptance_receipt), or None
+    at the unit-test layer. It is REQUIRED whenever the helper is in
+    the auditwheel-repaired shape (no libpython DT_NEEDED entry) and
+    is ignored for a helper that still links its libpython (the
+    tree-built shape), so the receipt rule cannot be bypassed by
+    deleting an entry it does not cover ... see helper_libpython_
+    problems.
+    """
     problems = []
     problems += wheel_matrix.validate_wheel(wheel, minor)
     problems += wheel_matrix.validate_metadata(wheel, version)
@@ -233,7 +251,15 @@ def wheel_problems(wheel, minor, version, engine_version):
     substrate_path = extracted.get(substrate[0])
     if helper_path:
         problems += wheel_matrix.helper_symbol_problems(helper_path)
-        problems += wheel_matrix.helper_libpython_problems(helper_path, minor)
+        handed = acceptance
+        if handed is not None:
+            # Bind the receipt to THIS wheel's bytes before the
+            # linkage rule looks at it: a receipt for another wheel
+            # authorises nothing.
+            problems += wheel_matrix.acceptance_receipt_problems(
+                handed, minor=minor, wheel_sha256=sha256_file(wheel))
+        problems += wheel_matrix.helper_libpython_problems(
+            helper_path, minor, acceptance=handed)
     if substrate_path:
         try:
             ver = rc._so_engine_version(substrate_path)
@@ -265,6 +291,11 @@ def _artifact_set(bundle):
                          % (bundle, exc))
     for name in names:
         path = os.path.join(bundle, name)
+        if name == "acceptance" and os.path.isdir(path):
+            # The acceptance receipts live in their own subdirectory
+            # and are validated separately (validate_bundle); they are
+            # not release artifacts.
+            continue
         if not os.path.isfile(path):
             extra.append(name)
         elif name.endswith(".whl"):
@@ -312,13 +343,21 @@ def _parse_build_info(path):
             key, value = key.strip(), value.strip()
             if key == "wheel":
                 fields = value.split()
-                if len(fields) != 7:
+                if len(fields) not in (7, 10):
                     raise ValueError("malformed wheel record: %r" % (line,))
                 info["wheel"].append({
                     "minor": fields[0], "python_tag": fields[1],
                     "abi_tag": fields[2], "platform_tag": fields[3],
                     "filename": fields[4], "sha256": fields[5],
-                    "helper": fields[6]})
+                    "helper": fields[6],
+                    # Installed-wheel UDF acceptance evidence for this
+                    # exact wheel (wheel_matrix.acceptance_receipt_
+                    # problems). Legacy rows without them parse, but
+                    # carry no evidence -- the validator then refuses
+                    # a repaired helper that needs it.
+                    "acc_sha256": fields[7] if len(fields) == 10 else None,
+                    "acc_result": fields[8] if len(fields) == 10 else None,
+                    "acc_minor": fields[9] if len(fields) == 10 else None})
             elif key == "sdist":
                 fields = value.split()
                 if len(fields) != 2:
@@ -338,8 +377,45 @@ def validate_bundle(bundle, *, expect_tree=False, expect_source_commit=None,
     problems = []
     report = {"bundle": os.path.abspath(bundle), "version": version,
               "engine_version": engine_version, "wheels": {}, "sdist": None,
-              "source_commit": None, "source_tree_sha256": None}
+              "source_commit": None, "source_tree_sha256": None,
+              "acceptance_receipts": {}}
+    # ---- installed-wheel UDF acceptance receipts (bundle-level) -----
+    # assemble() copies the six receipts (one per minor) into
+    # <bundle>/acceptance/*.json; validate reads them back bound to
+    # the wheel SHA-256. A receipt for another wheel, another minor,
+    # or a failed run authorises nothing.
+    receipts = {}
+    receipts_dir = os.path.join(bundle, "acceptance")
+    if os.path.isdir(receipts_dir):
+        try:
+            names = sorted(os.listdir(receipts_dir))
+        except OSError as exc:
+            names = []
+            problems.append("cannot list acceptance receipts: %s" % (exc,))
+        for n in names:
+            if not n.endswith(".json"):
+                problems.append("bundle acceptance/ contains a "
+                                "non-receipt entry %r" % (n,))
+                continue
+            receipt, rproblems = wheel_matrix.load_acceptance_receipt(
+                os.path.join(receipts_dir, n))
+            problems += ["acceptance/%s: %s" % (n, p) for p in rproblems]
+            if receipt is not None:
+                receipts[receipt.get("wheel_sha256")] = receipt
+                report["acceptance_receipts"][n] = receipt
+    elif os.path.exists(receipts_dir):
+        problems.append("bundle acceptance entry is not a directory")
     wheels, sdists, extra = _artifact_set(bundle)
+    if not receipts and any(wheels):
+        # A bundle with no receipts at all cannot prove a repaired
+        # helper's compiled minor for ANY of its wheels. Legacy
+        # bundles (pre-receipt) parse -- their BUILD-INFO rows carry
+        # no acc-* evidence -- but the validator refuses them for
+        # exactly this reason: suffix-only is not proof.
+        problems.append(
+            "bundle carries no installed-wheel UDF acceptance "
+            "receipts (acceptance/ is missing or empty): the "
+            "repaired helpers' compiled minors are unproven")
     if extra:
         problems.append(
             "bundle contains entries that are not release artifacts: %r "
@@ -379,7 +455,14 @@ def validate_bundle(bundle, *, expect_tree=False, expect_source_commit=None,
                         % (len(wheels), len(wheel_matrix.SUPPORTED_MINORS)))
 
     for minor, wheel in sorted(seen.items()):
-        wproblems = wheel_problems(wheel, minor, version, engine_version)
+        handed = receipts.get(sha256_file(wheel))
+        if handed is not None and handed.get("expect_minor") != minor:
+            problems.append(
+                "%s: its acceptance receipt names Python %r, not %s"
+                % (os.path.basename(wheel),
+                   handed.get("expect_minor"), minor))
+        wproblems = wheel_problems(wheel, minor, version, engine_version,
+                                   acceptance=handed)
         report["wheels"][minor] = {
             "filename": os.path.basename(wheel),
             "sha256": sha256_file(wheel),
@@ -580,6 +663,28 @@ def _provenance_problems(info, report, wheels, sdists, version,
         if not row["helper"].startswith("forkrun/"):
             problems.append("provenance helper path for Python %s is %r"
                             % (minor, row["helper"]))
+        # Acceptance evidence recorded at assembly. Legacy rows
+        # without it parse (acc_* are None) but then a repaired
+        # helper -- which needs its receipt -- fails the wheel rule
+        # above, so no provenance can invent evidence after the fact.
+        if row.get("acc_sha256") is not None:
+            if not re.fullmatch(r"[0-9a-f]{64}", row["acc_sha256"] or ""):
+                problems.append("provenance acc-sha256 for Python %s is "
+                                "not a SHA-256 digest" % (minor,))
+            elif row["acc_sha256"] != row["sha256"]:
+                problems.append(
+                    "provenance acc-sha256 for Python %s (%s) is not "
+                    "the wheel's own SHA-256 (%s): the acceptance "
+                    "evidence does not describe this wheel"
+                    % (minor, row["acc_sha256"], row["sha256"]))
+            if row.get("acc_result") != "PASS":
+                problems.append("provenance acc-result for Python %s is "
+                                "%r, expected 'PASS'"
+                                % (minor, row.get("acc_result")))
+            if row.get("acc_minor") != minor:
+                problems.append("provenance acc-minor for Python %s is "
+                                "%r, expected %r"
+                                % (minor, row.get("acc_minor"), minor))
 
     sdist_rows = info.get("sdist", [])
     if len(sdist_rows) != 1:
@@ -613,11 +718,15 @@ def _write_build_info(path, version, engine_version, source_commit,
         "created-utc: %s" % created,
     ]
     for row in rows:
+        acc = row.get("acceptance") or {}
         lines.append(
-            "wheel: %s %s %s %s %s %s %s"
+            "wheel: %s %s %s %s %s %s %s %s %s %s"
             % (row["minor"], row["python_tag"], row["abi_tag"],
                row["platform_tag"], row["filename"], row["sha256"],
-               row["helper"]))
+               row["helper"],
+               acc.get("wheel_sha256", "-"),
+               acc.get("result", "-"),
+               acc.get("expect_minor", "-")))
     lines.append("sdist: %s %s" % (sdist_row["filename"],
                                    sdist_row["sha256"]))
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
@@ -625,7 +734,7 @@ def _write_build_info(path, version, engine_version, source_commit,
 
 
 def assemble(wheels_dir, sdist_path, out_dir, source_commit, source_ref,
-             source_workflow, version=None):
+             source_workflow, version=None, receipts_dir_value=None):
     """Copy + validate + seal the bundle. Returns (report, problems)."""
     import datetime
     import tempfile
@@ -661,6 +770,39 @@ def assemble(wheels_dir, sdist_path, out_dir, source_commit, source_ref,
         _top, members = wheel_matrix.sdist_source_members(sdist_path)
         fingerprint = tree_fingerprint(members)
 
+        # Installed-wheel UDF acceptance receipts (one per minor) for
+        # the wheels being sealed. Indexed by the wheel SHA-256 they
+        # prove: a receipt for another wheel authorises nothing.
+        receipts = {}
+        if receipts_dir_value is not None:
+            if not os.path.isdir(receipts_dir_value):
+                raise SystemExit(
+                    "release_bundle: --acceptance-receipts %s is not a "
+                    "directory" % (receipts_dir_value,))
+            staged_receipts = os.path.join(staged, "acceptance")
+            os.makedirs(staged_receipts, exist_ok=True)
+            for n in sorted(os.listdir(receipts_dir_value)):
+                if not n.endswith(".json"):
+                    raise SystemExit(
+                        "release_bundle: --acceptance-receipts/%s is not "
+                        "a receipt (.json); refusing to guess which "
+                        "evidence to seal" % (n,))
+                receipt, rproblems = \
+                    wheel_matrix.load_acceptance_receipt(
+                        os.path.join(receipts_dir_value, n))
+                if rproblems or receipt is None:
+                    raise SystemExit(
+                        "release_bundle: acceptance receipt %s: %s"
+                        % (n, "; ".join(rproblems)))
+                receipts[receipt["wheel_sha256"]] = receipt
+                shutil.copy2(os.path.join(receipts_dir_value, n),
+                             os.path.join(staged_receipts, n))
+            os.makedirs(os.path.join(out_dir, "acceptance"),
+                        exist_ok=True)
+            for n in os.listdir(staged_receipts):
+                shutil.copy2(os.path.join(staged_receipts, n),
+                             os.path.join(out_dir, "acceptance", n))
+
         os.makedirs(out_dir, exist_ok=True)
         for path in wheels + [sdist_path]:
             shutil.copy2(path, os.path.join(out_dir, os.path.basename(path)))
@@ -683,6 +825,7 @@ def assemble(wheels_dir, sdist_path, out_dir, source_commit, source_ref,
                 "filename": name,
                 "sha256": sha256_file(wheel),
                 "helper": helpers[0] if len(helpers) == 1 else "unknown",
+                "acceptance": receipts.get(sha256_file(wheel)),
             })
         sdist_row = {"filename": os.path.basename(sdist_path),
                      "sha256": sha256_file(sdist_path)}
@@ -725,6 +868,12 @@ def main(argv=None):
     a.add_argument("--source-commit", required=True)
     a.add_argument("--source-ref", required=True)
     a.add_argument("--source-workflow", default="")
+    a.add_argument("--acceptance-receipts", default=None,
+                   help="directory of installed-wheel UDF acceptance "
+                        "receipt JSON files (one per minor) for the "
+                        "wheels being sealed; each receipt is bound to "
+                        "an exact wheel SHA-256 by wheel_matrix."
+                        "acceptance_receipt_problems")
     a.add_argument("--version", default=None)
 
     v = sub.add_parser("validate", help="validate an existing bundle")
@@ -740,7 +889,8 @@ def main(argv=None):
         if args.mode == "assemble":
             report, problems = assemble(
                 args.wheels, args.sdist, args.out, args.source_commit,
-                args.source_ref, args.source_workflow, version=args.version)
+                args.source_ref, args.source_workflow, version=args.version,
+                receipts_dir_value=args.acceptance_receipts)
         else:
             report, problems = validate_bundle(
                 args.bundle, expect_tree=args.expect_tree,

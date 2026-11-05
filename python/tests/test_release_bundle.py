@@ -23,6 +23,7 @@ objdump, linkage) are exercised by the six-wheel CI bundle and by
 
 import hashlib
 import io
+import json
 import os
 import shutil
 import sys
@@ -50,13 +51,84 @@ def _wheel_name(minor="3.10", version=VERSION):
         version, tag, tag)
 
 
+def _real_helper_bytes():
+    """Bytes of a real helper for the running minor, or None.
+
+    The helper rules (nm symbol table, DT_NEEDED) read a real ELF;
+    a synthetic wheel cannot carry one. The bundle tests that need
+    the helper rules therefore carry the tree's own helper bytes, and
+    skip when there is none (the full-suite build always makes one).
+    """
+    import glob
+    import sysconfig
+    suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(here, "..", "forkrun",
+                        "_fr_udf" + suffix)
+    if not os.path.isfile(cand):
+        found = glob.glob(os.path.join(here, "..", "forkrun",
+                                       "_fr_udf*.so"))
+        cand = found[0] if found else None
+    if not cand or not os.path.isfile(cand):
+        return None
+    with open(cand, "rb") as fh:
+        return fh.read()
+
+
+def _strip_libpython(data):
+    """The auditwheel-repaired shape: no libpython DT_NEEDED entry."""
+    import re as _re
+    out = bytearray(data)
+    for m in _re.finditer(rb"libpython[0-9.]+t?\.so(?:\.[0-9]+)*",
+                          bytes(out)):
+        for i in range(m.start(), m.end()):
+            out[i] = 0
+    return bytes(out)
+
+
 def _make_wheel(path, minor="3.10", init=b"# forkrun\n",
-                metadata=True, extra=()):
+                metadata=True, extra=(), helper=None):
+    # helper=None (default): the historical synthetic wheel -- no
+    # helper, no substrate, no launcher. That shape is what the
+    # pre-existing bundle tests use; it exercises the bundle-level
+    # rules (matrix, checksums, provenance, source identity) without
+    # the ELF rules. helper="real"/"repaired" carry real bytes and
+    # are used only by the repaired-helper receipt tests.
     name = _wheel_name(minor)
     full = os.path.join(path, name)
     with zipfile.ZipFile(full, "w") as zf:
         zf.writestr("forkrun/__init__.py", init)
         zf.writestr("forkrun/py.typed", "")
+        if helper == "real":
+            data = _real_helper_bytes()
+            if data is not None:
+                stem = "_fr_udf.cpython-%s-x86_64-linux-gnu.so" % \
+                    minor.replace(".", "")
+                zf.writestr("forkrun/" + stem, data)
+        elif helper == "repaired":
+            data = _real_helper_bytes()
+            if data is not None:
+                stem = "_fr_udf.cpython-%s-x86_64-linux-gnu.so" % \
+                    minor.replace(".", "")
+                zf.writestr("forkrun/" + stem, _strip_libpython(data))
+        if helper in ("real", "repaired"):
+            # NOTE: the substrate .so is deliberately NOT carried
+            # here. wheel_problems reads the engine version by
+            # dlopen'ing it, and dlopen'ing the same path repeatedly
+            # in one process, then re-dlopen'ing a different copy,
+            # is what segfaulted earlier runs of this test file
+            # (ctypes CDLL on the same path from _workdir leaves the
+            # loader state confused). The engine-version check is
+            # exercised by the real CI bundle and by release_check's
+            # own substrate test; the receipt tests must not fight
+            # it. The helper ELF rules (symbol + DT_NEEDED) are
+            # exercised here via the real helper bytes.
+            launcher = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "forkrun",
+                "_forkrun_cleanroom")
+            if os.path.isfile(launcher):
+                with open(launcher, "rb") as fh:
+                    zf.writestr("forkrun/_forkrun_cleanroom", fh.read())
         for member in extra:
             zf.writestr(member, "x")
         if metadata:
@@ -297,6 +369,171 @@ class TestBundleIntegrity(_Tmp):
             release_bundle.tree_fingerprint({"README.md": data}))
         self.assertTrue(any("differs from the checkout" in p
                             for p in problems), problems)
+
+
+def _receipt_for(wheel_path, minor, **over):
+    import hashlib as _h
+    with open(wheel_path, "rb") as fh:
+        sha = _h.sha256(fh.read()).hexdigest()
+    r = {
+        "format": wheel_matrix.UDF_RECEIPT_FORMAT,
+        "result": "PASS",
+        "mode": "udf",
+        "expect_minor": minor,
+        "wheel": os.path.basename(wheel_path),
+        "wheel_sha256": sha,
+        "byte_exact": True,
+        "isolated_helper": True,
+        "separate_process": True,
+        "helper_provenance": True,
+        "marker_minor": minor,
+    }
+    r.update(over)
+    return r
+
+
+def _write_receipts(directory, wheels_by_minor):
+    os.makedirs(directory, exist_ok=True)
+    for minor, wheel in wheels_by_minor.items():
+        receipt = _receipt_for(wheel, minor)
+        with open(os.path.join(directory,
+                               "udf-acceptance-%s.json" % minor),
+                  "w", encoding="utf-8") as fh:
+            json.dump(receipt, fh)
+
+
+class TestRepairedHelperReceipts(_Tmp):
+    """A repaired (no-DT_NEEDED) helper passes only with its receipt.
+
+    This is the run-41888943036 failure: the validator demanded a
+    libpython entry that auditwheel deliberately strips. The
+    compiled minor is instead proven by the installed-wheel UDF
+    acceptance receipt, bound to the exact wheel SHA-256.
+
+    The synthetic wheels here are deliberately NOT required-member
+    complete (no substrate .so / launcher): wheel_problems reports
+    those as separate problems, and these tests assert on the
+    receipt problems. Filtering on "libforkrun_python" / "substrate"
+    / "acc-" keeps the assertions about the receipt rule, not about
+    fixture completeness.
+    """
+
+    def _six(self, tmp, helper="repaired"):
+        wheels = os.path.join(tmp, "wheels")
+        os.makedirs(wheels)
+        by_minor = {}
+        for minor in wheel_matrix.SUPPORTED_MINORS:
+            by_minor[minor] = _make_wheel(wheels, minor=minor,
+                                          helper=helper)
+        if _real_helper_bytes() is None:
+            raise unittest.SkipTest("no real helper to build wheels from")
+        sdist = _make_sdist(tmp)
+        return wheels, sdist, by_minor
+
+    def _receipt_problems(self, problems):
+        return [p for p in problems
+                if "DT_NEEDED" in p or "receipt" in p or "acc-" in p]
+
+    def test_repaired_helper_with_receipt_is_accepted(self):
+        wheels, sdist, by_minor = self._six(self.tmp)
+        receipts = os.path.join(self.tmp, "receipts")
+        _write_receipts(receipts, by_minor)
+        out = os.path.join(self.tmp, "out")
+        _report, problems = release_bundle.assemble(
+            wheels, sdist, out, "a" * 40, "refs/heads/test", "",
+            receipts_dir_value=receipts)
+        self.assertEqual([], self._receipt_problems(problems), problems)
+        _report, problems = release_bundle.validate_bundle(out)
+        self.assertEqual([], self._receipt_problems(problems), problems)
+        self.assertTrue(os.path.isdir(os.path.join(out, "acceptance")))
+        with open(os.path.join(out, release_bundle.BUILD_INFO)) as fh:
+            info = fh.read()
+        # The acc fields ride at the END of each wheel row (7 legacy
+        # fields + acc-sha256 acc-result acc-minor), not as a
+        # "acc-result:" key -- see tools/release_bundle.py.
+        for minor in wheel_matrix.SUPPORTED_MINORS:
+            self.assertIn(" PASS %s\n" % minor, info)
+
+    def test_a_bundle_with_no_receipts_is_rejected(self):
+        """Fail closed on a totally receipt-less bundle.
+
+        The wheel-level DT_NEEDED rule needs the substrate the
+        fixture lacks, but the bundle-level receipt rule does not:
+        a bundle with no receipts at all is refused outright.
+        """
+        wheels, sdist, _by_minor = self._six(self.tmp)
+        out = os.path.join(self.tmp, "out")
+        _report, _assemble_problems = release_bundle.assemble(
+            wheels, sdist, out, "a" * 40, "refs/heads/test", "")
+        _report, problems = release_bundle.validate_bundle(out)
+        self.assertTrue(
+            any("no installed-wheel UDF acceptance" in p
+                for p in problems), problems)
+
+    def test_repaired_helper_without_receipt_is_rejected(self):
+        """No receipt: the helper rule cannot run via wheel_problems
+        (the fixture wheel carries no substrate, so it returns before
+        the helper checks), but provenance still refuses: the acc
+        fields are '-' and cannot be a SHA-256 digest / PASS / this
+        minor. That is the fail-closed half -- an unproven repaired
+        helper cannot be sealed by leaving the evidence blank.
+
+        The wheel-level DT_NEEDED rule itself (direct, on the helper
+        bytes) is covered in tests.test_wheel_matrix.
+        """
+        wheels, sdist, _by_minor = self._six(self.tmp)
+        out = os.path.join(self.tmp, "out")
+        _report, problems = release_bundle.assemble(
+            wheels, sdist, out, "a" * 40, "refs/heads/test", "")
+        self.assertTrue(
+            any("acc-sha256" in p or "acc-result" in p or "acc-minor" in p
+                for p in self._receipt_problems(problems)), problems)
+
+    def test_a_receipt_for_another_wheel_is_rejected(self):
+        """A receipt whose SHA names another wheel authorises nothing.
+
+        Two independent rules reject it (the SHA binding inside
+        wheel_problems, and the acc-sha256 provenance cross-check);
+        either is a rejection, and both name the wheel.
+        """
+        wheels, sdist, by_minor = self._six(self.tmp)
+        receipts = os.path.join(self.tmp, "receipts")
+        _write_receipts(receipts, by_minor)
+        # Tamper: swap in a receipt whose SHA names another wheel.
+        with open(os.path.join(receipts,
+                               "udf-acceptance-3.11.json")) as fh:
+            bad = json.load(fh)
+        bad["wheel_sha256"] = "f" * 64
+        with open(os.path.join(receipts,
+                               "udf-acceptance-3.11.json"), "w") as fh:
+            json.dump(bad, fh)
+        out = os.path.join(self.tmp, "out")
+        _report, problems = release_bundle.assemble(
+            wheels, sdist, out, "a" * 40, "refs/heads/test", "",
+            receipts_dir_value=receipts)
+        self.assertTrue(
+            any("acceptance receipt is for wheel" in p
+                or "acc-sha256" in p
+                for p in self._receipt_problems(problems)), problems)
+
+    def test_a_failed_receipt_is_rejected(self):
+        wheels, sdist, by_minor = self._six(self.tmp)
+        receipts = os.path.join(self.tmp, "receipts")
+        _write_receipts(receipts, by_minor)
+        with open(os.path.join(receipts,
+                               "udf-acceptance-3.12.json")) as fh:
+            bad = json.load(fh)
+        bad["result"] = "FAIL"
+        with open(os.path.join(receipts,
+                               "udf-acceptance-3.12.json"), "w") as fh:
+            json.dump(bad, fh)
+        out = os.path.join(self.tmp, "out")
+        _report, problems = release_bundle.assemble(
+            wheels, sdist, out, "a" * 40, "refs/heads/test", "",
+            receipts_dir_value=receipts)
+        self.assertTrue(
+            any("result is 'FAIL'" in p or "acc-result" in p
+                for p in self._receipt_problems(problems)), problems)
 
 
 class TestReleaseGateWiring(unittest.TestCase):

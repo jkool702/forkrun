@@ -249,11 +249,22 @@ PY
 
   rm -rf "/tmp/udfacc_${minor}"
   mkdir -p "/tmp/udfacc_${minor}"
+  # The receipt (--receipt) is the durable evidence that THIS wheel's
+  # helper ran a real UDF under the launcher's version barrier at
+  # $minor. Written into the repaired/ directory (next to its wheel)
+  # so the "Upload repaired UDF wheel" step carries it with the
+  # wheel it proves; tools/release_bundle.py requires it to prove
+  # the repaired helper's compiled minor (auditwheel strips its
+  # libpython DT_NEEDED, so the filename alone is not proof).
+  receipt="$rep_dir/udf-acceptance-${minor}.json"
   "$PY" "$REPO/tools/acceptance_installed_wheel.py" \
     --wheel "$repaired" --interpreter "$PY" --expect-minor "$minor" \
     --mode udf --udf-func px_udf:up \
     --workdir "/tmp/udfacc_${minor}" \
+    --receipt "$receipt" \
     || die "installed-wheel UDF acceptance failed for $minor"
+  [ -f "$receipt" ] \
+    || die "UDF acceptance receipt was not written for $minor"
 
   echo "=== UDF acceptance PASSED: Python $minor ($(basename "$repaired")) ==="
 }

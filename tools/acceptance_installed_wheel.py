@@ -453,6 +453,46 @@ def _write(path, text):
         fh.write(text)
 
 
+def _build_receipt(report, wheel_path, expected_bytes, markers):
+    """The durable evidence for ONE passing acceptance run.
+
+    Bound to the exact wheel SHA-256 and to the request; the bundle
+    validator (wheel_matrix.acceptance_receipt_problems) re-checks
+    every field. The structured report is the primary source; this
+    distils only what the bundle needs so the receipt cannot smuggle
+    a bare "PASS". The launcher's typed version barrier is what
+    establishes the helper's compiled minor during the run; the
+    marker's `version` is that minor as observed by the helper's own
+    interpreter.
+    """
+    minors = sorted({m.get("version") for m in markers if isinstance(m, dict)})
+    return {
+        "format": wheel_matrix.UDF_RECEIPT_FORMAT,
+        "result": report.get("result"),
+        "mode": report.get("mode"),
+        "expect_minor": report.get("expect_minor"),
+        "wheel": os.path.basename(wheel_path),
+        "wheel_sha256": _sha256_file(wheel_path),
+        "interpreter": report.get("interpreter_resolved"),
+        "byte_exact": True,
+        "isolated_helper": bool(
+            markers and all(m.get("isolated") is True for m in markers)),
+        "separate_process": bool(
+            markers and all(
+                isinstance(m.get("pid"), int)
+                and m.get("pid") != report.get("driver_pid")
+                for m in markers)),
+        "helper_provenance": bool(
+            report.get("provenance")
+            and (report.get("wheel_inspection") or {}).get("helper")
+            in report["provenance"]),
+        "marker_minor": minors[0] if len(minors) == 1 else None,
+        "marker_count": len(markers),
+        "expected_bytes": expected_bytes,
+        "udf_func": report.get("udf_func"),
+    }
+
+
 def _make_workdir(requested):
     if requested:
         os.makedirs(requested, exist_ok=True)
@@ -477,6 +517,13 @@ def main(argv=None):
     ap.add_argument("--udf-func", default=None,
                     help="MODULE:FUNC importable from --workdir for UDF mode")
     ap.add_argument("--workdir", default=None)
+    ap.add_argument("--receipt", default=None,
+                    help="write the structured UDF acceptance receipt "
+                         "(wheel SHA-256 + expected minor + isolated, "
+                         "separate-process, byte-exact evidence) to "
+                         "this path; the release-bundle validator "
+                         "requires it to prove a repaired helper's "
+                         "compiled minor")
     ap.add_argument("--timeout", type=int, default=600)
     args = ap.parse_args(argv)
 
@@ -927,7 +974,19 @@ sys.exit(0 if joined == expected else 3)
         % (len(helper_pids), ", ".join(str(p) for p in helper_pids),
            len(wl["markers"]), args.expect_minor, len(expected)))
     report["result"] = "PASS"
+    report["receipt"] = _build_receipt(
+        report, wheel, len(expected), wl["markers"])
     print(json.dumps(report, indent=2, sort_keys=True))
+    if args.receipt:
+        try:
+            with open(args.receipt, "w", encoding="utf-8",
+                      newline="\n") as fh:
+                json.dump(report["receipt"], fh, indent=2, sort_keys=True)
+                fh.write("\n")
+        except OSError as exc:
+            return _fail(report, ["could not write UDF acceptance "
+                                  "receipt %s: %s"
+                                  % (args.receipt, exc)])
     return 0
 
 

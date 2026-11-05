@@ -580,29 +580,226 @@ def helper_symbol_problems(helper_path, header=None):
     return problems
 
 
-def helper_libpython_problems(helper_path, minor):
-    """Does this helper LINK the libpython of `minor`?
+def _needed_entries(helper_path):
+    """The helper's DT_NEEDED entries, or None if they cannot be read.
 
-    The extension SUFFIX is a name; the NEEDED entry is what the loader
-    will actually resolve. A helper renamed (or copied) to look like
-    another minor's would pass a suffix-only check and fail at dlopen,
-    so the bundle validator checks the linkage too.
+    `objdump` is attempted first (the repository's existing tool for
+    this); when it is unavailable, `readelf` (which ships with the
+    same binutils) is used. Failing both is a read failure (None),
+    never an assumption of "no entries".
     """
-    want = "libpython%s.so" % minor
-    proc = subprocess.run(["objdump", "-p", helper_path],
-                          capture_output=True, text=True)
-    if proc.returncode != 0:
-        return ["objdump failed on %s: %s"
-                % (helper_path, proc.stderr[-500:])]
-    needed = [ln.split()[-1] for ln in proc.stdout.splitlines()
-              if "NEEDED" in ln and ln.split()]
-    if not any(n.startswith(want) for n in needed):
-        return ["%s does not link %s (NEEDED: %s) -- the helper's "
-                "extension suffix claims %s but the artifact was not "
-                "built against that interpreter"
-                % (os.path.basename(helper_path), want,
-                   ", ".join(needed), minor)]
-    return []
+    for cmd in (["objdump", "-p", helper_path],
+                ["readelf", "-d", helper_path]):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except OSError:
+            continue
+        if proc.returncode == 0:
+            return [ln.split()[-1] for ln in proc.stdout.splitlines()
+                    if "NEEDED" in ln and ln.split()]
+    return None
+
+
+def _libpython_needed(needed):
+    """The libpython entries among `needed`, as (name, minor) pairs.
+
+    A free-threaded build links ``libpython3.XXt.so...``; stripping
+    the optional ``t`` lets a caller compare the minor while still
+    naming the exact soname that was found. Entries that are present
+    but not shaped like a libpython soname are returned with their
+    own name and no minor so a caller can reject them rather than
+    ignore them.
+    """
+    out = []
+    for name in needed or ():
+        m = re.match(r"^libpython(\d+)\.(\d+)t?\.so(?:\.\d+)*$", name) \
+            or re.match(r"^libpython(\d+)\.(\d+)t?\.so$", name)
+        if m:
+            out.append((name, "%s.%s" % (m.group(1), m.group(2))))
+        elif name.startswith("libpython"):
+            out.append((name, None))
+    return out
+
+
+def helper_libpython_problems(helper_path, minor, *, acceptance=None):
+    """Is this helper's libpython linkage compatible with `minor`?
+
+    auditwheel strips the helper's libpython DT_NEEDED entry during
+    manylinux repair (manylinux policy: the helper must not pin the
+    interpreter's library -- see forkrun_cleanroom.c:960 in
+    setup_udf_helper()). An ABSENT entry is therefore the normal
+    shape of a repaired wheel, not a defect, and this function does
+    not report it.
+
+    What it does report, and why the minor still matters:
+
+    * a PRESENT libpython entry for a different minor (or one whose
+      shape is not a libpython soname) -- the artifact was built for
+      another interpreter than the one its name and tag claim;
+    * when the caller supplies `acceptance`, the runtime proof the
+      bundle carries (see acceptance_receipt_problems): the installed
+      wheel executed a real UDF in a separate helper process at the
+      expected minor, under the launcher's own version barrier. That
+      barrier -- not the filename suffix, and not the mere existence
+      of the exported typed symbol -- is what establishes the
+      helper's COMPILED minor. An absent NEEDED entry with a valid
+      receipt is accepted; an absent entry with no (or a defective)
+      receipt is rejected, so an arbitrary helper cannot pass on its
+      filename alone.
+
+    The unrepaired tree helper (the one release_check inspects)
+    keeps its DT_NEEDED entry, so the present-entry check is live
+    there as well.
+    """
+    needed = _needed_entries(helper_path)
+    if needed is None:
+        return ["could not read the DT_NEEDED entries of %s"
+                % (os.path.basename(helper_path),)]
+    libpy = _libpython_needed(needed)
+    problems = []
+    for name, found in libpy:
+        if found != minor:
+            problems.append(
+                "%s links %s, which is not the libpython for Python %s "
+                "-- the helper's name and tag claim %s but the "
+                "artifact was built against %s"
+                % (os.path.basename(helper_path), name, minor, minor,
+                   found or "an unrecognised soname"))
+    if libpy:
+        return problems
+    # No libpython DT_NEEDED entry: the auditwheel-repaired shape. The
+    # compiled minor must be proven by the installed-wheel acceptance
+    # receipt for this exact wheel (wheel SHA-256 + expected minor +
+    # isolated execution + byte-exact output + helper identity).
+    if acceptance is None:
+        problems.append(
+            "%s carries no libpython DT_NEEDED entry and no "
+            "installed-wheel acceptance receipt was supplied: its "
+            "compiled minor is unproven (a filename suffix alone is "
+            "not proof)"
+            % (os.path.basename(helper_path),))
+        return problems
+    problems += acceptance_receipt_problems(
+        acceptance, minor=minor, wheel_sha256=None)
+    return problems
+
+
+# --- installed-wheel acceptance receipts (SETUP only, never a
+# --- second UDF harness) ---------------------------------------------
+#
+# The per-minor UDF acceptance job already installs the repaired
+# wheel and lets the cleanroom launcher execute a real UDF through
+# it. That run is the authority for the helper's COMPILED minor:
+# the launcher preloads the caller's libpython, resolves the
+# helper's typed build-version symbol, compares the reported
+# major.minor against the declared caller version, and refuses
+# (UDF_SETUP_VERIFY) on any mismatch -- and the acceptance harness
+# independently re-verifies that the run was isolated, separate-
+# process, at the expected minor, and byte-exact. The receipt below
+# is the structured record of THAT run, bound to the exact wheel
+# SHA-256. The bundle validator checks the receipt; it never
+# re-executes a UDF.
+
+UDF_RECEIPT_FORMAT = "forkrun-udf-acceptance/1"
+
+
+def acceptance_receipt_problems(receipt, *, minor=None,
+                                wheel_sha256=None):
+    """Defects in an installed-wheel UDF acceptance receipt.
+
+    Returns a list of problems (empty means the receipt proves what
+    the bundle needs). Checked here, in one place, so the bundle
+    validator and the acceptance harness cannot drift on the shape:
+
+    * the receipt is a dict of the expected format;
+    * the wheel SHA-256 matches the wheel being validated (a
+      receipt for another wheel authorises nothing); when the caller
+      has already hashed the wheel, `wheel_sha256` is that value and
+      must equal the receipt's;
+    * the requested interpreter is the expected minor, and the
+      isolated run actually reported that minor in its marker (the
+      helper's COMPILED version, as observed by the running
+      interpreter, not merely the filename);
+    * a separate helper process ran (marker pid != driver pid);
+    * the sampled workload was byte-exact;
+    * the installed helper is the wheel's own member (provenance).
+
+    When `minor` is None the receipt's own expect_minor is used as
+    the reference (the receipt must still prove that minor).
+    """
+    problems = []
+    if not isinstance(receipt, dict):
+        return ["UDF acceptance receipt is not a JSON object"]
+    if receipt.get("format") != UDF_RECEIPT_FORMAT:
+        problems.append(
+            "UDF acceptance receipt format is %r, expected %r"
+            % (receipt.get("format"), UDF_RECEIPT_FORMAT))
+    want_minor = minor or receipt.get("expect_minor")
+    if want_minor not in SUPPORTED_MINORS:
+        problems.append(
+            "UDF acceptance receipt names no supported minor "
+            "(expect_minor=%r)" % (receipt.get("expect_minor"),))
+        want_minor = None
+    if receipt.get("result") != "PASS":
+        problems.append(
+            "UDF acceptance receipt result is %r, expected 'PASS' "
+            "(a failed or unparsed acceptance authorises nothing)"
+            % (receipt.get("result"),))
+    if receipt.get("mode") != "udf":
+        problems.append(
+            "UDF acceptance receipt mode is %r, expected 'udf' (a "
+            "generic acceptance proves no helper)"
+            % (receipt.get("mode"),))
+    if receipt.get("byte_exact") is not True:
+        problems.append(
+            "UDF acceptance receipt does not record byte-exact output")
+    if receipt.get("isolated_helper") is not True:
+        problems.append(
+            "UDF acceptance receipt does not record isolated helper "
+            "execution")
+    if receipt.get("separate_process") is not True:
+        problems.append(
+            "UDF acceptance receipt does not record a separate helper "
+            "process")
+    if receipt.get("helper_provenance") is not True:
+        problems.append(
+            "UDF acceptance receipt does not record that the installed "
+            "helper is the wheel's own member")
+    if receipt.get("marker_minor") != want_minor:
+        problems.append(
+            "UDF acceptance marker ran under Python %r, expected %r "
+            "(the helper's compiled minor is not %s)"
+            % (receipt.get("marker_minor"), want_minor, want_minor))
+    sha = receipt.get("wheel_sha256")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+        problems.append(
+            "UDF acceptance receipt carries no wheel SHA-256 (it is "
+            "not bound to the wheel it accepted)")
+    elif wheel_sha256 is not None and sha != wheel_sha256:
+        problems.append(
+            "UDF acceptance receipt is for wheel %s, not the wheel "
+            "being validated (%s)" % (sha, wheel_sha256))
+    return problems
+
+
+def load_acceptance_receipt(path):
+    """Read an acceptance receipt file. Returns (receipt, problems).
+
+    A missing or malformed file is a problem, not None: the bundle
+    validator must fail closed on an unavailable receipt rather than
+    treating it like a wheel it merely has not checked.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            receipt = json.load(fh)
+    except FileNotFoundError:
+        return None, ["no UDF acceptance receipt at %s (an unrepaired "
+                      "helper without its receipt cannot be validated)"
+                      % (path,)]
+    except (OSError, ValueError) as exc:
+        return None, ["UDF acceptance receipt at %s is not readable "
+                      "JSON: %s" % (path, exc)]
+    return receipt, []
 
 
 def auditwheel_repair(wheel_path, out_dir, interpreter):

@@ -241,6 +241,148 @@ class TestWheelValidation(unittest.TestCase):
         self.assertEqual([], wheel_matrix.validate_wheel_tags(w))
 
 
+class TestHelperLibpython(unittest.TestCase):
+    """The repaired-helper shape, and the proof that replaces it.
+
+    auditwheel strips the helper's libpython DT_NEEDED entry during
+    manylinux repair (forkrun_cleanroom.c setup_udf_helper()), so a
+    repaired wheel's helper carries NO libpython entry. That is the
+    normal shape, not a defect -- but a filename suffix alone is not
+    proof of the compiled minor, so the rule requires the
+    installed-wheel acceptance receipt (which exercised the
+    launcher's typed version barrier) for that shape. A present
+    entry must name the expected minor either way.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.helper = os.path.join(self.tmp, "_fr_udf.so")
+        # Minimal ELF-shaped shared object: NEEDED entries are what
+        # the rule reads. Start with none (the repaired shape).
+        self._elf([])
+
+    def _elf(self, needed):
+        # A fake ELF cannot be parsed by objdump/readelf, and the
+        # rule deliberately fails closed on unreadable entries --
+        # so the "absent" and "present" shapes are produced by
+        # EDITING a real shared object: NEEDED entries are removed
+        # (the auditwheel-repaired shape) or replaced (a wrong-minor
+        # build), by their byte offsets. The real file is the one
+        # the host built; nothing here assumes it is 3.14.
+        import sysconfig
+        real = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+        src_ = os.path.join(os.environ.get("FORKRUN_TEST_SO_SRC") or
+                            os.path.join(_ROOT, "python/forkrun"),
+                            "_fr_udf" + real)
+        if not os.path.isfile(src_):
+            raise unittest.SkipTest(
+                "no real helper at %s to edit into a test shape" % (src_,))
+        with open(src_, "rb") as fh:
+            data = bytearray(fh.read())
+        mine = [n.encode() for n in needed]
+        # Find libpython NEEDED names in the real file and either
+        # erase (absent) or rename (present) them, preserving length.
+        import re as _re
+        for m in _re.finditer(rb"libpython[0-9.]+t?\.so(?:\.[0-9]+)*", bytes(data)):
+            name = m.group().decode()
+            if not mine:
+                for i in range(m.start(), m.end()):
+                    data[i] = 0
+            else:
+                want = mine.pop(0).decode()
+                encoded = want.encode()
+                if len(encoded) != len(name):
+                    raise unittest.SkipTest(
+                        "cannot rename %r to %r without changing its "
+                        "length" % (name, want))
+                data[m.start():m.end()] = encoded
+        with open(self.helper, "wb") as fh:
+            fh.write(bytes(data))
+
+    def _receipt(self, minor="3.14", sha="a" * 64, **over):
+        r = {
+            "format": wheel_matrix.UDF_RECEIPT_FORMAT,
+            "result": "PASS",
+            "mode": "udf",
+            "expect_minor": minor,
+            "wheel": "forkrun-0.18.0-cp314-cp314-manylinux_2_28_x86_64.whl",
+            "wheel_sha256": sha,
+            "byte_exact": True,
+            "isolated_helper": True,
+            "separate_process": True,
+            "helper_provenance": True,
+            "marker_minor": minor,
+        }
+        r.update(over)
+        return r
+
+    def test_absent_needed_with_valid_receipt_is_accepted(self):
+        self.assertEqual(
+            [], wheel_matrix.helper_libpython_problems(
+                self.helper, "3.14", acceptance=self._receipt()))
+
+    def test_absent_needed_without_receipt_is_rejected(self):
+        problems = wheel_matrix.helper_libpython_problems(
+            self.helper, "3.14")
+        self.assertTrue(
+            any("no libpython DT_NEEDED" in p for p in problems),
+            problems)
+
+    def test_a_present_matching_needed_is_accepted(self):
+        self._elf(["libpython3.14.so.1.0"])
+        self.assertEqual(
+            [], wheel_matrix.helper_libpython_problems(
+                self.helper, "3.14"))
+
+    def test_a_present_wrong_minor_needed_is_rejected(self):
+        self._elf(["libpython3.12.so.1.0"])
+        problems = wheel_matrix.helper_libpython_problems(
+            self.helper, "3.14")
+        self.assertTrue(
+            any("libpython3.12.so.1.0" in p for p in problems), problems)
+
+    def test_a_receipt_for_another_wheel_is_rejected(self):
+        problems = wheel_matrix.acceptance_receipt_problems(
+            self._receipt(sha="a" * 64), minor="3.14",
+            wheel_sha256="b" * 64)
+        self.assertTrue(
+            any("receipt is for wheel" in p for p in problems), problems)
+
+    def test_a_receipt_with_a_wrong_marker_minor_is_rejected(self):
+        problems = wheel_matrix.acceptance_receipt_problems(
+            self._receipt(marker_minor="3.12"), minor="3.14")
+        self.assertTrue(
+            any("marker ran under Python" in p for p in problems), problems)
+
+    def test_a_failed_acceptance_receipt_is_rejected(self):
+        problems = wheel_matrix.acceptance_receipt_problems(
+            self._receipt(result="FAIL"), minor="3.14")
+        self.assertTrue(problems, "a failed receipt authorised a wheel")
+
+    def test_a_malformed_receipt_file_fails_closed(self):
+        path = os.path.join(self.tmp, "bad.json")
+        with open(path, "w") as fh:
+            fh.write("{not json")
+        receipt, problems = wheel_matrix.load_acceptance_receipt(path)
+        self.assertIsNone(receipt)
+        self.assertTrue(problems)
+        receipt, problems = wheel_matrix.load_acceptance_receipt(
+            os.path.join(self.tmp, "absent.json"))
+        self.assertIsNone(receipt)
+        self.assertTrue(any("no UDF acceptance receipt" in p
+                            for p in problems), problems)
+
+    def test_load_acceptance_receipt_round_trip(self):
+        path = os.path.join(self.tmp, "good.json")
+        import json as _json
+        with open(path, "w") as fh:
+            _json.dump(self._receipt(), fh)
+        receipt, problems = wheel_matrix.load_acceptance_receipt(path)
+        self.assertEqual([], problems)
+        self.assertEqual("PASS", receipt["result"])
+
+
 class TestMatrixReporting(unittest.TestCase):
     """A partial matrix must never read as a complete one."""
 
