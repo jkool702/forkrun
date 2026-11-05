@@ -271,3 +271,28 @@ drop call). The checker probes the ten entry points by name
 ten — a driver-merge would redesign checker+manifest+probes, i.e.
 W-REL4 #2 scope, not this order. The executors share everything
 shareable through the core; their sequencing is the executor.
+
+**UPDATE 2026-10-21 (third SSoT pass).** The `_watch_scanner x2` entry
+above is now OBSOLETE. The per-executor "nonlocal rebinding" was the
+stated reason for leaving it shape-bound, and it is not a reason: a
+module-level helper that RETURNS the new state handles the rebinding
+exactly the way `_watch_numa_pipeline` already did. `_scanner_watch()`
+now holds the waitpid mechanic; the two closures keep only what the
+executor does next (abort, and raise) and are byte-identical.
+
+A THIRD copy of the same rule exists INLINE (not as a closure, so a
+function-level scan does not see it) and has drifted: it returns
+True/False rather than None, clears `scan_pid` on `ChildProcessError`,
+and has no D-PORT2/D6 "excuse" check — so it aborts and raises even
+when an abort is already in flight, which is the spurious fatal
+D-PORT2/D6 exists to prevent. It is NOT folded, because folding it
+would change behaviour; it is recorded in
+`PYTHON_FRONTEND_DUPLICATION_AUDIT.md` §2.7 as a decision to be made,
+not a refactor to be done.
+
+The `_maybe_fork_workers` copies (FOUR of them, not three) are now one
+rule in `_fork_timing()`. Note the rule has THREE outcomes, not two:
+the workers may ALREADY exist, in which case the caller must not fork
+again. A boolean cannot carry that, and the first version of the fold
+that used one re-forked an existing set and lost records.
+

@@ -18,14 +18,19 @@ byte ranges map exactly to line sets.
 
 import gc
 import os
+import signal
 import sys
 import tempfile
+import time
+import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import forkrun  # noqa: E402
+from forkrun import _resume  # noqa: E402
 from forkrun._bindings import find_substrate, get  # noqa: E402
 from forkrun._checkpoint import (CheckpointState,  # noqa: E402
                                  check_checkpoint_safety,
@@ -33,7 +38,8 @@ from forkrun._checkpoint import (CheckpointState,  # noqa: E402
                                  serialize_checkpoint,
                                  snapshot_from_engine, write_checkpoint)
 
-from _helpers import assert_no_zombies  # noqa: E402
+from _helpers import (ChildLifecycleMixin, DefaultSigint,  # noqa: E402
+                      assert_no_zombies, nfd, run_on_background_thread)
 
 try:
     find_substrate()
@@ -300,7 +306,7 @@ class TestCheckpointCodec(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSnapshotAPI(unittest.TestCase):
+class TestSnapshotAPI(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -342,7 +348,7 @@ class TestSnapshotAPI(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestResumePathValidation(unittest.TestCase):
+class TestResumePathValidation(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -449,7 +455,7 @@ class TestResumePathValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestResumeExecution(unittest.TestCase):
+class TestResumeExecution(ChildLifecycleMixin, unittest.TestCase):
     """Abort -> checkpoint -> resume cycles (byte-coordinate proofs).
 
     Abort mechanism: a file-append counter shared by forked workers
@@ -495,17 +501,35 @@ class TestResumeExecution(unittest.TestCase):
                         return bytes(batch.data).upper()
                     import signal
                     os.kill(os.getppid(), signal.SIGINT)
+                    # Keep the batch IN FLIGHT after the signal. Signal
+                    # DELIVERY is asynchronous: without this hold the
+                    # parent can finish the whole corpus before it
+                    # processes the pending interrupt, so the run
+                    # completes successfully and there is no abort to
+                    # checkpoint. That was the original full-suite
+                    # failure (no checkpoint + a teardown interrupted
+                    # by the late signal). Sleeping here makes the
+                    # trigger genuinely mid-pipeline without changing
+                    # the eight-execution premise.
+                    time.sleep(0.25)
             return bytes(batch.data).upper()
         return _payload
 
     def _abort_run(self, path, counter, limit, ckpt, action="raise",
-                   workers=2):
-        """Run to a synthetic abort; return nothing (asserts abort)."""
+                   workers=2, lines=None):
+        """Run to a synthetic abort; return nothing (asserts abort).
+
+        ``lines`` pins the batch granularity. The abort premise is
+        "the payload runs ``limit`` times"; auto batching derives the
+        batch count from the CPU count, so a 4-CPU runner can produce
+        fewer batches than the limit and the abort never fires. Callers
+        that need the premise made explicit pass ``lines=1``.
+        """
         with self.assertRaises(RuntimeError):
             forkrun.map(self._counter_payload(counter, limit, action),
                         path, workers=workers, orchestrator=True,
                         order="index", on_error="fail-fast",
-                        checkpoint_file=ckpt, nodes=1)
+                        checkpoint_file=ckpt, nodes=1, lines=lines)
         self.assertTrue(os.path.exists(ckpt),
                         "abort with progress must checkpoint")
 
@@ -518,7 +542,7 @@ class TestResumeExecution(unittest.TestCase):
                 os.unlink(f)
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
-        self._abort_run(path, counter, 8, ckpt)
+        self._abort_run(path, counter, 8, ckpt, lines=1)
         state = parse_checkpoint(ckpt)
         self.assertGreater(state.horizon, 0)
 
@@ -560,7 +584,7 @@ class TestResumeExecution(unittest.TestCase):
                 os.unlink(f)
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
-        self._abort_run(path, counter, 8, ckpt)
+        self._abort_run(path, counter, 8, ckpt, lines=500)
         state = parse_checkpoint(ckpt)
         committed = _byte_lines(0, state.horizon)
         for s, e in state.jagged:
@@ -596,13 +620,19 @@ class TestResumeExecution(unittest.TestCase):
                 os.unlink(f)
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
-        self._abort_run(path, counter, 8, ckpt)
+        self._abort_run(path, counter, 8, ckpt, lines=500)
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
                           order="index", resume=ckpt, nodes=1)
         expect = forkrun.map(_up, path, workers=4, orchestrator=True,
                              order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
-        self.assertEqual(len(res), len(expect))
+        # Chunk COUNT is not part of the contract. A resumed map
+        # batches the corpus that REMAINS after the checkpoint horizon,
+        # so auto batching legitimately splits it into a different
+        # number of chunks than a fresh full run (measured: 12 vs 5 on
+        # a 4-CPU runner). Byte identity above is the claim; this pins
+        # that the comparison cannot pass vacuously on an empty result.
+        self.assertTrue(res)
         # W-REL5-C4 (deliver-then-unlink): the consumed sidecar is
         # RETAINED after a successful resume — deleting it before
         # durable delivery would lose the prefix permanently on a
@@ -628,7 +658,7 @@ class TestResumeExecution(unittest.TestCase):
                 os.unlink(f)
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
-        self._abort_run(path, counter, 8, ckpt)
+        self._abort_run(path, counter, 8, ckpt, lines=500)
         # Aborted run's committed output (sidecar, read BEFORE the
         # resume consumes it) + resumed output: every input line
         # exactly once (multiset proof — any cross-run duplicate
@@ -656,7 +686,7 @@ class TestResumeExecution(unittest.TestCase):
         counter1 = path + ".c1"
         self.addCleanup(
             lambda: os.path.exists(counter1) and os.unlink(counter1))
-        self._abort_run(path, counter1, 8, ckpt)
+        self._abort_run(path, counter1, 8, ckpt, lines=500)
         h1 = parse_checkpoint(ckpt).horizon
         self.assertGreater(h1, 0)
         counter2 = path + ".c2"
@@ -666,7 +696,7 @@ class TestResumeExecution(unittest.TestCase):
             forkrun.map(self._counter_payload(counter2, 12), path,
                         workers=2, orchestrator=True, order="index",
                         on_error="fail-fast", resume=ckpt,
-                        checkpoint_file=ckpt, nodes=1)
+                        checkpoint_file=ckpt, nodes=1, lines=500)
         self.assertTrue(os.path.exists(ckpt))
         h2 = parse_checkpoint(ckpt).horizon
         self.assertGreaterEqual(h2, h1)
@@ -677,7 +707,16 @@ class TestResumeExecution(unittest.TestCase):
         self.assertEqual(b"".join(res), b"".join(expect))
 
     def test_resume_sigint(self):
-        """SIGINT mid-pipeline checkpoints; resume completes."""
+        """SIGINT mid-pipeline checkpoints; resume completes.
+
+        The abort must be observably MID-PIPELINE, not after it: the
+        entry snapshot (taken before ``fr_py_abort``) must show committed
+        progress, and the published horizon must be at least that
+        frontier and still short of the whole input. That is the
+        evidence the old per-thread mask could not provide -- it
+        delivered the KeyboardInterrupt at an arbitrary bytecode, often
+        after the pipeline had already finished.
+        """
         n = 20000
         path = self._input(n=n)
         counter = path + ".count"
@@ -700,20 +739,301 @@ class TestResumeExecution(unittest.TestCase):
         try:
             with self.assertRaises(KeyboardInterrupt):
                 forkrun.map(payload, path, workers=2, orchestrator=True,
-                            order="index", checkpoint_file=ckpt, nodes=1)
+                            order="index", checkpoint_file=ckpt, nodes=1,
+                            lines=500)
         finally:
             _signal.signal(_signal.SIGINT, _old_int)
+        total_input_bytes = os.path.getsize(path)
+        self.assertTrue(
+            os.path.exists(fired),
+            "the single-shot SIGINT trigger never fired")
         self.assertTrue(os.path.exists(ckpt),
                         "SIGINT abort must checkpoint")
+        self.assertTrue(
+            os.path.exists(ckpt + ".coll"),
+            "the collected-output sidecar was not published; a resume "
+            "would skip output the caller never saw")
+        state = parse_checkpoint(ckpt)
+        self.assertGreater(
+            state.horizon, 0,
+            "the published checkpoint records no committed frontier")
+        diag = _resume.abort_diagnostics()
+        self.assertTrue(diag["entered"],
+                        "the abort choreography was never entered")
+        self.assertEqual(
+            "published", diag["category"],
+            "the abort choreography declined: %r" % (diag,))
+        self.assertTrue(diag["published"])
+        self.assertEqual(
+            state.horizon, diag["horizon"],
+            "the checkpoint on disk disagrees with the published "
+            "diagnosis")
+        self.assertIsNotNone(
+            diag["horizon_at_entry"],
+            "the entry snapshot was unavailable, so 'mid-pipeline' is "
+            "asserted rather than measured")
+        self.assertGreater(
+            diag["horizon_at_entry"], 0,
+            "the SIGINT was delivered before any batch committed: the "
+            "trigger was not mid-pipeline")
+        self.assertLessEqual(
+            diag["horizon_at_entry"], state.horizon,
+            "the published horizon is BEHIND the frontier already "
+            "committed when the abort began; resume would duplicate "
+            "output")
+        self.assertLess(
+            diag["horizon_at_entry"], total_input_bytes,
+            "the pipeline had already consumed the whole input when the "
+            "abort began, so this run did not exercise a mid-pipeline "
+            "interrupt")
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
                           order="index", resume=ckpt, nodes=1)
         expect = forkrun.map(_up, path, workers=4, orchestrator=True,
                              order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
+        assert_no_zombies(self)
+
+    def _armed_checkpoint_paths(self, suffix=""):
+        path = self._input()
+        ckpt = path + ".ckpt" + suffix
+        counter = path + ".count" + suffix
+        for f in (counter, ckpt, ckpt + ".coll"):
+            if os.path.exists(f):
+                os.unlink(f)
+            self.addCleanup(
+                lambda f=f: os.path.exists(f) and os.unlink(f))
+        return path, counter, ckpt
+
+    def test_second_sigint_during_publication_cannot_abandon_the_checkpoint(self):
+        """A signal inside write_checkpoint is deferred, not obeyed.
+
+        The abort choreography runs while the run's own exception is
+        unwinding. An operator pressing Ctrl-C again (or a terminal
+        delivering a second SIGINT) must not abandon publication
+        half-way, and must not replace the exception that caused the
+        abort. The signal is therefore recorded, the checkpoint is
+        written, and the original error propagates.
+        """
+        path, counter, ckpt = self._armed_checkpoint_paths()
+        real_write = _resume.write_checkpoint
+        fired = []
+
+        def _write_then_sigint(dest, snap):
+            if not fired:
+                fired.append(True)
+                os.kill(os.getpid(), signal.SIGINT)
+            return real_write(dest, snap)
+
+        with DefaultSigint(), mock.patch.object(
+                _resume, "write_checkpoint", _write_then_sigint):
+            with self.assertRaises(RuntimeError):
+                forkrun.map(self._counter_payload(counter, 8), path,
+                            workers=2, orchestrator=True, order="index",
+                            on_error="fail-fast", checkpoint_file=ckpt,
+                            nodes=1, lines=500)
+        self.assertTrue(fired, "the second SIGINT was never delivered")
+        self.assertTrue(
+            os.path.exists(ckpt),
+            "a SIGINT during write_checkpoint abandoned publication")
+        self.assertGreater(
+            parse_checkpoint(ckpt).horizon, 0,
+            "the published checkpoint records no committed frontier")
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("published", diag["category"])
+        self.assertTrue(diag["published"])
+
+    def test_background_sigint_during_publication_cannot_abandon_the_checkpoint(self):
+        """The same contract when the RUN itself is on a worker thread.
+
+        Delivery is synchronous on the thread that closes the deferral,
+        which for a background run is the run's own thread (see
+        ``_signals.py`` "DELIVERY THREAD"). The publication deferral is
+        process-wide, so it must protect a background run exactly as it
+        protects a main-thread one: the signal is recorded, the
+        checkpoint is written, and the run's own error survives.
+        """
+        path, counter, ckpt = self._armed_checkpoint_paths(".bg")
+        real_write = _resume.write_checkpoint
+        fired = []
+
+        def _write_then_sigint(dest, snap):
+            if not fired:
+                fired.append(True)
+                os.kill(os.getpid(), signal.SIGINT)
+            return real_write(dest, snap)
+
+        def body():
+            return forkrun.map(self._counter_payload(counter, 8), path,
+                               workers=2, orchestrator=True,
+                               order="index", on_error="fail-fast",
+                               checkpoint_file=ckpt, nodes=1, lines=500)
+
+        with DefaultSigint(), mock.patch.object(
+                _resume, "write_checkpoint", _write_then_sigint):
+            result = run_on_background_thread(body)
+        self.assertTrue(result["finished"],
+                        "the background publication run did not finish")
+        self.assertTrue(fired, "the second SIGINT was never delivered")
+        self.assertIsInstance(
+            result.get("exc"), RuntimeError,
+            "expected the run's own abort, got %r" % (result.get("exc"),))
+        self.assertNotIsInstance(
+            result.get("exc"), KeyboardInterrupt,
+            "the deferred signal replaced the run's own error")
+        self.assertTrue(
+            os.path.exists(ckpt),
+            "a SIGINT during write_checkpoint abandoned publication")
+        self.assertGreater(
+            parse_checkpoint(ckpt).horizon, 0,
+            "the published checkpoint records no committed frontier")
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("published", diag["category"])
+        self.assertTrue(diag["published"])
+        assert_no_zombies(self)
+
+    def test_second_sigint_during_sidecar_cannot_abandon_publication(self):
+        """Same contract for the sidecar (the output half of a resume)."""
+        path, counter, ckpt = self._armed_checkpoint_paths()
+        real_publish = _resume._publish_sidecar
+        fired = []
+
+        def _publish_then_sigint(dest, resume_src, coll_fd):
+            if not fired:
+                fired.append(True)
+                os.kill(os.getpid(), signal.SIGINT)
+            return real_publish(dest, resume_src, coll_fd)
+
+        with DefaultSigint(), mock.patch.object(
+                _resume, "_publish_sidecar", _publish_then_sigint):
+            with self.assertRaises(RuntimeError):
+                forkrun.map(self._counter_payload(counter, 8), path,
+                            workers=2, orchestrator=True, order="index",
+                            on_error="fail-fast", checkpoint_file=ckpt,
+                            nodes=1, lines=500)
+        self.assertTrue(fired, "the second SIGINT was never delivered")
+        self.assertTrue(os.path.exists(ckpt + ".coll"),
+                        "the sidecar was abandoned after its publication "
+                        "began")
+        self.assertTrue(os.path.exists(ckpt),
+                        "the checkpoint was abandoned after the sidecar")
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("published", diag["category"])
+
+
+class TestAbortDiagnostics(unittest.TestCase):
+    """The abort-choreography decision is observable, category by category.
+
+    The original full-suite failure reported "SIGINT abort must
+    checkpoint" with no diagnosis of WHICH decision declined. These
+    tests pin every outcome the choreography can produce, including the
+    ones that must publish and the ones that legitimately decline.
+    """
+
+    def setUp(self):
+        self._saved = _resume._LAST_ABORT[0]
+        _resume._LAST_ABORT[0] = None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        _resume._LAST_ABORT[0] = self._saved
+
+    @staticmethod
+    def _lib():
+        return types.SimpleNamespace(fr_py_abort=lambda: None)
+
+    def _call(self, **overrides):
+        kwargs = dict(lib=self._lib(), state=None, orderer_pid=None,
+                      order_w=None, coll_fd=None, use_orderer=True,
+                      collect=False, resume_src="/tmp/forkrun-diag.ckpt",
+                      checkpoint_file=None, engine_live=True)
+        kwargs.update(overrides)
+        return _resume.checkpoint_on_abort(**kwargs)
+
+    def test_never_entered_is_the_default(self):
+        diag = _resume.abort_diagnostics()
+        self.assertFalse(diag["entered"])
+        self.assertEqual("never-entered", diag["category"])
+        self.assertFalse(diag["published"])
+
+    def test_unarmed_engine_declines(self):
+        self.assertFalse(self._call(engine_live=False))
+        self.assertEqual("unarmed-engine",
+                         _resume.abort_diagnostics()["category"])
+
+    def test_unarmed_checkpoint_declines(self):
+        self.assertFalse(self._call(resume_src=None, checkpoint_file=None))
+        self.assertEqual("unarmed-checkpoint",
+                         _resume.abort_diagnostics()["category"])
+
+    def test_snapshot_unavailable_declines(self):
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               return_value=None):
+            self.assertFalse(self._call())
+        self.assertEqual("snapshot-unavailable",
+                         _resume.abort_diagnostics()["category"])
+
+    def test_no_progress_declines_and_says_so(self):
+        snap = types.SimpleNamespace(horizon=0, jagged=[])
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               return_value=snap):
+            self.assertFalse(self._call())
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("no-progress", diag["category"])
+        self.assertEqual(0, diag["horizon"])
+        self.assertFalse(diag["attempted_publication"])
+
+    def test_published_reports_the_frontier(self):
+        snap = types.SimpleNamespace(horizon=123, jagged=[(7, 9)])
+        written = []
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               return_value=snap), \
+                mock.patch.object(_resume, "write_checkpoint",
+                                  side_effect=lambda d, s: written.append(
+                                      (d, s.horizon))):
+            self.assertTrue(self._call())
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("published", diag["category"])
+        self.assertTrue(diag["published"])
+        self.assertTrue(diag["attempted_publication"])
+        self.assertEqual(123, diag["horizon"])
+        self.assertEqual(1, diag["jagged"])
+        self.assertEqual([("/tmp/forkrun-diag.ckpt", 123)], written)
+
+    def test_sidecar_failure_fails_closed_without_writing(self):
+        snap = types.SimpleNamespace(horizon=123, jagged=[])
+        written = []
+        fd, coll = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(os.unlink, coll)
+        coll_fd = os.open(coll, os.O_RDONLY)
+        self.addCleanup(os.close, coll_fd)
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               return_value=snap), \
+                mock.patch.object(_resume, "_publish_sidecar",
+                                  side_effect=OSError("disk full")), \
+                mock.patch.object(_resume, "write_checkpoint",
+                                  side_effect=lambda d, s: written.append(d)):
+            self.assertFalse(self._call(collect=True, coll_fd=coll_fd))
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("sidecar-failed", diag["category"])
+        self.assertFalse(diag["published"])
+        self.assertEqual([], written,
+                         "the checkpoint was written after its sidecar "
+                         "failed: it would skip output the caller can "
+                         "never recover")
+        self.assertIn("disk full", diag["error"])
+
+    def test_unexpected_failure_is_reported_not_raised(self):
+        with mock.patch.object(_resume, "snapshot_from_engine",
+                               side_effect=RuntimeError("boom")):
+            self.assertFalse(self._call())
+        diag = _resume.abort_diagnostics()
+        self.assertEqual("error", diag["category"])
+        self.assertIn("boom", diag["error"])
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestResumeStream(unittest.TestCase):
+class TestResumeStream(ChildLifecycleMixin, unittest.TestCase):
     """stream() resume: consumer-owns-yielded contract.
 
     The consumer persists everything yielded live. After abandon +
@@ -747,9 +1067,12 @@ class TestResumeStream(unittest.TestCase):
             time.sleep(0.05)
             return bytes(batch.data).upper()
 
+        # lines=400: 50 batches for 20k lines. Auto batching on a
+        # 4-CPU runner can drop below the 20 this test abandons after,
+        # which would make "tail non-empty" vacuous.
         gen = forkrun.stream(_slow, path, workers=4, orchestrator=True,
                              order="index", checkpoint_file=ckpt,
-                             nodes=1)
+                             nodes=1, lines=400)
         seen = []
         try:
             # ~64 batches for 20k lines at 50ms each: abandon after 20
@@ -783,6 +1106,104 @@ class TestResumeStream(unittest.TestCase):
         resumed_lines = _lines_of(b"".join(resumed))
         self.assertTrue(tail_lines <= resumed_lines,
                         "resumed stream lost uncommitted bytes")
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestResumeInitFailureReleasesSource(ChildLifecycleMixin,
+                                          unittest.TestCase):
+    """A failed resume gate releases BOTH acquisitions, every time.
+
+    The source is opened BEFORE the engine (the ordering that stopped a
+    rejected source leaving a live engine behind). That moves source
+    ownership ahead of the executor's try/finally, and resume validation
+    runs in that gap -- before any fork, by design -- so a malformed
+    checkpoint raises while the source fd is already open and unowned.
+    The earlier handler destroyed only the engine and leaked exactly one
+    descriptor per failed call: unbounded across a long-lived process,
+    and invisible in a test that makes one call.
+
+    All four resume-capable executor shapes are exercised: map/stream x
+    materialized/streaming ingest. A path source makes the descriptor
+    internally opened (``must_close=True``); an fd source would be
+    caller-owned and legitimately left open, so it cannot detect this
+    leak.
+    """
+
+    def tearDown(self):
+        assert_no_zombies(self)
+
+    def _input(self, n):
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        os.close(fd)
+        _write_input(path, n)
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def _bad_checkpoint(self):
+        fd, path = tempfile.mkstemp(suffix=".ckpt")
+        os.close(fd)
+        _write_file(path, "garbage\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def _shapes(self, bad):
+        """(name, callable(source)) for every resume-capable executor."""
+        def _map(src, **kw):
+            return forkrun.map(_up, src, workers=2, order="index",
+                               resume=bad, nodes=1, **kw)
+
+        def _stream(src, **kw):
+            return list(forkrun.stream(_up, src, workers=2, order="index",
+                                       resume=bad, nodes=1, **kw))
+
+        return (
+            ("map-materialized", lambda src: _map(src)),
+            ("map-ingest", lambda src: _map(src, streaming=True)),
+            ("stream-materialized", lambda src: _stream(src)),
+            ("stream-ingest", lambda src: _stream(src, streaming=True)),
+        )
+
+    def test_repeated_failures_leave_fd_count_and_engine_clean(self):
+        path = self._input(n=200)
+        bad = self._bad_checkpoint()
+        lib = get()
+
+        for name, run in self._shapes(bad):
+            with self.subTest(shape=name):
+                # Warm imports (and the first engine init) outside the
+                # measured baseline so lazy module loading cannot read
+                # as a leak.
+                with self.assertRaises(ValueError):
+                    run(path)
+                self.assertEqual(lib.fr_py_abort_reason(), -1,
+                                 "%s left the engine live after a failed "
+                                 "resume" % (name,))
+                baseline = nfd()
+                for attempt in range(5):
+                    with self.assertRaises(ValueError):
+                        run(path)
+                    self.assertEqual(
+                        nfd(), baseline,
+                        "%s leaked a descriptor on failed resume "
+                        "attempt %d" % (name, attempt + 1))
+                    self.assertEqual(
+                        lib.fr_py_abort_reason(), -1,
+                        "%s left the engine live on failed resume "
+                        "attempt %d" % (name, attempt + 1))
+
+                # A later, VALID run in the same process still works and
+                # still leaves nothing behind.
+                out = forkrun.map(_up, path, workers=2, order="index",
+                                  nodes=1, output="bytes")
+                got = sorted(b"".join(out).splitlines())
+                with open(path, "rb") as fh:
+                    want = sorted(fh.read().upper().splitlines())
+                self.assertEqual(got, want,
+                                 "%s: a failed resume corrupted the next "
+                                 "run" % (name,))
+                self.assertEqual(nfd(), baseline,
+                                 "%s left a descriptor behind after the "
+                                 "recovery run" % (name,))
 
 
 if __name__ == "__main__":

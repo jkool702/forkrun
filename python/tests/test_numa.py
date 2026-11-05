@@ -22,7 +22,7 @@ from forkrun._numa import (build_numa_map, detect_numa_nodes,  # noqa: E402
                            distribute_workers, get_node_cpus,
                            pin_to_node)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -84,6 +84,28 @@ class TestNumaTopology(unittest.TestCase):
         else:
             self.assertEqual(num_nodes, n)
         self.assertEqual(len(cpus), num_nodes)
+
+    def test_identical_cpu_masks_do_not_collapse_nodes(self):
+        """Fake-NUMA nodes share a CPU mask and are STILL distinct nodes.
+
+        `numa=fake=N` exposes N online nodes whose CPU masks are all the
+        same. Treating that as UMA collapsed the topology: a default
+        `nodes="auto"` call silently stopped exercising the per-node
+        machinery (and on the cleanroom route, whether the multi-node
+        envelope was requested changed with it). Topology detection
+        reports what the kernel reports; it does not infer placement
+        from mask equality.
+        """
+        online = detect_numa_nodes()
+        if len(online) < 2:
+            self.skipTest("single-node host: nothing to collapse")
+        masks = {tuple(get_node_cpus(n)) for n in online}
+        if len(masks) != 1:
+            self.skipTest("distinct CPU masks: not a fake-NUMA topology")
+        self.assertEqual(online, sorted(set(online)))
+        self.assertEqual(build_numa_map("auto")[1], len(online),
+                         "identical CPU masks must not collapse online "
+                         "nodes to one")
 
     def test_int_over_online_rejected(self):
         online = detect_numa_nodes()
@@ -178,7 +200,7 @@ class TestNumaSymbols(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestNumaExecution(unittest.TestCase):
+class TestNumaExecution(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -296,16 +318,19 @@ class TestNumaExecution(unittest.TestCase):
             sys.path.insert(0, d)
             try:
                 res = forkrun.map("w21segv_mod:payload", path,
-                                  workers=4, nodes=NODES_2)
+                                  workers=4, nodes=NODES_2, lines=100)
             finally:
                 sys.path.remove(d)
-            healthy = forkrun.map(_up, path, workers=4, nodes=1)
-            # Batch granularity differs across topologies, so the
-            # comparison is over LINES: every landed line is
-            # byte-exact, and only the crashed batch's lines may be
-            # missing (a SIGKILL-class death runs no code — no escrow
-            # deposit exists for it). Never a hang, never a
-            # whole-run abort for one batch's death.
+            healthy = forkrun.map(_up, path, workers=4, nodes=1, lines=100)
+            # Batch granularity is pinned to 100 lines so the crashed
+            # batch's loss is bounded independently of the host's CPU
+            # count (auto batching loses ~456 lines on a 4-CPU runner,
+            # over the 300-line bound below). The comparison is over
+            # LINES: every landed line is byte-exact, and only the
+            # crashed batch's lines may be missing (a SIGKILL-class
+            # death runs no code — no escrow deposit exists for it).
+            # Never a hang, never a whole-run abort for one batch's
+            # death.
             rl, hl = _lines(res), _lines(healthy)
             self.assertTrue(rl)
             self.assertTrue(set(rl) <= set(hl))
@@ -463,6 +488,51 @@ class TestNumaPurity(unittest.TestCase):
                 if token in src:
                     offenders.append("%s: %s" % (name, token))
         self.assertEqual(offenders, [])
+
+
+
+class TestNodesSpecification(unittest.TestCase):
+    """The `nodes` spec: what a physical count does when it cannot be had.
+
+    A DELIBERATE divergence from the bash frontend, which SKIPS nodes
+    that do not exist. The Python frontend RAISES instead: silently
+    running UMA after `nodes=4` was requested would benchmark a
+    different configuration than the caller asked for, and the number
+    would be a lie. `@N` is the way to ask for logical nodes.
+    """
+
+    def test_at_n_forces_logical_nodes_cycling_the_physicals(self):
+        """`@2` on a one-physical machine is TWO logical nodes."""
+        _spec, num_nodes, cpus = build_numa_map("@2")
+        self.assertEqual(2, num_nodes,
+                         "@N must produce N LOGICAL nodes, not fall back "
+                         "to the physical count")
+        self.assertEqual(2, len(cpus))
+
+    def test_a_physical_count_beyond_the_machine_raises(self):
+        """`nodes=N` with fewer physicals online is an error, not a
+        silent fallback."""
+        online = detect_numa_nodes()
+        if len(online) >= 2:
+            self.skipTest("this host has %d physical nodes online"
+                           % (len(online),))
+        with self.assertRaises(ValueError) as cm:
+            build_numa_map(len(online) + 1)
+        msg = str(cm.exception)
+        self.assertIn("only %d NUMA node(s) online" % (len(online),), msg)
+        self.assertIn("@", msg,
+                      "the error must point at the @N form")
+
+    def test_the_divergence_is_documented(self):
+        """The divergence is a decision, so it is written down."""
+        here = os.path.join(os.path.dirname(__file__), "..", "..", "DOCS",
+                            "FLAGS.md")
+        with open(here, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("deliberate", text.lower(),
+                      "the Python-vs-bash nodes divergence must be "
+                      "documented as deliberate")
+        self.assertIn("@N", text)
 
 
 if __name__ == "__main__":

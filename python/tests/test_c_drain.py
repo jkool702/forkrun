@@ -24,6 +24,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get, v1_available  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -72,7 +73,7 @@ class TestCDrainValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCDrainBasic(unittest.TestCase):
+class TestCDrainBasic(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -218,7 +219,7 @@ class TestCDrainBasic(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCDrainStream(unittest.TestCase):
+class TestCDrainStream(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -352,7 +353,7 @@ class TestCDrainStream(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCDrainReactor(unittest.TestCase):
+class TestCDrainReactor(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -431,7 +432,7 @@ class TestCDrainReactor(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCDrainNUMA(unittest.TestCase):
+class TestCDrainNUMA(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -481,7 +482,7 @@ class TestCDrainNUMA(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCDrainPerformance(unittest.TestCase):
+class TestCDrainPerformance(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 

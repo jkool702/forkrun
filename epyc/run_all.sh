@@ -69,7 +69,7 @@ Stages (in order):
   44_bench_headline       (dagger)/(max) pinned grid vs the published CSV
   50_bench_bash           bash matrix + parallel/xargs baselines + sweeps
   51_bench_core           core python suite @ 10M lines
-  60_utest_bash_full      test_frun_comprehensive.sh (264, un-timeboxed)
+  60_utest_bash_full      test_frun_comprehensive.sh (267, un-timeboxed)
   90_collect              bundle + ENVIRONMENT.md + DEVIATIONS.md
 EOF
 }

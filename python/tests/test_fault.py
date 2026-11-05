@@ -32,6 +32,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
 from _helpers import (assert_no_zombies, redirect_fd, restore_fd,  # noqa: E402
+                      ChildLifecycleMixin,
                       write_lines)
 
 try:
@@ -49,7 +50,7 @@ def _segv(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerSegfault(unittest.TestCase):
+class TestWorkerSegfault(ChildLifecycleMixin, unittest.TestCase):
     def test_all_segfault_parent_raises_no_zombies(self):
         # Every batch kills every attempt: the reactor's respawn cap
         # trips (bounded, never infinite) and the run raises.
@@ -173,7 +174,7 @@ class TestWorkerSegfault(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerOOM(unittest.TestCase):
+class TestWorkerOOM(ChildLifecycleMixin, unittest.TestCase):
     def test_allocation_failure_retries_then_poisons(self):
         # Explicit MemoryError exercises the same escrow path a real
         # allocation failure would take (a true 10GB alloc is nondetermin-
@@ -195,7 +196,7 @@ class TestWorkerOOM(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerException(unittest.TestCase):
+class TestWorkerException(ChildLifecycleMixin, unittest.TestCase):
     def test_value_error_poison_summary_on_stderr(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
@@ -350,7 +351,7 @@ class TestWorkerException(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestEmitRollback(unittest.TestCase):
+class TestEmitRollback(ChildLifecycleMixin, unittest.TestCase):
     """W-REL2/R13: the pure-Python v0 emit path rolls back partial
     records on write failure (the C-loop payload_error pattern
     verbatim: ftruncate to the pre-record end, append-once rule),

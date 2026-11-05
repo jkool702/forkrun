@@ -1,12 +1,25 @@
-"""forkrun Python frontend — Stage 0 API surface stub (v1.3 §3.0).
+"""forkrun Python frontend -- public API surface.
 
-This module defines the SHIPPING SURFACE that the Stage 0 falsification
-gate measures. It intentionally contains no engine changes: every call
-validates its arguments (including the source/sink plumbing shape) and
-then raises NotImplementedError until Stage 4 wires the substrate.
+This module defines the SHIPPING SURFACE: ``run``/``map``/``stream`` and
+their arguments. It validates public arguments and resolves configuration
+into a ``RunConfig``, then hands off to ``run.py``.
 
-The gate must measure the shipping surface — including how `source=`
-and `sink=` plumb — or it validates an API that won't ship.
+It is the single public entry point for every downstream path -- run/map/
+stream, reactor, streaming ingest and NUMA -- which is why engine-hazard
+checks (the CUDA fork guard) and path validation live HERE rather than
+being repeated per-path. Per-path copies were deleted as redundant.
+
+Division of responsibility, so the boundary does not erode:
+
+* **this module** validates and resolves *public* arguments. It is not
+  the authority for engine-side limits -- those belong to the C
+  contract. ``FORKRUN_RETRY_LIMIT`` is read here because it is a public
+  knob, but its semantics are the C worker's (W-REL6-3.5).
+* **run.py** selects the execution strategy.
+* **_executor_core.py** implements the shared mechanics.
+
+Execution and payload resolution are NOT done here; see ``run.py`` and
+``_udf.py``.
 """
 
 from __future__ import annotations
@@ -18,14 +31,14 @@ import os
 
 from forkrun._cuda_guard import check_cuda_hazard
 
-Mode = Literal["python", "spawn", "plugin", "splice"]
+Mode = Literal["python", "spawn", "plugin", "splice", "udf"]
 Order = Literal["none", "index"]
 OnError = Literal["retry", "fail-fast", "skip"]
 # W-PY21: "auto"/None (detect), 1 (UMA), N (first N physicals),
 # "0,1" (explicit physicals), "@N" (forced logical nodes).
 Nodes = Union[int, str, None]
 
-_VALID_MODES = ("python", "spawn", "plugin", "splice")
+_VALID_MODES = ("python", "spawn", "plugin", "splice", "udf")
 _VALID_ORDERS = ("none", "index")
 _VALID_ON_ERROR = ("retry", "fail-fast", "skip")
 

@@ -141,8 +141,6 @@ Any other `output` value raises `ValueError`.
 
 ## forkrun.sweep(payload, source=None, *, args=None, args_from=None, link=False, **kwargs)
 
-## forkrun.sweep(payload, source=None, *, args=None, args_from=None, link=False, **kwargs)
-
 Run the payload once per argument combination. Each batch's
 `.metadata` carries its sweep tuple; results return in
 combination order.
@@ -188,7 +186,7 @@ else raises `TypeError`.
 
 | Parameter | Type | Default | Where |
 |---|---|---|---|
-| `mode` | `str` | `"python"` | all — `"python"`, `"spawn"`, `"plugin"`, `"splice"` |
+| `mode` | `str` | `"python"` | all — `"python"`, `"spawn"`, `"plugin"`, `"splice"`, `"udf"` |
 | `workers` | `int` | auto (CPU count, capped) | all |
 | `order` | `str` | `"none"` | `map`/`stream` — or `"index"` for input order |
 | `lines` / `bytes` | `int` | adaptive | all — batch size (mutually exclusive) |

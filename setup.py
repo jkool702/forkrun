@@ -20,11 +20,169 @@ import shutil
 import subprocess
 
 from setuptools import setup
+from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools.command.build_py import build_py
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG_DIR = os.path.join(REPO_ROOT, "python", "forkrun")
 SO_NAME = "libforkrun_python.so"
+# CR-FIX1-I: the cleanroom launcher. Sits beside the substrate .so;
+# forkrun.run._cleanroom_launcher_path() looks for exactly this name in
+# exactly this directory, and nothing used to ship it.
+CR_NAME = "_forkrun_cleanroom"
+
+# W-EXP-1 (DECISION-01 5.4 / 6.2.1): the UDF helper is a SEPARATE,
+# CPython-LINKED artifact. Two rules follow, and they are one rule:
+#
+#   * A wheel that SHIPS the helper must not claim a generic `py3` tag.
+#     The helper links libpython3.X, so the wheel is valid only for the
+#     minor it was built against. DECISION-01 6.2.1: "a wheel built from
+#     an sdist on one machine and tagged py3-none would carry a
+#     different minor than its tag claims, with nothing in the artifact
+#     to prove it."
+#   * A wheel with NO helper stays `py3-none-<platform>`, and the
+#     substrate remains interpreter-agnostic. "Keep the source-only
+#     development path honest: do not advertise a locally built helper
+#     as present in a generic ABI-independent wheel."
+#
+# The tag follows the HELPER, not the running interpreter. The helper's
+# extension suffix ENCODES the minor it was compiled against
+# (_fr_udf.cpython-314-x86_64-linux-gnu.so -> 3.14), so a helper built
+# for a different minor has a different NAME and is simply not found
+# here -- which is the property that makes this safe: a mismatched build
+# cannot produce a wheel that claims the wrong minor.
+#
+# A plain `_fr_udf.so` (no suffix) is deliberately NOT shipped: its
+# minor cannot be established from its name. The runtime fallback in
+# forkrun/_udf.py still finds it in a SOURCE CHECKOUT, so the
+# development path keeps working -- it is only the WHEEL that declines
+# to vouch for it.
+_RUNTIME_UDF = None
+
+
+def _runtime_udf_module():
+    """forkrun/_udf.py, loaded by path.
+
+    It has no relative imports, so it can be loaded without importing
+    the package (whose __init__ is Linux-only and would fail on a
+    non-Linux builder).
+    """
+    global _RUNTIME_UDF
+    if _RUNTIME_UDF is None:
+        import importlib.util
+        path = os.path.join(REPO_ROOT, "python", "forkrun", "_udf.py")
+        spec = importlib.util.spec_from_file_location("forkrun._udf_abi",
+                                                      path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RUNTIME_UDF = mod
+    return _RUNTIME_UDF
+
+
+def _freethreaded_interpreter(suffix=None):
+    """Is THIS suffix / interpreter free-threaded (no-GIL) CPython?
+
+    Delegates to the RUNTIME's answer rather than keeping a second copy
+    of the rule: the packaging and the runtime must agree about which
+    configurations are supported, and two copies of that rule is how
+    they drift.
+
+    `suffix` asks the question about a CANDIDATE artifact's suffix
+    rather than the running interpreter's; the runtime's detector takes
+    both, so the packaging can ask about either side with the SAME
+    function.
+    """
+    return _runtime_udf_module().freethreaded_interpreter(suffix=suffix)
+
+
+def _udf_helper_for_this_interpreter(pkg_dir=None, suffix=None):
+    """The UDF helper built for THIS interpreter, or None.
+
+    None means: ship no helper, and keep the generic `py3-none` tag.
+
+    `pkg_dir` is the package directory to look in; it defaults to the
+    real one. It is a parameter so the RULE can be tested directly
+    (which minor a helper was built for, and what may ship) without
+    needing a second interpreter on the box. `suffix` is likewise a
+    parameter, for the same reason.
+    """
+    import sys
+    import sysconfig
+    if pkg_dir is None:
+        pkg_dir = PKG_DIR
+    if suffix is None:
+        suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+    # FREE-THREADED CPython IS NOT SUPPORTED for this helper route, so
+    # a free-threaded build ships no helper at all. The reasons are
+    # structural, not caution: the helper links libpython3.X and the
+    # free-threaded build links libpython3.Xt -- different sonames, so
+    # the artifacts are mutually load-incompatible; the C0.5 matrix
+    # fetches GIL interpreters only, so there is no measured evidence
+    # for the free-threaded path; and the launcher has never been
+    # exercised against one. Shipping it would be shipping an UNMEASUREED
+    # configuration, so the wheel declines to claim it.
+    minor = "%d%d" % sys.version_info[:2]
+    # The candidate must be the SAME FLAVOUR as the running interpreter:
+    # a free-threaded helper links libpython3.Xt and a GIL one links
+    # libpython3.X, so the two are not interchangeable.
+    #
+    # BOTH sides of that question go through the shared runtime
+    # detector, so there is one rule and not two: asking it about the
+    # CANDIDATE's suffix and about the RUNNING interpreter's flavour,
+    # and requiring the answers to agree. That covers both directions
+    # -- a free-threaded candidate on a GIL interpreter, and a GIL
+    # candidate on a free-threaded one -- and it leaves no local copy of
+    # the flavour test to drift from the runtime's.
+    if _freethreaded_interpreter(suffix=suffix) != _freethreaded_interpreter():
+        return None
+    name = "_fr_udf" + suffix
+    if not os.path.exists(os.path.join(pkg_dir, name)):
+        return None
+    # The suffix must carry THIS interpreter's minor. It normally does
+    # (cpython-314 for 3.14), and if it does not, the helper was built
+    # for something else and must not ship under this interpreter's tag.
+    if ("cpython-%s" % minor) not in suffix:
+        return None
+    return name
+
+
+UDF_HELPER = _udf_helper_for_this_interpreter()
+# The wheel's python AND abi tags. cp3XX when the helper ships; None
+# (so setuptools keeps py3-none) when it does not. Never `py3` with a
+# CPython-linked helper inside, and never `none` as the ABI of a wheel
+# that carries one -- "none" means "no ABI constraint", and a
+# free-threaded CPython 3.14 accepts `cp314-none-<platform>` exactly as
+# a GIL 3.14 does.
+WHEEL_PYTHON_TAG = None
+WHEEL_ABI_TAG = None
+if UDF_HELPER:
+    import sys as _sys
+    WHEEL_PYTHON_TAG = "cp%d%d" % _sys.version_info[:2]
+    WHEEL_ABI_TAG = WHEEL_PYTHON_TAG
+
+
+class BdistWheel(_bdist_wheel):
+    """bdist_wheel that emits the REAL ABI tag, not "none".
+
+    This project ships its binaries as package_data rather than as C
+    extension modules, so setuptools considers the distribution PURE and
+    bdist_wheel emits the ABI tag "none". "none" means "no ABI
+    constraint" -- and a free-threaded CPython 3.14 accepts
+    "cp314-none-<platform>" just as a GIL 3.14 does. So a GIL-built
+    helper in a "none"-ABI wheel advertises compatibility with a
+    free-threaded interpreter that cannot load it.
+
+    Emitting the real ABI ("cp314") makes the wheel's compatibility set
+    exactly the interpreters that can actually use the helper: the GIL
+    build, and not the free-threaded one (whose tag set contains
+    cp314-cp314t and cp314-abi3t, but not cp314-cp314).
+    """
+
+    def get_tag(self):
+        if UDF_HELPER and WHEEL_ABI_TAG:
+            plat = self.plat_name or "any"
+            return (WHEEL_PYTHON_TAG, WHEEL_ABI_TAG, plat)
+        return super().get_tag()
 
 # W-PY23/REL: PEP 600 manylinux policy floors, oldest first. A wheel
 # built against glibc G may claim the highest policy floor <= G:
@@ -166,6 +324,22 @@ class BuildSubstratePy(build_py):
         if not os.path.exists(so_path):
             raise RuntimeError("substrate build produced no %s" % SO_NAME)
 
+        # CR-FIX1-I: build the launcher on BOTH paths. The gcc fallback
+        # used to stop at the substrate, so behaviour silently diverged
+        # by host tooling -- and because the launcher was never listed in
+        # package_data, that divergence was invisible.
+        cr_path = os.path.join(PKG_DIR, CR_NAME)
+        self.announce("building cleanroom launcher %s" % CR_NAME)
+        if shutil.which("gcc") is None:
+            raise RuntimeError("need gcc to build the cleanroom launcher")
+        subprocess.run(
+            ["gcc", "-O2", "-o", cr_path,
+             os.path.join(REPO_ROOT, "forkrun_cleanroom.c"),
+             "-ldl", "-lrt"],
+            check=True, cwd=REPO_ROOT)
+        if not os.path.exists(cr_path):
+            raise RuntimeError("launcher build produced no %s" % CR_NAME)
+
 
 def read_readme():
     with open(os.path.join(REPO_ROOT, "python", "README.md")) as fh:
@@ -195,14 +369,29 @@ setup(
     ],
     package_dir={"": "python"},
     packages=["forkrun"],
-    package_data={"forkrun": [SO_NAME, "py.typed"]},
-    cmdclass={"build_py": BuildSubstratePy},
+    # CR-FIX1-I: the launcher ships too. It was listed NOWHERE, so a
+    # wheel install silently had no cleanroom at all: _cleanroom_
+    # launcher_path() resolves the binary relative to the substrate .so,
+    # and it simply was not there. That made `pip install forkrun`
+    # quietly different from a source checkout, which is exactly the
+    # kind of divergence the substrate .so being explicitly listed was
+    # meant to prevent.
+    # CR-FIX1-I again: an artifact that is not LISTED does not ship, and
+    # a wheel install is then quietly different from a source checkout.
+    # The UDF helper is the same class of artifact as the launcher.
+    package_data={"forkrun": ([SO_NAME, CR_NAME, "py.typed"]
+                               + ([UDF_HELPER] if UDF_HELPER else []))},
+    cmdclass={"build_py": BuildSubstratePy, "bdist_wheel": BdistWheel},
     # The wheel carries a compiled .so: tag it for this platform so
     # pip refuses it elsewhere (never py3-none-any). The tag is a
     # PEP 600 manylinux floor derived from the BUILD HOST's glibc —
     # see get_platform_tag(). Build inside the manylinux container to
     # get a floor below your distro's glibc (tools/build_wheel.sh).
-    options={"bdist_wheel": {"plat_name": PLATFORM_TAG}},
+    options={"bdist_wheel": dict(
+        {"plat_name": PLATFORM_TAG},
+        # cp3XX when the CPython-linked helper ships; absent otherwise,
+        # so the generic substrate wheel keeps its py3-none tag.
+        **({"python_tag": WHEEL_PYTHON_TAG} if WHEEL_PYTHON_TAG else {}))},
     python_requires=">=3.10",
     install_requires=[],
     classifiers=[
@@ -220,6 +409,14 @@ setup(
         # W-REL5-F (F2): 3.13 joins the CI version matrix (python-check
         # version-matrix job); the floor stays 3.10 (python_requires).
         "Programming Language :: Python :: 3.13",
+        # The declared support target is 3.10-3.15 (DECISION-01 Option A:
+        # "one helper per supported CPython minor ... cp310, cp311, ...
+        # cp315"), and the C0.5 interpreter matrix carries the same set.
+        # The classifiers said 3.10-3.13 while the decision and the
+        # matrix said 3.10-3.15: a release-metadata inconsistency, not
+        # a support change. They now agree.
+        "Programming Language :: Python :: 3.14",
+        "Programming Language :: Python :: 3.15",
         "Topic :: System :: Distributed Computing",
         "Topic :: System",
         "Topic :: Scientific/Engineering",

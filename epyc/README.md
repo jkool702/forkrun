@@ -252,7 +252,7 @@ warns (without aborting) if it did not.
 | 44 | `44_bench_headline` | (†)/(max) pinned grid, cell-for-cell vs `headline_2026-09-29.csv` | 20 m |
 | 50 | `50_bench_bash` | `run_benchmark.bash` + GNU Parallel + xargs baselines + 9 targeted sweeps | 1.5 h |
 | 51 | `51_bench_core` | `run_all.py --scale large` (10M lines, median of 5) | 30 m |
-| 60 | `60_utest_bash_full` | `test_frun_comprehensive.sh` — 264 tests, un-timeboxed | 1–1.5 h |
+| 60 | `60_utest_bash_full` | `test_frun_comprehensive.sh` — 267 tests, un-timeboxed | 1–1.5 h |
 | 90 | `90_collect` | `ENVIRONMENT.md`, `DEVIATIONS.md`, `RUN_REPORT.txt`, sha256 manifest | 5 m |
 
 Ordering rationale: **41 and 43 can only ever be measured on this box**, so they

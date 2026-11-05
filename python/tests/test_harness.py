@@ -20,15 +20,21 @@ from _helpers import nfd  # noqa: E402
 
 class TestFramingCodec(unittest.TestCase):
     def test_hdr_round_trip(self):
-        packed = _HDR.pack(12345, 67)
-        idx, ln = _HDR.unpack_from(packed, 0)
+        # DECISION-02: the header carries an explicit disposition, so this
+        # imports the REAL _HDR rather than redeclaring the layout. The
+        # previous version asserted size == 16 and packed two fields; that
+        # duplication is why the 16->24 change broke four tests here
+        # instead of zero.
+        packed = _HDR.pack(12345, 67, 0, 0)
+        idx, ln, disp, _res = _HDR.unpack_from(packed, 0)
         self.assertEqual((idx, ln), (12345, 67))
-        self.assertEqual(_HDR.size, 16)
+        self.assertEqual(disp, 0, "DATA disposition")
+        self.assertEqual(_HDR.size, 24)
 
     def test_parse_records_exact(self):
-        blob = (_HDR.pack(2, 3) + b"abc"
-                + _HDR.pack(0, 0)
-                + _HDR.pack(1, 5) + b"hello")
+        blob = (_HDR.pack(2, 3, 0, 0) + b"abc"
+                + _HDR.pack(0, 0, 0, 0)
+                + _HDR.pack(1, 5, 0, 0) + b"hello")
         recs = _parse_records(blob)
         self.assertEqual(recs, [(2, b"abc"), (0, b""), (1, b"hello")])
 
@@ -36,7 +42,7 @@ class TestFramingCodec(unittest.TestCase):
         # A complete record followed by a header claiming 10 bytes with
         # only 3 present (dead worker's partial write): the tail is
         # dropped — waitpid already raised before parsing runs.
-        blob = _HDR.pack(5, 2) + b"ok" + _HDR.pack(6, 10) + b"abc"
+        blob = _HDR.pack(5, 2, 0, 0) + b"ok" + _HDR.pack(6, 10, 0, 0) + b"abc"
         self.assertEqual(_parse_records(blob), [(5, b"ok")])
         # Truncated header alone is also dropped, not raised.
         self.assertEqual(_parse_records(b"\x01\x02"), [])
@@ -47,7 +53,7 @@ class TestFramingCodec(unittest.TestCase):
     def test_parse_catches_corruption(self):
         # Deliberately wrong expectation: proves the helper discriminates
         # (a comparator that always passes is worse than none).
-        blob = _HDR.pack(0, 3) + b"abc"
+        blob = _HDR.pack(0, 3, 0, 0) + b"abc"
         self.assertNotEqual(_parse_records(blob), [(0, b"abd")])
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""forkrun v3.6.1 release checklist (W-PY23, W-REL5-F F6).
+"""forkrun v3.6.2 release checklist (W-PY23, W-REL5-F F6).
 
-Run from the repo root BEFORE tagging v3.6.1. Every check must pass:
+Run from the repo root BEFORE tagging v3.6.2. Every check must pass:
 
     python3 python/release_check.py
 
@@ -9,8 +9,9 @@ Checks: version coherence, tag freedom (F6.1), changelog finality
 (F6.2, DESIGNED RED until the owner finalizes the heading at tag
 time), full test suite, canary link check, IDL schema + freshness
 (F6.3) checks, reproducible builds, single-artifact wheel/sdist
-build with recorded checksums (F6.4), doc twins, clean tree, frozen
-engine.
+build with recorded checksums (F6.4), the release bundle
+(FORKRUN_RELEASE_BUNDLE: six per-minor UDF wheels + sdist, checksums
+and provenance), doc twins, clean tree, frozen engine.
 
 Exit 0 + "ALL CHECKS PASSED" means ready to tag. Anything else means
 DO NOT TAG. (The tree-clean and frozen-engine checks require a
@@ -47,14 +48,39 @@ def _read_py_version():
 
 
 PY_VERSION = _read_py_version()
-PROJECT_VERSION = "v3.6.1"
+PROJECT_VERSION = "v3.6.2"
 FROZEN_FILES = ["forkrun_ring.c", "forkrun_substrate.h", "substratestubs.c"]
 
 CHECKS = []
 
+# The default reason a gated check is not applicable. Kept as one string
+# so the message cannot drift from the gate it describes.
+_TAGS_SKIP = ("not applicable here; set FORKRUN_RELEASE_CHECK_TAGS=1 "
+              "to include")
 
-def check(name):
+
+def check(name, only_if=None, skip_message=None):
+    """Register a release check.
+
+    `only_if` gates a check that is only MEANINGFUL in some situations.
+    A gated check is reported as [SKIP] with its condition, never silently
+    omitted -- a check that disappears is indistinguishable from a check
+    that was never written.
+
+    `skip_message` names the condition for the gated check. Two checks
+    are gated for opposite reasons (the tag guard applies only in the
+    moments before tagging; the bundle check applies only when a bundle
+    was produced), so one shared message would be actively misleading.
+
+    Currently used by the tag-is-free guard and the release-bundle
+    validator. See their decorators.
+    """
     def deco(fn):
+        # The gate rides on the function rather than as a third tuple
+        # element: CHECKS is unpacked as (name, fn) elsewhere, and
+        # widening the tuple would silently break those consumers.
+        fn.only_if = only_if
+        fn.skip_message = skip_message or _TAGS_SKIP
         CHECKS.append((name, fn))
         return fn
     return deco
@@ -117,6 +143,24 @@ def _ensure_artifacts():
     return wheels[0], sdists[0]
 
 
+def _packaged_wheel():
+    """Return the wheel artifact to INSPECT (not necessarily to build).
+
+    FORKRUN_RELEASE_WHEEL names an externally built wheel. The
+    version-matrix lane downloads one and verifies it; rebuilding
+    there would need the bash headers Ubuntu does not carry, and -- more
+    importantly -- would verify a DIFFERENT artifact than the one the
+    lane is testing. Absent the override, build ours as before.
+    """
+    override = os.environ.get("FORKRUN_RELEASE_WHEEL", "").strip()
+    if not override:
+        return _ensure_artifacts()[0]
+    path = os.path.abspath(override)
+    assert os.path.isfile(path), \
+        "FORKRUN_RELEASE_WHEEL=%r is not a file" % override
+    return path
+
+
 @check("Version: __version__ is %s" % PY_VERSION)
 def check_version():
     sys.path.insert(0, os.path.join(REPO_ROOT, "python"))
@@ -162,7 +206,7 @@ def check_changelog_final():
                        % re.escape(PROJECT_VERSION), content, re.M)
     assert marked is None, \
         "CHANGELOG.md still heads %s as (unreleased) -- finalize the " \
-        "heading at tag time (TAG_PREP_v3.6.1.md step: this red is " \
+        "heading at tag time (TAG_PREP_v3.6.2.md step: this red is " \
         "designed, not a bug)" % PROJECT_VERSION
     return True
 
@@ -191,11 +235,31 @@ def check_unreleased_untagged():
     return True
 
 
-@check("Tag: %s not already taken" % PROJECT_VERSION)
+def _tag_checks_enabled():
+    """Gating predicate for the tag-is-free guard.
+
+    This guard answers "may I tag v3.6.2 right now?", which is only the
+    question in the moments before tagging. Once the tag exists -- which
+    it does, and legitimately so, for the whole of a normal development
+    day -- the guard can only ever report failure, and a permanently red
+    check trains people to ignore the whole report.
+
+    So it is off by default and switched on explicitly for a release:
+
+        FORKRUN_RELEASE_CHECK_TAGS=1 python3 python/release_check.py
+
+    Gating it does not weaken it: the same command a tagger runs now
+    includes it, and it still refuses to pass when the tag is taken.
+    """
+    return os.environ.get("FORKRUN_RELEASE_CHECK_TAGS") == "1"
+
+
+@check("Tag: %s not already taken" % PROJECT_VERSION,
+       only_if=_tag_checks_enabled)
 def check_tag_free():
     # W-REL5-F (F6.1): tagging over an existing tag would move/fail
     # it. Local tags only (offline-safe); pushing the tag is the
-    # owner's step in TAG_PREP_v3.6.1.md.
+    # owner's step in TAG_PREP_v3.6.2.md.
     proc = _run(["git", "tag", "--list", PROJECT_VERSION], timeout=60)
     assert proc.returncode == 0, proc.stderr[-500:]
     assert proc.stdout.strip() == "", \
@@ -270,6 +334,150 @@ def check_twins():
     return True
 
 
+# The nested suite's deadline. It is a NAMED constant so the message
+# below cannot drift from the budget actually applied, and so the
+# parent test can read it instead of hard-coding a second number.
+SUITE_DEADLINE_S = 2400
+
+# Where the nested suite's COMPLETE stdout/stderr are preserved. CI
+# points this OUTSIDE the checkout (a diag directory created inside it
+# while the suite runs would register as an uncommitted change in
+# release_check's own clean-tree check, turning one failure into two)
+# and uploads it under `if: always()`. Locally an unset value gets a
+# fresh temp directory whose path is printed in the failure text. A
+# fixed filename contract (`suite.*`) is what makes the CI artifact
+# layout stable.
+DIAG_DIR_ENV = "FORKRUN_RELEASE_DIAG_DIR"
+_SUITE_FAIL_LINES = 40
+_SUITE_HEAD_CHARS = 4000
+_SUITE_TAIL_CHARS = 8000
+
+
+def _decode_stream(stream):
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", "replace")
+    return stream
+
+
+def _clip_head(text, limit=_SUITE_HEAD_CHARS):
+    if len(text) <= limit:
+        return text
+    return (text[:limit]
+            + "\n...[head clipped; %d chars total]..." % len(text))
+
+
+def _clip_tail(text, limit=_SUITE_TAIL_CHARS):
+    if len(text) <= limit:
+        return text
+    return ("...[tail clipped; %d chars total]...\n" % len(text)
+            + text[-limit:])
+
+
+def _last_result_line(text):
+    """The final unittest result line in one stream, or None."""
+    return next(
+        (line.strip() for line in reversed(text.splitlines())
+         if line.strip().startswith(("FAILED (", "OK ("))), None)
+
+
+def _unittest_diagnostics(stdout, stderr):
+    """Failure identities and result line from captured unittest output.
+
+    ONE reader for both streams. unittest's TextTestRunner writes its
+    progress, ``FAIL:``/``ERROR:`` headers and final result line to
+    STDERR; anything the tests themselves print goes to stdout. Reading
+    only stdout -- the original defect -- therefore omits the actual
+    failing test identities in the normal case. Headers are collected
+    from both streams with exact duplicates collapsed, so a stream that
+    was forwarded into the other does not name a test twice. The result
+    line is taken from stderr when present (the runner's own stream),
+    falling back to stdout for callers that captured it there.
+    """
+    headers = []
+    for text in (stdout, stderr):
+        for line in text.splitlines():
+            stripped = line.strip()
+            if (stripped.startswith(("FAIL:", "ERROR:"))
+                    and stripped not in headers):
+                headers.append(stripped)
+    summary = _last_result_line(stderr) or _last_result_line(stdout)
+    return headers, summary
+
+
+def _suite_failure_report(stdout, stderr, *, reason, diag_dir=None):
+    """Persist the nested suite's FULL streams and return a bounded report.
+
+    Why this exists: a fixed stderr tail is a losing diagnostic. The
+    one failure the tail does not reach is exactly the one that needs
+    explaining, and the outer suite's own assertion then reports only
+    "SOME CHECKS FAILED (2)" with no way to see the second failure.
+    The complete streams are therefore written to files, and the
+    report carries the three things a reader needs:
+
+      * every `FAIL:`/`ERROR:` header in the unittest summary (so a
+        failure whose traceback is outside any window is still NAMED),
+        read from BOTH streams because unittest normally writes them
+        to stderr;
+      * the absolute paths of the verbatim `suite.stdout.txt` /
+        `suite.stderr.txt` files (the CI artifact surface);
+      * a head and tail of stdout plus a stderr tail, so the message
+        is useful even when the files cannot be retrieved.
+
+    Diagnostics are best-effort. If the directory cannot be created or
+    written, the report says so and still carries the streams' bounded
+    views; a diagnostics failure must never replace the check verdict.
+    """
+    out = _decode_stream(stdout)
+    err = _decode_stream(stderr)
+    paths = {}
+    diag_note = None
+    try:
+        directory = (diag_dir if diag_dir is not None
+                     else os.environ.get(DIAG_DIR_ENV) or None)
+        if not directory:
+            directory = tempfile.mkdtemp(prefix="forkrun-release-diag-")
+        else:
+            os.makedirs(directory, exist_ok=True)
+        for name, text in (("suite.stdout.txt", out),
+                           ("suite.stderr.txt", err)):
+            path = os.path.join(directory, name)
+            with open(path, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write(text)
+            paths[name] = path
+    except Exception as exc:                 # noqa: BLE001 - best effort
+        diag_note = ("could not preserve full logs (%s: %s); set %s "
+                     "to a writable directory" %
+                     (type(exc).__name__, exc, DIAG_DIR_ENV))
+
+    headers, summary = _unittest_diagnostics(out, err)
+
+    lines = [reason]
+    if headers:
+        lines.append("Failing tests named by the nested summary:")
+        lines.extend("  " + h for h in headers[:_SUITE_FAIL_LINES])
+        if len(headers) > _SUITE_FAIL_LINES:
+            lines.append("  ...(%d more)" % (len(headers) - _SUITE_FAIL_LINES))
+    if summary:
+        lines.append("Nested result line: %s" % summary)
+    if paths:
+        lines.append("Complete nested stdout/stderr preserved at:")
+        lines.extend("  " + paths[name] for name in
+                     ("suite.stdout.txt", "suite.stderr.txt") if name in paths)
+        lines.append("  (set %s to choose this location; CI uploads it)"
+                     % DIAG_DIR_ENV)
+    if diag_note:
+        lines.append(diag_note)
+    lines.append("--- nested stdout (head) ---")
+    lines.append(_clip_head(out))
+    lines.append("--- nested stdout (tail) ---")
+    lines.append(_clip_tail(out))
+    lines.append("--- nested stderr (tail) ---")
+    lines.append(_clip_tail(err))
+    return "\n".join(lines)
+
+
 @check("Tests: full suite passes")
 def check_tests():
     # Anti-recursion: the suite contains
@@ -280,11 +488,41 @@ def check_tests():
     # every other test still runs, so coverage is intact.
     env = dict(os.environ)
     env["FORKRUN_UNDER_RELEASE_CHECK"] = "1"
-    proc = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover",
-         "-s", "python/tests"], capture_output=True, text=True,
-        timeout=1200, cwd=REPO_ROOT, env=env)
-    assert proc.returncode == 0, proc.stderr[-2000:]
+    # The budget is set for the LOADED case, not the quiet one. The
+    # suite costs ~5 minutes on an idle box and ~11 minutes on a loaded
+    # one (it forks hundreds of worker processes, and the machine's
+    # other tenants compete for the same cores), and a run that
+    # exceeded a 20-minute budget failed the GATE without a single test
+    # failing -- a harness limit reported as a product defect. The gate
+    # itself is unchanged: every test must still pass.
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover",
+             "-s", "python/tests"], capture_output=True, text=True,
+            timeout=SUITE_DEADLINE_S, cwd=REPO_ROOT, env=env)
+    except subprocess.TimeoutExpired as exc:
+        # A timeout is a DEADLINE being reached, not a verdict. The
+        # suite did not finish, so it is NOT known whether the cause was
+        # load, a hang, or a regression -- the check below must not
+        # claim otherwise. The complete partial output is preserved, not
+        # just a tail: the test that was running when time ran out is
+        # the one a reader needs to see.
+        raise AssertionError(_suite_failure_report(
+            getattr(exc, "stdout", None), getattr(exc, "stderr", None),
+            reason=(
+                "the full suite did not finish within %ds. That is a "
+                "DEADLINE being reached; the result is INCOMPLETE, and "
+                "without a finished run it cannot be said whether the "
+                "cause was load, a hang, or a regression. The suite "
+                "costs ~5 minutes on an idle machine and much longer "
+                "under load." % SUITE_DEADLINE_S))) from exc
+    if proc.returncode != 0:
+        raise AssertionError(_suite_failure_report(
+            proc.stdout, proc.stderr,
+            reason=("the full suite failed (nested unittest exit %d); "
+                    "every failure below must be diagnosed from the "
+                    "preserved output, not from a clipped stream"
+                    % proc.returncode)))
     return True
 
 
@@ -293,6 +531,57 @@ def check_canary():
     proc = _run(["make", "-f", "Makefile.substrate", "canary"],
                 timeout=300)
     assert proc.returncode == 0, proc.stderr[-2000:]
+    return True
+
+
+def _wheel_matrix():
+    """tools/wheel_matrix.py -- the one wheel/sdist artifact authority.
+
+    Both this gate and tools/release_bundle.py import it, so the
+    tag/helper rule, the METADATA rule, the sdist-content rule and the
+    helper-symbol rule each have exactly one implementation.
+    """
+    tools = os.path.join(REPO_ROOT, "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import wheel_matrix
+    return wheel_matrix
+
+
+@check("UDF helper: no test-only version override in the shipped artifact")
+def check_no_udf_version_override():
+    """The mismatch barrier's negative control must be UNREACHABLE in a
+    release build.
+
+    `fr_udf_built_version()` can be compiled to report a deliberately
+    different version via -DFR_UDF_REPORT_VERSION_OVERRIDE, which is what
+    lets a test exercise the mismatch branch with a helper that is
+    otherwise perfectly loadable. Without that, the "mismatch" test
+    refuses because the other minor's libpython is absent -- it would pass
+    for the wrong reason even with the comparison deleted.
+
+    The override deliberately exports an EXTRA symbol,
+    `fr_udf_TEST_VERSION_OVERRIDE_MARKER`, because a bare #define leaves
+    nothing to inspect: the release check has to be able to PROVE the flag
+    cannot reach a shipped artifact, and that means looking in the ELF
+    dynamic symbol table rather than trusting the build command.
+
+    The RULE lives in tools/wheel_matrix.py::helper_symbol_problems --
+    the bundle validator checks each wheel's helper with the same
+    function, so a shipped helper cannot pass one gate and fail the
+    other. Round 15 moved the launcher to the typed ABI
+    (fr_udf_built_version_v2) while this check still asserted the bare
+    literal, and it passed as a prefix substring; reading the symbol
+    name from the header is what prevents that class of rot.
+    """
+    import glob
+    helpers = glob.glob("python/forkrun/_fr_udf*.so")
+    assert helpers, ("no UDF helper artifact found to inspect -- run "
+                     "`make -f Makefile.substrate udf-lib` first")
+    wm = _wheel_matrix()
+    for path in helpers:
+        problems = wm.helper_symbol_problems(path)
+        assert not problems, "\n".join(problems)
     return True
 
 
@@ -314,6 +603,43 @@ def check_idl_fresh():
     return True
 
 
+@check("Bench: decision-record figures match the committed artifacts")
+def check_bench_docs_match_artifacts():
+    """The published benchmark figures must match the raw evidence.
+
+    F6 Stage 5.1 shipped a decision record whose §8.1/§8.1b numbers did not
+    match the committed JSON artifact -- the figures had been transcribed
+    from a console during one run while the artifact on disk came from a
+    later run into the same path, and they differed by around 10%. That is
+    not rounding, and a reader checking the evidence would have found it.
+
+    The tables are now GENERATED from the artifacts by
+    dev/supervisor/gen_bench_tables.py. This gate re-derives them and fails
+    if the document has drifted from the committed evidence, so the
+    mismatch cannot recur silently between runs.
+    """
+    proc = _run([sys.executable,
+                 "dev/supervisor/gen_bench_tables.py", "--check"],
+                timeout=300)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
+
+
+@check("Docs: DOCS_ALL.md matches its source documents")
+def check_docs_all_fresh():
+    # DOCS_ALL.md is a generated AGGREGATE. check_twins() above only
+    # compares CHANGELOG headings, and it passed for a long time while six
+    # of the embedded documents were stale by ~130 lines: a heading check
+    # cannot see a body rewritten underneath it. This regenerates and
+    # compares, so "stale" is a detectable state.
+    #
+    # Mirrors the gen_idl.py --check gate (F6.3) for the same reason: a
+    # CI-only freshness test lets a stale regen sail through tagging.
+    proc = _run([sys.executable, "tools/gen_docs_all.py", "--check"],
+                timeout=300)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
+    return True
+
+
 @check("Reproducible: two substrate builds are byte-identical")
 def check_reproducible():
     proc = _run(["make", "-f", "Makefile.substrate",
@@ -323,13 +649,18 @@ def check_reproducible():
 
 
 def _wheel_glibc_floor(wheel):
-    """Highest GLIBC_x.y the wheel's .so references, or None.
+    """Highest GLIBC_x.y the wheel's binaries reference, or None.
 
     The manylinux tag in a wheel filename is a claim about the libc the
     binary needs. It is metadata — nothing validates it at build time —
     so the release gate re-derives the floor from the ELF. Returns None
     when the toolchain to do so (binutils) is unavailable, so the gate
     degrades to tag-shape validation rather than failing spuriously.
+
+    EVERY .so member is inspected and the MAXIMUM taken: a wheel can
+    carry the substrate AND a per-minor UDF helper, and checking only
+    the first member (zip order) would let the other one need a newer
+    glibc than the tag claims.
     """
     import zipfile
     try:
@@ -337,16 +668,18 @@ def _wheel_glibc_floor(wheel):
             names = [n for n in zf.namelist() if n.endswith(".so")]
             if not names:
                 return None
-            blob = zf.read(names[0])
+            blobs = [zf.read(n) for n in names]
     except (OSError, KeyError, zipfile.BadZipFile):
         return None
-    proc = subprocess.run(["objdump", "-T", "-"], input=blob,
-                          capture_output=True)
-    if proc.returncode != 0:
-        return None
-    vers = {(int(a), int(b)) for a, b in
-            re.findall(r"GLIBC_(\d+)\.(\d+)", proc.stdout.decode(
-                "utf-8", "replace"))}
+    vers = set()
+    for blob in blobs:
+        proc = subprocess.run(["objdump", "-T", "-"], input=blob,
+                              capture_output=True)
+        if proc.returncode != 0:
+            return None
+        vers |= {(int(a), int(b)) for a, b in
+                 re.findall(r"GLIBC_(\d+)\.(\d+)", proc.stdout.decode(
+                     "utf-8", "replace"))}
     return max(vers) if vers else None
 
 
@@ -385,19 +718,13 @@ def check_wheel():
 
 @check("Wheel: METADATA is complete")
 def check_metadata():
-    import zipfile
+    # The field list is RELEASE metadata, not a wheel-build detail: the
+    # bundle validator checks each of the six release wheels against the
+    # same rule (tools/wheel_matrix.py::validate_metadata), so a field
+    # dropped here cannot survive there.
     wheel, _ = _ensure_artifacts()
-    with zipfile.ZipFile(wheel) as zf:
-        meta_names = [n for n in zf.namelist()
-                      if n.endswith(".dist-info/METADATA")]
-        assert meta_names, "no METADATA in wheel"
-        meta = zf.read(meta_names[0]).decode("utf-8")
-    for field in ("Name: forkrun", "Version: " + PY_VERSION,
-                  "Summary:", "Home-page:",
-                  "Requires-Python: >=3.10",
-                  "License:", "Classifier:"):
-        assert field in meta, "METADATA missing %r" % field
-    assert "Development Status :: 4 - Beta" in meta
+    problems = _wheel_matrix().validate_metadata(wheel, PY_VERSION)
+    assert not problems, "\n".join(problems)
     return True
 
 
@@ -406,18 +733,17 @@ def check_sdist():
     # W-REL5-F (F6.4): uses the exact fresh sdist from the shared
     # build (stale tarballs are removed first -- the old glob could
     # pass on leftovers).
-    import tarfile
+    #
+    # The content rule (required sources + no build products) lives in
+    # tools/wheel_matrix.py::validate_sdist, which the release-bundle
+    # validator applies to the bundle's sdist as well. The "no build
+    # products" half is why MANIFEST.in excludes the substrate .so, the
+    # launcher and any UDF helper: an sdist whose payload depends on
+    # whether the packager's tree was built is not reproducible, and
+    # its binaries are not traceable to a release build.
     _, sdist = _ensure_artifacts()
-    with tarfile.open(sdist) as tf:
-        names = tf.getnames()
-    top = "forkrun-%s/" % PY_VERSION
-    needed = ["forkrun_ring.c", "forkrun_substrate.h",
-              "substratestubs.c", "Makefile.substrate",
-              "ring_loadables/forkrun_plugin.h",
-              "python/forkrun/_shim.c", "python/README.md",
-              "LICENSE", "setup.py", "pyproject.toml"]
-    for rel in needed:
-        assert top + rel in names, "sdist missing %s" % rel
+    problems = _wheel_matrix().validate_sdist(sdist, PY_VERSION)
+    assert not problems, "\n".join(problems)
     return True
 
 
@@ -429,14 +755,63 @@ def check_readme_version():
     return True
 
 
+BUNDLE_ENV = "FORKRUN_RELEASE_BUNDLE"
+_BUNDLE_SKIP = ("no release bundle supplied; set FORKRUN_RELEASE_BUNDLE="
+                "<dir> to validate the six-wheel matrix + sdist")
+
+
+def _bundle_path():
+    return os.environ.get(BUNDLE_ENV, "").strip()
+
+
+@check("Bundle: six CPython wheels + sdist, checksums and provenance",
+       only_if=lambda: bool(_bundle_path()), skip_message=_BUNDLE_SKIP)
+def check_release_bundle():
+    """Validate the ACTUAL distribution set, not a build of it.
+
+    A green wheel matrix and a green installed-wheel acceptance prove
+    that wheels CAN be produced; they do not prove that the files being
+    released are the ones that were tested. This check reads the bundle
+    the release will publish and re-derives every claim from its bytes:
+    exactly one wheel per supported minor, the tag/helper/METADATA rules,
+    the engine version inside each wheel, one sdist with no build
+    products, the SHA-256 manifest, and a provenance record that
+    describes THIS bundle.
+
+    The rule implementations are shared, not copied:
+    tools/release_bundle.py imports tools/wheel_matrix.py (tags, helper,
+    METADATA, sdist) and this module (versions, glibc floor, engine
+    version), so the bundle cannot pass here and fail its own assembly.
+
+    `--expect-tree` compares the sdist's SOURCE PAYLOAD with this
+    checkout byte for byte. That is deliberately stricter than comparing
+    the recorded commit SHA: the owner's final release commit changes
+    only release documentation, which is not part of the sdist, and a
+    content comparison is the property that actually matters (the
+    artifacts were built from this source). The commit that produced the
+    bundle is still recorded, format-checked, and reported in
+    TAG_PREP.
+    """
+    path = _bundle_path()
+    assert os.path.isdir(path), \
+        "%s=%r is not a directory" % (BUNDLE_ENV, path)
+    proc = _run([sys.executable, "tools/release_bundle.py", "validate",
+                 path, "--expect-tree"], timeout=900)
+    assert proc.returncode == 0, \
+        (proc.stdout + proc.stderr)[-6000:]
+    return True
+
+
 @check("Wheel: embedded .so reports %s" % PROJECT_VERSION)
 def check_wheel_so_version():
     # F-PORT5: the wheel must SHIP the release engine, not a stale
     # local build. Extract the packaged .so and read its version by
     # the same helper as the tree-built substrate. W-REL5-F (F6.4):
-    # reads the single shared build.
+    # reads the single shared build. WO-COMPAT-08: the artifact under
+    # test may be supplied by FORKRUN_RELEASE_WHEEL (version-matrix),
+    # so the lane verifies the wheel it downloaded.
     import zipfile
-    wheel, _ = _ensure_artifacts()
+    wheel = _packaged_wheel()
     with zipfile.ZipFile(wheel) as zf:
         so_names = [n for n in zf.namelist()
                     if n.endswith("libforkrun_python.so")]
@@ -490,6 +865,18 @@ def main(argv=None):
     print("=" * 60)
     failures = 0
     for name, fn in CHECKS:
+        only_if = getattr(fn, "only_if", None)
+        if only_if is not None:
+            try:
+                if not only_if():
+                    print("  [SKIP] %s\n         (%s)"
+                          % (name, getattr(fn, "skip_message", _TAGS_SKIP)))
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                print("  [ERROR] %s\n         gate failed: %s"
+                      % (name, exc))
+                failures += 1
+                continue
         try:
             fn()
         except AssertionError as exc:

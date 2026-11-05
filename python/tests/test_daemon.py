@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -36,7 +36,7 @@ except FileNotFoundError:
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestPayloadForksDaemon(unittest.TestCase):
+class TestPayloadForksDaemon(ChildLifecycleMixin, unittest.TestCase):
     def test_daemon_survives_and_run_returns(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:

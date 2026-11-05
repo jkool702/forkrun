@@ -21,7 +21,7 @@ from forkrun._pipes import (DEFAULT_PIPE_SIZE, LARGE_PIPE_SIZE,  # noqa: E402
                             get_pipe_capacity, make_pipe,
                             set_pipe_capacity)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -94,7 +94,7 @@ class TestPipeSizing(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestPipeFunctional(unittest.TestCase):
+class TestPipeFunctional(ChildLifecycleMixin, unittest.TestCase):
     """Behavior unchanged at 1MB: streaming + spawn stay byte-exact."""
 
     def test_streaming_with_large_signal_pipe(self):

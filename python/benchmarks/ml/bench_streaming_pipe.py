@@ -67,12 +67,17 @@ FORKRUN_PAYLOADS = {"light": forkrun_payload_light,
                     "heavy": forkrun_payload_heavy}
 POOL_CHUNKS = {"light": pool_chunk_payload_light,
                "medium": pool_chunk_payload_medium,
-               "heavy": pool_chunk_payload_heavy}
+               "heavy": pool_chunk_payload_heavy,
+               # 20M-record light corpus (2,130,842,196 B, seeded, 0%
+               # malformed). Same payload as "light": the variant differs
+               # only in input size, so it reuses the light transform.
+               "light20m": pool_chunk_payload_light}
 
 CORPORA = {
     "light":  "/mnt/ramdisk/numa1/ml/light_5M.jsonl",
     "medium": "/mnt/ramdisk/numa1/ml/medium_5M.jsonl",
     "heavy":  "/tmp/opencode/heavy_5M.jsonl",
+    "light20m": "/tmp/opencode/light_20M.jsonl",
 }
 # Valid-record counts, per the headline table's verification convention.
 # NOT the line count: the generators emit some malformed lines, and the
@@ -81,7 +86,8 @@ CORPORA = {
 # lines (my first cut) reported 5,000,000 for every corpus and flagged
 # four working systems as failures. The reference is measured once by
 # SERIAL_PREAMBLE and cached; see _serial_reference().
-EXPECTED = {"light": 5000000, "medium": 4997892, "heavy": 4997982}
+EXPECTED = {"light": 5000000, "medium": 4997892, "heavy": 4997982,
+            "light20m": 20000000}
 
 WORKERS = 28
 TRIALS = 3          # median-of-3 after warmup (matches cell.py)

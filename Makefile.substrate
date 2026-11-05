@@ -19,7 +19,20 @@
 # when the artifact's ELF machine doesn't match the requested compiler.
 CC      ?= gcc
 CFLAGS  ?= -O1 -fPIC -Wall -Wextra
-INCLUDES = -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins
+
+# WO-COMPAT-08: bash's generated headers are supplied by a DISTRO PACKAGE
+# (Fedora: bash-devel; Debian/Ubuntu: bash-builtins), not by this tree and
+# not by the bash binary. forkrun_ring.c is compiled with -DSHELL
+# -DHAVE_CONFIG_H and includes <config.h> followed by command.h/shell.h;
+# when the package is missing or stale the compiler reports a bare
+# "config.h: No such file or directory" from the middle of the engine,
+# which reads like a bug in this repository. The prerequisite below is the
+# ONE place that decides the headers are present, and it names the package.
+# BASH_INCLUDE exists for non-standard prefixes; the -I order stays in
+# lockstep with it.
+BASH_INCLUDE ?= /usr/include/bash
+BASH_HEADERS  = $(BASH_INCLUDE)/config.h $(BASH_INCLUDE)/shell.h
+INCLUDES = -I$(BASH_INCLUDE) -I$(BASH_INCLUDE)/include -I$(BASH_INCLUDE)/builtins
 
 # W-PY23 reproducible builds: same source + same compiler must yield
 # byte-identical outputs. Three inputs defeat that by default:
@@ -60,6 +73,12 @@ PY_SHIM_OBJ = forkrun_python_shim.o
 # link the engine -- building it needs no engine objects, only -ldl.
 # Shipped next to the .so; forkrun.run locates it relative to that.
 CR_OUT ?= python/forkrun/_forkrun_cleanroom
+
+# Declared HERE, above the launcher rule, because the launcher includes
+# it. It used to be defined near the UDF helper rule further down, so a
+# reference added to $(CR_OUT) would have expanded to EMPTY -- make reads
+# prerequisites lazily and the variable was not yet set.
+UDF_VER_HDR = forkrun_udf_version.h
 CR_SRC = forkrun_cleanroom.c
 
 all: canary
@@ -67,7 +86,7 @@ all: canary
 .PHONY: cleanroom-launcher
 cleanroom-launcher: $(CR_OUT)
 
-.PHONY: all canary canary-versions check clean python-substrate FORCE bench bench-small bench-large bench-csv reproducibility-check clean-python
+.PHONY: all canary canary-versions check clean python-substrate udf FORCE bench bench-small bench-large bench-csv reproducibility-check clean-python
 
 # Rewritten only when the compiler identity/options actually change, so its
 # mtime bumps exactly when dependent objects must rebuild.
@@ -77,10 +96,35 @@ $(CCSTAMP): FORCE
 
 FORCE:
 
+# Authoritative bash-header prerequisite (WO-COMPAT-08). ORDER-ONLY on the
+# engine/shim objects: it always runs (so a header that disappears after a
+# successful build still fails the next build loudly) but never forces a
+# recompile, which would defeat make on every invocation.
+.PHONY: bash-headers
+bash-headers:
+	@missing=; for h in $(BASH_HEADERS); do \
+		[ -f "$$h" ] || missing="$$missing $$h"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		{ \
+			echo "ERROR: bash development headers are missing:$$missing"; \
+			echo; \
+			echo "  forkrun_ring.c is built with -DSHELL -DHAVE_CONFIG_H and"; \
+			echo "  includes bash's own headers; they ship in a distro package:"; \
+			echo "    Fedora/RHEL:    dnf install bash-devel"; \
+			echo "    Debian/Ubuntu:  apt-get install bash-builtins"; \
+			echo; \
+			echo "  Looked under BASH_INCLUDE=$(BASH_INCLUDE)"; \
+			echo "  (override BASH_INCLUDE= if bash was installed to another prefix)."; \
+			echo "  Reproduce the install: rpm -q bash-devel || dpkg -l bash-builtins"; \
+		} >&2; \
+		exit 1; \
+	fi
+
 substratestubs.o: substratestubs.c forkrun_substrate.h $(CCSTAMP)
 	$(CC) $(CFLAGS) -c substratestubs.c -o $@
 
-forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h $(CCSTAMP)
+forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h $(CCSTAMP) | bash-headers
 	# NOTE: no -D_GNU_SOURCE here — the TU must set its own FTMs (before any
 	# libc include). A CLI define would mask exactly the include-order bug
 	# class the canary exists to catch.
@@ -90,7 +134,7 @@ $(OUT): forkrun_ring_canary.o $(CANARY_STUBS)
 	$(CC) -shared -o $@ forkrun_ring_canary.o $(CANARY_STUBS) \
 		-Wl,--no-undefined $(ALLOWED_DEPS) $(LDFLAGS_REPRO)
 
-forkrun_python_shim.o: python/forkrun/_shim.c forkrun_ring.c forkrun_substrate.h ring_loadables/forkrun_plugin.h $(CCSTAMP)
+forkrun_python_shim.o: python/forkrun/_shim.c forkrun_ring.c forkrun_substrate.h ring_loadables/forkrun_plugin.h $(CCSTAMP) | bash-headers
 	# NOTE: same FTM hygiene as the canary — no -D_GNU_SOURCE on the CLI.
 	# _shim.c's first directive includes forkrun_ring.c, so the engine's
 	# FTM block still precedes the first libc include in this TU.
@@ -107,7 +151,9 @@ python-substrate: $(PY_OUT) $(CR_OUT)
 # W-CR1: launcher build. -O2 -D_GNU_SOURCE for memfd_create/
 # copy_file_range; -ldl for dlopen. No engine linkage on purpose --
 # it resolves every fr_py_* symbol from the .so at runtime.
-$(CR_OUT): $(CR_SRC) $(PY_OUT)
+# The header is a real prerequisite: a header-only change must rebuild the
+# launcher, or it keeps running compiled against the previous API shape.
+$(CR_OUT): $(CR_SRC) $(PY_OUT) $(UDF_VER_HDR)
 	$(CC) -O2 -D_GNU_SOURCE -o $@ $(CR_SRC) -ldl -lrt
 	@echo "cleanroom launcher OK: $@"
 
@@ -130,7 +176,7 @@ reproducibility-check: python-substrate
 	@rm -f /tmp/fr_build1.sha /tmp/fr_build2.sha
 
 clean-python:
-	rm -f $(PY_SHIM_OBJ) $(PY_OUT) $(CCSTAMP)
+	rm -f $(PY_SHIM_OBJ) $(PY_OUT) $(CR_OUT) $(CCSTAMP)
 
 bench: python-substrate
 	python3 python/benchmarks/run_all.py --scale medium --trials 3
@@ -178,5 +224,77 @@ canary-versions:
 check: canary
 	python3 -m unittest discover -s python/tests
 
+# ---------------------------------------------------------------------------
+# P1 (DECISION-01): embedded-CPython UDF helper, Phase 2.
+#
+# Two artifacts, both PER-MINOR because the configuration API used here is
+# not in the Stable ABI (DECISION-01 sections 2.1/7):
+#
+#   UDF_LIB  -- the shipped shape. A dlopen-able .so the launcher loads in
+#               UDF mode only, so a non-UDF run never links libpython and
+#               its DT_NEEDED set is unchanged.
+#   UDF_PROBE-- the Phase-1 diagnostic driver, now calling UDF_LIB's code
+#               (fr_udf.c) so probe and shipped path cannot drift.
+#
+# Interpreter selection: PYTHON ?= python3. Override per minor when
+# building the wheel matrix, e.g. make udf-lib PYTHON=/opt/python/cp310-cp310/bin/python3.10
+# ---------------------------------------------------------------------------
+PYTHON  ?= python3
+PYCONFIG ?= $(PYTHON)-config
+
+UDF_SRC   = python/forkrun/fr_udf.c
+UDF_HDR   = python/forkrun/fr_udf.h
+UDF_OBJ   = fr_udf.o
+UDF_EXT   = $(shell $(PYCONFIG) --extension-suffix)
+UDF_LIB   = python/forkrun/_fr_udf$(UDF_EXT)
+UDF_PROBE = python/forkrun/fr_udf_helper
+UDF_CFLAGS  = $(shell $(PYCONFIG) --includes)
+# The helper EMBEDS the interpreter, so it links libpython. That is the
+# opposite of every other target here, and is exactly why it is a separate
+# dlopen-able object rather than part of $(PY_OUT).
+UDF_LDFLAGS = $(shell $(PYCONFIG) --ldflags --embed 2>/dev/null || $(PYCONFIG) --ldflags)
+
+.PHONY: udf-lib udf-probe udf-fork udf
+
+$(UDF_OBJ): $(UDF_SRC) $(UDF_HDR) $(UDF_VER_HDR)
+	$(CC) -O2 -fPIC -Wall -Wextra $(UDF_CFLAGS) -I. -c $< -o $@
+
+$(UDF_LIB): $(UDF_OBJ)
+	$(CC) -shared -o $@ $< $(UDF_LDFLAGS) -Wl,--build-id=none
+
+udf-lib: $(UDF_LIB)
+	@echo "udf helper library OK: $(UDF_LIB)"
+
+# The probe links the library object directly (not the .so): it is a
+# diagnostic that must work even before the extension-suffixed .so is
+# installed next to the package.
+fr_udf_helper_probe.o: python/forkrun/fr_udf_helper.c $(UDF_HDR)
+	$(CC) -O2 -Wall -Wextra $(UDF_CFLAGS) -c $< -o $@
+
+# The UDF helper and the cleanroom launcher must agree on the build-stamp
+# struct. Both compile against forkrun_udf_version.h, so the pairing is
+# structural rather than a convention two sides re-implement.
+
+$(UDF_PROBE): fr_udf_helper_probe.o $(UDF_OBJ)
+	$(CC) -o $@ fr_udf_helper_probe.o $(UDF_OBJ) $(UDF_LDFLAGS)
+
+udf-probe: $(UDF_PROBE)
+	@echo "udf probe OK: $(UDF_PROBE)"
+
+# C0.4: pre-fork vs post-fork measurement driver.
+fr_udf_fork.o: python/forkrun/fr_udf_fork.c $(UDF_HDR)
+	$(CC) -O2 -Wall -Wextra $(UDF_CFLAGS) -c $< -o $@
+
+UDF_FORK_BIN = python/forkrun/fr_udf_fork
+
+$(UDF_FORK_BIN): fr_udf_fork.o $(UDF_OBJ)
+	$(CC) -o $@ fr_udf_fork.o $(UDF_OBJ) $(UDF_LDFLAGS)
+
+udf-fork: $(UDF_FORK_BIN)
+	@echo "udf fork driver OK: $(UDF_FORK_BIN)"
+
+udf: udf-lib udf-probe udf-fork
+
+
 clean:
-	rm -f *.o *.so $(CCSTAMP) $(PY_SHIM_OBJ) $(PY_OUT)
+	rm -f *.o *.so $(CCSTAMP) $(PY_SHIM_OBJ) $(PY_OUT) $(CR_OUT) $(UDF_OBJ) fr_udf_helper_probe.o $(UDF_PROBE) fr_udf_fork.o $(UDF_FORK_BIN)

@@ -2,7 +2,14 @@
 # PEP 517: setuptools backend. The custom build_py step in setup.py
 # compiles the C substrate before packaging (see System dependencies
 # below). No network fetch beyond setuptools/wheel (both ubiquitous).
-requires = ["setuptools>=61", "wheel"]
+#
+# 70.1 IS A REAL FLOOR, not a preference: setup.py imports
+# `setuptools.command.bdist_wheel` to subclass the wheel command, and
+# that module first appears in setuptools 70.1 (verified: 70.0.0 raises
+# ModuleNotFoundError, 70.1.0 imports). An isolated PEP 517 build with
+# the previous `>=61` floor could therefore install a setuptools that
+# cannot even import setup.py.
+requires = ["setuptools>=70.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 # System dependencies (build-time only, not PyPI-installable):

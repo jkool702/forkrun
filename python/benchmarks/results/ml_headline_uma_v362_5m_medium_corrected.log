@@ -1,0 +1,33 @@
+forkrun ML pipeline benchmark — 5000000 records/variant
+Hardware: 28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Versions: {'python': '3.14.8', 'ray': '2.58.0', 'polars': '1.44.2', 'duckdb': '1.5.5', 'datasets': '5.0.1', 'pyarrow': '25.0.1', 'forkrun': '0.18.0'}
+Frameworks: {'serial': True, 'pool': True, 'executor': True, 'forkrun': True, 'ray': True, 'polars': True, 'duckdb': True, 'hf_datasets': True}
+Worker sweep: [28] (best reported per system)
+generating medium (5000000 records)...
+--- medium: 5000000 records, 2238.7MB ---
+--- medium results (this variant) ---
++--------------------+---------+------+---------+----------+------+------------------------------------------+
+| Benchmark          | Mode    | Path | Lines/s | Peak RSS | CPU% | Notes                                    |
++--------------------+---------+------+---------+----------+------+------------------------------------------+
+| forkrun-medium-28w | forkrun | udf  | 816k    | 1084MB   | -    | out=4997892/5000000 records, order=index |
++--------------------+---------+------+---------+----------+------+------------------------------------------+
+
++--------------------+---------+------+---------+----------+------+------------------------------------------+
+| Benchmark          | Mode    | Path | Lines/s | Peak RSS | CPU% | Notes                                    |
++--------------------+---------+------+---------+----------+------+------------------------------------------+
+| forkrun-medium-28w | forkrun | udf  | 816k    | 1084MB   | -    | out=4997892/5000000 records, order=index |
++--------------------+---------+------+---------+----------+------+------------------------------------------+
+
+BEST (worker sweep):
+  forkrun      medium     815568 records/s (382.9 MB/s input)
+
+NOTES:
+- Worker sweep [28]; each system's best rate shown above.
+- UDF systems run the IDENTICAL Python transformation (ml_payload.py); only batching/transport/scheduling differ.
+- Native systems (Polars/DuckDB) use their own expression language (medium variant only); the heavy UDF cannot be expressed natively, which is the point of the comparison.
+- forkrun uses order=index (validated counts); Pool/Executor chunk into workers*4 line-chunks (pickled); Ray uses pandas batches via read_text; HF Datasets uses from_text + batched map (batch_size=1000, in-memory).
+- TIMING SCOPE. Rows named 'pool-*'/'executor-*' are END-TO-END: reading, splitting, decoding and partitioning the input happen inside the timed region, because forkrun's timed call takes a path and does all of that too. Rows ending in '-prepart' time only map() against data already in memory, are NOT comparable to forkrun, and are reported separately so the difference stays visible instead of flattering the competitor. Every system uses the same trial count and is timed with the same median-of-trials rule; competitor record counts are asserted, not just noted.
+- OUTPUT REPRESENTATION differs by design and is NOT a bug: Pool/Executor return one Python str per input record, while forkrun returns batch-combined bytes/memoryview. Both produce the same record count and the same transformation, so rates are comparable as pipeline throughput, but the per-record object count and memory profile are different shapes.
+- Fault injection is crash-once (file markers): first attempt crashes, retry succeeds. forkrun recovers via orchestrator respawn; Pool has no retry (documented).
+- RSS is parent-process peak (ru_maxrss); worker/subprocess memory is not attributed per system.
+CSV: python/benchmarks/results/ml_headline_uma_v362_5m_medium_corrected.csv

@@ -13,8 +13,13 @@ Correctness notes:
 - No hard size cap is enforced: a poisoned head-of-line legitimately
   buffers everything after it until EOF, so any cap would risk dropping
   data. max_size is a diagnostic; in the common case the buffer holds
-  only the out-of-order depth (workers x in-flight), and the 16-byte
-  signal pipe itself caps outstanding un-drained completions at 4096.
+  only the out-of-order depth (workers x in-flight), and the
+  worker-completion notification pipe bounds how far the workers may run
+  ahead of the drain. That bound is 256 outstanding completions on the
+  public stream() paths (`STREAM_NOTIFY_PIPE_SIZE`, 4KB / 16-byte
+  notifications) and 65536 on the map/run paths -- but it bounds the
+  WORKERS' read-ahead, NOT this buffer. A poisoned head still buffers
+  the whole tail regardless of the pipe size.
 - W-REL6-3.2: high-water warning. Buffered bytes past the limit warn
   ONCE on stderr (actionable: names the head batch, the buffered
   total, and the knob). The limit is reassembly_limit (bytes) when
@@ -28,6 +33,17 @@ Correctness notes:
 """
 
 from __future__ import annotations
+
+# DECISION-02 dispositions. Duplicated rather than imported to keep this
+# module free of run.py imports (it is loaded on every ordered path);
+# test_stage1_reassembly pins the two definitions agree.
+_DISP_DATA = 0
+_DISP_NO_RESULT = 1
+_DISP_SKIPPED = 2
+_DISP_POISONED = 3
+
+NAME_OF = {_DISP_DATA: "DATA", _DISP_NO_RESULT: "NO_RESULT",
+           _DISP_SKIPPED: "SKIPPED", _DISP_POISONED: "POISONED"}
 
 import os as _os
 
@@ -55,7 +71,32 @@ class ReassemblyBuffer:
 
     def __init__(self, start: int = 0, reassembly_limit=None) -> None:
         self._buffer: dict = {}
+        # Stage 1: batches that reached a terminal outcome WITHOUT a
+        # payload (NO_RESULT / SKIPPED / POISONED). Tracked separately
+        # from _buffer so they advance the contiguous prefix without
+        # yielding, and so their dispositions stay distinguishable.
+        self._terminal: set = set()
+        self._terminal_seen: dict = {}
+        self._conflicts: dict = {}
         self._next_idx = start
+        # Indices whose outcome has ALREADY been delivered downstream.
+        #
+        # Without this, a duplicate arriving after its original was
+        # drained is invisible: `drain()` removes the payload from
+        # _buffer and advances _next_idx, so the later add_disposition
+        # finds neither a pending DATA nor a pending terminal marker, and
+        # add() happily re-buffers the stale index. final_drain() then
+        # emits it -- a duplicate, published through a buffer whose whole
+        # stated policy is first-wins.
+        #
+        # Bounded the same way _terminal_seen is: the window is
+        # (self._consumed_upto - _next_idx), which is at most the
+        # reorder depth, not the whole stream. An index far below the
+        # window is not a duplicate but a different error entirely (a
+        # producer restarting its numbering), so it is recorded as a
+        # conflict rather than silently dropped.
+        self._consumed_upto = start
+        self._seen_below: dict = {}
         self._max_size = 0
         # W-REL6-3.2: byte accounting for the high-water warning.
         self._sizes: dict = {}
@@ -121,16 +162,171 @@ class ReassemblyBuffer:
             self._max_bytes = self._bytes
         self._check_warn()
 
+    def add_disposition(self, batch_idx: int, disposition: int,
+                        payload=None) -> None:
+        """Record a batch's TERMINAL outcome, preserving its disposition.
+
+        Stage 1. ``add()`` takes only results, so every control record is
+        invisible to it: a batch that completed with NO_RESULT, was
+        SKIPPED, or was POISONED simply never appears, and an ordered
+        consumer reads that absence as a HOLE. Worse, a batch that later
+        completes successfully would still look like a hole to anything
+        that already consumed the earlier state.
+
+        All four dispositions advance the contiguous prefix; only DATA
+        yields a payload:
+
+        * ``DATA``          -- record the payload and yield it. A genuine
+          ``b""`` is a REAL empty result and is stored as such.
+        * ``NO_RESULT``     -- the batch completed with no output.
+        * ``SKIPPED``       -- on_error=skip gave up on the batch.
+        * ``POISONED``      -- the retry limit was reached.
+
+        The last three are retained distinctly rather than collapsed:
+        poison accounting and the skip/skip distinction are exactly what
+        a consumer needs to report, and DECISION-02 introduced them to
+        remove a conflation, not to add another.
+        """
+        # A second outcome for an index already DELIVERED is the case
+        # the original duplicate checks could not see, because by then
+        # the payload has left _buffer and _terminal.
+        if batch_idx < self._consumed_upto:
+            self._note_conflict(
+                batch_idx,
+                "%s for batch %d AFTER it was delivered (consumed up to %d)"
+                % (NAME_OF.get(disposition, disposition), batch_idx,
+                   self._consumed_upto))
+            return
+
+        # Contradictions are PROTOCOL VIOLATIONS, not cases to merge.
+        #
+        # A correct producer emits exactly one terminal outcome per
+        # batch. Silently accepting a second one would hide a future
+        # exactly-once regression: the reassembly layer is precisely the
+        # place that would absorb it and make the stream look healthy.
+        # So each contradiction is recorded and the FIRST outcome kept --
+        # in EVERY direction, including duplicate DATA. That last one was
+        # inconsistent at first: the conflict was noted and then `add()`
+        # was still called, and `add()` overwrites, so duplicate DATA was
+        # last-wins while every other contradiction was first-wins. The
+        # docstring claimed one policy and the code did another, which is
+        # SHAPES.md Shape 6's failure mode exactly: ownership that is not
+        # written down as a truth table at the site. First-wins is also
+        # the conservative direction -- a second delivery must not
+        # replace a payload that has already been delivered.
+        if disposition == _DISP_DATA:
+            if batch_idx in self._terminal:
+                self._note_conflict(batch_idx, "DATA after terminal %s"
+                                    % NAME_OF.get(
+                                        self._terminal_seen.get(batch_idx),
+                                        "?"))
+                return
+            if batch_idx in self._buffer:
+                # Duplicate DATA: keep the FIRST payload. `add()` would
+                # overwrite, and the first-wins policy is the one the
+                # docstring states and the one the terminal branches
+                # already follow.
+                self._note_conflict(batch_idx, "duplicate DATA")
+                return
+            self.add(batch_idx, payload)
+            return
+        if batch_idx in self._buffer:
+            self._note_conflict(batch_idx, "%s after DATA"
+                                % NAME_OF.get(disposition, disposition))
+            return
+        if batch_idx in self._terminal:
+            self._note_conflict(batch_idx, "%s after %s"
+                                % (NAME_OF.get(disposition, disposition),
+                                   NAME_OF.get(
+                                       self._terminal_seen.get(batch_idx),
+                                       "?")))
+            return
+        self._terminal.add(batch_idx)
+        self._terminal_seen[batch_idx] = disposition
+        if len(self._terminal) > self._max_size:
+            self._max_size = len(self._terminal)
+
+    def _note_conflict(self, batch_idx, what):
+        """Record a contradictory terminal outcome for this batch.
+
+        Reported rather than raised: the caller is a streaming loop that
+        has already consumed real input, so raising would convert a
+        protocol defect into a lost run. It is surfaced through
+        `conflicts()` so a caller can refuse the result.
+        """
+        self._conflicts.setdefault(batch_idx, []).append(what)
+
+    def conflicts(self) -> dict:
+        """batch_idx -> [contradictory outcome descriptions].
+
+        Empty for a correct producer. A non-empty result means the
+        stream is not trustworthy even if it looks well-formed, so the
+        caller should refuse it rather than return it.
+        """
+        return dict(self._conflicts)
+
     def drain(self):
         """Yield the consecutive run starting at _next_idx, in order.
 
-        Stops at the first hole. Returns a generator of (batch_idx, data).
+        Stops at the first hole. Terminal-without-payload batches advance
+        the prefix without yielding, so a NO_RESULT / SKIPPED / POISONED
+        batch no longer strands everything behind it.
+
+        Returns a generator of (batch_idx, data).
         """
-        while self._next_idx in self._buffer:
-            data = self._buffer.pop(self._next_idx)
-            self._bytes -= self._sizes.pop(self._next_idx, 0)
-            yield (self._next_idx, data)
-            self._next_idx += 1
+        while True:
+            if self._next_idx in self._buffer:
+                data = self._buffer.pop(self._next_idx)
+                self._bytes -= self._sizes.pop(self._next_idx, 0)
+                # Mark delivered BEFORE the yield, not after. The
+                # consumer has the payload the moment the yield returns,
+                # so that is the moment a duplicate becomes detectable.
+                # Advancing after the yield would leave a window in which
+                # a re-submission of this index looked like new work.
+                self._consumed_upto = self._next_idx + 1
+                yield (self._next_idx, data)
+                self._next_idx += 1
+            elif self._next_idx in self._terminal:
+                self._terminal.discard(self._next_idx)
+                self._terminal_seen.pop(self._next_idx, None)
+                self._consumed_upto = self._next_idx + 1
+                self._next_idx += 1
+            else:
+                return
+
+    def terminal_dispositions(self) -> dict:
+        """batch_idx -> disposition for terminals not yet yielded.
+
+        Diagnostics only; the map is mutated by drain().
+        """
+        return dict(self._terminal_seen)
+
+    def unresolved_gaps(self, upto: int) -> list:
+        """Indices in [start, upto) that no terminal outcome has covered.
+
+        DIAGNOSTIC ONLY. Deliberately not wired into the production
+        completion check, because no single call site can tell whether its
+        producer emits an authoritative disposition for EVERY published
+        batch:
+
+          * the C loops under the launcher do emit SKIPPED/POISONED;
+          * ordinary Python-mode payloads do NOT -- a payload returning
+            None passes data=NULL to fr_py_emit(), which writes no record
+            at all, so such a batch is a genuine hole rather than a
+            missing marker.
+
+        Enforcing this unconditionally would therefore report false
+        completeness failures on ordinary None results. It is offered for
+        callers that can scope it to a known terminal-aware producer, and
+        as a diagnostic for anyone investigating a short run. Turning it
+        into an enforced invariant needs a per-producer capability flag,
+        which is Stage 1 follow-up work rather than something to smuggle
+        in here.
+        """
+        return [i for i in range(self._next_idx, upto) if i not in self._seen()]
+
+    def _seen(self) -> set:
+        return set(self._buffer) | self._terminal
 
     def final_drain(self):
         """Yield ALL leftovers sorted by batch_idx (EOF path).
@@ -139,13 +335,32 @@ class ReassemblyBuffer:
         Returns a generator of (batch_idx, data).
         """
         for idx in sorted(self._buffer.keys()):
+            # Belt and braces: add_disposition already refuses an index
+            # below _consumed_upto, so nothing stale should be here. But
+            # final_drain is the LAST gate before the payload reaches the
+            # caller, and this is the path a duplicate escaped through
+            # before. Emitting it here is exactly the failure the
+            # first-wins policy exists to prevent, so the guard is
+            # repeated rather than assumed.
+            if idx < self._consumed_upto:
+                self._note_conflict(
+                    idx, "stale payload buffered for already-delivered "
+                         "batch %d (consumed up to %d)"
+                         % (idx, self._consumed_upto))
+                self._buffer.pop(idx, None)
+                self._sizes.pop(idx, None)
+                continue
             self._bytes -= self._sizes.pop(idx, 0)
             yield (idx, self._buffer.pop(idx))
+        # Terminal-without-payload indices are not yielded (there is no
+        # payload to yield) but must not linger as phantom holes.
+        self._terminal.clear()
+        self._terminal_seen.clear()
 
     @property
     def pending(self) -> int:
-        """Buffered (not yet yielded) results."""
-        return len(self._buffer)
+        """Buffered (not yet yielded) outcomes, payloads and terminals."""
+        return len(self._buffer) + len(self._terminal)
 
     @property
     def max_size(self) -> int:

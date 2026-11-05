@@ -1,0 +1,2 @@
+name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
+forkrun-plugin-light-28w,plugin,c-callback,13589658.786633214,1367.625,-1.0,"out=20000000/20000000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64

@@ -19,7 +19,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._checkpoint import CheckpointState, write_checkpoint  # noqa: E402
 
-from _helpers import assert_no_zombies  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies  # noqa: E402
 
 try:
     find_substrate()
@@ -76,7 +76,7 @@ class TestDegenerateInputs(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestResumeBoundaries(unittest.TestCase):
+class TestResumeBoundaries(ChildLifecycleMixin, unittest.TestCase):
     def _write_input(self, data):
         fh = tempfile.NamedTemporaryFile(mode="wb", suffix=".txt",
                                          delete=False)

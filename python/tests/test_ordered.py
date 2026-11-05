@@ -23,6 +23,7 @@ from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._reassembly import ReassemblyBuffer  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -72,7 +73,7 @@ class TestReassemblyBuffer(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestOrderedStreaming(unittest.TestCase):
+class TestOrderedStreaming(ChildLifecycleMixin, unittest.TestCase):
     def test_ordered_yields_in_sequence(self):
         def marked(batch):
             return b"%08d:" % batch.batch_index + bytes(batch.data)
@@ -152,8 +153,12 @@ class TestOrderedStreaming(unittest.TestCase):
                 return bytes(batch.data)
 
             stats: dict = {}
+            # lines=100 -> 40 batches. The gating pattern needs at
+            # least four batches; auto batching on a 4-CPU runner can
+            # produce fewer, leaving reassembly_max < 3 and making the
+            # bound assertions below measure the scheduler.
             out = list(run_mod._execute_streaming(
-                gated, path, lines=None, bytes_=None, workers=4,
+                gated, path, lines=100, bytes_=None, workers=4,
                 on_error="retry", order="index", stats=stats))
             with open(path, "rb") as fh:
                 # No poison: ordered reassembly is byte-exact.

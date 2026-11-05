@@ -26,7 +26,7 @@ from forkrun.exceptions import ForkrunTerminated  # noqa: E402
 from forkrun.run import (_abort_reason_now,  # noqa: E402
                          _helper_death_disposition)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -88,7 +88,7 @@ def _slow(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestNumaHupSuppression(unittest.TestCase):
+class TestNumaHupSuppression(ChildLifecycleMixin, unittest.TestCase):
     def test_hup_abort_has_no_spurious_index_fatal(self):
         # HUP-aborted NUMA run raises ForkrunTerminated with NO
         # chained "NUMA index/scan failed" spurious fatal. The

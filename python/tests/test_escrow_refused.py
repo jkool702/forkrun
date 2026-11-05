@@ -24,6 +24,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get  # noqa: E402
 
 from _helpers import (assert_no_zombies, redirect_fd, restore_fd,  # noqa: E402
+                      ChildLifecycleMixin,
                       write_lines)
 
 try:
@@ -34,7 +35,7 @@ except FileNotFoundError:
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestEscrowRefusedLoud(unittest.TestCase):
+class TestEscrowRefusedLoud(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -111,7 +112,7 @@ class TestEscrowRefusedLoud(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestDoubleDepositSingleEntry(unittest.TestCase):
+class TestDoubleDepositSingleEntry(ChildLifecycleMixin, unittest.TestCase):
     """W-REL2/R14b: fr_py_escrow_deposit clears worker_last_cnt on
     success (mirroring ring_ack_main). Two deposits without an
     intervening claim must leave exactly one escrow entry — the

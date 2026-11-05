@@ -104,6 +104,32 @@ class ForkrunWorkerFailure(RuntimeError):
         self.signo: int | None = signo
 
 
+class ForkrunProtocolError(RuntimeError):
+    """A producer emitted two terminal outcomes for one batch.
+
+    Raised by the consumers of `ReassemblyBuffer` when `conflicts()` is
+    non-empty. The buffer itself records rather than raises, because it
+    is fed from inside a streaming loop that has already consumed real
+    input, and raising from there would convert a protocol defect into a
+    lost run.
+
+    But record-and-let-the-caller-refuse only works if there IS a caller,
+    and there was none: `conflicts()` was written, documented as
+    "the caller should refuse the result", and then never consulted by
+    any production path. The policy was therefore record-and-ignore.
+
+    `.conflicts` carries the batch_idx -> [descriptions] map so a caller
+    can report which batches were affected rather than just that
+    something was.
+    """
+
+    bash_code = 1
+
+    def __init__(self, msg, conflicts=None):
+        super().__init__(msg)
+        self.conflicts = dict(conflicts or {})
+
+
 #: Bash exit code -> Python exception (cause fidelity, not number
 #: fidelity). Codes without a signal cause (1, 42, 200/254) stay
 #: plain RuntimeError/SpawnError/PluginError by design.

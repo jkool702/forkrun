@@ -1,4 +1,4 @@
-# forkrun Python frontend — v0.17.0 (W-PY23 release prep)
+# forkrun Python frontend — v0.18.0 (v3.6.2 release)
 
 > **New here?** Start with [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
 > (5 minutes to your first parallel job). Full user guides:
@@ -19,8 +19,8 @@
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.17.0"`; `forkrun.__engine_version__` reports the
-substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
+`forkrun.__version__` is `"0.18.0"`; `forkrun.__engine_version__` reports the
+substrate build (e.g. `"v3.6.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
 
@@ -33,22 +33,45 @@ The `.so` is built from `python/forkrun/_shim.c`, which textually includes
 `forkrun_ring.c` (same TU, so the engine's statics/TLS are visible) and adds
 non-static `fr_py_*` entry points. `forkrun_ring.c` itself is unmodified.
 
-## Install (W-PY10)
+## Install
 
 ```bash
-pip install .            # builds the substrate, installs the wheel
+pip install forkrun      # from PyPI, no compiler needed
+pip install .            # from a checkout; builds the substrate
 ```
+
+The release set is **six wheels plus one sdist**:
+
+- one wheel per supported CPython minor — **3.10, 3.11, 3.12, 3.13,
+  3.14, 3.15** (GIL builds) — tagged `cp3XX-cp3XX-manylinux_2_28_<arch>`;
+- each wheel carries the UDF helper compiled for **that** minor (the
+  helper links `libpython3.XX.so`, so the minor is a hard constraint,
+  not a preference);
+- one source distribution, which contains no binaries: `setup.py`
+  rebuilds the substrate and launcher on install, and the UDF helper is
+  built per-minor by `tools/wheel_matrix.py` for wheel builds.
+
+Free-threaded CPython is deliberately not served by the helper route.
+`setup.py` and the runtime ask the same detector and both decline it:
+the free-threaded build links `libpython3.XXt.so`, the artifacts are
+mutually load-incompatible, and that configuration has no measured
+evidence. A free-threaded interpreter can still use the generic
+substrate-only path.
 
 - No `src/` move: `package_dir={"": "python"}` maps `python/forkrun/`
   to the wheel top-level; tests never ship (no `__init__.py` under
   `python/tests/`). Version single-sources from `__version__`.
-- System build deps: `gcc make bash-devel` (Fedora; same rule as the
-  canary — Debian has no bash-headers package). `setup.py` drives
-  `Makefile.substrate` (single source of flags) with a documented
-  gcc fallback.
+- System build deps for a source install: `gcc make bash-devel`
+  (Fedora; Debian has no bash-headers package). `setup.py` drives
+  `Makefile.substrate` (single source of flags) with a documented gcc
+  fallback.
 - Linux-only: import raises `ImportError` off Linux (plan §4).
-- No PyPI upload in this work order — local wheel (`pip wheel .`)
-  only; reproducible-builds/signing gate the first PyPI release.
+- Release artifacts are assembled and validated by
+  `tools/release_bundle.py`: exactly one wheel per supported minor,
+  byte-identical `forkrun/*.py` in every wheel and the sdist, a
+  `SHA256SUMS` manifest, and `BUILD-INFO.txt` provenance naming the
+  source commit. `python/release_check.py` validates that bundle when
+  `FORKRUN_RELEASE_BUNDLE=<dir>` is set.
 
 ## Use
 
@@ -75,9 +98,20 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
   `bytes` (it drains live, with no finished file to map). Full contract:
   [docs/API.md](docs/API.md#result-representation).
 
-- `payload`: `"pkg.mod:func"` (imported post-fork in the worker — keeps the
-  parent virgin of native imports) or a callable (fork-inherited, never
+- `payload`: `"pkg.mod:func"` or a callable (fork-inherited, never
   pickled). Receives a `Batch`, returns `bytes`/`memoryview`/`str`/`None`.
+  Where a **string** spec is imported depends on the path, and it is not
+  the same everywhere:
+  - `mode="plugin"` (and `mode="python"` when the cleanroom UDF helper is
+    not built, as in a plain wheel install) resolves it in the **parent**,
+    before any fork. A child forked from a threaded host must never import:
+    frozen import locks in the child deadlock. Import errors therefore
+    surface early, in the caller.
+  - `mode="udf"` / `mode="python"` with the helper built resolve it
+    **inside the launcher**, after `exec`, so the user's module state never
+    enters the process that forks the workers.
+  Both are deliberate; see `_worker.py` (`resolve_payload_parent`) and
+  `_udf.py`.
 - `source`: path | fd | pipe/socket object. v0.5 **materializes** the input
   into an ingress memfd and mmaps it whole: bounded inputs only.
 - `Batch.data`: borrowed `memoryview` (zero-copy MAP_SHARED window). Valid
@@ -90,8 +124,11 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
 - `streaming`: `None` (default; fifo/socket sources stream, files
   materialize), `True` (bounded-ingress streaming ingest, TB-scale),
   `False` (force materialized).
-- Modes `spawn`/`plugin`, multi-node, ordered emitter pipe, resume: not in
-  v0 (`NotImplementedError`).
+- All five modes are shipped: `python` (default), `spawn`, `plugin`,
+  `splice`, `udf` (`_VALID_MODES` in `_api.py`). An earlier revision of
+  this line still listed `spawn`/`plugin`, multi-node, the ordered
+  emitter and resume as "not in v0" — all four landed (W-PY13, W-PY21,
+  W-PY22, W-PY7) and the line was stale.
 - Workers are single-threaded by contract: payloads must not spawn threads
   (documented, not policed at runtime since W-PY21-B — a thread that
   outlives its batch is UB-by-contract); return bytes and
@@ -103,10 +140,15 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
   `batch_index` sequence with `order="index"` (parent-side reassembly;
   landed W-PY7).
 - **Spawn/plugin v1 fast paths (W-PY13, landed):** C-level dispatch with
-  v0 fallback — see Modes. Remaining: NUMA multi-node.
+  v0 fallback — see Modes. Also landed: NUMA multi-node (W-PY21), the
+  `mode="udf"` helper route (P1-3), and resume/checkpoint (W-PY22).
 - **Resume UX, halt, TUI:** Stage 6 (demand-pulled).
 
 ## Modes
+
+Five modes are accepted (`_api.py::_VALID_MODES`). Four are enumerated
+below; `udf` is documented in `docs/MODES.md` because its payload and
+helper rules differ from the others.
 
 - `mode="python"` (default): payload is `"pkg.mod:func"` (imported
   post-fork in the worker) or a callable (fork-inherited, never pickled).

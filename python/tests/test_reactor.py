@@ -18,6 +18,7 @@ Contract under test:
   - C orderer: ordered output identical to Python reassembly.
 """
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -31,6 +32,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, write_lines)
 
 try:
@@ -42,6 +44,47 @@ except FileNotFoundError:
 
 def _up(batch):
     return bytes(batch.data).upper()
+
+
+#: stderr emitted by the most recent _capture_stderr() block.
+_LAST_STDERR = [""]
+
+
+@contextlib.contextmanager
+def _capture_stderr():
+    """Capture fd 2 for the duration of the block.
+
+    The poison pill reports on stderr, and asserting that report exists
+    is part of the guarantee -- a batch skipped WITHOUT telling the user
+    is silent partial data loss. Redirecting fd 2 rather than using
+    warnings catches the C-level write as well as any Python-level
+    message, so the assertion cannot be satisfied by a stray UserWarning.
+    """
+    saved = os.dup(2)
+    tmp = os.memfd_create("stderr")
+    try:
+        os.dup2(tmp, 2)
+        yield
+        # Flush the PYTHON-level stderr buffer too: sys.stderr wraps fd 2
+        # and may hold buffered text that has not reached the fd yet.
+        # (os has no flush() -- that was the first attempt's bug.)
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os.fsync(tmp)
+        os.lseek(tmp, 0, os.SEEK_SET)
+        chunks = []
+        while True:
+            b = os.read(tmp, 65536)
+            if not b:
+                break
+            chunks.append(b)
+        _LAST_STDERR[0] = b"".join(chunks).decode("utf-8", "replace")
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+        os.close(tmp)
 
 
 def _make_input(n=2000, prefix="line"):
@@ -69,7 +112,7 @@ class TestOrchestratorValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestReactorBasic(unittest.TestCase):
+class TestReactorBasic(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -167,12 +210,27 @@ class TestReactorBasic(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerRespawn(unittest.TestCase):
+class TestWorkerRespawn(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
     def test_segfault_respawn_completes(self):
-        """Segfault on batch 0: respawned, others complete (31/32)."""
+        """Segfault on batch 0: respawned, others complete (19/20).
+
+        ``lines=100`` is LOAD-BEARING, not a speed knob. This test
+        compares a crash run against a separate healthy run batch by
+        batch, which is only meaningful when both runs split the input
+        the same way. The default adaptive batching does not promise
+        that: the crash and its respawn change the timing, so the
+        recovered run legitimately used different boundaries (measured:
+        31 healthy vs 31 recovered, where the recovered run had 32
+        batches and lost one -- a CORRECT run the old assertion
+        rejected; and 32 vs 30, where 32 healthy also differed). Under
+        the old test that demanded equality of counts, 7-10 of 20 runs
+        failed while every run had lost exactly the first batch.
+        Pinning the split makes the content assertion test the product
+        rather than the batching heuristic.
+        """
         path = _make_input(2000)
         plugin_dir = tempfile.mkdtemp(prefix="w19segv_")
         mod_path = os.path.join(plugin_dir, "w19segv_mod.py")
@@ -186,16 +244,62 @@ class TestWorkerRespawn(unittest.TestCase):
                     "    return bytes(batch.data).upper()\n")
             sys.path.insert(0, plugin_dir)
             try:
+                # order="index" EXPLICITLY (round-9 review). Both runs
+                # previously used the default order="none", where output
+                # is COMPLETION order -- so `healthy_recs[0]` was the
+                # first record to COMPLETE, not necessarily batch 0, and
+                # `healthy_recs[1:] == res_recs` treated list position as
+                # batch identity. That is not a contract order="none"
+                # makes, and it would reject a correct run whose later
+                # batches happened to complete in a different order.
+                #
+                # Indexed order is a promise, so under it "the first
+                # record IS batch 0" is supported rather than assumed,
+                # and the rest of the assertion becomes meaningful.
                 res = forkrun.map("w19segv_mod:payload", path,
-                                  workers=2, orchestrator=True, nodes=1)
+                                  workers=2, orchestrator=True, nodes=1,
+                                  order="index", lines=100)
             finally:
                 sys.path.remove(plugin_dir)
-            # The crashed batch is best-effort (no escrow possible
-            # for a death that runs no code); everything else lands.
-            # Results are batch-granular blobs: batch 0 (lowest
-            # lines) is the lost one, the tail must be intact.
-            healthy = forkrun.map(_up, path, workers=2, nodes=1)
-            self.assertEqual(len(res), len(healthy) - 1)
+            # The crashed batch is lost through the POISON path, not
+            # through a claim-time hole: the engine escrows a CLAIMED
+            # batch when the parent recovers the death, the respawned
+            # worker re-claims the same batch, the payload segfaults
+            # again (batch_index is still 0), and once its kill count
+            # reaches the retry limit the claim loop poisons it and the
+            # rest of the pipeline continues without it.
+            #
+            # Was: assertEqual(len(res), len(healthy) - 1) plus
+            # assertIn(b"LINE 1999\n", ...). The count says ONE blob is
+            # missing but not WHICH -- a run that dropped batch 500 and
+            # kept batch 0 satisfies it just as well as the opposite.
+            # The round-8 review is right that it does not establish that
+            # the correct batch was lost and the rest intact.
+            #
+            # Now asserts the CONTENT: exactly the first record of the
+            # healthy run is absent, and every other record is present
+            # byte-identical. That names the loss and proves the tail,
+            # which a count cannot. Both runs pin `lines=100` (see the
+            # docstring): the content comparison is only valid when the
+            # two runs split the input identically, which adaptive
+            # batching does not promise.
+            healthy = forkrun.map(_up, path, workers=2, nodes=1,
+                                  order="index", lines=100)
+            healthy_recs = [bytes(x) for x in healthy if x is not None]
+            res_recs = [bytes(x) for x in res if x is not None]
+            self.assertEqual(
+                len(healthy_recs) - 1, len(res_recs),
+                "expected exactly one batch to be lost (%d healthy, %d "
+                "recovered)" % (len(healthy_recs), len(res_recs)))
+            self.assertNotIn(
+                healthy_recs[0], res_recs,
+                "batch 0 should be the LOST one -- the poison path drops "
+                "the batch that keeps crashing, not a healthy batch")
+            self.assertEqual(
+                healthy_recs[1:], res_recs,
+                "every batch after the lost one must arrive byte-identical "
+                "and in order; got %d record(s) against %d"
+                % (len(res_recs), len(healthy_recs) - 1))
             self.assertIn(b"LINE 1999\n", b"".join(res))
         finally:
             os.unlink(path)
@@ -337,7 +441,7 @@ class TestWorkerRespawn(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestTrapACK(unittest.TestCase):
+class TestTrapACK(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -358,13 +462,73 @@ class TestTrapACK(unittest.TestCase):
         """Retry-always-fail poisons via escrow; run completes short."""
         path = _make_input(1000)
         try:
+            # Selective failure (round-9 review). The payload raised for
+            # EVERY batch, so the result was empty and
+            # `set(got_lines) <= set(healthy_lines)` was trivially true of
+            # the empty set -- it established nothing about surviving
+            # content, and an early abort after the warning would also
+            # have satisfied it. Failing only EVEN batches leaves real
+            # output behind, so the surviving set can be checked against
+            # what a correct skip should leave.
             def _boom(batch):
-                raise ValueError("nope")
-            res = forkrun.map(_boom, path, workers=2,
-                              orchestrator=True, on_error="retry", nodes=1)
+                if batch.batch_index % 2 == 0:
+                    raise ValueError("nope")
+                return bytes(batch.data).upper()
+            with _capture_stderr():
+                res = forkrun.map(_boom, path, workers=2,
+                                  orchestrator=True, on_error="retry",
+                                  nodes=1)
             healthy = forkrun.map(_up, path, workers=2, nodes=1)
             # Poisoned batches are skipped, never silently kept.
+            #
+            # Was: assertLess(len(res), len(healthy)). That proves
+            # something was dropped, which is also what any truncation,
+            # any lost batch and any early exit would satisfy -- and it
+            # never checks the user was TOLD. A poison pill that skipped
+            # batches silently would pass.
+            #
+            # Now: the poison warning must appear on stderr, and the
+            # surviving content must be the healthy content minus whole
+            # records -- dropped, never altered or duplicated.
             self.assertLess(len(res), len(healthy))
+            # PINNED to the per-batch warning, not merely the word.
+            #
+            # Mutation-checked: silencing every "Skipping poisoned batch"
+            # fprintf in _shim.c still passed a bare
+            # assertIn("poison", stderr), because the run ALSO prints
+            # "N poisoned batch(es) skipped" and a POISONED BATCH
+            # SUMMARY. So the assertion was satisfiable without the
+            # notification the test is about.
+            self.assertRegex(
+                _LAST_STDERR[0],
+                r"\[WARN\]: Skipping poisoned batch \d+",
+                "the per-batch poison warning is missing; stderr had:\n%s"
+                % _LAST_STDERR[0][:400])
+            healthy_lines = sorted(
+                b"".join(bytes(x) for x in healthy if x is not None)
+                .splitlines())
+            got_lines = sorted(
+                b"".join(bytes(x) for x in res if x is not None)
+                .splitlines())
+            # There IS surviving content now, so these are load-bearing.
+            self.assertTrue(
+                got_lines, "no output survived; the selective payload "
+                           "should have let the odd batches through")
+            self.assertTrue(
+                set(got_lines) <= set(healthy_lines),
+                "the poisoned run produced lines the healthy run did not, "
+                "so records were altered rather than skipped")
+            self.assertLess(
+                len(got_lines), len(healthy_lines),
+                "nothing was actually skipped -- every batch should have "
+                "been poisoned by the even-index rule")
+            # And the surviving content is a PROPER, substantial subset:
+            # roughly the odd half, not a token remnant.
+            self.assertGreater(
+                len(got_lines), 0.4 * len(healthy_lines),
+                "only %d of %d lines survived; that looks like an early "
+                "abort rather than selective skipping"
+                % (len(got_lines), len(healthy_lines)))
         finally:
             os.unlink(path)
 
@@ -386,7 +550,7 @@ class TestTrapACK(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCOrderer(unittest.TestCase):
+class TestCOrderer(ChildLifecycleMixin, unittest.TestCase):
     def tearDown(self):
         assert_no_zombies(self)
 
@@ -552,7 +716,7 @@ class TestReactorPurity(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestWorkerStartupDeadline(unittest.TestCase):
+class TestWorkerStartupDeadline(ChildLifecycleMixin, unittest.TestCase):
     """W-REL6-3.1: fork-in-threaded-host hang is bounded.
 
     String payloads resolve in the parent (no post-fork import);

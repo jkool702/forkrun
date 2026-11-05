@@ -209,25 +209,30 @@ def _set_engine_state(lib, state):
             "failed to set resume state (rc=%d)" % (rc,))
 
 
-def _waitpid_bounded(pid, timeout):
-    """Blocking reap with a deadline; SIGKILL on expiry, then reap.
+_UNREAPED = object()
 
-    Returns (reaped, status-or-None). Never raises.
+
+def _waitpid_until(pid, timeout):
+    """Wait for a child to exit, up to `timeout` seconds.
+
+    Returns its wait status, or None when the child was already
+    reaped elsewhere, or _UNREAPED when it did not exit in time.
+    Never raises. ONE implementation of the bounded wait, because the
+    rule it encodes ("give up at the deadline and say so") is the
+    same rule in both places it is used.
     """
-    if pid is None or pid <= 0:
-        return False, None
     deadline = time.monotonic() + max(0.0, timeout)
     while True:
         try:
             wpid, status = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
-            return True, None
+            return None       # already reaped elsewhere
         except OSError:
-            return False, None
+            return _UNREAPED
         if wpid == pid:
-            return True, status
+            return status
         if time.monotonic() >= deadline:
-            break
+            return _UNREAPED
         # W-REL5-B4/coord-fix: 2ms quantum (was 20ms). The old 20ms
         # overshot every still-running helper join by up to a full
         # quantum — on 15ms-scale completion paths (scanner + drain
@@ -235,15 +240,34 @@ def _waitpid_bounded(pid, timeout):
         # test_c_drain_not_slower deterministically (0.05→0.14s).
         # Deadline + SIGKILL + named-alarm semantics unchanged.
         time.sleep(0.002)
+
+
+def _waitpid_bounded(pid, timeout):
+    """Blocking reap with a deadline; SIGKILL on expiry, then reap.
+
+    Returns (reaped, status-or-None). Never raises.
+
+    The post-SIGKILL reap is BOUNDED too. SIGKILL is not a guarantee:
+    a process in uninterruptible sleep does not die on it, and the
+    old `os.waitpid(pid, 0)` here was an UNBOUNDED blocking wait --
+    so a helper that could not die hung the entire run, with no
+    report. A bounded wait that gives up and says so is the honest
+    shape: the caller reports the child as unresolved.
+    """
+    if pid is None or pid <= 0:
+        return False, None
+    status = _waitpid_until(pid, timeout)
+    if status is not _UNREAPED:
+        return True, status
     try:
         os.kill(pid, 9)
     except OSError:
         pass
-    try:
-        _, status = os.waitpid(pid, 0)
-        return True, status
-    except (ChildProcessError, OSError):
+    # Bounded after SIGKILL as well: SIGKILL is not a guarantee.
+    status = _waitpid_until(pid, timeout)
+    if status is _UNREAPED:
         return False, None
+    return True, status
 
 
 def _read_fd_all(fd):
@@ -331,6 +355,46 @@ def _publish_sidecar(dest_coll, resume_src, coll_fd):
     return True
 
 
+# The last abort-checkpoint decision, for tests and post-mortems. A
+# one-slot list so assignment is atomic (a run is serialized by
+# _RUN_LOCK anyway, but a diagnostic must never be the thing that
+# corrupts a teardown). Categories:
+#   never-entered        checkpoint_on_abort was not called at all
+#   unarmed-engine       engine dead / no C orderer
+#   unarmed-checkpoint   no resume= / checkpoint_file=
+#   snapshot-unavailable snapshot_from_engine returned None
+#   no-progress          horizon 0 and no jagged intervals
+#   sidecar-failed       collected output could not be published
+#   published            checkpoint durably written
+#   error                an unexpected exception (reported, not raised)
+_LAST_ABORT = [None]
+
+_ABORT_DIAG_DEFAULT = {
+    "entered": False, "category": "never-entered", "dest": None,
+    "horizon": None, "jagged": None,
+    "horizon_at_entry": None, "jagged_at_entry": None,
+    "published": False, "attempted_publication": False, "error": None,
+}
+
+
+def abort_diagnostics():
+    """The last abort-checkpoint decision (a copy, so callers can't mutate)."""
+    rec = _LAST_ABORT[0]
+    return dict(_ABORT_DIAG_DEFAULT if rec is None else rec)
+
+
+def reset_abort_diagnostics():
+    """Start a fresh diagnosis for a new run.
+
+    Every executor shape constructs one ``_RunDepthToken`` at run start,
+    so that is the one authoritative place this is called from. Without
+    it, a run that never reaches the choreography would report the
+    PREVIOUS run's decision -- the failure mode this diagnostic exists
+    to make impossible.
+    """
+    _LAST_ABORT[0] = None
+
+
 def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
                          coll_fd, use_orderer, collect,
                          resume_src, checkpoint_file, engine_live):
@@ -349,11 +413,36 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
     abort path must not turn a sick pipeline into a second failure
     (the original exception keeps propagating).
     """
+    diag = {"entered": True, "category": None, "dest": None,
+            "horizon": None, "jagged": None,
+            "horizon_at_entry": None, "jagged_at_entry": None,
+            "published": False, "attempted_publication": False,
+            "error": None}
+    _LAST_ABORT[0] = diag
     if not engine_live or not use_orderer:
+        diag["category"] = "unarmed-engine"
         return False
     if resume_src is None and checkpoint_file is None:
+        diag["category"] = "unarmed-checkpoint"
         return False
     dest = resolve_checkpoint_dest(checkpoint_file, resume_src)
+    diag["dest"] = dest
+    # ENTRY SNAPSHOT, BEFORE THE ABORT. The committed frontier at the
+    # moment the choreography begins is what distinguishes "the signal
+    # arrived mid-pipeline with progress already durable" from "the
+    # abort produced the only progress". It is read BEFORE
+    # fr_py_abort(): the abort is what quiesces the workers, and a
+    # reading taken after it could be attributed to the abort itself
+    # (SSoT 4.1 -- a check that reads state another step produces must
+    # come first). Diagnostic only: a failed read must not change the
+    # choreography's decision.
+    try:
+        entry = snapshot_from_engine(lib)
+    except Exception:
+        entry = None
+    if entry is not None:
+        diag["horizon_at_entry"] = entry.horizon
+        diag["jagged_at_entry"] = len(entry.jagged)
     try:
         try:
             lib.fr_py_abort()
@@ -380,9 +469,16 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
         if orderer_pid:
             _waitpid_bounded(orderer_pid, ORDERER_REAP_TIMEOUT)
         snap = snapshot_from_engine(lib)
-        if snap is None or (snap.horizon == 0 and not snap.jagged):
+        if snap is None:
+            diag["category"] = "snapshot-unavailable"
+            return False
+        diag["horizon"] = snap.horizon
+        diag["jagged"] = len(snap.jagged)
+        if snap.horizon == 0 and not snap.jagged:
+            diag["category"] = "no-progress"
             return False
         if collect and coll_fd is not None and coll_fd >= 0:
+            diag["attempted_publication"] = True
             try:
                 _publish_sidecar(dest + SIDECAR_SUFFIX, resume_src,
                                  coll_fd)
@@ -391,6 +487,8 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
                 # would skip output the caller can never recover
                 # (map/collect paths). The previous checkpoint
                 # survives (atomicity) — report and stop.
+                diag["category"] = "sidecar-failed"
+                diag["error"] = repr(exc)
                 try:
                     print("forkrun: checkpoint sidecar failed "
                           "(%s); previous checkpoint preserved"
@@ -398,7 +496,10 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
                 except Exception:
                     pass
                 return False
+        diag["attempted_publication"] = True
         write_checkpoint(dest, snap)
+        diag["published"] = True
+        diag["category"] = "published"
         try:
             print("forkrun: checkpoint written to %s "
                   "(engine committed frontier: %d bytes%s)" % (
@@ -412,6 +513,8 @@ def checkpoint_on_abort(lib, *, state, orderer_pid, order_w,
             pass
         return True
     except Exception as exc:
+        diag["category"] = "error"
+        diag["error"] = repr(exc)
         try:
             print("forkrun: checkpoint unavailable (%s)" % (exc,),
                   file=sys.stderr)
@@ -475,4 +578,5 @@ def consume_sidecar(resume_src, records):
 __all__ = ["SIDECAR_SUFFIX", "WORKER_REAP_TIMEOUT",
            "ORDERER_REAP_TIMEOUT", "path_has_c_orderer",
            "require_resume_path", "resolve_checkpoint_dest",
-           "resume_begin", "checkpoint_on_abort", "consume_sidecar"]
+           "resume_begin", "checkpoint_on_abort", "abort_diagnostics",
+           "reset_abort_diagnostics", "consume_sidecar"]

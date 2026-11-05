@@ -41,7 +41,19 @@ HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 
 KEEP_RAW=0
-[ "${1:-}" = "--keep-raw" ] && KEEP_RAW=1
+MATRIX=0
+STRICT=0
+MINORS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep-raw) KEEP_RAW=1 ;;
+        --matrix)   MATRIX=1 ;;
+        --strict)   STRICT=1 ;;
+        --minor)    MINORS="$MINORS ${2:-}"; shift ;;
+        *) die "unknown option: $1" ;;
+    esac
+    shift
+done
 
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 step() { printf '\033[36m==>\033[0m %s\n' "$*"; }
@@ -80,6 +92,9 @@ $RUNTIME run --rm \
     -w /src \
     -e "FORKRUN_ARCH_TAG=$ARCH_TAG" \
     -e "FORKRUN_BUILD_PYTHON=${FORKRUN_BUILD_PYTHON:-}" \
+    -e "FORKRUN_MATRIX=$MATRIX" \
+    -e "FORKRUN_STRICT=$STRICT" \
+    -e "FORKRUN_MINORS=${MINORS# }" \
     "$IMAGE" \
     bash -euo pipefail -c '
         # bash headers are NOT in the manylinux image, and the engine TU
@@ -111,6 +126,48 @@ $RUNTIME run --rm \
         "$PY" --version
         "$PY" -m auditwheel --version
 
+        if [ "${FORKRUN_MATRIX:-0}" = "1" ]; then
+            # PER-MINOR MATRIX (DECISION-01 Option A): one wheel per
+            # supported CPython minor, each carrying the helper built
+            # for THAT minor. The orchestration is tools/wheel_matrix.py
+            # -- one implementation, testable without a container.
+            echo "--- per-minor matrix ---"
+            "$PY" -m pip install --quiet --upgrade build auditwheel
+            mkdir -p dist/matrix
+            STRICT_FLAG=""
+            [ "${FORKRUN_STRICT:-0}" = "1" ] && STRICT_FLAG=--strict
+            if [ -n "${FORKRUN_MINORS:-}" ]; then
+                set -- --minor
+                for m in $FORKRUN_MINORS; do set -- "$@" "$m"; done
+                "$PY" tools/wheel_matrix.py "$@" --out-dir dist/matrix \
+                    --auditwheel $STRICT_FLAG
+            else
+                "$PY" tools/wheel_matrix.py --all --out-dir dist/matrix \
+                    --auditwheel $STRICT_FLAG
+            fi
+            exit 0
+        fi
+
+        # The UDF helper EMBEDS the interpreter (it links libpython).
+        # This image ships NO libpython at all -- the interpreters under
+        # /opt/python are built with a STATIC libpython and the static
+        # archives are stripped -- so the helper CANNOT be built here.
+        #
+        # That means any helper already present in the tree is a
+        # FOREIGN artifact: built on the host, linked against the HOST
+        # glibc. Baking it into a manylinux_2_28 wheel would make the
+        # tag a lie (the binary would need a newer glibc than the tag
+        # claims) -- exactly the trap auditwheel refuses, and exactly
+        # what the comment at the top of this file describes. Remove
+        # them, so the container build produces the generic substrate
+        # wheel it can honestly produce.
+        #
+        # The PER-MINOR wheels (which carry the helper) are built by
+        # tools/wheel_matrix.py, where the interpreter is one that HAS
+        # an embeddable libpython.
+        rm -f python/forkrun/_fr_udf*.so
+        echo "removed any pre-existing UDF helper from the tree"
+
         # 1. sdist first, from the tree.
         "$PY" -m build --sdist --outdir dist .
 
@@ -135,12 +192,45 @@ $RUNTIME run --rm \
     '
 
 # --- gate ----------------------------------------------------------------
+if [ "$MATRIX" -eq 1 ]; then
+    # PER-MINOR MATRIX gate. Every wheel is validated against its own
+    # artifacts (the canonical rule, tools/wheel_matrix.py), and an
+    # INCOMPLETE matrix is reported as such -- never as a successful
+    # release build.
+    step "verifying the per-minor matrix"
+    shopt -s nullglob
+    MATRIX_WHEELS=("$OUT_DIR"/matrix/forkrun-*.whl)
+    [ "${#MATRIX_WHEELS[@]}" -ge 1 ] || die "the matrix produced no wheels"
+    for w in "${MATRIX_WHEELS[@]}"; do
+        case "$(basename "$w")" in
+            *"$ARCH_TAG"*) : ;;
+            *) die "wheel is not tagged $ARCH_TAG: $(basename "$w")" ;;
+        esac
+        python3 "$REPO_ROOT/tools/wheel_matrix.py" --validate-wheel "$w" \
+            || die "invalid wheel: $(basename "$w")"
+    done
+    echo
+    echo "matrix wheels:"
+    ls -l "${MATRIX_WHEELS[@]}"
+    # Strictness is enforced INSIDE the container run (the module exits
+    # non-zero when a supported minor did not produce a valid wheel),
+    # so an incomplete matrix fails the build there rather than being
+    # rediscovered by rebuilding everything here.
+    step "ok"
+    exit 0
+fi
+
 # The whole point of the container build is this filename. If it is not
 # the manylinux tag, PyPI will either 400 it (bare linux_*) or we have
 # silently shipped a wheel with a floor higher than it needs.
 step "verifying output"
 shopt -s nullglob
-WHEELS=("$OUT_DIR"/forkrun-*-none-*.whl)
+# A per-minor wheel is tagged cp3XX, because the UDF helper it carries is
+# CPython-LINKED (DECISION-01 5.4). The generic substrate wheel -- built
+# without the helper -- stays py3-none. Accept EITHER, and refuse to pick
+# between two: a build that produced both is ambiguous, and silently
+# choosing one is how the wrong artifact ships.
+WHEELS=("$OUT_DIR"/forkrun-*-py3-*.whl "$OUT_DIR"/forkrun-*-cp3??-*.whl)
 SDISTS=("$OUT_DIR"/forkrun-*.tar.gz)
 [ "${#WHEELS[@]}" -eq 1 ] || die "expected exactly 1 wheel, got ${#WHEELS[@]}"
 [ "${#SDISTS[@]}" -eq 1 ] || die "expected exactly 1 sdist, got ${#SDISTS[@]}"
@@ -209,6 +299,20 @@ if need < claimed:
 else:
     print("OK         : tag matches the binary exactly")
 PY
+
+# The wheel's PYTHON tag must agree with the helper it carries.
+#
+#   cp3XX  -> the wheel ships the UDF helper, built for THAT minor.
+#   py3    -> the wheel ships NO helper. "Keep the source-only development
+#             path honest: do not advertise a locally built helper as
+#             present in a generic ABI-independent wheel" (DECISION-01 5.4).
+#
+# A cp3XX wheel whose helper is for a different minor is a LYING tag, and
+# pip would install it on the wrong interpreter.
+# The tag-vs-artifact rule lives in ONE place (tools/wheel_matrix.py):
+# it is the same rule the per-minor matrix validates each wheel with,
+# and two copies of a rule is how they drift.
+python3 "$REPO_ROOT/tools/wheel_matrix.py" --validate-wheel "$WHEEL" || exit 1
 
 [ "$KEEP_RAW" -eq 1 ] || rm -rf "$OUT_DIR/raw"
 

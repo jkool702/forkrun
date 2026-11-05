@@ -25,18 +25,25 @@ the caller's UB, same as Layer 3 numpy UB).
 
 from __future__ import annotations
 
+import importlib.machinery
 import mmap
+import inspect
 import os
 import struct
 import sys
 import traceback
 
+from . import _childreg
 from ._bindings import RC_EOF, RC_FAIL, RC_OK, FrPyBatch, get, v1_available
 from ._batch import Batch
 from ._plugin import PluginError
 from ._spawn import SpawnError
 
-_HDR = struct.Struct("<QQ")  # batch_idx u64, payload length u64
+# DECISION-02: batch_idx u64, payload length u64, disposition u32,
+# reserved u32. The disposition is EXPLICIT because len == 0 already means
+# "a real empty result" -- overloading it for "completed with no result"
+# would collapse None and b"".
+_HDR = struct.Struct("<QQII")  # batch_idx, len, disposition, reserved
 # v1 streaming signal: (worker_id u64, batch_idx u64). Indices only — never
 # payload bytes (<= PIPE_BUF, so one write is atomic across workers).
 _SIG = struct.Struct("<QQ")
@@ -79,6 +86,15 @@ def _cloexec_all() -> None:
         pass
 
 
+# C0.7: records WHICH ack route was actually taken, as opposed to the
+# one requested. Set by _ack() on every call. The completeness
+# certificate refuses when this is "fallback", because the legacy route
+# reaches ring_ack_main and skips the shim-side commit flush -- so frames
+# would be committed with no count. Process-local and advisory; it exists
+# so a silent fallback cannot pass for a covered run.
+_ACK_ROUTE = {"route": "none"}
+
+
 def _ack(lib, fallow_fd=-1, target_fd=-1) -> int:
     """Flush + ack. The single ack funnel for the pre-W-PY21-B paths.
 
@@ -96,14 +112,25 @@ def _ack(lib, fallow_fd=-1, target_fd=-1) -> int:
     -1 is the materialized-path disarm (no reaper exists).
     target_fd: W-PY19 C-orderer target (>= 0 emits an OrderPacket for
     the bytes appended since the last ack; -1 disarms, the v0 default).
+
+    C0.7: the fallback to fr_py_ack routes to ring_ack_main, which does
+    NOT run the shim-side commit flush, so a DATA frame could be
+    committed with no count reaching the shared counter. That fallback is
+    therefore recorded in _ACK_ROUTE, and the completeness certificate
+    REFUSES to claim coverage when it is anything but "direct". This is
+    enforced rather than documented: a silent ack fallback would
+    otherwise produce a certificate that looks clean and is not.
     """
     _flush()
     ack_direct = getattr(lib, "fr_py_ack_direct", None)
     if ack_direct is not None:
         try:
-            return ack_direct(fallow_fd, target_fd)
+            rc = ack_direct(fallow_fd, target_fd)
+            _ACK_ROUTE["route"] = "direct"
+            return rc
         except Exception:
-            pass
+            _ACK_ROUTE["route"] = "fallback"
+    _ACK_ROUTE["route"] = "fallback"
     return lib.fr_py_ack(fallow_fd, target_fd)
 
 
@@ -138,6 +165,25 @@ def _resolve_payload(spec):
         if not callable(fn):
             raise TypeError(
                 "payload %r is not callable" % (spec,))
+        # A CLASS is callable, so the check above admits it. W-EXP-1
+        # eligibility is module-level functions (roadmap C0.3); a class
+        # reference must be DECLINED before input is consumed, not
+        # discovered at call time.
+        #
+        # What happened without this: workers called MyUDF(batch), which
+        # CONSTRUCTED an instance and returned it instead of bytes. The
+        # instance was not a valid result, so it was dropped, and
+        # map() returned [] -- indistinguishable from "input had no
+        # matching records". A wiring mistake reported as an empty
+        # result is worse than an error, because the user has no reason
+        # to doubt the data.
+        if inspect.isclass(fn):
+            raise TypeError(
+                "payload %r resolves to a class (%s.%s), not a function. "
+                "Cleanroom UDF mode takes module-level functions; pass "
+                "the function itself, e.g. %r, or an instance/callable "
+                "directly." % (spec, mod_name, func_name,
+                               "%s:%s.__call__" % (mod_name, func_name)))
         return fn
     if not callable(spec):
         raise TypeError("payload must be 'pkg.mod:func' or callable")
@@ -171,12 +217,116 @@ def resolve_payload_parent(spec):
     fixtures, REPL/notebook iteration) would resolve stale in the
     parent. Only the leaf is dropped ("pkg" stays cached; the
     re-import rebinds it).
+
+    THE DROP IS LIMITED TO SOURCE MODULES, and that limit is load
+    bearing. Dropping a module and re-importing it produces a NEW
+    MODULE OBJECT: every module that imported it earlier keeps a
+    reference to the OLD one. For a user module that is harmless --
+    the old object is about to be replaced anyway, and the freshness
+    rule wants exactly that. For a BUILT-IN, FROZEN or EXTENSION
+    module it is not: `os` is frozen, so re-importing it hands the
+    process a different `os` object while `forkrun._checkpoint` (and
+    every other module imported earlier) still holds the old one.
+    Two consequences, both observed:
+
+      * a patch applied to the current `os` (a test's
+        `mock.patch("os.stat", ...)`, or any instrumentation) is
+        applied to the NEW object and is invisible to every module
+        holding the OLD one -- so the code under test silently sees
+        the real function;
+      * the reverse holds too: a module that holds the old object
+        keeps using it, so the process ends up with two `os` objects
+        and no single source of truth.
+
+    A built-in is never "rewritten between calls", so the freshness
+    rule has nothing to do there. `_is_source_module` is the one
+    implementation of that distinction.
     """
     if isinstance(spec, str):
         mod_name, _, func_name = spec.partition(":")
-        if mod_name and func_name:
+        if mod_name and func_name and _is_source_module(mod_name):
             sys.modules.pop(mod_name, None)
     return _resolve_payload(spec)
+
+
+def _is_source_module(name):
+    """May the freshness rule drop and re-import this module?
+
+    ONLY a module the USER owns: one that came from a source file
+    OUTSIDE the interpreter's own directories.
+
+    The rule exists so a module REWRITTEN between calls (a test
+    fixture, a REPL/notebook iteration) is not resolved stale. A
+    standard library module is not rewritten that way -- and dropping
+    one replaces the module OBJECT, so every module that imported it
+    earlier keeps a stale reference. That is not a hypothetical: it is
+    exactly what happened with the FROZEN `os`.
+
+    So the predicate is about OWNERSHIP, not about the loader class.
+    `base64` is loaded from ordinary Python source, and it is still
+    not the user's to replace: dropping and re-importing it would
+    hand the process two `base64` objects, and `b64encode` resolved
+    from the new one would not be the function the old one holds.
+
+    FAIL CLOSED: if the origin cannot be established, the module is
+    not droppable. A module that is not imported yet IS droppable:
+    there is nothing to keep a reference to.
+    """
+    mod = sys.modules.get(name)
+    if mod is None:
+        return True
+    path = getattr(mod, "__file__", None)
+    if not path:
+        return False                     # no file: a builtin, or a
+                                         # namespace package
+    if not _is_source_path(path):
+        return False                     # not loaded from source
+    return _is_outside_interpreter_dirs(path)
+
+
+def _is_source_path(path):
+    """Was this file loaded from Python source (or a source-less
+    extension)?"""
+    import importlib.machinery
+    suffix = os.path.splitext(path)[1]
+    if suffix in (".pyc", ".pyo"):
+        return True
+    if suffix == ".py":
+        return True
+    # a source-less extension (.so): the loader says so
+    name = os.path.basename(path)
+    for suffix_candidate in importlib.machinery.EXTENSION_SUFFIXES:
+        if name.endswith(suffix_candidate):
+            return True
+    return False
+
+
+def _is_outside_interpreter_dirs(path):
+    """Is this file outside the interpreter's own directories?
+
+    The standard library, the interpreter's extension directory and
+    the site directories belong to the interpreter, not to the user:
+    a module from one of them is not something a user rewrote between
+    calls, and replacing its OBJECT is never what the freshness rule
+    wanted.
+    """
+    import sysconfig
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return False
+    roots = []
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
+        try:
+            root = sysconfig.get_path(key)
+        except (KeyError, OSError):
+            root = None
+        if root:
+            roots.append(os.path.realpath(root))
+    for root in roots:
+        if real == root or real.startswith(root + os.sep):
+            return False
+    return True
 
 
 def _coerce_result(ret):
@@ -712,30 +862,79 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         # (append-once rule), so framing stays
                         # parseable under ENOSPC; the shared failure
                         # path below then retries the batch whole.
+                        #
+                        # If the rollback itself cannot be performed,
+                        # the batch is NOT retryable here: the partial
+                        # record survives and a same-process retry would
+                        # append behind it. That is a distinct,
+                        # non-retryable outcome -- see
+                        # _UnrecoverableOutput.
                         try:
                             _emit_end = os.lseek(out_fd, 0, os.SEEK_END)
                         except OSError:
                             _emit_end = -1
                         try:
+                            # DECISION-02: disposition is explicit.
+                            # len(blob) == 0 with blob == b"" is a REAL
+                            # empty result (DATA).
+                            #
+                            # blob == None never reaches here: the guard
+                            # above skips the whole block. Note that this
+                            # means the ordinary Python payload path
+                            # writes NO record at all for a None result --
+                            # fr_py_emit() is handed data=NULL and its
+                            # contract is to write nothing. An earlier
+                            # version of this comment claimed the C
+                            # emitter supplies a NO_RESULT record here;
+                            # that was wrong, and it matters for Stage 1,
+                            # because a None batch is a genuine hole for
+                            # an ordered consumer rather than a marker it
+                            # can skip over.
                             _write_all(out_fd, _HDR.pack(
-                                batch.batch_index, len(blob)))
+                                batch.batch_index, len(blob),
+                                0, 0))
                             if blob:
                                 _write_all(out_fd, blob)
                         except OSError:
-                            if _emit_end >= 0:
-                                try:
-                                    os.ftruncate(out_fd, _emit_end)
-                                except OSError:
-                                    pass
+                            # Raises _UnrecoverableOutput if the rollback
+                            # cannot be done; on success the append-once
+                            # rule holds and the ordinary failure path may
+                            # retry the batch whole.
+                            _rollback_partial_record(
+                                out_fd, _emit_end, batch.batch_index)
                             raise
                         # W-PY29: complete record durable — advance the
-                        # rollback frontier (best-effort; emit/ordered
-                        # paths advance in C anyway).
+                        # rollback frontier.
+                        #
+                        # The size MUST be the real framed size: _HDR.size
+                        # is 24 (batch_idx u64, len u64, disposition u32,
+                        # reserved u32), not 16. A hard 16 undercounted
+                        # the frontier by 8 bytes per record, which
+                        # accumulated across batches until recovery
+                        # truncated INTO already-committed output. It was
+                        # masked in order="index" runs because ordered-ACK
+                        # processing resynchronised the cursor to the true
+                        # file end; unordered runs have no such
+                        # correction and were vulnerable.
+                        #
+                        # Deriving it from _HDR.size rather than repeating
+                        # a literal is the whole point: the C emitters now
+                        # advance inside their framer, and this is the
+                        # matching Python one.
                         if _advanced_fn is not None:
                             try:
-                                _advanced_fn(16 + len(blob))
-                            except Exception:
-                                pass
+                                _advanced_fn(_HDR.size + len(blob))
+                            except Exception as adv_exc:
+                                # A stale frontier is indistinguishable
+                                # from a correct one until recovery
+                                # truncates through committed output, so
+                                # this must not be swallowed into a
+                                # successful-looking batch.
+                                raise _UnrecoverableOutput(
+                                    "forkrun: frontier advance failed for "
+                                    "batch %d (%s); the rollback frontier "
+                                    "is now untrustworthy"
+                                    % (batch.batch_index, adv_exc))
             except BaseException as exc:  # noqa: BLE001
                 error = exc
             finally:
@@ -751,10 +950,33 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     # -2/-3 are fatal infrastructure (v0 parity with
                     # _success False); -1 rides the escrow failure
                     # path like a Python write error.
+                    #
+                    # -4 (FR_PY_ERR_NOTIFY) is NEITHER of those, and it
+                    # must not fall through to the escrow path below.
+                    # The commit already HAPPENED: fr_py_complete calls
+                    # fr_py_ack_direct, which stores TXN_IDLE, and only
+                    # THEN publishes. So -4 means "committed, but the
+                    # drain was never told" — the C contract says so
+                    # outright ("NEVER a plain retry"), and the C worker
+                    # loop honours it by treating ANY nonzero rc as
+                    # fatal.
+                    #
+                    # The escrow path would RE-ARM this batch for a
+                    # same-process re-claim, which RE-EXECUTES a batch
+                    # that is already committed. That is a
+                    # duplicate-execution bug, not a retry — and it is
+                    # exactly what the distinct error code exists to
+                    # prevent.
+                    #
+                    # Exiting is the contract's "aborting the run
+                    # without claiming success": the parent's
+                    # fr_py_recover_worker classifies the death as
+                    # TXN_IDLE (committed, nothing in flight) and
+                    # respawns the worker WITHOUT re-running the batch.
                     comp_rc = _commit(batch.batch_index, blob)
                     if comp_rc == 0:
                         continue
-                    if comp_rc == -2 or comp_rc == -3:
+                    if comp_rc == -2 or comp_rc == -3 or comp_rc == -4:
                         return 1
                     error = OSError(
                         "forkrun: output write failed on batch %d"
@@ -785,6 +1007,15 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     continue
 
             # --- failure path (bash -E analogue) ---
+            # STAGE0: an output state we cannot trust must not enter the
+            # ladder at all. skip would ack a batch whose partial record
+            # is still in the output; retry would append a fresh record
+            # behind it and corrupt framing for everything downstream.
+            # Exit and let parent-side recovery roll back on the
+            # transaction frontier instead.
+            if isinstance(error, _UnrecoverableOutput):
+                _flush()
+                return 1
             if on_error == "skip":
                 if _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
@@ -819,6 +1050,57 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
         # valid for any in-flight exported views; Layer 3 UB otherwise).
 
 
+def _rollback_partial_record(out_fd, emit_end, batch_index):
+    """Remove a partially written record so framing stays parseable.
+
+    Mirrors _shim.c's payload_error. Raises _UnrecoverableOutput when the
+    rollback cannot be performed, which is the case that must not become
+    a same-process retry: the partial record survives, and the retry
+    would append behind it.
+
+    Extracted as a module-level function so the failure branch is
+    directly testable -- inline inside the worker loop it was reachable
+    only by forcing both a write failure and a rollback failure.
+    """
+    if emit_end < 0:
+        raise _UnrecoverableOutput(
+            "forkrun: cannot establish the pre-record boundary on output "
+            "fd for batch %d; a partial record may remain and the batch is "
+            "not retryable in-process" % batch_index)
+    try:
+        os.ftruncate(out_fd, emit_end)
+    except OSError as cleanup_exc:
+        raise _UnrecoverableOutput(
+            "forkrun: output rollback failed for batch %d (%s); a partial "
+            "record may remain, so the batch is not retryable in-process"
+            % (batch_index, cleanup_exc))
+
+
+class _UnrecoverableOutput(OSError):
+    """Output state can no longer be trusted; this worker must exit.
+
+    Raised when a write failure could NOT be rolled back -- the
+    pre-record boundary was never established, or ftruncate itself
+    failed. The partial record may still be present in the output memfd,
+    so retrying the batch in-process would append behind it and leave
+    malformed framing for every downstream record.
+
+    This deliberately does NOT ride the ordinary on_error ladder. That
+    ladder's three options are all wrong here:
+
+      skip       would ack a batch whose partial record is still there;
+      fail-fast  would abort rather than let recovery try, which is
+                 heavier than necessary when the transaction state is
+                 recoverable;
+      retry      is the dangerous one -- it deposits for a same-process
+                 retry, which appends behind the partial record.
+
+    Exiting instead hands the decision to parent-side recovery
+    (fr_py_recover_worker), which rolls back on the transaction frontier
+    and retries with a clean output.
+    """
+
+
 _ON_ERROR_CODES = {"retry": 0, "skip": 1, "fail-fast": 2}
 
 
@@ -848,7 +1130,7 @@ def _c_plugin_spec(payload_fn):
 
 def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
                            out_fd, signal_w, fallow_w, engine_fds,
-                           on_error="retry"):
+                           on_error="retry", extra_keep_fds=None):
     """Fork one C-loop plugin worker (W-PY26 mode="plugin" fast path).
 
     The child scrubs to engine + job fds, then runs
@@ -863,7 +1145,7 @@ def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
     fail-fast); v0 72B plugins must never reach here (gate on
     _c_plugin_spec first).
     """
-    pid = os.fork()
+    pid = _childreg.fork_child('c-plugin-worker')
     if pid == 0:
         try:
             keep = set(engine_fds) | {memfd_fd, out_fd}
@@ -871,6 +1153,8 @@ def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
                 keep.add(signal_w)
             if fallow_w is not None and fallow_w >= 0:
                 keep.add(fallow_w)
+            if extra_keep_fds:
+                keep.update(extra_keep_fds)
             from ._fd_scrub import scrub_fds
             scrub_fds(keep)
         except Exception:
@@ -914,7 +1198,7 @@ def _c_spawn_spec(payload_fn):
 
 def _fork_c_spawn_worker(lib, wid, spawn_argv, memfd_fd,
                          out_fd, signal_w, fallow_w, engine_fds,
-                         on_error="retry"):
+                         on_error="retry", extra_keep_fds=None):
     """Fork one C-loop spawn worker (W-PY33 mode="spawn" fast path).
 
     The child scrubs to engine + job fds, then runs
@@ -933,7 +1217,7 @@ def _fork_c_spawn_worker(lib, wid, spawn_argv, memfd_fd,
     _argv_b = [(a.encode("utf-8") if isinstance(a, str) else bytes(a))
                for a in spawn_argv]
     argv_c = (_ctypes.c_char_p * (len(_argv_b) + 1))(*_argv_b, None)
-    pid = os.fork()
+    pid = _childreg.fork_child('c-spawn-worker')
     if pid == 0:
         try:
             keep = set(engine_fds) | {memfd_fd, out_fd}
@@ -941,6 +1225,8 @@ def _fork_c_spawn_worker(lib, wid, spawn_argv, memfd_fd,
                 keep.add(signal_w)
             if fallow_w is not None and fallow_w >= 0:
                 keep.add(fallow_w)
+            if extra_keep_fds:
+                keep.update(extra_keep_fds)
             from ._fd_scrub import scrub_fds
             scrub_fds(keep)
         except Exception:

@@ -3,7 +3,7 @@
 #
 #   bash epyc/60_utest_bash_full.sh
 #
-# 264 tests across 21 lettered sections, including the chaos paths:
+# 267 tests across 21 lettered sections, including the chaos paths:
 #   L  Fault resilience: escrow, poison, self-healing
 #   M  Checkpoint & resume (the largest section, ~1100 lines)
 #   T13 a 3-second background loop SIGKILLing ~30% of worker subshells
@@ -35,7 +35,7 @@ OUTD="$EPYC_OUT/10_utests/bash_full"
 mkdir -p "$OUTD"
 cd "$EPYC_ROOT/UNIT_TESTS" || die "no UNIT_TESTS dir"
 
-banner "60 test_frun_comprehensive.sh (264 tests, un-timeboxed, foreground)"
+banner "60 test_frun_comprehensive.sh (267 tests, un-timeboxed, foreground)"
 log "CI gives this suite a 120-minute timeout and marks it advisory over known"
 log "timing flakes (C-drain framing, reactor-ingest multiset, T10b, M8 HUP-window)."
 log "A red here is triaged, not necessarily a defect on this hardware."

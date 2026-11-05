@@ -1,4 +1,37 @@
-# Cleanroom Integration — Context Handover & Work Order
+# Python cleanroom launcher — handover
+
+> **CR-FIX1 STATUS (read this first).** Everything below this banner that
+> describes measurements, the default, or the scope was written before
+> the hardening pass and is now HISTORICAL. It is kept because the
+> findings are still worth having — not because it describes current
+> behaviour. Where the two disagree, `python/forkrun/run.py`
+> `_cleanroom_enabled`'s docstring and the `CHANGELOG.md` CR-FIX1 entry
+> are authoritative.
+>
+> What changed:
+>
+> * The fixed ~100 ms startup overhead is **gone**: startup 107.06 ms ->
+>   3.41 ms (32.5x), throughput 232.2 ms -> 192.9 ms (1.20x) on
+>   light_5M at 28 workers, byte-exact output on both sides. Root cause
+>   was the scanner and spill children not inheriting the engine
+>   descriptors, plus a close-all-except scrub that only covered
+>   fds 3..1023.
+> * The "circular wait" diagnosis below (§7.5 / the spares explanation)
+>   is **refuted** — see the CR-FIX1 changelog entry.
+> * The default is still OFF, but for different reasons: the feature is
+>   no longer slower; it remains narrower than the API and has never run
+>   on real multi-node hardware.
+> * Fatal teardown no longer hangs on a live input producer; fallback is
+>   no longer able to silently return truncated output.
+> * §7.1's four load-sensitive tests were resolved earlier (W-STREAMDRAIN)
+>   and are unrelated to the remaining open items.
+> * The test suite is now self-contained: 70 tests, 0 skipped (was 58
+>   with 37 skipped and 1 error).
+>
+> Still open, and still not in this file's original scope: NUMA,
+> Python UDF mode, spawn-pipe-driven worker spawning, and real
+> multi-socket validation. See `DOCS/FUTURE_WORK.md`.
+
 
 **For:** a fresh opencode instance with no memory of this work.
 **Author:** previous instance. **Date:** 2026-10-04.
@@ -163,8 +196,22 @@ yet handle:
   cannot do that — the whole point of exec is that you no longer share the
   parent's Python state).
 - **Python UDF callables.** A UDF is a live Python closure. Crossing `exec`
-  destroys it. Structurally impossible; do not attempt it. Coverage stays
-  materialized + C plugin.
+  destroys it, so a *closure* cannot be **carried**. Coverage stays
+  materialized + C plugin for the callable form.
+
+  **Superseded in part — see `CLEANROOM_DESIGN.md` "CR-FIX1 correction to
+  the ruling below".** The original text here read "Structurally
+  impossible; do not attempt it", which is correct about **carrying** and
+  wrong about **reachability**: `exec` prevents transporting an object
+  graph, but the far side can **re-create** an interpreter and re-import a
+  *module* reference — the same technique `frun.bash` already uses for the
+  shell. A callable closure remains out of reach; a module function
+  reference does not, and is the `mode="python"` work item.
+
+  Kept rather than deleted because the distinction is the whole point:
+  a reader who needs to know why a closure cannot cross should still find
+  the reason here, and should not have to infer that "possible" means
+  "easy".
 - **Fault injection / poison retry.** The test suite drives hooks through the
   Python path that the launcher does not yet implement.
 
@@ -204,6 +251,9 @@ job here is to confirm it, not to write it.
 path, which the launcher already fully covers.
 
 - Add `FORKRUN_CLEANROOM` env flag, default **off** for now.
+  **[STALE as of WO-CR-ROI-2 / `04485e52`]** The gate is now per-ROUTE and
+  `map(plugin)` is default-on; the other four routes are still opt-in.
+  See `dev/supervisor/CLEANROOM_DEFAULT_ON_DECISION.md` §6.
 - Build the launcher as part of the normal build (`Makefile.substrate`), or
   ship it as a prebuilt in the wheel. Decide, and write down why.
 - Route the chosen path through the launcher; leave the other 9 alone.

@@ -253,7 +253,12 @@ class TestViewLifetime(unittest.TestCase):
         path = _tmp(_write_lines, 400)
         try:
             held = []
-            for blob in forkrun.stream(_up, path, workers=4, nodes=1):
+            # lines=10 -> 40 batches for 400 lines. Auto batching on a
+            # 4-CPU runner can yield fewer than the 20 this test retains,
+            # which would make the count assertion below measure the
+            # scheduler instead of the view lifetime.
+            for blob in forkrun.stream(_up, path, workers=4, nodes=1,
+                                       lines=10):
                 held.append(blob)
                 if len(held) >= 20:
                     break

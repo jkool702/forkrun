@@ -21,7 +21,7 @@ from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._plugin import PluginError, load_plugin  # noqa: E402
 from forkrun._spawn import make_spawn_payload  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -30,7 +30,7 @@ except FileNotFoundError:
     HAVE_LIB = False
 
 
-class TestSpawnPathPinning(unittest.TestCase):
+class TestSpawnPathPinning(ChildLifecycleMixin, unittest.TestCase):
     def setUp(self):
         self._saved_path = os.environ.get("PATH")
         self._tmp = tempfile.mkdtemp(prefix="forkrun_hostile_")

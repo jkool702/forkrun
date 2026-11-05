@@ -14,7 +14,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from forkrun import _bindings as _b  # noqa: E402
-from _helpers import assert_no_zombies  # noqa: E402
+from forkrun._worker import _HDR  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies  # noqa: E402
 
 try:
     _b.find_substrate()
@@ -128,11 +129,10 @@ class TestC2OffMainThreadLoud(unittest.TestCase):
 
 
 def _framed(*pairs):
-    import struct  # noqa: PLC0415
-
     out = []
     for idx, blob in pairs:
-        out.append(struct.pack("<QQ", idx, len(blob)) + blob)
+        # DECISION-02: use the real header (it carries a disposition).
+        out.append(_HDR.pack(idx, len(blob), 0, 0) + blob)
     return b"".join(out)
 
 
@@ -187,7 +187,7 @@ class TestC4DeliverThenUnlink(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestC5SpareNulled(unittest.TestCase):
+class TestC5SpareNulled(ChildLifecycleMixin, unittest.TestCase):
     """C5 (M19): teardown must not receive a closed spare number."""
 
     def test_spare_is_none_at_teardown(self):
@@ -286,7 +286,7 @@ class TestC7TornSignalGuard(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestC9SigkillBackoff(unittest.TestCase):
+class TestC9SigkillBackoff(ChildLifecycleMixin, unittest.TestCase):
     """C9 (M11): SIGKILL deaths back off; persistent killers still end."""
 
     def _run_killer(self, max_kills, path):

@@ -13,6 +13,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import forkrun  # noqa: E402
+from _helpers import ChildLifecycleMixin
 
 try:
     from forkrun._bindings import find_substrate  # noqa: E402
@@ -51,7 +52,7 @@ def _nfd():
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestE15TeardownHygiene(unittest.TestCase):
+class TestE15TeardownHygiene(ChildLifecycleMixin, unittest.TestCase):
     """E15 (M19 completion): no stale numbers reach teardown; fds stable.
 
     Audit (see wave report) classified every close in run.py:
@@ -66,6 +67,7 @@ class TestE15TeardownHygiene(unittest.TestCase):
         import sys as _sys  # noqa: PLC0415
         from unittest import mock as _mock  # noqa: PLC0415
         from _helpers import (  # noqa: PLC0415
+            ChildLifecycleMixin,
             assert_no_zombies, write_lines)
 
         _run_mod = _sys.modules["forkrun.run"]

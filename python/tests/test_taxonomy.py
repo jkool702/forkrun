@@ -24,7 +24,7 @@ from forkrun.exceptions import (BASH_CODE_MAP, ForkrunInterrupted,  # noqa: E402
                                 ForkrunSignalError, ForkrunTerminated,
                                 ForkrunWorkerFailure)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import ChildLifecycleMixin, assert_no_zombies, write_lines  # noqa: E402
 
 try:
     find_substrate()
@@ -106,7 +106,7 @@ def _segv(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestStrictPoison(unittest.TestCase):
+class TestStrictPoison(ChildLifecycleMixin, unittest.TestCase):
     def test_strict_raises_with_count(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
@@ -154,7 +154,7 @@ class TestStrictPoison(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestCrashStaysRuntimeError(unittest.TestCase):
+class TestCrashStaysRuntimeError(ChildLifecycleMixin, unittest.TestCase):
     def test_segfault_is_plain_runtime_error(self):
         # Engine faults with no signal *cause contract* (claim race,
         # worker crash) stay RuntimeError (Bash exit 1) — taxonomy
@@ -203,7 +203,7 @@ def _slow(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestParentInterrupt(unittest.TestCase):
+class TestParentInterrupt(ChildLifecycleMixin, unittest.TestCase):
     def test_sigint_becomes_forkrun_interrupted(self):
         # Parent-side SIGINT mid-run translates to
         # ForkrunInterrupted (still a KeyboardInterrupt).
@@ -218,8 +218,13 @@ class TestParentInterrupt(unittest.TestCase):
                                                          _signal.SIGINT))
             try:
                 timer.start()
+                # lines=100 -> 40 batches x 50ms over 2 workers is
+                # ~1s of work, so the 0.5s SIGINT lands mid-run. Auto
+                # batching finishes the 4000 lines in ~100ms on a
+                # 4-CPU runner, before the timer fires.
                 with self.assertRaises(ForkrunInterrupted) as ctx:
-                    forkrun.map(_slow, path, workers=2, nodes=1)
+                    forkrun.map(_slow, path, workers=2, nodes=1,
+                                lines=100)
             finally:
                 timer.cancel()
                 _signal.signal(_signal.SIGINT, old)

@@ -46,6 +46,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
 from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      ChildLifecycleMixin,
                       lines_of, nfd, write_lines)
 
 try:
@@ -64,7 +65,7 @@ def _upper(batch):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestSequentialInvocations(unittest.TestCase):
+class TestSequentialInvocations(ChildLifecycleMixin, unittest.TestCase):
     def test_two_runs_same_process(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
@@ -105,7 +106,7 @@ class TestSequentialInvocations(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
-class TestConcurrentInvocations(unittest.TestCase):
+class TestConcurrentInvocations(ChildLifecycleMixin, unittest.TestCase):
     def test_two_runs_concurrent_threads(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
