@@ -83,9 +83,15 @@ jobs:
                                   # missing-artifact path in the
                                   # verify step ships the stale blob
                                   # the updater retained (F31 class).
-              # 1. Install Dependencies (Fedora/RHEL style)
-              dnf install -y gcc make bash-devel git grep sed binutils file || \
-              (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils file)
+              # 1. Install Dependencies (Fedora/RHEL style).
+              # diffutils (cmp) is REQUIRED by the freshness gate
+              # below; the quay manylinux images ship it but
+              # fedorariscv/base does not (run 42092479045: the
+              # riscv64 build+test SUCCEEDED, then the gate died on
+              # "cmp: command not found" and the job failed after
+              # producing its artifact -- leaving the blob stale).
+              dnf install -y gcc make bash-devel git grep sed binutils file diffutils || \
+              (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils file diffutils)
               # W-BASHCOMPAT-BC6: record the resolved toolchain into the
               # log (provenance visibility for the blob-build container;
               # informational only — never gate on it here).
