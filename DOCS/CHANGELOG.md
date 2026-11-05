@@ -1,15 +1,11 @@
 # forkrun Changelog
 
-## v3.6.2 — unreleased
+## v3.6.2 — 2026-11-05
 
 Python frontend 0.18.0; engine `v3.6.2` (frozen). This release closes
 the SIGINT deferral boundary, seals the distribution as a validated
 release bundle (six per-minor CPython wheels plus one sdist), and lands
 the accumulated correctness and Single-Source-of-Truth work below.
-
-The heading deliberately still says `unreleased`. Finalizing it is an
-owner act at tag time; until then `python/release_check.py` reports
-exactly that one expected failure and nothing else.
 
 ### a failed resume releases the source it opened
 

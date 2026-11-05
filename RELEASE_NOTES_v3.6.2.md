@@ -11,7 +11,7 @@ GitHub Release remain owner actions in the order recorded in
 | Python suite (clean committed tree) | full suite, both cleanroom modes; counts in the closeout report |
 | Bash suites | `test_c_plugins.sh` + `test_frun.sh`, comprehensive, security; CI run recorded in the closeout report |
 | Sanitizers | `sanitizer-validation.yml` with `mode=all` |
-| `python/release_check.py` | exactly one designed-red failure pre-finalization: `Docs: CHANGELOG v3.6.2 heading is final (no (unreleased))` |
+| `python/release_check.py` | **ALL CHECKS PASSED** on the finalized tree with the verified bundle and `FORKRUN_RELEASE_CHECK_TAGS=1` (pre-finalization, the same command reported exactly one designed-red failure: the changelog heading) |
 
 The exact workflow run URLs and the release HEAD SHA are recorded in the
 closeout report for the final `main` commit. Any release-gate failure

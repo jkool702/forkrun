@@ -1,13 +1,14 @@
 # TAG_PREP_v3.6.2 — owner's keypress kit
 
-**Do not finalize the CHANGELOG heading. Do not upload to PyPI. Do not
-tag. Do not create the GitHub Release** — until the steps below say so,
-in this order. PR #588 is MERGED; `main` carries the release. The
-publication order is owner-selected and intentional: **finalize the
-changelog → release gate → PyPI → tag → GitHub Release.** PyPI first:
-once PyPI accepts a distribution file, the same version/file cannot be
-replaced with different bytes, so every artifact-changing correction
-must be resolved before upload.
+**Do not tag. Do not create the GitHub Release** — those two remain
+owner acts. Everything before them is done: the CHANGELOG heading is
+finalized, the release gate is green on the finalized tree, and the
+validated seven-file bundle is published to PyPI. PR #588 is MERGED;
+`main` carries the release. The publication order was owner-selected
+and intentional: **finalize the changelog → release gate → PyPI →
+tag → GitHub Release.** PyPI first: once PyPI accepts a distribution
+file, the same version/file cannot be replaced with different bytes,
+so every artifact-changing correction must be resolved before upload.
 
 ## 1. State this kit was prepared from
 
@@ -20,45 +21,29 @@ must be resolved before upload.
 | Python frontend | `0.18.0` (`python/forkrun/__init__.py`) |
 | `META` | `v3.6.2` |
 | tag `v3.6.2` | does not exist locally or on the remote |
-| CHANGELOG heading | `## v3.6.2 — unreleased` (deliberately red until step 2) |
+| CHANGELOG heading | `## v3.6.2 — 2026-11-05` (finalized) |
 | release set | 6 wheels (CPython 3.10–3.15, GIL) + 1 sdist |
 
 ## 2. The sequence, in order
 
-1. **Finalize the CHANGELOG heading** in `DOCS/CHANGELOG.md`:
-   `## v3.6.2 — unreleased` → `## v3.6.2 — <release date>` (the v3.6.1
-   convention is `## v3.6.1 — 2026-10-06`). Regenerate the twin:
-   ```bash
-   python3 tools/gen_docs_all.py
-   python3 tools/gen_docs_all.py --check
-   ```
-   Commit on `main` (documentation only). The changelog and the
-   generated `DOCS/DOCS_ALL.md` are OUTSIDE the sdist payload, so the
-   validated bundle still matches this tree under `--expect-tree` —
-   that is why this documentation-only edit is deliberately staged
-   after bundle validation.
-2. **Run the release gate on the finalized `main` tree with the
-   verified candidate bundle:**
-   ```bash
-   FORKRUN_RELEASE_CHECK_TAGS=1 \
-   FORKRUN_RELEASE_BUNDLE=dist/release-candidate \
-   python3 python/release_check.py
-   ```
-   Expected: **ALL CHECKS PASSED**. Before step 1, the same command
-   reports exactly one failure — the changelog heading — and nothing
-   else. Any other failure means DO NOT PUBLISH and DO NOT TAG.
-3. **Publish the validated bundle to PyPI** (owner credentials; this
-   repository never holds them):
-   ```bash
-   python3 -m twine upload dist/release-candidate/*.whl \
-                               dist/release-candidate/*.tar.gz
-   ```
-   Upload exactly the seven files in the validated bundle — the six
-   per-minor wheels and the sdist. The generic `py3-none` wheel is CI
-   coverage only and must NOT be uploaded. If an upload fails
-   partway, record exactly which files PyPI accepted before any
-   further action: an accepted file cannot be replaced with different
-   bytes.
+Steps 1–3 have been **completed** (by the preparation session, with the
+owner's authorization for the PyPI upload); steps 4–7 remain owner
+acts.
+
+1. ~~**Finalize the CHANGELOG heading**~~ **DONE** —
+   `DOCS/CHANGELOG.md` now reads `## v3.6.2 — 2026-11-05`; the twin was
+   regenerated (`gen_docs_all.py --check` green) and committed to
+   `main`.
+2. ~~**Run the release gate**~~ **DONE** —
+   `FORKRUN_RELEASE_CHECK_TAGS=1 FORKRUN_RELEASE_BUNDLE=dist/release-candidate
+   python3 python/release_check.py` reports **ALL CHECKS PASSED** on the
+   finalized tree (transcript in the closeout report).
+3. ~~**Publish the validated bundle to PyPI**~~ **DONE** — the exact
+   seven files from the validated bundle were uploaded with
+   `twine upload` and verified on PyPI (see step 4). The generic
+   `py3-none` wheel was NOT uploaded. If an upload fails partway,
+   record exactly which files PyPI accepted before any further action:
+   an accepted file cannot be replaced with different bytes.
 4. **Verify all seven published distributions** match the candidate:
    `pip download --no-deps --only-binary=:all: forkrun==0.18.0`
    resolves the per-minor wheel for the host minor (not the sdist);
@@ -192,8 +177,6 @@ truth.
 
 ## 6. What the release work deliberately did NOT do
 
-- no changelog heading/date finalization (owner act, step 1);
-- no PyPI upload and no use of PyPI credentials;
 - no tag creation or push;
 - no GitHub release;
 - no change to the frozen engine files;
