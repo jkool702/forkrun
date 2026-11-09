@@ -400,6 +400,8 @@ def main():
     results = _run_cells(cells, forms, args.size_bytes,
                          args.node_x, args.node_y)
     if args.json:
+        os.makedirs(os.path.dirname(os.path.abspath(args.json)),
+                    exist_ok=True)
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump({"results": results}, fh, indent=2, sort_keys=True)
     return 0

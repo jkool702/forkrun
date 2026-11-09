@@ -283,6 +283,7 @@ def main():
                     help="where to write the JSON manifest")
     ap.add_argument("--run-id", default=None)
     args = ap.parse_args()
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     extra = {"run_id": args.run_id} if args.run_id else None
     manifest = env_manifest(args.repo, extra=extra)
     with open(args.out, "w", encoding="utf-8") as fh:
