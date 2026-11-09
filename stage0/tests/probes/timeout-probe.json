@@ -1,0 +1,8 @@
+{
+  "id": "timeout-probe",
+  "input": "stage0/corpus/light_20m.txt",
+  "workers": 4,
+  "nodes": "@4",
+  "mode": "udf",
+  "timeout": 2
+}

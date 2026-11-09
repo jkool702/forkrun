@@ -2,41 +2,54 @@
 
 ## Verdict (spec §8)
 
-**INCONCLUSIVE for real-NUMA benefit (required by spec §8: fake-NUMA evidence cannot establish the gate; rental campaign needed)**
+**INVALID INCOMPLETE CAMPAIGN (spec §8 verdict must not classify: expected trials/cases missing or failed)**
 
-- Whole-tree CPU: 1.16-7.32 core-equivalents (child process tree, sampled concurrently). Whether the single centralized ingest THREAD saturates ~1 core while workers idle cannot be attributed from here: no per-thread role tagging or queue-empty telemetry exists in the harness (spec §4.2/§4.3 gap).
-  NOTE: upper-stage numbers that bundle 'ingest+' compute' into one tree total; the ingest-only rate is NOT isolated in these cells.
-- Startup-dominated cells (<2s wall; the campaign's own 2-second rule flags these as bring-up-dominated, not steady-state: file-light20m-n4-w14-plugin)
-- Downstream-demand (spec §3 queue-nonempty-interval method) is NOT AVAILABLE in this harness: no scanner-queue occupancy telemetry is exposed; the least-invasive ring diagnostic for isolating ingest vs starvation is deferred to the rental/instrumentation phase. Without it, ingest-limited vs downstream-limited attribution of idle time is an inference, not a measurement.
+Completeness: INCOMPLETE CAMPAIGN — fail-probe: 3/3 trials incomplete or failed; timeout-probe: 3/3 trials incomplete or failed
+(No Go/No-Go classification is permitted while the campaign is incomplete.)
+
+Named ingest-thread (fr-ingest) CPU basis: file-light20m-n4-w14: 0.19 cores; file-light20m-n4-w14-plugin: 0.72 cores; file-light20m-n4-w4: 0.17 cores; pipe-light20m-n4-w14: 0.22 cores; plugin-light60m-n4-w14: 0.86 cores
+
+Completeness check failed; report what is missing instead of a Go/No-Go.
 
 ## Baseline cases (median of trials)
 
 | case | spec | trials ok | rec/s (median) | spread % | wall s | tree cores |
 |---|---|---|---|---|---|---|
-| file-light20m-n1-w14 | w14 n1 udf | 3/3 | 5603025 | 2.2 | 3.65 | 1.16 |
-| file-light20m-n4-w14 | w14 n@4 udf | 3/3 | 5967069 | 4.4 | 3.42 | 1.84 |
-| file-light20m-n4-w14-plugin | w14 n@4 plugin | 3/3 | 26963126 | 24.2 | 0.81 | 7.32 |
-| file-light20m-n4-w4 | w4 n@4 udf | 3/3 | 5448008 | 8.5 | 3.75 | 1.43 |
-| pipe-light20m-n4-w14 | w14 n@4 udf | 3/3 | 5643890 | 8.0 | 3.62 | 1.82 |
+| fail-probe | w4 n@4 udf | 0/3 | - | - | - | - |
+| file-light20m-n1-w14 | w14 n1 udf | 3/3 | 5450271 | 6.6 | 3.77 | 1.18 |
+| file-light20m-n4-w14 | w14 n@4 udf | 3/3 | 5579723 | 10.9 | 3.66 | 1.76 |
+| file-light20m-n4-w14-plugin | w14 n@4 plugin | 3/3 | 27202450 | 15.3 | 0.80 | 6.92 |
+| file-light20m-n4-w4 | w4 n@4 udf | 3/3 | 5527706 | 1.7 | 3.70 | 1.36 |
+| file-light5m-n1-w14 | w14 n1 udf | 3/3 | 5491395 | 3.5 | 0.98 | 1.01 |
+| file-light5m-n4-w14 | w14 n@4 udf | 3/3 | 5749035 | 11.0 | 0.94 | 1.45 |
+| file-light5m-n4-w14-plugin | w14 n@4 plugin | 3/3 | 16005031 | 6.5 | 0.37 | 3.26 |
+| file-light5m-n4-w4 | w4 n@4 udf | 3/3 | 5644017 | 2.8 | 0.96 | 1.17 |
+| pipe-light20m-n4-w14 | w14 n@4 udf | 3/3 | 5433874 | 1.3 | 3.76 | 1.78 |
+| plugin-light60m-n4-w14 | w14 n@4 plugin | 3/3 | 29755815 | 2.1 | 2.08 | 8.13 |
+| smoke-light-100k-n4 | w4 n@4 udf | 3/3 | 2344036 | 22.8 | 0.10 | 0.50 |
+| timeout-probe | w4 n@4 udf | 0/3 | - | - | - | - |
 
 ## 2×2 affinity/policy ablation (spec §6)
 
 | cell | affinity (cpu, set_rc) | policy (node, set_rc) | pages by node | unknown |
 |---|---|---|---|---|
-| A | cpu=None rc=None | node=None rc=None | {'0': 2048} | 0 |
-| B | cpu=7 rc=0 | node=None rc=0 | {'0': 2048} | 0 |
-| C | cpu=None rc=None | node=2 rc=0 | {'2': 2048} | 0 |
-| D | cpu=14 rc=0 | node=1 rc=0 | {'1': 2048} | 0 |
+| A/map-fault | cpu=default rc=0 | node=None rc=0 | {'0': 2048} | 0 |
+| A/write-path | cpu=default rc=0 | node=None rc=0 | {} | 0 |
+| B/map-fault | cpu=0 rc=0 | node=None rc=0 | {'0': 2048} | 0 |
+| B/write-path | cpu=0 rc=0 | node=None rc=0 | {} | 0 |
+| C/map-fault | cpu=default rc=0 | node=2 rc=0 | {'2': 2048} | 0 |
+| C/write-path | cpu=default rc=0 | node=2 rc=0 | {} | 0 |
+| D/map-fault | cpu=0 rc=0 | node=1 rc=0 | {'1': 2048} | 0 |
+| D/write-path | cpu=0 rc=0 | node=1 rc=0 | {} | 0 |
 
-Finding: cell D (pinned node X, bound node Y) allocates on Y →
-task memory policy decides placement; CPU affinity does not.
+map-fault form: task memory policy decides placement (cell C/D land 2048/2048 pages on the bound node; cell D pinned-2/bound-1 allocates on node 1; cell B pinned-2/default allocates on node 0). Write-path form: mincore confirms all pages resident, but per-node attribution is Weak via process-level accounting on this box — see raw JSON numastat_delta_mb; the write-path node claim is NOT established here and must not be generalized from the map-fault result.
 
 ## Provenance
 
-- git: NEW/REFACTOR5.0 @ 06937795edd6efe8a7dfab5737dea25e0ce1fe2e (dirty=True)
+- git: NEW/REFACTOR5.0 @ ebfbd345f6ab23a32bc12d74e1b00c100dcf1498 (dirty=True)
 - kernel: 7.1.10-200.numa_emu.fc44.x86_64 | cmdline fake-numa: numa=fake=4
 - shmem THP: [always] within_size advise never deny force
-- build hashes: frun.bash=fdf5fcf30905, _forkrun_cleanroom=7d0644fc39bb, _fr_udf.cpython-314-x86_64-linux-gnu.so=9c69deeb8176, libforkrun_python.so=2e8563091075
+- build hashes: frun.bash=fdf5fcf30905, _forkrun_cleanroom=7d0644fc39bb, _fr_udf.cpython-314-x86_64-linux-gnu.so=9c69deeb8176, libforkrun_python.so=134ba3f70897
 
 ## One-page decision summary
 

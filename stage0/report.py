@@ -59,8 +59,16 @@ def case_summary(cases):
     return rows
 
 
-def derive_verdict(summary):
+def derive_verdict(summary, fake_numa=None, complete=True):
     """Spec §8 derivation (fake NUMA cannot produce Go for real-NUMA)."""
+    if not complete:
+        return {
+            "verdict": "INVALID INCOMPLETE CAMPAIGN (spec §8 verdict must not "
+                       "classify: expected trials/cases missing or failed)",
+            "evidence": "Completeness check failed; report what is missing "
+                        "instead of a Go/No-Go.",
+            "first_order_ingest_signal": False,
+        }
     text = []
     # Tree-CPU is NOT ingest-thread CPU: the engine forks ingest and
     # workers, and threads share the tree total. Report levels honestly
@@ -96,12 +104,31 @@ def derive_verdict(summary):
                 "ingest-limited vs downstream-limited attribution of idle "
                 "time is an inference, not a measurement.")
     return {
-        "verdict": "INCONCLUSIVE for real-NUMA benefit (required by spec "
-                   "§8: fake-NUMA evidence cannot establish the gate; "
-                   "rental campaign needed)",
+        "verdict": ("INCONCLUSIVE for real-NUMA benefit (required by spec "
+                    "§8: fake-NUMA evidence cannot establish the gate; "
+                    "rental campaign needed)"),
         "evidence": "\n".join("- " + t for t in text),
         "first_order_ingest_signal": False,
     }
+
+
+def campaign_complete(cases, expected_trials=3, expected_cases=None):
+    """Every expected case must have `expected_trials` trials and every
+    trial must be complete; optional expected-case list must match."""
+    problems = []
+    if expected_cases is not None:
+        missing = [c for c in expected_cases if c not in cases]
+        if missing:
+            problems.append("missing cases: %s" % ", ".join(missing))
+    for case, ms in sorted(cases.items()):
+        if len(ms) < expected_trials:
+            problems.append("%s: %d trials < %d" % (
+                case, len(ms), expected_trials))
+        bad = [m for m in ms if not m.get("complete")]
+        if bad:
+            problems.append("%s: %d/%d trials incomplete or failed" % (
+                case, len(bad), len(ms)))
+    return problems
 
 
 def main():
@@ -110,20 +137,46 @@ def main():
     ap.add_argument("--ablation", default=None)
     ap.add_argument("--env", default=None,
                     help="env_capture.py output (JSON manifest)")
+    ap.add_argument("--expected-trials", type=int, default=3)
+    ap.add_argument("--expect-cases", default=None,
+                    help="comma-separated spec case IDs expected")
     ap.add_argument("--out", default="stage0/reports/stage0-report.md")
     args = ap.parse_args()
     cases = load_cases(args.runs)
+    expected_cases = None
+    if args.expect_cases:
+        expected_cases = [c.strip() for c in args.expect_cases.split(",")
+                          if c.strip()]
+    completeness = campaign_complete(cases, args.expected_trials,
+                                     expected_cases)
     summary = case_summary(cases)
-    verdict = derive_verdict(summary)
+    verdict = derive_verdict(summary, complete=not completeness)
 
     lines = ["# Stage 0 rehearsal report (fake NUMA — NOT real-NUMA evidence)",
              "",
              "## Verdict (spec §8)", "",
-             "**%s**" % verdict["verdict"], "",
-             verdict["evidence"], "",
-             "## Baseline cases (median of trials)", "",
-             "| case | spec | trials ok | rec/s (median) | spread % | wall s | tree cores |",
-             "|---|---|---|---|---|---|---|"]
+             "**%s**" % verdict["verdict"], ""]
+    if completeness:
+        lines.append("Completeness: INCOMPLETE CAMPAIGN — " +
+                     "; ".join(completeness))
+        lines.append("(No Go/No-Go classification is permitted while the "
+                     "campaign is incomplete.)")
+        lines.append("")
+    # Ingest-attribution summary line beneath verdict.
+    ingests = []
+    for case, ms in sorted(cases.items()):
+        vals = [m.get("ingest_cpu_basis_cores") for m in ms
+                if m.get("ingest_cpu_basis_cores") is not None]
+        if vals:
+            ingests.append("%s: %.2f cores" % (case, _median(vals)))
+    if ingests:
+        lines.append("Named ingest-thread (fr-ingest) CPU basis: " +
+                     "; ".join(ingests))
+        lines.append("")
+    lines += [verdict["evidence"], "",
+              "## Baseline cases (median of trials)", "",
+              "| case | spec | trials ok | rec/s (median) | spread % | wall s | tree cores |",
+              "|---|---|---|---|---|---|---|"]
     for r in summary:
         lines.append("| %s | w%s n%s %s | %d/%d | %s | %s | %s | %s |" % (
             r["case"],
@@ -141,13 +194,29 @@ def main():
         lines.append("| cell | affinity (cpu, set_rc) | policy (node, set_rc) | pages by node | unknown |")
         lines.append("|---|---|---|---|---|")
         for r in abl["results"]:
-            lines.append("| %s | cpu=%s rc=%s | node=%s rc=%s | %s | %d |" % (
-                r["cell"], r["affinity"].get("cpu"), r["affinity"].get("set_rc"),
-                r["policy"].get("node"), r["policy"].get("set_rc"),
+            aff = r.get("affinity_requested", r.get("affinity", {}))
+            pol = r.get("policy_requested", r.get("policy", {}))
+            lines.append("| %s/%s | cpu=%s rc=%s | node=%s rc=%s | %s | %d |" % (
+                r["cell"], r.get("form", "?"),
+                aff.get("cpu"), aff.get("set_rc"),
+                pol.get("node"), pol.get("set_rc"),
                 r["pages_by_node"], r["pages_unknown"]))
         lines.append("")
-        lines.append("Finding: cell D (pinned node X, bound node Y) allocates on Y →")
-        lines.append("task memory policy decides placement; CPU affinity does not.")
+        # map-fault vs write-path is a MEASUREMENT-METHOD distinction,
+        # not a result merge: move_pages/numa_maps answer for
+        # fault-through-mapping pages; write() pages answer via
+        # mincore + node-level accounting instead (both -2/empty on
+        # this kernel). Report them as parallel rows.
+        lines.append("map-fault form: task memory policy decides placement "
+                     "(cell C/D land 2048/2048 pages on the bound node; "
+                     "cell D pinned-2/bound-1 allocates on node 1; cell B "
+                     "pinned-2/default allocates on node 0). Write-path "
+                     "form: mincore confirms all pages resident, but "
+                     "per-node attribution is Weak via process-level "
+                     "accounting on this box — see raw JSON "
+                     "numastat_delta_mb; the write-path node claim is "
+                     "NOT established here and must not be generalized "
+                     "from the map-fault result.")
     else:
         lines.append("(ablation JSON not supplied or missing)")
     lines += ["", "## Provenance", ""]

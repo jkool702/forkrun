@@ -1,0 +1,8 @@
+{
+  "id": "fail-probe",
+  "input": "/nonexistent/file.txt",
+  "workers": 4,
+  "nodes": "@4",
+  "mode": "udf",
+  "timeout": 120
+}

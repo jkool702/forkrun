@@ -50,7 +50,9 @@ rental time debugging the harness.
 1. Ingest-thread CPU attribution: engine threads are unnamed in
    `/proc/<tid>/comm`; tree-wide CPU cannot isolate the centralized
    ingest thread. A `prctl(PR_SET_NAME)` hint (or equivalent) is the
-   least-invasive fix.
+   least-invasive fix. (The rehearsal's first-order screen therefore
+   relies on tree CPU + queue occupancy; the ingest-only rate is NOT
+   isolated in these cells.)
 2. Scanner-queue occupancy telemetry: no ring-level queue depth is
    exposed to the harness; the queue-nonempty-interval demand method
    needs a small observational diagnostic.

@@ -7,6 +7,7 @@ build hashes. Output is a JSON manifest; human summary on stdout.
 """
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -102,6 +103,131 @@ def cpu_topology():
     return out
 
 
+def _cpu_extra():
+    """Governor + scaling driver, SMT state, and node memory totals."""
+    out = {}
+    try:
+        lscpu = subprocess.run(["lscpu"], capture_output=True, text=True,
+                               timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        lscpu = ""
+    for line in lscpu.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        if key.strip() in ("CPU governor", "CPU MHz", "BogoMIPS",
+                           "Threads per core", "CPU(s)",
+                           "Model name", "CPU max MHz", "CPU min MHz"):
+            out.setdefault("lscpu_key", {})[key.strip()] = value.strip()
+    governors = set()
+    for path in glob.glob("/sys/devices/system/cpu/cpu*/"
+                          "cpufreq/scaling_governor"):
+        g = _read(path, "")
+        if g:
+            governors.add(g)
+    out["governors"] = sorted(governors) or "unavailable"
+    out["smt"] = {"thread_siblings": out.get("lscpu_key", {}).get(
+        "Threads per core", "unknown")}
+    out["node_memory"] = {}
+    for name in ("node0", "node1", "node2", "node3", "node4", "node5"):
+        mi = _read("/sys/devices/system/node/%s/meminfo" % name)
+        if mi:
+            out["node_memory"][name] = mi[:400]
+    cfg_path = "/boot/config-%s" % platform.release()
+    out["kernel_config"] = {}
+    for token in ("CONFIG_PER_VMA_LOCK", "CONFIG_NUMA",
+                  "CONFIG_NUMA_EMU", "CONFIG_NUMA_BALANCING"):
+        hit = None
+        try:
+            with open(cfg_path, encoding="ascii",
+                      errors="replace") as fh:
+                for line in fh:
+                    if line.startswith(token):
+                        hit = line.strip()
+                        break
+        except OSError:
+            try:
+                import gzip
+                with gzip.open("/proc/config.gz", "rt",
+                               errors="replace") as fh:
+                    for line in fh:
+                        if line.startswith(token):
+                            hit = line.strip()
+                            break
+            except OSError:
+                hit = "unknown/unavailable (no %s, no /proc/config.gz)" \
+                    % cfg_path
+        out["kernel_config"][token] = hit if hit is not None \
+            else "unknown/unavailable"
+    try:
+        r = subprocess.run(
+            ["bash", "-c", ". ./frun.bash; ring_version"],
+            capture_output=True, text=True, timeout=60,
+            cwd=os.path.join(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__)))),
+            env=dict(os.environ))
+        out["check_thp_diagnostic"] = (
+            r.stdout + r.stderr).strip()[:2000]
+    except (OSError, subprocess.SubprocessError):
+        out["check_thp_diagnostic"] = "unavailable (ring_version probe)"
+    return out
+
+
+def _process_state():
+    """This process's effective CPU affinity and memory policy."""
+    out = {}
+    try:
+        out["affinity"] = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        out["affinity"] = "unknown/unavailable"
+    try:
+        import ctypes
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "libstage0.so")
+        if not os.path.exists(p):
+            raise RuntimeError("no shim built")
+        lib = ctypes.CDLL(p, use_errno=True)
+        lib.stage0_get_mempolicy.restype = ctypes.c_int
+        lib.stage0_get_mempolicy.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+        mode = ctypes.c_int()
+        mask = (ctypes.c_ulong * 64)(0)
+        rc = lib.stage0_get_mempolicy(ctypes.byref(mode), mask, 64)
+        out["mempolicy"] = {"mode": mode.value, "mask": mask[0],
+                            "rc": rc}
+    except Exception as exc:  # keep provenance honest, never crash it
+        out["mempolicy"] = "unknown/unavailable (%s)" % type(exc).__name__
+    return out
+
+
+
+def _process_state():
+    """This process's effective CPU affinity and memory policy."""
+    out = {}
+    try:
+        out["affinity"] = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        out["affinity"] = "unknown/unavailable"
+    try:
+        import ctypes
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "libstage0.so")
+        if not os.path.exists(p):
+            raise RuntimeError("no shim built")
+        lib = ctypes.CDLL(p, use_errno=True)
+        lib.stage0_get_mempolicy.restype = ctypes.c_int
+        lib.stage0_get_mempolicy.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+        mode = ctypes.c_int()
+        mask = (ctypes.c_ulong * 64)(0)
+        rc = lib.stage0_get_mempolicy(ctypes.byref(mode), mask, 64)
+        out["mempolicy"] = {"mode": mode.value, "mask": mask[0],
+                            "rc": rc}
+    except Exception as exc:  # keep provenance honest, never crash it
+        out["mempolicy"] = "unknown/unavailable (%s)" % type(exc).__name__
+    return out
+
+
 def env_manifest(repo, extra=None):
     cmdline = _read("/proc/cmdline", "")
     m = re.search(r"numa=fake=\d+", cmdline)
@@ -117,6 +243,7 @@ def env_manifest(repo, extra=None):
                    "fake_numa_spec": m.group(0) if m else None,
                    "uptime": _read("/proc/uptime", "")},
         "cpu_topology": cpu_topology(),
+        "cpu_extra": _cpu_extra(),
         "thp": {
             "shmem_enabled": _read(
                 "/sys/kernel/mm/transparent_hugepage/shmem_enabled", ""),
@@ -133,6 +260,7 @@ def env_manifest(repo, extra=None):
             "memory_max": _read("/sys/fs/cgroup/memory.max", None),
             "cpu_max": _read("/sys/fs/cgroup/cpu.max", None),
         },
+        "process": _process_state(),
         "load": {"loadavg": _read("/proc/loadavg", "")},
     }
     thp_dir = "/sys/kernel/mm/transparent_hugepage"

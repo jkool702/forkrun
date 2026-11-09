@@ -62,6 +62,7 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/prctl.h> /* STAGE 0: prctl(PR_SET_NAME) for thread naming */
 #include <sys/resource.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -3019,6 +3020,24 @@ static int ring_destroy_main(int argc, char **argv) {
 // load-balancing).
 
 static int ring_numa_ingest_main(int argc, char **argv) {
+  /* STAGE 0 DIAGNOSTIC (observational only — Stage 0 campaign spec):
+   * prctl names the ingest task for /proc/<pid>/task/<tid>/comm CPU
+   * attribution. FORKRUN_DIAG_QUEUE gates a stderr sampler of
+   * per-node queue occupancy (head/tail), materialized bytes, the
+   backlog-gated wait time, and the current target/limit. All reads
+   are relaxed atomics; NO scheduling, queue, or publication state is
+   modified. Zero cost when the env var is unset (one getenv + flag
+   checks per outer-loop iteration). */
+  prctl(PR_SET_NAME, "fr-ingest");
+  const char *diag_queue_on = getenv("FORKRUN_DIAG_QUEUE");
+  uint64_t diag_next_sample_ms = 0;
+  uint64_t diag_gated_ns = 0;
+  uint64_t diag_start_ns = 0;
+  {
+    struct timespec _ts;
+    clock_gettime(CLOCK_MONOTONIC, &_ts);
+    diag_start_ns = (uint64_t)_ts.tv_sec * 1000000000ULL + _ts.tv_nsec;
+  }
   if (argc < 4)
     return EXECUTION_FAILURE;
   int infd = atoi(argv[1]);
@@ -3216,9 +3235,57 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       NUMA_CHECK_SCANNERS_DONE();
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
+      /* STAGE 0 DIAG: measure backlog-gated wait (downstream-limited
+       * signal) — only under the diagnostic flag (two clock reads per
+       gated poll; gated loop iterates at most every 10ms). */
+      uint64_t gate0_ns = 0;
+      if (diag_queue_on) {
+        struct timespec _g;
+        clock_gettime(CLOCK_MONOTONIC, &_g);
+        gate0_ns = (uint64_t)_g.tv_sec * 1000000000ULL + _g.tv_nsec;
+      }
       if (poll(&pfd, 1, 10) > 0) {
         uint64_t v;
         sys_read(evfd_chunk_done, &v, 8);
+      }
+      if (diag_queue_on) {
+        struct timespec _g;
+        clock_gettime(CLOCK_MONOTONIC, &_g);
+        diag_gated_ns +=
+            ((uint64_t)_g.tv_sec * 1000000000ULL + _g.tv_nsec) - gate0_ns;
+      }
+    }
+
+    /* STAGE 0 DIAG: sampler — one observational stderr line per ~20ms
+     * while FORKRUN_DIAG_QUEUE is set. Per-node queue occupancy
+     * (head/tail as relaxed atomics), materialized bytes (total_moved),
+     * backlog-gated wait time, current target/limit. No scheduling or
+     * dataflow state is touched. */
+    if (diag_queue_on) {
+      struct timespec _s;
+      clock_gettime(CLOCK_MONOTONIC, &_s);
+      uint64_t now_ms = (uint64_t)_s.tv_sec * 1000 + _s.tv_nsec / 1000000;
+      uint64_t elapsed_ms = now_ms - diag_start_ns / 1000000;
+      if (elapsed_ms >= diag_next_sample_ms) {
+        diag_next_sample_ms = elapsed_ms + 20;
+        char diag_buf[1024];
+        int diag_len = snprintf(diag_buf, sizeof(diag_buf),
+          "STAGE0_DIAG t_ms=%llu moved=%llu major=%llu tgt=%d lim=%u "
+          "gated_ms=%llu q=",
+          (unsigned long long)elapsed_ms, (unsigned long long)total_moved,
+          (unsigned long long)current_major, target_node,
+          current_buffer_limit,
+          (unsigned long long)(diag_gated_ns / 1000000));
+        for (int i = 0; i < num_nodes && diag_len < (int)sizeof(diag_buf) - 40; i++) {
+          diag_len += snprintf(diag_buf + diag_len,
+              sizeof(diag_buf) - diag_len, "n%d:%llu,%llu ",
+              i, (unsigned long long)atomic_load_relaxed(&state[i].chunk_queue_head),
+              (unsigned long long)atomic_load_relaxed(&state[i].chunk_queue_tail));
+        }
+        if (diag_len < (int)sizeof(diag_buf)) {
+          diag_len += snprintf(diag_buf + diag_len, sizeof(diag_buf) - diag_len, "\n");
+        }
+        sys_write(2, diag_buf, diag_len);
       }
     }
 
@@ -3606,6 +3673,16 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
 
 ingest_done:
+  /* STAGE 0 DIAG: final materialized-bytes accounting (observational). */
+  if (diag_queue_on) {
+    char fin_buf[256];
+    int fin_len = snprintf(fin_buf, sizeof(fin_buf),
+        "STAGE0_FINAL moved=%llu major=%llu gated_ms=%llu\n",
+        (unsigned long long)total_moved,
+        (unsigned long long)current_major,
+        (unsigned long long)(diag_gated_ns / 1000000));
+    sys_write(2, fin_buf, fin_len);
+  }
   if (bounce_buf)
     munmap(bounce_buf, chunk_size);
   if (numa_enabled)
