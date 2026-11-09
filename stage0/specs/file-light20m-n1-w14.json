@@ -1,0 +1,7 @@
+{
+  "id": "file-light20m-n1-w14",
+  "input": "stage0/corpus/light_20m.txt",
+  "workers": 14,
+  "nodes": "1",
+  "mode": "udf"
+}

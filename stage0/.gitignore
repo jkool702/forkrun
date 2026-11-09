@@ -1,0 +1,7 @@
+# Stage 0 campaign artifacts: regenerable, keep out of git.
+corpus/
+runs/
+runs20/
+raw/
+*.so
+__pycache__/

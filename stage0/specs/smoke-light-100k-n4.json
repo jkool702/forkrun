@@ -1,0 +1,8 @@
+{
+  "id": "smoke-light-100k-n4",
+  "input": "/mnt/ramdisk/forkrun/stage0/corpus/light_100k.txt",
+  "workers": 4,
+  "nodes": "@4",
+  "mode": "udf",
+  "timeout": 120
+}

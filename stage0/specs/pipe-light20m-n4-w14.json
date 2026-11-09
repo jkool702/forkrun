@@ -1,0 +1,9 @@
+{
+  "id": "pipe-light20m-n4-w14",
+  "input": "stage0/corpus/light_20m.txt",
+  "source_kind": "pipe",
+  "workers": 14,
+  "nodes": "@4",
+  "mode": "udf",
+  "timeout": 300
+}
