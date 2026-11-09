@@ -14,6 +14,12 @@ echo "=== [1/5] build prerequisites (substrate + helpers + shim)"
 make -f Makefile.substrate python-substrate udf || fail "substrate build"
 gcc -O2 -shared -fPIC -o stage0/libstage0.so stage0/residency_shim.c -lnuma \
   || fail "residency shim build"
+python3 stage0/make_corpus.py --records 100000 --variant light \
+  --out stage0/corpus/light_100k.txt || fail "corpus: light_100k"
+python3 stage0/make_corpus.py --records 20000000 --variant light \
+  --out stage0/corpus/light_20m.txt || fail "corpus: light_20m"
+python3 stage0/make_corpus.py --records 60000000 --variant light \
+  --out stage0/corpus/light_60m.txt || fail "corpus: light_60m"
 
 echo "=== [2/5] environment-before capture"
 python3 stage0/env_capture.py --out stage0/runs/env-before.json \
