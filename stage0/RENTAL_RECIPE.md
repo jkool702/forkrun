@@ -45,17 +45,30 @@ rental time debugging the harness.
   the §12.5 contamination controls.
 - All raw logs + manifests + env captures retained beside the report.
 
-## Known instrumentation gaps to close during the rental
+## Instrumentation status (post-rehearsal: what remains, what was fixed)
 
-1. Ingest-thread CPU attribution: engine threads are unnamed in
-   `/proc/<tid>/comm`; tree-wide CPU cannot isolate the centralized
-   ingest thread. A `prctl(PR_SET_NAME)` hint (or equivalent) is the
-   least-invasive fix. (The rehearsal's first-order screen therefore
-   relies on tree CPU + queue occupancy; the ingest-only rate is NOT
-   isolated in these cells.)
-2. Scanner-queue occupancy telemetry: no ring-level queue depth is
-   exposed to the harness; the queue-nonempty-interval demand method
-   needs a small observational diagnostic.
-3. Plugin-cell corpus: at 20M light records the C plugin finishes in
-   <1 s, so the cell is bring-up-dominated; use a larger corpus for
-   the rental if steady-state plugin throughput is a desired output.
+1. **Baseline**: `forkrun_ring.c` blob is identical on `main`,
+   `NEW/REFACTOR4.7`, and `NEW/REFACTOR5.0` (blob-verified
+   2026-11-08), so the engine behavior is the same everywhere.
+   `python/forkrun/run.py` differs between 4.7 and 5.0 (release work:
+   346+/166−); the campaign ran the **released run.py** (REFACTOR5.0 ==
+   main for that file). If a re-run against the 4.7 baseline is
+   required by policy, rerun after checking out 4.7 — specs and
+   harness are branch-agnostic.
+2. **Ingest-thread CPU attribution: RESOLVED.** The engine names its
+   ingest task `fr-ingest` (prctl, STAGE0 instrumentation commit); the
+   harness attributes per-TID comm into `ingest_cpu_sec` per run.
+3. **Queue occupancy demand: RESOLVED via sampler.** The
+   `FORKRUN_DIAG_QUEUE` stderr sampler emits per-node head/tail at
+   ~20 ms; `report.py` derives nonempty-fraction/empty-streak inputs
+   to the spec §3 demand estimate. **The rental must run with
+   `FORKRUN_DIAG_QUEUE=1`** for demand data.
+4. **Write-path residency attribution: OPEN.** Production
+   write()-based materialization pages are invisible to both
+   `move_pages()` (-2 per page) and `numa_maps` (no N-fields) —
+   measured on the rehearsal host. The rental's placement gate for the
+   write form needs a node-level method (e.g. sysfs node-meminfo
+   deltas or a tuned accounting source), developed on the rental host.
+5. **Plugin steady state**: 60M corpus runs ≥2 s (this box ~2.0–3.0 s);
+   use a larger corpus on the rental if sustained plugin throughput
+   is a required output.

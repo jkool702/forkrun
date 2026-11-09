@@ -2,32 +2,45 @@
 
 ## Verdict (spec §8)
 
-**INVALID INCOMPLETE CAMPAIGN (spec §8 verdict must not classify: expected trials/cases missing or failed)**
+**INCONCLUSIVE for real-NUMA benefit (required by spec §8: fake-NUMA evidence cannot establish the gate; rental campaign needed)**
 
-Completeness: INCOMPLETE CAMPAIGN — fail-probe: 3/3 trials incomplete or failed; timeout-probe: 3/3 trials incomplete or failed
-(No Go/No-Go classification is permitted while the campaign is incomplete.)
+Named ingest-thread (fr-ingest) CPU basis: file-light20m-n4-w14: 0.18 cores; file-light20m-n4-w14-plugin: 0.80 cores; file-light20m-n4-w4: 0.18 cores; pipe-light20m-n4-w14: 0.22 cores; plugin-light60m-n4-w14: 0.90 cores
 
-Named ingest-thread (fr-ingest) CPU basis: file-light20m-n4-w14: 0.19 cores; file-light20m-n4-w14-plugin: 0.72 cores; file-light20m-n4-w4: 0.17 cores; pipe-light20m-n4-w14: 0.22 cores; plugin-light60m-n4-w14: 0.86 cores
-
-Completeness check failed; report what is missing instead of a Go/No-Go.
+- Whole-tree CPU: 0.50-8.64 core-equivalents (child process tree, sampled concurrently). Per-thread role attribution IS available: the engine names its ingest task fr-ingest (prctl), so ingest-thread CPU is separated above — but it is still the harness's process-tree accounting and ingest BELOW ~1 core at peak does not by itself prove the ingest cannot be the limiter (demand must be correlated, §3).
+- Startup-dominated cells (<2s wall; the campaign's own 2-second rule flags these as bring-up-dominated, not steady-state: file-light20m-n4-w14-plugin, file-light5m-n1-w14, file-light5m-n4-w14, file-light5m-n4-w14-plugin, file-light5m-n4-w4, smoke-light-100k-n4)
+- Downstream-demand inputs ARE available from the engine's STAGE0_DIAG queue sampler (per-node head/tail at ~20ms): queue-occupancy samples per case are tabulated below (nonempty fraction / longest empty streak). Cases run without FORKRUN_DIAG_QUEUE=1 report no demand data — that absence is recorded, not backfilled from assumptions.
 
 ## Baseline cases (median of trials)
 
 | case | spec | trials ok | rec/s (median) | spread % | wall s | tree cores |
 |---|---|---|---|---|---|---|
-| fail-probe | w4 n@4 udf | 0/3 | - | - | - | - |
-| file-light20m-n1-w14 | w14 n1 udf | 3/3 | 5450271 | 6.6 | 3.77 | 1.18 |
-| file-light20m-n4-w14 | w14 n@4 udf | 3/3 | 5579723 | 10.9 | 3.66 | 1.76 |
-| file-light20m-n4-w14-plugin | w14 n@4 plugin | 3/3 | 27202450 | 15.3 | 0.80 | 6.92 |
-| file-light20m-n4-w4 | w4 n@4 udf | 3/3 | 5527706 | 1.7 | 3.70 | 1.36 |
+| file-light20m-n1-w14 | w14 n1 udf | 3/3 | 5361532 | 34.4 | 3.82 | 1.12 |
+| file-light20m-n4-w14 | w14 n@4 udf | 4/4 | 5654503 | 6.3 | 3.62 | 1.62 |
+| file-light20m-n4-w14-plugin | w14 n@4 plugin | 3/3 | 27538020 | 11.6 | 0.79 | 6.96 |
+| file-light20m-n4-w4 | w4 n@4 udf | 3/3 | 5503045 | 6.7 | 3.72 | 1.37 |
 | file-light5m-n1-w14 | w14 n1 udf | 3/3 | 5491395 | 3.5 | 0.98 | 1.01 |
 | file-light5m-n4-w14 | w14 n@4 udf | 3/3 | 5749035 | 11.0 | 0.94 | 1.45 |
 | file-light5m-n4-w14-plugin | w14 n@4 plugin | 3/3 | 16005031 | 6.5 | 0.37 | 3.26 |
 | file-light5m-n4-w4 | w4 n@4 udf | 3/3 | 5644017 | 2.8 | 0.96 | 1.17 |
-| pipe-light20m-n4-w14 | w14 n@4 udf | 3/3 | 5433874 | 1.3 | 3.76 | 1.78 |
-| plugin-light60m-n4-w14 | w14 n@4 plugin | 3/3 | 29755815 | 2.1 | 2.08 | 8.13 |
-| smoke-light-100k-n4 | w4 n@4 udf | 3/3 | 2344036 | 22.8 | 0.10 | 0.50 |
-| timeout-probe | w4 n@4 udf | 0/3 | - | - | - | - |
+| pipe-light20m-n4-w14 | w14 n@4 udf | 3/3 | 5621696 | 2.8 | 3.63 | 1.79 |
+| plugin-light60m-n4-w14 | w14 n@4 plugin | 4/4 | 30732538 | 44.1 | 2.03 | 8.64 |
+| smoke-light-100k-n4 | w4 n@4 udf | 3/3 | 2246742 | 14.9 | 0.10 | 0.50 |
+
+## Scanner-queue occupancy (STAGE0_DIAG samples, spec §4.3)
+
+| case | samples | nonempty fraction | longest empty streak (samples) |
+|---|---|---|---|
+| file-light20m-n1-w14 | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
+| file-light20m-n4-w14 | 36 | 0.92 | 1 |
+| file-light20m-n4-w14-plugin | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
+| file-light20m-n4-w4 | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
+| file-light5m-n1-w14 | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
+| file-light5m-n4-w14 | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
+| file-light5m-n4-w14-plugin | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
+| file-light5m-n4-w4 | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
+| pipe-light20m-n4-w14 | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
+| plugin-light60m-n4-w14 | 93 | 0.89 | 2 |
+| smoke-light-100k-n4 | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |
 
 ## 2×2 affinity/policy ablation (spec §6)
 

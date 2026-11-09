@@ -22,6 +22,50 @@ def _median(xs):
     return statistics.median(xs) if xs else None
 
 
+def queue_demand_stats(runs_dir, case):
+    """Per-case scanner-queue occupancy intervals from the STAGE0_DIAG
+    engine sampler (per-node head/tail at ~20ms). Returns the fraction
+    of samples where the best-queue depth is non-zero (downstream has
+    work available) and the empty-interval rate — inputs to the spec
+    §3 downstream-demand estimate."""
+    total_samples = 0
+    nonempty = 0
+    empty_streak = 0
+    max_empty_streak = 0
+    for mp in sorted(glob.glob(os.path.join(runs_dir, case, "trial*",
+                                            "stderr.log"))):
+        try:
+            with open(mp, encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if "STAGE0_DIAG" not in line:
+                continue
+            depth = 0
+            for token in line.split("q=")[-1].split():
+                # tokens look like 'n<shard>:<head>,<tail>'
+                try:
+                    _label, _, counts = token.partition(":")
+                    h, _, t = counts.partition(",")
+                    depth = max(depth, int(h) - int(t))
+                except ValueError:
+                    continue
+            total_samples += 1
+            if depth > 0:
+                nonempty += 1
+                empty_streak = 0
+            else:
+                empty_streak += 1
+                max_empty_streak = max(max_empty_streak, empty_streak)
+    if not total_samples:
+        return None
+    return {"samples": total_samples,
+            "nonempty_fraction": nonempty / total_samples,
+            "max_empty_streak_samples": max_empty_streak}
+
+
+
 def load_cases(runs_dir):
     cases = {}
     for trial in sorted(glob.glob(os.path.join(runs_dir, "*", "trial*"))):
@@ -78,14 +122,13 @@ def derive_verdict(summary, fake_numa=None, complete=True):
     if levels:
         lo, hi = min(v for _, v in levels), max(v for _, v in levels)
         text.append("Whole-tree CPU: %.2f-%.2f core-equivalents (child "
-                    "process tree, sampled concurrently). Whether the "
-                    "single centralized ingest THREAD saturates ~1 core "
-                    "while workers idle cannot be attributed from here: "
-                    "no per-thread role tagging or queue-empty telemetry "
-                    "exists in the harness (spec §4.2/§4.3 gap).\n"
-                    "  NOTE: upper-stage numbers that bundle 'ingest+' "
-                    "compute' into one tree total; the ingest-only rate "
-                    "is NOT isolated in these cells."
+                    "process tree, sampled concurrently). Per-thread role "
+                    "attribution IS available: the engine names its ingest "
+                    "task fr-ingest (prctl), so ingest-thread CPU is "
+                    "separated above — but it is still the harness's "
+                    "process-tree accounting and ingest BELOW ~1 core at "
+                    "peak does not by itself prove the ingest cannot be "
+                    "the limiter (demand must be correlated, §3)."
                     % (lo, hi))
     slow_or_startup = [r for r in summary
                        if r["median_wall_s"] and r["median_wall_s"] < 2.0]
@@ -96,13 +139,13 @@ def derive_verdict(summary, fake_numa=None, complete=True):
                         r["case"] for r in slow_or_startup))
     else:
         text.append("All cells ran >=2s wall (bring-up amortized).")
-    text.append("Downstream-demand (spec §3 queue-nonempty-interval "
-                "method) is NOT AVAILABLE in this harness: no scanner-"
-                "queue occupancy telemetry is exposed; the least-invasive "
-                "ring diagnostic for isolating ingest vs starvation is "
-                "deferred to the rental/instrumentation phase. Without it, "
-                "ingest-limited vs downstream-limited attribution of idle "
-                "time is an inference, not a measurement.")
+    text.append("Downstream-demand inputs ARE available from the "
+                "engine's STAGE0_DIAG queue sampler (per-node "
+                "head/tail at ~20ms): queue-occupancy samples per case "
+                "are tabulated below (nonempty fraction / longest empty "
+                "streak). Cases run without FORKRUN_DIAG_QUEUE=1 report "
+                "no demand data — that absence is recorded, not "
+                "backfilled from assumptions.")
     return {
         "verdict": ("INCONCLUSIVE for real-NUMA benefit (required by spec "
                     "§8: fake-NUMA evidence cannot establish the gate; "
@@ -187,6 +230,18 @@ def main():
             ("%.1f" % r["spread_pct"]) if r["spread_pct"] is not None else "-",
             ("%.2f" % r["median_wall_s"]) if r["median_wall_s"] else "-",
             ("%.2f" % r["median_per_core"]) if r["median_per_core"] else "-"))
+    lines += ["", "## Scanner-queue occupancy (STAGE0_DIAG samples, spec §4.3)", ""]
+    lines.append("| case | samples | nonempty fraction | longest empty streak (samples) |")
+    lines.append("|---|---|---|---|")
+    for r in summary:
+        q = queue_demand_stats(args.runs, r["case"])
+        if q is None:
+            lines.append("| %s | 0 (no FORKRUN_DIAG_QUEUE=1 samples) | - | - |"
+                         % r["case"])
+        else:
+            lines.append("| %s | %d | %.2f | %d |" % (
+                r["case"], q["samples"], q["nonempty_fraction"],
+                q["max_empty_streak_samples"]))
     lines += ["", "## 2×2 affinity/policy ablation (spec §6)", ""]
     if args.ablation and os.path.isfile(args.ablation):
         with open(args.ablation, encoding="utf-8") as fh:
