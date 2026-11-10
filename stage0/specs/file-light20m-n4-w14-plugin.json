@@ -1,8 +1,0 @@
-{
-  "id": "file-light20m-n4-w14-plugin",
-  "input": "stage0/corpus/light_20m.txt",
-  "workers": 14,
-  "nodes": "@4",
-  "mode": "plugin",
-  "plugin_payload": "/mnt/ramdisk/forkrun/stage0/ml_plugin_light.so:ml_process_light"
-}

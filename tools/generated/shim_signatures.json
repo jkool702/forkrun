@@ -314,6 +314,11 @@
     "linkage": "extern",
     "return": "int"
   },
+  "fr_py_set_task_name": {
+    "args": "const char *name",
+    "linkage": "extern",
+    "return": "int"
+  },
   "fr_py_sigint_defer_begin": {
     "args": "void",
     "linkage": "extern",

@@ -3749,7 +3749,48 @@ def _init_engine_source(source, *, lines, bytes_, spec, num_nodes=None,
     return lib, engine_fds, src_fd, must_close
 
 
+def _task_name_current():
+    """STAGE 0 diagnostic: read the CALLING task's comm (best effort)."""
+    try:
+        tid = _threading.get_native_id()
+        with open("/proc/self/task/%d/comm" % tid, encoding="ascii",
+                  errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _task_name_set(name):
+    """STAGE 0 diagnostic: name the CALLING task (observational only).
+
+    The external harness attributes per-thread CPU from comm, so the
+    UMA spill is named `fr-ingest` exactly while it copies. Best effort:
+    an older substrate without fr_py_set_task_name is not an error.
+    """
+    if not name:
+        return -1
+    try:
+        return get().fr_py_set_task_name(name.encode("ascii", "replace"))
+    except Exception:
+        return -1
+
+
 def _spill_to_memfd(src_fd) -> tuple[int, int]:
+    """Name the UMA spill `fr-ingest` for the duration of the copy.
+
+    Thin wrapper: the copy itself is _spill_to_memfd_inner (the single
+    authoritative spill implementation). The name is restored in a
+    finally so CPU spent after the spill is not misattributed to ingest.
+    """
+    previous = _task_name_current()
+    _task_name_set("fr-ingest")
+    try:
+        return _spill_to_memfd_inner(src_fd)
+    finally:
+        _task_name_set(previous)
+
+
+def _spill_to_memfd_inner(src_fd) -> tuple[int, int]:
     """Copy src_fd until EOF into a sealed-by-usage ingress memfd.
 
     Returns (memfd_fd, size). v0 materializes the whole input (bounded
@@ -4273,6 +4314,11 @@ def _ingest_copy_loop(src_fd, mem_fd, chunk=_CHUNK, lib=None):
     or failing signal just leaves the pre-flight on its 50 ms timeout.
     """
     total = 0
+    if lib is not None:
+        try:
+            lib.fr_py_set_task_name(b"fr-ingest")
+        except Exception:
+            pass  # observational only; never fail the copy over it
     while True:
         try:
             buf = os.read(src_fd, chunk)

@@ -1,0 +1,8 @@
+{
+  "id": "file-light20m-nauto-w14-plugin",
+  "input": "stage0/corpus/light_20m.txt",
+  "workers": 14,
+  "nodes": "auto",
+  "mode": "plugin",
+  "plugin_payload": "stage0/ml_plugin_light.so:ml_process_light"
+}

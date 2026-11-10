@@ -345,6 +345,11 @@ def _setup_signatures(lib) -> None:
         # diagnostics only — no run-path caller.
         lib.fr_py_active_waiters.argtypes = [ctypes.c_int]
         lib.fr_py_active_waiters.restype = ctypes.c_int
+        # STAGE 0: name the calling task for /proc comm attribution.
+        # Observational; used around the UMA spill and in the ingest
+        # child (the NUMA C ingest names itself).
+        lib.fr_py_set_task_name.argtypes = [ctypes.c_char_p]
+        lib.fr_py_set_task_name.restype = ctypes.c_int
         lib.fr_py_worker_probe.argtypes = [
             ctypes.c_int, ctypes.POINTER(ctypes.c_uint32)]
         lib.fr_py_worker_probe.restype = ctypes.c_int

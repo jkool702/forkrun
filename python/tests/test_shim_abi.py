@@ -348,7 +348,13 @@ class TestShimBindings(unittest.TestCase):
         # layout changed. Extern 62 -> 65; static stays 17 (the recorder
         # is named frk_* deliberately -- it is not part of the
         # fr_py_* ABI).
-        self.assertEqual((n_ext, n_st), (65, 17),
+        # STAGE 0 diagnostic (WO-STAGE0-REHEARSAL-CORRECTIONS-3 §4):
+        # ONE extern, fr_py_set_task_name(name). Observational: names
+        # the calling task so the external harness can attribute
+        # per-thread CPU from /proc/<pid>/task/<tid>/comm. No existing
+        # signature or struct layout changed. Extern 65 -> 66; static
+        # stays 17.
+        self.assertEqual((n_ext, n_st), (66, 17),
                          "ABI surface changed (extern=%d static=%d) — "
                          "if intentional, regenerate + justify in the "
                          "behavior-delta audit" % (n_ext, n_st))

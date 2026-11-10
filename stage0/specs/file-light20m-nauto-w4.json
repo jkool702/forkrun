@@ -1,7 +1,7 @@
 {
-  "id": "file-light20m-n4-w4",
+  "id": "file-light20m-nauto-w4",
   "input": "stage0/corpus/light_20m.txt",
   "workers": 4,
-  "nodes": "@4",
+  "nodes": "auto",
   "mode": "udf"
 }

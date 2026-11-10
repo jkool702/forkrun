@@ -3,24 +3,30 @@
 
 Each cell runs in a FRESH CHILD PROCESS (policy/affinity can never leak
 between cells). Per cell:
-  A  unpinned/default + MPOL_DEFAULT          (baseline)
-  B  pinned to node X + MPOL_DEFAULT          (affinity only)
-  C  unpinned/default + MPOL_BIND node Y      (policy only)
-  D  pinned to node X + MPOL_BIND node Y, X != Y (conflicting controls)
+  A  unpinned/default + MPOL_DEFAULT              (baseline)
+  B  pinned to node X + MPOL_DEFAULT              (affinity only)
+  C  unpinned/default + MPOL_BIND to node Y       (policy only)
+  D  pinned to node X + MPOL_BIND to node Y       (conflicting controls)
 
-Records, per cell: requested AND effective state (sched_getaffinity /
-get_mempolicy queried immediately before first touch), the actual CPU
-executing the first-touch operation (sched_getcpu), every syscall
-return code, and actual destination-page residency via move_pages()
-plus /proc/<pid>/numa_maps (secondary, dual-evidence agreement).
-Two materialization forms are covered separately (work order §2.1):
-  map-fault  : first touch through a MAP_SHARED mapping (explicit
-               write fault into the mapped range)
-  write-path : os.write() into the memfd fd (the current production
-               materializer's shape: sendfile/write under the task's
-               mempolicy, no mapping)
-Results from the two forms are labelled so synthetic-mapping results
-are never generalized to the write path without evidence.
+Node argument semantics (WO-STAGE0-REHEARSAL-CORRECTIONS-3 §2.3):
+  --node-x = the AFFINITY node: B and D pin a CPU of this node.
+  --node-y = the POLICY node:   C and D bind MPOL_BIND to this node.
+  X and Y must differ. When omitted, the lowest-numbered distinct pair
+  of online memory nodes that each have a CPU allowed by the process
+  cpuset is used and recorded.
+
+Every cell records the symbolic AND numeric requested policy mode, the
+effective mode/mask from get_mempolicy(), sched_getaffinity(), the CPU
+executing the first touch, every syscall return code and errno, and
+actual destination-page residency. A cell whose effective state does
+not match the requested state is INVALID.
+
+Two materialization forms are measured separately:
+  map-fault  : first touch is an explicit one-byte WRITE through a
+               MAP_SHARED mapping, then move_pages + numa_maps.
+  write-path : write() into the memfd (production materializer shape),
+               then MAP_SHARED + read-touch every page, then move_pages
+               + numa_maps + mincore. Raw per-page statuses are kept.
 
 Usage: ablation_2x2.py [--cells A,B,C,D] [--forms map-fault,write-path]
        [--size-bytes N] [--node-x X] [--node-y Y] [--json PATH]
@@ -28,63 +34,45 @@ Usage: ablation_2x2.py [--cells A,B,C,D] [--forms map-fault,write-path]
 
 import argparse
 import ctypes
+import errno as _errno
 import json
+import mmap as _mmap
 import os
-import statistics as _st
+import signal
+import subprocess
+import sys
+import time
 
 _MEMPOL_DEFAULT = 0
-_MEMPOL_BIND = 2  # MPOL_PREFERRED is 1; MPOL_BIND is 2 (numaif.h)
-MPAQ_NA = 0xFF
-
-
-def _node_cpus(node):
-    path = "/sys/devices/system/node/node%d/cpulist" % node
-    try:
-        with open(path, encoding="ascii") as fh:
-            spec = fh.read().strip()
-    except OSError:
-        return None
-    cpus = []
-    for part in spec.split(","):
-        if "-" in part:
-            lo, _, hi = part.partition("-")
-            cpus.extend(range(int(lo), int(hi) + 1))
-        elif part:
-            cpus.append(int(part))
-    return cpus
-
-
-def _allowed_cpus():
-    try:
-        return sorted(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        return list(range(os.cpu_count() or 0))
-
-
-def _pick_cpu(node, allowed):
-    cands = _node_cpus(node) or []
-    both = [c for c in cands if c in allowed]
-    if not both:
-        raise RuntimeError(
-            "no CPU of node %d is in the process cpuset (allowed=%s)" %
-            (node, allowed[:8]))
-    return both[0]
+_MEMPOL_PREFERRED = 1
+_MEMPOL_BIND = 2
+_MEMPOL_NAMES = {
+    0: "MPOL_DEFAULT",
+    1: "MPOL_PREFERRED",
+    2: "MPOL_BIND",
+    3: "MPOL_INTERLEAVE",
+    4: "MPOL_WEIGHTED_INTERLEAVE",
+    5: "MPOL_LOCAL",
+    6: "MPOL_PREFERRED_MANY",
+}
+_WORD_BITS = ctypes.sizeof(ctypes.c_ulong) * 8
+_SHIMMED = None
 
 
 def _shim():
-    import os as _os
-    import ctypes as _ct
-    p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                      "libstage0.so")
-    lib = _ct.CDLL(p, use_errno=True)
+    global _SHIMMED
+    if _SHIMMED is not None:
+        return _SHIMMED
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "libstage0.so")
+    lib = ctypes.CDLL(path, use_errno=True)
     lib.stage0_query_nodes.restype = ctypes.c_int
     lib.stage0_query_nodes.argtypes = [
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
     lib.stage0_apply_affinity.restype = ctypes.c_int
-    lib.stage0_apply_affinity.argtypes = [
-        ctypes.c_void_p, ctypes.c_long]  # const int* cpus, ncpus
+    lib.stage0_apply_affinity.argtypes = [ctypes.c_void_p, ctypes.c_long]
     lib.stage0_get_affinity.restype = ctypes.c_int
-    lib.stage0_get_affinity.argtypes = [ctypes.c_void_p]
+    lib.stage0_get_affinity.argtypes = [ctypes.c_void_p, ctypes.c_long]
     lib.stage0_set_mempolicy.restype = ctypes.c_int
     lib.stage0_set_mempolicy.argtypes = [
         ctypes.c_int, ctypes.c_ulong, ctypes.c_void_p]
@@ -96,28 +84,236 @@ def _shim():
     lib.stage0_mincore.restype = ctypes.c_int
     lib.stage0_mincore.argtypes = [
         ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+    _SHIMMED = lib
     return lib
 
 
-def _residency(addrs):
-    shim = _shim()
+def _parse_list(spec):
+    """Parse a kernel range list ('0-3,8') into ints."""
     out = []
-    for addr in addrs:
-        pages = (ctypes.c_void_p * 1)(addr)
-        status = (ctypes.c_int * 1)(0)
-        r = shim.stage0_query_nodes(pages, status, 1)
-        if r != 0:
-            errno = ctypes.get_errno()
-            if errno in (1, 38, 22):
-                return None  # query method unavailable
-            out.append(None)
+    for part in (spec or "").strip().split(","):
+        if not part:
             continue
-        # status semantics: >=0 node index; -1 query error; -2 page not
-        # present. write()-instantiated shmem pages return -2 for every
-        # page even when mapped — so move_pages is NOT a viable
-        # residency source for the write-path; /proc/<pid>/numa_maps is.
-        out.append(status[0] if status[0] >= 0 else None)
+        if "-" in part:
+            lo, _, hi = part.partition("-")
+            out.extend(range(int(lo), int(hi) + 1))
+        else:
+            out.append(int(part))
     return out
+
+
+def _online_nodes():
+    path = "/sys/devices/system/node/online"
+    try:
+        with open(path, encoding="ascii") as fh:
+            return _parse_list(fh.read())
+    except OSError:
+        return []
+
+
+def _node_cpus(node):
+    path = "/sys/devices/system/node/node%d/cpulist" % node
+    try:
+        with open(path, encoding="ascii") as fh:
+            return _parse_list(fh.read())
+    except OSError:
+        return []
+
+
+def _node_mem_total_kb(node):
+    path = "/sys/devices/system/node/node%d/meminfo" % node
+    try:
+        with open(path, encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("Node %d MemTotal:" % node):
+                    return int(line.split()[3])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _node_mem_free_kb(node):
+    path = "/sys/devices/system/node/node%d/meminfo" % node
+    try:
+        with open(path, encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("Node %d MemFree:" % node):
+                    return int(line.split()[3])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _allowed_cpus():
+    try:
+        return sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return list(range(os.cpu_count() or 0))
+
+
+def _validate_node(node, allowed, role):
+    if node not in _online_nodes():
+        raise SystemExit("node %s=%d is not online (online=%s)" % (
+            role, node, _online_nodes()))
+    if _node_mem_total_kb(node) <= 0:
+        raise SystemExit("node %s=%d has no memory" % (role, node))
+    cpus = _node_cpus(node)
+    if not any(c in allowed for c in cpus):
+        raise SystemExit(
+            "node %s=%d has no CPU in the process cpuset (node cpus=%s, "
+            "allowed=%s)" % (role, node, cpus[:8], allowed[:8]))
+    return cpus
+
+
+def _select_nodes(node_x, node_y):
+    """Resolve and validate (affinity node X, policy node Y)."""
+    allowed = _allowed_cpus()
+    usable = [n for n in _online_nodes()
+              if _node_mem_total_kb(n) > 0
+              and any(c in allowed for c in _node_cpus(n))]
+    if len(usable) < 2:
+        raise SystemExit(
+            "need at least two usable memory nodes with allowed CPUs; "
+            "usable=%s allowed=%s" % (usable, allowed[:8]))
+    if node_x is None and node_y is None:
+        x, y = usable[0], usable[1]
+    elif node_x is None:
+        y = int(node_y)
+        _validate_node(y, allowed, "y")
+        x = next((n for n in usable if n != y), None)
+        if x is None:
+            raise SystemExit("no usable affinity node distinct from y=%d" % y)
+    elif node_y is None:
+        x = int(node_x)
+        _validate_node(x, allowed, "x")
+        y = next((n for n in usable if n != x), None)
+        if y is None:
+            raise SystemExit("no usable policy node distinct from x=%d" % x)
+    else:
+        x, y = int(node_x), int(node_y)
+        _validate_node(x, allowed, "x")
+        _validate_node(y, allowed, "y")
+    if x == y:
+        raise SystemExit("node X (%d) must differ from node Y (%d)" % (x, y))
+    return {
+        "x": x,
+        "y": y,
+        "x_cpus": _node_cpus(x),
+        "y_cpus": _node_cpus(y),
+        "x_mem_total_kb": _node_mem_total_kb(x),
+        "y_mem_total_kb": _node_mem_total_kb(y),
+        "x_mem_free_kb": _node_mem_free_kb(x),
+        "y_mem_free_kb": _node_mem_free_kb(y),
+        "online_nodes": _online_nodes(),
+        "allowed_cpus": allowed,
+        "fake_numa": _fake_numa(),
+    }
+
+
+def _fake_numa():
+    try:
+        with open("/proc/cmdline", encoding="ascii", errors="replace") as fh:
+            cmd = fh.read()
+    except OSError:
+        return None
+    for token in cmd.split():
+        if token.startswith("numa=fake="):
+            return token
+    return False
+
+
+def _pick_cpu(node, allowed):
+    cands = [c for c in _node_cpus(node) if c in allowed]
+    if not cands:
+        raise RuntimeError("no allowed CPU on node %d" % node)
+    return cands[0]
+
+
+def _mask_layout(node_ids):
+    """Words and maxnode (bits) sized from the highest selected node id."""
+    highest = max(node_ids) if node_ids else 0
+    words = max(1, highest // _WORD_BITS + 1)
+    return words, words * _WORD_BITS
+
+
+def _mask_for(nodes, words):
+    mask = (ctypes.c_ulong * words)()
+    for node in nodes:
+        mask[node // _WORD_BITS] |= 1 << (node % _WORD_BITS)
+    return mask
+
+
+def _mask_nodes(mask, words, maxnode):
+    out = []
+    for bit in range(maxnode):
+        if mask[bit // _WORD_BITS] >> (bit % _WORD_BITS) & 1:
+            out.append(bit)
+    return out
+
+
+def _effective(maxnode, words):
+    lib = _shim()
+    mode = ctypes.c_int(-1)
+    mask = (ctypes.c_ulong * words)()
+    ctypes.set_errno(0)
+    rc = lib.stage0_get_mempolicy(ctypes.byref(mode), mask, maxnode)
+    err = ctypes.get_errno()
+    cpus_buf = (ctypes.c_int * 4096)()
+    n = lib.stage0_get_affinity(cpus_buf, 4096)
+    aff = sorted(cpus_buf[i] for i in range(n)) if n > 0 else None
+    return {
+        "mempolicy_mode": mode.value if rc == 0 else None,
+        "mempolicy_mode_symbolic": _MEMPOL_NAMES.get(mode.value, "UNKNOWN")
+        if rc == 0 else None,
+        "mempolicy_mask_nodes": _mask_nodes(mask, words, maxnode)
+        if rc == 0 else None,
+        "mempolicy_mask_words": [int(mask[i]) for i in range(words)]
+        if rc == 0 else None,
+        "get_mempolicy_rc": rc,
+        "get_mempolicy_errno": err if rc != 0 else 0,
+        "affinity_cpus": aff,
+    }
+
+
+def _set_policy(mode, nodes, words, maxnode):
+    lib = _shim()
+    ctypes.set_errno(0)
+    if mode == _MEMPOL_DEFAULT:
+        rc = lib.stage0_set_mempolicy(_MEMPOL_DEFAULT, 0, None)
+    else:
+        mask = _mask_for(nodes, words)
+        rc = lib.stage0_set_mempolicy(mode, maxnode, mask)
+    err = ctypes.get_errno()
+    return {
+        "mode_numeric": mode,
+        "mode_symbolic": _MEMPOL_NAMES.get(mode, "UNKNOWN"),
+        "nodes": list(nodes),
+        "maxnode_bits": maxnode,
+        "set_rc": rc,
+        "set_errno": err if rc != 0 else 0,
+    }
+
+
+def _apply_affinity(cpu):
+    lib = _shim()
+    cpus = (ctypes.c_int * 1)(cpu)
+    ctypes.set_errno(0)
+    rc = lib.stage0_apply_affinity(cpus, 1)
+    err = ctypes.get_errno()
+    return {"mode": "pinned", "cpu": cpu, "set_rc": rc,
+            "set_errno": err if rc != 0 else 0}
+
+
+def _query_nodes(addrs):
+    lib = _shim()
+    count = len(addrs)
+    pages = (ctypes.c_void_p * count)(*addrs)
+    status = (ctypes.c_int * count)(*([-999] * count))
+    ctypes.set_errno(0)
+    rc = lib.stage0_query_nodes(pages, status, count)
+    err = ctypes.get_errno()
+    return {"rc": rc, "errno": err if rc != 0 else 0,
+            "statuses": [int(s) for s in status]}
 
 
 def _numamap_counts(pid, needle):
@@ -132,8 +328,7 @@ def _numamap_counts(pid, needle):
                     if token.startswith("N") and "=" in token:
                         try:
                             node_s, _, pages_s = token[1:].partition("=")
-                            node = int(node_s)
-                            pages = int(pages_s)
+                            node, pages = int(node_s), int(pages_s)
                         except ValueError:
                             continue
                         if pages:
@@ -143,248 +338,264 @@ def _numamap_counts(pid, needle):
     return counts
 
 
-def _effective():
-    shim = _shim()
-    cpus_buf = (ctypes.c_int * 4096)()
-    n = shim.stage0_get_affinity(cpus_buf)
-    eff_cpus = sorted(cpus_buf[i] for i in range(n)) if n > 0 else None
-    mode_buf = ctypes.c_int()
-    mask = (ctypes.c_ulong * 64)(0)
-    gm = shim.stage0_get_mempolicy(ctypes.byref(mode_buf), mask, 64)
-    return {
-        "affinity_cpus": eff_cpus,
-        "mempolicy_mode": mode_buf.value if gm == 0 else None,
-        "mempolicy_mask": mask[0] if gm == 0 else None,
-        "get_mempolicy_rc": gm,
-    }
+def _mincore(addr0, size_bytes, npages):
+    lib = _shim()
+    vec = (ctypes.c_ubyte * npages)()
+    ctypes.set_errno(0)
+    rc = lib.stage0_mincore(addr0, size_bytes, vec)
+    err = ctypes.get_errno()
+    resident = sum(1 for b in vec if b & 1) if rc == 0 else None
+    return {"rc": rc, "errno": err if rc != 0 else 0,
+            "resident_pages": resident, "total_pages": npages}
+
+
+def _placement(statuses):
+    by_node = {}
+    negative = {}
+    for status in statuses:
+        if status >= 0:
+            by_node[status] = by_node.get(status, 0) + 1
+        else:
+            negative[status] = negative.get(status, 0) + 1
+    return by_node, negative
+
+
+def _touch_write(addr):
+    """Explicit one-byte WRITE fault (the map-fault contract)."""
+    ctypes.c_ubyte.from_address(addr).value = 0x5A
+
+
+def _touch_read(addr):
+    """Read-touch only: establishes the PTE without modifying data."""
+    return ctypes.c_ubyte.from_address(addr).value
 
 
 def _run_one_cell(cell, form, size_bytes, node_x, node_y, pagesize):
     """Executed INSIDE the fresh child process — one cell, one form."""
-    import mmap as _mmap
-    shim = _shim()
+    lib = _shim()
     allowed = _allowed_cpus()
-    # --- establish requested state -------------------------------
-    affinity_rec = {"cpu": None, "set_rc": None}
-    policy_rec = {"policy": "DEFAULT", "set_rc": None, "node": None}
-    if cell == "A":
-        affinity_rec = {"cpu": "default", "set_rc": 0}
-        policy_rec = {"policy": "DEFAULT", "set_rc": 0, "node": None}
-    elif cell == "B":
+    words, maxnode = _mask_layout([node_x, node_y])
+
+    affinity_requested = {"mode": "default", "cpu": None, "set_rc": None,
+                          "set_errno": 0}
+    if cell in ("B", "D"):
         cpu = _pick_cpu(node_x, allowed)
-        cpus = (ctypes.c_int * 1)(cpu)
-        rc = shim.stage0_apply_affinity(cpus, 1)
-        affinity_rec = {"cpu": cpu, "set_rc": rc}
-        policy_rec = {"policy": "DEFAULT",
-                      "set_rc": shim.stage0_set_mempolicy(0, 0, None),
-                      "node": None}
-    elif cell == "C":
-        affinity_rec = {"cpu": "default", "set_rc": 0}
-        nodes = (ctypes.c_ulong * 1)(1 << node_y)
-        rc = shim.stage0_set_mempolicy(1, 8, nodes)
-        policy_rec = {"policy": "BIND", "node": node_y, "set_rc": rc}
-    elif cell == "D":
-        cpu = _pick_cpu(node_y, allowed)
-        cpus = (ctypes.c_int * 1)(cpu)
-        rc1 = shim.stage0_apply_affinity(cpus, 1)
-        nodes = (ctypes.c_ulong * 1)(1 << node_x)
-        rc2 = shim.stage0_set_mempolicy(1, 8, nodes)
-        affinity_rec = {"cpu": cpu, "set_rc": rc1}
-        policy_rec = {"policy": "BIND", "node": node_x, "set_rc": rc2}
+        affinity_requested = _apply_affinity(cpu)
+    else:
+        cpu = None
+
+    if cell in ("A", "B"):
+        policy_requested = _set_policy(_MEMPOL_DEFAULT, [], words, maxnode)
+    elif cell in ("C", "D"):
+        policy_requested = _set_policy(_MEMPOL_BIND, [node_y], words, maxnode)
     else:
         raise ValueError(cell)
 
-    # --- capture EFFECTIVE state immediately before first touch --
-    effective = _effective()
-    establish_ok = (
-        (affinity_rec["set_rc"] in (None, 0)) and
-        (policy_rec["set_rc"] == 0))
-    if not establish_ok:
-        return {"cell": cell, "form": form, "valid": False,
-                "reason": "requested state could not be established",
-                "affinity_requested": affinity_rec,
-                "policy_requested": policy_rec, "effective": effective}
+    effective = _effective(maxnode, words)
+    checks = {
+        "affinity_ok": True,
+        "policy_ok": True,
+        "checked_before_first_touch": True,
+    }
+    if cell in ("B", "D"):
+        checks["affinity_ok"] = (
+            effective["affinity_cpus"] == [cpu])
+    if cell in ("A", "B"):
+        checks["policy_ok"] = (
+            effective["mempolicy_mode"] == _MEMPOL_DEFAULT)
+    else:
+        checks["policy_ok"] = (
+            effective["mempolicy_mode"] == _MEMPOL_BIND
+            and effective["mempolicy_mask_nodes"] == [node_y])
 
-    # --- fresh destination range (sparse, uninstantiated) --------
+    establish_ok = (policy_requested["set_rc"] == 0
+                    and affinity_requested["set_rc"] in (None, 0)
+                    and checks["affinity_ok"] and checks["policy_ok"])
+    if not establish_ok:
+        return {
+            "cell": cell, "form": form, "valid": False,
+            "invalid_reason": "requested state was not established/verified",
+            "affinity_requested": affinity_requested,
+            "policy_requested": policy_requested,
+            "effective": effective,
+            "verification": checks,
+            "pagesize": pagesize,
+            "pages_total": max(1, size_bytes // pagesize),
+        }
+
     fd = os.memfd_create("stage0_ablation_%s_%s" % (cell, form), 0)
     os.ftruncate(fd, size_bytes)
     npages = max(1, size_bytes // pagesize)
+    name = "stage0_ablation_%s_%s" % (cell, form)
 
-    if form == "map-fault":
-        mm = _mmap.mmap(fd, size_bytes, flags=_mmap.MAP_SHARED)
-        addr0 = ctypes.addressof(ctypes.c_char.from_buffer(mm, 0))
-        addrs = [addr0 + i * pagesize for i in range(npages)]
+    try:
         cpu_at_touch = None
-        for addr in addrs:  # explicit write fault into the mapping
-            ctypes.string_at(addr, 1)
-            if cpu_at_touch is None:
-                cpu_at_touch = shim.stage0_sched_getcpu()
-        residency = _residency(addrs)
-        numamap = _numamap_counts(os.getpid(), "stage0_ablation_%s_%s"
-                                  % (cell, form))
-        mm.close()
-    elif form == "write-path":
-        # The production materializer's shape: write() into the memfd
-        # under the task's mempolicy (sendfile/write in the engine).
-        # Residency evidence differs from map-fault (measured on this
-        # box, both with and without MBIND): move_pages() returns the
-        # -2 "page not present" status for EVERY write()-instantiated
-        # page, and /proc/<pid>/numa_maps carries no N-fields for the
-        # VMA, either — writes instantiate pages against the inode, not
-        # the VMA. The working evidence pair is: mincore() residency
-        # bits (page present?) + `numastat -p` per-node process totals
-        # sampled before/after (which node absorbed the pages).
-        import subprocess as _sp
-        def numastat_totals(pid):
-            try:
-                r = _sp.run(["numastat", "-p", str(pid)],
-                            capture_output=True, text=True, timeout=30)
-                vals = {}
-                for line in r.stdout.splitlines():
-                    # "Private  3.18  0.00 ..." rows carry per-node MB.
-                    parts = line.split()
-                    if not parts:
-                        continue
-                    if parts[0].lower() in ("private", "total",
-                                             "shared", "stack"):
-                        vals[parts[0]] = [float(x) for x in parts[1:5]]
-                return vals
-            except (OSError, ValueError, subprocess.SubprocessError):
-                return {}
-        before = numastat_totals(os.getpid())
-        buf = b"\x01" * 65536
-        cpu_at_touch = None
-        for off in range(0, size_bytes, len(buf)):
-            n = os.write(fd, buf)
-            if cpu_at_touch is None:
-                cpu_at_touch = shim.stage0_sched_getcpu()
-            if n != len(buf):
-                raise RuntimeError("short write at offset %d" % off)
-        after = numastat_totals(os.getpid())
-        node_delta = {}
-        for row in ("Private", "Total"):
-            if row in after and row in before:
-                for k in range(min(len(after[row]), len(before[row]))):
-                    d = after[row][k] - before[row][k]
-                    if abs(d) > 1e-9:
-                        node_delta[k] = round(d, 3)
-        # mincore residency bits over a fresh mapping (pages must be
-        # present for the measurement to mean anything)
-        mm = _mmap.mmap(fd, size_bytes, flags=_mmap.MAP_SHARED)
-        addr0 = ctypes.addressof(ctypes.c_char.from_buffer(mm, 0))
-        vec = (ctypes.c_ubyte * npages)()
-        mr = shim.stage0_mincore(addr0, size_bytes, vec)
-        resident = sum(1 for b in vec if b & 1) if mr == 0 else -1
-        residency = "numastat-delta+mincore"
-        numamap = {}
-        mm.close()
-        result = {"cell": cell, "form": form, "valid": True,
-                  "affinity_requested": affinity_rec,
-                  "policy_requested": policy_rec,
-                  "effective": effective,
-                  "cpu_at_first_touch": cpu_at_touch,
-                  "pages_total": npages,
-                  "pages_by_node": {},
-                  "pages_unknown": 0,
-                  "pagesize": pagesize,
-                  "numamap_counts": numamap,
-                  "mincore_resident_pages": resident,
-                  "numastat_delta_mb": node_delta,
-                  "residency_method": residency,
-                  "move_pages_note": ("returns -2 (page not present) "
-                                      "for every write()-instantiated "
-                                      "page; not usable for this form"),
-                  "object_measured": ("destination memfd; write() into "
-                                      "the fd (production sendfile/write "
-                                      "shape); residency via mincore + "
-                                      "numastat -p deltas")}
-        os.close(fd)
-        return result
-    else:
-        raise ValueError(form)
-    os.close(fd)
-
-    by_node = {}
-    unknown = 0
-    for node in residency or []:
-        if node is None:
-            unknown += 1
+        if form == "map-fault":
+            mm = _mmap.mmap(fd, size_bytes, flags=_mmap.MAP_SHARED)
+            addr0 = ctypes.addressof(ctypes.c_char.from_buffer(mm, 0))
+            addrs = [addr0 + i * pagesize for i in range(npages)]
+            numamap_pre = _numamap_counts(os.getpid(), name)
+            move_pre = _query_nodes(addrs)
+            for i, addr in enumerate(addrs):
+                _touch_write(addr)  # explicit one-byte WRITE fault
+                if i == 0:
+                    cpu_at_touch = lib.stage0_sched_getcpu()
+            touched = npages
+            touch_kind = "write"
+        elif form == "write-path":
+            # Production materializer's shape: write() into the memfd
+            # under the task's mempolicy. Then map the ALREADY-POPULATED
+            # range MAP_SHARED and read-touch it (no writes here).
+            buf = b"\x01" * 65536
+            off = 0
+            while off < size_bytes:
+                n = os.write(fd, buf[:min(len(buf), size_bytes - off)])
+                if n <= 0:
+                    raise RuntimeError("short write at offset %d" % off)
+                off += n
+                if cpu_at_touch is None:
+                    cpu_at_touch = lib.stage0_sched_getcpu()
+            mm = _mmap.mmap(fd, size_bytes, flags=_mmap.MAP_SHARED)
+            addr0 = ctypes.addressof(ctypes.c_char.from_buffer(mm, 0))
+            addrs = [addr0 + i * pagesize for i in range(npages)]
+            numamap_pre = _numamap_counts(os.getpid(), name)
+            move_pre = _query_nodes(addrs)
+            # Touch page 0 alone, then check it again after the rest of
+            # the range is touched: this makes "read-touch did not move
+            # the folio" an observed property of the measurement rather
+            # than an assumption.
+            _touch_read(addrs[0])
+            first_after_first_touch = _query_nodes([addrs[0]])
+            for addr in addrs[1:]:
+                _touch_read(addr)  # establish PTEs, do not modify data
+            touched = npages
+            touch_kind = "read"
         else:
-            by_node[node] = by_node.get(node, 0) + 1
-    return {"cell": cell, "form": form, "valid": True,
-            "affinity_requested": affinity_rec,
-            "policy_requested": policy_rec,
-            "effective": effective,
-            "cpu_at_first_touch": cpu_at_touch,
-            "pages_total": npages,
-            "pages_by_node": by_node,
-            "pages_unknown": unknown,
-            "pagesize": pagesize,
-            "numamap_counts": numamap,
-            "object_measured": ("destination memfd; map-fault touches via "
-                                "MAP_SHARED mapping, write-path via "
-                                "write(2) into the fd (production "
-                                "sendfile/write shape without the copy)")
-            if form == "write-path" else
-            ("destination memfd; first touch through MAP_SHARED mapping "
-             "(write fault); staging buffer NOT present in this ablation")}
+            raise ValueError(form)
+
+        move_post = _query_nodes(addrs)
+        numamap_post = _numamap_counts(os.getpid(), name)
+        mincore = _mincore(addr0, size_bytes, npages)
+        by_node, negative = _placement(move_post["statuses"])
+        placement_measured = bool(by_node) and move_post["rc"] == 0
+        changed = (bool(numamap_pre) and bool(numamap_post)
+                   and numamap_pre != numamap_post)
+        if form == "write-path":
+            first_after_all = move_post["statuses"][0]
+            first_status = first_after_first_touch["statuses"][0]
+            read_touch_stable = (first_status == first_after_all)
+        else:
+            first_after_first_touch = None
+            read_touch_stable = None
+        mm.close()
+    finally:
+        os.close(fd)
+
+    return {
+        "cell": cell,
+        "form": form,
+        "valid": True,
+        "invalid_reason": None,
+        "affinity_requested": affinity_requested,
+        "policy_requested": policy_requested,
+        "effective": effective,
+        "verification": checks,
+        "cpu_at_first_touch": cpu_at_touch,
+        "pages_total": npages,
+        "pagesize": pagesize,
+        "pages_by_node": by_node,
+        "pages_unknown": sum(negative.values()),
+        "pages_negative_status_counts": {str(k): v
+                                         for k, v in sorted(negative.items())},
+        "placement_measured": placement_measured,
+        "move_pages_pre": move_pre,
+        "move_pages_post": move_post,
+        "mincore": mincore,
+        "numamap_pre": numamap_pre,
+        "numamap_post": numamap_post,
+        "numamap_changed_by_touch": changed,
+        "first_page_after_first_touch": first_after_first_touch,
+        "read_touch_stable": read_touch_stable,
+        "touch": {"kind": touch_kind, "pages_touched": touched},
+        "object_measured": (
+            "destination memfd; explicit one-byte write faults through a "
+            "MAP_SHARED mapping; staging buffer NOT present"
+            if form == "map-fault" else
+            "destination memfd; write(2) into the fd (production "
+            "materializer shape), then MAP_SHARED read-touch; the "
+            "read-touch does not modify the data"),
+    }
 
 
 def _child_main():
-    import argparse, json, os as _os
     ap = argparse.ArgumentParser()
     ap.add_argument("--cell", required=True)
     ap.add_argument("--form", required=True)
     ap.add_argument("--size-bytes", type=int, default=8 << 20)
+    ap.add_argument("--node-x", type=int, required=True)
+    ap.add_argument("--node-y", type=int, required=True)
     args = ap.parse_args()
-    pagesize = _os.sysconf("SC_PAGE_SIZE")
-    r = _run_one_cell(args.cell, args.form, args.size_bytes,
-                      1, 2, pagesize)
-    print("CELLJSON " + json.dumps(r, sort_keys=True))
+    pagesize = os.sysconf("SC_PAGE_SIZE")
+    result = _run_one_cell(args.cell, args.form, args.size_bytes,
+                           args.node_x, args.node_y, pagesize)
+    print("CELLJSON " + json.dumps(result, sort_keys=True))
     return 0
 
 
-def _run_cells(cells, forms, size_bytes, node_x, node_y, timeout=120):
-    """Driver: one fresh child process per (cell, form)."""
-    import subprocess
+def _run_cells(cells, forms, size_bytes, nodes, timeout=180):
     results = []
     for cell in cells:
         for form in forms:
-            cmd = [sys_path(), os.path.abspath(__file__), "--cell", cell,
-                   "--form", form, "--size-bytes", str(size_bytes)]
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=timeout)
+            cmd = [sys.executable, os.path.abspath(__file__),
+                   "--cell", cell, "--form", form,
+                   "--size-bytes", str(size_bytes),
+                   "--node-x", str(nodes["x"]), "--node-y", str(nodes["y"])]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
+            timed_out = False
+            try:
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                os.killpg(proc.pid, signal.SIGKILL)
+                try:
+                    out, err = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    out, err = "", ""
             per_cell = None
-            for line in proc.stdout.splitlines():
+            for line in (out or "").splitlines():
                 if line.startswith("CELLJSON "):
                     per_cell = json.loads(line[len("CELLJSON "):])
                     break
             if per_cell is None:
                 per_cell = {"cell": cell, "form": form, "valid": False,
-                            "reason": "child failed",
-                            "rc": proc.returncode,
-                            "stderr_tail": proc.stderr[-1500:]}
+                            "invalid_reason": "child produced no CELLJSON",
+                            "child_rc": proc.returncode,
+                            "timed_out": timed_out,
+                            "stderr_tail": (err or "")[-1500:]}
             per_cell["child_rc"] = proc.returncode
+            per_cell["child_timed_out"] = timed_out
             results.append(per_cell)
-            print("cell %s/%s: valid=%s by_node=%s unknown=%d" % (
-                cell, form, per_cell.get("valid"),
-                per_cell.get("pages_by_node"), per_cell.get("pages_unknown", -1)))
+            print("cell %s/%s: valid=%s placement=%s by_node=%s "
+                  "unknown=%d" % (
+                      cell, form, per_cell.get("valid"),
+                      per_cell.get("placement_measured"),
+                      per_cell.get("pages_by_node"),
+                      per_cell.get("pages_unknown", -1)))
     return results
 
 
-def sys_path():
-    return sys.executable
-
-
 def main():
-    global sys
-    import sys
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cells", default="A,B,C,D")
     ap.add_argument("--forms", default="map-fault,write-path")
     ap.add_argument("--size-bytes", type=int, default=8 << 20)
-    ap.add_argument("--node-x", type=int, default=1)
-    ap.add_argument("--node-y", type=int, default=2)
+    ap.add_argument("--node-x", type=int, default=None,
+                    help="affinity node for B/D (default: auto)")
+    ap.add_argument("--node-y", type=int, default=None,
+                    help="MPOL_BIND node for C/D (default: auto)")
+    ap.add_argument("--campaign-id", default=None)
     ap.add_argument("--json", default=None)
     ap.add_argument("--cell", default=None)   # internal child mode
     ap.add_argument("--form", default=None)
@@ -393,18 +604,31 @@ def main():
         return _child_main()
     cells = [c.strip() for c in args.cells.split(",") if c.strip()]
     forms = [f.strip() for f in args.forms.split(",") if f.strip()]
-    if args.node_x == args.node_y:
-        raise SystemExit("node X must differ from node Y (spec §6 cell D)")
     if not (0 < args.size_bytes < (1 << 31)):
         raise SystemExit("size_bytes out of range")
-    results = _run_cells(cells, forms, args.size_bytes,
-                         args.node_x, args.node_y)
+    nodes = _select_nodes(args.node_x, args.node_y)
+    results = _run_cells(cells, forms, args.size_bytes, nodes)
+    doc = {
+        "schema": "stage0-ablation/2",
+        "campaign_id": args.campaign_id,
+        "generated_epoch": time.time(),
+        "generated_monotonic": time.monotonic(),
+        "size_bytes": args.size_bytes,
+        "pagesize": os.sysconf("SC_PAGE_SIZE"),
+        "nodes": nodes,
+        "cells": cells,
+        "forms": forms,
+        "results": results,
+        "all_valid": all(r.get("valid") for r in results),
+        "all_placement_measured": all(r.get("placement_measured")
+                                      for r in results),
+    }
     if args.json:
         os.makedirs(os.path.dirname(os.path.abspath(args.json)),
                     exist_ok=True)
         with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump({"results": results}, fh, indent=2, sort_keys=True)
-    return 0
+            json.dump(doc, fh, indent=2, sort_keys=True)
+    return 0 if doc["all_valid"] else 1
 
 
 if __name__ == "__main__":

@@ -4073,6 +4073,18 @@ int fr_py_active_waiters(int node) {
                                 __ATOMIC_ACQUIRE);
 }
 
+/* STAGE 0 diagnostic: name the CALLING task (thread) so the external
+ * harness can attribute per-thread CPU from /proc/<pid>/task/<tid>/comm.
+ * Observational only: changes no scheduling, queue, or dataflow state.
+ * Returns 0 on success, -1 with errno preserved. A forked child may call
+ * this before touching Python; the parent's Python front end calls it
+ * around the UMA spill. */
+int fr_py_set_task_name(const char *name) {
+    if (!name || !*name)
+        return -1;
+    return prctl(PR_SET_NAME, name, 0, 0, 0);
+}
+
 int fr_py_worker_probe(int wid, uint32_t *out) {
     if (!out || !g_state || wid < 0 || wid >= MAX_TXN_WORKERS)
         return -1;

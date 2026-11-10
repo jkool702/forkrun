@@ -7,6 +7,10 @@
  * libnuma, not libc; sched APIs take cpu_set_t whose word-size
  * assumption (8-byte masks) broke on modern kernels — so affinity
  * takes an explicit int array instead of a raw mask.
+ *
+ * The nodemask entry points take an explicit maxnode in BITS and the
+ * caller sizes the mask from the highest selected node id. No helper
+ * here assumes one unsigned long or the first 64 nodes.
  */
 
 #define _GNU_SOURCE
@@ -21,7 +25,9 @@
 /* Query the NUMA node of each page in addrs[0..count).
  *
  * addrs[i] must be page-aligned (the caller supplies per-page starts).
- * status[i] receives the node index on success (or -1 for failure).
+ * status[i] receives the RAW kernel result: the node index on success,
+ * or a negative errno (-1 EPERM, -2 ENOENT/page-not-present, -3 ...).
+ * The caller preserves those values; do not collapse them here.
  * Returns 0 on success, or -1 with errno set (EPERM/ENOSYS/EINVAL ->
  * "method unavailable", handled by the caller).
  */
@@ -80,12 +86,17 @@ int stage0_get_affinity(int out[], long max)
     return n;
 }
 
+/* set_mempolicy(mode, nodemask, maxnode). maxnode is in BITS and the
+ * caller's mask has at least (maxnode + bits-per-word - 1) / bits
+ * words. mode is the kernel's MPOL_* number (MPOL_BIND == 2). */
 int stage0_set_mempolicy(int mode, unsigned long size,
                          const void *nodes)
 {
     return set_mempolicy(mode, (const unsigned long *)nodes, size);
 }
 
+/* get_mempolicy(&mode, mask, maxnode). Returns 0 on success; on
+ * failure -1 with errno preserved (the caller records both). */
 int stage0_get_mempolicy(int *mode, unsigned long *mask,
                          unsigned long size)
 {

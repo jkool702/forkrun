@@ -3019,6 +3019,139 @@ static int ring_destroy_main(int argc, char **argv) {
 // traffic. The target node is selected based on indexer backpressure (self
 // load-balancing).
 
+/* ===========================================================================
+ * STAGE 0 DIAGNOSTIC SAMPLER (observational only — Stage 0 campaign spec)
+ *
+ * ONE authoritative implementation of the STAGE0_DIAG / STAGE0_FINAL
+ * wire format, shared by the NUMA ingest loop (which publishes the
+ * per-node chunk queues) and the UMA scanner loop (which publishes the
+ * per-node batch queue and worker-claim progress). The previous inline
+ * copy lived only in the NUMA ingest, so every UMA case had no queue
+ * telemetry at all.
+ *
+ * Every field is an atomic load of an existing counter. No scheduling,
+ * queue, publication, or dataflow state is read-modify-written here.
+ * Enabled only by FORKRUN_DIAG_QUEUE (unset or "0" => disabled), so the
+ * default path pays one getenv at loop entry and one flag test per
+ * sample point.
+ *
+ * Wire format (whitespace-separated; node lists are ';'-separated):
+ *   STAGE0_DIAG src=ingest|scan t_ms=<ms> moved=<bytes|lines> major=<n>
+ *               tgt=<n> lim=<n> gated_ms=<ms>
+ *               q=n0:<head>,<tail>;n1:...      (ingest chunks)
+ *               b=n0:<read>,<write>;n1:...     (worker batch queue)
+ *               c=n0:<claims>;n1:...           (dequeue progress)
+ *               a=n0:<waiters>,<workers>;n1:... (idle attribution)
+ *
+ * `moved` is materialized bytes for src=ingest and scanned lines for
+ * src=scan. `b` is the queue workers claim from: read_idx (claimed) and
+ * write_idx (scanner-published). `c` is total_lines_consumed, which the
+ * claim path increments once per claimed batch — the dequeue-progress
+ * counter needed to estimate consumption during a continuously
+ * non-empty interval. `a` exposes the engine's own waiter gauge so the
+ * report can distinguish "workers idle waiting for work" from "queue
+ * occupancy alone". A trailing `trunc=<n>` appears when the topology
+ * exceeds the sampler's per-group node cap (64).
+ * =========================================================================== */
+#define STAGE0_DIAG_MAX_NODES 64
+
+struct stage0_diag_state {
+  int enabled;
+  uint64_t start_ns;
+  uint64_t next_sample_ms;
+  uint64_t gated_ns;
+};
+
+static void stage0_diag_init(struct stage0_diag_state *d) {
+  const char *v = getenv("FORKRUN_DIAG_QUEUE");
+  d->enabled = (v != NULL && strcmp(v, "0") != 0);
+  d->next_sample_ms = 0;
+  d->gated_ns = 0;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  d->start_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static int stage0_diag_append_group(char *buf, int len, size_t cap,
+                                    const char *name, int kind,
+                                    int num_nodes) {
+  int emit = (num_nodes < STAGE0_DIAG_MAX_NODES)
+                 ? num_nodes : STAGE0_DIAG_MAX_NODES;
+  if (len < 0 || (size_t)len >= cap)
+    return (int)cap;
+  len += snprintf(buf + len, cap - (size_t)len, " %s=", name);
+  for (int i = 0; i < emit; i++) {
+    if ((size_t)len >= cap - 96)
+      return (int)cap;
+    if (i)
+      len += snprintf(buf + len, cap - (size_t)len, ";");
+    uint64_t a = 0, b = 0;
+    switch (kind) {
+      case 0: /* chunk queue: published by ingest, claimed by indexer */
+        a = atomic_load_relaxed(&state[i].chunk_queue_head);
+        b = atomic_load_relaxed(&state[i].chunk_queue_tail);
+        break;
+      case 1: /* batch queue: claimed by workers, published by scanner */
+        a = atomic_load_relaxed(&state[i].read_idx);
+        b = atomic_load_relaxed(&state[i].write_idx);
+        break;
+      case 2: /* dequeue progress: one increment per worker claim */
+        a = atomic_load_relaxed(&state[i].total_lines_consumed);
+        break;
+      default: /* idle attribution: waiters, live workers */
+        a = atomic_load_relaxed(&state[i].active_waiters);
+        b = atomic_load_relaxed(&state[i].active_workers);
+        break;
+    }
+    if (kind == 2)
+      len += snprintf(buf + len, cap - (size_t)len, "n%d:%llu",
+                      i, (unsigned long long)a);
+    else
+      len += snprintf(buf + len, cap - (size_t)len, "n%d:%llu,%llu",
+                      i, (unsigned long long)a, (unsigned long long)b);
+  }
+  return len;
+}
+
+static void stage0_diag_emit(struct stage0_diag_state *d, int final,
+                             const char *src, uint64_t moved,
+                             uint64_t major, int tgt, unsigned lim,
+                             int num_nodes) {
+  if (!d->enabled)
+    return;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
+                    (uint64_t)ts.tv_nsec;
+  uint64_t elapsed_ms = (now_ns - d->start_ns) / 1000000ULL;
+  if (!final && elapsed_ms < d->next_sample_ms)
+    return;
+  if (!final)
+    d->next_sample_ms = elapsed_ms + 20;
+  char buf[8192];
+  int len = snprintf(buf, sizeof(buf),
+      "%s src=%s t_ms=%llu moved=%llu major=%llu tgt=%d lim=%u gated_ms=%llu",
+      final ? "STAGE0_FINAL" : "STAGE0_DIAG",
+      src, (unsigned long long)elapsed_ms, (unsigned long long)moved,
+      (unsigned long long)major, tgt, lim,
+      (unsigned long long)(d->gated_ns / 1000000ULL));
+  len = stage0_diag_append_group(buf, len, sizeof(buf), "q", 0, num_nodes);
+  len = stage0_diag_append_group(buf, len, sizeof(buf), "b", 1, num_nodes);
+  len = stage0_diag_append_group(buf, len, sizeof(buf), "c", 2, num_nodes);
+  len = stage0_diag_append_group(buf, len, sizeof(buf), "a", 3, num_nodes);
+  if (len < 0)
+    return;
+  if (num_nodes > STAGE0_DIAG_MAX_NODES &&
+      (size_t)len < sizeof(buf) - 32) {
+    len += snprintf(buf + len, sizeof(buf) - (size_t)len,
+                    " trunc=%d", num_nodes);
+  }
+  if (len > (int)sizeof(buf) - 2)
+    len = (int)sizeof(buf) - 2;
+  buf[len++] = '\n';
+  sys_write(2, buf, len);
+}
+
 static int ring_numa_ingest_main(int argc, char **argv) {
   /* STAGE 0 DIAGNOSTIC (observational only — Stage 0 campaign spec):
    * prctl names the ingest task for /proc/<pid>/task/<tid>/comm CPU
@@ -3029,15 +3162,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
    modified. Zero cost when the env var is unset (one getenv + flag
    checks per outer-loop iteration). */
   prctl(PR_SET_NAME, "fr-ingest");
-  const char *diag_queue_on = getenv("FORKRUN_DIAG_QUEUE");
-  uint64_t diag_next_sample_ms = 0;
-  uint64_t diag_gated_ns = 0;
-  uint64_t diag_start_ns = 0;
-  {
-    struct timespec _ts;
-    clock_gettime(CLOCK_MONOTONIC, &_ts);
-    diag_start_ns = (uint64_t)_ts.tv_sec * 1000000000ULL + _ts.tv_nsec;
-  }
+  struct stage0_diag_state diag;
+  stage0_diag_init(&diag);
   if (argc < 4)
     return EXECUTION_FAILURE;
   int infd = atoi(argv[1]);
@@ -3239,7 +3365,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
        * signal) — only under the diagnostic flag (two clock reads per
        gated poll; gated loop iterates at most every 10ms). */
       uint64_t gate0_ns = 0;
-      if (diag_queue_on) {
+      if (diag.enabled) {
         struct timespec _g;
         clock_gettime(CLOCK_MONOTONIC, &_g);
         gate0_ns = (uint64_t)_g.tv_sec * 1000000000ULL + _g.tv_nsec;
@@ -3248,10 +3374,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint64_t v;
         sys_read(evfd_chunk_done, &v, 8);
       }
-      if (diag_queue_on) {
+      if (diag.enabled) {
         struct timespec _g;
         clock_gettime(CLOCK_MONOTONIC, &_g);
-        diag_gated_ns +=
+        diag.gated_ns +=
             ((uint64_t)_g.tv_sec * 1000000000ULL + _g.tv_nsec) - gate0_ns;
       }
     }
@@ -3261,33 +3387,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
      * (head/tail as relaxed atomics), materialized bytes (total_moved),
      * backlog-gated wait time, current target/limit. No scheduling or
      * dataflow state is touched. */
-    if (diag_queue_on) {
-      struct timespec _s;
-      clock_gettime(CLOCK_MONOTONIC, &_s);
-      uint64_t now_ms = (uint64_t)_s.tv_sec * 1000 + _s.tv_nsec / 1000000;
-      uint64_t elapsed_ms = now_ms - diag_start_ns / 1000000;
-      if (elapsed_ms >= diag_next_sample_ms) {
-        diag_next_sample_ms = elapsed_ms + 20;
-        char diag_buf[1024];
-        int diag_len = snprintf(diag_buf, sizeof(diag_buf),
-          "STAGE0_DIAG t_ms=%llu moved=%llu major=%llu tgt=%d lim=%u "
-          "gated_ms=%llu q=",
-          (unsigned long long)elapsed_ms, (unsigned long long)total_moved,
-          (unsigned long long)current_major, target_node,
-          current_buffer_limit,
-          (unsigned long long)(diag_gated_ns / 1000000));
-        for (int i = 0; i < num_nodes && diag_len < (int)sizeof(diag_buf) - 40; i++) {
-          diag_len += snprintf(diag_buf + diag_len,
-              sizeof(diag_buf) - diag_len, "n%d:%llu,%llu ",
-              i, (unsigned long long)atomic_load_relaxed(&state[i].chunk_queue_head),
-              (unsigned long long)atomic_load_relaxed(&state[i].chunk_queue_tail));
-        }
-        if (diag_len < (int)sizeof(diag_buf)) {
-          diag_len += snprintf(diag_buf + diag_len, sizeof(diag_buf) - diag_len, "\n");
-        }
-        sys_write(2, diag_buf, diag_len);
-      }
-    }
+    stage0_diag_emit(&diag, 0, "ingest", total_moved, current_major,
+                     target_node, current_buffer_limit, num_nodes);
 
     /* F-NUMA1: meta-ring lifetime bound. The queue caps above bound
      * per-node UNCLAIMED depth, but a node stalled with
@@ -3673,16 +3774,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
 
 ingest_done:
-  /* STAGE 0 DIAG: final materialized-bytes accounting (observational). */
-  if (diag_queue_on) {
-    char fin_buf[256];
-    int fin_len = snprintf(fin_buf, sizeof(fin_buf),
-        "STAGE0_FINAL moved=%llu major=%llu gated_ms=%llu\n",
-        (unsigned long long)total_moved,
-        (unsigned long long)current_major,
-        (unsigned long long)(diag_gated_ns / 1000000));
-    sys_write(2, fin_buf, fin_len);
-  }
+  /* STAGE 0 DIAG: final accounting (observational). */
+  stage0_diag_emit(&diag, 1, "ingest", total_moved, current_major,
+                   last_target, current_buffer_limit, num_nodes);
   if (bounce_buf)
     munmap(bounce_buf, chunk_size);
   if (numa_enabled)
@@ -4370,6 +4464,13 @@ uint64_t chunk_bounds[16] = {0};
   bool experienced_stall = false;
   uint64_t pending_lines = 0;
 
+  /* STAGE 0 DIAG (observational): UMA scanner sampler. The NUMA path's
+   * ingest process owns its own sampler; this one covers the UMA
+   * scanner so a single-file/UMA case still yields queue telemetry.
+   * Disabled unless FORKRUN_DIAG_QUEUE is set and not "0". */
+  struct stage0_diag_state diag;
+  stage0_diag_init(&diag);
+
   // -----------------------------------------------------------------
 
   if (is_resume) {
@@ -4467,6 +4568,10 @@ uint64_t chunk_bounds[16] = {0};
     bool hit_real_eof       = false;
 
     while (pre_lines < target_pre && (pre_offset - buf_base_offset) < target_pre_bytes) {
+        // STAGE 0 DIAG: UMA scanner pre-flight sample (observational).
+        if (!is_numa)
+          stage0_diag_emit(&diag, 0, "scan", pre_lines, 0, (int)W,
+                           (unsigned)L, num_nodes);
         // EMERGENCY BYPASS FIX: Prevent infinite hang if downstream pipe breaks
         if (atomic_load_relaxed(&state[0].emergency_abort)) {
             goto unified_scanner_eof;
@@ -4684,6 +4789,11 @@ uint64_t chunk_bounds[16] = {0};
     if (atomic_load_relaxed(&state[0].emergency_abort)) {
         goto unified_scanner_eof;
     }
+
+    /* STAGE 0 DIAG: UMA scanner main-loop sample (observational). */
+    if (!is_numa)
+      stage0_diag_emit(&diag, 0, "scan", total_scanned, local_scan_idx,
+                       (int)W, (unsigned)L, num_nodes);
 
     uint64_t chunk_end = ~(uint64_t)0;
     uint64_t current_p_offset;
@@ -5959,6 +6069,11 @@ unified_scanner_eof:
   // =========================================================
   // 3. FINALIZATION (NUMA Finish vs UMA Tail Re-batching)
   // =========================================================
+
+  /* STAGE 0 DIAG: UMA scanner final sample (observational). */
+  if (!is_numa)
+    stage0_diag_emit(&diag, 1, "scan", total_scanned, local_scan_idx,
+                     (int)W, (unsigned)L, num_nodes);
 
   if (fd_spawn >= 0) {
     uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);

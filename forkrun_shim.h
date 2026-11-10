@@ -8,7 +8,7 @@
  *
  * Scope: declarations, argument types, return types only.
  * No semantic contracts (see test_invariant_gate.py §3/§6/§9).
- * Extern entries are the dlsym-visible ABI surface (65);
+ * Extern entries are the dlsym-visible ABI surface (66);
  * static entries are internal (17, listed with linkage in
  * shim_signatures.json, omitted here).
  *
@@ -79,6 +79,7 @@ int fr_py_scan_with_spawn(int fd, int spawn_w);
 int fr_py_set_order_pipe(int fd);
 int fr_py_set_output_fd(int fd);
 int fr_py_set_resume_state(uint64_t horizon, uint64_t stdout_bytes, const struct FrPyInterval *jagged, uint32_t jagged_count);
+int fr_py_set_task_name(const char *name);
 int fr_py_sigint_defer_begin(void);
 int fr_py_sigint_defer_cancel(void);
 int fr_py_sigint_defer_end(void);
