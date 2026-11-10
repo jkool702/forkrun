@@ -74,7 +74,8 @@ class TestIngestSourceSetup(unittest.TestCase):
             # Inner helpers legitimately read an ALREADY-prepared fd
             # handed down by a caller that did prepare it. They are
             # listed explicitly so adding one is a deliberate act.
-            PREPARED_BY_CALLER = {"_spill_to_memfd", "_pump"}
+            PREPARED_BY_CALLER = {"_spill_to_memfd", "_spill_to_memfd_inner",
+                                  "_pump"}
             if ("_prepare_ingest_source" not in body
                     and "_ingest_copy_loop" not in body
                     and "spill_quantum" not in fn.name

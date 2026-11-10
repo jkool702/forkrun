@@ -75,13 +75,19 @@ if [ -z "$OUT" ]; then
   OUT="stage0/runs/$CAMPAIGN_ID"
 fi
 
-# Immutability: never mix this invocation's artifacts with a previous one.
+# Immutability: never mix this invocation's artifacts with a previous
+# one. The ONE permitted pre-existing artifact is the env-before
+# manifest the one-command driver captures before this script starts
+# (it is campaign identity evidence, not a trial result).
 if [ -e "$OUT" ]; then
   if [ ! -d "$OUT" ]; then
     echo "campaign: output path exists and is not a directory: $OUT" >&2
     exit 2
   fi
-  if [ -n "$(find "$OUT" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  if [ -n "$(find "$OUT" -mindepth 1 -maxdepth 1 ! -name env \
+             -print -quit)" ] || \
+     { [ -d "$OUT/env" ] && [ -n "$(find "$OUT/env" -mindepth 1 \
+             -maxdepth 1 ! -name env-before.json -print -quit)" ]; }; then
     echo "campaign: output directory is not empty: $OUT" >&2
     echo "campaign: campaigns are immutable; choose a new --out/--campaign-id" >&2
     exit 2

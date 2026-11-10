@@ -171,19 +171,29 @@ def _verify_group_gone(pgid, label):
 
 
 def _parse_diag(stderr):
-    """Count STAGE0_DIAG / STAGE0_FINAL lines and their src= values."""
+    """Count STAGE0_DIAG / STAGE0_FINAL lines and their src= values.
+
+    Also extracts the DIRECT ingest-thread CPU records:
+      - STAGE0_FINAL src=ingest cpu_ns=... (C NUMA ingest)
+      - STAGE0_INGEST_CPU src=... cpu_ns=... wall_ns=... (Python spill)
+    The comm-delta sampler is a cross-check, not the authority.
+    """
     samples = 0
     finals = 0
     by_src = {}
     queue_lines = []
+    direct_cpu_ns = {}
+    direct_wall_ns = {}
+    final_cpu_ns = {}
+    final_t_ms = {}
     for line in (stderr or "").splitlines():
         if not line.startswith("STAGE0_"):
             continue
-        src = None
-        for token in line.split():
-            if token.startswith("src="):
-                src = token[4:]
-                break
+        fields = {}
+        for token in line.split()[1:]:
+            key, _, value = token.partition("=")
+            fields[key] = value
+        src = fields.get("src")
         if line.startswith("STAGE0_DIAG "):
             samples += 1
             entry = by_src.setdefault(src or "?", {"samples": 0,
@@ -195,12 +205,33 @@ def _parse_diag(stderr):
             entry = by_src.setdefault(src or "?", {"samples": 0,
                                                    "finals": 0})
             entry["finals"] += 1
+            try:
+                final_cpu_ns[src or "?"] = int(fields.get("cpu_ns", 0))
+            except ValueError:
+                pass
+            try:
+                final_t_ms[src or "?"] = int(fields.get("t_ms", 0))
+            except ValueError:
+                pass
+        elif line.startswith("STAGE0_INGEST_CPU "):
+            try:
+                cpu = int(fields.get("cpu_ns", 0))
+                wall = int(fields.get("wall_ns", 0))
+            except ValueError:
+                continue
+            phase = src or "?"
+            direct_cpu_ns[phase] = direct_cpu_ns.get(phase, 0) + cpu
+            direct_wall_ns[phase] = direct_wall_ns.get(phase, 0) + wall
     return {
         "samples": samples,
         "finals": finals,
         "by_src": by_src,
         "queue_present": samples >= 1 and finals >= 1,
         "sample_lines": queue_lines,
+        "direct_ingest_cpu_ns": direct_cpu_ns,
+        "direct_ingest_wall_ns": direct_wall_ns,
+        "final_cpu_ns": final_cpu_ns,
+        "final_t_ms": final_t_ms,
     }
 
 
@@ -448,6 +479,7 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     # also includes the harness's post-run exactness accounting.
     manifest["map_s"] = (manifest.get("child_report") or {}).get(
         "elapsed_s")
+    diag = _parse_diag(stderr)
     cpu_peak_total, per_pid = cpu_peak
     cpu_total = sum(comm_cpu.values()) if comm_cpu else None
     manifest["consumer_tree_cpu_sec"] = (
@@ -478,6 +510,39 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
         "the NUMA C ingest names itself. No fr-ingest CPU => null. "
         "The basis is the child's forkrun.map() timer, not the outer "
         "process wall (which includes post-run exactness accounting).")
+    # DIRECT ingest CPU: authoritative when available. The comm-delta
+    # figure above remains as a cross-check because it can miss a short
+    # rename or assign a sample's CPU to the wrong name.
+    direct_ns = sum(diag["direct_ingest_cpu_ns"].values())
+    direct_source = None
+    direct_phase_s = None
+    if direct_ns > 0:
+        direct_source = "python-spill (CLOCK_THREAD_CPUTIME_ID)"
+        direct_phase_s = sum(diag["direct_ingest_wall_ns"].values()) / 1e9
+    else:
+        c_ns = diag["final_cpu_ns"].get("ingest", 0)
+        if c_ns > 0:
+            direct_ns = c_ns
+            direct_source = "c-ingest-final (CLOCK_THREAD_CPUTIME_ID)"
+            direct_phase_s = diag["final_t_ms"].get("ingest", 0) / 1000.0
+    manifest["ingest_cpu_direct_sec"] = (
+        round(direct_ns / 1e9, 6) if direct_ns > 0 else None)
+    manifest["ingest_cpu_direct_source"] = direct_source
+    manifest["ingest_phase_s"] = direct_phase_s
+    manifest["ingest_cpu_direct_basis_cores"] = (
+        (direct_ns / 1e9) / ingest_basis_s
+        if direct_ns > 0 and ingest_basis_s > 0 else None)
+    # The direct record covers the ingest PHASE, not the whole map, so
+    # its phase duration is the honest denominator for "is this task
+    # using about one core while it ingests?". The map-basis figure
+    # above is retained as a run-level cross-check.
+    manifest["ingest_cpu_phase_cores"] = (
+        (direct_ns / 1e9) / direct_phase_s
+        if direct_ns > 0 and direct_phase_s and direct_phase_s > 0
+        else None)
+    manifest["ingest_cpu_attribution"] = (
+        "direct" if direct_ns > 0 else
+        ("comm-sampled" if ingest_found else "unavailable"))
     manifest["cpu_per_core_basis"] = (cpu_total / dt) if cpu_total else None
     producer_peak_total, producer_by_pid = producer_peak
     producer_total = (sum(producer_comm_cpu.values())
@@ -503,7 +568,6 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     if cpu_total is None:
         manifest["cpu_note"] = ("sampler incomplete (child exited before "
                                 "first sample; rerun with a bigger corpus)")
-    diag = _parse_diag(stderr)
     manifest["diagnostics"] = {
         "samples": diag["samples"],
         "finals": diag["finals"],

@@ -3037,21 +3037,30 @@ static int ring_destroy_main(int argc, char **argv) {
  *
  * Wire format (whitespace-separated; node lists are ';'-separated):
  *   STAGE0_DIAG src=ingest|scan t_ms=<ms> moved=<bytes|lines> major=<n>
- *               tgt=<n> lim=<n> gated_ms=<ms>
+ *               tgt=<n> lim=<n> gated_ms=<ms> cpu_ns=<thread cpu>
  *               q=n0:<head>,<tail>;n1:...      (ingest chunks)
+ *               i=n0:<indexer_waiters>;n1:...  (indexer waits for chunk)
  *               b=n0:<read>,<write>;n1:...     (worker batch queue)
  *               c=n0:<claims>;n1:...           (dequeue progress)
  *               a=n0:<waiters>,<workers>;n1:... (idle attribution)
  *
  * `moved` is materialized bytes for src=ingest and scanned lines for
- * src=scan. `b` is the queue workers claim from: read_idx (claimed) and
+ * src=scan. `q` is the ingest->indexer chunk queue: head (consumed by
+ * the indexer) and tail (published by ingest). `i` is the engine's
+ * indexer_waiter gauge: the indexer increments it while it is blocked
+ * waiting for the next chunk and decrements it after the wait, so
+ * "q empty AND i > 0" is direct ingest->indexer starvation evidence.
+ * `b` is the queue workers claim from: read_idx (claimed) and
  * write_idx (scanner-published). `c` is total_lines_consumed, which the
  * claim path increments once per claimed batch — the dequeue-progress
  * counter needed to estimate consumption during a continuously
  * non-empty interval. `a` exposes the engine's own waiter gauge so the
  * report can distinguish "workers idle waiting for work" from "queue
- * occupancy alone". A trailing `trunc=<n>` appears when the topology
- * exceeds the sampler's per-group node cap (64).
+ * occupancy alone". `cpu_ns` is CLOCK_THREAD_CPUTIME_ID for the task
+ * that emitted the record: on src=ingest FINAL it is a DIRECT ingest
+ * CPU measurement, not a comm-sampled estimate. A trailing `trunc=<n>`
+ * appears when the topology exceeds the sampler's per-group node cap
+ * (64).
  * =========================================================================== */
 #define STAGE0_DIAG_MAX_NODES 64
 
@@ -3098,12 +3107,15 @@ static int stage0_diag_append_group(char *buf, int len, size_t cap,
       case 2: /* dequeue progress: one increment per worker claim */
         a = atomic_load_relaxed(&state[i].total_lines_consumed);
         break;
-      default: /* idle attribution: waiters, live workers */
+      case 3: /* idle attribution: waiters, live workers */
         a = atomic_load_relaxed(&state[i].active_waiters);
         b = atomic_load_relaxed(&state[i].active_workers);
         break;
+      default: /* indexer waiting for the ingest chunk queue */
+        a = atomic_load_relaxed(&state[i].indexer_waiters);
+        break;
     }
-    if (kind == 2)
+    if (kind == 2 || kind == 4)
       len += snprintf(buf + len, cap - (size_t)len, "n%d:%llu",
                       i, (unsigned long long)a);
     else
@@ -3128,14 +3140,21 @@ static void stage0_diag_emit(struct stage0_diag_state *d, int final,
     return;
   if (!final)
     d->next_sample_ms = elapsed_ms + 20;
+  struct timespec cts;
+  uint64_t cpu_ns = 0;
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cts) == 0)
+    cpu_ns = (uint64_t)cts.tv_sec * 1000000000ULL + (uint64_t)cts.tv_nsec;
   char buf[8192];
   int len = snprintf(buf, sizeof(buf),
-      "%s src=%s t_ms=%llu moved=%llu major=%llu tgt=%d lim=%u gated_ms=%llu",
+      "%s src=%s t_ms=%llu moved=%llu major=%llu tgt=%d lim=%u gated_ms=%llu"
+      " cpu_ns=%llu",
       final ? "STAGE0_FINAL" : "STAGE0_DIAG",
       src, (unsigned long long)elapsed_ms, (unsigned long long)moved,
       (unsigned long long)major, tgt, lim,
-      (unsigned long long)(d->gated_ns / 1000000ULL));
+      (unsigned long long)(d->gated_ns / 1000000ULL),
+      (unsigned long long)cpu_ns);
   len = stage0_diag_append_group(buf, len, sizeof(buf), "q", 0, num_nodes);
+  len = stage0_diag_append_group(buf, len, sizeof(buf), "i", 4, num_nodes);
   len = stage0_diag_append_group(buf, len, sizeof(buf), "b", 1, num_nodes);
   len = stage0_diag_append_group(buf, len, sizeof(buf), "c", 2, num_nodes);
   len = stage0_diag_append_group(buf, len, sizeof(buf), "a", 3, num_nodes);

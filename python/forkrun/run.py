@@ -3775,19 +3775,45 @@ def _task_name_set(name):
         return -1
 
 
+def _diag_ingest_cpu_emit(phase, cpu_ns, wall_ns):
+    """STAGE 0 diagnostic: direct ingest-thread CPU, not a comm sample.
+
+    `run_case.py` accumulates per-thread CPU from 20 ms `/proc` samples
+    and keys each delta by the task's comm at the later sample, so a
+    short spill can be missed or misattributed. This record is the
+    authoritative direct measurement for the UMA spill: it is the
+    calling thread's CLOCK_THREAD_CPUTIME_ID delta around the copy.
+    Emitted only when the campaign's queue-telemetry gate is on, and
+    never allowed to fail the copy.
+    """
+    if os.environ.get("FORKRUN_DIAG_QUEUE", "0") == "0":
+        return
+    try:
+        os.write(2, ("STAGE0_INGEST_CPU src=%s cpu_ns=%d wall_ns=%d\n"
+                     % (phase, cpu_ns, wall_ns)).encode("ascii", "replace"))
+    except OSError:
+        pass
+
+
 def _spill_to_memfd(src_fd) -> tuple[int, int]:
     """Name the UMA spill `fr-ingest` for the duration of the copy.
 
     Thin wrapper: the copy itself is _spill_to_memfd_inner (the single
     authoritative spill implementation). The name is restored in a
     finally so CPU spent after the spill is not misattributed to ingest.
+    The direct thread-CPU record is the same phase's authoritative CPU
+    measurement (the harness's comm sampling is only a cross-check).
     """
     previous = _task_name_current()
     _task_name_set("fr-ingest")
+    cpu0 = _time.thread_time_ns()
+    wall0 = _time.monotonic_ns()
     try:
         return _spill_to_memfd_inner(src_fd)
     finally:
         _task_name_set(previous)
+        _diag_ingest_cpu_emit("uma-spill", _time.thread_time_ns() - cpu0,
+                              _time.monotonic_ns() - wall0)
 
 
 def _spill_to_memfd_inner(src_fd) -> tuple[int, int]:
@@ -4314,31 +4340,38 @@ def _ingest_copy_loop(src_fd, mem_fd, chunk=_CHUNK, lib=None):
     or failing signal just leaves the pre-flight on its 50 ms timeout.
     """
     total = 0
-    if lib is not None:
-        try:
-            lib.fr_py_set_task_name(b"fr-ingest")
-        except Exception:
-            pass  # observational only; never fail the copy over it
-    while True:
-        try:
-            buf = os.read(src_fd, chunk)
-        except OSError as exc:
-            raise RuntimeError("failed reading source: %s" % (exc,))
-        if not buf:
-            return total
-        view = memoryview(buf)
-        while view:
-            try:
-                n = os.pwrite(mem_fd, view, total)
-            except OSError as exc:
-                raise RuntimeError("failed writing ingress: %s" % (exc,))
-            view = view[n:]
-            total += n
+    cpu0 = _time.thread_time_ns()
+    wall0 = _time.monotonic_ns()
+    try:
         if lib is not None:
             try:
-                lib.fr_py_ingest_data_post()
+                lib.fr_py_set_task_name(b"fr-ingest")
             except Exception:
-                pass  # advisory only; never fail the copy over it
+                pass  # observational only; never fail the copy over it
+        while True:
+            try:
+                buf = os.read(src_fd, chunk)
+            except OSError as exc:
+                raise RuntimeError("failed reading source: %s" % (exc,))
+            if not buf:
+                return total
+            view = memoryview(buf)
+            while view:
+                try:
+                    n = os.pwrite(mem_fd, view, total)
+                except OSError as exc:
+                    raise RuntimeError("failed writing ingress: %s" % (exc,))
+                view = view[n:]
+                total += n
+            if lib is not None:
+                try:
+                    lib.fr_py_ingest_data_post()
+                except Exception:
+                    pass  # advisory only; never fail the copy over it
+    finally:
+        _diag_ingest_cpu_emit("uma-stream-spill",
+                              _time.thread_time_ns() - cpu0,
+                              _time.monotonic_ns() - wall0)
 
 
 def _iter_records(lib, fd, _chunk=_CHUNK, views=False):

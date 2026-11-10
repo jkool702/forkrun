@@ -9,11 +9,14 @@ between cells). Per cell:
   D  pinned to node X + MPOL_BIND to node Y       (conflicting controls)
 
 Node argument semantics (WO-STAGE0-REHEARSAL-CORRECTIONS-3 §2.3):
-  --node-x = the AFFINITY node: B and D pin a CPU of this node.
-  --node-y = the POLICY node:   C and D bind MPOL_BIND to this node.
+  --node-x = the AFFINITY node: B and D pin a CPU of this node. It must
+             have at least one CPU allowed by the process cpuset.
+  --node-y = the POLICY node:   C and D bind MPOL_BIND to this node. It
+             only needs online memory: on a real host a policy-only node
+             may legitimately have no CPU in this process's cpuset.
   X and Y must differ. When omitted, the lowest-numbered distinct pair
-  of online memory nodes that each have a CPU allowed by the process
-  cpuset is used and recorded.
+  of online memory nodes is used, with X required to have an allowed CPU
+  and Y only required to be online with memory.
 
 Every cell records the symbolic AND numeric requested policy mode, the
 effective mode/mask from get_mempolicy(), sched_getaffinity(), the CPU
@@ -27,6 +30,9 @@ Two materialization forms are measured separately:
   write-path : write() into the memfd (production materializer shape),
                then MAP_SHARED + read-touch every page, then move_pages
                + numa_maps + mincore. Raw per-page statuses are kept.
+               Stability is checked over the FULL measured range: every
+               page's status after the read-touch must equal its status
+               before it, and the unstable count is recorded.
 
 Usage: ablation_2x2.py [--cells A,B,C,D] [--forms map-fault,write-path]
        [--size-bytes N] [--node-x X] [--node-y Y] [--json PATH]
@@ -151,48 +157,63 @@ def _allowed_cpus():
         return list(range(os.cpu_count() or 0))
 
 
-def _validate_node(node, allowed, role):
+def _validate_node(node, role, require_allowed_cpu):
     if node not in _online_nodes():
         raise SystemExit("node %s=%d is not online (online=%s)" % (
             role, node, _online_nodes()))
     if _node_mem_total_kb(node) <= 0:
         raise SystemExit("node %s=%d has no memory" % (role, node))
     cpus = _node_cpus(node)
-    if not any(c in allowed for c in cpus):
-        raise SystemExit(
-            "node %s=%d has no CPU in the process cpuset (node cpus=%s, "
-            "allowed=%s)" % (role, node, cpus[:8], allowed[:8]))
+    if require_allowed_cpu:
+        allowed = _allowed_cpus()
+        if not any(c in allowed for c in cpus):
+            raise SystemExit(
+                "node %s=%d has no CPU in the process cpuset (node cpus=%s, "
+                "allowed=%s)" % (role, node, cpus[:8], allowed[:8]))
     return cpus
 
 
 def _select_nodes(node_x, node_y):
-    """Resolve and validate (affinity node X, policy node Y)."""
+    """Resolve and validate (affinity node X, policy node Y).
+
+    X must have an allowed CPU (B/D pin to it). Y is a POLICY node and
+    only needs online memory: MPOL_BIND places pages there without
+    requiring a CPU there, and on a real host the cpuset may exclude
+    node Y's CPUs entirely.
+    """
     allowed = _allowed_cpus()
-    usable = [n for n in _online_nodes()
-              if _node_mem_total_kb(n) > 0
-              and any(c in allowed for c in _node_cpus(n))]
-    if len(usable) < 2:
+    memory_nodes = [n for n in _online_nodes()
+                    if _node_mem_total_kb(n) > 0]
+    affinity_nodes = [n for n in memory_nodes
+                      if any(c in allowed for c in _node_cpus(n))]
+    if not affinity_nodes:
         raise SystemExit(
-            "need at least two usable memory nodes with allowed CPUs; "
-            "usable=%s allowed=%s" % (usable, allowed[:8]))
+            "need at least one online memory node with a CPU in the "
+            "process cpuset for the affinity arm; online memory nodes=%s "
+            "allowed=%s" % (memory_nodes, allowed[:8]))
     if node_x is None and node_y is None:
-        x, y = usable[0], usable[1]
+        x = affinity_nodes[0]
+        y = next((n for n in memory_nodes if n != x), None)
+        if y is None:
+            raise SystemExit("need a second online memory node distinct "
+                             "from x=%d" % x)
     elif node_x is None:
         y = int(node_y)
-        _validate_node(y, allowed, "y")
-        x = next((n for n in usable if n != y), None)
+        _validate_node(y, "y", require_allowed_cpu=False)
+        x = next((n for n in affinity_nodes if n != y), None)
         if x is None:
-            raise SystemExit("no usable affinity node distinct from y=%d" % y)
+            raise SystemExit("no affinity node with an allowed CPU distinct "
+                             "from y=%d" % y)
     elif node_y is None:
         x = int(node_x)
-        _validate_node(x, allowed, "x")
-        y = next((n for n in usable if n != x), None)
+        _validate_node(x, "x", require_allowed_cpu=True)
+        y = next((n for n in memory_nodes if n != x), None)
         if y is None:
-            raise SystemExit("no usable policy node distinct from x=%d" % x)
+            raise SystemExit("no online memory node distinct from x=%d" % x)
     else:
         x, y = int(node_x), int(node_y)
-        _validate_node(x, allowed, "x")
-        _validate_node(y, allowed, "y")
+        _validate_node(x, "x", require_allowed_cpu=True)
+        _validate_node(y, "y", require_allowed_cpu=False)
     if x == y:
         raise SystemExit("node X (%d) must differ from node Y (%d)" % (x, y))
     return {
@@ -430,6 +451,7 @@ def _run_one_cell(cell, form, size_bytes, node_x, node_y, pagesize):
 
     try:
         cpu_at_touch = None
+        read_touch_statuses = None
         if form == "map-fault":
             mm = _mmap.mmap(fd, size_bytes, flags=_mmap.MAP_SHARED)
             addr0 = ctypes.addressof(ctypes.c_char.from_buffer(mm, 0))
@@ -460,14 +482,20 @@ def _run_one_cell(cell, form, size_bytes, node_x, node_y, pagesize):
             addrs = [addr0 + i * pagesize for i in range(npages)]
             numamap_pre = _numamap_counts(os.getpid(), name)
             move_pre = _query_nodes(addrs)
-            # Touch page 0 alone, then check it again after the rest of
-            # the range is touched: this makes "read-touch did not move
-            # the folio" an observed property of the measurement rather
-            # than an assumption.
-            _touch_read(addrs[0])
-            first_after_first_touch = _query_nodes([addrs[0]])
-            for addr in addrs[1:]:
-                _touch_read(addr)  # establish PTEs, do not modify data
+            # Record each page's placement immediately after its own first
+            # read-touch, in batches, then re-query EVERY page after the
+            # full range has been read-touched. A difference means the
+            # rest of the range's read-touch moved that page. (Querying
+            # before the first touch is not valid: an un-faulted page has
+            # no observable placement yet, so it would report -ENOENT and
+            # every page would look "unstable" for the wrong reason.)
+            read_touch_statuses = []
+            for start in range(0, npages, 64):
+                batch = addrs[start:start + 64]
+                for addr in batch:
+                    _touch_read(addr)  # establish PTEs, do not modify data
+                read_touch_statuses.extend(
+                    _query_nodes(batch)["statuses"])
             touched = npages
             touch_kind = "read"
         else:
@@ -481,12 +509,18 @@ def _run_one_cell(cell, form, size_bytes, node_x, node_y, pagesize):
         changed = (bool(numamap_pre) and bool(numamap_post)
                    and numamap_pre != numamap_post)
         if form == "write-path":
-            first_after_all = move_post["statuses"][0]
-            first_status = first_after_first_touch["statuses"][0]
-            read_touch_stable = (first_status == first_after_all)
+            # Full-range stability: every page's status recorded just
+            # after its first read-touch is compared with its status
+            # after the whole range was read-touched.
+            unstable = sum(
+                1 for before, after in zip(read_touch_statuses,
+                                           move_post["statuses"])
+                if before != after)
+            read_touch_stable = (unstable == 0)
         else:
-            first_after_first_touch = None
+            read_touch_statuses = None
             read_touch_stable = None
+            unstable = None
         mm.close()
     finally:
         os.close(fd)
@@ -514,8 +548,13 @@ def _run_one_cell(cell, form, size_bytes, node_x, node_y, pagesize):
         "numamap_pre": numamap_pre,
         "numamap_post": numamap_post,
         "numamap_changed_by_touch": changed,
-        "first_page_after_first_touch": first_after_first_touch,
+        "first_page_after_first_touch": (
+            read_touch_statuses[0] if read_touch_statuses else None),
+        "first_page_after_full_touch": move_post["statuses"][0],
+        "read_touch_statuses_after_first_touch": read_touch_statuses,
         "read_touch_stable": read_touch_stable,
+        "read_touch_unstable_pages": unstable,
+        "read_touch_range_pages": npages if form == "write-path" else None,
         "touch": {"kind": touch_kind, "pages_touched": touched},
         "object_measured": (
             "destination memfd; explicit one-byte write faults through a "

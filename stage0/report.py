@@ -75,6 +75,81 @@ def _resolve(base, rel):
         os.path.join(base, rel))
 
 
+def _get(doc, *path):
+    cur = doc
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _env_topology_map(env):
+    """Normalized node -> cpulist map for drift comparison."""
+    nodes = _get(env, "cpu_topology", "nodes") or {}
+    out = {}
+    if isinstance(nodes, dict):
+        for name, value in nodes.items():
+            if isinstance(value, dict):
+                out[name] = value.get("cpulist")
+            else:
+                out[name] = value
+    return out
+
+
+def _env_cpu_map(env):
+    """Normalized CPU -> (node, core, socket) map for drift comparison."""
+    rows = _get(env, "cpu_topology", "cpus") or []
+    out = {}
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict) or row.get("cpu") is None:
+                continue
+            out[str(row["cpu"])] = (row.get("node"), row.get("core"),
+                                    row.get("socket"))
+    return out
+
+
+def _env_drift(before, after):
+    """Fields whose change makes direct before/after comparison invalid."""
+    drift = []
+    fields = [
+        ("git", "head_sha"),
+        ("git", "branch"),
+        ("kernel", "release"),
+        ("kernel", "version"),
+        ("kernel", "fake_numa"),
+        ("kernel", "fake_numa_spec"),
+        ("kernel", "cmdline"),
+        ("cpu_extra", "governors"),
+        ("cpu_extra", "smt"),
+        ("cpu_extra", "kernel_config"),
+        ("thp", "shmem_enabled"),
+        ("thp", "enabled"),
+        ("thp", "per_size"),
+        ("cgroup", "cpuset_cpus"),
+        ("cgroup", "memory_max"),
+        ("cgroup", "cpu_max"),
+        ("build_hashes",),
+        ("process", "affinity"),
+        ("python", "version"),
+    ]
+    for path in fields:
+        a = _get(before, *path)
+        b = _get(after, *path)
+        if a != b:
+            drift.append(("%s" % ".".join(path), a, b))
+    a = _env_topology_map(before)
+    b = _env_topology_map(after)
+    if a != b:
+        drift.append(("cpu_topology.nodes.cpulist", a, b))
+    a = _env_cpu_map(before)
+    b = _env_cpu_map(after)
+    if a != b:
+        drift.append(("cpu_topology.cpus", a, b))
+    return drift
+
+
 def load_campaign(path):
     """Load and STRICTLY validate one campaign. Raises CampaignError."""
     problems = []
@@ -88,6 +163,11 @@ def load_campaign(path):
     campaign_id = doc.get("campaign_id")
     if not campaign_id:
         problems.append("campaign: missing campaign_id")
+    if doc.get("forkrun_diag_queue") != "1":
+        problems.append(
+            "campaign: FORKRUN_DIAG_QUEUE was %r; per-node queue telemetry "
+            "is required evidence and the driver must force it to 1"
+            % (doc.get("forkrun_diag_queue"),))
     source_sha = doc.get("source_sha")
     trials_requested = doc.get("trials_requested")
     if not isinstance(trials_requested, int) or trials_requested < 1:
@@ -189,30 +269,36 @@ def load_campaign(path):
 
     env_before = None
     env_after = None
+    if not doc.get("env_before"):
+        problems.append("campaign: missing env_before reference")
+    if not doc.get("env_after"):
+        problems.append("campaign: missing env_after reference")
     if doc.get("env_before"):
         env_before = _read_json(_resolve(campaign_dir, doc["env_before"]),
                                 "env-before", problems)
     if doc.get("env_after"):
         env_after = _read_json(_resolve(campaign_dir, doc["env_after"]),
                                "env-after", problems)
-    if env_before is not None:
-        sha = (env_before.get("git") or {}).get("head_sha")
+    for label, env in (("env-before", env_before), ("env-after", env_after)):
+        if env is None:
+            continue
+        git = env.get("git") or {}
+        if git.get("dirty") is not False:
+            problems.append(
+                "campaign: %s was captured from a %s worktree (dirty=%r); "
+                "a SHA alone does not identify dirty source changes"
+                % (label, "DIRTY" if git.get("dirty") else "non-clean",
+                   git.get("dirty")))
+        sha = git.get("head_sha")
         if source_sha and sha and sha != source_sha:
-            problems.append("campaign: env-before git %s != source_sha %s"
-                            % (sha, source_sha))
+            problems.append("campaign: %s git %s != source_sha %s"
+                            % (label, sha, source_sha))
     if env_after is not None and env_before is not None:
-        drift = []
-        for key in (("git", "head_sha"), ("kernel", "release"),
-                    ("kernel", "fake_numa_spec"), ("thp", "shmem_enabled")):
-            a = env_before
-            b = env_after
-            for part in key:
-                a = a.get(part) if isinstance(a, dict) else None
-                b = b.get(part) if isinstance(b, dict) else None
-            if a != b:
-                drift.append("%s: %r -> %r" % (".".join(key), a, b))
+        drift = _env_drift(env_before, env_after)
         if drift:
-            problems.append("campaign: environment drift %s" % drift)
+            problems.append(
+                "campaign: environment drift between before/after: %s"
+                % "; ".join("%s: %r -> %r" % item for item in drift))
 
     doc["_campaign_dir"] = campaign_dir
     doc["_cases"] = cases
@@ -308,7 +394,7 @@ def _diag_records(text):
         rec = {"kind": parts[0]}
         for token in parts[1:]:
             key, _, value = token.partition("=")
-            if key in ("q", "b", "c", "a"):
+            if key in ("q", "i", "b", "c", "a"):
                 rec[key] = _parse_group(value)
             else:
                 rec[key] = value
@@ -325,131 +411,178 @@ def _depth(group, node, pair=True):
     return value[0]
 
 
-def _trial_queue_stats(records):
-    samples = [r for r in records if r["kind"] == "STAGE0_DIAG"]
-    finals = [r for r in records if r["kind"] == "STAGE0_FINAL"]
-    final = None
-    if finals:
-        # One sampler owns a trial (NUMA ingest or UMA scanner), so a
-        # normal trial has exactly one FINAL. If a source ever emits
-        # more than one, use the latest timeline point; gated_ms is
-        # accumulated by the ingest source and must not be lost to a
-        # later zero-valued scan FINAL.
-        final = max(finals, key=lambda r: int(r.get("t_ms", 0)))
-        samples = samples + [final]
-    if not samples:
-        samples = finals
-    samples = sorted(samples, key=lambda r: int(r.get("t_ms", 0)))
+def _scalar(group, node):
+    value = group.get(node)
+    if not value:
+        return None
+    return value[0]
+
+
+def _delta(cur, prev):
+    """Return (delta, state); state is ok|missing|regressed.
+
+    A counter regression is NEVER silently converted to zero work: the
+    interval is excluded from the rate and counted explicitly.
+    """
+    if cur is None or prev is None:
+        return None, "missing"
+    if cur < prev:
+        return None, "regressed"
+    return cur - prev, "ok"
+
+
+def _batch_stats(records):
+    """Scanner-published -> worker-claimed batch queue, per node.
+
+    `b` is (read_idx, write_idx). Publication is the RAW write_idx
+    delta, claims are the RAW read_idx delta. Depth
+    (write_idx - read_idx) is used ONLY for occupancy. `c` is
+    total_lines_consumed and is a cross-check on the claim position.
+    """
+    samples = sorted(records, key=lambda r: int(r.get("t_ms", 0)))
     nodes = sorted({n for r in samples for n in (r.get("b") or {})})
-    result = {
+    out = {
         "samples": len(samples),
         "duration_s": 0.0,
-        "gated_ms": None,
         "nodes": {},
         "all_empty_fraction": None,
-        "longest_all_empty_ms": 0.0,
         "any_nonempty_fraction": None,
+        "longest_all_empty_ms": 0.0,
         "idle_waiter_fraction": None,
+        "idle_samples": 0,
+        "idle_waiter_samples": 0,
+        "published_batches_total": 0,
+        "claimed_batches_total": 0,
+        "claims_c_total": 0,
+        "supply_gap_batches_total": 0,
         "published_batches_per_s": None,
         "claimed_batches_per_s": None,
-        "srcs": sorted({r.get("src") for r in records
-                        if r.get("src") is not None}),
+        "claims_c_per_s": None,
+        "supply_gap_batches_per_s": None,
     }
-    gated_values = []
-    for rec in finals:
-        try:
-            gated_values.append(int(rec.get("gated_ms", 0)))
-        except (TypeError, ValueError):
-            pass
-    if gated_values:
-        result["gated_ms"] = max(gated_values)
+    empty_node = {
+        "samples": 0, "nonempty_fraction": None, "longest_empty_ms": None,
+        "published_batches_per_s": None, "claimed_batches_per_s": None,
+        "claimed_batches_per_s_nonempty": None,
+        "supply_gap_batches_per_s": None, "supply_gap_batches": None,
+        "common_interval_s": 0.0,
+        "consumption_intervals": 0, "consumption_interval_s": 0.0,
+        "endpoint_claims": 0,
+        "claim_crosscheck_mismatch_intervals": 0,
+        "counter_regressions": {},
+        "published_batches": 0, "claimed_batches": 0,
+        "claims_c_batches": 0,
+        "published_interval_s": 0.0, "claimed_interval_s": 0.0,
+    }
     if len(samples) < 2:
-        if nodes:
-            result["nodes"] = {n: {"samples": len(samples),
-                                   "nonempty_fraction": None,
-                                   "longest_empty_ms": None,
-                                   "claimed_batches_per_s_nonempty": None,
-                                   "consumption_intervals": 0}
-                               for n in nodes}
-        return result
-
+        out["nodes"] = {n: dict(empty_node, samples=len(samples))
+                        for n in nodes}
+        return out
     t0 = int(samples[0].get("t_ms", 0))
     t1 = int(samples[-1].get("t_ms", 0))
-    result["duration_s"] = max(0.0, (t1 - t0) / 1000.0)
-
-    per_node = {n: {"samples": 0, "nonempty": 0, "empty": 0,
-                    "longest_empty_ms": 0.0, "empty_start": None,
-                    "consume_time": 0.0, "consume_claims": 0.0,
-                    "intervals": 0, "published": 0.0, "pub_time": 0.0,
-                    "claimed": 0.0, "claim_time": 0.0}
-                for n in nodes}
+    out["duration_s"] = max(0.0, (t1 - t0) / 1000.0)
+    per = {n: {
+        "samples": 0, "nonempty": 0, "empty": 0,
+        "longest_empty_ms": 0.0, "empty_start": None,
+        "pub_count": 0, "pub_time": 0.0, "pub_regressions": 0,
+        "read_count": 0, "read_time": 0.0, "read_regressions": 0,
+        "c_count": 0, "c_time": 0.0, "c_regressions": 0,
+        "common_pub": 0, "common_read": 0, "common_c": 0,
+        "common_time": 0.0, "crosscheck_mismatch": 0,
+        "ep_time": 0.0, "ep_claims": 0, "ep_intervals": 0,
+        "idle_samples": 0, "idle_waiter_samples": 0,
+    } for n in nodes}
     all_empty = 0
     all_pairs = 0
     any_nonempty = 0
     all_empty_start = None
-    idle_waiter = 0
     idle_samples = 0
+    idle_waiter_samples = 0
 
     for prev, cur in zip(samples, samples[1:]):
         try:
-            dt = (int(cur.get("t_ms", 0)) - int(prev.get("t_ms", 0))) / 1000.0
+            t_prev = int(prev.get("t_ms", 0))
+            t_cur = int(cur.get("t_ms", 0))
         except (TypeError, ValueError):
             continue
+        dt = (t_cur - t_prev) / 1000.0
         if dt <= 0:
             continue
         all_pairs += 1
         depths = {}
         for node in nodes:
-            p = _depth(prev.get("b") or {}, node)
-            c = _depth(cur.get("b") or {}, node)
-            if p is None or c is None:
+            bp = (prev.get("b") or {}).get(node)
+            bc = (cur.get("b") or {}).get(node)
+            if not bp or not bc or len(bp) < 2 or len(bc) < 2:
                 continue
-            depths[node] = c
-            st = per_node[node]
+            st = per[node]
             st["samples"] += 1
-            if c > 0:
+            depth_p = bp[1] - bp[0]
+            depth_c = bc[1] - bc[0]
+            depths[node] = depth_c
+            if depth_c > 0:
                 st["nonempty"] += 1
                 st["empty_start"] = None
             else:
                 st["empty"] += 1
                 if st["empty_start"] is None:
-                    st["empty_start"] = int(prev.get("t_ms", 0))
+                    st["empty_start"] = t_prev
                 st["longest_empty_ms"] = max(
-                    st["longest_empty_ms"],
-                    int(cur.get("t_ms", 0)) - st["empty_start"])
-            # Publication and dequeue progress over the whole trial.
-            pw = _depth(prev.get("b") or {}, node)
-            cw = _depth(cur.get("b") or {}, node)
-            if pw is not None and cw is not None and cw >= pw:
-                st["published"] += cw - pw
+                    st["longest_empty_ms"], t_cur - st["empty_start"])
+            pub, pstate = _delta(bc[1], bp[1])
+            read, rstate = _delta(bc[0], bp[0])
+            if pub is not None:
+                st["pub_count"] += pub
                 st["pub_time"] += dt
-            pc = _depth(prev.get("c") or {}, node, pair=False)
-            cc = _depth(cur.get("c") or {}, node, pair=False)
-            if pc is not None and cc is not None and cc >= pc:
-                st["claimed"] += cc - pc
-                st["claim_time"] += dt
-            # Consumption while this node's batch queue is continuously
-            # non-empty (both endpoints non-empty).
-            if p > 0 and c > 0 and pc is not None and cc is not None \
-                    and cc >= pc:
-                st["consume_time"] += dt
-                st["consume_claims"] += cc - pc
-                st["intervals"] += 1
+            elif pstate == "regressed":
+                st["pub_regressions"] += 1
+            if read is not None:
+                st["read_count"] += read
+                st["read_time"] += dt
+            elif rstate == "regressed":
+                st["read_regressions"] += 1
+            cp = _scalar(prev.get("c") or {}, node)
+            cc = _scalar(cur.get("c") or {}, node)
+            cdel, cstate = _delta(cc, cp)
+            if cdel is not None:
+                st["c_count"] += cdel
+                st["c_time"] += dt
+            elif cstate == "regressed":
+                st["c_regressions"] += 1
+            if pub is not None and read is not None:
+                # Same node, same interval basis: the only place a
+                # supply-gap comparison is meaningful.
+                st["common_time"] += dt
+                st["common_pub"] += pub
+                st["common_read"] += read
+                if cdel is not None:
+                    st["common_c"] += cdel
+                    if cdel != read:
+                        st["crosscheck_mismatch"] += 1
+            # Endpoint-persistent, NOT proof of continuous availability:
+            # the queue can dip and refill between two 20 ms samples.
+            if depth_p > 0 and depth_c > 0 and read is not None:
+                st["ep_time"] += dt
+                st["ep_claims"] += read
+                st["ep_intervals"] += 1
+            a = (cur.get("a") or {}).get(node)
+            if depth_c == 0 and a and len(a) >= 2 and a[1] > 0:
+                st["idle_samples"] += 1
+                if a[0] > 0:
+                    st["idle_waiter_samples"] += 1
         if depths:
             if all(v == 0 for v in depths.values()):
                 all_empty += 1
                 if all_empty_start is None:
-                    all_empty_start = int(prev.get("t_ms", 0))
-                result["longest_all_empty_ms"] = max(
-                    result["longest_all_empty_ms"],
-                    int(cur.get("t_ms", 0)) - all_empty_start)
+                    all_empty_start = t_prev
+                out["longest_all_empty_ms"] = max(
+                    out["longest_all_empty_ms"], t_cur - all_empty_start)
             else:
                 any_nonempty += 1
                 all_empty_start = None
-            # Idle attribution: workers alive, queue empty, waiters > 0.
             waiters = 0
             workers = 0
-            for node in nodes:
+            for node in depths:
                 a = (cur.get("a") or {}).get(node)
                 if a and len(a) >= 2:
                     waiters += a[0]
@@ -457,53 +590,435 @@ def _trial_queue_stats(records):
             if workers > 0 and all(v == 0 for v in depths.values()):
                 idle_samples += 1
                 if waiters > 0:
-                    idle_waiter += 1
+                    idle_waiter_samples += 1
 
     if all_pairs:
-        result["all_empty_fraction"] = all_empty / all_pairs
-        result["any_nonempty_fraction"] = any_nonempty / all_pairs
+        out["all_empty_fraction"] = all_empty / all_pairs
+        out["any_nonempty_fraction"] = any_nonempty / all_pairs
+    out["idle_samples"] = idle_samples
+    out["idle_waiter_samples"] = idle_waiter_samples
     if idle_samples:
-        result["idle_waiter_fraction"] = idle_waiter / idle_samples
+        out["idle_waiter_fraction"] = idle_waiter_samples / idle_samples
+
     node_out = {}
-    for node, st in per_node.items():
+    for node, st in per.items():
         pairs = st["samples"]
+        gap = None
+        gap_count = None
+        if st["common_time"]:
+            gap_count = st["common_read"] - st["common_pub"]
+            gap = gap_count / st["common_time"]
+        regressions = {}
+        for name, count in (("publication", st["pub_regressions"]),
+                            ("claim_position", st["read_regressions"]),
+                            ("claim_counter", st["c_regressions"])):
+            if count:
+                regressions[name] = count
         node_out[node] = {
             "samples": pairs,
             "nonempty_fraction": (st["nonempty"] / pairs) if pairs else None,
             "longest_empty_ms": st["longest_empty_ms"],
-            "published_batches_per_s": (st["published"] / st["pub_time"])
-            if st["pub_time"] else None,
-            "claimed_batches_per_s": (st["claimed"] / st["claim_time"])
-            if st["claim_time"] else None,
+            "published_batches_per_s": (
+                st["pub_count"] / st["pub_time"]) if st["pub_time"] else None,
+            "claimed_batches_per_s": (
+                st["read_count"] / st["read_time"]) if st["read_time"] else None,
             "claimed_batches_per_s_nonempty": (
-                st["consume_claims"] / st["consume_time"])
-            if st["consume_time"] else None,
-            "consumption_intervals": st["intervals"],
-            "consumption_interval_s": st["consume_time"],
+                st["ep_claims"] / st["ep_time"]) if st["ep_time"] else None,
+            "supply_gap_batches_per_s": gap,
+            "supply_gap_batches": gap_count,
+            "common_interval_s": st["common_time"],
+            "consumption_intervals": st["ep_intervals"],
+            "consumption_interval_s": st["ep_time"],
+            "endpoint_claims": st["ep_claims"],
+            "claim_crosscheck_mismatch_intervals": st["crosscheck_mismatch"],
+            "counter_regressions": regressions,
+            "published_batches": st["pub_count"],
+            "claimed_batches": st["read_count"],
+            "claims_c_batches": st["c_count"],
+            "published_interval_s": st["pub_time"],
+            "claimed_interval_s": st["read_time"],
         }
-    result["nodes"] = node_out
-    result["published_batches_per_s"] = _sum_rate(
-        [(v["published_batches_per_s"],
-          v["samples"]) for v in node_out.values()])
-    result["claimed_batches_per_s"] = _sum_rate(
-        [(v["claimed_batches_per_s"], v["samples"])
-         for v in node_out.values()])
+    out["nodes"] = node_out
+    out["published_batches_total"] = sum(
+        v["published_batches"] for v in node_out.values())
+    out["claimed_batches_total"] = sum(
+        v["claimed_batches"] for v in node_out.values())
+    out["claims_c_total"] = sum(
+        v["claims_c_batches"] for v in node_out.values())
+    out["supply_gap_batches_total"] = sum(
+        (v["supply_gap_batches"] or 0) for v in node_out.values())
+    if out["duration_s"]:
+        out["published_batches_per_s"] = (
+            out["published_batches_total"] / out["duration_s"])
+        out["claimed_batches_per_s"] = (
+            out["claimed_batches_total"] / out["duration_s"])
+        out["claims_c_per_s"] = out["claims_c_total"] / out["duration_s"]
+        out["supply_gap_batches_per_s"] = (
+            out["supply_gap_batches_total"] / out["duration_s"])
+    return out
+
+
+def _chunk_stats(records):
+    """Ingest-published -> indexer-consumed chunk queue, per node.
+
+    `q` is (chunk_queue_head, chunk_queue_tail); `i` is the engine's
+    indexer_waiter gauge. Only src=ingest records own this path; the
+    UMA scanner has no indexer and emits no `i`, which is reported as
+    "not measurable", never as zero.
+    """
+    samples = sorted(records, key=lambda r: int(r.get("t_ms", 0)))
+    nodes = sorted({n for r in samples for n in (r.get("q") or {})})
+    out = {
+        "samples": len(samples),
+        "duration_s": 0.0,
+        "nodes": {},
+        "all_empty_fraction": None,
+        "any_nonempty_fraction": None,
+        "longest_all_empty_ms": 0.0,
+        "gated_ms": None,
+        "indexer_waiters_observed": False,
+        "indexer_wait_while_empty_fraction": None,
+        "empty_samples": 0,
+        "empty_with_waiters": 0,
+        "chunk_published_total": 0,
+        "chunk_consumed_total": 0,
+        "chunk_published_per_s": None,
+        "chunk_consumed_per_s": None,
+    }
+    gated = []
+    for rec in records:
+        if rec.get("kind") != "STAGE0_FINAL":
+            continue
+        try:
+            gated.append(int(rec.get("gated_ms", 0)))
+        except (TypeError, ValueError):
+            pass
+    if gated:
+        out["gated_ms"] = max(gated)
+    empty_node = {
+        "samples": 0, "nonempty_fraction": None, "empty_fraction": None,
+        "longest_empty_ms": None,
+        "chunk_published_per_s": None, "chunk_consumed_per_s": None,
+        "indexer_waiters_max": None, "indexer_waiters_mean": None,
+        "i_samples": 0, "i_time": 0.0, "empty_samples": 0,
+        "empty_with_waiters": None,
+        "empty_with_waiters_fraction": None,
+        "counter_regressions": {},
+        "chunk_published": 0, "chunk_consumed": 0,
+        "published_interval_s": 0.0, "consumed_interval_s": 0.0,
+    }
+    if len(samples) < 2:
+        out["nodes"] = {n: dict(empty_node, samples=len(samples))
+                        for n in nodes}
+        return out
+    t0 = int(samples[0].get("t_ms", 0))
+    t1 = int(samples[-1].get("t_ms", 0))
+    out["duration_s"] = max(0.0, (t1 - t0) / 1000.0)
+    per = {n: {
+        "samples": 0, "nonempty": 0, "empty": 0,
+        "longest_empty_ms": 0.0, "empty_start": None,
+        "pub_count": 0, "pub_time": 0.0, "pub_regressions": 0,
+        "cons_count": 0, "cons_time": 0.0, "cons_regressions": 0,
+        "i_samples": 0, "i_max": None, "i_sum": 0.0, "i_time": 0.0,
+        "empty_samples": 0, "empty_with_waiters": 0,
+    } for n in nodes}
+    all_empty = 0
+    all_pairs = 0
+    any_nonempty = 0
+    all_empty_start = None
+    for prev, cur in zip(samples, samples[1:]):
+        try:
+            t_prev = int(prev.get("t_ms", 0))
+            t_cur = int(cur.get("t_ms", 0))
+        except (TypeError, ValueError):
+            continue
+        dt = (t_cur - t_prev) / 1000.0
+        if dt <= 0:
+            continue
+        all_pairs += 1
+        depths = {}
+        for node in nodes:
+            qp = (prev.get("q") or {}).get(node)
+            qc = (cur.get("q") or {}).get(node)
+            if not qp or not qc or len(qp) < 2 or len(qc) < 2:
+                continue
+            st = per[node]
+            st["samples"] += 1
+            depth_p = qp[1] - qp[0]
+            depth_c = qc[1] - qc[0]
+            depths[node] = depth_c
+            if depth_c > 0:
+                st["nonempty"] += 1
+                st["empty_start"] = None
+            else:
+                st["empty"] += 1
+                if st["empty_start"] is None:
+                    st["empty_start"] = t_prev
+                st["longest_empty_ms"] = max(
+                    st["longest_empty_ms"], t_cur - st["empty_start"])
+            pub, pstate = _delta(qc[1], qp[1])
+            cons, cstate = _delta(qc[0], qp[0])
+            if pub is not None:
+                st["pub_count"] += pub
+                st["pub_time"] += dt
+            elif pstate == "regressed":
+                st["pub_regressions"] += 1
+            if cons is not None:
+                st["cons_count"] += cons
+                st["cons_time"] += dt
+            elif cstate == "regressed":
+                st["cons_regressions"] += 1
+            ic = _scalar(cur.get("i") or {}, node)
+            if ic is not None:
+                out["indexer_waiters_observed"] = True
+                st["i_samples"] += 1
+                st["i_sum"] += ic * dt
+                st["i_time"] += dt
+                st["i_max"] = ic if st["i_max"] is None \
+                    else max(st["i_max"], ic)
+            if depth_c == 0:
+                st["empty_samples"] += 1
+                if ic is not None and ic > 0:
+                    st["empty_with_waiters"] += 1
+        if depths:
+            if all(v == 0 for v in depths.values()):
+                all_empty += 1
+                if all_empty_start is None:
+                    all_empty_start = t_prev
+                out["longest_all_empty_ms"] = max(
+                    out["longest_all_empty_ms"], t_cur - all_empty_start)
+            else:
+                any_nonempty += 1
+                all_empty_start = None
+    if all_pairs:
+        out["all_empty_fraction"] = all_empty / all_pairs
+        out["any_nonempty_fraction"] = any_nonempty / all_pairs
+    node_out = {}
+    for node, st in per.items():
+        pairs = st["samples"]
+        regressions = {}
+        for name, count in (("chunk_publication", st["pub_regressions"]),
+                            ("chunk_consumption", st["cons_regressions"])):
+            if count:
+                regressions[name] = count
+        empty_frac = None
+        if pairs:
+            empty_frac = st["empty"] / pairs
+        node_out[node] = {
+            "samples": pairs,
+            "nonempty_fraction": (st["nonempty"] / pairs) if pairs else None,
+            "empty_fraction": empty_frac,
+            "longest_empty_ms": st["longest_empty_ms"],
+            "chunk_published_per_s": (
+                st["pub_count"] / st["pub_time"]) if st["pub_time"] else None,
+            "chunk_consumed_per_s": (
+                st["cons_count"] / st["cons_time"]) if st["cons_time"] else None,
+            "indexer_waiters_max": st["i_max"],
+            "indexer_waiters_mean": (
+                st["i_sum"] / st["i_time"]) if st["i_time"] else None,
+            "i_samples": st["i_samples"],
+            "i_time": st["i_time"],
+            "empty_samples": st["empty_samples"],
+            "empty_with_waiters": (
+                st["empty_with_waiters"] if st["i_samples"] else None),
+            "empty_with_waiters_fraction": (
+                st["empty_with_waiters"] / st["empty_samples"]
+                if st["empty_samples"] and st["i_samples"] else None),
+            "counter_regressions": regressions,
+            "chunk_published": st["pub_count"],
+            "chunk_consumed": st["cons_count"],
+            "published_interval_s": st["pub_time"],
+            "consumed_interval_s": st["cons_time"],
+        }
+    out["nodes"] = node_out
+    observed_max = [v["indexer_waiters_max"] for v in node_out.values()
+                    if v["indexer_waiters_max"] is not None]
+    out["indexer_waiters_max"] = max(observed_max) if observed_max else None
+    out["indexer_waiters_mean"] = _weighted(
+        [(v["indexer_waiters_mean"], v.get("i_time")) for v in
+         node_out.values()])
+    out["empty_samples"] = sum(
+        v["empty_samples"] for v in node_out.values())
+    out["empty_with_waiters"] = sum(
+        (v["empty_with_waiters"] or 0) for v in node_out.values())
+    if out["empty_samples"] and out["indexer_waiters_observed"]:
+        out["indexer_wait_while_empty_fraction"] = (
+            out["empty_with_waiters"] / out["empty_samples"])
+    out["chunk_published_total"] = sum(
+        v["chunk_published"] for v in node_out.values())
+    out["chunk_consumed_total"] = sum(
+        v["chunk_consumed"] for v in node_out.values())
+    if out["duration_s"]:
+        out["chunk_published_per_s"] = (
+            out["chunk_published_total"] / out["duration_s"])
+        out["chunk_consumed_per_s"] = (
+            out["chunk_consumed_total"] / out["duration_s"])
+    return out
+
+
+def _trial_queue_stats(records):
+    """One trial: batch (scanner->worker) + chunk (ingest->indexer).
+
+    The two samplers have independent t_ms origins, so they are NEVER
+    interleaved into one timeline: batch metrics come from src=scan,
+    chunk metrics from src=ingest.
+    """
+    scan = [r for r in records
+            if (r.get("src") or "scan") != "ingest"]
+    ingest = [r for r in records if r.get("src") == "ingest"]
+    batch = _batch_stats(scan)
+    chunk = _chunk_stats(ingest)
+    result = dict(batch)
+    result["chunk"] = chunk
+    result["chunk_nodes"] = chunk["nodes"]
+    result["chunk_samples"] = chunk["samples"]
+    result["gated_ms"] = chunk["gated_ms"]
+    result["srcs"] = sorted({r.get("src") for r in records
+                             if r.get("src") is not None})
+    gap_nodes = sorted(
+        n for n, v in batch["nodes"].items()
+        if v.get("supply_gap_batches_per_s") is not None
+        and v["supply_gap_batches_per_s"] > 0)
+    result["gap_nodes"] = gap_nodes
+    result["has_supply_gap"] = bool(gap_nodes)
+    chunk_measurable = (bool(chunk["nodes"])
+                        and chunk["indexer_waiters_observed"])
+    result["chunk_measurable"] = chunk_measurable
+    ingest_starved = bool(
+        chunk_measurable
+        and chunk.get("all_empty_fraction") is not None
+        and chunk["all_empty_fraction"] > 0
+        and (chunk.get("indexer_wait_while_empty_fraction") or 0) > 0)
+    result["has_ingest_starvation"] = ingest_starved
+    if not chunk_measurable:
+        result["has_scanner_starvation"] = None
+    else:
+        result["has_scanner_starvation"] = bool(
+            not ingest_starved
+            and batch.get("idle_waiter_fraction") is not None
+            and batch["idle_waiter_fraction"] > 0)
+    result["has_workers_saturated"] = bool(
+        batch.get("any_nonempty_fraction") is not None
+        and batch["any_nonempty_fraction"] > 0)
     return result
 
 
-def _sum_rate(pairs):
-    vals = [(v, w) for v, w in pairs if v is not None and w]
-    if not vals:
-        return None
-    return sum(v * w for v, w in vals) / sum(w for _, w in vals)
+
+def _agg_batch_nodes(trials):
+    out = {}
+    node_ids = sorted({n for t in trials for n in t["nodes"]})
+    for node in node_ids:
+        rows = [t["nodes"][node] for t in trials if node in t["nodes"]]
+        if not rows:
+            continue
+        pub_time = sum(r.get("published_interval_s") or 0.0 for r in rows)
+        read_time = sum(r.get("claimed_interval_s") or 0.0 for r in rows)
+        common_time = sum(r.get("common_interval_s") or 0.0 for r in rows)
+        ep_time = sum(r.get("consumption_interval_s") or 0.0 for r in rows)
+        pub_count = sum(r.get("published_batches") or 0 for r in rows)
+        read_count = sum(r.get("claimed_batches") or 0 for r in rows)
+        c_count = sum(r.get("claims_c_batches") or 0 for r in rows)
+        ep_claims = sum(r.get("endpoint_claims") or 0 for r in rows)
+        gap_count = sum(r.get("supply_gap_batches") or 0 for r in rows)
+        regressions = {}
+        for row in rows:
+            for key, val in (row.get("counter_regressions") or {}).items():
+                regressions[key] = regressions.get(key, 0) + val
+        out[node] = {
+            "samples": sum(r.get("samples") or 0 for r in rows),
+            "nonempty_fraction": _weighted(
+                [(r.get("nonempty_fraction"),
+                  max(0, (r.get("samples") or 0) - 1)) for r in rows]),
+            "longest_empty_ms": max(
+                (r.get("longest_empty_ms") or 0.0 for r in rows),
+                default=0.0),
+            "published_batches_per_s": (
+                pub_count / pub_time) if pub_time else None,
+            "claimed_batches_per_s": (
+                read_count / read_time) if read_time else None,
+            "claimed_batches_per_s_nonempty": (
+                ep_claims / ep_time) if ep_time else None,
+            "supply_gap_batches_per_s": (
+                gap_count / common_time) if common_time else None,
+            "supply_gap_batches": gap_count if common_time else None,
+            "common_interval_s": common_time,
+            "consumption_intervals": sum(
+                r.get("consumption_intervals") or 0 for r in rows),
+            "consumption_interval_s": ep_time,
+            "claim_crosscheck_mismatch_intervals": sum(
+                r.get("claim_crosscheck_mismatch_intervals") or 0
+                for r in rows),
+            "counter_regressions": regressions,
+            "published_batches": pub_count,
+            "claimed_batches": read_count,
+            "claims_c_batches": c_count,
+        }
+    return out
+
+
+def _agg_chunk_nodes(trials):
+    out = {}
+    node_ids = sorted({n for t in trials for n in t["chunk_nodes"]})
+    for node in node_ids:
+        rows = [t["chunk_nodes"][node] for t in trials
+                if node in t["chunk_nodes"]]
+        if not rows:
+            continue
+        pub_time = sum(r.get("published_interval_s") or 0.0 for r in rows)
+        cons_time = sum(r.get("consumed_interval_s") or 0.0 for r in rows)
+        i_time = sum(r.get("i_time") or 0.0 for r in rows)
+        pub_count = sum(r.get("chunk_published") or 0 for r in rows)
+        cons_count = sum(r.get("chunk_consumed") or 0 for r in rows)
+        empty_samples = sum(r.get("empty_samples") or 0 for r in rows)
+        empty_waiters = sum(r.get("empty_with_waiters") or 0 for r in rows)
+        i_samples = sum(r.get("i_samples") or 0 for r in rows)
+        regressions = {}
+        for row in rows:
+            for key, val in (row.get("counter_regressions") or {}).items():
+                regressions[key] = regressions.get(key, 0) + val
+        out[node] = {
+            "samples": sum(r.get("samples") or 0 for r in rows),
+            "nonempty_fraction": _weighted(
+                [(r.get("nonempty_fraction"),
+                  max(0, (r.get("samples") or 0) - 1)) for r in rows]),
+            "empty_fraction": _weighted(
+                [(r.get("empty_fraction"),
+                  max(0, (r.get("samples") or 0) - 1)) for r in rows]),
+            "longest_empty_ms": max(
+                (r.get("longest_empty_ms") or 0.0 for r in rows),
+                default=0.0),
+            "chunk_published_per_s": (
+                pub_count / pub_time) if pub_time else None,
+            "chunk_consumed_per_s": (
+                cons_count / cons_time) if cons_time else None,
+            "indexer_waiters_max": max(
+                (r.get("indexer_waiters_max") for r in rows
+                 if r.get("indexer_waiters_max") is not None), default=None),
+            "indexer_waiters_mean": _weighted(
+                [(r.get("indexer_waiters_mean"), r.get("i_time"))
+                 for r in rows]),
+            "i_samples": i_samples,
+            "empty_samples": empty_samples,
+            "empty_with_waiters": empty_waiters if i_samples else None,
+            "empty_with_waiters_fraction": (
+                empty_waiters / empty_samples
+                if empty_samples and i_samples else None),
+            "counter_regressions": regressions,
+            "chunk_published": pub_count,
+            "chunk_consumed": cons_count,
+        }
+    return out
 
 
 def queue_demand_stats(cases):
     """Aggregate per-case queue telemetry from raw stderr.log files.
 
     Trials are processed independently: no interval ever spans a trial
-    boundary. Timestamps are the sampler's own t_ms, not an assumed
-    20ms cadence.
+    boundary. Batch metrics use src=scan records and chunk metrics use
+    src=ingest records; their t_ms origins are independent and are never
+    interleaved. Rates are computed from raw counter deltas over the
+    intervals where both counters are valid; a counter regression is
+    counted, not silently treated as zero.
     """
     out = {}
     for case, entries in sorted(cases.items()):
@@ -515,61 +1030,124 @@ def queue_demand_stats(cases):
                     text = fh.read()
             except OSError:
                 continue
-            trials.append(_trial_queue_stats(_diag_records(text)))
+            stats = _trial_queue_stats(_diag_records(text))
+            stats["ingest_basis_cores"] = (
+                manifest.get("ingest_cpu_phase_cores")
+                if manifest.get("ingest_cpu_phase_cores") is not None
+                else (manifest.get("ingest_cpu_direct_basis_cores")
+                      if manifest.get("ingest_cpu_direct_basis_cores")
+                      is not None
+                      else manifest.get("ingest_cpu_basis_cores")))
+            trials.append(stats)
         if not trials:
             out[case] = None
             continue
+        duration_total = sum(t["duration_s"] for t in trials)
+        batch_nodes = _agg_batch_nodes(trials)
+        chunk_nodes = _agg_chunk_nodes(trials)
+        chunk_samples = sum(t["chunk_samples"] for t in trials)
+        gated_values = [t["gated_ms"] for t in trials
+                        if t["gated_ms"] is not None]
+        chunk_all_empty = _weighted(
+            [(t["chunk"]["all_empty_fraction"],
+              max(0, t["chunk_samples"] - 1)) for t in trials])
+        chunk_any_nonempty = _weighted(
+            [(t["chunk"]["any_nonempty_fraction"],
+              max(0, t["chunk_samples"] - 1)) for t in trials])
+        empty_samples = sum(t["chunk"]["empty_samples"] for t in trials)
+        empty_waiters = sum(t["chunk"]["empty_with_waiters"]
+                            for t in trials)
+        chunk_measurable = any(t["chunk_measurable"] for t in trials)
+        chunk_wait_fraction = None
+        if chunk_measurable and empty_samples:
+            chunk_wait_fraction = empty_waiters / empty_samples
+        chunk_agg = {
+            "trials": len(trials),
+            "samples": chunk_samples,
+            "duration_s": _median([t["chunk"]["duration_s"]
+                                   for t in trials]),
+            "gated_ms": _median(gated_values),
+            "all_empty_fraction": chunk_all_empty,
+            "any_nonempty_fraction": chunk_any_nonempty,
+            "longest_all_empty_ms": max(
+                (t["chunk"]["longest_all_empty_ms"] for t in trials),
+                default=0.0),
+            "indexer_waiters_observed": any(
+                t["chunk"]["indexer_waiters_observed"] for t in trials),
+            "indexer_wait_while_empty_fraction": chunk_wait_fraction,
+            "empty_samples": empty_samples,
+            "empty_with_waiters": empty_waiters if chunk_measurable else None,
+            "chunk_published_total": sum(
+                t["chunk"]["chunk_published_total"] for t in trials),
+            "chunk_consumed_total": sum(
+                t["chunk"]["chunk_consumed_total"] for t in trials),
+            "nodes": chunk_nodes,
+        }
+        if duration_total:
+            chunk_agg["chunk_published_per_s"] = (
+                chunk_agg["chunk_published_total"] / duration_total)
+            chunk_agg["chunk_consumed_per_s"] = (
+                chunk_agg["chunk_consumed_total"] / duration_total)
+        else:
+            chunk_agg["chunk_published_per_s"] = None
+            chunk_agg["chunk_consumed_per_s"] = None
         agg = {
             "trials": len(trials),
             "samples": sum(t["samples"] for t in trials),
+            "chunk_samples": chunk_samples,
             "srcs": sorted({s for t in trials for s in t["srcs"]}),
             "duration_s": _median([t["duration_s"] for t in trials]),
-            "gated_ms": _median([t["gated_ms"] for t in trials
-                                 if t["gated_ms"] is not None]),
+            "gated_ms": _median(gated_values),
             "all_empty_fraction": _weighted(
-                [(t["all_empty_fraction"], t["samples"] - 1)
+                [(t["all_empty_fraction"], max(0, t["samples"] - 1))
+                 for t in trials]),
+            "any_nonempty_fraction": _weighted(
+                [(t["any_nonempty_fraction"], max(0, t["samples"] - 1))
                  for t in trials]),
             "longest_all_empty_ms": max(
                 (t["longest_all_empty_ms"] for t in trials), default=0.0),
-            "any_nonempty_fraction": _weighted(
-                [(t["any_nonempty_fraction"], t["samples"] - 1)
-                 for t in trials]),
             "idle_waiter_fraction": _weighted(
-                [(t["idle_waiter_fraction"], t["samples"] - 1)
+                [(t["idle_waiter_fraction"], t["idle_samples"])
                  for t in trials]),
-            "published_batches_per_s": _weighted(
-                [(t["published_batches_per_s"], t["duration_s"])
-                 for t in trials]),
-            "claimed_batches_per_s": _weighted(
-                [(t["claimed_batches_per_s"], t["duration_s"])
-                 for t in trials]),
-            "nodes": {},
+            "published_batches_total": sum(
+                t["published_batches_total"] for t in trials),
+            "claimed_batches_total": sum(
+                t["claimed_batches_total"] for t in trials),
+            "claims_c_total": sum(t["claims_c_total"] for t in trials),
+            "supply_gap_batches_total": sum(
+                t["supply_gap_batches_total"] for t in trials),
+            "supply_gap_trials": sum(1 for t in trials
+                                     if t["has_supply_gap"]),
+            "no_supply_gap_trials": sum(1 for t in trials
+                                        if not t["has_supply_gap"]),
+            "ingest_starvation_trials": sum(
+                1 for t in trials if t["has_ingest_starvation"]),
+            "scanner_starvation_trials": sum(
+                1 for t in trials if t["has_scanner_starvation"] is True),
+            "scanner_starvation_measurable_trials": sum(
+                1 for t in trials if t["has_scanner_starvation"] is not None),
+            "workers_saturated_trials": sum(
+                1 for t in trials if t["has_workers_saturated"]),
+            "chunk_measurable_trials": sum(
+                1 for t in trials if t["chunk_measurable"]),
+            "nodes": batch_nodes,
+            "chunk": chunk_agg,
+            "chunk_nodes": chunk_nodes,
         }
-        node_ids = sorted({n for t in trials for n in t["nodes"]})
-        for node in node_ids:
-            rows = [t["nodes"][node] for t in trials
-                    if node in t["nodes"]]
-            agg["nodes"][node] = {
-                "samples": sum(r["samples"] for r in rows),
-                "nonempty_fraction": _weighted(
-                    [(r["nonempty_fraction"], r["samples"] - 1)
-                     for r in rows]),
-                "longest_empty_ms": max(
-                    (r["longest_empty_ms"] for r in rows), default=0.0),
-                "published_batches_per_s": _weighted(
-                    [(r["published_batches_per_s"], r["samples"])
-                     for r in rows]),
-                "claimed_batches_per_s": _weighted(
-                    [(r["claimed_batches_per_s"], r["samples"])
-                     for r in rows]),
-                "claimed_batches_per_s_nonempty": _weighted(
-                    [(r["claimed_batches_per_s_nonempty"],
-                      r["consumption_interval_s"]) for r in rows]),
-                "consumption_intervals": sum(
-                    r["consumption_intervals"] for r in rows),
-                "consumption_interval_s": sum(
-                    r["consumption_interval_s"] for r in rows),
-            }
+        if duration_total:
+            agg["published_batches_per_s"] = (
+                agg["published_batches_total"] / duration_total)
+            agg["claimed_batches_per_s"] = (
+                agg["claimed_batches_total"] / duration_total)
+            agg["claims_c_per_s"] = (
+                agg["claims_c_total"] / duration_total)
+            agg["supply_gap_batches_per_s"] = (
+                agg["supply_gap_batches_total"] / duration_total)
+        else:
+            agg["published_batches_per_s"] = None
+            agg["claimed_batches_per_s"] = None
+            agg["claims_c_per_s"] = None
+            agg["supply_gap_batches_per_s"] = None
         out[case] = agg
     return out
 
@@ -579,6 +1157,106 @@ def _weighted(pairs):
     if not vals:
         return None
     return sum(v * w for v, w in vals) / sum(w for _, w in vals)
+
+
+def classify_demand(row, q):
+    """Classify measured demand from q/i/b/c/a evidence (spec §4.3/§8).
+
+    This is the ONE authoritative interpretation of the queue telemetry.
+    It never fills an unmeasurable quantity with zero and it never turns
+    an ingest CPU figure or a worker-waiter figure alone into proof of an
+    ingestion bottleneck.
+    """
+    if not q:
+        return {"available": False,
+                "evidence": ["no STAGE0 queue telemetry for this case"]}
+    chunk = q.get("chunk") or {}
+    chunk_nodes = chunk.get("nodes") or {}
+    batch_nodes = q.get("nodes") or {}
+    chunk_measurable = (bool(chunk_nodes)
+                        and bool(chunk.get("indexer_waiters_observed")))
+    batch_measurable = bool(batch_nodes)
+    evidence = []
+    gap_nodes = sorted(
+        n for n, v in batch_nodes.items()
+        if v.get("supply_gap_batches_per_s") is not None
+        and v["supply_gap_batches_per_s"] > 0)
+    ingest_starved = bool(q.get("ingest_starvation_trials"))
+    scanner_starved = (
+        True if q.get("scanner_starvation_trials") else
+        (False if q.get("scanner_starvation_measurable_trials")
+         else None))
+    workers_saturated = bool(q.get("workers_saturated_trials"))
+    gated = q.get("gated_ms")
+    ingest_cores = row.get("median_ingest_cores")
+    ingest_near_one = (
+        ingest_cores is not None
+        and _INGEST_NEAR_ONE[0] <= ingest_cores <= _INGEST_NEAR_ONE[1])
+    source_limited = None
+    if ingest_starved:
+        if ingest_cores is None:
+            evidence.append(
+                "chunk queue empty with indexer waiters, but ingest CPU is "
+                "not measured; source-limited vs CPU-bound ingest cannot "
+                "be distinguished")
+        elif not ingest_near_one and not (gated is not None and gated > 0):
+            source_limited = True
+            evidence.append(
+                "chunk queue empty with indexer waiters while ingest CPU "
+                "%.2f cores is below the spec §4.2 near-one-core reading "
+                "band and gated_ms=%s; this is source-limited, not "
+                "centralized-ingest CPU saturation"
+                % (ingest_cores, gated))
+        else:
+            source_limited = False
+            evidence.append(
+                "chunk queue empty with indexer waiters while ingest CPU "
+                "%.2f cores is near one core (spec §4.2)"
+                % ingest_cores)
+    elif chunk_measurable:
+        source_limited = False
+    ingest_backpressure = bool(gated is not None and gated > 0)
+    if gap_nodes:
+        evidence.append(
+            "per-node supply gap (claims > publications): %s"
+            % ", ".join("n%d %+.1f/s" % (
+                n, batch_nodes[n]["supply_gap_batches_per_s"])
+                for n in gap_nodes))
+    else:
+        evidence.append("no per-node supply gap (claims <= publications)")
+    if ingest_starved:
+        evidence.append(
+            "chunk queue empty with indexer waiters in %d/%d trials"
+            % (q.get("ingest_starvation_trials", 0), q.get("trials", 0)))
+    if scanner_starved is True:
+        evidence.append(
+            "batch queue empty with waiting workers while upstream chunk "
+            "supply was available (scanner/worker starvation)")
+    if workers_saturated:
+        evidence.append(
+            "batch queue non-empty in at least one sample (workers supplied)")
+    if ingest_backpressure:
+        evidence.append(
+            "ingest gated_ms=%s: ingest waited for destination chunk-queue "
+            "capacity" % gated)
+    if not chunk_measurable:
+        evidence.append(
+            "upstream chunk queue/indexer waiters are not measurable on this "
+            "source path; reported as unavailable, not zero")
+    return {
+        "available": True,
+        "batch_measurable": batch_measurable,
+        "chunk_measurable": chunk_measurable,
+        "gap_nodes": gap_nodes,
+        "has_supply_gap": bool(gap_nodes),
+        "ingest_indexer_starvation": ingest_starved,
+        "scanner_worker_starvation": scanner_starved,
+        "workers_saturated": workers_saturated,
+        "source_limited": source_limited,
+        "ingest_backpressure": ingest_backpressure,
+        "ingest_cpu_near_one": ingest_near_one,
+        "evidence": evidence,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -597,8 +1275,20 @@ def case_summary(cases):
                 for m in ok]
         cpus = [m["cpu_per_core_basis"] for m in ok
                 if m.get("cpu_per_core_basis") is not None]
-        ingests = [m["ingest_cpu_basis_cores"] for m in ok
-                   if m.get("ingest_cpu_basis_cores") is not None]
+        ingest_bases = []
+        ingest_attribution = "unavailable"
+        for m in ok:
+            direct = m.get("ingest_cpu_phase_cores")
+            if direct is None:
+                direct = m.get("ingest_cpu_direct_basis_cores")
+            comm = m.get("ingest_cpu_basis_cores")
+            if direct is not None:
+                ingest_bases.append(direct)
+                ingest_attribution = "direct"
+            elif comm is not None:
+                ingest_bases.append(comm)
+                if ingest_attribution != "direct":
+                    ingest_attribution = "comm-sampled"
         spec = (manifests[0] or {}).get("spec", {}) if manifests else {}
         rows.append({
             "case": case,
@@ -611,8 +1301,15 @@ def case_summary(cases):
             "median_map_s": _median(maps),
             "median_process_s": _median(walls),
             "median_per_core": _median(cpus),
-            "median_ingest_cores": _median(ingests),
-            "ingest_attributed": bool(ingests),
+            "median_ingest_cores": _median(ingest_bases),
+            "ingest_attributed": bool(ingest_bases),
+            "ingest_attribution": ingest_attribution,
+            "n_ingest_near_one": sum(
+                1 for v in ingest_bases
+                if _INGEST_NEAR_ONE[0] <= v <= _INGEST_NEAR_ONE[1]),
+            "ingest_phase_s": _median(
+                [m["ingest_phase_s"] for m in ok
+                 if m.get("ingest_phase_s") is not None]),
             "diag_samples": sum(
                 (m.get("diagnostics") or {}).get("samples", 0)
                 for m in manifests),
@@ -641,35 +1338,92 @@ def _env_topology(env):
             "fake_spec": kernel.get("fake_numa_spec")}
 
 
+_ABLATION_CELLS = ("A", "B", "C", "D")
+_ABLATION_FORMS = ("map-fault", "write-path")
+_ABLATION_PAIRS = tuple((c, f) for c in _ABLATION_CELLS for f in _ABLATION_FORMS)
+
+
 def ablation_ok(ablation, campaign_id=None):
+    """Validate the COMPLETE 2x2 x two-materialization-form evidence.
+
+    Exactly eight unique cell/form pairs are required. `valid: true` is
+    not enough: the requested and effective policy, the affinity arm,
+    page accounting, move_pages statuses, mincore residency, and the
+    full-range write-path read-touch stability are all checked.
+    """
     problems = []
     if not isinstance(ablation, dict):
         return False, ["ablation JSON missing"]
     if ablation.get("schema") != SCHEMA_ABLATION:
         problems.append("ablation: schema %r != %r"
                         % (ablation.get("schema"), SCHEMA_ABLATION))
-    if campaign_id and ablation.get("campaign_id") not in (None, campaign_id):
+    if campaign_id is not None and \
+            ablation.get("campaign_id") != campaign_id:
         problems.append("ablation: campaign_id %r != %r"
                         % (ablation.get("campaign_id"), campaign_id))
     nodes = ablation.get("nodes") or {}
     x, y = nodes.get("x"), nodes.get("y")
-    if x is None or y is None or x == y:
+    if not isinstance(x, int) or not isinstance(y, int) or x == y:
         problems.append("ablation: invalid node pair x=%r y=%r" % (x, y))
-    for result in ablation.get("results") or []:
+    x_cpus = nodes.get("x_cpus") or []
+    allowed = nodes.get("allowed_cpus") or []
+    if not x_cpus:
+        problems.append("ablation: node X has no recorded CPU list")
+    if not allowed:
+        problems.append("ablation: no recorded allowed CPU set")
+    declared_cells = ablation.get("cells")
+    if declared_cells is not None and \
+            list(declared_cells) != list(_ABLATION_CELLS):
+        problems.append("ablation: cells %r != %r"
+                        % (declared_cells, list(_ABLATION_CELLS)))
+    declared_forms = ablation.get("forms")
+    if declared_forms is not None and \
+            list(declared_forms) != list(_ABLATION_FORMS):
+        problems.append("ablation: forms %r != %r"
+                        % (declared_forms, list(_ABLATION_FORMS)))
+
+    results = ablation.get("results")
+    if not isinstance(results, list):
+        return False, problems + ["ablation: results is not a list"]
+    seen = {}
+    for result in results:
+        if not isinstance(result, dict):
+            problems.append("ablation: malformed result row")
+            continue
         cell = result.get("cell")
         form = result.get("form")
         label = "%s/%s" % (cell, form)
-        if not result.get("valid"):
+        if (cell, form) not in _ABLATION_PAIRS:
+            problems.append("%s: unexpected cell/form pair" % label)
+            continue
+        if label in seen:
+            problems.append("%s: duplicate result row" % label)
+            continue
+        seen[label] = result
+        if result.get("valid") is not True:
             problems.append("%s: invalid (%s)"
                             % (label, result.get("invalid_reason")))
-            continue
+        if result.get("child_rc") != 0:
+            problems.append("%s: child_rc %r != 0"
+                            % (label, result.get("child_rc")))
+        if result.get("child_timed_out") is not False:
+            problems.append("%s: child_timed_out %r != false"
+                            % (label, result.get("child_timed_out")))
+
         req = result.get("policy_requested") or {}
         eff = result.get("effective") or {}
+        aff = result.get("affinity_requested") or {}
+        if req.get("set_rc") != 0:
+            problems.append("%s: policy set_rc %r != 0"
+                            % (label, req.get("set_rc")))
+        if eff.get("get_mempolicy_rc") != 0:
+            problems.append("%s: get_mempolicy_rc %r != 0"
+                            % (label, eff.get("get_mempolicy_rc")))
         if cell in ("A", "B"):
             if req.get("mode_numeric") != 0 or eff.get("mempolicy_mode") != 0:
                 problems.append("%s: MPOL_DEFAULT not requested/effective"
                                 % label)
-        elif cell in ("C", "D"):
+        else:
             if req.get("mode_numeric") != 2:
                 problems.append("%s: requested mode %r != MPOL_BIND (2)"
                                 % (label, req.get("mode_numeric")))
@@ -679,27 +1433,131 @@ def ablation_ok(ablation, campaign_id=None):
             if eff.get("mempolicy_mask_nodes") != [y]:
                 problems.append("%s: effective mask %r != [%r]"
                                 % (label, eff.get("mempolicy_mask_nodes"), y))
-        if not result.get("placement_measured"):
+        if cell in ("B", "D"):
+            if aff.get("mode") != "pinned" or aff.get("set_rc") != 0:
+                problems.append("%s: affinity not pinned (mode=%r rc=%r)"
+                                % (label, aff.get("mode"),
+                                   aff.get("set_rc")))
+            cpu = aff.get("cpu")
+            if not isinstance(cpu, int):
+                problems.append("%s: affinity CPU %r is not an int"
+                                % (label, cpu))
+            else:
+                if cpu not in x_cpus:
+                    problems.append("%s: affinity CPU %r is not on node X=%r"
+                                    % (label, cpu, x))
+                if cpu not in allowed:
+                    problems.append("%s: affinity CPU %r is not allowed"
+                                    % (label, cpu))
+                if eff.get("affinity_cpus") != [cpu]:
+                    problems.append(
+                        "%s: effective affinity %r != [%r]"
+                        % (label, eff.get("affinity_cpus"), cpu))
+        else:
+            if aff.get("mode") != "default":
+                problems.append("%s: affinity was not inherited/default (%r)"
+                                % (label, aff.get("mode")))
+            if allowed and eff.get("affinity_cpus") != allowed:
+                problems.append(
+                    "%s: inherited affinity %r != recorded allowed set %r"
+                    % (label, eff.get("affinity_cpus"), allowed))
+
+        pages_total = result.get("pages_total")
+        by_node = result.get("pages_by_node")
+        if not isinstance(pages_total, int) or pages_total <= 0:
+            problems.append("%s: pages_total %r is not positive"
+                            % (label, pages_total))
+            pages_total = None
+        if not isinstance(by_node, dict):
+            problems.append("%s: pages_by_node missing" % label)
+        elif pages_total is not None:
+            accounted = sum(int(v) for v in by_node.values())
+            if accounted != pages_total:
+                problems.append(
+                    "%s: node counts sum to %d, pages_total is %d"
+                    % (label, accounted, pages_total))
+        if result.get("pages_unknown") != 0:
+            problems.append("%s: pages_unknown %r != 0"
+                            % (label, result.get("pages_unknown")))
+        post = result.get("move_pages_post") or {}
+        statuses = post.get("statuses")
+        if post.get("rc") != 0:
+            problems.append("%s: move_pages rc %r != 0"
+                            % (label, post.get("rc")))
+        if not isinstance(statuses, list):
+            problems.append("%s: move_pages statuses missing" % label)
+        else:
+            if pages_total is not None and len(statuses) != pages_total:
+                problems.append(
+                    "%s: %d raw statuses for %d pages"
+                    % (label, len(statuses), pages_total))
+            if any(not isinstance(s, int) or s < 0 for s in statuses):
+                problems.append("%s: negative/non-integer page status"
+                                % label)
+        if result.get("placement_measured") is not True:
             problems.append("%s: placement not measured" % label)
-        if form == "write-path" and not result.get("read_touch_stable"):
-            problems.append("%s: read-touch changed page-0 placement" % label)
-    if not ablation.get("results"):
-        problems.append("ablation: no results")
+        mc = result.get("mincore") or {}
+        if mc.get("rc") != 0:
+            problems.append("%s: mincore rc %r != 0"
+                            % (label, mc.get("rc")))
+        if mc.get("total_pages") != pages_total or \
+                mc.get("resident_pages") != pages_total:
+            problems.append(
+                "%s: mincore resident %r/%r != %r"
+                % (label, mc.get("resident_pages"),
+                   mc.get("total_pages"), pages_total))
+        touch = result.get("touch") or {}
+        if form == "write-path":
+            if result.get("read_touch_stable") is not True:
+                problems.append(
+                    "%s: read-touch changed page placement over the "
+                    "measured range" % label)
+            if result.get("read_touch_unstable_pages") not in (None, 0):
+                problems.append(
+                    "%s: %r pages changed placement during read-touch"
+                    % (label, result.get("read_touch_unstable_pages")))
+            if touch.get("kind") != "read":
+                problems.append("%s: touch kind %r != read"
+                                % (label, touch.get("kind")))
+        elif touch.get("kind") != "write":
+            problems.append("%s: touch kind %r != write"
+                            % (label, touch.get("kind")))
+
+    expected_labels = {"%s/%s" % pair for pair in _ABLATION_PAIRS}
+    missing = sorted(expected_labels - set(seen))
+    extra = sorted(set(seen) - expected_labels)
+    if missing:
+        problems.append("ablation: missing result pairs %s" % missing)
+    if extra:
+        problems.append("ablation: unexpected result pairs %s" % extra)
+    if len(results) != len(_ABLATION_PAIRS):
+        problems.append("ablation: expected exactly %d result rows, got %d"
+                        % (len(_ABLATION_PAIRS), len(results)))
     return not problems, problems
 
 
-def derive_verdict(summary, queue, env, ablation_issues, campaign_problems):
-    """Spec §8 derivation. Fake NUMA is always Inconclusive."""
+def derive_verdict(summary, queue, env, ablation_issues, campaign_problems,
+                   trials_requested=None):
+    """Spec §8 derivation: Go, No-Go, or Inconclusive.
+
+    Decisive physical verdicts require (a) a genuine multi-node host,
+    (b) valid placement evidence, (c) at least three completed trials
+    per decisive case, and (d) per-node queue evidence that separates
+    ingest->indexer starvation from scanner/worker and source limits.
+    Fake NUMA is always Inconclusive by rule.
+    """
     topo = _env_topology(env)
     if campaign_problems:
         return {
             "verdict": "INVALID — campaign completeness/identity check failed",
+            "decision": "INVALID",
             "evidence": ["- " + p for p in campaign_problems],
             "go": False, "topology": topo,
         }
     if topo["fake"]:
         return {
             "verdict": "INCONCLUSIVE for real-NUMA benefit — fake NUMA",
+            "decision": "INCONCLUSIVE",
             "evidence": [
                 "- The host reports %s. Spec §8 forbids converting "
                 "fake-NUMA evidence into a Go decision." % topo["label"],
@@ -712,12 +1570,14 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems):
     if topo["nodes"] <= 1:
         return {
             "verdict": "INCONCLUSIVE — host is not genuinely multi-node",
+            "decision": "INCONCLUSIVE",
             "evidence": ["- %s" % topo["label"]],
             "go": False, "topology": topo,
         }
     if ablation_issues:
         return {
             "verdict": "INCONCLUSIVE — placement evidence is not valid",
+            "decision": "INCONCLUSIVE",
             "evidence": ["- " + p for p in ablation_issues],
             "go": False, "topology": topo,
         }
@@ -727,8 +1587,32 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems):
     if not decisive:
         return {
             "verdict": "INCONCLUSIVE — no decisive (>=2s) case",
+            "decision": "INCONCLUSIVE",
             "evidence": ["- Every case is shorter than the campaign's own "
                          "2-second rule; startup dominates."],
+            "go": False, "topology": topo,
+        }
+    if trials_requested is not None and trials_requested < 3:
+        return {
+            "verdict": "INCONCLUSIVE — fewer than three trials",
+            "decision": "INCONCLUSIVE",
+            "evidence": [
+                "- The campaign requested %d trial(s) per case. Spec §8 "
+                "requires repeatability across at least three trials for a "
+                "decisive Go/No-Go; this campaign cannot decide."
+                % trials_requested,
+                "- Decisive cases: %s" % ", ".join(
+                    r["case"] for r in decisive),
+            ],
+            "go": False, "topology": topo,
+        }
+    under_trialed = [r["case"] for r in decisive if r["n_ok"] < 3]
+    if under_trialed:
+        return {
+            "verdict": "INCONCLUSIVE — fewer than three completed trials",
+            "decision": "INCONCLUSIVE",
+            "evidence": ["- Decisive case(s) with <3 complete trials: %s"
+                         % ", ".join(under_trialed)],
             "go": False, "topology": topo,
         }
     missing_demand = [r["case"] for r in decisive
@@ -737,71 +1621,138 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems):
     if missing_demand:
         return {
             "verdict": "INCONCLUSIVE — downstream-demand estimate missing",
+            "decision": "INCONCLUSIVE",
             "evidence": ["- No usable per-node queue telemetry for: %s"
                          % ", ".join(missing_demand)],
             "go": False, "topology": topo,
         }
 
-    # Relative evidence, no invented absolute throughput margin.
-    supply_gap = []
-    ingest_near_one = []
-    idle_evidence = []
+    classifications = {}
     for row in decisive:
-        q = queue[row["case"]]
-        pub = q.get("published_batches_per_s")
-        cons = [n.get("claimed_batches_per_s_nonempty")
-                for n in q["nodes"].values()
-                if n.get("claimed_batches_per_s_nonempty") is not None]
-        cons_max = max(cons) if cons else None
-        if pub is not None and cons_max is not None and cons_max > pub:
-            supply_gap.append(row["case"])
-        ic = row.get("median_ingest_cores")
-        if ic is not None and _INGEST_NEAR_ONE[0] <= ic <= _INGEST_NEAR_ONE[1]:
-            ingest_near_one.append(row["case"])
-        iw = q.get("idle_waiter_fraction")
-        if iw is not None and iw > 0:
-            idle_evidence.append(row["case"])
+        classifications[row["case"]] = classify_demand(
+            row, queue[row["case"]])
 
-    evidence = []
-    evidence.append("- Topology: %s" % topo["label"])
-    evidence.append("- Decisive cases (>=2s): %s"
-                    % ", ".join(r["case"] for r in decisive))
-    evidence.append("- Ingest CPU basis (cores): %s"
-                    % ", ".join("%s=%.2f" % (
-                        r["case"], r["median_ingest_cores"])
-                        for r in decisive
-                        if r["median_ingest_cores"] is not None))
-    evidence.append("- Supply gap (consumption under available work > "
-                    "publication): %s"
-                    % (", ".join(supply_gap) or "none observed"))
-    evidence.append("- Ingest near one core (spec §4.2 reading band "
-                    "%.2f-%.2f): %s"
-                    % (_INGEST_NEAR_ONE[0], _INGEST_NEAR_ONE[1],
-                       ", ".join(ingest_near_one) or "none"))
-    evidence.append("- Worker-waiter evidence during empty queues: %s"
-                    % (", ".join(idle_evidence) or "none observed"))
-    all_cases_gap = len(supply_gap) == len(decisive)
-    all_cases_ingest = len(ingest_near_one) == len(decisive)
-    if all_cases_gap and all_cases_ingest and idle_evidence:
+    go_cases = []
+    nogo_cases = []
+    ambiguous = []
+    for row in decisive:
+        case = row["case"]
+        q = queue[case]
+        c = classifications[case]
+        trials = q.get("trials", 0)
+        gap_all_trials = q.get("supply_gap_trials", 0) == trials
+        starve_all_trials = q.get("ingest_starvation_trials", 0) == trials
+        idle = q.get("idle_waiter_fraction")
+        go = (
+            c["has_supply_gap"] and gap_all_trials
+            and c["ingest_indexer_starvation"] and starve_all_trials
+            and c["ingest_cpu_near_one"]
+            and idle is not None and idle > 0
+            and c["source_limited"] is False
+            and c["scanner_worker_starvation"] is not True)
+        nogo = (
+            c["source_limited"] is True
+            or c["scanner_worker_starvation"] is True
+            or (not c["has_supply_gap"]
+                and q.get("no_supply_gap_trials", 0) == trials
+                and c["workers_saturated"]))
+        if go:
+            go_cases.append(case)
+        elif nogo:
+            nogo_cases.append(case)
+        else:
+            ambiguous.append(case)
+
+    evidence = ["- Topology: %s" % topo["label"],
+                "- Decisive cases (>=2s, >=3 trials): %s"
+                % ", ".join(r["case"] for r in decisive),
+                "- Ingest CPU basis (cores; direct thread CPU where "
+                "available): %s"
+                % ", ".join("%s=%.2f (%s)" % (
+                    r["case"], r["median_ingest_cores"],
+                    r.get("ingest_attribution"))
+                    for r in decisive
+                    if r["median_ingest_cores"] is not None),
+                "- Per-node supply gap (claims > publications) cases: %s"
+                % (", ".join(r["case"] for r in decisive
+                             if classifications[r["case"]]["has_supply_gap"])
+                   or "none observed"),
+                "- Ingest->indexer starvation cases: %s"
+                % (", ".join(
+                    r["case"] for r in decisive
+                    if classifications[r["case"]]
+                    ["ingest_indexer_starvation"]) or "none observed"),
+                "- Source-limited cases: %s"
+                % (", ".join(
+                    r["case"] for r in decisive
+                    if classifications[r["case"]]["source_limited"] is True)
+                   or "none observed"),
+                "- Scanner/worker-starvation cases: %s"
+                % (", ".join(
+                    r["case"] for r in decisive
+                    if classifications[r["case"]]
+                    ["scanner_worker_starvation"] is True)
+                   or "none observed")]
+    for row in decisive:
+        evidence.append("- %s: %s" % (
+            row["case"],
+            "; ".join(classifications[row["case"]]["evidence"])))
+
+    if go_cases and not nogo_cases and not ambiguous:
         return {
             "verdict": "GO candidate — centralized ingest is the measured "
                        "limiter on this physical host",
+            "decision": "GO",
             "evidence": evidence + [
-                "- All decisive cases show consumption under available "
-                "work above the publication rate, ingest CPU near one "
-                "core, and worker-waiter evidence while queues are empty.",
+                "- Every decisive case shows a per-node supply deficit "
+                "(claims above publications) in every trial, ingest CPU "
+                "near one core, ingest->indexer starvation, and workers "
+                "idle while the batch queue is empty.",
+                "- Source starvation and scanner/worker bottlenecks are "
+                "excluded by the measured q/i/b/a evidence.",
                 "- This is a recommendation to implement/test the "
                 "distributed design, not proof that it will scale."],
             "go": True, "topology": topo,
         }
+    if nogo_cases and not go_cases and not ambiguous:
+        reasons = []
+        if any(classifications[r["case"]]["source_limited"] is True
+               for r in decisive):
+            reasons.append(
+                "measured throughput is limited by the source rather than "
+                "centralized ingestion (chunk queue empty with indexer "
+                "waiters while ingest CPU is below the near-one-core "
+                "reading band)")
+        if any(classifications[r["case"]]
+               ["scanner_worker_starvation"] is True for r in decisive):
+            reasons.append(
+                "measured throughput is limited by the scanner/worker "
+                "downstream stage while upstream chunk supply was "
+                "available")
+        if not reasons:
+            reasons.append(
+                "centralized ingestion supplies sufficient work: no "
+                "per-node supply gap was measured and the batch queue "
+                "stayed available to active workers in every trial")
+        return {
+            "verdict": "NO-GO — centralized ingestion is not the measured "
+                       "limiter",
+            "decision": "NO-GO",
+            "evidence": evidence + ["- " + reason for reason in reasons] + [
+                "- Spec §8: retain the diagnostic tooling and shelve "
+                "Stages 2-3."],
+            "go": False, "topology": topo,
+        }
     return {
         "verdict": "INCONCLUSIVE — the evidence does not isolate ingestion",
+        "decision": "INCONCLUSIVE",
         "evidence": evidence + [
             "- Spec §8 requires the supply gap to be attributable to "
             "centralized ingest CPU saturation while downstream has "
-            "unused capacity, consistently across trials. At least one "
-            "required condition is missing or inconsistent, so no "
-            "Go/No-Go is asserted."],
+            "unused capacity, consistently across at least three trials. "
+            "At least one required distinction remains ambiguous "
+            "(ambiguous cases: %s), so no Go/No-Go is asserted."
+            % (", ".join(ambiguous) or "none; mixed Go/No-Go evidence")],
         "go": False, "topology": topo,
     }
 
@@ -868,13 +1819,18 @@ def main():
     abl_ok, abl_issues = ablation_ok(ablation, campaign.get("campaign_id"))
 
     verdict = derive_verdict(summary, queue, env, abl_issues,
-                             campaign.get("_problems") or [])
+                             campaign.get("_problems") or [],
+                             trials_requested=campaign.get("trials_requested"))
 
+    git = (env or {}).get("git") or {}
     lines = [
         "# Stage 0 rehearsal report — %s" % topo["label"],
         "",
         "- campaign: `%s`" % campaign.get("campaign_id"),
         "- source: `%s`" % campaign.get("source_sha"),
+        "- source worktree: %s" % (
+            "CLEAN" if git.get("dirty") is False
+            else "DIRTY (report refused by the validator)"),
         "- trials requested: %s" % campaign.get("trials_requested"),
         "- spec inventory: %s" % ", ".join(
             s.get("id") for s in campaign.get("specs") or []),
@@ -885,12 +1841,12 @@ def main():
     lines += verdict["evidence"]
     lines += ["", "## Baseline cases (median of trials)", "",
               "| case | spec | trials ok | rec/s (median) | spread % | "
-              "map s | process s | tree cores | ingest cores | "
-              "ingest attributed | diag samples |",
-              "|---|---|---|---|---|---|---|---|---|---|---|"]
+              "map s | process s | tree cores | ingest cores | ingest "
+              "attribution | ingest phase s | diag samples |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary:
         lines.append("| %s | w%s n%s %s | %d/%d | %s | %s | %s | %s | %s | "
-                     "%s | %s | %d |" % (
+                     "%s | %s | %s | %d |" % (
                          r["case"], r["spec"].get("workers"),
                          r["spec"].get("nodes"), r["spec"].get("mode"),
                          r["n_ok"], r["n_trials"],
@@ -900,79 +1856,170 @@ def main():
                          _fmt(r["median_process_s"]),
                          _fmt(r["median_per_core"]),
                          _fmt(r["median_ingest_cores"]),
-                         "yes" if r["ingest_attributed"] else "NO",
+                         r.get("ingest_attribution") or "unavailable",
+                         _fmt(r.get("ingest_phase_s"), "%.3f"),
                          r["diag_samples"]))
     lines += ["", "`map s` is the child's `forkrun.map()` timer; `process s` "
                   "is the outer process wall, which also contains the "
-                  "harness's post-run exactness accounting. Ingest "
-                  "attribution is per-TASK `comm` CPU accumulated as "
-                  "a delta between samples: a task named `fr-ingest` only "
-                  "while it spills is attributed to ingest. Tree cores are "
-                  "the sum of all task CPU deltas over the run divided by "
-                  "wall, not a peak snapshot.", ""]
+                  "harness's post-run exactness accounting. Ingest CPU is "
+                  "reported in cores. When a direct record exists, the "
+                  "denominator is that ingest phase's measured duration "
+                  "(the honest basis for \"about one core while ingesting\"); "
+                  "otherwise it falls back to the comm-sampled figure over "
+                  "the map timer. `direct` is the ingest task's own "
+                  "`CLOCK_THREAD_CPUTIME_ID` record (Python spill, or the C "
+                  "NUMA ingest FINAL); `comm-sampled` is the 20 ms per-task "
+                  "delta keyed by `comm`, which is a cross-check and can miss "
+                  "a short phase. `ingest phase s` is the measured duration "
+                  "of that direct ingest window. Tree cores are the sum of "
+                  "all task CPU deltas over the run divided by wall, not a "
+                  "peak snapshot.", ""]
 
     lines += ["## Per-node queue telemetry (STAGE0_DIAG, spec §4.3)", ""]
-    lines.append("Raw timestamped samples (per node head/tail, batch "
+    lines.append("Raw timestamped samples (per node chunk head/tail, batch "
                  "read/write, dequeue counter, waiter gauge) are retained "
-                 "in each trial's `stderr.log`; the table aggregates them "
-                 "per trial and never joins one trial's end to the next "
+                 "in each trial's `stderr.log`; the tables aggregate them "
+                 "per trial and never join one trial's end to the next "
                  "trial's start.")
     lines.append("")
-    lines.append("| case | samples | duration s | nodes | per-node "
-                 "nonempty (batch queue) | all-shards-empty | longest "
-                 "all-empty ms | published/s | claimed/s | claimed/s in "
-                 "nonempty intervals | gated ms |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("### Batch queue: scanner -> worker (`b`, `c`, `a`)")
+    lines.append("")
+    lines.append("| case | samples | duration s | nodes | nonempty per node "
+                 "| all-empty | longest all-empty ms | published/s (raw "
+                 "write_idx) | claimed/s (raw read_idx) | c/s (cross-check) "
+                 "| supply gap/s (claims-pub) | gated ms |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in summary:
         q = queue.get(r["case"])
         if not q:
             lines.append("| %s | 0 | - | - | NO TELEMETRY | - | - | - | - | "
-                         "- | - |" % r["case"])
+                         "- | - | - |" % r["case"])
             continue
         per_node = "; ".join(
             "n%d:%s" % (n, _fmt(v.get("nonempty_fraction"), "%.2f"))
             for n, v in sorted(q["nodes"].items()))
         lines.append("| %s | %d | %s | %s | %s | %s | %s | %s | %s | %s | "
-                     "%s |" % (
+                     "%s | %s |" % (
                          r["case"], q["samples"],
                          _fmt(q["duration_s"], "%.2f"),
-                         ",".join(str(n) for n in sorted(q["nodes"])),
+                         ",".join(str(n) for n in sorted(q["nodes"])) or "-",
                          per_node or "-",
                          _fmt(q["all_empty_fraction"], "%.2f"),
                          _fmt(q["longest_all_empty_ms"], "%.0f"),
                          _fmt(q["published_batches_per_s"], "%.1f"),
                          _fmt(q["claimed_batches_per_s"], "%.1f"),
-                         _fmt(_weighted([
-                             (v.get("claimed_batches_per_s_nonempty"),
-                              v.get("consumption_interval_s"))
-                             for v in q["nodes"].values()]), "%.1f"),
+                         _fmt(q["claims_c_per_s"], "%.1f"),
+                         _fmt(q["supply_gap_batches_per_s"], "%+.1f"),
                          _fmt(q["gated_ms"], "%.0f")))
+    lines += ["", "### Chunk queue: ingest -> indexer (`q`, `i`)", ""]
+    lines.append("| case | samples | nodes | chunk published/s | chunk "
+                 "consumed/s | all-empty | longest all-empty ms | indexer "
+                 "waiters max | empty-with-waiters | gated ms |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    for r in summary:
+        q = queue.get(r["case"])
+        chunk = (q or {}).get("chunk") or {}
+        if not q or not chunk.get("nodes"):
+            lines.append("| %s | 0 | - | NOT MEASURABLE (no ingest/indexer "
+                         "path on this source) | - | - | - | - | - | %s |"
+                         % (r["case"], _fmt((q or {}).get("gated_ms"),
+                                            "%.0f")))
+            continue
+        lines.append("| %s | %d | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            r["case"], chunk.get("samples"),
+            ",".join(str(n) for n in sorted(chunk["nodes"])),
+            _fmt(chunk.get("chunk_published_per_s"), "%.1f"),
+            _fmt(chunk.get("chunk_consumed_per_s"), "%.1f"),
+            _fmt(chunk.get("all_empty_fraction"), "%.2f"),
+            _fmt(chunk.get("longest_all_empty_ms"), "%.0f"),
+            _fmt(chunk.get("indexer_waiters_max"), "%.0f"),
+            _fmt(chunk.get("indexer_wait_while_empty_fraction"), "%.2f"),
+            _fmt(q.get("gated_ms"), "%.0f")))
     lines += ["", "### Per-node detail", "",
               "| case | node | nonempty | longest empty ms | published/s | "
-              "claimed/s | claimed/s (nonempty) | nonempty interval s |",
-              "|---|---|---|---|---|---|---|---|"]
+              "claimed/s | c/s | supply gap/s | gap batches | "
+              "endpoint-persistent claimed/s | intervals | c-mismatch "
+              "intervals | counter regressions |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary:
         q = queue.get(r["case"])
         if not q:
             continue
         for node, v in sorted(q["nodes"].items()):
-            lines.append("| %s | n%d | %s | %s | %s | %s | %s | %s |" % (
-                r["case"], node,
-                _fmt(v.get("nonempty_fraction"), "%.2f"),
-                _fmt(v.get("longest_empty_ms"), "%.0f"),
-                _fmt(v.get("published_batches_per_s"), "%.1f"),
-                _fmt(v.get("claimed_batches_per_s"), "%.1f"),
-                _fmt(v.get("claimed_batches_per_s_nonempty"), "%.1f"),
-                _fmt(v.get("consumption_interval_s"), "%.2f")))
-    lines += ["", "`published/s` is the batch-queue write_idx delta; "
-                  "`claimed/s` is the dequeue counter delta. "
-                  "`claimed/s (nonempty)` uses only intervals where that "
-                  "node's batch queue was non-empty at both sampled ends. "
-                  "Sampling is event-driven at ~20ms, so intervals are "
-                  "reported in real seconds from the sampler timestamps, "
-                  "not as sample counts. `gated_ms` is the ingest "
-                  "backlog-gated wait accumulated by the engine sampler "
-                  "(ingest source only).", ""]
+            reg = v.get("counter_regressions") or {}
+            lines.append("| %s | n%d | %s | %s | %s | %s | %s | %s | %s | "
+                         "%s | %d | %d | %s |" % (
+                             r["case"], node,
+                             _fmt(v.get("nonempty_fraction"), "%.2f"),
+                             _fmt(v.get("longest_empty_ms"), "%.0f"),
+                             _fmt(v.get("published_batches_per_s"), "%.1f"),
+                             _fmt(v.get("claimed_batches_per_s"), "%.1f"),
+                             _fmt(v.get("claims_c_batches") and
+                                  v.get("claimed_interval_s") and
+                                  v["claims_c_batches"] /
+                                  v["claimed_interval_s"], "%.1f"),
+                             _fmt(v.get("supply_gap_batches_per_s"), "%+.1f"),
+                             _fmt(v.get("supply_gap_batches"), "%.0f"),
+                             _fmt(v.get("claimed_batches_per_s_nonempty"),
+                                  "%.1f"),
+                             v.get("consumption_intervals") or 0,
+                             v.get("claim_crosscheck_mismatch_intervals") or 0,
+                             ",".join("%s:%d" % (k, val)
+                                      for k, val in sorted(reg.items()))
+                             or "-"))
+    lines += ["", "`published/s` is the RAW `write_idx` delta (batches the "
+                  "scanner published); `claimed/s` is the RAW `read_idx` "
+                  "delta (batches workers claimed); depth "
+                  "(`write_idx - read_idx`) is used ONLY for occupancy. `c/s` "
+                  "is `total_lines_consumed`, incremented once per successful "
+                  "claim: it is a cross-check on the claim position, and "
+                  "intervals where `c` and `read_idx` disagree are counted "
+                  "rather than reconciled. A counter regression is counted "
+                  "and excluded from the rate; it is never silently treated "
+                  "as zero work.", "",
+                  "`supply gap/s` is computed PER NODE over the intervals "
+                  "where that node's publication and claim counters are both "
+                  "valid: a positive value means that node claimed faster "
+                  "than the scanner supplied it, i.e. that node was "
+                  "downstream-limited. It is not an aggregate rate compared "
+                  "against the fastest node.", "",
+                  "`endpoint-persistent claimed/s` uses intervals where that "
+                  "node's batch queue was non-empty at BOTH sampled ends. "
+                  "This is an endpoint-persistent estimate, not proof that "
+                  "the queue never emptied between two 20 ms samples; a "
+                  "queue that dips and refills between samples is counted "
+                  "as continuously available here.", "",
+                  "`gated_ms` is the ingest backlog-gated wait accumulated by "
+                  "the engine sampler (ingest source only). `q`/`i` are "
+                  "reported only when the source has an ingest->indexer "
+                  "path; the UMA scanner has no indexer, so those fields are "
+                  "reported as NOT MEASURABLE, never as zero.", ""]
+
+    lines += ["## Demand classification (spec §4.3/§8)", ""]
+    lines.append("| case | supply gap | ingest->indexer starvation | "
+                 "scanner->worker starvation | workers saturated | "
+                 "source-limited | ingest backpressure |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for r in summary:
+        cls = classify_demand(r, queue.get(r["case"]))
+        if not cls.get("available"):
+            lines.append("| %s | - | - | - | - | - | - |" % r["case"])
+            continue
+        def _tri(value):
+            return "?" if value is None else ("yes" if value else "no")
+        lines.append("| %s | %s | %s | %s | %s | %s | %s |" % (
+            r["case"], _tri(cls["has_supply_gap"]),
+            _tri(cls["ingest_indexer_starvation"]),
+            _tri(cls["scanner_worker_starvation"]),
+            _tri(cls["workers_saturated"]),
+            _tri(cls["source_limited"]),
+            _tri(cls["ingest_backpressure"])))
+    lines += ["", "`?` means the quantity is not measurable on this source "
+                  "path, not that it is absent. A supply gap is attributed to "
+                  "centralized ingestion only when ingest->indexer starvation "
+                  "coincurs and ingest CPU is near one core (spec §4.2); an "
+                  "empty chunk queue with indexer waiters while ingest CPU is "
+                  "well below one core is classified source-limited.", ""]
 
     lines += ["## 2×2 affinity/policy ablation (spec §6)", ""]
     if ablation is None:
@@ -987,15 +2034,16 @@ def main():
                      nodes.get("fake_numa")), ""]
         lines.append("| cell/form | requested mode | effective mode | "
                      "effective mask | affinity | first-touch cpu | pages by "
-                     "node | unknown | placement | mincore |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+                     "node | unknown | placement | mincore | read-touch |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for res in ablation.get("results") or []:
             req = res.get("policy_requested") or {}
             eff = res.get("effective") or {}
             aff = res.get("affinity_requested") or {}
             mc = res.get("mincore") or {}
+            touch = res.get("touch") or {}
             lines.append("| %s/%s | %s (%s) | %s | %s | cpu=%s rc=%s | %s | "
-                         "%s | %s | %s | %s/%s |" % (
+                         "%s | %s | %s | %s/%s | %s (%s pages) |" % (
                              res.get("cell"), res.get("form"),
                              req.get("mode_symbolic"), req.get("mode_numeric"),
                              eff.get("mempolicy_mode_symbolic"),
@@ -1005,7 +2053,11 @@ def main():
                              res.get("pages_by_node"),
                              res.get("pages_unknown"),
                              res.get("placement_measured"),
-                             mc.get("resident_pages"), mc.get("total_pages")))
+                             mc.get("resident_pages"), mc.get("total_pages"),
+                             "stable" if res.get("read_touch_stable") else
+                             ("n/a" if res.get("form") != "write-path"
+                              else "UNSTABLE"),
+                             touch.get("pages")))
         lines += ["", "Ablation validity: %s%s" % (
             "PASS" if abl_ok else "FAIL",
             "" if abl_ok else " — " + "; ".join(abl_issues)), ""]
@@ -1016,14 +2068,14 @@ def main():
                          "statuses are %s; post-touch statuses are real node "
                          "ids and `numa_maps` gains N-fields. Raw per-page "
                          "statuses are preserved in the JSON. The "
-                         "read-touch stability check (page 0 re-queried after "
-                         "the rest of the range was touched) is %s." % (
+                         "read-touch stability check re-queries EVERY page "
+                         "of the measured range after the full range was "
+                         "read-touched; unstable pages are %s." % (
                              sorted({s for r in wp
                                      for s in (r.get("move_pages_pre") or {})
                                      .get("statuses", [])}),
-                             "stable for every cell"
-                             if all(r.get("read_touch_stable") for r in wp)
-                             else "NOT stable for every cell"))
+                             sum(r.get("read_touch_unstable_pages") or 0
+                                 for r in wp)))
             lines.append("")
         lines.append("On this fake topology every CPU is listed on every "
                      "node, so the affinity arm cannot be distinguished from "
@@ -1038,15 +2090,35 @@ def main():
         kernel = env.get("kernel") or {}
         lines.append("- git: %s @ %s (dirty=%s)" % (
             g.get("branch"), g.get("head_sha"), g.get("dirty")))
+        lines.append("- source worktree: %s" % (
+            "CLEAN (reported SHA identifies the source)"
+            if g.get("dirty") is False else
+            "DIRTY — the report validator refuses this campaign"))
         lines.append("- kernel: %s | fake-numa: %s" % (
             kernel.get("release"), kernel.get("fake_numa_spec")))
+        topo_map = _env_topology_map(env)
+        lines.append("- CPU topology: %s" % ", ".join(
+            "node%s=%s" % (name, cpus) for name, cpus in
+            sorted(topo_map.items())))
         lines.append("- shmem THP: %s" % (env.get("thp") or {}).get(
             "shmem_enabled"))
+        lines.append("- governors: %s | SMT: %s" % (
+            (env.get("cpu_extra") or {}).get("governors"),
+            (env.get("cpu_extra") or {}).get("smt")))
+        lines.append("- cpuset: %s | memory.max: %s" % (
+            (env.get("cgroup") or {}).get("cpuset_cpus"),
+            (env.get("cgroup") or {}).get("memory_max")))
         lines.append("- build hashes: %s" % ", ".join(
             "%s=%s" % (os.path.basename(k), str(v)[:12])
             for k, v in (env.get("build_hashes") or {}).items()))
         lines.append("- campaign env: `%s` / `%s`" % (
             campaign.get("env_before"), campaign.get("env_after")))
+        env_after = campaign.get("_env_after")
+        if env_after:
+            drift = _env_drift(env, env_after)
+            lines.append("- before/after drift: %s" % (
+                "none" if not drift else
+                "; ".join("%s: %r -> %r" % item for item in drift)))
     else:
         lines.append("(env manifest not supplied)")
     if args.baseline_compare and os.path.isfile(args.baseline_compare):
