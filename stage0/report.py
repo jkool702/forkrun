@@ -431,6 +431,28 @@ def _delta(cur, prev):
     return cur - prev, "ok"
 
 
+def _sample_us(rec):
+    """Sample timestamp in microseconds. `t_us` is authoritative.
+
+    `t_ms` is retained as a human-readable field only; falling back to it
+    keeps old logs parseable. Interval math must use microseconds so two
+    samples in the same millisecond are still ordered.
+    """
+    t_us = rec.get("t_us")
+    if t_us is not None:
+        try:
+            return int(t_us)
+        except (TypeError, ValueError):
+            return None
+    t_ms = rec.get("t_ms")
+    if t_ms is not None:
+        try:
+            return int(t_ms) * 1000
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _batch_stats(records):
     """Scanner-published -> worker-claimed batch queue, per node.
 
@@ -440,13 +462,19 @@ def _batch_stats(records):
     total_lines_consumed and is a cross-check on the claim position.
     """
     # The sampler is shared by the UMA scanner and the NUMA C ingest, so
-    # the batch groups are owned by BOTH sources. Filtering on src here
-    # would silently discard every NUMA batch sample; the src field only
-    # decides who owns the ingest->indexer chunk path.
+    # the batch groups are owned by BOTH sources. A trial is emitted by
+    # exactly one of them in practice; if both appear, prefer the NUMA
+    # ingest sampler because that is the path the chunk timeline belongs
+    # to. Their t_us origins are independent, so never interleave them.
+    with_b = [r for r in records if r.get("b") is not None]
+    srcs = {r.get("src") for r in with_b}
+    owner = "ingest" if "ingest" in srcs else (
+        "scan" if "scan" in srcs else None)
     samples = sorted(
-        (r for r in records
-         if r.get("b") is not None and r.get("t_ms") is not None),
-        key=lambda r: int(r.get("t_ms", 0)))
+        (r for r in with_b
+         if (owner is None or r.get("src") == owner)
+         and _sample_us(r) is not None),
+        key=_sample_us)
     nodes = sorted({n for r in samples for n in (r.get("b") or {})})
     out = {
         "samples": len(samples),
@@ -485,9 +513,9 @@ def _batch_stats(records):
         out["nodes"] = {n: dict(empty_node, samples=len(samples))
                         for n in nodes}
         return out
-    t0 = int(samples[0].get("t_ms", 0))
-    t1 = int(samples[-1].get("t_ms", 0))
-    out["duration_s"] = max(0.0, (t1 - t0) / 1000.0)
+    t0 = _sample_us(samples[0])
+    t1 = _sample_us(samples[-1])
+    out["duration_s"] = max(0.0, (t1 - t0) / 1e6)
     per = {n: {
         "samples": 0, "nonempty": 0, "empty": 0,
         "longest_empty_ms": 0.0, "empty_start": None,
@@ -507,12 +535,11 @@ def _batch_stats(records):
     idle_waiter_samples = 0
 
     for prev, cur in zip(samples, samples[1:]):
-        try:
-            t_prev = int(prev.get("t_ms", 0))
-            t_cur = int(cur.get("t_ms", 0))
-        except (TypeError, ValueError):
+        t_prev = _sample_us(prev)
+        t_cur = _sample_us(cur)
+        if t_prev is None or t_cur is None:
             continue
-        dt = (t_cur - t_prev) / 1000.0
+        dt = (t_cur - t_prev) / 1e6
         if dt <= 0:
             continue
         all_pairs += 1
@@ -535,7 +562,7 @@ def _batch_stats(records):
                 if st["empty_start"] is None:
                     st["empty_start"] = t_prev
                 st["longest_empty_ms"] = max(
-                    st["longest_empty_ms"], t_cur - st["empty_start"])
+                    st["longest_empty_ms"], (t_cur - st["empty_start"]) / 1000.0)
             pub, pstate = _delta(bc[1], bp[1])
             read, rstate = _delta(bc[0], bp[0])
             if pub is not None:
@@ -583,7 +610,8 @@ def _batch_stats(records):
                 if all_empty_start is None:
                     all_empty_start = t_prev
                 out["longest_all_empty_ms"] = max(
-                    out["longest_all_empty_ms"], t_cur - all_empty_start)
+                    out["longest_all_empty_ms"],
+                    (t_cur - all_empty_start) / 1000.0)
             else:
                 any_nonempty += 1
                 all_empty_start = None
@@ -681,8 +709,8 @@ def _chunk_stats(records):
     """
     samples = sorted(
         (r for r in records
-         if r.get("q") is not None and r.get("t_ms") is not None),
-        key=lambda r: int(r.get("t_ms", 0)))
+         if r.get("q") is not None and _sample_us(r) is not None),
+        key=_sample_us)
     nodes = sorted({n for r in samples for n in (r.get("q") or {})})
     out = {
         "samples": len(samples),
@@ -727,9 +755,9 @@ def _chunk_stats(records):
         out["nodes"] = {n: dict(empty_node, samples=len(samples))
                         for n in nodes}
         return out
-    t0 = int(samples[0].get("t_ms", 0))
-    t1 = int(samples[-1].get("t_ms", 0))
-    out["duration_s"] = max(0.0, (t1 - t0) / 1000.0)
+    t0 = _sample_us(samples[0])
+    t1 = _sample_us(samples[-1])
+    out["duration_s"] = max(0.0, (t1 - t0) / 1e6)
     per = {n: {
         "samples": 0, "nonempty": 0, "empty": 0,
         "longest_empty_ms": 0.0, "empty_start": None,
@@ -743,12 +771,11 @@ def _chunk_stats(records):
     any_nonempty = 0
     all_empty_start = None
     for prev, cur in zip(samples, samples[1:]):
-        try:
-            t_prev = int(prev.get("t_ms", 0))
-            t_cur = int(cur.get("t_ms", 0))
-        except (TypeError, ValueError):
+        t_prev = _sample_us(prev)
+        t_cur = _sample_us(cur)
+        if t_prev is None or t_cur is None:
             continue
-        dt = (t_cur - t_prev) / 1000.0
+        dt = (t_cur - t_prev) / 1e6
         if dt <= 0:
             continue
         all_pairs += 1
@@ -772,7 +799,7 @@ def _chunk_stats(records):
                 if st["empty_start"] is None:
                     st["empty_start"] = t_prev
                 st["longest_empty_ms"] = max(
-                    st["longest_empty_ms"], t_cur - st["empty_start"])
+                    st["longest_empty_ms"], (t_cur - st["empty_start"]) / 1000.0)
             pub, pstate = _delta(qc[0], qp[0])
             cons, cstate = _delta(qc[1], qp[1])
             if pub is not None:
@@ -803,7 +830,8 @@ def _chunk_stats(records):
                 if all_empty_start is None:
                     all_empty_start = t_prev
                 out["longest_all_empty_ms"] = max(
-                    out["longest_all_empty_ms"], t_cur - all_empty_start)
+                    out["longest_all_empty_ms"],
+                    (t_cur - all_empty_start) / 1000.0)
             else:
                 any_nonempty += 1
                 all_empty_start = None
@@ -873,18 +901,384 @@ def _chunk_stats(records):
     return out
 
 
+def _num(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def correlated_intervals(records):
+    """Time-correlated ingest/scanner/worker evidence for ONE trial.
+
+    The NUMA C ingest emits `q`/`i`/`b`/`c`/`a` and its own `cpu_ns` on
+    ONE CLOCK_MONOTONIC origin, so consecutive `src=ingest` samples are a
+    common timeline. Every predicate below is evaluated on the SAME
+    per-node interval; trial-level co-occurrence is not evidence.
+
+    `q` is (published, claimed); `b` is (read_idx, write_idx); `c` is the
+    claim cross-check. A counter regression, a non-monotonic timestamp,
+    or a missing/regressed CPU sample EXCLUDES the interval and is
+    counted; nothing is silently bridged.
+
+    The UMA scanner has no ingest->indexer path, so this returns
+    available=False there rather than inventing zeros.
+    """
+    samples = sorted(
+        (r for r in records
+         if r.get("src") == "ingest" and _sample_us(r) is not None),
+        key=_sample_us)
+    out = {
+        "available": bool(samples),
+        "samples": len(samples),
+        "intervals": 0,
+        "interval_s": 0.0,
+        "excluded": {
+            "non_monotonic_timestamps": 0,
+            "missing_cpu": 0,
+            "cpu_regressed": 0,
+            "missing_node_groups": 0,
+            "counter_regressions": 0,
+            "no_node_data": 0,
+        },
+        "excluded_total": 0,
+        "nodes": {},
+        "ingest_starved_intervals": 0,
+        "ingest_starved_s": 0.0,
+        "ingest_cpu_saturated_starved_intervals": 0,
+        "ingest_cpu_saturated_starved_s": 0.0,
+        "scanner_starved_intervals": 0,
+        "scanner_starved_s": 0.0,
+        "source_limited_intervals": 0,
+        "source_limited_s": 0.0,
+        "ingest_backpressure_intervals": 0,
+        "worker_wait_intervals": 0,
+        "go_intervals": 0,
+        "go_s": 0.0,
+        "go_nodes": [],
+        "trial_go": False,
+        "mixed": False,
+        "cpu_cores_starved": None,
+        "go_cpu_cores": None,
+        "supply_gap_go_batches": 0,
+        "supply_gap_go_per_s": None,
+        "go_interval_list": [],
+        "claim_crosscheck_mismatch_intervals": 0,
+        "attribution_complete": False,
+    }
+    if len(samples) < 2:
+        return out
+
+    empty_node = {
+        "intervals": 0,
+        "interval_s": 0.0,
+        "ingest_starved_intervals": 0,
+        "ingest_starved_s": 0.0,
+        "ingest_starved_cpu_cores": None,
+        "ingest_cpu_saturated_starved_intervals": 0,
+        "ingest_cpu_saturated_starved_s": 0.0,
+        "scanner_starved_intervals": 0,
+        "scanner_starved_s": 0.0,
+        "source_limited_intervals": 0,
+        "source_limited_s": 0.0,
+        "ingest_backpressure_intervals": 0,
+        "worker_wait_intervals": 0,
+        "batch_empty_intervals": 0,
+        "batch_draining_intervals": 0,
+        "supply_gap_intervals": 0,
+        "go_intervals": 0,
+        "go_s": 0.0,
+        "go_supply_gap_batches": 0,
+        "go_supply_gap_per_s": None,
+        "go_cpu_cores": None,
+        "chunk_published_per_s": None,
+        "chunk_consumed_per_s": None,
+        "batch_published_per_s": None,
+        "batch_claimed_per_s": None,
+        "counter_regressions": 0,
+        "claim_crosscheck_mismatch_intervals": 0,
+    }
+    per = {}
+    starved_cpu_ns = 0
+    starved_dt_us = 0
+    go_cpu_ns = 0
+    go_dt_us = 0
+    go_gap_batches = 0
+    go_gap_s = 0.0
+    mismatches = 0
+
+    def _node():
+        node = dict(empty_node)
+        node["_cpu_ns"] = 0
+        node["_dt_us"] = 0
+        node["_chunk_pub"] = 0
+        node["_chunk_cons"] = 0
+        node["_batch_pub"] = 0
+        node["_batch_claim"] = 0
+        node["_gap_batches"] = 0
+        node["_gap_s"] = 0.0
+        node["_go_cpu_ns"] = 0
+        node["_go_dt_us"] = 0
+        node["_go_gap_batches"] = 0
+        node["_go_gap_s"] = 0.0
+        node["_starved_cpu_ns"] = 0
+        node["_starved_dt_us"] = 0
+        return node
+
+    for prev, cur in zip(samples, samples[1:]):
+        t_prev = _sample_us(prev)
+        t_cur = _sample_us(cur)
+        if t_prev is None or t_cur is None or t_cur <= t_prev:
+            out["excluded"]["non_monotonic_timestamps"] += 1
+            continue
+        dt_us = t_cur - t_prev
+        dt_s = dt_us / 1e6
+        cpu_prev = _num(prev.get("cpu_ns"))
+        cpu_cur = _num(cur.get("cpu_ns"))
+        if cpu_prev is None or cpu_cur is None:
+            out["excluded"]["missing_cpu"] += 1
+            continue
+        if cpu_cur < cpu_prev:
+            out["excluded"]["cpu_regressed"] += 1
+            continue
+        cpu_ns = cpu_cur - cpu_prev
+        cpu_cores = (cpu_ns / 1e9) / dt_s if dt_s > 0 else None
+        if cpu_cores is None:
+            out["excluded"]["non_monotonic_timestamps"] += 1
+            continue
+        gated_prev = _num(prev.get("gated_ms"))
+        gated_cur = _num(cur.get("gated_ms"))
+        gated_delta = (gated_cur - gated_prev
+                       if gated_prev is not None and gated_cur is not None
+                       and gated_cur >= gated_prev else 0)
+        nodes = sorted(set((prev.get("q") or {}))
+                       | set((cur.get("q") or {})))
+        valid_nodes = 0
+        interval_has_starvation = False
+        interval_has_scanner_starve = False
+        for node in nodes:
+            qp = (prev.get("q") or {}).get(node)
+            qc = (cur.get("q") or {}).get(node)
+            bp = (prev.get("b") or {}).get(node)
+            bc = (cur.get("b") or {}).get(node)
+            ip = _scalar(prev.get("i") or {}, node)
+            ic = _scalar(cur.get("i") or {}, node)
+            ap = (prev.get("a") or {}).get(node)
+            ac = (cur.get("a") or {}).get(node)
+            cp = _scalar(prev.get("c") or {}, node)
+            cc = _scalar(cur.get("c") or {}, node)
+            if (not qp or not qc or len(qp) < 2 or len(qc) < 2
+                    or not bp or not bc or len(bp) < 2 or len(bc) < 2
+                    or ip is None or ic is None
+                    or not ap or not ac or len(ap) < 2 or len(ac) < 2):
+                out["excluded"]["missing_node_groups"] += 1
+                continue
+            if (qc[0] < qp[0] or qc[1] < qp[1]
+                    or bc[0] < bp[0] or bc[1] < bp[1]
+                    or (cp is not None and cc is not None and cc < cp)):
+                out["excluded"]["counter_regressions"] += 1
+                continue
+            st = per.setdefault(node, _node())
+            st["intervals"] += 1
+            st["interval_s"] += dt_s
+            valid_nodes += 1
+
+            chunk_depth_p = qp[0] - qp[1]
+            chunk_depth_c = qc[0] - qc[1]
+            batch_depth_p = bp[1] - bp[0]
+            batch_depth_c = bc[1] - bc[0]
+            chunk_pub = qc[0] - qp[0]
+            chunk_cons = qc[1] - qp[1]
+            batch_pub = bc[1] - bp[1]
+            batch_claim = bc[0] - bp[0]
+            supply_gap = batch_claim - batch_pub
+            indexer_waiters = max(ip, ic)
+            worker_waiters = max(ap[0], ac[0])
+            upstream_available = (
+                chunk_depth_p > 0 or chunk_depth_c > 0
+                or indexer_waiters == 0)
+            ingest_starved = (
+                chunk_depth_p == 0 and chunk_depth_c == 0
+                and indexer_waiters > 0)
+            scanner_starved = (
+                batch_depth_p == 0 and batch_depth_c == 0
+                and worker_waiters > 0 and upstream_available)
+            cpu_near_one = (
+                _INGEST_NEAR_ONE[0] <= cpu_cores <= _INGEST_NEAR_ONE[1])
+            source_limited = (
+                ingest_starved and not cpu_near_one and gated_delta == 0)
+            backpressure = gated_delta > 0
+            batch_draining_or_empty = (
+                batch_depth_c == 0 or batch_depth_c < batch_depth_p)
+            go_interval = (
+                ingest_starved and cpu_near_one
+                and supply_gap > 0 and worker_waiters > 0
+                and batch_draining_or_empty and not backpressure)
+
+            st["_cpu_ns"] += cpu_ns
+            st["_dt_us"] += dt_us
+            st["_chunk_pub"] += chunk_pub
+            st["_chunk_cons"] += chunk_cons
+            st["_batch_pub"] += batch_pub
+            st["_batch_claim"] += batch_claim
+            st["_gap_batches"] += supply_gap
+            st["_gap_s"] += dt_s
+            if ingest_starved:
+                st["ingest_starved_intervals"] += 1
+                st["ingest_starved_s"] += dt_s
+                st["_starved_cpu_ns"] += cpu_ns
+                st["_starved_dt_us"] += dt_us
+                starved_cpu_ns += cpu_ns
+                starved_dt_us += dt_us
+                interval_has_starvation = True
+                if cpu_near_one:
+                    st["ingest_cpu_saturated_starved_intervals"] += 1
+                    st["ingest_cpu_saturated_starved_s"] += dt_s
+                    out["ingest_cpu_saturated_starved_intervals"] += 1
+                    out["ingest_cpu_saturated_starved_s"] += dt_s
+                if source_limited:
+                    st["source_limited_intervals"] += 1
+                    st["source_limited_s"] += dt_s
+                    out["source_limited_intervals"] += 1
+                    out["source_limited_s"] += dt_s
+            if scanner_starved:
+                st["scanner_starved_intervals"] += 1
+                st["scanner_starved_s"] += dt_s
+                interval_has_scanner_starve = True
+            if backpressure:
+                st["ingest_backpressure_intervals"] += 1
+                out["ingest_backpressure_intervals"] += 1
+            if worker_waiters > 0:
+                st["worker_wait_intervals"] += 1
+            if batch_depth_c == 0:
+                st["batch_empty_intervals"] += 1
+            if batch_draining_or_empty:
+                st["batch_draining_intervals"] += 1
+            if supply_gap > 0:
+                st["supply_gap_intervals"] += 1
+            if cp is not None and cc is not None and (cc - cp) != batch_claim:
+                st["claim_crosscheck_mismatch_intervals"] += 1
+                mismatches += 1
+            if go_interval:
+                st["go_intervals"] += 1
+                st["go_s"] += dt_s
+                st["_go_gap_batches"] += supply_gap
+                st["_go_gap_s"] += dt_s
+                st["_go_cpu_ns"] += cpu_ns
+                st["_go_dt_us"] += dt_us
+                go_gap_batches += supply_gap
+                go_gap_s += dt_s
+                go_cpu_ns += cpu_ns
+                go_dt_us += dt_us
+                out["go_interval_list"].append({
+                    "node": node,
+                    "t0_us": t_prev,
+                    "t1_us": t_cur,
+                    "cpu_cores": round(cpu_cores, 3),
+                    "supply_gap_batches": supply_gap,
+                    "supply_gap_per_s": round(supply_gap / dt_s, 1),
+                    "chunk_depth_start": chunk_depth_p,
+                    "chunk_depth_end": chunk_depth_c,
+                    "batch_depth_start": batch_depth_p,
+                    "batch_depth_end": batch_depth_c,
+                    "indexer_waiters": indexer_waiters,
+                    "worker_waiters": worker_waiters,
+                })
+        if not valid_nodes:
+            out["excluded"]["no_node_data"] += 1
+            continue
+        out["intervals"] += 1
+        out["interval_s"] += dt_s
+        if interval_has_starvation:
+            out["ingest_starved_intervals"] += 1
+            out["ingest_starved_s"] += dt_s
+        if interval_has_scanner_starve:
+            out["scanner_starved_intervals"] += 1
+            out["scanner_starved_s"] += dt_s
+
+    for node, st in per.items():
+        if st["_dt_us"]:
+            st["chunk_published_per_s"] = st["_chunk_pub"] / (
+                st["_dt_us"] / 1e6)
+            st["chunk_consumed_per_s"] = st["_chunk_cons"] / (
+                st["_dt_us"] / 1e6)
+            st["batch_published_per_s"] = st["_batch_pub"] / (
+                st["_dt_us"] / 1e6)
+            st["batch_claimed_per_s"] = st["_batch_claim"] / (
+                st["_dt_us"] / 1e6)
+        if st["_starved_dt_us"]:
+            st["ingest_starved_cpu_cores"] = (
+                st["_starved_cpu_ns"] / 1e9) / (
+                    st["_starved_dt_us"] / 1e6)
+        if st["_gap_s"]:
+            st["supply_gap_batches_per_s"] = (
+                st["_gap_batches"] / st["_gap_s"])
+        if st["_go_gap_s"]:
+            st["go_supply_gap_per_s"] = (
+                st["_go_gap_batches"] / st["_go_gap_s"])
+            st["go_supply_gap_batches"] = st["_go_gap_batches"]
+        if st["_go_dt_us"]:
+            st["go_cpu_cores"] = (
+                st["_go_cpu_ns"] / 1e9) / (st["_go_dt_us"] / 1e6)
+        for key in list(st):
+            if key.startswith("_"):
+                del st[key]
+    out["nodes"] = per
+    out["go_intervals"] = sum(v["go_intervals"] for v in per.values())
+    out["go_s"] = sum(v["go_s"] for v in per.values())
+    out["go_nodes"] = sorted(n for n, v in per.items() if v["go_intervals"])
+    out["trial_go"] = out["go_intervals"] > 0
+    out["ingest_starved_intervals"] = sum(
+        v["ingest_starved_intervals"] for v in per.values())
+    out["ingest_starved_s"] = sum(
+        v["ingest_starved_s"] for v in per.values())
+    out["scanner_starved_intervals"] = sum(
+        v["scanner_starved_intervals"] for v in per.values())
+    out["scanner_starved_s"] = sum(
+        v["scanner_starved_s"] for v in per.values())
+    out["source_limited_intervals"] = sum(
+        v["source_limited_intervals"] for v in per.values())
+    out["source_limited_s"] = sum(
+        v["source_limited_s"] for v in per.values())
+    out["ingest_backpressure_intervals"] = sum(
+        v["ingest_backpressure_intervals"] for v in per.values())
+    out["worker_wait_intervals"] = sum(
+        v["worker_wait_intervals"] for v in per.values())
+    out["mixed"] = (
+        out["ingest_starved_intervals"] > 0
+        and out["scanner_starved_intervals"] > 0)
+    out["supply_gap_intervals"] = sum(
+        v["supply_gap_intervals"] for v in per.values())
+    out["claim_crosscheck_mismatch_intervals"] = mismatches
+    if starved_dt_us:
+        out["cpu_cores_starved"] = (starved_cpu_ns / 1e9) / (
+            starved_dt_us / 1e6)
+    if go_dt_us:
+        out["go_cpu_cores"] = (go_cpu_ns / 1e9) / (go_dt_us / 1e6)
+    if go_gap_s:
+        out["supply_gap_go_batches"] = go_gap_batches
+        out["supply_gap_go_per_s"] = go_gap_batches / go_gap_s
+    out["excluded_total"] = sum(out["excluded"].values())
+    out["attribution_complete"] = (
+        out["intervals"] > 0 and out["excluded_total"] == 0)
+    return out
+
+
 def _trial_queue_stats(records):
     """One trial: batch (scanner->worker) + chunk (ingest->indexer).
 
-    The two samplers have independent t_ms origins, so they are NEVER
+    The two samplers have independent origins, so they are NEVER
     interleaved into one timeline. Batch groups (`b`/`c`/`a`) are emitted
     by BOTH the UMA scanner and the NUMA C ingest; only the chunk path
-    (`q`/`i`) is owned by src=ingest.
+    (`q`/`i`) is owned by src=ingest. `correlated` is the ONE
+    same-interval analysis; the trial-level booleans below are retained
+    for display and must not be used to decide Go.
     """
     batch = _batch_stats(records)
     chunk = _chunk_stats([r for r in records if r.get("src") == "ingest"])
     result = dict(batch)
     result["chunk"] = chunk
+    result["correlated"] = correlated_intervals(records)
     result["chunk_nodes"] = chunk["nodes"]
     result["chunk_samples"] = chunk["samples"]
     result["gated_ms"] = chunk["gated_ms"]
@@ -1030,12 +1424,154 @@ def _agg_chunk_nodes(trials):
     return out
 
 
+def _agg_correlated(trials):
+    """Aggregate same-interval evidence across a case's trials.
+
+    The per-trial rows are retained so the report can show repeatability
+    and spread; no trial's intervals are ever joined to another trial's.
+    """
+    rows = [t.get("correlated") for t in trials if t.get("correlated")]
+    avail = [r for r in rows if r.get("available")]
+    merged_excluded = {}
+    for r in avail:
+        for key, value in (r.get("excluded") or {}).items():
+            merged_excluded[key] = merged_excluded.get(key, 0) + value
+    nodes = {}
+    for r in avail:
+        for node, st in (r.get("nodes") or {}).items():
+            dst = nodes.setdefault(node, {
+                "intervals": 0, "interval_s": 0.0,
+                "ingest_starved_intervals": 0, "ingest_starved_s": 0.0,
+                "ingest_cpu_saturated_starved_intervals": 0,
+                "ingest_cpu_saturated_starved_s": 0.0,
+                "scanner_starved_intervals": 0, "scanner_starved_s": 0.0,
+                "source_limited_intervals": 0, "source_limited_s": 0.0,
+                "ingest_backpressure_intervals": 0,
+                "worker_wait_intervals": 0,
+                "batch_empty_intervals": 0,
+                "batch_draining_intervals": 0,
+                "supply_gap_intervals": 0,
+                "go_intervals": 0, "go_s": 0.0,
+                "go_supply_gap_batches": 0, "go_gap_s": 0.0,
+                "go_trials": 0,
+                "counter_regressions": 0,
+                "claim_crosscheck_mismatch_intervals": 0,
+            })
+            for key in ("intervals", "interval_s",
+                        "ingest_starved_intervals", "ingest_starved_s",
+                        "ingest_cpu_saturated_starved_intervals",
+                        "ingest_cpu_saturated_starved_s",
+                        "scanner_starved_intervals", "scanner_starved_s",
+                        "source_limited_intervals", "source_limited_s",
+                        "ingest_backpressure_intervals",
+                        "worker_wait_intervals", "batch_empty_intervals",
+                        "batch_draining_intervals", "supply_gap_intervals",
+                        "go_intervals", "go_s", "go_supply_gap_batches",
+                        "counter_regressions",
+                        "claim_crosscheck_mismatch_intervals"):
+                dst[key] += st.get(key) or 0
+            dst["go_gap_s"] += st.get("go_s") or 0.0
+            if st.get("go_intervals"):
+                dst["go_trials"] += 1
+    for dst in nodes.values():
+        if dst["go_gap_s"]:
+            dst["go_supply_gap_per_s"] = (
+                dst["go_supply_gap_batches"] / dst["go_gap_s"])
+        else:
+            dst["go_supply_gap_per_s"] = None
+        dst.pop("go_gap_s", None)
+    trial_rows = []
+    for idx, r in enumerate(rows, 1):
+        if not r.get("available"):
+            continue
+        trial_rows.append({
+            "trial": idx,
+            "intervals": r.get("intervals"),
+            "interval_s": r.get("interval_s"),
+            "excluded": dict(r.get("excluded") or {}),
+            "excluded_total": r.get("excluded_total"),
+            "attribution_complete": r.get("attribution_complete"),
+            "ingest_starved_intervals": r.get("ingest_starved_intervals"),
+            "ingest_starved_s": r.get("ingest_starved_s"),
+            "ingest_cpu_saturated_starved_intervals":
+                r.get("ingest_cpu_saturated_starved_intervals"),
+            "ingest_cpu_saturated_starved_s":
+                r.get("ingest_cpu_saturated_starved_s"),
+            "scanner_starved_intervals": r.get("scanner_starved_intervals"),
+            "scanner_starved_s": r.get("scanner_starved_s"),
+            "source_limited_intervals": r.get("source_limited_intervals"),
+            "ingest_backpressure_intervals":
+                r.get("ingest_backpressure_intervals"),
+            "worker_wait_intervals": r.get("worker_wait_intervals"),
+            "supply_gap_intervals": r.get("supply_gap_intervals"),
+            "ingest_supplied": bool(
+                (r.get("intervals") or 0) > 0
+                and (r.get("supply_gap_intervals") or 0) == 0
+                and (r.get("scanner_starved_intervals") or 0) == 0
+                and (r.get("source_limited_intervals") or 0) == 0),
+            "go_intervals": r.get("go_intervals"),
+            "go_s": r.get("go_s"),
+            "go_nodes": list(r.get("go_nodes") or []),
+            "supply_gap_go_batches": r.get("supply_gap_go_batches"),
+            "supply_gap_go_per_s": r.get("supply_gap_go_per_s"),
+            "cpu_cores_starved": r.get("cpu_cores_starved"),
+            "go_cpu_cores": r.get("go_cpu_cores"),
+            "trial_go": r.get("trial_go"),
+            "mixed": r.get("mixed"),
+            "claim_crosscheck_mismatch_intervals":
+                r.get("claim_crosscheck_mismatch_intervals"),
+        })
+    go_gaps = [r["supply_gap_go_per_s"] for r in trial_rows
+               if r.get("trial_go")
+               and r.get("supply_gap_go_per_s") is not None]
+    out = {
+        "available": bool(avail),
+        "trials": len(avail),
+        "intervals": sum(r.get("intervals") or 0 for r in avail),
+        "interval_s": sum(r.get("interval_s") or 0.0 for r in avail),
+        "excluded": merged_excluded,
+        "excluded_total": sum(merged_excluded.values()),
+        "trial_go_trials": sum(1 for r in avail if r.get("trial_go")),
+        "mixed_trials": sum(1 for r in avail if r.get("mixed")),
+        "ingest_starved_trials": sum(
+            1 for r in avail if (r.get("ingest_starved_intervals") or 0) > 0),
+        "scanner_starved_trials": sum(
+            1 for r in avail
+            if (r.get("scanner_starved_intervals") or 0) > 0),
+        "source_limited_trials": sum(
+            1 for r in avail if (r.get("source_limited_intervals") or 0) > 0),
+        "ingest_backpressure_trials": sum(
+            1 for r in avail
+            if (r.get("ingest_backpressure_intervals") or 0) > 0),
+        "attribution_complete_trials": sum(
+            1 for r in avail if r.get("attribution_complete")),
+        "go_intervals": sum(r.get("go_intervals") or 0 for r in avail),
+        "go_s": sum(r.get("go_s") or 0.0 for r in avail),
+        "go_nodes": sorted({n for r in avail
+                            for n in (r.get("go_nodes") or [])}),
+        "supply_gap_intervals": sum(
+            r.get("supply_gap_intervals") or 0 for r in avail),
+        "worker_wait_intervals": sum(
+            r.get("worker_wait_intervals") or 0 for r in avail),
+        "nodes": nodes,
+        "trial_rows": trial_rows,
+        "go_gap_per_s_min": min(go_gaps) if go_gaps else None,
+        "go_gap_per_s_max": max(go_gaps) if go_gaps else None,
+        "go_gap_per_s_median": _median(go_gaps),
+        "go_gap_per_s_spread": (max(go_gaps) - min(go_gaps)
+                                if len(go_gaps) > 1 else None),
+    }
+    return out
+
+
 def queue_demand_stats(cases):
     """Aggregate per-case queue telemetry from raw stderr.log files.
 
     Trials are processed independently: no interval ever spans a trial
-    boundary. Batch metrics use src=scan records and chunk metrics use
-    src=ingest records; their t_ms origins are independent and are never
+    boundary. Batch groups are emitted by whichever sampler owns the
+    path in that mode (src=ingest for NUMA, src=scan for UMA); chunk
+    metrics are owned by src=ingest only. Timestamps use `t_us` on the
+    owning sampler's own CLOCK_MONOTONIC origin; sources are never
     interleaved. Rates are computed from raw counter deltas over the
     intervals where both counters are valid; a counter regression is
     counted, not silently treated as zero.
@@ -1161,6 +1697,7 @@ def queue_demand_stats(cases):
             "nodes": batch_nodes,
             "chunk": chunk_agg,
             "chunk_nodes": chunk_nodes,
+            "correlated": _agg_correlated(trials),
         }
         if duration_total:
             agg["published_batches_per_s"] = (
@@ -1188,12 +1725,13 @@ def _weighted(pairs):
 
 
 def classify_demand(row, q):
-    """Classify measured demand from q/i/b/c/a evidence (spec §4.3/§8).
+    """Classify measured demand from same-interval q/i/b/c/a evidence.
 
     This is the ONE authoritative interpretation of the queue telemetry.
-    It never fills an unmeasurable quantity with zero and it never turns
-    an ingest CPU figure or a worker-waiter figure alone into proof of an
-    ingestion bottleneck.
+    The decisive fields (`correlated_*`) come from consecutive
+    src=ingest samples on ONE timeline; trial-level co-occurrence is
+    never treated as correlation. Unmeasurable quantities stay None,
+    never zero.
     """
     if not q:
         return {"available": False,
@@ -1204,46 +1742,163 @@ def classify_demand(row, q):
     chunk_measurable = (bool(chunk_nodes)
                         and bool(chunk.get("indexer_waiters_observed")))
     batch_measurable = bool(batch_nodes)
+    corr = q.get("correlated") or {}
+    corr_available = bool(corr.get("available"))
+    trials = q.get("trials", 0)
+    corr_trials = corr.get("trials", 0)
+    trial_rows = corr.get("trial_rows") or []
     evidence = []
     gap_nodes = sorted(
         n for n, v in batch_nodes.items()
         if v.get("supply_gap_batches_per_s") is not None
         and v["supply_gap_batches_per_s"] > 0)
-    ingest_starved = bool(q.get("ingest_starvation_trials"))
-    scanner_starved = (
-        True if q.get("scanner_starvation_trials") else
-        (False if q.get("scanner_starvation_measurable_trials")
-         else None))
-    workers_saturated = bool(q.get("workers_saturated_trials"))
     gated = q.get("gated_ms")
     ingest_cores = row.get("median_ingest_cores")
-    ingest_near_one = (
-        ingest_cores is not None
-        and _INGEST_NEAR_ONE[0] <= ingest_cores <= _INGEST_NEAR_ONE[1])
-    source_limited = None
-    if ingest_starved:
-        if ingest_cores is None:
-            evidence.append(
-                "chunk queue empty with indexer waiters, but ingest CPU is "
-                "not measured; source-limited vs CPU-bound ingest cannot "
-                "be distinguished")
-        elif not ingest_near_one and not (gated is not None and gated > 0):
-            source_limited = True
-            evidence.append(
-                "chunk queue empty with indexer waiters while ingest CPU "
-                "%.2f cores is below the spec §4.2 near-one-core reading "
-                "band and gated_ms=%s; this is source-limited, not "
-                "centralized-ingest CPU saturation"
-                % (ingest_cores, gated))
-        else:
+
+    if corr_available:
+        ingest_starved = (corr.get("ingest_starved_trials") or 0) > 0
+        scanner_starved = (corr.get("scanner_starved_trials") or 0) > 0
+        source_limited = (corr.get("source_limited_trials") or 0) > 0
+        ingest_backpressure = (
+            corr.get("ingest_backpressure_trials") or 0) > 0
+        ingest_near_one = (
+            corr.get("nodes")
+            and any((v.get("ingest_cpu_saturated_starved_intervals") or 0)
+                    > 0 for v in corr["nodes"].values()))
+        supply_gap_intervals = corr.get("supply_gap_intervals") or 0
+        workers_saturated = bool(
+            corr_trials == trials and trials > 0
+            and (corr.get("attribution_complete_trials") or 0) == trials
+            and supply_gap_intervals == 0
+            and (corr.get("scanner_starved_trials") or 0) == 0)
+    else:
+        ingest_starved = bool(q.get("ingest_starvation_trials"))
+        scanner_starved = (
+            True if q.get("scanner_starvation_trials") else
+            (False if q.get("scanner_starvation_measurable_trials")
+             else None))
+        ingest_near_one = (
+            ingest_cores is not None
+            and _INGEST_NEAR_ONE[0] <= ingest_cores <= _INGEST_NEAR_ONE[1])
+        source_limited = None
+        if ingest_starved:
+            if ingest_cores is None:
+                evidence.append(
+                    "chunk queue empty with indexer waiters, but ingest CPU "
+                    "is not measured; source-limited vs CPU-bound ingest "
+                    "cannot be distinguished")
+            elif not ingest_near_one and not (gated is not None
+                                              and gated > 0):
+                source_limited = True
+                evidence.append(
+                    "chunk queue empty with indexer waiters while ingest CPU "
+                    "%.2f cores is below the spec §4.2 near-one-core reading "
+                    "band and gated_ms=%s; this is source-limited, not "
+                    "centralized-ingest CPU saturation"
+                    % (ingest_cores, gated))
+            else:
+                source_limited = False
+                evidence.append(
+                    "chunk queue empty with indexer waiters while ingest CPU "
+                    "%.2f cores is near one core (spec §4.2)"
+                    % ingest_cores)
+        elif chunk_measurable:
             source_limited = False
+        ingest_backpressure = bool(gated is not None and gated > 0)
+        workers_saturated = bool(q.get("workers_saturated_trials"))
+
+    corr_all_trials = (corr_available and trials > 0
+                       and corr_trials == trials)
+    corr_all_go = (corr_all_trials
+                   and (corr.get("trial_go_trials") or 0) == trials)
+    corr_no_mixed = (corr.get("mixed_trials") or 0) == 0
+    corr_no_scanner = (corr.get("scanner_starved_trials") or 0) == 0
+    corr_no_source = (corr.get("source_limited_trials") or 0) == 0
+    corr_complete = (corr_all_trials
+                     and (corr.get("attribution_complete_trials") or 0)
+                     == trials)
+    gap_min = corr.get("go_gap_per_s_min")
+    gap_spread = corr.get("go_gap_per_s_spread")
+    # Repeatability is not a percentage threshold: the weakest trial's
+    # GO-interval deficit rate must be larger than the full observed
+    # spread (max-min) of those rates. If the deficit is inside the
+    # trial-to-trial variation, the evidence cannot distinguish it from
+    # noise and the verdict stays INCONCLUSIVE.
+    corr_positive = gap_min is not None and gap_min > 0
+    corr_distinguishable = bool(
+        corr_positive and (gap_spread is None or gap_min > gap_spread))
+    corr_repeatable = bool(corr_all_go and corr_distinguishable)
+    correlated_go = bool(
+        corr_all_trials and corr_all_go and corr_no_mixed
+        and corr_no_scanner and corr_no_source and corr_complete
+        and corr_repeatable)
+
+    if corr_available:
+        evidence.append(
+            "same-interval evidence: %d/%d trials usable, %d intervals "
+            "over %.2fs" % (corr_trials, trials,
+                            corr.get("intervals") or 0,
+                            corr.get("interval_s") or 0.0))
+        if corr.get("go_intervals"):
             evidence.append(
-                "chunk queue empty with indexer waiters while ingest CPU "
-                "%.2f cores is near one core (spec §4.2)"
-                % ingest_cores)
-    elif chunk_measurable:
-        source_limited = False
-    ingest_backpressure = bool(gated is not None and gated > 0)
+                "same-interval GO evidence: %d interval(s) over %.2fs on "
+                "node(s) %s; per-trial deficit %s"
+                % (corr.get("go_intervals"),
+                   corr.get("go_s") or 0.0,
+                   ", ".join("n%d" % n for n in
+                             (corr.get("go_nodes") or [])) or "none",
+                   _gap_range(corr)))
+            evidence.append(
+                "trial-to-trial repeatability: deficit rates %s; spread %s; "
+                "weakest trial %s the spread -> %s"
+                % (_trial_gap_values(corr),
+                   _fmt(corr.get("go_gap_per_s_spread"), "%.1f"),
+                   "exceeds" if corr_distinguishable else "does not exceed",
+                   "distinguishable from trial variation"
+                   if corr_distinguishable else
+                   "NOT distinguishable from trial variation"))
+        else:
+            evidence.append(
+                "no interval has ingest CPU near one core, an empty chunk "
+                "queue with indexer waiters, a draining/empty batch queue, "
+                "waiting workers, and claims above publications together")
+        if corr.get("mixed_trials"):
+            evidence.append(
+                "mixed/ambiguous: %d trial(s) show ingest starvation in one "
+                "interval and scanner/worker starvation with upstream input "
+                "available in another; trial-level co-occurrence is not "
+                "correlation" % corr["mixed_trials"])
+        if corr.get("scanner_starved_trials"):
+            evidence.append(
+                "scanner/worker starvation with upstream input available in "
+                "%d/%d trials; this is a downstream limitation, not an "
+                "ingest one" % (corr["scanner_starved_trials"], trials))
+        if corr.get("source_limited_trials"):
+            evidence.append(
+                "source-limited intervals (chunk queue empty with indexer "
+                "waiters while ingest CPU is below the near-one-core band) "
+                "in %d/%d trials"
+                % (corr["source_limited_trials"], trials))
+        if corr.get("ingest_backpressure_trials"):
+            evidence.append(
+                "ingest backlog-gated intervals in %d/%d trials: ingest "
+                "waited for destination chunk-queue capacity"
+                % (corr["ingest_backpressure_trials"], trials))
+        if corr.get("excluded_total"):
+            evidence.append(
+                "excluded intervals (never bridged): %s"
+                % ", ".join("%s=%d" % (k, v) for k, v in
+                            sorted((corr.get("excluded") or {}).items())
+                            if v))
+        if not corr_complete:
+            evidence.append(
+                "same-interval attribution is incomplete: %d/%d trials "
+                "have clean, usable intervals"
+                % (corr.get("attribution_complete_trials") or 0, trials))
+    else:
+        evidence.append(
+            "no src=ingest timeline on this source path; same-interval "
+            "attribution is unavailable (not zero)")
     if gap_nodes:
         evidence.append(
             "per-node supply gap (claims > publications): %s"
@@ -1255,14 +1910,18 @@ def classify_demand(row, q):
     if ingest_starved:
         evidence.append(
             "chunk queue empty with indexer waiters in %d/%d trials"
-            % (q.get("ingest_starvation_trials", 0), q.get("trials", 0)))
+            % (corr.get("ingest_starved_trials")
+               if corr_available
+               else q.get("ingest_starvation_trials", 0), trials))
     if scanner_starved is True:
         evidence.append(
             "batch queue empty with waiting workers while upstream chunk "
             "supply was available (scanner/worker starvation)")
     if workers_saturated:
         evidence.append(
-            "batch queue non-empty in at least one sample (workers supplied)")
+            "no interval shows worker claims exceeding scanner publication, "
+            "and no scanner/worker starvation was measured: centralized "
+            "ingest supplied downstream demand in every complete trial")
     if ingest_backpressure:
         evidence.append(
             "ingest gated_ms=%s: ingest waited for destination chunk-queue "
@@ -1283,8 +1942,59 @@ def classify_demand(row, q):
         "source_limited": source_limited,
         "ingest_backpressure": ingest_backpressure,
         "ingest_cpu_near_one": ingest_near_one,
+        "correlated_available": corr_available,
+        "correlated_trials": corr_trials,
+        "correlated_intervals": corr.get("intervals"),
+        "correlated_interval_s": corr.get("interval_s"),
+        "correlated_excluded": dict(corr.get("excluded") or {}),
+        "correlated_excluded_total": corr.get("excluded_total"),
+        "correlated_go": correlated_go,
+        "correlated_go_trials": corr.get("trial_go_trials"),
+        "correlated_go_intervals": corr.get("go_intervals"),
+        "correlated_go_s": corr.get("go_s"),
+        "correlated_go_nodes": list(corr.get("go_nodes") or []),
+        "correlated_mixed_trials": corr.get("mixed_trials"),
+        "correlated_scanner_starved_trials":
+            corr.get("scanner_starved_trials"),
+        "correlated_source_limited_trials":
+            corr.get("source_limited_trials"),
+        "correlated_backpressure_trials":
+            corr.get("ingest_backpressure_trials"),
+        "correlated_attribution_complete_trials":
+            corr.get("attribution_complete_trials"),
+        "correlated_repeatable": corr_repeatable,
+        "correlated_distinguishable": corr_distinguishable,
+        "correlated_gap_per_s_min": corr.get("go_gap_per_s_min"),
+        "correlated_gap_per_s_median": corr.get("go_gap_per_s_median"),
+        "correlated_gap_per_s_max": corr.get("go_gap_per_s_max"),
+        "correlated_gap_per_s_spread": corr.get("go_gap_per_s_spread"),
+        "correlated_supply_gap_intervals":
+            corr.get("supply_gap_intervals"),
+        "correlated_ingest_supplied": bool(
+            corr_complete
+            and (corr.get("supply_gap_intervals") or 0) == 0
+            and (corr.get("scanner_starved_trials") or 0) == 0),
+        "correlated_trial_rows": trial_rows,
         "evidence": evidence,
     }
+
+
+def _gap_range(corr):
+    vals = [corr.get("go_gap_per_s_min"),
+            corr.get("go_gap_per_s_median"),
+            corr.get("go_gap_per_s_max")]
+    if any(v is None for v in vals):
+        return "not measured"
+    return "min/median/max %.1f/%.1f/%.1f batches/s" % tuple(vals)
+
+
+def _trial_gap_values(corr):
+    vals = [r.get("supply_gap_go_per_s") for r in (corr.get("trial_rows") or [])
+            if r.get("trial_go")
+            and r.get("supply_gap_go_per_s") is not None]
+    if not vals:
+        return "not measured"
+    return "/".join("%.1f" % v for v in vals) + " batches/s"
 
 
 # --------------------------------------------------------------------------
@@ -1663,30 +2373,37 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems,
     go_cases = []
     nogo_cases = []
     ambiguous = []
+    attributable = []
+    not_attributable = []
     for row in decisive:
         case = row["case"]
         q = queue[case]
         c = classifications[case]
         trials = q.get("trials", 0)
-        gap_all_trials = q.get("supply_gap_trials", 0) == trials
-        starve_all_trials = q.get("ingest_starvation_trials", 0) == trials
-        idle = q.get("idle_waiter_fraction")
-        go = (
-            c["has_supply_gap"] and gap_all_trials
-            and c["ingest_indexer_starvation"] and starve_all_trials
-            and c["ingest_cpu_near_one"]
-            and idle is not None and idle > 0
-            and c["source_limited"] is False
-            and c["scanner_worker_starvation"] is not True)
-        nogo = (
-            c["source_limited"] is True
-            or c["scanner_worker_starvation"] is True
-            or (not c["has_supply_gap"]
-                and q.get("no_supply_gap_trials", 0) == trials
-                and c["workers_saturated"]))
-        if go:
+        if not c.get("available") or not c.get("chunk_measurable"):
+            # No ingest->indexer path exists on this source (the UMA
+            # control case). It is reported but cannot decide a
+            # centralized-ingest hypothesis.
+            not_attributable.append(case)
+            continue
+        attributable.append(case)
+        if c.get("correlated_go"):
             go_cases.append(case)
-        elif nogo:
+            continue
+        if not c.get("correlated_available"):
+            ambiguous.append(case)
+            continue
+        rows = c.get("correlated_trial_rows") or []
+        complete = [r for r in rows if r.get("attribution_complete")]
+        gap_trials = [r for r in rows
+                      if (r.get("supply_gap_intervals") or 0) > 0]
+        # NO-GO requires the same-interval evidence to be complete in
+        # every trial AND to show no interval where worker claims
+        # exceeded scanner publication. A trial with a deficit that is
+        # not attributable (CPU not near one, workers not waiting,
+        # queue not draining) is ambiguous, not No-Go.
+        if (trials > 0 and len(rows) == trials
+                and len(complete) == trials and not gap_trials):
             nogo_cases.append(case)
         else:
             ambiguous.append(case)
@@ -1696,72 +2413,104 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems,
                 % ", ".join(r["case"] for r in decisive),
                 "- Ingest CPU basis (cores; direct thread CPU where "
                 "available): %s"
-                % ", ".join("%s=%.2f (%s)" % (
+                % (", ".join("%s=%.2f (%s)" % (
                     r["case"], r["median_ingest_cores"],
                     r.get("ingest_attribution"))
                     for r in decisive
-                    if r["median_ingest_cores"] is not None),
-                "- Per-node supply gap (claims > publications) cases: %s"
-                % (", ".join(r["case"] for r in decisive
-                             if classifications[r["case"]]["has_supply_gap"])
+                    if r["median_ingest_cores"] is not None)
+                   or "none measured"),
+                "- Same-interval GO cases (CPU saturation + empty chunk "
+                "queue with indexer waiters + draining batch queue with "
+                "waiting workers + claims above publications): %s"
+                % (", ".join(go_cases) or "none observed"),
+                "- Same-interval supply-gap cases (worker claims exceeded "
+                "scanner publication on at least one node in at least one "
+                "interval): %s"
+                % (", ".join(
+                    r["case"] for r in decisive
+                    if (classifications[r["case"]]
+                        .get("correlated_supply_gap_intervals") or 0) > 0)
                    or "none observed"),
-                "- Ingest->indexer starvation cases: %s"
+                "- Same-interval ingest->indexer starvation cases: %s"
                 % (", ".join(
                     r["case"] for r in decisive
                     if classifications[r["case"]]
-                    ["ingest_indexer_starvation"]) or "none observed"),
-                "- Source-limited cases: %s"
+                    .get("ingest_indexer_starvation")) or "none observed"),
+                "- Same-interval source-limited cases: %s"
                 % (", ".join(
                     r["case"] for r in decisive
-                    if classifications[r["case"]]["source_limited"] is True)
-                   or "none observed"),
-                "- Scanner/worker-starvation cases: %s"
+                    if classifications[r["case"]].get("source_limited")
+                    is True) or "none observed"),
+                "- Same-interval scanner/worker-starvation cases: %s"
                 % (", ".join(
                     r["case"] for r in decisive
                     if classifications[r["case"]]
-                    ["scanner_worker_starvation"] is True)
-                   or "none observed")]
+                    .get("scanner_worker_starvation") is True)
+                   or "none observed"),
+                "- Cases without an ingest->indexer path (reported, not "
+                "used for the centralized-ingest decision): %s"
+                % (", ".join(not_attributable) or "none")]
     for row in decisive:
         evidence.append("- %s: %s" % (
             row["case"],
             "; ".join(classifications[row["case"]]["evidence"])))
 
+    if not attributable:
+        return {
+            "verdict": "INCONCLUSIVE — no decisive case has an "
+                       "ingest->indexer path to attribute",
+            "decision": "INCONCLUSIVE",
+            "evidence": evidence + [
+                "- The UMA control case(s) cannot measure centralized "
+                "ingest->indexer starvation, so they cannot support a Go "
+                "or No-Go for the distributed-ingest hypothesis."],
+            "go": False, "topology": topo,
+        }
     if go_cases and not nogo_cases and not ambiguous:
         return {
             "verdict": "GO candidate — centralized ingest is the measured "
                        "limiter on this physical host",
             "decision": "GO",
             "evidence": evidence + [
-                "- Every decisive case shows a per-node supply deficit "
-                "(claims above publications) in every trial, ingest CPU "
-                "near one core, ingest->indexer starvation, and workers "
-                "idle while the batch queue is empty.",
+                "- In every attributable decisive case and every trial, at "
+                "least one per-node interval shows the required conditions "
+                "TOGETHER: ingest CPU near one core, the chunk queue empty "
+                "with indexer waiters, worker claims exceeding scanner "
+                "publications while the batch queue drains, and workers "
+                "waiting.",
+                "- The per-trial deficit rates are larger than their own "
+                "trial-to-trial spread (see each case line), so the "
+                "deficit is distinguishable from run-to-run noise.",
                 "- Source starvation and scanner/worker bottlenecks are "
-                "excluded by the measured q/i/b/a evidence.",
+                "excluded: no source-limited intervals and no "
+                "scanner/worker starvation with upstream input available "
+                "were measured in any trial.",
                 "- This is a recommendation to implement/test the "
                 "distributed design, not proof that it will scale."],
             "go": True, "topology": topo,
         }
     if nogo_cases and not go_cases and not ambiguous:
         reasons = []
-        if any(classifications[r["case"]]["source_limited"] is True
+        if any((classifications[r["case"]]
+                .get("correlated_source_limited_trials") or 0) > 0
                for r in decisive):
             reasons.append(
                 "measured throughput is limited by the source rather than "
                 "centralized ingestion (chunk queue empty with indexer "
                 "waiters while ingest CPU is below the near-one-core "
                 "reading band)")
-        if any(classifications[r["case"]]
-               ["scanner_worker_starvation"] is True for r in decisive):
+        if any((classifications[r["case"]]
+                .get("correlated_scanner_starved_trials") or 0) > 0
+               for r in decisive):
             reasons.append(
                 "measured throughput is limited by the scanner/worker "
                 "downstream stage while upstream chunk supply was "
                 "available")
         if not reasons:
             reasons.append(
-                "centralized ingestion supplies sufficient work: no "
-                "per-node supply gap was measured and the batch queue "
-                "stayed available to active workers in every trial")
+                "centralized ingestion supplied sufficient work: no "
+                "same-interval supply deficit (claims above publications) "
+                "was measured on any node in any trial")
         return {
             "verdict": "NO-GO — centralized ingestion is not the measured "
                        "limiter",
@@ -1777,9 +2526,10 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems,
         "evidence": evidence + [
             "- Spec §8 requires the supply gap to be attributable to "
             "centralized ingest CPU saturation while downstream has "
-            "unused capacity, consistently across at least three trials. "
-            "At least one required distinction remains ambiguous "
-            "(ambiguous cases: %s), so no Go/No-Go is asserted."
+            "unused capacity, in the SAME per-node intervals, consistently "
+            "across at least three trials. At least one required "
+            "distinction remains ambiguous (ambiguous cases: %s), so no "
+            "Go/No-Go is asserted."
             % (", ".join(ambiguous) or "none; mixed Go/No-Go evidence")],
         "go": False, "topology": topo,
     }
@@ -2007,10 +2757,15 @@ def main():
                   "as zero work.", "",
                   "`supply gap/s` is computed PER NODE over the intervals "
                   "where that node's publication and claim counters are both "
-                  "valid: a positive value means that node claimed faster "
-                  "than the scanner supplied it, i.e. that node was "
-                  "downstream-limited. It is not an aggregate rate compared "
-                  "against the fastest node.", "",
+                  "valid: a positive value means worker claims exceeded "
+                  "scanner publication on that node over those intervals, "
+                  "i.e. a scanner-side supply deficit relative to worker "
+                  "demand (workers drew down previously queued work). It is "
+                  "NOT evidence by itself that the downstream stage is the "
+                  "limiter; the q/i timeline decides whether the scanner was "
+                  "starved for input or unable to process available input. "
+                  "It is not an aggregate rate compared against the fastest "
+                  "node, so one node's surplus cannot hide another's deficit.", "",
                   "The chunk queue uses the opposite pair order: `q` is "
                   "(`chunk_queue_head`, `chunk_queue_tail`), where head is "
                   "the ingest publication counter and tail is the "
@@ -2031,31 +2786,162 @@ def main():
                   "path; the UMA scanner has no indexer, so those fields are "
                   "reported as NOT MEASURABLE, never as zero.", ""]
 
+    lines += ["## Time-correlated same-interval evidence", "",
+              "The NUMA C ingest emits `q`, `i`, `b`, `c`, `a`, `cpu_ns` "
+              "and `t_us` on ONE CLOCK_MONOTONIC origin. Consecutive "
+              "`src=ingest` samples form one timeline per trial, and the "
+              "predicates below are evaluated on the SAME per-node "
+              "interval. Trial-level co-occurrence is never treated as "
+              "correlation. All elapsed-time math uses `t_us`; `t_ms` is "
+              "human-readable only.", "",
+              "Predicates: **ingest->indexer starvation** = the node's chunk "
+              "queue is empty at both sampled endpoints and its indexer "
+              "waiter gauge is positive in the same interval. **Scanner->"
+              "worker starvation** = the batch queue is empty at both "
+              "endpoints and workers are waiting in the same interval while "
+              "upstream input is available (nonzero chunk depth or no "
+              "indexer waiters). **Ingest CPU saturation** = the ingest "
+              "thread's `delta(cpu_ns)/delta(t_us)` is inside the declared "
+              "near-one-core reading band in the same interval. **Supply "
+              "deficit** = raw `read_idx` delta exceeds raw `write_idx` "
+              "delta on the node in the same interval (worker claims exceed "
+              "scanner publication). **GO interval** requires all of these "
+              "together, with the batch queue draining or empty and no "
+              "backlog-gated ingest wait. **Mixed** means ingest starvation "
+              "and upstream-available scanner/worker starvation occur in "
+              "different intervals of the same trial: ambiguous, not "
+              "\"scanner starvation absent\".", "",
+              "Excluded intervals are counted, never bridged: a "
+              "non-monotonic/duplicate timestamp, missing or regressed "
+              "`cpu_ns`, missing per-node groups, or a counter regression "
+              "removes the interval from every predicate.", ""]
+    lines.append("| case | trial | intervals | duration s | ingest "
+                 "starved | CPU-sat starved | scanner starved | source "
+                 "limited | backpressure | GO intervals | GO s | GO "
+                 "deficit/s | GO CPU cores | excluded |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for r in summary:
+        q = queue.get(r["case"])
+        corr = (q or {}).get("correlated") or {}
+        if not corr.get("available"):
+            lines.append("| %s | - | 0 | - | NOT AVAILABLE (no src=ingest "
+                         "timeline) | - | - | - | - | - | - | - | - | - |"
+                         % r["case"])
+            continue
+        rows = corr.get("trial_rows") or []
+        if not rows:
+            lines.append("| %s | - | 0 | - | - | - | - | - | - | - | - | "
+                         "- | - | %d |" % (r["case"],
+                                           corr.get("excluded_total") or 0))
+            continue
+        for t in rows:
+            lines.append("| %s | %d | %d | %s | %d | %d | %d | %d | %d | "
+                         "%d | %s | %s | %s | %s |" % (
+                             r["case"], t["trial"],
+                             t.get("intervals") or 0,
+                             _fmt(t.get("interval_s"), "%.2f"),
+                             t.get("ingest_starved_intervals") or 0,
+                             t.get("ingest_cpu_saturated_starved_intervals")
+                             or 0,
+                             t.get("scanner_starved_intervals") or 0,
+                             t.get("source_limited_intervals") or 0,
+                             t.get("ingest_backpressure_intervals") or 0,
+                             t.get("go_intervals") or 0,
+                             _fmt(t.get("go_s"), "%.2f"),
+                             _fmt(t.get("supply_gap_go_per_s"), "%.1f"),
+                             _fmt(t.get("go_cpu_cores"), "%.2f"),
+                             t.get("excluded_total") or 0))
+    lines += ["", "### Per-node same-interval detail", "",
+              "| case | node | intervals | ingest starved | CPU-sat "
+              "starved | scanner starved | source limited | worker waits | "
+              "supply-gap intervals | GO intervals | GO s | GO deficit/s | "
+              "GO CPU cores | chunk pub/s | chunk cons/s | batch pub/s | "
+              "batch claim/s | counter regressions | c-mismatch intervals |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in summary:
+        q = queue.get(r["case"])
+        corr = (q or {}).get("correlated") or {}
+        for node, v in sorted((corr.get("nodes") or {}).items()):
+            lines.append("| %s | n%d | %d | %d | %d | %d | %d | %d | %d | "
+                         "%d | %s | %s | %s | %s | %s | %s | %s | %d | %d |"
+                         % (
+                             r["case"], node,
+                             v.get("intervals") or 0,
+                             v.get("ingest_starved_intervals") or 0,
+                             v.get("ingest_cpu_saturated_starved_intervals")
+                             or 0,
+                             v.get("scanner_starved_intervals") or 0,
+                             v.get("source_limited_intervals") or 0,
+                             v.get("worker_wait_intervals") or 0,
+                             v.get("supply_gap_intervals") or 0,
+                             v.get("go_intervals") or 0,
+                             _fmt(v.get("go_s"), "%.2f"),
+                             _fmt(v.get("go_supply_gap_per_s"), "%.1f"),
+                             _fmt(v.get("go_cpu_cores"), "%.2f"),
+                             _fmt(v.get("chunk_published_per_s"), "%.1f"),
+                             _fmt(v.get("chunk_consumed_per_s"), "%.1f"),
+                             _fmt(v.get("batch_published_per_s"), "%.1f"),
+                             _fmt(v.get("batch_claimed_per_s"), "%.1f"),
+                             v.get("counter_regressions") or 0,
+                             v.get("claim_crosscheck_mismatch_intervals")
+                             or 0))
+    lines += ["", "`GO deficit/s` is the per-trial or per-node supply "
+                  "deficit measured ONLY over GO intervals, so it is not "
+                  "netted against intervals with a surplus. The verdict "
+                  "requires every trial to have GO intervals, the weakest "
+                  "trial's GO deficit rate to exceed the full trial-to-trial "
+                  "spread of those rates, complete attribution (zero "
+                  "exclusions), no source-limited intervals, no "
+                  "upstream-available scanner/worker starvation, and no "
+                  "mixed trial. The endpoint-sampling caveat applies: two "
+                  "samples 20 ms apart cannot prove the queue was "
+                  "continuously empty between them.", ""]
+
     lines += ["## Demand classification (spec §4.3/§8)", ""]
     lines.append("| case | supply gap | ingest->indexer starvation | "
                  "scanner->worker starvation | workers saturated | "
-                 "source-limited | ingest backpressure |")
-    lines.append("|---|---|---|---|---|---|---|")
+                 "source-limited | ingest backpressure | same-interval GO | "
+                 "GO trials | GO intervals | GO deficit/s min/median/max | "
+                 "excluded |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in summary:
         cls = classify_demand(r, queue.get(r["case"]))
         if not cls.get("available"):
-            lines.append("| %s | - | - | - | - | - | - |" % r["case"])
+            lines.append("| %s | - | - | - | - | - | - | - | - | - | - | "
+                         "- |" % r["case"])
             continue
         def _tri(value):
             return "?" if value is None else ("yes" if value else "no")
-        lines.append("| %s | %s | %s | %s | %s | %s | %s |" % (
-            r["case"], _tri(cls["has_supply_gap"]),
-            _tri(cls["ingest_indexer_starvation"]),
-            _tri(cls["scanner_worker_starvation"]),
-            _tri(cls["workers_saturated"]),
-            _tri(cls["source_limited"]),
-            _tri(cls["ingest_backpressure"])))
+        lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | "
+                     "%s | %s |" % (
+                         r["case"], _tri(cls["has_supply_gap"]),
+                         _tri(cls["ingest_indexer_starvation"]),
+                         _tri(cls["scanner_worker_starvation"]),
+                         _tri(cls["workers_saturated"]),
+                         _tri(cls["source_limited"]),
+                         _tri(cls["ingest_backpressure"]),
+                         _tri(cls.get("correlated_go")),
+                         _fmt(cls.get("correlated_go_trials"), "%.0f"),
+                         _fmt(cls.get("correlated_go_intervals"), "%.0f"),
+                         _gap_range({"go_gap_per_s_min":
+                                     cls.get("correlated_gap_per_s_min"),
+                                     "go_gap_per_s_median":
+                                     cls.get("correlated_gap_per_s_median"),
+                                     "go_gap_per_s_max":
+                                     cls.get("correlated_gap_per_s_max")}),
+                         _fmt(cls.get("correlated_excluded_total"), "%.0f")))
     lines += ["", "`?` means the quantity is not measurable on this source "
                   "path, not that it is absent. A supply gap is attributed to "
-                  "centralized ingestion only when ingest->indexer starvation "
-                  "coincides and ingest CPU is near one core (spec §4.2); an "
-                  "empty chunk queue with indexer waiters while ingest CPU is "
-                  "well below one core is classified source-limited.", ""]
+                  "centralized ingestion only when the SAME per-node interval "
+                  "shows ingest->indexer starvation, ingest CPU near one core, "
+                  "workers waiting, and the batch queue draining (spec §4.2); "
+                  "an empty chunk queue with indexer waiters while ingest CPU "
+                  "is well below one core is classified source-limited. A "
+                  "positive `claims - publications` is a scanner-side supply "
+                  "deficit relative to worker demand, not by itself evidence "
+                  "that downstream is the limiter; q/i decides whether the "
+                  "scanner lacked input or could not process available "
+                  "input.", ""]
 
     lines += ["## 2×2 affinity/policy ablation (spec §6)", ""]
     if ablation is None:

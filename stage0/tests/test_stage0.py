@@ -548,9 +548,171 @@ class TestQueueTelemetry(unittest.TestCase):
         self.assertEqual(stats["gated_ms"], 7)
         self.assertIn(0, stats["chunk"]["nodes"])
 
+    def test_interval_math_uses_t_us_not_rounded_ms(self):
+        # Adjacent samples in the SAME millisecond: t_ms is identical,
+        # but t_us delta is 500 us. Interval math must use t_us.
+        stats = self._stats([
+            "STAGE0_DIAG src=ingest t_ms=1 t_us=1000 moved=0 major=0 "
+            "tgt=0 lim=4 gated_ms=0 cpu_ns=0 q=n0:0,0 i=n0:0 "
+            "b=n0:0,0 c=n0:0 a=n0:0,1",
+            "STAGE0_DIAG src=ingest t_ms=1 t_us=1500 moved=0 major=0 "
+            "tgt=0 lim=4 gated_ms=0 cpu_ns=500000 q=n0:0,0 i=n0:0 "
+            "b=n0:5,10 c=n0:5 a=n0:0,1",
+        ])
+        self.assertAlmostEqual(stats["duration_s"], 0.0005)
+        self.assertAlmostEqual(stats["published_batches_per_s"], 20000.0)
+        self.assertAlmostEqual(stats["claimed_batches_per_s"], 10000.0)
+        corr = report.correlated_intervals(
+            report._diag_records("\n".join([
+                "STAGE0_DIAG src=ingest t_ms=1 t_us=1000 moved=0 major=0 "
+                "tgt=0 lim=4 gated_ms=0 cpu_ns=0 q=n0:0,0 i=n0:0 "
+                "b=n0:0,0 c=n0:0 a=n0:0,1",
+                "STAGE0_DIAG src=ingest t_ms=1 t_us=1500 moved=0 major=0 "
+                "tgt=0 lim=4 gated_ms=0 cpu_ns=500000 q=n0:0,0 i=n0:0 "
+                "b=n0:5,10 c=n0:5 a=n0:0,1",
+            ])))
+        self.assertEqual(corr["intervals"], 1)
+        self.assertAlmostEqual(corr["interval_s"], 0.0005)
+
     def test_malformed_group_is_ignored(self):
         self.assertEqual(report._parse_group("n0:1,2;nope:3;n1:x"),
                          {0: (1, 2)})
+
+
+class TestCorrelatedEvidence(unittest.TestCase):
+    """Same-interval predicates, not trial-level co-occurrence (P0)."""
+
+    def _verdict(self, trials, summary=None):
+        return report.derive_verdict(
+            summary or [summary_row()],
+            {"case-a": queue_row(corr=trials)},
+            env_doc(physical=True), [], [], trials_requested=3)
+
+    def test_go_requires_same_interval_overlap_across_trials(self):
+        trials = [corr_go_trial() for _ in range(3)]
+        for recs in trials:
+            st = report.correlated_intervals(recs)
+            self.assertEqual(st["intervals"], 1)
+            self.assertEqual(st["go_intervals"], 1)
+            self.assertTrue(st["trial_go"])
+            self.assertTrue(st["attribution_complete"])
+            node = st["nodes"][0]
+            self.assertAlmostEqual(node["go_cpu_cores"], 1.0)
+            self.assertGreater(node["go_supply_gap_per_s"], 0)
+        v = self._verdict(trials)
+        self.assertEqual(v["decision"], "GO", v["evidence"])
+        self.assertIn("TOGETHER", " ".join(v["evidence"]))
+
+    def test_disjoint_phases_do_not_go(self):
+        # Phase 1: empty chunk queue + indexer waiters + near-one-core
+        # CPU, but no supply deficit and no waiting workers. Phase 2:
+        # upstream available and no ingest starvation. Phase 3: a
+        # supply deficit with waiting workers, but no CPU saturation
+        # and no ingest starvation. No single interval has them all.
+        trial = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+              "q_claim": 10, "b_pub": 0, "b_claim": 0, "i": 1,
+              "a": (0, 4)},
+             {"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+              "q_claim": 0, "b_pub": 0, "b_claim": 0, "i": 0,
+              "a": (0, 4)},
+             {"dt_us": 1000000, "cpu_ns": 200000000, "q_pub": 10,
+              "q_claim": 10, "b_pub": 5, "b_claim": 12, "i": 0,
+              "a": (2, 4)}],
+            initial={"q": (10, 10), "i": 1, "b": (0, 10), "c": 0,
+                     "a": (0, 4)})
+        st = report.correlated_intervals(trial)
+        self.assertEqual(st["go_intervals"], 0)
+        self.assertEqual(st["ingest_starved_intervals"], 1)
+        self.assertGreater(st["supply_gap_intervals"], 0)
+        v = self._verdict([trial for _ in range(3)])
+        self.assertNotEqual(v["decision"], "GO", v["evidence"])
+
+    def test_mixed_ingest_then_scanner_starvation_is_ambiguous(self):
+        def mixed_trial():
+            return corr_trial(
+                [{"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+                  "q_claim": 10, "b_pub": 10, "b_claim": 15, "i": 1,
+                  "a": (1, 4)},
+                 {"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+                  "q_claim": 0, "b_pub": 0, "b_claim": 0, "i": 0,
+                  "a": (2, 4)}],
+                initial={"q": (10, 10), "i": 1, "b": (0, 5), "c": 0,
+                         "a": (2, 4)})
+
+        trials = [mixed_trial() for _ in range(3)]
+        st = report.correlated_intervals(trials[0])
+        self.assertEqual(st["ingest_starved_intervals"], 1)
+        self.assertEqual(st["scanner_starved_intervals"], 1)
+        self.assertTrue(st["mixed"])
+        v = self._verdict(trials)
+        self.assertEqual(v["decision"], "INCONCLUSIVE", v["evidence"])
+        joined = " ".join(v["evidence"])
+        self.assertIn("mixed/ambiguous", joined)
+        self.assertNotIn("scanner starvation absent", joined)
+
+    def test_near_one_core_in_another_phase_does_not_count(self):
+        trial = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 200000000, "q_pub": 10,
+              "q_claim": 10, "b_pub": 0, "b_claim": 0, "i": 1,
+              "a": (0, 4)},
+             {"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+              "q_claim": 0, "b_pub": 0, "b_claim": 0, "i": 0,
+              "a": (0, 4)}],
+            initial={"q": (10, 10), "i": 1, "b": (0, 0), "c": 0,
+                     "a": (0, 4)})
+        st = report.correlated_intervals(trial)
+        self.assertEqual(st["ingest_cpu_saturated_starved_intervals"], 0)
+        self.assertEqual(st["source_limited_intervals"], 1)
+        self.assertEqual(st["go_intervals"], 0)
+        v = self._verdict([trial for _ in range(3)])
+        self.assertNotEqual(v["decision"], "GO", v["evidence"])
+
+    def test_one_node_deficit_is_not_hidden_by_another_surplus(self):
+        node0 = corr_go_trial(node=0)
+        node1 = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+              "q_claim": 5, "b_pub": 15, "b_claim": 5, "i": 0,
+              "a": (0, 4)}],
+            node=1,
+            initial={"q": (5, 5), "i": 0, "b": (0, 10), "c": 0,
+                     "a": (0, 4)})
+        merged = merge_nodes(node0, node1)
+        st = report.correlated_intervals(merged)
+        self.assertEqual(st["go_nodes"], [0])
+        self.assertEqual(st["supply_gap_intervals"], 1)
+        self.assertGreater(st["nodes"][0]["go_supply_gap_per_s"], 0)
+        self.assertIsNone(st["nodes"][1]["go_supply_gap_per_s"])
+        # The trial-level GO deficit is node 0's +5, not the aggregate
+        # +5-10 = -5. A surplus on node 1 cannot erase node 0's deficit.
+        self.assertAlmostEqual(st["supply_gap_go_per_s"], 5.0)
+        v = self._verdict([merged for _ in range(3)])
+        self.assertEqual(v["decision"], "GO", v["evidence"])
+
+    def test_exclusions_prevent_attribution(self):
+        def mutated(kind):
+            recs = corr_go_trial()
+            if kind == "duplicate_timestamp":
+                recs.append(dict(recs[-1]))
+            elif kind == "cpu_regression":
+                recs[0]["cpu_ns"] = 2000000000
+            elif kind == "missing_cpu":
+                del recs[-1]["cpu_ns"]
+            elif kind == "counter_regression":
+                recs[-1]["q"] = {0: (0, 0)}
+            elif kind == "missing_node_group":
+                del recs[-1]["i"]
+            return recs
+
+        for kind in ("duplicate_timestamp", "cpu_regression", "missing_cpu",
+                     "counter_regression", "missing_node_group"):
+            st = report.correlated_intervals(mutated(kind))
+            self.assertGreater(st["excluded_total"], 0, kind)
+            self.assertFalse(st["attribution_complete"], kind)
+            v = self._verdict([mutated(kind) for _ in range(3)])
+            self.assertEqual(v["decision"], "INCONCLUSIVE",
+                             (kind, v["evidence"]))
+            self.assertIn("excluded intervals", " ".join(v["evidence"]))
 
 
 def ablation_doc(cid="campaign-1"):
@@ -746,11 +908,86 @@ def summary_row(case="case-a", map_s=2.5, cores=0.95, n_ok=3):
     }
 
 
+def corr_trial(intervals, node=0, initial=None):
+    """Build src=ingest records for consecutive per-node intervals.
+
+    `intervals` entries are deltas: dt_us, cpu_ns, q_pub, q_claim,
+    b_pub, b_claim, c, i, a, gated_ms. The first sample carries the
+    initial state. Every sample includes all five groups so the
+    correlated analyzer can evaluate same-interval predicates.
+    """
+    state = {"t_us": 0, "cpu_ns": 0, "gated_ms": 0,
+             "q": (0, 0), "i": 0, "b": (0, 0), "c": 0, "a": (0, 1)}
+    if initial:
+        state.update(initial)
+    records = []
+
+    def emit():
+        records.append({
+            "src": "ingest",
+            "t_us": state["t_us"],
+            "cpu_ns": state["cpu_ns"],
+            "gated_ms": state["gated_ms"],
+            "q": {node: state["q"]},
+            "i": {node: (state["i"],)},
+            "b": {node: state["b"]},
+            "c": {node: (state["c"],)},
+            "a": {node: state["a"]},
+        })
+
+    emit()
+    for iv in intervals:
+        dt_us = iv.get("dt_us", 1000000)
+        state["t_us"] += dt_us
+        state["cpu_ns"] += iv.get("cpu_ns", int(1.0 * dt_us))
+        state["gated_ms"] += iv.get("gated_ms", 0)
+        state["q"] = (state["q"][0] + iv.get("q_pub", 0),
+                      state["q"][1] + iv.get("q_claim", 0))
+        state["b"] = (state["b"][0] + iv.get("b_claim", 0),
+                      state["b"][1] + iv.get("b_pub", 0))
+        state["c"] += iv.get("c", iv.get("b_claim", 0))
+        state["i"] = iv.get("i", state["i"])
+        state["a"] = iv.get("a", state["a"])
+        emit()
+    return records
+
+
+def corr_go_trial(gap=5, cpu_ns=1000000000, dt_us=1000000, node=0):
+    """One trial whose only interval is a same-interval GO interval."""
+    return corr_trial(
+        [{"dt_us": dt_us, "cpu_ns": cpu_ns, "q_pub": 10, "q_claim": 10,
+          "b_pub": 10, "b_claim": 15, "i": 1, "a": (1, 4)}],
+        node=node,
+        initial={"q": (10, 10), "i": 1, "b": (0, 5), "c": 0,
+                 "a": (2, 4)})
+
+
+def corr_stats(records_per_trial):
+    return report._agg_correlated(
+        [{"correlated": report.correlated_intervals(recs)}
+         for recs in records_per_trial])
+
+
+def merge_nodes(*records_lists):
+    """Merge same-timeline per-node trials into one multi-node timeline."""
+    merged = []
+    for samples in zip(*records_lists):
+        rec = {"src": "ingest", "t_us": samples[0]["t_us"],
+               "cpu_ns": samples[0]["cpu_ns"],
+               "gated_ms": samples[0]["gated_ms"]}
+        for group in ("q", "i", "b", "c", "a"):
+            rec[group] = {}
+            for sample in samples:
+                rec[group].update(sample[group])
+        merged.append(rec)
+    return merged
+
+
 def queue_row(trials=3, gap=True, ingest_starved=True, scanner_starved=False,
-              saturated=True, idle=0.5, cores=None, gated=0):
+              saturated=True, idle=0.5, cores=None, gated=0, corr=None):
     nodes = {0: {"supply_gap_batches_per_s": 5.0 if gap else -1.0}}
     chunk_nodes = {0: {"chunk_published_per_s": 10.0}}
-    return {
+    row = {
         "trials": trials,
         "supply_gap_trials": trials if gap else 0,
         "no_supply_gap_trials": 0 if gap else trials,
@@ -764,6 +1001,9 @@ def queue_row(trials=3, gap=True, ingest_starved=True, scanner_starved=False,
         "chunk": {"nodes": chunk_nodes,
                   "indexer_waiters_observed": True},
     }
+    if corr is not None:
+        row["correlated"] = corr_stats(corr)
+    return row
 
 
 class TestVerdict(unittest.TestCase):
@@ -773,29 +1013,44 @@ class TestVerdict(unittest.TestCase):
             ablation or [], [], trials_requested=trials)
 
     def test_go_requires_supply_gap_ingest_starvation_and_cores(self):
-        v = self._verdict([summary_row()], {"case-a": queue_row()})
+        v = self._verdict(
+            [summary_row()],
+            {"case-a": queue_row(corr=[corr_go_trial() for _ in range(3)])})
         self.assertEqual(v["decision"], "GO", v["evidence"])
+        self.assertIn("TOGETHER", " ".join(v["evidence"]))
 
     def test_source_limited_is_no_go(self):
+        trial = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 200000000, "q_pub": 10,
+              "q_claim": 10, "b_pub": 0, "b_claim": 0, "i": 1,
+              "a": (0, 4)}],
+            initial={"q": (10, 10), "i": 1, "b": (0, 0), "a": (0, 4)})
         v = self._verdict(
             [summary_row(cores=0.2)],
-            {"case-a": queue_row(gap=False, ingest_starved=True,
-                                 saturated=False)})
+            {"case-a": queue_row(corr=[trial for _ in range(3)])})
         self.assertEqual(v["decision"], "NO-GO", v["evidence"])
         self.assertIn("source", " ".join(v["evidence"]))
 
     def test_scanner_worker_starvation_is_no_go(self):
+        trial = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 200000000, "q_pub": 10,
+              "q_claim": 0, "b_pub": 0, "b_claim": 0, "i": 0,
+              "a": (2, 4)}],
+            initial={"q": (0, 0), "i": 0, "b": (0, 0), "a": (2, 4)})
         v = self._verdict(
             [summary_row(cores=0.2)],
-            {"case-a": queue_row(gap=False, ingest_starved=False,
-                                 scanner_starved=True, saturated=False)})
+            {"case-a": queue_row(corr=[trial for _ in range(3)])})
         self.assertEqual(v["decision"], "NO-GO", v["evidence"])
 
     def test_saturated_workers_without_supply_gap_is_no_go(self):
+        trial = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+              "q_claim": 10, "b_pub": 10, "b_claim": 10, "i": 0,
+              "a": (0, 4)}],
+            initial={"q": (5, 5), "i": 0, "b": (0, 10), "a": (0, 4)})
         v = self._verdict(
             [summary_row()],
-            {"case-a": queue_row(gap=False, ingest_starved=False,
-                                 saturated=True)})
+            {"case-a": queue_row(corr=[trial for _ in range(3)])})
         self.assertEqual(v["decision"], "NO-GO", v["evidence"])
 
     def test_one_trial_physical_cannot_decide(self):
@@ -1163,6 +1418,104 @@ class TestRunAllCampaignIntegration(unittest.TestCase):
         self.assertIn(self.git.sha, text)
         self.assertIn("INCONCLUSIVE", text)
         self.assertIn("Ablation validity: PASS", text)
+
+    def test_fake_numa_auto_nodes_emits_correlated_ingest_evidence(self):
+        """`nodes:"auto"` must exercise the REAL NUMA C-ingest sampler.
+
+        This is the integration guard for the correlated-evidence P0:
+        the one-command driver has to produce a same-interval
+        `src=ingest` timeline carrying q/i/b/c/a plus `cpu_ns` and
+        `t_us`, attribute CPU to the C ingest thread, and still return
+        an INCONCLUSIVE verdict on this fake-NUMA host.
+        """
+        nodes = online_memory_nodes()
+        if len(nodes) < 2:
+            self.skipTest("needs at least two online memory nodes")
+        node_x, node_y = nodes[0], nodes[1]
+
+        corpus = os.path.join(self.tmp, "tiny-nauto.txt")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            for i in range(20000):
+                fh.write(json.dumps({"id": i, "text": "x" * 24},
+                                    separators=(",", ":")) + "\n")
+        spec = os.path.join(self.tmp, "tiny-nauto.json")
+        write_json(spec, {"id": "tiny-nauto", "input": corpus,
+                          "workers": 2, "nodes": "auto", "mode": "udf",
+                          "timeout": 120})
+
+        run_dir = os.path.join(self.tmp, "run-nauto")
+        report_out = os.path.join(self.tmp, "report-nauto.md")
+        campaign_id = "e2e-nauto-1"
+        env = {
+            **self.git.env,
+            "FORKRUN_DIAG_QUEUE": "0",
+            "ABLATION_NODE_X": str(node_x),
+            "ABLATION_NODE_Y": str(node_y),
+        }
+        proc = subprocess.run(
+            ["bash", os.path.join(STAGE0, "run_all_campaign.sh"),
+             "--spec", spec, "--no-corpus", "--trials", "1",
+             "--campaign-id", campaign_id, "--run-dir", run_dir,
+             "--report-out", report_out, "--no-publish"],
+            cwd=REPO, env=env, capture_output=True, text=True,
+            timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        trial_dir = os.path.join(run_dir, "cases", "tiny-nauto", "trial1")
+        trial = read_json(os.path.join(trial_dir, "manifest.json"))
+        self.assertEqual(trial["diagnostics"]["forkrun_diag_queue"], "1")
+        self.assertTrue(trial["diagnostics"]["queue_present"], trial)
+        self.assertIn("ingest", trial["diagnostics"]["by_src"])
+        # Direct attribution must come from the C ingest FINAL, not
+        # from /proc comm sampling.
+        self.assertEqual(trial["ingest_cpu_attribution"], "direct", trial)
+        self.assertIn("c-ingest-final", trial["ingest_cpu_direct_source"])
+        self.assertIsNotNone(trial["ingest_phase_s"])
+        self.assertGreater(trial["ingest_phase_s"], 0.0)
+        self.assertGreater(trial["ingest_cpu_direct_sec"], 0.0)
+
+        with open(os.path.join(trial_dir, "stderr.log"),
+                  encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        records = report._diag_records(text)
+        ingest = [r for r in records
+                  if r.get("src") == "ingest"
+                  and r.get("kind") in ("STAGE0_DIAG", "STAGE0_FINAL")]
+        self.assertTrue(ingest, "no src=ingest diagnostic samples")
+        complete = [
+            r for r in ingest
+            if all(r.get(k) for k in ("q", "i", "b", "c", "a"))
+            and r.get("cpu_ns") is not None
+            and r.get("t_us") is not None]
+        self.assertTrue(complete, "src=ingest samples missing groups/CPU")
+        sample = complete[-1]
+        self.assertTrue(sample["q"], sample)
+        self.assertTrue(sample["i"], sample)
+        self.assertTrue(sample["b"], sample)
+        self.assertTrue(sample["c"], sample)
+        self.assertTrue(sample["a"], sample)
+        for node, pair in sample["q"].items():
+            self.assertEqual(len(pair), 2, (node, pair))
+        for node, pair in sample["b"].items():
+            self.assertEqual(len(pair), 2, (node, pair))
+        for node, pair in sample["a"].items():
+            self.assertEqual(len(pair), 2, (node, pair))
+        for node, scalar in sample["i"].items():
+            self.assertEqual(len(scalar), 1, (node, scalar))
+        for node, scalar in sample["c"].items():
+            self.assertEqual(len(scalar), 1, (node, scalar))
+
+        correlated = report.correlated_intervals(ingest)
+        self.assertTrue(correlated["available"], correlated)
+        self.assertGreaterEqual(correlated["intervals"], 1, correlated)
+        self.assertEqual(correlated["excluded_total"], 0, correlated)
+
+        with open(report_out, encoding="utf-8") as fh:
+            rendered = fh.read()
+        self.assertIn(campaign_id, rendered)
+        self.assertIn("INCONCLUSIVE", rendered)
+        self.assertIn("fake NUMA", rendered)
+        self.assertIn("Time-correlated same-interval evidence", rendered)
 
 
 if __name__ == "__main__":
