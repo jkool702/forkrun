@@ -1453,7 +1453,11 @@ def _agg_correlated(trials):
                 "supply_gap_intervals": 0,
                 "go_intervals": 0, "go_s": 0.0,
                 "go_supply_gap_batches": 0, "go_gap_s": 0.0,
-                "go_trials": 0,
+                "go_cpu_cores": None, "go_trials": 0,
+                "chunk_published_per_s": None,
+                "chunk_consumed_per_s": None,
+                "batch_published_per_s": None,
+                "batch_claimed_per_s": None,
                 "counter_regressions": 0,
                 "claim_crosscheck_mismatch_intervals": 0,
             })
@@ -1471,6 +1475,20 @@ def _agg_correlated(trials):
                         "claim_crosscheck_mismatch_intervals"):
                 dst[key] += st.get(key) or 0
             dst["go_gap_s"] += st.get("go_s") or 0.0
+            # Duration-weighted across trials: sum(cpu_s) / sum(go_s).
+            dst["_go_cpu_s"] = (dst.get("_go_cpu_s") or 0.0) + (
+                (st.get("go_cpu_cores") or 0.0) * (st.get("go_s") or 0.0))
+            # Pool per-node rates over the intervals they were measured
+            # on, so a trial with more valid intervals weighs more.
+            node_s = st.get("interval_s") or 0.0
+            dst["_rate_s"] = (dst.get("_rate_s") or 0.0) + node_s
+            for src_key, dst_key in (
+                    ("chunk_published_per_s", "_chunk_pub"),
+                    ("chunk_consumed_per_s", "_chunk_cons"),
+                    ("batch_published_per_s", "_batch_pub"),
+                    ("batch_claimed_per_s", "_batch_claim")):
+                dst[dst_key] = (dst.get(dst_key) or 0.0) + (
+                    (st.get(src_key) or 0.0) * node_s)
             if st.get("go_intervals"):
                 dst["go_trials"] += 1
     for dst in nodes.values():
@@ -1479,6 +1497,19 @@ def _agg_correlated(trials):
                 dst["go_supply_gap_batches"] / dst["go_gap_s"])
         else:
             dst["go_supply_gap_per_s"] = None
+        if dst["go_s"]:
+            dst["go_cpu_cores"] = (
+                (dst.pop("_go_cpu_s", 0.0) or 0.0) / dst["go_s"])
+        else:
+            dst.pop("_go_cpu_s", None)
+        rate_s = dst.pop("_rate_s", 0.0) or 0.0
+        for dst_key, out_key in (
+                ("_chunk_pub", "chunk_published_per_s"),
+                ("_chunk_cons", "chunk_consumed_per_s"),
+                ("_batch_pub", "batch_published_per_s"),
+                ("_batch_claim", "batch_claimed_per_s")):
+            value = dst.pop(dst_key, 0.0) or 0.0
+            dst[out_key] = (value / rate_s) if rate_s else None
         dst.pop("go_gap_s", None)
     trial_rows = []
     for idx, r in enumerate(rows, 1):
@@ -1936,6 +1967,8 @@ def classify_demand(row, q):
         "chunk_measurable": chunk_measurable,
         "gap_nodes": gap_nodes,
         "has_supply_gap": bool(gap_nodes),
+        "correlated_has_supply_gap": bool(
+            corr_available and (corr.get("supply_gap_intervals") or 0) > 0),
         "ingest_indexer_starvation": ingest_starved,
         "scanner_worker_starvation": scanner_starved,
         "workers_saturated": workers_saturated,
@@ -1985,7 +2018,11 @@ def _gap_range(corr):
             corr.get("go_gap_per_s_max")]
     if any(v is None for v in vals):
         return "not measured"
-    return "min/median/max %.1f/%.1f/%.1f batches/s" % tuple(vals)
+    text = "min/median/max %.1f/%.1f/%.1f batches/s" % tuple(vals)
+    spread = corr.get("go_gap_per_s_spread")
+    if spread is not None:
+        text += "; spread %.1f" % spread
+    return text
 
 
 def _trial_gap_values(corr):
@@ -2602,7 +2639,7 @@ def main():
 
     git = (env or {}).get("git") or {}
     lines = [
-        "# Stage 0 rehearsal report — %s" % topo["label"],
+        "# Stage 0 campaign report — %s" % topo["label"],
         "",
         "- campaign: `%s`" % campaign.get("campaign_id"),
         "- source: `%s`" % campaign.get("source_sha"),
@@ -2814,11 +2851,16 @@ def main():
               "Excluded intervals are counted, never bridged: a "
               "non-monotonic/duplicate timestamp, missing or regressed "
               "`cpu_ns`, missing per-node groups, or a counter regression "
-              "removes the interval from every predicate.", ""]
-    lines.append("| case | trial | intervals | duration s | ingest "
-                 "starved | CPU-sat starved | scanner starved | source "
-                 "limited | backpressure | GO intervals | GO s | GO "
-                 "deficit/s | GO CPU cores | excluded |")
+              "removes the interval from every predicate.", "",
+              "Per-trial predicate columns are summed over nodes "
+              "(node-intervals); `intervals` and `duration s` are timeline "
+              "intervals. The per-node table below gives the same counts "
+              "for each node.", ""]
+    lines.append("| case | trial | intervals | duration s | ingest-starved "
+                 "node-iv | CPU-sat starved node-iv | scanner-starved "
+                 "node-iv | source-limited node-iv | backpressure node-iv | "
+                 "GO node-iv | GO s | GO deficit/s | GO CPU cores | "
+                 "excluded |")
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in summary:
         q = queue.get(r["case"])
@@ -2898,11 +2940,11 @@ def main():
                   "continuously empty between them.", ""]
 
     lines += ["## Demand classification (spec §4.3/§8)", ""]
-    lines.append("| case | supply gap | ingest->indexer starvation | "
-                 "scanner->worker starvation | workers saturated | "
-                 "source-limited | ingest backpressure | same-interval GO | "
-                 "GO trials | GO intervals | GO deficit/s min/median/max | "
-                 "excluded |")
+    lines.append("| case | same-interval supply gap | ingest->indexer "
+                 "starvation | scanner->worker starvation | workers "
+                 "saturated | source-limited | ingest backpressure | "
+                 "correlated GO case | GO trials | GO node-iv | GO deficit/s "
+                 "min/median/max; spread | excluded |")
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in summary:
         cls = classify_demand(r, queue.get(r["case"]))
@@ -2912,9 +2954,13 @@ def main():
             continue
         def _tri(value):
             return "?" if value is None else ("yes" if value else "no")
+        supply_gap = (
+            cls.get("correlated_has_supply_gap")
+            if cls.get("correlated_available")
+            else cls["has_supply_gap"])
         lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | "
                      "%s | %s |" % (
-                         r["case"], _tri(cls["has_supply_gap"]),
+                         r["case"], _tri(supply_gap),
                          _tri(cls["ingest_indexer_starvation"]),
                          _tri(cls["scanner_worker_starvation"]),
                          _tri(cls["workers_saturated"]),
@@ -2928,18 +2974,30 @@ def main():
                                      "go_gap_per_s_median":
                                      cls.get("correlated_gap_per_s_median"),
                                      "go_gap_per_s_max":
-                                     cls.get("correlated_gap_per_s_max")}),
+                                     cls.get("correlated_gap_per_s_max"),
+                                     "go_gap_per_s_spread":
+                                     cls.get("correlated_gap_per_s_spread")}),
                          _fmt(cls.get("correlated_excluded_total"), "%.0f")))
     lines += ["", "`?` means the quantity is not measurable on this source "
-                  "path, not that it is absent. A supply gap is attributed to "
-                  "centralized ingestion only when the SAME per-node interval "
-                  "shows ingest->indexer starvation, ingest CPU near one core, "
-                  "workers waiting, and the batch queue draining (spec §4.2); "
-                  "an empty chunk queue with indexer waiters while ingest CPU "
-                  "is well below one core is classified source-limited. A "
-                  "positive `claims - publications` is a scanner-side supply "
-                  "deficit relative to worker demand, not by itself evidence "
-                  "that downstream is the limiter; q/i decides whether the "
+                  "path, not that it is absent. `same-interval supply gap` "
+                  "means at least one per-node interval had worker claims "
+                  "above scanner publication; it is not an aggregate trial "
+                  "rate. `correlated GO case` is the full case-level "
+                  "predicate (every trial, complete attribution, no mixed "
+                  "trial, no source-limited interval, no upstream-available "
+                  "scanner/worker starvation, and a deficit larger than the "
+                  "trial-to-trial spread); `GO node-iv` counts the "
+                  "individual intervals that meet the conditions, so a "
+                  "case can have GO intervals without being a GO case. A "
+                  "supply gap is attributed to centralized ingestion only "
+                  "when the SAME per-node interval shows ingest->indexer "
+                  "starvation, ingest CPU near one core, workers waiting, "
+                  "and the batch queue draining (spec §4.2); an empty chunk "
+                  "queue with indexer waiters while ingest CPU is well "
+                  "below one core is classified source-limited. A positive "
+                  "`claims - publications` is a scanner-side supply deficit "
+                  "relative to worker demand, not by itself evidence that "
+                  "downstream is the limiter; q/i decides whether the "
                   "scanner lacked input or could not process available "
                   "input.", ""]
 
