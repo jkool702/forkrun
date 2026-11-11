@@ -3036,37 +3036,44 @@ static int ring_destroy_main(int argc, char **argv) {
  * sample point.
  *
  * Wire format (whitespace-separated; node lists are ';'-separated):
- *   STAGE0_DIAG src=ingest|scan t_ms=<ms> moved=<bytes|lines> major=<n>
- *               tgt=<n> lim=<n> gated_ms=<ms> cpu_ns=<thread cpu>
- *               q=n0:<head>,<tail>;n1:...      (ingest chunks)
+ *   STAGE0_DIAG src=ingest|scan t_ms=<ms> t_us=<us> moved=<bytes|lines>
+ *               major=<n> tgt=<n> lim=<n> gated_ms=<ms> cpu_ns=<thread cpu>
+ *               q=n0:<published>,<claimed>;n1:...  (ingest chunks)
  *               i=n0:<indexer_waiters>;n1:...  (indexer waits for chunk)
  *               b=n0:<read>,<write>;n1:...     (worker batch queue)
  *               c=n0:<claims>;n1:...           (dequeue progress)
  *               a=n0:<waiters>,<workers>;n1:... (idle attribution)
  *
  * `moved` is materialized bytes for src=ingest and scanned lines for
- * src=scan. `q` is the ingest->indexer chunk queue: head (consumed by
- * the indexer) and tail (published by ingest). `i` is the engine's
- * indexer_waiter gauge: the indexer increments it while it is blocked
- * waiting for the next chunk and decrements it after the wait, so
- * "q empty AND i > 0" is direct ingest->indexer starvation evidence.
- * `b` is the queue workers claim from: read_idx (claimed) and
- * write_idx (scanner-published). `c` is total_lines_consumed, which the
- * claim path increments once per claimed batch — the dequeue-progress
- * counter needed to estimate consumption during a continuously
- * non-empty interval. `a` exposes the engine's own waiter gauge so the
- * report can distinguish "workers idle waiting for work" from "queue
- * occupancy alone". `cpu_ns` is CLOCK_THREAD_CPUTIME_ID for the task
- * that emitted the record: on src=ingest FINAL it is a DIRECT ingest
- * CPU measurement, not a comm-sampled estimate. A trailing `trunc=<n>`
- * appears when the topology exceeds the sampler's per-group node cap
- * (64).
+ * src=scan. `q` is the ingest->indexer chunk queue: head is the
+ * INGEST PUBLICATION counter (incremented when a chunk is published)
+ * and tail is the SCANNER/INDEXER CLAIM counter (incremented when the
+ * chunk is claimed), i.e. q is (published, claimed) -- the OPPOSITE
+ * pair order from `b`. `i` is the engine's indexer_waiter gauge: the
+ * indexer increments it while it is blocked waiting for the next chunk
+ * and decrements it after the wait, so "q empty AND i > 0" is direct
+ * ingest->indexer starvation evidence. `b` is the queue workers claim
+ * from: read_idx (claimed) and write_idx (scanner-published). `c` is
+ * total_lines_consumed, which the claim path increments once per
+ * claimed batch — the dequeue-progress counter needed to estimate
+ * consumption during a continuously non-empty interval. `a` exposes
+ * the engine's own waiter gauge so the report can distinguish "workers
+ * idle waiting for work" from "queue occupancy alone". `cpu_ns` is the
+ * emitting thread's CLOCK_THREAD_CPUTIME_ID DELTA since sampler init,
+ * so a short phase cannot inherit CPU time spent before init (a forked
+ * ingest child would otherwise report more CPU than wall). `t_us` is
+ * the same elapsed interval as `t_ms` at microsecond resolution: the
+ * millisecond field is for humans, `t_us` is the precise phase basis.
+ * On src=ingest FINAL `cpu_ns` is a DIRECT ingest CPU measurement, not
+ * a comm-sampled estimate. A trailing `trunc=<n>` appears when the
+ * topology exceeds the sampler's per-group node cap (64).
  * =========================================================================== */
 #define STAGE0_DIAG_MAX_NODES 64
 
 struct stage0_diag_state {
   int enabled;
   uint64_t start_ns;
+  uint64_t cpu_start_ns;
   uint64_t next_sample_ms;
   uint64_t gated_ns;
 };
@@ -3079,6 +3086,10 @@ static void stage0_diag_init(struct stage0_diag_state *d) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   d->start_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+  d->cpu_start_ns = 0;
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0)
+    d->cpu_start_ns =
+        (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 static int stage0_diag_append_group(char *buf, int len, size_t cap,
@@ -3135,21 +3146,32 @@ static void stage0_diag_emit(struct stage0_diag_state *d, int final,
   clock_gettime(CLOCK_MONOTONIC, &ts);
   uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
                     (uint64_t)ts.tv_nsec;
-  uint64_t elapsed_ms = (now_ns - d->start_ns) / 1000000ULL;
+  uint64_t elapsed_ns = now_ns - d->start_ns;
+  uint64_t elapsed_ms = elapsed_ns / 1000000ULL;
+  uint64_t elapsed_us = elapsed_ns / 1000ULL;
   if (!final && elapsed_ms < d->next_sample_ms)
     return;
   if (!final)
     d->next_sample_ms = elapsed_ms + 20;
   struct timespec cts;
   uint64_t cpu_ns = 0;
-  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cts) == 0)
-    cpu_ns = (uint64_t)cts.tv_sec * 1000000000ULL + (uint64_t)cts.tv_nsec;
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cts) == 0) {
+    uint64_t now_cpu = (uint64_t)cts.tv_sec * 1000000000ULL +
+                       (uint64_t)cts.tv_nsec;
+    /* DELTA since sampler init: a forked child inherits no CPU here,
+     * but it may have spent time in setup before this sampler existed.
+     * An absolute value would make a short phase look like >1 core. */
+    if (now_cpu >= d->cpu_start_ns)
+      cpu_ns = now_cpu - d->cpu_start_ns;
+  }
   char buf[8192];
   int len = snprintf(buf, sizeof(buf),
-      "%s src=%s t_ms=%llu moved=%llu major=%llu tgt=%d lim=%u gated_ms=%llu"
-      " cpu_ns=%llu",
+      "%s src=%s t_ms=%llu t_us=%llu moved=%llu major=%llu tgt=%d lim=%u"
+      " gated_ms=%llu cpu_ns=%llu",
       final ? "STAGE0_FINAL" : "STAGE0_DIAG",
-      src, (unsigned long long)elapsed_ms, (unsigned long long)moved,
+      src, (unsigned long long)elapsed_ms,
+      (unsigned long long)elapsed_us,
+      (unsigned long long)moved,
       (unsigned long long)major, tgt, lim,
       (unsigned long long)(d->gated_ns / 1000000ULL),
       (unsigned long long)cpu_ns);

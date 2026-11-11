@@ -437,7 +437,11 @@ class TestQueueTelemetry(unittest.TestCase):
             "gated_ms=42 q=n0:2,2 i=n0:0 b=n0:0,0 c=n0:0 a=n0:0,1",
         ])
         chunk = stats["chunk"]
-        self.assertEqual(stats["samples"], 0)  # no batch queue on ingest
+        # The ingest sampler owns BOTH the chunk path and the batch
+        # groups; batch telemetry must not be discarded by src.
+        self.assertEqual(stats["samples"], 4)
+        self.assertEqual(stats["published_batches_total"], 0)
+        self.assertEqual(stats["claimed_batches_total"], 0)
         self.assertEqual(chunk["samples"], 4)
         self.assertEqual(stats["gated_ms"], 42)
         self.assertEqual(chunk["chunk_published_total"], 2)
@@ -450,12 +454,54 @@ class TestQueueTelemetry(unittest.TestCase):
                                1 / 3)
         self.assertTrue(stats["has_ingest_starvation"])
 
+    def test_ingest_batch_samples_are_not_dropped(self):
+        """The NUMA C ingest is the only sampler on that path."""
+        stats = self._stats([
+            "STAGE0_DIAG src=ingest t_ms=0 moved=0 major=0 tgt=0 lim=4 "
+            "gated_ms=0 q=n0:0,0 i=n0:1 b=n0:0,0 c=n0:0 a=n0:0,1",
+            "STAGE0_DIAG src=ingest t_ms=100 moved=1 major=0 tgt=0 lim=4 "
+            "gated_ms=0 q=n0:1,1 i=n0:1 b=n0:4,10 c=n0:4 a=n0:2,1",
+            "STAGE0_FINAL src=ingest t_ms=200 moved=2 major=0 tgt=0 lim=4 "
+            "gated_ms=0 q=n0:2,2 i=n0:0 b=n0:8,20 c=n0:8 a=n0:0,1",
+        ])
+        self.assertEqual(stats["samples"], 3)
+        self.assertEqual(stats["published_batches_total"], 20)
+        self.assertEqual(stats["claimed_batches_total"], 8)
+        self.assertEqual(stats["claims_c_total"], 8)
+        self.assertAlmostEqual(stats["published_batches_per_s"], 100.0)
+        self.assertAlmostEqual(stats["claimed_batches_per_s"], 40.0)
+        self.assertEqual(stats["nodes"][0]["samples"], 2)
+
+    def test_chunk_wire_order_is_published_then_claimed(self):
+        """q = (chunk_queue_head=published, tail=claimed), unlike b."""
+        stats = self._stats([
+            "STAGE0_DIAG src=ingest t_ms=0 moved=0 major=0 tgt=0 lim=4 "
+            "gated_ms=0 q=n0:0,0 i=n0:0 b=n0:0,0 c=n0:0 a=n0:0,1",
+            "STAGE0_DIAG src=ingest t_ms=100 moved=1 major=0 tgt=0 lim=4 "
+            "gated_ms=0 q=n0:10,4 i=n0:0 b=n0:0,0 c=n0:0 a=n0:0,1",
+            "STAGE0_DIAG src=ingest t_ms=200 moved=2 major=0 tgt=0 lim=4 "
+            "gated_ms=0 q=n0:20,8 i=n0:0 b=n0:0,0 c=n0:0 a=n0:0,1",
+            "STAGE0_FINAL src=ingest t_ms=300 moved=3 major=0 tgt=0 lim=4 "
+            "gated_ms=0 q=n0:30,12 i=n0:0 b=n0:0,0 c=n0:0 a=n0:0,1",
+        ])
+        chunk = stats["chunk"]
+        self.assertEqual(chunk["chunk_published_total"], 30)
+        self.assertEqual(chunk["chunk_consumed_total"], 12)
+        self.assertAlmostEqual(chunk["chunk_published_per_s"], 100.0)
+        self.assertAlmostEqual(chunk["chunk_consumed_per_s"], 40.0)
+        self.assertAlmostEqual(chunk["all_empty_fraction"], 0.0)
+        self.assertAlmostEqual(chunk["any_nonempty_fraction"], 1.0)
+        self.assertFalse(stats["has_ingest_starvation"])
+
     def test_uma_chunk_path_is_not_measurable(self):
+        # The UMA scanner emits q/i groups too (the sampler is shared),
+        # but it has no ingest->indexer path; src=scan must not make the
+        # chunk path measurable.
         stats = self._stats([
             "STAGE0_DIAG src=scan t_ms=0 moved=0 major=0 tgt=0 lim=4 "
-            "gated_ms=0 b=n0:0,0 c=n0:0 a=n0:0,1",
+            "gated_ms=0 q=n0:0,0 i=n0:0 b=n0:0,0 c=n0:0 a=n0:0,1",
             "STAGE0_FINAL src=scan t_ms=100 moved=1 major=0 tgt=0 lim=4 "
-            "gated_ms=0 b=n0:1,1 c=n0:1 a=n0:0,1",
+            "gated_ms=0 q=n0:0,0 i=n0:0 b=n0:1,1 c=n0:1 a=n0:0,1",
         ])
         self.assertFalse(stats["chunk_measurable"])
         self.assertEqual(stats["chunk"]["nodes"], {})
@@ -496,7 +542,8 @@ class TestQueueTelemetry(unittest.TestCase):
         stats = self._stats([
             "STAGE0_FINAL src=ingest t_ms=4 moved=10 major=0 tgt=0 lim=4 "
             "gated_ms=7 q=n0:1,1 i=n0:0 b=n0:1,1 c=n0:1 a=n0:0,1"])
-        self.assertEqual(stats["samples"], 0)
+        self.assertEqual(stats["samples"], 1)
+        self.assertEqual(stats["published_batches_total"], 0)
         self.assertEqual(stats["chunk"]["samples"], 1)
         self.assertEqual(stats["gated_ms"], 7)
         self.assertIn(0, stats["chunk"]["nodes"])
@@ -791,8 +838,8 @@ class TestIngestCpuParsing(unittest.TestCase):
             "wall_ns=2000000000\n"
             "STAGE0_INGEST_CPU src=uma-stream-spill cpu_ns=500000000 "
             "wall_ns=1000000000\n"
-            "STAGE0_FINAL src=ingest t_ms=1234 moved=1 major=0 tgt=0 "
-            "lim=4 gated_ms=0 cpu_ns=990000000 q=n0:0,0 i=n0:0 "
+            "STAGE0_FINAL src=ingest t_ms=1234 t_us=1234567 moved=1 major=0 "
+            "tgt=0 lim=4 gated_ms=0 cpu_ns=990000000 q=n0:0,0 i=n0:0 "
             "b=n0:0,0 c=n0:0 a=n0:0,1\n")
         self.assertEqual(parsed["direct_ingest_cpu_ns"]["uma-spill"],
                          1500000000)
@@ -802,7 +849,33 @@ class TestIngestCpuParsing(unittest.TestCase):
                          2000000000)
         self.assertEqual(parsed["final_cpu_ns"]["ingest"], 990000000)
         self.assertEqual(parsed["final_t_ms"]["ingest"], 1234)
+        self.assertEqual(parsed["final_t_us"]["ingest"], 1234567)
         self.assertEqual(parsed["finals"], 1)
+
+    def test_c_phase_prefers_microseconds_over_truncated_ms(self):
+        # t_ms=3 truncates a 3.9 ms phase; using it would report >1 core
+        # for a single thread. t_us is the precise phase basis.
+        diag = run_case._parse_diag(
+            "STAGE0_FINAL src=ingest t_ms=3 t_us=3900 moved=1 major=0 "
+            "tgt=0 lim=4 gated_ms=0 cpu_ns=3900000 q=n0:0,0 i=n0:0 "
+            "b=n0:0,0 c=n0:0 a=n0:0,1\n")
+        direct = run_case._direct_ingest_cpu(diag, 0.02)
+        self.assertEqual(
+            direct["source"],
+            "c-ingest-final (CLOCK_THREAD_CPUTIME_ID)")
+        self.assertAlmostEqual(direct["phase_s"], 0.0039)
+        # With t_ms=3 this would be 1.3 cores for a single thread.
+        self.assertAlmostEqual(direct["phase_cores"], 1.0)
+        self.assertAlmostEqual(direct["map_basis_cores"], 0.195)
+
+    def test_c_phase_falls_back_to_ms_without_t_us(self):
+        diag = run_case._parse_diag(
+            "STAGE0_FINAL src=ingest t_ms=500 moved=1 major=0 tgt=0 "
+            "lim=4 gated_ms=0 cpu_ns=400000000 q=n0:0,0 i=n0:0 "
+            "b=n0:0,0 c=n0:0 a=n0:0,1\n")
+        direct = run_case._direct_ingest_cpu(diag, 1.0)
+        self.assertAlmostEqual(direct["phase_s"], 0.5)
+        self.assertAlmostEqual(direct["phase_cores"], 0.8)
 
     def test_phase_basis_is_preferred_over_whole_map_basis(self):
         manifest = trial_manifest()

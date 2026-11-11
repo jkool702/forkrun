@@ -439,7 +439,14 @@ def _batch_stats(records):
     (write_idx - read_idx) is used ONLY for occupancy. `c` is
     total_lines_consumed and is a cross-check on the claim position.
     """
-    samples = sorted(records, key=lambda r: int(r.get("t_ms", 0)))
+    # The sampler is shared by the UMA scanner and the NUMA C ingest, so
+    # the batch groups are owned by BOTH sources. Filtering on src here
+    # would silently discard every NUMA batch sample; the src field only
+    # decides who owns the ingest->indexer chunk path.
+    samples = sorted(
+        (r for r in records
+         if r.get("b") is not None and r.get("t_ms") is not None),
+        key=lambda r: int(r.get("t_ms", 0)))
     nodes = sorted({n for r in samples for n in (r.get("b") or {})})
     out = {
         "samples": len(samples),
@@ -661,12 +668,21 @@ def _batch_stats(records):
 def _chunk_stats(records):
     """Ingest-published -> indexer-consumed chunk queue, per node.
 
-    `q` is (chunk_queue_head, chunk_queue_tail); `i` is the engine's
-    indexer_waiter gauge. Only src=ingest records own this path; the
-    UMA scanner has no indexer and emits no `i`, which is reported as
-    "not measurable", never as zero.
+    `q` is (chunk_queue_head, chunk_queue_tail). The C sampler's head is
+    the INGEST PUBLICATION counter (incremented when a chunk is
+    published) and tail is the SCANNER/INDEXER CLAIM counter (incremented
+    when claimed). So publication is the raw q[0] delta and consumption
+    is the raw q[1] delta -- the OPPOSITE pair order from `b`, which is
+    (read_idx, write_idx). Do not reuse one order for the other.
+
+    `i` is the engine's indexer_waiter gauge. Only src=ingest records own
+    this path; the UMA scanner emits q/i groups but has no indexer, and
+    those are reported as "not measurable", never as zero.
     """
-    samples = sorted(records, key=lambda r: int(r.get("t_ms", 0)))
+    samples = sorted(
+        (r for r in records
+         if r.get("q") is not None and r.get("t_ms") is not None),
+        key=lambda r: int(r.get("t_ms", 0)))
     nodes = sorted({n for r in samples for n in (r.get("q") or {})})
     out = {
         "samples": len(samples),
@@ -744,8 +760,9 @@ def _chunk_stats(records):
                 continue
             st = per[node]
             st["samples"] += 1
-            depth_p = qp[1] - qp[0]
-            depth_c = qc[1] - qc[0]
+            # q = (published, claimed); see the wire-order note above.
+            depth_p = qp[0] - qp[1]
+            depth_c = qc[0] - qc[1]
             depths[node] = depth_c
             if depth_c > 0:
                 st["nonempty"] += 1
@@ -756,8 +773,8 @@ def _chunk_stats(records):
                     st["empty_start"] = t_prev
                 st["longest_empty_ms"] = max(
                     st["longest_empty_ms"], t_cur - st["empty_start"])
-            pub, pstate = _delta(qc[1], qp[1])
-            cons, cstate = _delta(qc[0], qp[0])
+            pub, pstate = _delta(qc[0], qp[0])
+            cons, cstate = _delta(qc[1], qp[1])
             if pub is not None:
                 st["pub_count"] += pub
                 st["pub_time"] += dt
@@ -860,14 +877,12 @@ def _trial_queue_stats(records):
     """One trial: batch (scanner->worker) + chunk (ingest->indexer).
 
     The two samplers have independent t_ms origins, so they are NEVER
-    interleaved into one timeline: batch metrics come from src=scan,
-    chunk metrics from src=ingest.
+    interleaved into one timeline. Batch groups (`b`/`c`/`a`) are emitted
+    by BOTH the UMA scanner and the NUMA C ingest; only the chunk path
+    (`q`/`i`) is owned by src=ingest.
     """
-    scan = [r for r in records
-            if (r.get("src") or "scan") != "ingest"]
-    ingest = [r for r in records if r.get("src") == "ingest"]
-    batch = _batch_stats(scan)
-    chunk = _chunk_stats(ingest)
+    batch = _batch_stats(records)
+    chunk = _chunk_stats([r for r in records if r.get("src") == "ingest"])
     result = dict(batch)
     result["chunk"] = chunk
     result["chunk_nodes"] = chunk["nodes"]
@@ -927,8 +942,8 @@ def _agg_batch_nodes(trials):
         out[node] = {
             "samples": sum(r.get("samples") or 0 for r in rows),
             "nonempty_fraction": _weighted(
-                [(r.get("nonempty_fraction"),
-                  max(0, (r.get("samples") or 0) - 1)) for r in rows]),
+                [(r.get("nonempty_fraction"), r.get("samples") or 0)
+                 for r in rows]),
             "longest_empty_ms": max(
                 (r.get("longest_empty_ms") or 0.0 for r in rows),
                 default=0.0),
@@ -952,6 +967,8 @@ def _agg_batch_nodes(trials):
             "published_batches": pub_count,
             "claimed_batches": read_count,
             "claims_c_batches": c_count,
+            "published_interval_s": pub_time,
+            "claimed_interval_s": read_time,
         }
     return out
 
@@ -979,11 +996,11 @@ def _agg_chunk_nodes(trials):
         out[node] = {
             "samples": sum(r.get("samples") or 0 for r in rows),
             "nonempty_fraction": _weighted(
-                [(r.get("nonempty_fraction"),
-                  max(0, (r.get("samples") or 0) - 1)) for r in rows]),
+                [(r.get("nonempty_fraction"), r.get("samples") or 0)
+                 for r in rows]),
             "empty_fraction": _weighted(
-                [(r.get("empty_fraction"),
-                  max(0, (r.get("samples") or 0) - 1)) for r in rows]),
+                [(r.get("empty_fraction"), r.get("samples") or 0)
+                 for r in rows]),
             "longest_empty_ms": max(
                 (r.get("longest_empty_ms") or 0.0 for r in rows),
                 default=0.0),
@@ -1006,6 +1023,9 @@ def _agg_chunk_nodes(trials):
             "counter_regressions": regressions,
             "chunk_published": pub_count,
             "chunk_consumed": cons_count,
+            "published_interval_s": pub_time,
+            "consumed_interval_s": cons_time,
+            "i_time": i_time,
         }
     return out
 
@@ -1074,6 +1094,14 @@ def queue_demand_stats(cases):
                 default=0.0),
             "indexer_waiters_observed": any(
                 t["chunk"]["indexer_waiters_observed"] for t in trials),
+            "indexer_waiters_max": max(
+                (v.get("indexer_waiters_max")
+                 for v in chunk_nodes.values()
+                 if v.get("indexer_waiters_max") is not None),
+                default=None),
+            "indexer_waiters_mean": _weighted(
+                [(v.get("indexer_waiters_mean"), v.get("i_time"))
+                 for v in chunk_nodes.values()]),
             "indexer_wait_while_empty_fraction": chunk_wait_fraction,
             "empty_samples": empty_samples,
             "empty_with_waiters": empty_waiters if chunk_measurable else None,
@@ -1983,6 +2011,14 @@ def main():
                   "than the scanner supplied it, i.e. that node was "
                   "downstream-limited. It is not an aggregate rate compared "
                   "against the fastest node.", "",
+                  "The chunk queue uses the opposite pair order: `q` is "
+                  "(`chunk_queue_head`, `chunk_queue_tail`), where head is "
+                  "the ingest publication counter and tail is the "
+                  "scanner/indexer claim counter. `chunk published/s` and "
+                  "`chunk consumed/s` are the raw head and tail deltas "
+                  "respectively. Batch groups (`b`/`c`/`a`) are emitted by "
+                  "both the UMA scanner and the NUMA C ingest; `q`/`i` are "
+                  "owned by src=ingest only.", "",
                   "`endpoint-persistent claimed/s` uses intervals where that "
                   "node's batch queue was non-empty at BOTH sampled ends. "
                   "This is an endpoint-persistent estimate, not proof that "
@@ -2017,7 +2053,7 @@ def main():
     lines += ["", "`?` means the quantity is not measurable on this source "
                   "path, not that it is absent. A supply gap is attributed to "
                   "centralized ingestion only when ingest->indexer starvation "
-                  "coincurs and ingest CPU is near one core (spec §4.2); an "
+                  "coincides and ingest CPU is near one core (spec §4.2); an "
                   "empty chunk queue with indexer waiters while ingest CPU is "
                   "well below one core is classified source-limited.", ""]
 
@@ -2098,7 +2134,7 @@ def main():
             kernel.get("release"), kernel.get("fake_numa_spec")))
         topo_map = _env_topology_map(env)
         lines.append("- CPU topology: %s" % ", ".join(
-            "node%s=%s" % (name, cpus) for name, cpus in
+            "%s=%s" % (name, cpus) for name, cpus in
             sorted(topo_map.items())))
         lines.append("- shmem THP: %s" % (env.get("thp") or {}).get(
             "shmem_enabled"))

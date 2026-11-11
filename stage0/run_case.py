@@ -186,6 +186,7 @@ def _parse_diag(stderr):
     direct_wall_ns = {}
     final_cpu_ns = {}
     final_t_ms = {}
+    final_t_us = {}
     for line in (stderr or "").splitlines():
         if not line.startswith("STAGE0_"):
             continue
@@ -213,6 +214,11 @@ def _parse_diag(stderr):
                 final_t_ms[src or "?"] = int(fields.get("t_ms", 0))
             except ValueError:
                 pass
+            try:
+                if fields.get("t_us") is not None:
+                    final_t_us[src or "?"] = int(fields.get("t_us", 0))
+            except ValueError:
+                pass
         elif line.startswith("STAGE0_INGEST_CPU "):
             try:
                 cpu = int(fields.get("cpu_ns", 0))
@@ -232,6 +238,46 @@ def _parse_diag(stderr):
         "direct_ingest_wall_ns": direct_wall_ns,
         "final_cpu_ns": final_cpu_ns,
         "final_t_ms": final_t_ms,
+        "final_t_us": final_t_us,
+    }
+
+
+def _direct_ingest_cpu(diag, ingest_basis_s):
+    """Authoritative direct ingest-thread CPU figures for one trial.
+
+    Python spill records are already CPU/wall deltas around the copy.
+    The C NUMA ingest emits its FINAL with `cpu_ns` measured as a delta
+    since sampler init and `t_us` as the phase duration at microsecond
+    resolution. Prefer `t_us` over `t_ms`: a millisecond field truncates
+    a 3.9 ms phase to 3 ms, which would report >1 core for a single
+    thread. The map-basis figure is a run-level cross-check only.
+    """
+    direct_ns = sum(diag["direct_ingest_cpu_ns"].values())
+    source = None
+    phase_s = None
+    if direct_ns > 0:
+        source = "python-spill (CLOCK_THREAD_CPUTIME_ID)"
+        phase_s = sum(diag["direct_ingest_wall_ns"].values()) / 1e9
+    else:
+        c_ns = diag["final_cpu_ns"].get("ingest", 0)
+        if c_ns > 0:
+            direct_ns = c_ns
+            source = "c-ingest-final (CLOCK_THREAD_CPUTIME_ID)"
+            t_us = diag["final_t_us"].get("ingest")
+            if t_us is not None:
+                phase_s = t_us / 1e6
+            else:
+                phase_s = diag["final_t_ms"].get("ingest", 0) / 1000.0
+    return {
+        "cpu_ns": direct_ns,
+        "source": source,
+        "phase_s": phase_s,
+        "map_basis_cores": (
+            (direct_ns / 1e9) / ingest_basis_s
+            if direct_ns > 0 and ingest_basis_s > 0 else None),
+        "phase_cores": (
+            (direct_ns / 1e9) / phase_s
+            if direct_ns > 0 and phase_s and phase_s > 0 else None),
     }
 
 
@@ -513,33 +559,18 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     # DIRECT ingest CPU: authoritative when available. The comm-delta
     # figure above remains as a cross-check because it can miss a short
     # rename or assign a sample's CPU to the wrong name.
-    direct_ns = sum(diag["direct_ingest_cpu_ns"].values())
-    direct_source = None
-    direct_phase_s = None
-    if direct_ns > 0:
-        direct_source = "python-spill (CLOCK_THREAD_CPUTIME_ID)"
-        direct_phase_s = sum(diag["direct_ingest_wall_ns"].values()) / 1e9
-    else:
-        c_ns = diag["final_cpu_ns"].get("ingest", 0)
-        if c_ns > 0:
-            direct_ns = c_ns
-            direct_source = "c-ingest-final (CLOCK_THREAD_CPUTIME_ID)"
-            direct_phase_s = diag["final_t_ms"].get("ingest", 0) / 1000.0
+    direct = _direct_ingest_cpu(diag, ingest_basis_s)
+    direct_ns = direct["cpu_ns"]
     manifest["ingest_cpu_direct_sec"] = (
         round(direct_ns / 1e9, 6) if direct_ns > 0 else None)
-    manifest["ingest_cpu_direct_source"] = direct_source
-    manifest["ingest_phase_s"] = direct_phase_s
-    manifest["ingest_cpu_direct_basis_cores"] = (
-        (direct_ns / 1e9) / ingest_basis_s
-        if direct_ns > 0 and ingest_basis_s > 0 else None)
+    manifest["ingest_cpu_direct_source"] = direct["source"]
+    manifest["ingest_phase_s"] = direct["phase_s"]
+    manifest["ingest_cpu_direct_basis_cores"] = direct["map_basis_cores"]
     # The direct record covers the ingest PHASE, not the whole map, so
     # its phase duration is the honest denominator for "is this task
     # using about one core while it ingests?". The map-basis figure
     # above is retained as a run-level cross-check.
-    manifest["ingest_cpu_phase_cores"] = (
-        (direct_ns / 1e9) / direct_phase_s
-        if direct_ns > 0 and direct_phase_s and direct_phase_s > 0
-        else None)
+    manifest["ingest_cpu_phase_cores"] = direct["phase_cores"]
     manifest["ingest_cpu_attribution"] = (
         "direct" if direct_ns > 0 else
         ("comm-sampled" if ingest_found else "unavailable"))
