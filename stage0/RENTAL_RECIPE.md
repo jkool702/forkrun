@@ -241,11 +241,12 @@ and `stage0/raw/` are gitignored; copy the generated report to
 ## 8. Local fake-NUMA rehearsal (already done)
 
 The committed report at `stage0/reports/stage0-report.md` is generated
-from a clean-checkout campaign on the development host (fake NUMA,
-`numa=fake=4`). It exercises the real C-ingest sampler, the same-interval
-correlated evidence, the 8-row ablation, and the report gate, and
-returns INCONCLUSIVE by rule. It is a harness validation, **not**
-real-NUMA evidence.
+from campaign `stage0-final-38bda5ac` at source SHA
+`38bda5ac2e5127ade192d017b9985c222d8965b1`, run from a clean checkout
+on the development host (fake NUMA, `numa=fake=4`). It exercises the
+real C-ingest sampler, the same-interval correlated evidence, the 8-row
+ablation, and the report gate, and returns INCONCLUSIVE by rule. It is a
+harness validation, **not** real-NUMA evidence.
 
 Reproduce the local shape with:
 
