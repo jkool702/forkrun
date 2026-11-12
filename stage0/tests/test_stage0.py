@@ -702,10 +702,15 @@ class TestCorrelatedEvidence(unittest.TestCase):
                 recs[-1]["q"] = {0: (0, 0)}
             elif kind == "missing_node_group":
                 del recs[-1]["i"]
+            elif kind == "missing_timestamp":
+                del recs[-1]["t_us"]
+            elif kind == "malformed_timestamp":
+                recs[-1]["t_us"] = "not-an-int"
             return recs
 
         for kind in ("duplicate_timestamp", "cpu_regression", "missing_cpu",
-                     "counter_regression", "missing_node_group"):
+                     "counter_regression", "missing_node_group",
+                     "missing_timestamp", "malformed_timestamp"):
             st = report.correlated_intervals(mutated(kind))
             self.assertGreater(st["excluded_total"], 0, kind)
             self.assertFalse(st["attribution_complete"], kind)
@@ -713,6 +718,172 @@ class TestCorrelatedEvidence(unittest.TestCase):
             self.assertEqual(v["decision"], "INCONCLUSIVE",
                              (kind, v["evidence"]))
             self.assertIn("excluded intervals", " ".join(v["evidence"]))
+
+    def test_out_of_order_timestamps_are_excluded_not_reordered(self):
+        # Original order is 0us, 1_000_000us, then 500_000us, then
+        # 2_000_000us. Sorting would manufacture three clean intervals
+        # and no exclusion. The analyzer must keep the original order,
+        # reject the decreasing observation, and DROP it: it must not be
+        # re-baselined into an interval 500_000us -> 2_000_000us either.
+        # Only the first interval survives.
+        recs = corr_go_trial()
+        late = dict(recs[-1])
+        late["t_us"] = 500000
+        late["cpu_ns"] = recs[-1]["cpu_ns"] // 2
+        recs.append(late)
+        after = dict(recs[-1])
+        after["t_us"] = 2000000
+        after["cpu_ns"] = recs[-1]["cpu_ns"] * 2
+        recs.append(after)
+        st = report.correlated_intervals(recs)
+        self.assertEqual(st["observations"], 4)
+        self.assertEqual(st["samples"], 4)
+        self.assertEqual(st["intervals"], 1)
+        self.assertEqual(st["excluded"]["non_monotonic_timestamps"], 1)
+        self.assertGreater(st["excluded_total"], 0)
+        self.assertFalse(st["attribution_complete"])
+        self.assertEqual(st["go_intervals"], 1)
+        self.assertEqual(st["go_interval_list"][0]["t1_us"], 1000000)
+        v = self._verdict([recs for _ in range(3)])
+        self.assertEqual(v["decision"], "INCONCLUSIVE", v["evidence"])
+
+    def test_duplicate_timestamp_is_dropped_not_rebaselined(self):
+        # 0us, 1_000_000us, duplicate 1_000_000us, 2_000_000us. The
+        # duplicate must close the run and be dropped, so the 2s
+        # observation cannot pair with it (which would manufacture an
+        # interval across the invalid observation).
+        recs = corr_go_trial()
+        dup = dict(recs[-1])
+        recs.append(dup)
+        after = dict(recs[-1])
+        after["t_us"] = 2000000
+        after["cpu_ns"] = recs[-1]["cpu_ns"] * 2
+        recs.append(after)
+        st = report.correlated_intervals(recs)
+        self.assertEqual(st["observations"], 4)
+        self.assertEqual(st["intervals"], 1)
+        self.assertEqual(st["excluded"]["duplicate_timestamps"], 1)
+        self.assertFalse(st["attribution_complete"])
+        v = self._verdict([recs for _ in range(3)])
+        self.assertEqual(v["decision"], "INCONCLUSIVE", v["evidence"])
+
+    def test_missing_timestamp_breaks_timeline(self):
+        recs = corr_go_trial()
+        middle = dict(recs[-1])
+        middle.pop("t_us", None)
+        middle.pop("t_ms", None)
+        recs.insert(1, middle)
+        st = report.correlated_intervals(recs)
+        self.assertEqual(st["observations"], 3)
+        self.assertEqual(st["samples"], 2)
+        self.assertEqual(st["intervals"], 0)
+        self.assertEqual(st["excluded"]["missing_timestamps"], 1)
+        self.assertGreater(st["excluded_total"], 0)
+        self.assertFalse(st["attribution_complete"])
+        self.assertEqual(st["go_intervals"], 0)
+        v = self._verdict([recs for _ in range(3)])
+        self.assertEqual(v["decision"], "INCONCLUSIVE", v["evidence"])
+
+    def test_malformed_t_us_breaks_timeline_without_t_ms_fallback(self):
+        # A present-but-malformed t_us must not be silently downgraded
+        # to the valid t_ms: that would hide the broken observation and
+        # turn it into a plausible 500ms endpoint.
+        recs = corr_go_trial()
+        middle = dict(recs[-1])
+        middle["t_us"] = "not-an-int"
+        middle["t_ms"] = 500
+        recs.insert(1, middle)
+        st = report.correlated_intervals(recs)
+        self.assertEqual(st["observations"], 3)
+        self.assertEqual(st["samples"], 2)
+        self.assertEqual(st["intervals"], 0)
+        self.assertEqual(st["excluded"]["malformed_timestamps"], 1)
+        self.assertGreater(st["excluded_total"], 0)
+        self.assertFalse(st["attribution_complete"])
+        self.assertEqual(st["go_intervals"], 0)
+        v = self._verdict([recs for _ in range(3)])
+        self.assertEqual(v["decision"], "INCONCLUSIVE", v["evidence"])
+
+    def test_no_false_interval_across_invalid_observation(self):
+        # Five observations at 0,1,2,3,4s; the 2s timestamp is missing.
+        # Only 0->1s and 3->4s survive. A filter-then-sort path would
+        # have produced three intervals and bridged the missing one.
+        recs = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+              "q_claim": 10, "b_pub": 0, "b_claim": 0, "i": 0,
+              "a": (0, 0)} for _ in range(4)])
+        recs[2].pop("t_us", None)
+        recs[2].pop("t_ms", None)
+        st = report.correlated_intervals(recs)
+        self.assertEqual(st["observations"], 5)
+        self.assertEqual(st["samples"], 4)
+        self.assertEqual(st["intervals"], 2)
+        self.assertAlmostEqual(st["interval_s"], 2.0)
+        self.assertEqual(st["excluded"]["missing_timestamps"], 1)
+        self.assertGreater(st["excluded_total"], 0)
+        self.assertFalse(st["attribution_complete"])
+
+    def test_valid_monotonic_timeline_retains_behavior(self):
+        recs = corr_go_trial()
+        st = report.correlated_intervals(recs)
+        self.assertEqual(st["observations"], 2)
+        self.assertEqual(st["samples"], 2)
+        self.assertEqual(st["intervals"], 1)
+        self.assertEqual(st["go_intervals"], 1)
+        self.assertTrue(st["attribution_complete"])
+        self.assertEqual(st["cpu_scope"], "global-ingest-thread")
+        for key in ("missing_timestamps", "malformed_timestamps",
+                    "duplicate_timestamps", "non_monotonic_timestamps"):
+            self.assertEqual(st["excluded"][key], 0, key)
+        self.assertEqual(st["excluded_total"], 0)
+        v = self._verdict([recs for _ in range(3)])
+        self.assertEqual(v["decision"], "GO", v["evidence"])
+
+    def test_cpu_attribution_is_global_while_queues_are_per_node(self):
+        # Both nodes share ONE global ingest-thread CPU timeline: 1.0
+        # core in interval 1, 0.25 core in interval 2. Node 0 has a GO
+        # interval in interval 1; node 1 is neutral there and becomes
+        # source-limited in interval 2. CPU is shared; the queue and
+        # supply-deficit evidence remains per node.
+        node0 = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+              "q_claim": 10, "b_pub": 10, "b_claim": 15, "i": 1,
+              "a": (1, 4)},
+             {"dt_us": 1000000, "cpu_ns": 250000000, "q_pub": 10,
+              "q_claim": 0, "b_pub": 10, "b_claim": 10, "i": 0,
+              "a": (0, 0)}],
+            node=0,
+            initial={"q": (10, 10), "i": 1, "b": (0, 5), "c": 0,
+                     "a": (2, 4)})
+        node1 = corr_trial(
+            [{"dt_us": 1000000, "cpu_ns": 1000000000, "q_pub": 10,
+              "q_claim": 10, "b_pub": 10, "b_claim": 10, "i": 0,
+              "a": (0, 0)},
+             {"dt_us": 1000000, "cpu_ns": 250000000, "q_pub": 0,
+              "q_claim": 0, "b_pub": 0, "b_claim": 0, "i": 1,
+              "a": (0, 4)}],
+            node=1,
+            initial={"q": (10, 10), "i": 0, "b": (10, 10), "c": 10,
+                     "a": (0, 0)})
+        st = report.correlated_intervals(merge_nodes(node0, node1))
+        self.assertEqual(st["cpu_scope"], "global-ingest-thread")
+        self.assertEqual(st["go_nodes"], [0])
+        n0 = st["nodes"][0]
+        n1 = st["nodes"][1]
+        self.assertEqual(n0["go_intervals"], 1)
+        self.assertEqual(n1["go_intervals"], 0)
+        # Both CPU figures come from the SAME global timeline: node 0's
+        # GO interval ran at 1.0 core; node 1's starved interval ran at
+        # 0.25 core. Neither is a node-local CPU measurement.
+        self.assertAlmostEqual(n0["go_cpu_cores"], 1.0)
+        self.assertAlmostEqual(n1["ingest_starved_cpu_cores"], 0.25)
+        self.assertEqual(n0["supply_gap_intervals"], 1)
+        self.assertEqual(n1["supply_gap_intervals"], 0)
+        self.assertEqual(n1["ingest_starved_intervals"], 1)
+        self.assertEqual(n1["source_limited_intervals"], 1)
+        self.assertAlmostEqual(st["go_cpu_cores"], 1.0)
+        self.assertEqual(st["go_interval_list"][0]["cpu_cores"], 1.0)
+        self.assertEqual(st["claim_crosscheck_mismatch_intervals"], 0)
 
 
 def ablation_doc(cid="campaign-1"):

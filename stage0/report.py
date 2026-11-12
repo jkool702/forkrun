@@ -431,26 +431,42 @@ def _delta(cur, prev):
     return cur - prev, "ok"
 
 
-def _sample_us(rec):
-    """Sample timestamp in microseconds. `t_us` is authoritative.
+def _sample_timestamp(rec):
+    """Return `(t_us, status)` for one sample.
 
-    `t_ms` is retained as a human-readable field only; falling back to it
-    keeps old logs parseable. Interval math must use microseconds so two
-    samples in the same millisecond are still ordered.
+    `t_us` is authoritative and `t_ms` is a legacy fallback ONLY when
+    `t_us` is ABSENT. A `t_us` that is present but malformed is
+    MALFORMED, never silently downgraded to the coarser `t_ms` -- that
+    would conceal the invalid value and could turn a broken observation
+    into a plausible interval endpoint.
+
+    status is "ok", "missing" (neither field present) or "malformed"
+    (a present field does not parse as an integer).
     """
     t_us = rec.get("t_us")
     if t_us is not None:
         try:
-            return int(t_us)
+            return int(t_us), "ok"
         except (TypeError, ValueError):
-            return None
+            return None, "malformed"
     t_ms = rec.get("t_ms")
     if t_ms is not None:
         try:
-            return int(t_ms) * 1000
+            return int(t_ms) * 1000, "ok"
         except (TypeError, ValueError):
-            return None
-    return None
+            return None, "malformed"
+    return None, "missing"
+
+
+def _sample_us(rec):
+    """Sample timestamp in microseconds, or None when unusable.
+
+    `t_us` is authoritative; `t_ms` is the legacy fallback. Interval
+    math must use microseconds so two samples in the same millisecond
+    are still ordered. See `_sample_timestamp` for the status contract.
+    """
+    value, status = _sample_timestamp(rec)
+    return value if status == "ok" else None
 
 
 def _batch_stats(records):
@@ -917,23 +933,35 @@ def correlated_intervals(records):
     per-node interval; trial-level co-occurrence is not evidence.
 
     `q` is (published, claimed); `b` is (read_idx, write_idx); `c` is the
-    claim cross-check. A counter regression, a non-monotonic timestamp,
-    or a missing/regressed CPU sample EXCLUDES the interval and is
-    counted; nothing is silently bridged.
+    claim cross-check. Observations are consumed in ORIGINAL order and
+    each timestamp is validated against the immediately preceding
+    observation; a missing, malformed, duplicate or decreasing timestamp
+    breaks the timeline, so no interval is ever constructed across it.
+    A counter regression or a missing/regressed CPU sample EXCLUDES the
+    interval and is counted; nothing is silently bridged.
+
+    `cpu_ns` is the emitting ingest thread's own CPU -- ONE GLOBAL
+    measurement per interval -- while q/i/b/c/a are per-node counters.
+    The same global CPU interval is evaluated alongside each node's
+    queue evidence; it is not an independently measured per-node CPU
+    value.
 
     The UMA scanner has no ingest->indexer path, so this returns
     available=False there rather than inventing zeros.
     """
-    samples = sorted(
-        (r for r in records
-         if r.get("src") == "ingest" and _sample_us(r) is not None),
-        key=_sample_us)
+    observations = [r for r in records if r.get("src") == "ingest"]
+    stamps = [_sample_timestamp(r) for r in observations]
     out = {
-        "available": bool(samples),
-        "samples": len(samples),
+        "available": bool(observations),
+        "observations": len(observations),
+        "samples": sum(1 for _t, status in stamps if status == "ok"),
+        "cpu_scope": "global-ingest-thread",
         "intervals": 0,
         "interval_s": 0.0,
         "excluded": {
+            "missing_timestamps": 0,
+            "malformed_timestamps": 0,
+            "duplicate_timestamps": 0,
             "non_monotonic_timestamps": 0,
             "missing_cpu": 0,
             "cpu_regressed": 0,
@@ -966,7 +994,51 @@ def correlated_intervals(records):
         "claim_crosscheck_mismatch_intervals": 0,
         "attribution_complete": False,
     }
-    if len(samples) < 2:
+    for _t, status in stamps:
+        if status == "missing":
+            out["excluded"]["missing_timestamps"] += 1
+        elif status == "malformed":
+            out["excluded"]["malformed_timestamps"] += 1
+
+    # Preserve ORIGINAL observation order. Each timestamp is validated
+    # against the immediately preceding original observation. An invalid
+    # observation (missing/malformed) or a non-increasing transition
+    # (duplicate/decreasing) breaks the timeline: runs are maximal
+    # strictly-increasing segments, and intervals are built ONLY between
+    # consecutive observations in the same run. The offending observation
+    # is DROPPED -- it never becomes the baseline of a later interval --
+    # so an invalid timestamp cannot be re-baselined into plausible
+    # evidence. Nothing is sorted and no interval is ever constructed
+    # across an invalid observation.
+    runs = []
+    run = []
+    for rec, (t_us, status) in zip(observations, stamps):
+        if status != "ok":
+            if run:
+                runs.append(run)
+                run = []
+            continue
+        if not run:
+            run = [(rec, t_us)]
+            continue
+        prev_t = run[-1][1]
+        if t_us <= prev_t:
+            runs.append(run)
+            run = []
+            if t_us == prev_t:
+                out["excluded"]["duplicate_timestamps"] += 1
+            else:
+                out["excluded"]["non_monotonic_timestamps"] += 1
+            continue
+        run.append((rec, t_us))
+    if run:
+        runs.append(run)
+
+    pairs = []
+    for run in runs:
+        pairs.extend(zip(run, run[1:]))
+    out["excluded_total"] = sum(out["excluded"].values())
+    if not pairs:
         return out
 
     empty_node = {
@@ -1025,12 +1097,7 @@ def correlated_intervals(records):
         node["_starved_dt_us"] = 0
         return node
 
-    for prev, cur in zip(samples, samples[1:]):
-        t_prev = _sample_us(prev)
-        t_cur = _sample_us(cur)
-        if t_prev is None or t_cur is None or t_cur <= t_prev:
-            out["excluded"]["non_monotonic_timestamps"] += 1
-            continue
+    for (prev, t_prev), (cur, t_cur) in pairs:
         dt_us = t_cur - t_prev
         dt_s = dt_us / 1e6
         cpu_prev = _num(prev.get("cpu_ns"))
@@ -1042,10 +1109,7 @@ def correlated_intervals(records):
             out["excluded"]["cpu_regressed"] += 1
             continue
         cpu_ns = cpu_cur - cpu_prev
-        cpu_cores = (cpu_ns / 1e9) / dt_s if dt_s > 0 else None
-        if cpu_cores is None:
-            out["excluded"]["non_monotonic_timestamps"] += 1
-            continue
+        cpu_cores = (cpu_ns / 1e9) / dt_s
         gated_prev = _num(prev.get("gated_ms"))
         gated_cur = _num(cur.get("gated_ms"))
         gated_delta = (gated_cur - gated_prev
@@ -1115,6 +1179,10 @@ def correlated_intervals(records):
                 and supply_gap > 0 and worker_waiters > 0
                 and batch_draining_or_empty and not backpressure)
 
+            # `cpu_ns` is the GLOBAL ingest-thread delta. It is added
+            # here only so this node's rows can report the shared global
+            # CPU over the intervals they cover; it is NOT a per-node
+            # CPU measurement.
             st["_cpu_ns"] += cpu_ns
             st["_dt_us"] += dt_us
             st["_chunk_pub"] += chunk_pub
@@ -1815,23 +1883,25 @@ def classify_demand(row, q):
         if ingest_starved:
             if ingest_cores is None:
                 evidence.append(
-                    "chunk queue empty with indexer waiters, but ingest CPU "
-                    "is not measured; source-limited vs CPU-bound ingest "
-                    "cannot be distinguished")
+                    "chunk queue empty with indexer waiters, but the global "
+                    "ingest-thread CPU is not measured; source-limited vs "
+                    "CPU-bound ingest cannot be distinguished")
             elif not ingest_near_one and not (gated is not None
                                               and gated > 0):
                 source_limited = True
                 evidence.append(
-                    "chunk queue empty with indexer waiters while ingest CPU "
-                    "%.2f cores is below the spec §4.2 near-one-core reading "
-                    "band and gated_ms=%s; this is source-limited, not "
-                    "centralized-ingest CPU saturation"
+                    "chunk queue empty with indexer waiters while the global "
+                    "ingest-thread CPU %.2f cores is below the spec §4.2 "
+                    "near-one-core reading band and gated_ms=%s; this is "
+                    "source-limited, not centralized-ingest-thread CPU "
+                    "saturation"
                     % (ingest_cores, gated))
             else:
                 source_limited = False
                 evidence.append(
-                    "chunk queue empty with indexer waiters while ingest CPU "
-                    "%.2f cores is near one core (spec §4.2)"
+                    "chunk queue empty with indexer waiters while the global "
+                    "ingest-thread CPU %.2f cores is near one core "
+                    "(spec §4.2)"
                     % ingest_cores)
         elif chunk_measurable:
             source_limited = False
@@ -1890,9 +1960,10 @@ def classify_demand(row, q):
                    "NOT distinguishable from trial variation"))
         else:
             evidence.append(
-                "no interval has ingest CPU near one core, an empty chunk "
-                "queue with indexer waiters, a draining/empty batch queue, "
-                "waiting workers, and claims above publications together")
+                "no interval has the global ingest-thread CPU near one "
+                "core, an empty chunk queue with indexer waiters, a "
+                "draining/empty batch queue, waiting workers, and claims "
+                "above publications together")
         if corr.get("mixed_trials"):
             evidence.append(
                 "mixed/ambiguous: %d trial(s) show ingest starvation in one "
@@ -1907,8 +1978,8 @@ def classify_demand(row, q):
         if corr.get("source_limited_trials"):
             evidence.append(
                 "source-limited intervals (chunk queue empty with indexer "
-                "waiters while ingest CPU is below the near-one-core band) "
-                "in %d/%d trials"
+                "waiters while the global ingest-thread CPU is below the "
+                "near-one-core band) in %d/%d trials"
                 % (corr["source_limited_trials"], trials))
         if corr.get("ingest_backpressure_trials"):
             evidence.append(
@@ -2448,17 +2519,18 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems,
     evidence = ["- Topology: %s" % topo["label"],
                 "- Decisive cases (>=2s, >=3 trials): %s"
                 % ", ".join(r["case"] for r in decisive),
-                "- Ingest CPU basis (cores; direct thread CPU where "
-                "available): %s"
+                "- Global ingest-thread CPU basis (cores; direct thread CPU "
+                "where available): %s"
                 % (", ".join("%s=%.2f (%s)" % (
                     r["case"], r["median_ingest_cores"],
                     r.get("ingest_attribution"))
                     for r in decisive
                     if r["median_ingest_cores"] is not None)
                    or "none measured"),
-                "- Same-interval GO cases (CPU saturation + empty chunk "
-                "queue with indexer waiters + draining batch queue with "
-                "waiting workers + claims above publications): %s"
+                "- Same-interval GO cases (global ingest-thread CPU "
+                "saturation + empty chunk queue with indexer waiters + "
+                "draining batch queue with waiting workers + claims above "
+                "publications): %s"
                 % (", ".join(go_cases) or "none observed"),
                 "- Same-interval supply-gap cases (worker claims exceeded "
                 "scanner publication on at least one node in at least one "
@@ -2511,10 +2583,10 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems,
             "evidence": evidence + [
                 "- In every attributable decisive case and every trial, at "
                 "least one per-node interval shows the required conditions "
-                "TOGETHER: ingest CPU near one core, the chunk queue empty "
-                "with indexer waiters, worker claims exceeding scanner "
-                "publications while the batch queue drains, and workers "
-                "waiting.",
+                "TOGETHER: the global ingest-thread CPU is near one core, "
+                "the chunk queue is empty with indexer waiters, worker "
+                "claims exceed scanner publications while the batch queue "
+                "drains, and workers are waiting.",
                 "- The per-trial deficit rates are larger than their own "
                 "trial-to-trial spread (see each case line), so the "
                 "deficit is distinguishable from run-to-run noise.",
@@ -2534,8 +2606,8 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems,
             reasons.append(
                 "measured throughput is limited by the source rather than "
                 "centralized ingestion (chunk queue empty with indexer "
-                "waiters while ingest CPU is below the near-one-core "
-                "reading band)")
+                "waiters while the global ingest-thread CPU is below the "
+                "near-one-core reading band)")
         if any((classifications[r["case"]]
                 .get("correlated_scanner_starved_trials") or 0) > 0
                for r in decisive):
@@ -2562,7 +2634,7 @@ def derive_verdict(summary, queue, env, ablation_issues, campaign_problems,
         "decision": "INCONCLUSIVE",
         "evidence": evidence + [
             "- Spec §8 requires the supply gap to be attributable to "
-            "centralized ingest CPU saturation while downstream has "
+            "centralized ingest-thread CPU saturation while downstream has "
             "unused capacity, in the SAME per-node intervals, consistently "
             "across at least three trials. At least one required "
             "distinction remains ambiguous (ambiguous cases: %s), so no "
@@ -2656,8 +2728,9 @@ def main():
     lines += verdict["evidence"]
     lines += ["", "## Baseline cases (median of trials)", "",
               "| case | spec | trials ok | rec/s (median) | spread % | "
-              "map s | process s | tree cores | ingest cores | ingest "
-              "attribution | ingest phase s | diag samples |",
+              "map s | process s | tree cores | ingest-thread cores "
+              "(global) | ingest attribution | ingest phase s | diag "
+              "samples |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary:
         lines.append("| %s | w%s n%s %s | %d/%d | %s | %s | %s | %s | %s | "
@@ -2676,7 +2749,8 @@ def main():
                          r["diag_samples"]))
     lines += ["", "`map s` is the child's `forkrun.map()` timer; `process s` "
                   "is the outer process wall, which also contains the "
-                  "harness's post-run exactness accounting. Ingest CPU is "
+                  "harness's post-run exactness accounting. The ingest-"
+                  "thread CPU figure is GLOBAL to the ingest stage and is "
                   "reported in cores. When a direct record exists, the "
                   "denominator is that ingest phase's measured duration "
                   "(the honest basis for \"about one core while ingesting\"); "
@@ -2825,9 +2899,13 @@ def main():
 
     lines += ["## Time-correlated same-interval evidence", "",
               "The NUMA C ingest emits `q`, `i`, `b`, `c`, `a`, `cpu_ns` "
-              "and `t_us` on ONE CLOCK_MONOTONIC origin. Consecutive "
-              "`src=ingest` samples form one timeline per trial, and the "
-              "predicates below are evaluated on the SAME per-node "
+              "and `t_us` on ONE CLOCK_MONOTONIC origin. Observations are "
+              "consumed in ORIGINAL order; each timestamp is validated "
+              "against the immediately preceding observation, and a "
+              "missing, malformed, duplicate or decreasing timestamp breaks "
+              "the timeline so no interval is constructed across it. "
+              "Consecutive valid observations form one timeline per trial, "
+              "and the predicates below are evaluated on the SAME per-node "
               "interval. Trial-level co-occurrence is never treated as "
               "correlation. All elapsed-time math uses `t_us`; `t_ms` is "
               "human-readable only.", "",
@@ -2837,9 +2915,12 @@ def main():
               "worker starvation** = the batch queue is empty at both "
               "endpoints and workers are waiting in the same interval while "
               "upstream input is available (nonzero chunk depth or no "
-              "indexer waiters). **Ingest CPU saturation** = the ingest "
-              "thread's `delta(cpu_ns)/delta(t_us)` is inside the declared "
-              "near-one-core reading band in the same interval. **Supply "
+              "indexer waiters). **Global ingest-thread CPU saturation** = "
+              "the emitting ingest thread's `delta(cpu_ns)/delta(t_us)` is "
+              "inside the declared near-one-core reading band in the same "
+              "interval. This is ONE global measurement per interval, "
+              "evaluated alongside each node's queue evidence; it is not an "
+              "independently measured per-node CPU value. **Supply "
               "deficit** = raw `read_idx` delta exceeds raw `write_idx` "
               "delta on the node in the same interval (worker claims exceed "
               "scanner publication). **GO interval** requires all of these "
@@ -2848,19 +2929,25 @@ def main():
               "and upstream-available scanner/worker starvation occur in "
               "different intervals of the same trial: ambiguous, not "
               "\"scanner starvation absent\".", "",
-              "Excluded intervals are counted, never bridged: a "
-              "non-monotonic/duplicate timestamp, missing or regressed "
-              "`cpu_ns`, missing per-node groups, or a counter regression "
-              "removes the interval from every predicate.", "",
+              "Excluded observations/intervals are counted, never bridged: "
+              "missing or malformed timestamps, duplicate or decreasing "
+              "timestamps, missing or regressed `cpu_ns`, missing per-node "
+              "groups, or a counter regression removes the affected "
+              "interval(s) from every predicate. `attribution_complete` is "
+              "false whenever any relevant observation or interval was "
+              "excluded.", "",
               "Per-trial predicate columns are summed over nodes "
               "(node-intervals); `intervals` and `duration s` are timeline "
               "intervals. The per-node table below gives the same counts "
-              "for each node.", ""]
+              "for each node. The `GO ingest-thread CPU cores (global)` "
+              "column is the shared global ingest-thread CPU measured over "
+              "that node's GO intervals, not a per-node CPU measurement.",
+              ""]
     lines.append("| case | trial | intervals | duration s | ingest-starved "
-                 "node-iv | CPU-sat starved node-iv | scanner-starved "
+                 "node-iv | global-CPU-sat starved node-iv | scanner-starved "
                  "node-iv | source-limited node-iv | backpressure node-iv | "
-                 "GO node-iv | GO s | GO deficit/s | GO CPU cores | "
-                 "excluded |")
+                 "GO node-iv | GO s | GO deficit/s | GO ingest-thread CPU "
+                 "cores (global) | excluded |")
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in summary:
         q = queue.get(r["case"])
@@ -2894,11 +2981,12 @@ def main():
                              _fmt(t.get("go_cpu_cores"), "%.2f"),
                              t.get("excluded_total") or 0))
     lines += ["", "### Per-node same-interval detail", "",
-              "| case | node | intervals | ingest starved | CPU-sat "
+              "| case | node | intervals | ingest starved | global-CPU-sat "
               "starved | scanner starved | source limited | worker waits | "
               "supply-gap intervals | GO intervals | GO s | GO deficit/s | "
-              "GO CPU cores | chunk pub/s | chunk cons/s | batch pub/s | "
-              "batch claim/s | counter regressions | c-mismatch intervals |",
+              "GO ingest-thread CPU cores (global) | chunk pub/s | chunk "
+              "cons/s | batch pub/s | batch claim/s | counter regressions | "
+              "c-mismatch intervals |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in summary:
         q = queue.get(r["case"])
@@ -2991,10 +3079,11 @@ def main():
                   "case can have GO intervals without being a GO case. A "
                   "supply gap is attributed to centralized ingestion only "
                   "when the SAME per-node interval shows ingest->indexer "
-                  "starvation, ingest CPU near one core, workers waiting, "
-                  "and the batch queue draining (spec §4.2); an empty chunk "
-                  "queue with indexer waiters while ingest CPU is well "
-                  "below one core is classified source-limited. A positive "
+                  "starvation, the global ingest-thread CPU near one core, "
+                  "workers waiting, and the batch queue draining "
+                  "(spec §4.2); an empty chunk queue with indexer waiters "
+                  "while the global ingest-thread CPU is well below one "
+                  "core is classified source-limited. A positive "
                   "`claims - publications` is a scanner-side supply deficit "
                   "relative to worker demand, not by itself evidence that "
                   "downstream is the limiter; q/i decides whether the "
@@ -3119,10 +3208,10 @@ def main():
     lines += ["", "## One-page decision summary", ""]
     if topo["fake"]:
         lines.append("**Is the central ingest the limiter?** NOT DECIDABLE "
-                     "on this fake-NUMA host. The per-node queue, ingest-"
-                     "thread CPU, and worker-waiter metrics are present, "
-                     "but spec §8 requires physical multi-node evidence; "
-                     "this rehearsal returns Inconclusive by rule.")
+                     "on this fake-NUMA host. The per-node queue, global "
+                     "ingest-thread CPU, and worker-waiter metrics are "
+                     "present, but spec §8 requires physical multi-node "
+                     "evidence; this rehearsal returns Inconclusive by rule.")
         lines.append("")
         lines.append("**Is placement born-local?** The corrected ablation "
                      "shows that `MPOL_BIND` is requested with mode 2, is "

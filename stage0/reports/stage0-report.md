@@ -15,7 +15,7 @@
 
 ## Baseline cases (median of trials)
 
-| case | spec | trials ok | rec/s (median) | spread % | map s | process s | tree cores | ingest cores | ingest attribution | ingest phase s | diag samples |
+| case | spec | trials ok | rec/s (median) | spread % | map s | process s | tree cores | ingest-thread cores (global) | ingest attribution | ingest phase s | diag samples |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | file-light20m-n1-w14 | w14 n1 udf | 3/3 | 16211464 | 1.7 | 1.23 | 3.59 | 1.93 | 0.99 | direct | 0.475 | 6 |
 | file-light20m-nauto-w14 | w14 nauto udf | 3/3 | 24681972 | 3.7 | 0.81 | 3.63 | 2.56 | 0.90 | direct | 0.728 | 108 |
@@ -25,7 +25,7 @@
 | plugin-light60m-nauto-w14 | w14 nauto plugin | 3/3 | 32630625 | 1.4 | 1.84 | 1.95 | 8.74 | 0.99 | direct | 1.690 | 256 |
 | smoke-light-100k-nauto | w4 nauto udf | 3/3 | 3595349 | 39.8 | 0.03 | 0.11 | 0.67 | 0.99 | direct | 0.004 | 3 |
 
-`map s` is the child's `forkrun.map()` timer; `process s` is the outer process wall, which also contains the harness's post-run exactness accounting. Ingest CPU is reported in cores. When a direct record exists, the denominator is that ingest phase's measured duration (the honest basis for "about one core while ingesting"); otherwise it falls back to the comm-sampled figure over the map timer. `direct` is the ingest task's own `CLOCK_THREAD_CPUTIME_ID` record (Python spill, or the C NUMA ingest FINAL); `comm-sampled` is the 20 ms per-task delta keyed by `comm`, which is a cross-check and can miss a short phase. `ingest phase s` is the measured duration of that direct ingest window. Tree cores are the sum of all task CPU deltas over the run divided by wall, not a peak snapshot.
+`map s` is the child's `forkrun.map()` timer; `process s` is the outer process wall, which also contains the harness's post-run exactness accounting. The ingest-thread CPU figure is GLOBAL to the ingest stage and is reported in cores. When a direct record exists, the denominator is that ingest phase's measured duration (the honest basis for "about one core while ingesting"); otherwise it falls back to the comm-sampled figure over the map timer. `direct` is the ingest task's own `CLOCK_THREAD_CPUTIME_ID` record (Python spill, or the C NUMA ingest FINAL); `comm-sampled` is the 20 ms per-task delta keyed by `comm`, which is a cross-check and can miss a short phase. `ingest phase s` is the measured duration of that direct ingest window. Tree cores are the sum of all task CPU deltas over the run divided by wall, not a peak snapshot.
 
 ## Per-node queue telemetry (STAGE0_DIAG, spec §4.3)
 
@@ -97,15 +97,15 @@ The chunk queue uses the opposite pair order: `q` is (`chunk_queue_head`, `chunk
 
 ## Time-correlated same-interval evidence
 
-The NUMA C ingest emits `q`, `i`, `b`, `c`, `a`, `cpu_ns` and `t_us` on ONE CLOCK_MONOTONIC origin. Consecutive `src=ingest` samples form one timeline per trial, and the predicates below are evaluated on the SAME per-node interval. Trial-level co-occurrence is never treated as correlation. All elapsed-time math uses `t_us`; `t_ms` is human-readable only.
+The NUMA C ingest emits `q`, `i`, `b`, `c`, `a`, `cpu_ns` and `t_us` on ONE CLOCK_MONOTONIC origin. Observations are consumed in ORIGINAL order; each timestamp is validated against the immediately preceding observation, and a missing, malformed, duplicate or decreasing timestamp breaks the timeline so no interval is constructed across it. Consecutive valid observations form one timeline per trial, and the predicates below are evaluated on the SAME per-node interval. Trial-level co-occurrence is never treated as correlation. All elapsed-time math uses `t_us`; `t_ms` is human-readable only.
 
-Predicates: **ingest->indexer starvation** = the node's chunk queue is empty at both sampled endpoints and its indexer waiter gauge is positive in the same interval. **Scanner->worker starvation** = the batch queue is empty at both endpoints and workers are waiting in the same interval while upstream input is available (nonzero chunk depth or no indexer waiters). **Ingest CPU saturation** = the ingest thread's `delta(cpu_ns)/delta(t_us)` is inside the declared near-one-core reading band in the same interval. **Supply deficit** = raw `read_idx` delta exceeds raw `write_idx` delta on the node in the same interval (worker claims exceed scanner publication). **GO interval** requires all of these together, with the batch queue draining or empty and no backlog-gated ingest wait. **Mixed** means ingest starvation and upstream-available scanner/worker starvation occur in different intervals of the same trial: ambiguous, not "scanner starvation absent".
+Predicates: **ingest->indexer starvation** = the node's chunk queue is empty at both sampled endpoints and its indexer waiter gauge is positive in the same interval. **Scanner->worker starvation** = the batch queue is empty at both endpoints and workers are waiting in the same interval while upstream input is available (nonzero chunk depth or no indexer waiters). **Global ingest-thread CPU saturation** = the emitting ingest thread's `delta(cpu_ns)/delta(t_us)` is inside the declared near-one-core reading band in the same interval. This is ONE global measurement per interval, evaluated alongside each node's queue evidence; it is not an independently measured per-node CPU value. **Supply deficit** = raw `read_idx` delta exceeds raw `write_idx` delta on the node in the same interval (worker claims exceed scanner publication). **GO interval** requires all of these together, with the batch queue draining or empty and no backlog-gated ingest wait. **Mixed** means ingest starvation and upstream-available scanner/worker starvation occur in different intervals of the same trial: ambiguous, not "scanner starvation absent".
 
-Excluded intervals are counted, never bridged: a non-monotonic/duplicate timestamp, missing or regressed `cpu_ns`, missing per-node groups, or a counter regression removes the interval from every predicate.
+Excluded observations/intervals are counted, never bridged: missing or malformed timestamps, duplicate or decreasing timestamps, missing or regressed `cpu_ns`, missing per-node groups, or a counter regression removes the affected interval(s) from every predicate. `attribution_complete` is false whenever any relevant observation or interval was excluded.
 
-Per-trial predicate columns are summed over nodes (node-intervals); `intervals` and `duration s` are timeline intervals. The per-node table below gives the same counts for each node.
+Per-trial predicate columns are summed over nodes (node-intervals); `intervals` and `duration s` are timeline intervals. The per-node table below gives the same counts for each node. The `GO ingest-thread CPU cores (global)` column is the shared global ingest-thread CPU measured over that node's GO intervals, not a per-node CPU measurement.
 
-| case | trial | intervals | duration s | ingest-starved node-iv | CPU-sat starved node-iv | scanner-starved node-iv | source-limited node-iv | backpressure node-iv | GO node-iv | GO s | GO deficit/s | GO CPU cores | excluded |
+| case | trial | intervals | duration s | ingest-starved node-iv | global-CPU-sat starved node-iv | scanner-starved node-iv | source-limited node-iv | backpressure node-iv | GO node-iv | GO s | GO deficit/s | GO ingest-thread CPU cores (global) | excluded |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | file-light20m-n1-w14 | - | 0 | - | NOT AVAILABLE (no src=ingest timeline) | - | - | - | - | - | - | - | - | - |
 | file-light20m-nauto-w14 | 1 | 36 | 0.73 | 20 | 17 | 2 | 0 | 64 | 0 | 0.00 | - | - | 0 |
@@ -129,7 +129,7 @@ Per-trial predicate columns are summed over nodes (node-intervals); `intervals` 
 
 ### Per-node same-interval detail
 
-| case | node | intervals | ingest starved | CPU-sat starved | scanner starved | source limited | worker waits | supply-gap intervals | GO intervals | GO s | GO deficit/s | GO CPU cores | chunk pub/s | chunk cons/s | batch pub/s | batch claim/s | counter regressions | c-mismatch intervals |
+| case | node | intervals | ingest starved | global-CPU-sat starved | scanner starved | source limited | worker waits | supply-gap intervals | GO intervals | GO s | GO deficit/s | GO ingest-thread CPU cores (global) | chunk pub/s | chunk cons/s | batch pub/s | batch claim/s | counter regressions | c-mismatch intervals |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | file-light20m-nauto-w14 | n0 | 108 | 15 | 14 | 0 | 0 | 8 | 43 | 0 | 0.00 | - | - | 444.5 | 443.6 | 2531.2 | 2509.6 | 0 | 2 |
 | file-light20m-nauto-w14 | n1 | 108 | 17 | 13 | 4 | 0 | 8 | 50 | 0 | 0.00 | - | - | 441.8 | 440.9 | 2334.3 | 2309.9 | 0 | 0 |
@@ -170,7 +170,7 @@ Per-trial predicate columns are summed over nodes (node-intervals); `intervals` 
 | plugin-light60m-nauto-w14 | yes | yes | yes | no | no | no | no | 3 | 137 | min/median/max 73.1/73.7/74.7 batches/s; spread 1.6 | 0 |
 | smoke-light-100k-nauto | no | yes | yes | no | no | no | no | 0 | 0 | not measured | 0 |
 
-`?` means the quantity is not measurable on this source path, not that it is absent. `same-interval supply gap` means at least one per-node interval had worker claims above scanner publication; it is not an aggregate trial rate. `correlated GO case` is the full case-level predicate (every trial, complete attribution, no mixed trial, no source-limited interval, no upstream-available scanner/worker starvation, and a deficit larger than the trial-to-trial spread); `GO node-iv` counts the individual intervals that meet the conditions, so a case can have GO intervals without being a GO case. A supply gap is attributed to centralized ingestion only when the SAME per-node interval shows ingest->indexer starvation, ingest CPU near one core, workers waiting, and the batch queue draining (spec §4.2); an empty chunk queue with indexer waiters while ingest CPU is well below one core is classified source-limited. A positive `claims - publications` is a scanner-side supply deficit relative to worker demand, not by itself evidence that downstream is the limiter; q/i decides whether the scanner lacked input or could not process available input.
+`?` means the quantity is not measurable on this source path, not that it is absent. `same-interval supply gap` means at least one per-node interval had worker claims above scanner publication; it is not an aggregate trial rate. `correlated GO case` is the full case-level predicate (every trial, complete attribution, no mixed trial, no source-limited interval, no upstream-available scanner/worker starvation, and a deficit larger than the trial-to-trial spread); `GO node-iv` counts the individual intervals that meet the conditions, so a case can have GO intervals without being a GO case. A supply gap is attributed to centralized ingestion only when the SAME per-node interval shows ingest->indexer starvation, the global ingest-thread CPU near one core, workers waiting, and the batch queue draining (spec §4.2); an empty chunk queue with indexer waiters while the global ingest-thread CPU is well below one core is classified source-limited. A positive `claims - publications` is a scanner-side supply deficit relative to worker demand, not by itself evidence that downstream is the limiter; q/i decides whether the scanner lacked input or could not process available input.
 
 ## 2×2 affinity/policy ablation (spec §6)
 
@@ -214,7 +214,7 @@ Interleaved paired runs of the same child payload, corpus, worker count, and sta
 
 ## One-page decision summary
 
-**Is the central ingest the limiter?** NOT DECIDABLE on this fake-NUMA host. The per-node queue, ingest-thread CPU, and worker-waiter metrics are present, but spec §8 requires physical multi-node evidence; this rehearsal returns Inconclusive by rule.
+**Is the central ingest the limiter?** NOT DECIDABLE on this fake-NUMA host. The per-node queue, global ingest-thread CPU, and worker-waiter metrics are present, but spec §8 requires physical multi-node evidence; this rehearsal returns Inconclusive by rule.
 
 **Is placement born-local?** The corrected ablation shows that `MPOL_BIND` is requested with mode 2, is effective, and places destination pages on the bound node in both materialization forms. Because every CPU is listed on every fake node, this validates the instrumentation and the policy path, not physical born-local behavior.
 

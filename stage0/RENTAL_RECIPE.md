@@ -148,14 +148,22 @@ log path; the campaign does not silently skip a failed trial.
   `(read_idx, write_idx)`, `c` cross-checks claims, `i` is the indexer
   waiter gauge, and `a` is the worker waiter pair.
 - Interval math in **microseconds** (`t_us`); `t_ms` is human-readable
-  only. A duplicate/non-monotonic timestamp, missing or regressed
-  `cpu_ns`, missing per-node group, or counter regression **excludes**
-  the interval and is counted; it is never bridged.
+  only. Observations are consumed in their original order and each
+  timestamp is validated against the immediately preceding observation.
+  A missing, malformed, duplicate or decreasing timestamp **breaks the
+  timeline**, so no interval is constructed across it. A missing or
+  regressed `cpu_ns`, missing per-node group, or counter regression
+  **excludes** the interval and is counted; it is never bridged.
 - Same-interval predicates: ingest→indexer starvation (empty chunk
   queue + indexer waiters), scanner→worker starvation (empty batch
-  queue + waiting workers + upstream input available), ingest CPU
-  saturation in the same starvation intervals, and worker claims
-  exceeding scanner publication in the same interval.
+  queue + waiting workers + upstream input available), global
+  ingest-thread CPU saturation in the same starvation intervals, and
+  worker claims exceeding scanner publication in the same interval.
+  `cpu_ns` is the emitting ingest thread's own CPU: ONE global
+  measurement per interval, evaluated alongside each node's queue
+  evidence. It is not an independently measured per-node CPU value;
+  the per-node GO CPU columns report the shared global ingest-thread
+  CPU over that node's GO intervals.
 - Per-trial and per-node interval counts, durations, rates, exclusions,
   and the trial-to-trial spread. A GO verdict requires every trial to
   have GO intervals, complete attribution, no mixed trial, no
@@ -164,8 +172,8 @@ log path; the campaign does not silently skip a failed trial.
   trial-to-trial spread. If the deficit is not distinguishable from
   variation, the verdict is INCONCLUSIVE; there is no arbitrary
   percentage threshold.
-- Direct C-ingest CPU attribution: the trial manifest must say
-  `ingest_cpu_attribution: "direct"` with
+- Direct global C-ingest-thread CPU attribution: the trial manifest
+  must say `ingest_cpu_attribution: "direct"` with
   `ingest_cpu_direct_source: "c-ingest-final (CLOCK_THREAD_CPUTIME_ID)"`
   and a positive `ingest_phase_s`. Comm-sampled `/proc` attribution is
   a different basis and must not be mixed with the direct delta.
@@ -216,9 +224,9 @@ and `stage0/raw/` are gitignored; copy the generated report to
 ## 7. Physical multi-node requirements and placement caveats
 
 - **Fake NUMA cannot decide.** `numa=fake=N` gives each CPU a presence
-  on every fake node, so the per-node queue and CPU metrics validate the
-  instrumentation but cannot establish physical placement or scaling.
-  The report says so explicitly.
+  on every fake node, so the per-node queue and global ingest-thread
+  CPU metrics validate the instrumentation but cannot establish
+  physical placement or scaling. The report says so explicitly.
 - Confirm the topology before spending trials:
   `numactl -H`, `cat /sys/devices/system/node/online`, and the
   `kernel.fake_numa` / `kernel.fake_numa_spec` fields in
