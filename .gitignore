@@ -127,3 +127,7 @@ epyc/**/tokenize_plugin.so
 # BENCHMARKS/benchmark.out above: they pollute the clean-tree check that
 # release_check runs.
 numa1/
+
+# Experimental dist-ingest prototype artifacts
+stage0/dist_ingest/runs/
+stage0/libdist_ingest.so

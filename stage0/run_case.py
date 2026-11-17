@@ -364,13 +364,20 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
         json.dump(manifest, fh, indent=2, sort_keys=True)
 
     python_dir = python_path or os.path.join(REPO, "python")
+
+    # Experimental distributed-ingest candidates (WO-NUMA-DISTRIBUTED-INGEST).
+    # Selected by spec["ingest_candidate"] in {fixed_faa, local_adaptive,
+    # relative_adaptive}. "control"/absent use the existing forkrun child.
+    ingest_candidate = spec.get("ingest_candidate")
+    use_dist = ingest_candidate in ("fixed_faa", "local_adaptive", "relative_adaptive")
+
     script = child_script or CHILD_SCRIPT
 
     pipe_writer = None
     pipe_reader = None
     pass_fds = ()
     pipe_close_after_spawn = ()
-    if spec.get("source_kind") == "pipe":
+    if spec.get("source_kind") == "pipe" and not use_dist:
         r_fd, w_fd = os.pipe()
         def _remap():
             os.dup2(r_fd, 3)
@@ -384,10 +391,43 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
         pipe_close_after_spawn = (r_fd,)
     else:
         _remap = None
-    proc = subprocess.Popen(
-        [sys.executable, "-c", script, python_dir, json.dumps(resolved)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        pass_fds=pass_fds, preexec_fn=_remap, start_new_session=True)
+
+    if use_dist:
+        dist_runner = os.path.join(REPO, "stage0", "dist_ingest", "run_dist.py")
+        cmd = [sys.executable, dist_runner,
+               "--candidate", ingest_candidate,
+               "--input", resolved.get("input", spec.get("input", "")),
+               "--nodes", str(spec.get("dist_nodes", spec.get("nodes", 2) if isinstance(spec.get("nodes"), int) else 2)),
+               "--base-quantum", str(spec.get("base_quantum", 2 * 1024 * 1024)),
+               "--max-backlog", str(spec.get("max_backlog", 64 * 1024 * 1024)),
+               "--relative-rounding", str(spec.get("relative_rounding", 1)),
+               "--consumer-mode", str(spec.get("consumer_mode", "fast")),
+               "--consumer-bps", str(spec.get("consumer_bps", 0)),
+               "--consumer-stall-ms", str(spec.get("consumer_stall_ms", 0))]
+        if spec.get("max_reservation"):
+            cmd += ["--max-reservation", str(spec.get("max_reservation"))]
+        if spec.get("local_max_claim_quanta"):
+            cmd += ["--local-max-claim-quanta", str(spec.get("local_max_claim_quanta"))]
+        if spec.get("rel_max_claim_quanta"):
+            cmd += ["--rel-max-claim-quanta", str(spec.get("rel_max_claim_quanta"))]
+        if spec.get("prefer_hugepage"):
+            cmd += ["--prefer-hugepage"]
+        if spec.get("slow_node") is not None:
+            cmd += ["--slow-node", str(spec.get("slow_node"))]
+        if spec.get("slow_mode"):
+            cmd += ["--slow-mode", str(spec.get("slow_mode")),
+                    "--slow-bps", str(spec.get("slow_bps", 0)),
+                    "--slow-stall-ms", str(spec.get("slow_stall_ms", 0))]
+        if spec.get("json_out_rel"):
+            cmd += ["--json-out", os.path.join(out_dir, spec.get("json_out_rel"))]
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True, cwd=REPO)
+    else:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script, python_dir, json.dumps(resolved)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            pass_fds=pass_fds, preexec_fn=_remap, start_new_session=True)
     manifest["child_pid"] = proc.pid
     manifest["case_pgid"] = proc.pid
     manifest["producer_pid"] = pipe_writer.pid if pipe_writer else None
@@ -521,6 +561,14 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
                     line[len("CHILD_DONE "):])
             except ValueError:
                 manifest["child_report_error"] = "malformed CHILD_DONE JSON"
+    # Experimental dist-ingest result payload (stderr)
+    for line in (stderr or "").splitlines():
+        if line.startswith("DIST_RESULT "):
+            try:
+                manifest["dist_result"] = json.loads(
+                    line[len("DIST_RESULT "):])
+            except ValueError:
+                manifest["dist_result_error"] = "malformed DIST_RESULT JSON"
     # The child's own timer covers only forkrun.map(); the outer wall
     # also includes the harness's post-run exactness accounting.
     manifest["map_s"] = (manifest.get("child_report") or {}).get(
