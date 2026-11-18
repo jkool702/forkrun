@@ -53,6 +53,8 @@ class DiPolicyParams(ctypes.Structure):
         ("local_max_claim_quanta", ctypes.c_uint64),
         ("align_reservations", ctypes.c_int),
         ("prefer_hugepage", ctypes.c_int),
+        ("strict_affinity", ctypes.c_int),
+        ("strict_mbind", ctypes.c_int),
         ("one_outstanding_per_node", ctypes.c_int),
         ("enable_peer_headroom", ctypes.c_int),
     ]
@@ -69,7 +71,8 @@ class DiConsumerCfg(ctypes.Structure):
 class DiNodeMetrics(ctypes.Structure):
     _fields_ = [
         ("reservations", ctypes.c_uint64),
-        ("bytes_reserved", ctypes.c_uint64),
+        ("bytes_reserved_req", ctypes.c_uint64),
+        ("bytes_assigned", ctypes.c_uint64),
         ("bytes_read", ctypes.c_uint64),
         ("bytes_published", ctypes.c_uint64),
         ("bytes_consumed", ctypes.c_uint64),
@@ -81,20 +84,35 @@ class DiNodeMetrics(ctypes.Structure):
         ("publish_wait_ns", ctypes.c_uint64),
         ("consume_wait_ns", ctypes.c_uint64),
         ("current_published_backlog", ctypes.c_uint64),
+        ("current_consumer_inflight_backlog", ctypes.c_uint64),
         ("current_outstanding", ctypes.c_uint64),
         ("current_effective_backlog", ctypes.c_uint64),
-        ("max_effective_backlog", ctypes.c_uint64),
         ("max_published_backlog", ctypes.c_uint64),
+        ("max_consumer_inflight_backlog", ctypes.c_uint64),
+        ("max_effective_backlog", ctypes.c_uint64),
         ("peer_observe_ns", ctypes.c_uint64),
         ("peer_observe_count", ctypes.c_uint64),
+        ("placement_samples", ctypes.c_uint64),
+        ("placement_sample_cap", ctypes.c_uint64),
         ("local_pages", ctypes.c_uint64),
         ("remote_pages", ctypes.c_uint64),
         ("unknown_pages", ctypes.c_uint64),
-        ("hugepage_kb", ctypes.c_uint64),
+        ("hugepage_map_requested_bytes", ctypes.c_uint64),
+        ("hugepage_map_obtained_bytes", ctypes.c_uint64),
+        ("hugepage_fallback_bytes", ctypes.c_uint64),
+        ("hugepage_observed_kb", ctypes.c_uint64),
         ("alloc_bytes", ctypes.c_uint64),
         ("ingest_cpu_ns", ctypes.c_uint64),
         ("consumer_cpu_ns", ctypes.c_uint64),
         ("res_hist", ctypes.c_uint64 * 20),
+        ("affinity_requested", ctypes.c_int),
+        ("affinity_applied", ctypes.c_int),
+        ("affinity_verified", ctypes.c_int),
+        ("affinity_error", ctypes.c_int),
+        ("mbind_requested", ctypes.c_int),
+        ("mbind_applied", ctypes.c_int),
+        ("mbind_error", ctypes.c_int),
+        ("placement_strict_failed", ctypes.c_int),
         ("last_error", ctypes.c_int),
     ]
 
@@ -102,7 +120,8 @@ class DiNodeMetrics(ctypes.Structure):
 class DiResult(ctypes.Structure):
     _fields_ = [
         ("total_bytes", ctypes.c_uint64),
-        ("total_reserved", ctypes.c_uint64),
+        ("total_reserved_req", ctypes.c_uint64),
+        ("total_assigned", ctypes.c_uint64),
         ("total_read", ctypes.c_uint64),
         ("total_published", ctypes.c_uint64),
         ("total_consumed", ctypes.c_uint64),
@@ -111,6 +130,7 @@ class DiResult(ctypes.Structure):
         ("overlap_detected", ctypes.c_int),
         ("duplicate_detected", ctypes.c_int),
         ("lost_detected", ctypes.c_int),
+        ("input_changed", ctypes.c_int),
         ("wall_seconds", ctypes.c_double),
         ("ingest_cpu_ns", ctypes.c_uint64),
         ("consumer_cpu_ns", ctypes.c_uint64),
@@ -150,7 +170,8 @@ def node_metrics_to_dict(m, idx):
     return {
         "node": idx,
         "reservations": m.reservations,
-        "bytes_reserved": m.bytes_reserved,
+        "bytes_reserved_req": m.bytes_reserved_req,
+        "bytes_assigned": m.bytes_assigned,
         "bytes_read": m.bytes_read,
         "bytes_published": m.bytes_published,
         "bytes_consumed": m.bytes_consumed,
@@ -162,20 +183,35 @@ def node_metrics_to_dict(m, idx):
         "publish_wait_ns": m.publish_wait_ns,
         "consume_wait_ns": m.consume_wait_ns,
         "current_published_backlog": m.current_published_backlog,
+        "current_consumer_inflight_backlog": m.current_consumer_inflight_backlog,
         "current_outstanding": m.current_outstanding,
         "current_effective_backlog": m.current_effective_backlog,
-        "max_effective_backlog": m.max_effective_backlog,
         "max_published_backlog": m.max_published_backlog,
+        "max_consumer_inflight_backlog": m.max_consumer_inflight_backlog,
+        "max_effective_backlog": m.max_effective_backlog,
         "peer_observe_ns": m.peer_observe_ns,
         "peer_observe_count": m.peer_observe_count,
+        "placement_samples": m.placement_samples,
+        "placement_sample_cap": m.placement_sample_cap,
         "local_pages": m.local_pages,
         "remote_pages": m.remote_pages,
         "unknown_pages": m.unknown_pages,
-        "hugepage_kb": m.hugepage_kb,
+        "hugepage_map_requested_bytes": m.hugepage_map_requested_bytes,
+        "hugepage_map_obtained_bytes": m.hugepage_map_obtained_bytes,
+        "hugepage_fallback_bytes": m.hugepage_fallback_bytes,
+        "hugepage_observed_kb": m.hugepage_observed_kb,
         "alloc_bytes": m.alloc_bytes,
         "ingest_cpu_ns": m.ingest_cpu_ns,
         "consumer_cpu_ns": m.consumer_cpu_ns,
         "res_hist": list(m.res_hist),
+        "affinity_requested": m.affinity_requested,
+        "affinity_applied": m.affinity_applied,
+        "affinity_verified": m.affinity_verified,
+        "affinity_error": m.affinity_error,
+        "mbind_requested": m.mbind_requested,
+        "mbind_applied": m.mbind_applied,
+        "mbind_error": m.mbind_error,
+        "placement_strict_failed": m.placement_strict_failed,
         "last_error": m.last_error,
     }
 
@@ -203,6 +239,173 @@ def emit_stage0_lines(res, policy_name):
     print(line.replace("STAGE0_FINAL", "STAGE0_DIAG", 1), file=sys.stderr)
 
 
+def _parse_id_list(raw):
+    out = []
+    for part in (raw or "").strip().split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                start, end = int(a), int(b)
+            except ValueError:
+                continue
+            if end >= start:
+                out.extend(range(start, end + 1))
+        else:
+            try:
+                out.append(int(part))
+            except ValueError:
+                continue
+    return out
+
+
+def _read_first(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _allowed_cpus():
+    # Respect actual process allowed CPU set (cpuset/cgroup/sched affinity).
+    try:
+        return sorted(os.sched_getaffinity(0))
+    except Exception:
+        pass
+    raw = _read_first("/proc/self/status") or ""
+    for line in raw.splitlines():
+        if line.startswith("Cpus_allowed_list:"):
+            return _parse_id_list(line.split(":", 1)[1])
+    return []
+
+
+def _allowed_mems():
+    raw = _read_first("/proc/self/status") or ""
+    for line in raw.splitlines():
+        if line.startswith("Mems_allowed_list:"):
+            return _parse_id_list(line.split(":", 1)[1])
+    return []
+
+
+def _online_nodes():
+    raw = _read_first("/sys/devices/system/node/online")
+    if raw is None:
+        return [0]
+    nodes = _parse_id_list(raw)
+    return nodes or [0]
+
+
+def _node_cpus(node_id):
+    raw = _read_first("/sys/devices/system/node/node%d/cpulist" % node_id)
+    return _parse_id_list(raw) if raw is not None else []
+
+
+def _node_has_memory(node_id):
+    mi = _read_first("/sys/devices/system/node/node%d/meminfo" % node_id)
+    if mi is None:
+        return False
+    for line in mi.splitlines():
+        if line.startswith("Node %d MemTotal:" % node_id):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    return int(parts[3]) > 0
+                except ValueError:
+                    return False
+    # if meminfo exists but format unexpected, be conservative
+    return True
+
+
+def resolve_topology(requested_nodes, phys_nodes_spec=None):
+    """Return (logical_to_phys, per_node_cpus, topology_info, errors).
+
+    logical_to_phys: list[int] length requested_nodes (or fewer impossible -> errors)
+    per_node_cpus: list[list[int]] filtered to allowed CPUs
+    """
+    errors = []
+    allowed_cpus = set(_allowed_cpus())
+    allowed_mems = set(_allowed_mems())
+    online = _online_nodes()
+    # usable physical nodes: online, in allowed mems (if known), have memory
+    usable = []
+    for nid in online:
+        if allowed_mems and nid not in allowed_mems:
+            continue
+        if not _node_has_memory(nid):
+            continue
+        # need at least one allowed CPU on node for affinity/pinning usefulness
+        cpus = [c for c in _node_cpus(nid) if (not allowed_cpus or c in allowed_cpus)]
+        if not cpus:
+            continue
+        usable.append((nid, cpus))
+
+    if phys_nodes_spec:
+        # explicit physical node list in order
+        try:
+            explicit = [int(x) for x in phys_nodes_spec.split(",") if x.strip() != ""]
+        except ValueError:
+            return [], [], {}, ["invalid --phys-nodes: %r" % (phys_nodes_spec,)]
+        phys_to_cpus = {nid: cpus for nid, cpus in usable}
+        logical_to_phys = []
+        per_node_cpus = []
+        for nid in explicit:
+            if nid not in phys_to_cpus:
+                errors.append("physical node %d not usable (online/allowed/memory/cpu)" % nid)
+                continue
+            logical_to_phys.append(nid)
+            per_node_cpus.append(phys_to_cpus[nid])
+        if errors:
+            return [], [], {"requested_nodes": requested_nodes, "online": online,
+                            "allowed_cpus": sorted(allowed_cpus), "allowed_mems": sorted(allowed_mems),
+                            "usable": usable, "explicit": explicit}, errors
+        # if requested_nodes differs, honor explicit list length but must be >=1
+        if requested_nodes and requested_nodes != len(logical_to_phys):
+            errors.append("requested --nodes %d but --phys-nodes selects %d node(s)" % (requested_nodes, len(logical_to_phys)))
+            return [], [], {"requested_nodes": requested_nodes, "explicit": explicit}, errors
+        info = {"mode": "explicit", "online": online, "allowed_cpus_count": len(allowed_cpus),
+                "allowed_mems": sorted(allowed_mems), "usable_nodes": [n for n,_ in usable],
+                "logical_to_physical": logical_to_phys}
+        return logical_to_phys, per_node_cpus, info, []
+
+    # automatic selection of usable nodes
+    n = max(1, requested_nodes)
+    if len(usable) < n:
+        return [], [], {"requested_nodes": n, "online": online, "allowed_cpus_count": len(allowed_cpus),
+                        "allowed_mems": sorted(allowed_mems), "usable_nodes": [nid for nid,_ in usable]}, [
+            "insufficient usable NUMA nodes: requested %d, have %d usable (%s)" % (n, len(usable), [nid for nid,_ in usable])
+        ]
+    picked = usable[:n]
+    logical_to_phys = [nid for nid, _ in picked]
+    per_node_cpus = [cpus for _, cpus in picked]
+    info = {"mode": "auto", "online": online, "allowed_cpus_count": len(allowed_cpus),
+            "allowed_mems": sorted(allowed_mems), "usable_nodes": [nid for nid,_ in usable],
+            "logical_to_physical": logical_to_phys}
+    return logical_to_phys, per_node_cpus, info, []
+
+
+def build_ctypes_topology(logical_to_phys, per_node_cpus):
+    """Return (phys_nodes_arr, cpu_counts_arr, cpu_list_arrays, cpu_list_ptrs, keepalive) lifetime-safe."""
+    n = len(logical_to_phys)
+    PhysArr = ctypes.c_int * n
+    phys_nodes_arr = PhysArr(*[int(x) for x in logical_to_phys])
+    CountsArr = ctypes.c_int * n
+    cpu_counts_arr = CountsArr(*[len(c) for c in per_node_cpus])
+    cpu_list_arrays = []
+    for cpus in per_node_cpus:
+        A = ctypes.c_int * (len(cpus) if cpus else 1)
+        if cpus:
+            cpu_list_arrays.append(A(*[int(c) for c in cpus]))
+        else:
+            cpu_list_arrays.append(A(0))
+    PtrArr = ctypes.POINTER(ctypes.c_int) * n
+    cpu_list_ptrs = PtrArr(*[ctypes.cast(a, ctypes.POINTER(ctypes.c_int)) for a in cpu_list_arrays])
+    keepalive = (phys_nodes_arr, cpu_counts_arr, cpu_list_arrays, cpu_list_ptrs)
+    return phys_nodes_arr, cpu_counts_arr, cpu_list_ptrs, keepalive
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--candidate", default="fixed_faa",
@@ -210,6 +413,8 @@ def main():
                     help="distributed ingestion policy")
     ap.add_argument("--input", required=True)
     ap.add_argument("--nodes", type=int, default=2)
+    ap.add_argument("--phys-nodes", default=None,
+                    help="explicit physical NUMA node ids, comma-separated (logical order)")
     ap.add_argument("--base-quantum", type=int, default=2 * 1024 * 1024)
     ap.add_argument("--max-backlog", type=int, default=64 * 1024 * 1024)
     ap.add_argument("--max-reservation", type=int, default=0)
@@ -219,6 +424,10 @@ def main():
     ap.add_argument("--rel-max-claim-quanta", type=int, default=0)
     ap.add_argument("--prefer-hugepage", action="store_true")
     ap.add_argument("--no-align", action="store_true")
+    ap.add_argument("--strict-affinity", action="store_true")
+    ap.add_argument("--strict-mbind", action="store_true")
+    ap.add_argument("--no-pin", action="store_true",
+                    help="intentionally unpinned run (do not pass cpu lists)")
     ap.add_argument("--consumer-mode", default="fast",
                     choices=sorted(CONSUMER_MODE.keys()))
     ap.add_argument("--consumer-bps", type=int, default=0)
@@ -238,8 +447,17 @@ def main():
     fd = os.open(path, os.O_RDONLY)
 
     lib = load_lib()
-    n = max(1, min(args.nodes, DI_MAX_NODES))
     policy = POLICY_MAP[args.candidate]
+
+    # Topology resolution and wiring (S1 corrective).
+    logical_to_phys, per_node_cpus, topo_info, topo_errors = resolve_topology(args.nodes, args.phys_nodes)
+    if topo_errors:
+        os.close(fd)
+        raise SystemExit("topology resolution failed: " + "; ".join(topo_errors))
+    n = len(logical_to_phys)
+    if n < 1 or n > DI_MAX_NODES:
+        os.close(fd)
+        raise SystemExit("invalid resolved node count %d" % n)
 
     params = DiPolicyParams()
     params.base_quantum = args.base_quantum
@@ -251,6 +469,8 @@ def main():
     params.local_max_claim_quanta = args.local_max_claim_quanta
     params.align_reservations = 0 if args.no_align else 1
     params.prefer_hugepage = 1 if args.prefer_hugepage else 0
+    params.strict_affinity = 1 if args.strict_affinity else 0
+    params.strict_mbind = 1 if args.strict_mbind else 0
     params.one_outstanding_per_node = 1
     params.enable_peer_headroom = 1
 
@@ -264,14 +484,21 @@ def main():
         cons_arr[args.slow_node].bytes_per_sec = args.slow_bps
         cons_arr[args.slow_node].stall_ms = args.slow_stall_ms
 
+    topo_keepalive = None
     cfg = DiConfig()
     cfg.num_nodes = n
     cfg.policy = policy
     cfg.params = params
     cfg.consumers = ctypes.cast(cons_arr, ctypes.POINTER(DiConsumerCfg))
-    cfg.cpu_lists = None
-    cfg.cpu_counts = None
-    cfg.phys_nodes = None
+    # lifetime-safe topology wiring
+    phys_arr, counts_arr, cpu_ptrs, topo_keepalive = build_ctypes_topology(logical_to_phys, per_node_cpus)
+    cfg.phys_nodes = ctypes.cast(phys_arr, ctypes.c_void_p)
+    if args.no_pin:
+        cfg.cpu_lists = None
+        cfg.cpu_counts = None
+    else:
+        cfg.cpu_counts = ctypes.cast(counts_arr, ctypes.c_void_p)
+        cfg.cpu_lists = ctypes.cast(cpu_ptrs, ctypes.c_void_p)
 
     eng = lib.di_create(fd, st.st_size, ctypes.byref(cfg))
     if not eng:
@@ -290,6 +517,17 @@ def main():
 
     emit_stage0_lines(res, args.candidate)
 
+    # validity signals (S1/S6 groundwork)
+    affinity_ok = True
+    placement_ok = True
+    for i in range(res.num_nodes):
+        nm = res.nodes[i]
+        if args.strict_affinity and (not nm.affinity_verified or nm.placement_strict_failed):
+            affinity_ok = False
+        if args.strict_mbind and (nm.mbind_requested and not nm.mbind_applied or nm.placement_strict_failed):
+            placement_ok = False
+        if nm.placement_strict_failed:
+            placement_ok = False
     out = {
         "candidate": args.candidate,
         "policy": res.policy,
@@ -299,7 +537,8 @@ def main():
         "rc": rc,
         "wall_seconds": res.wall_seconds,
         "elapsed_s": elapsed,
-        "total_reserved": res.total_reserved,
+        "total_reserved_req": res.total_reserved_req,
+        "total_assigned": res.total_assigned,
         "total_read": res.total_read,
         "total_published": res.total_published,
         "total_consumed": res.total_consumed,
@@ -307,12 +546,28 @@ def main():
         "overlap_detected": bool(res.overlap_detected),
         "duplicate_detected": bool(res.duplicate_detected),
         "lost_detected": bool(res.lost_detected),
+        "input_changed": bool(res.input_changed),
         "ingest_cpu_ns": res.ingest_cpu_ns,
         "consumer_cpu_ns": res.consumer_cpu_ns,
         "res_hist": list(res.res_hist),
         "nodes": [node_metrics_to_dict(res.nodes[i], i) for i in range(res.num_nodes)],
+        "topology": {
+            **topo_info,
+            "requested_nodes_arg": args.nodes,
+            "phys_nodes_arg": args.phys_nodes,
+            "pinning": "disabled" if args.no_pin else "requested",
+            "strict_affinity": bool(args.strict_affinity),
+            "strict_mbind": bool(args.strict_mbind),
+            "per_node_cpus": per_node_cpus,
+        },
+        "validity": {
+            "functional_correct": (rc == 0 and not res.overlap_detected and not res.duplicate_detected and not res.lost_detected
+                                   and not res.input_changed and res.total_consumed == st.st_size),
+            "affinity_valid": affinity_ok,
+            "placement_valid": placement_ok,
+        },
         "correct": (rc == 0 and not res.overlap_detected and not res.duplicate_detected and not res.lost_detected
-                    and res.total_consumed == st.st_size),
+                    and not res.input_changed and res.total_consumed == st.st_size),
     }
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as fh:

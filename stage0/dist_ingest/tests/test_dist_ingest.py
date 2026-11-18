@@ -29,6 +29,8 @@ class DiPolicyParams(ctypes.Structure):
         ("local_max_claim_quanta", ctypes.c_uint64),
         ("align_reservations", ctypes.c_int),
         ("prefer_hugepage", ctypes.c_int),
+        ("strict_affinity", ctypes.c_int),
+        ("strict_mbind", ctypes.c_int),
         ("one_outstanding_per_node", ctypes.c_int),
         ("enable_peer_headroom", ctypes.c_int),
     ]
@@ -45,7 +47,8 @@ class DiConsumerCfg(ctypes.Structure):
 class DiNodeMetrics(ctypes.Structure):
     _fields_ = [
         ("reservations", ctypes.c_uint64),
-        ("bytes_reserved", ctypes.c_uint64),
+        ("bytes_reserved_req", ctypes.c_uint64),
+        ("bytes_assigned", ctypes.c_uint64),
         ("bytes_read", ctypes.c_uint64),
         ("bytes_published", ctypes.c_uint64),
         ("bytes_consumed", ctypes.c_uint64),
@@ -57,20 +60,35 @@ class DiNodeMetrics(ctypes.Structure):
         ("publish_wait_ns", ctypes.c_uint64),
         ("consume_wait_ns", ctypes.c_uint64),
         ("current_published_backlog", ctypes.c_uint64),
+        ("current_consumer_inflight_backlog", ctypes.c_uint64),
         ("current_outstanding", ctypes.c_uint64),
         ("current_effective_backlog", ctypes.c_uint64),
-        ("max_effective_backlog", ctypes.c_uint64),
         ("max_published_backlog", ctypes.c_uint64),
+        ("max_consumer_inflight_backlog", ctypes.c_uint64),
+        ("max_effective_backlog", ctypes.c_uint64),
         ("peer_observe_ns", ctypes.c_uint64),
         ("peer_observe_count", ctypes.c_uint64),
+        ("placement_samples", ctypes.c_uint64),
+        ("placement_sample_cap", ctypes.c_uint64),
         ("local_pages", ctypes.c_uint64),
         ("remote_pages", ctypes.c_uint64),
         ("unknown_pages", ctypes.c_uint64),
-        ("hugepage_kb", ctypes.c_uint64),
+        ("hugepage_map_requested_bytes", ctypes.c_uint64),
+        ("hugepage_map_obtained_bytes", ctypes.c_uint64),
+        ("hugepage_fallback_bytes", ctypes.c_uint64),
+        ("hugepage_observed_kb", ctypes.c_uint64),
         ("alloc_bytes", ctypes.c_uint64),
         ("ingest_cpu_ns", ctypes.c_uint64),
         ("consumer_cpu_ns", ctypes.c_uint64),
         ("res_hist", ctypes.c_uint64 * 20),
+        ("affinity_requested", ctypes.c_int),
+        ("affinity_applied", ctypes.c_int),
+        ("affinity_verified", ctypes.c_int),
+        ("affinity_error", ctypes.c_int),
+        ("mbind_requested", ctypes.c_int),
+        ("mbind_applied", ctypes.c_int),
+        ("mbind_error", ctypes.c_int),
+        ("placement_strict_failed", ctypes.c_int),
         ("last_error", ctypes.c_int),
     ]
 
@@ -78,7 +96,8 @@ class DiNodeMetrics(ctypes.Structure):
 class DiResult(ctypes.Structure):
     _fields_ = [
         ("total_bytes", ctypes.c_uint64),
-        ("total_reserved", ctypes.c_uint64),
+        ("total_reserved_req", ctypes.c_uint64),
+        ("total_assigned", ctypes.c_uint64),
         ("total_read", ctypes.c_uint64),
         ("total_published", ctypes.c_uint64),
         ("total_consumed", ctypes.c_uint64),
@@ -87,6 +106,7 @@ class DiResult(ctypes.Structure):
         ("overlap_detected", ctypes.c_int),
         ("duplicate_detected", ctypes.c_int),
         ("lost_detected", ctypes.c_int),
+        ("input_changed", ctypes.c_int),
         ("wall_seconds", ctypes.c_double),
         ("ingest_cpu_ns", ctypes.c_uint64),
         ("consumer_cpu_ns", ctypes.c_uint64),
@@ -120,6 +140,8 @@ def load_lib():
     lib.di_policy_decide.argtypes = [ctypes.c_int, ctypes.POINTER(DiPolicyParams), ctypes.c_int, ctypes.c_int,
                                      ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64)]
     lib.di_policy_decide.restype = ctypes.c_uint64
+    lib.di_effective_backlog.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64]
+    lib.di_effective_backlog.restype = ctypes.c_uint64
     return lib
 
 
@@ -153,6 +175,8 @@ def run_engine(path, policy, num_nodes=2, quantum=1024*1024, max_backlog=8*1024*
         params.local_max_claim_quanta = 0
         params.align_reservations = 1
         params.prefer_hugepage = 0
+        params.strict_affinity = 0
+        params.strict_mbind = 0
         params.one_outstanding_per_node = 1
         params.enable_peer_headroom = 1
         cons = (DiConsumerCfg * num_nodes)()

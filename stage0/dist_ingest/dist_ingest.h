@@ -12,14 +12,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <pthread.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define DI_MAX_NODES 64
-#define DI_MAX_CHUNKS 4096
 
 typedef enum {
     DI_POLICY_CENTRALIZED_CONTROL = 0, /* run existing control path externally */
@@ -68,6 +66,9 @@ typedef struct {
     /* Alignment / placement */
     int align_reservations;       /* align FAA offsets to quantum when feasible */
     int prefer_hugepage;          /* best-effort hints/alloc alignment */
+    /* Placement/affinity strictness */
+    int strict_affinity;          /* fail/mark invalid if affinity cannot be set/verified */
+    int strict_mbind;             /* fail/mark invalid if memory policy cannot be established/verified */
     /* Experiment */
     int one_outstanding_per_node; /* enforced as 1 in prototype */
     int enable_peer_headroom;     /* publish/read advisory headroom */
@@ -90,7 +91,8 @@ typedef struct {
 /* Per-node metrics snapshot (monotonic counters/totals). */
 typedef struct {
     uint64_t reservations;            /* successful FAA reservations */
-    uint64_t bytes_reserved;          /* sum of requested reservation sizes */
+    uint64_t bytes_reserved_req;      /* sum of requested reservation sizes */
+    uint64_t bytes_assigned;          /* sum of bytes assigned to in-file ranges */
     uint64_t bytes_read;              /* sum of bytes actually read */
     uint64_t bytes_published;
     uint64_t bytes_consumed;
@@ -102,27 +104,45 @@ typedef struct {
     uint64_t publish_wait_ns;         /* time waiting to publish (queue full) */
     uint64_t consume_wait_ns;         /* consumer-side wait */
     uint64_t current_published_backlog;
+    uint64_t current_consumer_inflight_backlog;
     uint64_t current_outstanding;
     uint64_t current_effective_backlog;
-    uint64_t max_effective_backlog;
     uint64_t max_published_backlog;
+    uint64_t max_consumer_inflight_backlog;
+    uint64_t max_effective_backlog;
     uint64_t peer_observe_ns;         /* time spent sampling peer headroom */
     uint64_t peer_observe_count;
-    /* Placement/buffer stats (best-effort) */
+    /* Placement/buffer stats */
+    uint64_t placement_samples;
+    uint64_t placement_sample_cap;
     uint64_t local_pages;
     uint64_t remote_pages;
     uint64_t unknown_pages;
-    uint64_t hugepage_kb;             /* observed where available */
+    /* Hugepage reporting (distinguish requested/obtained/fallback/observed) */
+    uint64_t hugepage_map_requested_bytes;
+    uint64_t hugepage_map_obtained_bytes;
+    uint64_t hugepage_fallback_bytes;
+    uint64_t hugepage_observed_kb;    /* observed where available, else 0 */
     uint64_t alloc_bytes;
     uint64_t ingest_cpu_ns;           /* per-ingestor thread CPU */
     uint64_t consumer_cpu_ns;         /* per-consumer thread CPU */
     uint64_t res_hist[20];            /* reservation size histogram */
+    /* Affinity/memory policy status */
+    int affinity_requested;
+    int affinity_applied;
+    int affinity_verified;
+    int affinity_error;
+    int mbind_requested;
+    int mbind_applied;                /* mbind call succeeded */
+    int mbind_error;
+    int placement_strict_failed;
     int last_error;
 } di_node_metrics_t;
 
 typedef struct {
     uint64_t total_bytes;
-    uint64_t total_reserved;
+    uint64_t total_reserved_req;
+    uint64_t total_assigned;
     uint64_t total_read;
     uint64_t total_published;
     uint64_t total_consumed;
@@ -131,6 +151,7 @@ typedef struct {
     int overlap_detected;
     int duplicate_detected;
     int lost_detected;
+    int input_changed;                /* file mutated/truncated during run */
     double wall_seconds;
     uint64_t ingest_cpu_ns;           /* sum over ingestor threads */
     uint64_t consumer_cpu_ns;
@@ -157,6 +178,14 @@ int di_run(di_engine_t *eng, di_result_t *result);
 uint64_t di_global_offset(const di_engine_t *eng);
 uint64_t di_file_size(const di_engine_t *eng);
 int di_num_nodes(const di_engine_t *eng);
+/* Debug/test snapshot: returns 0 on success. */
+int di_debug_node_accounting(di_engine_t *eng, int node,
+                             uint64_t *published, uint64_t *inflight,
+                             uint64_t *outstanding, uint64_t *effective);
+/* Narrow test seams (S3/S4 validation only). */
+int di_test_set_pread_seam(int mode, int counter, uint64_t threshold);
+int di_test_pread_seam_fired(void);
+int di_test_check_2m_alignment(size_t len); /* returns 1 if usable buffer 2MiB-aligned */
 
 /* Policy decision (exposed for unit tests). Computes claim bytes for node i
  * given per-node effective backlogs/headrooms (bytes). headrooms[i] is the
@@ -172,7 +201,9 @@ uint64_t di_policy_decide(di_policy_t policy,
                           const uint64_t *headrooms);
 
 /* Accounting helpers (exposed for unit tests). */
-uint64_t di_effective_backlog(uint64_t published_backlog, uint64_t outstanding);
+uint64_t di_effective_backlog(uint64_t published_backlog,
+                              uint64_t consumer_inflight_backlog,
+                              uint64_t outstanding);
 int di_can_admit(uint64_t max_backlog, uint64_t effective_backlog,
                  uint64_t outstanding, uint64_t want, int one_outstanding);
 

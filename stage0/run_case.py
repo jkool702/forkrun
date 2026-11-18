@@ -412,6 +412,14 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
             cmd += ["--rel-max-claim-quanta", str(spec.get("rel_max_claim_quanta"))]
         if spec.get("prefer_hugepage"):
             cmd += ["--prefer-hugepage"]
+        if spec.get("phys_nodes"):
+            cmd += ["--phys-nodes", str(spec.get("phys_nodes"))]
+        if spec.get("strict_affinity"):
+            cmd += ["--strict-affinity"]
+        if spec.get("strict_mbind"):
+            cmd += ["--strict-mbind"]
+        if spec.get("no_pin"):
+            cmd += ["--no-pin"]
         if spec.get("slow_node") is not None:
             cmd += ["--slow-node", str(spec.get("slow_node"))]
         if spec.get("slow_mode"):
