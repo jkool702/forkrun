@@ -1,4 +1,4 @@
-# Physical-NUMA Rental Recipe — Distributed Ingestion Prototype (Corrected)
+# Physical-NUMA Rental Recipe — Distributed Ingestion Prototype (Corrected, Rental-Ready Closeout)
 
 **Purpose:** run one physical multi-node NUMA campaign to compare **comparable dist-engine candidates** (in-engine centralized control baseline and distributed policies) using the corrected prototype suite. No rental is performed by this repository.
 
@@ -47,58 +47,150 @@ Environment capture:
 python3 stage0/env_capture.py --out /tmp/env-pre.json --run-id preflight
 ```
 
-### Placement/affinity/policy (strict/verified for NUMA conclusions)
+## Scenario profiles, minimum node counts, and topology compatibility
 
-- Resolve and record topology and logical→physical node mapping (sparse IDs allowed). Use `--phys-nodes` for explicit selection when appropriate; it must be compatible with scenario node counts (no silent incompatible application).
-- For NUMA-performance/placement conclusions, request CPU affinity and memory policy and use `--strict-affinity` and/or `--strict-mbind` so runs fail when required affinity or mbind policy application cannot be established. **Strictness controls enforcement/abort, not factual validity reporting.**
-- Validity/reporting is factual and tri-state: affinity, memory-policy application, placement observed, and overall NUMA-placement are reported independently (`true`/`false`/`null` = unknown/unrequested/not established). Failed or unknown NUMA evidence must not be promoted to success.
-- **`mbind(MPOL_PREFERRED)` syscall success is not physical placement proof.** Placement is observation-based and reported separately (unknown remains unknown).
-- Record kernel cmdline, CPU governor/frequency info where available, THP/mempolicy, and any cpuset/cgroup restrictions.
+The campaign driver validates selected scenario node counts against topology **before executing timed trials**. If a selected scenario cannot be satisfied by the selected hardware/mapping, the campaign fails before timed trials with a clear diagnostic (it must not begin a campaign containing scenarios the selected hardware cannot support, and unsupported scenarios are never marked successful).
 
-Verify corpus hashes and input immutability for timed trials.
+### Documented executable profiles (default/non-quick scenario set)
 
-## One-command campaign invocation
+| Profile | Minimum usable NUMA nodes | Scenarios (logical node counts) | Exact `--scenarios` invocation |
+|---|---:|---|---|
+| **2-node** (`nodes2`) | 2 | `nodes2`(2), `small`(2), `tiny`(2) | `--scenarios nodes2,small,tiny` |
+| **4-node** (`nodes4`) | 4 | four-node + compatible two-node: `equal`(4), `slow_one`(4), `fast_one`(4), `asymmetric`(4), `stall_recover`(4), `nodes2`(2), `large_seq`(4), `small`(2), `tiny`(2), `boundary`(4), `backpressure`(4); excludes `nodes8` | `--scenarios equal,slow_one,fast_one,asymmetric,stall_recover,nodes2,large_seq,small,tiny,boundary,backpressure` |
+| **Full** (`full`) | 8 | default full scenario set (includes `nodes8`(8)), subject to topology validation | `--scenarios equal,slow_one,fast_one,asymmetric,stall_recover,nodes2,nodes8,large_seq,small,tiny,boundary,backpressure` (or omit `--scenarios` to select all default scenarios) |
 
-### Verified strict physical-NUMA characterization example (recommended for decision-grade runs)
+Convenience: `--profile nodes2|nodes4|full` sets the corresponding scenario selection unless `--scenarios` is explicitly provided.
 
-From a clean checkout at the measured commit on real (non-fake) multi-node hardware:
+### `--phys-nodes` compatibility rules (explicit physical-node mapping)
+
+- `--phys-nodes <comma-separated-ids>` selects explicit physical NUMA nodes in logical order. A **single `--phys-nodes` list cannot map scenarios having different logical-node counts**.
+- **Explicit-mapping campaigns are restricted to scenarios whose logical node count equals the number of nodes in `--phys-nodes`.** If any selected scenario's node count does not match, the campaign is rejected **before timed trials** with a clear diagnostic.
+- Therefore, a mixed-count profile (e.g. the 4-node profile contains 2-node and 4-node scenarios) **cannot** be run with one explicit `--phys-nodes` list. To use explicit mapping, select only scenarios with a matching node count (e.g. only 4-node scenarios with `--phys-nodes` of length 4, or only 2-node scenarios with length 2), or use **automatic topology selection** (no `--phys-nodes`).
+- **Automatic topology selection** may support the default mixed-count campaign/profile when enough usable nodes exist (each selected scenario's node count must be <= available usable nodes); the driver validates this before timed trials.
+- Campaign provenance records: scenario profile, available usable nodes, selected scenarios (with node counts), and physical-node mapping (mode/list).
+
+## Exact campaign examples
+
+### 2 usable NUMA nodes (2-node profile)
 
 ```bash
 TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
-  --out stage0/dist_ingest/runs/<campaign-id> \
-  --campaign-id <campaign-id> \
+  --out stage0/dist_ingest/runs/<campaign-id-2n> \
+  --campaign-id <campaign-id-2n> \
+  --scenarios nodes2,small,tiny \
   --candidates centralized_ingest,fixed_faa,local_adaptive,relative_adaptive \
   --consumer-kernel full_byte_scan \
   --strict-affinity \
   --strict-mbind
 ```
 
-This explicitly records/wires `consumer_kernel=full_byte_scan` (default, memory-touch, scan-byte evidenced) and strict affinity/memory-policy enforcement for every comparable dist-engine candidate spec in each comparison block. If required strict settings cannot be established, trials fail (no silent fallback to non-strict).
+### 4 usable NUMA nodes (4-node profile, automatic mixed-count selection)
 
-### Local quick-smoke (non-strict, labeled; not for physical-NUMA decisions)
+```bash
+TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
+  --out stage0/dist_ingest/runs/<campaign-id-4n> \
+  --campaign-id <campaign-id-4n> \
+  --scenarios equal,slow_one,fast_one,asymmetric,stall_recover,nodes2,large_seq,small,tiny,boundary,backpressure \
+  --candidates centralized_ingest,fixed_faa,local_adaptive,relative_adaptive \
+  --consumer-kernel full_byte_scan \
+  --strict-affinity \
+  --strict-mbind
+```
+
+If using explicit `--phys-nodes` on a 4-node host, select only scenarios whose node count matches the list length (example: 4-node scenarios with 4 explicit nodes):
+
+```bash
+TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
+  --out stage0/dist_ingest/runs/<campaign-id-4n-explicit> \
+  --campaign-id <campaign-id-4n-explicit> \
+  --scenarios equal,slow_one,fast_one,asymmetric,stall_recover,large_seq,boundary,backpressure \
+  --candidates centralized_ingest,fixed_faa,local_adaptive,relative_adaptive \
+  --consumer-kernel full_byte_scan \
+  --strict-affinity \
+  --strict-mbind \
+  --phys-nodes <id0>,<id1>,<id2>,<id3>
+```
+
+### 8 or more usable NUMA nodes (full profile)
+
+```bash
+TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
+  --out stage0/dist_ingest/runs/<campaign-id-full> \
+  --campaign-id <campaign-id-full> \
+  --candidates centralized_ingest,fixed_faa,local_adaptive,relative_adaptive \
+  --consumer-kernel full_byte_scan \
+  --strict-affinity \
+  --strict-mbind
+```
+
+(Full profile includes `nodes8` and runs subject to topology validation; on hosts with fewer than 8 usable nodes, select a compatible profile/scenario set instead.)
+
+### Local quick-smoke (non-strict, labeled; not a documented rental profile and not for physical-NUMA decisions)
 
 ```bash
 bash stage0/dist_ingest/run_dist_campaign.sh \
   --quick \
-  --out stage0/dist_ingest/runs/<campaign-id> \
-  --campaign-id <campaign-id> \
+  --out stage0/dist_ingest/runs/<campaign-id-quick> \
+  --campaign-id <campaign-id-quick> \
   --candidates centralized_ingest,fixed_faa,local_adaptive,relative_adaptive \
   --trials 1
 ```
 
-Quick-smoke defaults are not decision-grade for NUMA placement/performance conclusions and must be labeled accordingly by reports/validity dimensions.
+Quick-smoke defaults/scenario subset are not decision-grade for NUMA placement/performance conclusions and must be labeled accordingly.
 
-### Options
+## Placement/affinity/policy (strict/verified for NUMA conclusions)
 
-- `--quick` small local smoke (not for physical-NUMA decisions).
+- Resolve and record topology and logical→physical node mapping (sparse IDs allowed). Use `--phys-nodes` only when compatible with every selected scenario's node count (see compatibility rules above).
+- For NUMA-performance/placement conclusions, request CPU affinity and memory policy and use `--strict-affinity` and/or `--strict-mbind` so runs fail when required affinity or mbind policy application cannot be established. **Strictness controls enforcement/abort, not factual validity reporting.**
+- Validity/reporting is factual and tri-state. Failed or unknown NUMA evidence must not be promoted to success.
+- **`mbind(MPOL_PREFERRED)` syscall success is not physical placement proof.** Placement is observation-based and reported separately (unknown remains unknown).
+- Record kernel cmdline, CPU governor/frequency info where available, THP/mempolicy, and any cpuset/cgroup restrictions.
+
+Verify corpus hashes and input immutability for timed trials.
+
+## Validity semantics (corrected)
+
+### Per-node affinity effective verification (tri-state, corrected)
+
+`affinity.effective_verified` is tri-state over **applicable, required roles**:
+- `true`: every applicable, required role is requested, applied, queried, and matched.
+- `false`: at least one applicable, required role was requested but failed, could not be queried, or did not match.
+- `null` (unknown/not applicable): at least one applicable, required role is unknown/unrequested and none failed; or the set of applicable required roles is empty (not applicable).
+- Roles with `required=false` are not applicable and must not make the result unknown.
+
+Architecture-specific required roles:
+- **Distributed candidates:** ingestor and consumer on each configured node.
+- **Centralized ingestion:** the single ingestor on node 0 and each configured consumer. Other nodes' ingestor roles are not applicable.
+
+`--no-pin` means required affinity is not requested/verified (unknown), not true. No field may claim affinity verification when a required role is unknown.
+
+Run-level factual affinity validity remains tri-state and independent of strict enforcement (strictness controls abort/enforcement, not truth).
+
+### Performance-valid vs functionally-correct trials
+
+- **Functionally correct:** run completed without overlap/loss/dup/input mutation and totals/rc indicate correctness as defined by the engine/result.
+- **Performance-measurement valid (factual, tri-state):** requires functional correctness and evidenced consumer workload and required affinity/perf evidence as applicable.
+  - `full_byte_scan`: scan-byte evidence must be accounted and `scan_equals_consumed` must be true for performance validity to be true; a false/incomplete scan result makes performance validity false; missing/indeterminate scan evidence makes performance validity unknown unless another independent failure already makes it false.
+  - `none`: explicit diagnostic opt-out (not the default comparison workload). Scanned bytes must be zero for evidence-valid `none`; nonzero scanned bytes make performance validity false; missing evidence makes it unknown unless another independent failure makes it false. `none` results must not be combined with full-byte-scan results into one comparable campaign summary.
+- **Headline performance reporting:** throughput, engine wall-time, and other performance summary medians use **performance-valid trials only** (trials with false or unknown performance validity are excluded from headline performance statistics). Functionally-correct but performance-invalid/unknown trials are retained in the detailed report with raw throughput and validity reasons and must not be discarded. If there are no performance-valid trials, the report makes this obvious and does not silently substitute functional correctness.
+- **Separate counts:** attempted trials, complete/functionally correct trials, performance-valid trials, and NUMA-placement-valid trials are reported separately.
+
+### Other validity dimensions (factual, tri-state)
+
+Functional correctness, performance-measurement, affinity, memory-policy application, placement observed, and overall NUMA-placement are separate dimensions (`true`/`false`/`null`). `unknown` is distinct from `false`. `manifest.complete`/functional correctness is not all-validity.
+
+## Campaign options
+
+- `--quick` small local smoke (not for physical-NUMA decisions; not a documented rental profile).
+- `--profile nodes2|nodes4|full` convenience scenario profile (sets `--scenarios` unless explicit).
 - `--scenarios <csv>` / `--candidates <csv>` to subset.
 - `--trials N` (>=3 recommended for decisive cases).
 - `--seed SEED` deterministic random seed for reproducible candidate/scenario ordering.
 - `--shuffle-scenarios` randomize scenario-block order (reproducible by seed).
 - `--cache-policy TEXT` explicit cache/warm-up assumption recorded in manifest.
-- `--consumer-kernel full_byte_scan|none` workload kernel (default `full_byte_scan`; explicitly written per comparable candidate spec). `none` is diagnostic opt-out only, not the default comparison workload.
+- `--consumer-kernel full_byte_scan|none` workload kernel (default `full_byte_scan`; explicitly written per comparable candidate spec).
 - `--strict-affinity` / `--strict-mbind` strict enforcement (abort on required failure); recorded in specs/manifests/campaign config and reported alongside factual validity.
-- `--phys-nodes LIST` explicit physical NUMA node ids (documented; must be compatible with scenario node counts).
+- `--phys-nodes LIST` explicit physical NUMA node ids; must be compatible with every selected scenario's logical node count (count match required) or the campaign is rejected before timed trials.
 
 **Randomization/fairness:** candidate order is shuffled within each (scenario,trial) block using the recorded seed; actual execution order and plan are recorded in `campaign-manifest.json`/`execution-order.jsonl`/`execution-plan.json`. Re-running into an existing case/trial directory does not overwrite earlier raw evidence.
 
@@ -107,13 +199,13 @@ Quick-smoke defaults are not decision-grade for NUMA placement/performance concl
 ## Expected runtime and disk
 
 - **Quick smoke:** ~1–5 minutes, < 300 MB.
-- **Full local/default file campaign (4 dist-engine candidates × default scenarios × trials):** estimate **30–90 minutes** on typical hardware (calibrate with `--quick`). Budget margin for physical-NUMA runs.
+- **Full/default campaigns:** estimate **30–90 minutes** on typical hardware (calibrate with `--quick`); profile and host-dependent. Budget margin for physical-NUMA runs.
 - **Disk:** corpora + per-trial manifests/logs/JSON. Reserve >= 20 GiB.
 
 ## Artifact collection
 
 Retain the entire campaign directory:
-- `campaign-manifest.json`, `execution-order.jsonl`, `execution-plan.json`, `report.md`
+- `campaign-manifest.json`, `execution-order.jsonl`, `execution-plan.json`, `prevalidation.json`, `report.md`
 - `env/env-before.json`, `env/env-after.json`
 - `cases/<case>/trialN/manifest.json`, `stderr.log`, `stdout.log`, `spec.json`, `dist-result.json` (when emitted)
 - `corpora/*` (or record hashes)
@@ -132,13 +224,13 @@ tar czf dist-campaign-artifacts.tgz stage0/dist_ingest/runs/<campaign-id>
 ## Interpretation
 
 - **Comparable set:** `centralized_ingest` vs `fixed_faa`/`local_adaptive`/`relative_adaptive` on the same dist_ingest engine/consumers/work units/measurement boundaries with identical consumer kernel/params per comparison block.
-- **Workload evidence:** default comparison workload is `full_byte_scan` (memory-touch) with per-node/aggregate `consumer_bytes_scanned` evidence reported; `none` runs must not be confused with default comparisons.
+- **Workload evidence:** default comparison workload is `full_byte_scan` (memory-touch) with scan-byte evidence reported; `none` runs must not be confused with or combined into default comparisons.
 - **Timing:** dist-engine authoritative wall time is `DIST_RESULT.wall_seconds`; harness/manifest duration is separate and diagnostic.
 - **Reference only:** `production_ref`/forkrun uses a different execution model (not apples-to-apples).
-- **Validity is multi-dimensional (factual, tri-state):** functional correctness, performance-measurement, affinity, memory-policy application, placement observed, and overall NUMA-placement are separate dimensions (`true`/`false`/`null`). A trial may be valid for one purpose and invalid/unknown for another. `unknown` is distinct from `false`. `manifest.complete`/functional correctness is not all-validity.
-- **Affinity:** role requirements depend on actual topology (`centralized_ingest`: single ingestor on central node + all consumers; other ingestor roles N/A). `--no-pin` means affinity not verified.
+- **Validity is multi-dimensional (factual, tri-state):** performance-valid vs functionally-correct are distinct; headline performance medians exclude false/unknown performance validity. `unknown` is distinct from `false`.
+- **Affinity:** per-node `effective_verified` is tri-state over applicable required roles (unknown required role is never reported as verified). Role requirements depend on actual topology (`centralized_ingest`: single ingestor on central node + all consumers; other ingestor roles N/A).
 - **Memory policy vs placement:** mbind requested/succeeded/failed counts and factual application validity are distinct from observed placement; `MPOL_PREFERRED` success is not physical placement proof.
-- **Telemetry:** `DIST_RESULT` is authoritative for dist-engine measurements; no fabricated STAGE0 time-series samples emitted for dist candidates.
+- **Telemetry:** `DIST_RESULT` is authoritative for dist-engine measurements.
 - **Correctness first:** overlap/loss/dup, wrong totals, or input mutation invalidate functional correctness.
 - **Not proven here:** fake/local NUMA does not establish physical CPU/memory locality, remote-memory penalties, multi-socket scaling, or production end-to-end speedup. Hugepage-success accounting is not proven on hosts without hugepage availability.
 - Pipe ingestion excluded from dist-candidate bake-off (see `PIPE_INGESTION.md`).

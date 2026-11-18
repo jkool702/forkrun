@@ -168,15 +168,16 @@ def main():
     lines.append("")
     lines.append("> Validity dimensions are separate: functional correctness, performance-measurement, affinity, "
                  "memory-policy application, observed placement, and overall NUMA-placement. "
-                 "`unknown` is distinct from `false`. `manifest.complete`/functional correctness is not all-validity.")
+                 "`unknown` is distinct from `false`. `manifest.complete`/functional correctness is not all-validity. "
+                 "Headline performance medians use performance-valid trials only; full-byte-scan and `none` results are not combined into one comparable summary.")
     lines.append("")
 
     scenarios = sorted({s for s, c in groups.keys()})
     candidates = ["centralized_ingest", "fixed_faa", "local_adaptive", "relative_adaptive", "production_ref", "control"]
 
-    lines.append("## Comparative summary (median of functionally-correct complete trials)")
+    lines.append("## Comparative summary (headline performance medians from performance-valid trials only)")
     lines.append("")
-    header = ("| scenario | candidate | valid/total | func ok | perf valid | numa-place valid | "
+    header = ("| scenario | candidate | attempted | func complete | perf valid | numa-place valid | "
               "throughput (MB/s) | engine wall s | harness wall s | reservations | kernel | scanned/consumed | notes |")
     sep = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"
     lines.append(header); lines.append(sep)
@@ -186,37 +187,65 @@ def main():
             if not recs:
                 continue
             total = len(recs)
-            # "valid" for this summary: attempted trial that is complete, readable, and functionally correct
+            # complete/functionally correct trials (readable, complete, functionally correct)
             func_valids = [r for r in recs if (not r.get("invalid")) and r.get("correct_functional") is True and r.get("complete") is True]
+            # performance-valid trials only for headline performance stats
+            perf_valids = [r for r in func_valids if r.get("v_perf") is True]
+            numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
 
-            def med(key, src=func_valids):
+            def med(key, src):
                 vals = [r.get(key) for r in src if r.get(key) is not None]
                 return statistics.median(vals) if vals else None
 
-            thr = med("throughput_bps")
+            kernels_func = sorted({str(r.get("consumer_kernel")) for r in func_valids if r.get("consumer_kernel") is not None})
+            kernels_perf = sorted({str(r.get("consumer_kernel")) for r in perf_valids if r.get("consumer_kernel") is not None})
+            kernel = ",".join(kernels_func) if kernels_func else "n/a"
+            mixed_kernel_func = len(kernels_func) > 1
+            mixed_kernel_perf = len(kernels_perf) > 1
+            # do not combine full-scan and no-kernel into one comparable campaign summary
+            noncomparable_kernel_mix = (("full_byte_scan" in kernels_func and "none" in kernels_func) or
+                                        ("full_byte_scan" in kernels_perf and "none" in kernels_perf))
+
+            perf_for_medians = [] if noncomparable_kernel_mix else perf_valids
+            thr = med("throughput_bps", perf_for_medians)
             thr_mb = (thr / 1e6) if thr else None
-            wall = med("engine_wall_s")
-            hwall = med("harness_wall_s")
-            resv = med("reservations")
-            kernels = sorted({str(r.get("consumer_kernel")) for r in func_valids if r.get("consumer_kernel") is not None})
-            kernel = ",".join(kernels) if kernels else "n/a"
-            scan_vals = [r.get("scan_bytes") for r in func_valids if r.get("scan_bytes") is not None]
-            cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in func_valids if r.get("dist")]
+            wall = med("engine_wall_s", perf_for_medians)
+            hwall = med("harness_wall_s", func_valids)  # diagnostic harness duration
+            resv = med("reservations", perf_for_medians)
+
             scan_s = "n/a"
-            if scan_vals and cons_vals:
-                scan_s = "%s/%s" % (int(statistics.median([v for v in scan_vals if v is not None])) if scan_vals else "n/a",
-                                    int(statistics.median([v for v in cons_vals if v is not None])) if cons_vals else "n/a")
-            perf_true = sum(1 for r in func_valids if r.get("v_perf") is True)
-            numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
+            if not noncomparable_kernel_mix and perf_for_medians:
+                scan_vals = [r.get("scan_bytes") for r in perf_for_medians if r.get("scan_bytes") is not None]
+                cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in perf_for_medians if r.get("dist")]
+                if scan_vals or cons_vals:
+                    s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
+                    c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
+                    scan_s = "%s/%s" % (s_med, c_med)
+            elif func_valids and not noncomparable_kernel_mix:
+                # show evidence context from functionally-correct trials even if no perf-valid headline medians
+                scan_vals = [r.get("scan_bytes") for r in func_valids if r.get("scan_bytes") is not None]
+                cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in func_valids if r.get("dist")]
+                if scan_vals or cons_vals:
+                    s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
+                    c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
+                    scan_s = "%s/%s" % (s_med, c_med)
+
             notes = []
             bad = total - len([r for r in recs if not r.get("invalid")])
             if bad:
                 notes.append("failed/invalid/incomplete=%d" % bad)
             if len(func_valids) == 0:
                 notes.append("NO FUNCTIONALLY-VALID TRIALS")
-            lines.append("| %s | %s | %d/%d | %d/%d | %d/%d | %d/%d | %s | %s | %s | %s | %s | %s | %s |" % (
-                scen, cand, len(func_valids), total, len(func_valids), total, perf_true, len(func_valids),
-                numa_true, len(func_valids), fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
+            if len(perf_valids) == 0:
+                notes.append("NO PERFORMANCE-VALID TRIALS")
+            if noncomparable_kernel_mix:
+                notes.append("MIXED KERNELS (full_byte_scan/none) — not comparable")
+            perf_invalid_or_unknown = [r for r in func_valids if r.get("v_perf") is not True]
+            if perf_invalid_or_unknown:
+                notes.append("func-but-perf-invalid/unknown=%d" % len(perf_invalid_or_unknown))
+            lines.append("| %s | %s | %d | %d/%d | %d/%d | %d/%d | %s | %s | %s | %s | %s | %s | %s |" % (
+                scen, cand, total, len(func_valids), total, len(perf_valids), total,
+                numa_true, total, fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
     lines.append("")
 
     lines.append("## Dist-candidate validity and workload evidence (per trial)")
@@ -286,7 +315,8 @@ def main():
     lines.append("- **Correctness first:** overlap/loss/dup or incorrect totals invalidate functional correctness.")
     lines.append("- **Comparable set:** centralized_ingest vs fixed_faa/local_adaptive/relative_adaptive share the same dist_ingest engine, consumers, work units, measurement boundaries, and (per block) consumer kernel/params.")
     lines.append("- **Timing:** dist-engine comparative wall time is `DIST_RESULT.wall_seconds`; harness duration is separate/diagnostic.")
-    lines.append("- **Validity separation:** a trial may be functionally correct but have unknown/false placement; do not promote failed/unknown NUMA evidence to success. `unknown` != `false`.")
+    lines.append("- **Headline performance:** throughput/engine wall-time/reservation medians use performance-valid trials only (not false/unknown performance validity). Functionally-correct but performance-invalid/unknown trials are retained in detailed evidence with raw throughput and validity reasons; `unknown` != `false`.")
+    lines.append("- **Workload comparability:** full-byte-scan and no-kernel (`none`) results are not combined into one comparable performance summary.")
     lines.append("- **Production reference:** production_ref/control is separate reference only (not apples-to-apples).")
     lines.append("- **Fake/local NUMA:** not evidence of physical locality/scalability. `MPOL_PREFERRED` success is not physical placement proof.")
     lines.append("")

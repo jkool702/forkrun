@@ -18,7 +18,10 @@ usage: run_dist_campaign.sh [options]
   --campaign-id ID     unique id
   --trials N           trials per case (default 3)
   --quick              small local smoke (1 trial, small corpus, subset)
-  --scenarios LIST     comma-separated scenario ids (default: all)
+  --scenarios LIST     comma-separated scenario ids (default: all in selected profile)
+  --profile NAME       scenario profile: nodes2 (2-node: nodes2,small,tiny),
+                       nodes4 (4-node: four-node + compatible two-node, excludes nodes8),
+                       full (default full set; 8+ usable nodes). Sets --scenarios unless explicit.
   --candidates LIST    comma-separated (default: centralized_ingest,fixed_faa,local_adaptive,relative_adaptive)
   --source-sha SHA
   --seed SEED          deterministic random seed for candidate/scenario ordering
@@ -27,7 +30,9 @@ usage: run_dist_campaign.sh [options]
   --consumer-kernel K  full_byte_scan (default) or none (explicit diagnostic opt-out)
   --strict-affinity    require verified affinity for all required roles (abort on failure)
   --strict-mbind       require successful mbind policy application (abort on failure)
-  --phys-nodes LIST    explicit physical NUMA node ids (documented; must be compatible with scenario node counts or runs will fail)
+  --phys-nodes LIST    explicit physical NUMA node ids (comma-separated). Must be compatible
+                       with every selected scenario's logical node count (count must match);
+                       incompatible/mixed-count selections are rejected before timed trials.
 EOF
 }
 
@@ -37,6 +42,8 @@ CAMPAIGN_ID=""
 SOURCE_SHA=""
 QUICK=0
 SCEN_FILTER=""
+SCEN_FILTER_EXPLICIT=0
+PROFILE=""
 CAND_FILTER="centralized_ingest,fixed_faa,local_adaptive,relative_adaptive"
 SEED=""
 SHUFFLE_SCENARIOS=0
@@ -52,7 +59,8 @@ while [ "$#" -gt 0 ]; do
     --campaign-id) CAMPAIGN_ID=${2:?}; shift 2 ;;
     --trials) TRIALS=${2:?}; shift 2 ;;
     --quick) QUICK=1; TRIALS=1; shift ;;
-    --scenarios) SCEN_FILTER=${2:?}; shift 2 ;;
+    --scenarios) SCEN_FILTER=${2:?}; SCEN_FILTER_EXPLICIT=1; shift 2 ;;
+    --profile) PROFILE=${2:?}; shift 2 ;;
     --candidates) CAND_FILTER=${2:?}; shift 2 ;;
     --source-sha) SOURCE_SHA=${2:?}; shift 2 ;;
     --seed) SEED=${2:?}; shift 2 ;;
@@ -66,6 +74,26 @@ while [ "$#" -gt 0 ]; do
     *) echo "dist-campaign: unknown arg $1" >&2; exit 2 ;;
   esac
 done
+
+# Documented executable scenario profiles (default/non-quick scenario set).
+# 2-node profile: scenarios configured for two nodes.
+PROFILE_NODES2="nodes2,small,tiny"
+# 4-node profile: four-node scenarios plus compatible two-node scenarios; excludes eight-node.
+PROFILE_NODES4="equal,slow_one,fast_one,asymmetric,stall_recover,nodes2,large_seq,small,tiny,boundary,backpressure"
+# Full profile: default full scenario set (subject to topology validation; 8+ usable nodes).
+PROFILE_FULL=""
+
+if [ -n "$PROFILE" ]; then
+  case "$PROFILE" in
+    nodes2|2|2node|two) _ps="$PROFILE_NODES2" ;;
+    nodes4|4|4node|four) _ps="$PROFILE_NODES4" ;;
+    full|8|8plus|eight) _ps="$PROFILE_FULL" ;;
+    *) echo "dist-campaign: unknown --profile '$PROFILE' (expected nodes2|nodes4|full)" >&2; exit 2 ;;
+  esac
+  if [ "$SCEN_FILTER_EXPLICIT" -eq 0 ]; then
+    SCEN_FILTER="$_ps"
+  fi
+fi
 
 if [ -z "$SOURCE_SHA" ]; then
   SOURCE_SHA=$(git rev-parse HEAD) || { echo "dist-campaign: cannot resolve HEAD" >&2; exit 2; }
@@ -87,6 +115,135 @@ if [ -e "$OUT" ]; then
   fi
 fi
 mkdir -p "$OUT/cases" "$OUT/env" "$OUT/corpora" || exit 1
+
+# Scenario definitions (id|input_rel|nodes|consumer_mode|consumer_bps|slow_node|slow_mode|slow_bps|slow_stall_ms|max_backlog|extra)
+# Required scenarios covered: equal/slow/fast/asymmetric consumers, temp stall+recovery,
+# varying node counts, large sequential file, small/short-final/boundary, backpressure.
+SCENARIOS=()
+if [ "$QUICK" -eq 1 ]; then
+  SCENARIOS+=("equal|corpora/large.bin|4|fast|0|-1|fast|0|0|33554432|")
+  SCENARIOS+=("slow_one|corpora/large.bin|4|fast|0|0|slow|20000000|0|33554432|")
+  SCENARIOS+=("stall_recover|corpora/large.bin|4|fast|0|1|stall|0|500|33554432|")
+  SCENARIOS+=("small|corpora/small.bin|2|fast|0|-1|fast|0|0|16777216|")
+else
+  SCENARIOS+=("equal|corpora/large.bin|4|fast|0|-1|fast|0|0|67108864|")
+  SCENARIOS+=("slow_one|corpora/large.bin|4|fast|0|0|slow|15000000|0|67108864|")
+  SCENARIOS+=("fast_one|corpora/large.bin|4|slow|10000000|1|fast|0|0|67108864|")
+  SCENARIOS+=("asymmetric|corpora/large.bin|4|fast|0|0|slow|8000000|0|67108864|")
+  SCENARIOS+=("stall_recover|corpora/large.bin|4|fast|0|2|stall|0|800|67108864|")
+  SCENARIOS+=("nodes2|corpora/large.bin|2|fast|0|-1|fast|0|0|67108864|")
+  SCENARIOS+=("nodes8|corpora/large.bin|8|fast|0|-1|fast|0|0|67108864|")
+  SCENARIOS+=("large_seq|corpora/large.bin|4|fast|0|-1|fast|0|0|134217728|")
+  SCENARIOS+=("small|corpora/small.bin|2|fast|0|-1|fast|0|0|16777216|")
+  SCENARIOS+=("tiny|corpora/tiny.bin|2|fast|0|-1|fast|0|0|4194304|")
+  SCENARIOS+=("boundary|corpora/boundary.bin|4|fast|0|-1|fast|0|0|33554432|")
+  SCENARIOS+=("backpressure|corpora/large.bin|4|slow|5000000|-1|slow|5000000|0|8388608|")
+fi
+
+echo "=== dist-ingest campaign: topology/scenario pre-validation"
+export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
+PREVAL_FILE="$OUT/prevalidation.json"
+python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" <<'PY'
+import json, os, sys
+out, scen_filter, phys_nodes, profile, quick, preval_path = sys.argv[1:7]
+quick = quick == '1'
+scen_defs = [l for l in os.environ.get('DIST_SCEN_DEFS','').split('\n') if l.strip()]
+scen_set = set([s for s in scen_filter.split(',') if s]) if scen_filter else None
+def allowed_scen(s): return scen_set is None or s in scen_set
+selected = []
+for d in scen_defs:
+    parts = d.split('|')
+    sid = parts[0]
+    if not allowed_scen(sid):
+        continue
+    try:
+        nodes = int(parts[2])
+    except Exception:
+        nodes = None
+    selected.append({'id': sid, 'nodes': nodes, 'def': d})
+if not selected:
+    print("dist-campaign: no scenarios selected (check --scenarios/--profile)", file=sys.stderr)
+    sys.exit(2)
+
+# determine available usable nodes / explicit mapping
+explicit = None
+if phys_nodes:
+    try:
+        explicit = [int(x) for x in phys_nodes.split(',') if x.strip() != '']
+    except ValueError:
+        print("dist-campaign: invalid --phys-nodes list: %r" % phys_nodes, file=sys.stderr)
+        sys.exit(2)
+    available_usable = len(explicit)
+    mapping_mode = 'explicit'
+else:
+    mapping_mode = 'auto'
+    available_usable = None
+    topo_err = None
+    try:
+        repo = os.getcwd()
+        sys.path.insert(0, os.path.join(repo, 'stage0', 'dist_ingest'))
+        import run_dist
+        # request large count to learn usable set; on insufficient it returns usable_nodes_auto
+        l,p,info,err = run_dist.resolve_topology(999, None, no_pin=False)
+        if l:
+            available_usable = len(l)
+        else:
+            usable = info.get('usable_nodes_auto') or []
+            if usable:
+                available_usable = len(usable)
+            elif info.get('online_known') is False:
+                topo_err = 'online-node information unknown; cannot validate selected scenario node counts'
+            else:
+                available_usable = 0
+                topo_err = '; '.join(err) if err else 'no usable NUMA nodes discovered'
+    except Exception as e:
+        topo_err = 'topology probe failed: %s' % e
+    if available_usable is None:
+        print('dist-campaign: topology validation failed before timed trials: %s' % (topo_err or 'unknown'), file=sys.stderr)
+        sys.exit(2)
+
+# validate selected scenarios before any timed trials
+errors = []
+for s in selected:
+    n = s['nodes']
+    if n is None:
+        errors.append("scenario %s has invalid node count" % s['id'])
+        continue
+    if mapping_mode == 'explicit':
+        # explicit --phys-nodes must match each selected scenario's logical node count
+        # (single list cannot map differing logical node counts)
+        if n != len(explicit):
+            errors.append("scenario %s requires %d logical node(s) but --phys-nodes provides %d; explicit mapping campaigns must select only scenarios whose node count matches the list" % (s['id'], n, len(explicit)))
+    else:
+        if n > available_usable:
+            errors.append("scenario %s requires %d node(s) but only %d usable node(s) available; select a compatible profile/scenario set for this topology" % (s['id'], n, available_usable))
+
+if errors:
+    for e in errors:
+        print('dist-campaign: scenario/topology validation failed before timed trials: ' + e, file=sys.stderr)
+    sys.exit(2)
+
+prov = {
+    'scenario_profile': profile or None,
+    'profile_quick': bool(quick),
+    'available_usable_nodes': available_usable,
+    'physical_node_mapping': {
+        'mode': mapping_mode,
+        'phys_nodes': explicit,
+        'note': 'explicit mapping requires each selected scenario logical node count to equal len(phys_nodes); automatic selection may serve mixed-count scenarios when enough usable nodes exist',
+    },
+    'selected_scenarios': [{'id': s['id'], 'nodes': s['nodes']} for s in selected],
+    'scenarios_filter': scen_filter or None,
+}
+os.makedirs(out, exist_ok=True)
+with open(preval_path, 'w') as f:
+    json.dump(prov, f, indent=2, sort_keys=True)
+print('prevalidation ok: selected=%s available_usable=%s mapping=%s' % ([s['id'] for s in selected], available_usable, mapping_mode), file=sys.stderr)
+PY
+PREVAL_RC=$?
+if [ "$PREVAL_RC" -ne 0 ]; then
+  exit "$PREVAL_RC"
+fi
 
 export FORKRUN_DIAG_QUEUE=1
 
@@ -125,29 +282,6 @@ else:
 print('corpora ready')
 PY
 
-# Scenario definitions (id|input_rel|nodes|consumer_mode|consumer_bps|slow_node|slow_mode|slow_bps|slow_stall_ms|max_backlog|extra)
-# Required scenarios covered: equal/slow/fast/asymmetric consumers, temp stall+recovery,
-# varying node counts, large sequential file, small/short-final/boundary, backpressure.
-SCENARIOS=()
-if [ "$QUICK" -eq 1 ]; then
-  SCENARIOS+=("equal|corpora/large.bin|4|fast|0|-1|fast|0|0|33554432|")
-  SCENARIOS+=("slow_one|corpora/large.bin|4|fast|0|0|slow|20000000|0|33554432|")
-  SCENARIOS+=("stall_recover|corpora/large.bin|4|fast|0|1|stall|0|500|33554432|")
-  SCENARIOS+=("small|corpora/small.bin|2|fast|0|-1|fast|0|0|16777216|")
-else
-  SCENARIOS+=("equal|corpora/large.bin|4|fast|0|-1|fast|0|0|67108864|")
-  SCENARIOS+=("slow_one|corpora/large.bin|4|fast|0|0|slow|15000000|0|67108864|")
-  SCENARIOS+=("fast_one|corpora/large.bin|4|slow|10000000|1|fast|0|0|67108864|")
-  SCENARIOS+=("asymmetric|corpora/large.bin|4|fast|0|0|slow|8000000|0|67108864|")
-  SCENARIOS+=("stall_recover|corpora/large.bin|4|fast|0|2|stall|0|800|67108864|")
-  SCENARIOS+=("nodes2|corpora/large.bin|2|fast|0|-1|fast|0|0|67108864|")
-  SCENARIOS+=("nodes8|corpora/large.bin|8|fast|0|-1|fast|0|0|67108864|")
-  SCENARIOS+=("large_seq|corpora/large.bin|4|fast|0|-1|fast|0|0|134217728|")
-  SCENARIOS+=("small|corpora/small.bin|2|fast|0|-1|fast|0|0|16777216|")
-  SCENARIOS+=("tiny|corpora/tiny.bin|2|fast|0|-1|fast|0|0|4194304|")
-  SCENARIOS+=("boundary|corpora/boundary.bin|4|fast|0|-1|fast|0|0|33554432|")
-  SCENARIOS+=("backpressure|corpora/large.bin|4|slow|5000000|-1|slow|5000000|0|8388608|")
-fi
 
 IFS=',' read -ra CANDS <<< "$CAND_FILTER"
 FAILURES=()
@@ -302,8 +436,12 @@ plan=None
 pp=os.path.join(out,'execution-plan.json')
 if os.path.isfile(pp):
     with open(pp) as f: plan=json.load(f)
+preval=None
+ppath=os.path.join(out,'prevalidation.json')
+if os.path.isfile(ppath):
+    with open(ppath) as f: preval=json.load(f)
 all_ok = all(r['status'] in ('ok','skipped_existing') for r in rows) if rows else False
-doc={"schema":"dist-campaign/3","campaign_id":cid,"source_sha":sha,"trials":int(trials),
+doc={"schema":"dist-campaign/4","campaign_id":cid,"source_sha":sha,"trials":int(trials),
      "randomization":{"seed":seed,"shuffle_scenarios":(shuf_sc=='1'),"execution_order":order,"plan":plan},
      "cache_policy":cache_policy,
      "campaign_config":{
@@ -313,6 +451,10 @@ doc={"schema":"dist-campaign/3","campaign_id":cid,"source_sha":sha,"trials":int(
         "phys_nodes": phys_nodes or None,
         "notes": "strict flags/kernel applied identically per comparable dist-engine candidate spec; strict mode must not silently fall back"
      },
+     "scenario_profile": (preval or {}).get('scenario_profile'),
+     "available_usable_nodes": (preval or {}).get('available_usable_nodes'),
+     "selected_scenarios": (preval or {}).get('selected_scenarios'),
+     "physical_node_mapping": (preval or {}).get('physical_node_mapping'),
      "outcomes":rows,"all_ok":all_ok,"finished_epoch":time.time()}
 with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,indent=2,sort_keys=True)
 PY

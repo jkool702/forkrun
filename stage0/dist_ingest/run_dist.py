@@ -312,9 +312,7 @@ def node_metrics_to_dict(m, idx, requested_phys_node=None, policy=None):
             "consumer": con,
             "ingestor_verified": ing_v,
             "consumer_verified": con_v,
-            "effective_verified": bool(
-                (ing_v is not False) and (con_v is not False) and (ing_v is True or con_v is True or (ing_v is None and con_v is None))
-            ),
+            "effective_verified": _affinity_effective_verified_node(ing, ing_v, con, con_v),
             "strict_affinity_failed": bool(m.strict_affinity_failed),
         },
         "hugepages": {
@@ -698,6 +696,35 @@ def _affinity_role_factual(rdict, required):
     return True if ok else False
 
 
+def _affinity_effective_verified_node(ing, ing_v, con, con_v):
+    """Per-node tri-state effective affinity verification over applicable required roles.
+    true: every applicable required role requested, applied, queried, and matched.
+    false: any applicable required role requested but failed/unqueried/unmatched.
+    null: any applicable required role unknown/unrequested and none failed.
+    Roles with required=false are not applicable and must not force unknown.
+    Empty set of applicable required roles => not applicable/unknown (null)."""
+    roles = []
+    if ing.get("required", False):
+        roles.append(ing_v)
+    if con.get("required", False):
+        roles.append(con_v)
+    if not roles:
+        return None
+    saw_false = False
+    saw_unknown = False
+    for v in roles:
+        if v is False:
+            saw_false = True
+        elif v is None:
+            saw_unknown = True
+        # True: ok
+    if saw_false:
+        return False
+    if saw_unknown:
+        return None
+    return True
+
+
 def _affinity_valid_factual(nodes_out):
     """Factual tri-state affinity validity independent of --strict-affinity.
     Evaluated only over roles required by actual topology/architecture.
@@ -757,15 +784,38 @@ def _memory_policy_valid_factual(nodes_out):
     return True
 
 
-def _performance_measurement_valid(functional_correct, affinity_valid):
-    # Useful for performance comparison only when functionally correct and affinity
-    # is factually verified. Unknown/unverified affinity => not verified (unknown).
+def _scan_evidence_valid(consumer_kernel_name, total_consumer_bytes_scanned, total_consumed):
+    """Tri-state scan-evidence validity for performance measurement.
+    full_byte_scan: true if scan bytes accounted and equal consumed; false if
+    accounted but not equal/incomplete; null if missing/indeterminate.
+    none: true if scanned bytes are zero; false if nonzero; null if missing/indeterminate."""
+    if total_consumer_bytes_scanned is None or total_consumed is None:
+        return None
+    try:
+        scanned = int(total_consumer_bytes_scanned)
+        consumed = int(total_consumed)
+    except (TypeError, ValueError):
+        return None
+    if consumer_kernel_name == "full_byte_scan":
+        return scanned == consumed
+    # none (or explicit no-kernel): scanned bytes must be zero
+    return scanned == 0
+
+
+def _performance_measurement_valid(functional_correct, affinity_valid, consumer_kernel_name, total_consumer_bytes_scanned, total_consumed):
+    """Factual tri-state performance-measurement validity.
+    Requires functional correctness, verified affinity, and evidenced consumer workload.
+    Independent failures (functional false, affinity false, scan evidence false) => false.
+    Missing/indeterminate scan evidence => unknown unless another independent failure already makes it false."""
     if not functional_correct:
         return False
-    if affinity_valid is True:
-        return True
     if affinity_valid is False:
         return False
+    scan_ok = _scan_evidence_valid(consumer_kernel_name, total_consumer_bytes_scanned, total_consumed)
+    if scan_ok is False:
+        return False
+    if affinity_valid is True and scan_ok is True:
+        return True
     return None
 
 
@@ -884,7 +934,11 @@ def main():
     affinity_valid = _affinity_valid_factual(nodes_out)
     placement_policy_valid = _memory_policy_valid_factual(nodes_out)
     placement_obs = _placement_observed_all_sampled_on_target(nodes_out)
-    performance_measurement_valid = _performance_measurement_valid(functional_correct, affinity_valid)
+    consumer_kernel_name = "full_byte_scan" if params.consumer_kernel == 1 else "none"
+    _total_scanned = getattr(res, "total_consumer_bytes_scanned", None)
+    _total_consumed_res = getattr(res, "total_consumed", None)
+    performance_measurement_valid = _performance_measurement_valid(
+        functional_correct, affinity_valid, consumer_kernel_name, _total_scanned, _total_consumed_res)
 
     # Overall NUMA-placement validity (tri-state, factual; strict flags affect enforcement, not truth):
     # true requires successful required policy application (true), verified required affinity (true),
@@ -899,7 +953,8 @@ def main():
         numa_placement_valid = None
 
     engine_model = "dist_ingest_experimental"
-    consumer_kernel_name = "full_byte_scan" if params.consumer_kernel == 1 else "none"
+    # consumer_kernel_name, _total_scanned, _total_consumed_res computed above for validity
+    scan_ev_ok = _scan_evidence_valid(consumer_kernel_name, _total_scanned, _total_consumed_res)
     comparability = {
         "engine": engine_model,
         "consumers": "simulated_per_node (dist_ingest)",
@@ -926,7 +981,7 @@ def main():
         "total_read": res.total_read,
         "total_published": res.total_published,
         "total_consumed": res.total_consumed,
-        "total_consumer_bytes_scanned": int(getattr(res, "total_consumer_bytes_scanned", 0)),
+        "total_consumer_bytes_scanned": int(_total_scanned) if _total_scanned is not None else 0,
         "reservations_total": res.reservations_total,
         "overlap_detected": bool(res.overlap_detected),
         "duplicate_detected": bool(res.duplicate_detected),
@@ -945,9 +1000,9 @@ def main():
                 "consumer_stall_ms": int(args.consumer_stall_ms),
             },
             "scan_bytes_evidence": {
-                "total_consumer_bytes_scanned": int(getattr(res, "total_consumer_bytes_scanned", 0)),
-                "total_consumed": int(res.total_consumed),
-                "scan_equals_consumed": bool(int(getattr(res, "total_consumer_bytes_scanned", 0)) == int(res.total_consumed)) if consumer_kernel_name == "full_byte_scan" else bool(int(getattr(res, "total_consumer_bytes_scanned", 0)) == 0),
+                "total_consumer_bytes_scanned": int(_total_scanned) if _total_scanned is not None else None,
+                "total_consumed": int(_total_consumed_res) if _total_consumed_res is not None else None,
+                "scan_equals_consumed": scan_ev_ok,
             },
         },
         "topology": {

@@ -48,15 +48,23 @@ def run_report(camp_dir):
 
 
 class TestReportDist(unittest.TestCase):
-    def _dist_manifest(self, complete=True, wall=1.25, harness_wall=1.80, correct=True, validity=None, consumed=1000):
+    def _dist_manifest(self, complete=True, wall=1.25, harness_wall=1.80, correct=True, validity=None, consumed=1000,
+                       kernel="full_byte_scan", scan_bytes=None, scan_ok=None):
+        if scan_bytes is None:
+            scan_bytes = consumed if kernel == "full_byte_scan" else 0
+        if scan_ok is None:
+            if kernel == "full_byte_scan":
+                scan_ok = (scan_bytes == consumed)
+            else:
+                scan_ok = (scan_bytes == 0)
         dr = {
             "correct": correct,
             "wall_seconds": wall,
             "total_consumed": consumed,
             "reservations_total": 10,
             "ingest_cpu_ns": 123456,
-            "consumer_kernel": {"name": "full_byte_scan", "scan_bytes_evidence": {"total_consumer_bytes_scanned": consumed, "scan_equals_consumed": True}},
-            "nodes": [{"node": 0, "consumer_bytes_scanned": consumed, "bytes_consumed": consumed, "max_effective_backlog": 1,
+            "consumer_kernel": {"name": kernel, "scan_bytes_evidence": {"total_consumer_bytes_scanned": scan_bytes, "scan_equals_consumed": scan_ok}},
+            "nodes": [{"node": 0, "consumer_bytes_scanned": scan_bytes, "bytes_consumed": consumed, "max_effective_backlog": 1,
                        "affinity": {"ingestor": {"required": True, "requested": False, "applicable": True, "set_applied": False, "query_succeeded": False, "matched": False},
                                     "consumer": {"required": True, "requested": False, "applicable": True, "set_applied": False, "query_succeeded": False, "matched": False}},
                        "memory_policy": {"requested_count": 0, "success_count": 0, "failure_count": 0, "all_requested_succeeded": False, "error": 0},
@@ -177,6 +185,108 @@ class TestReportDist(unittest.TestCase):
             self.assertIn("1/2", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_headline_performance_medians_use_performance_valid_only(self):
+        tmp = tempfile.mkdtemp(prefix='rptperf_')
+        try:
+            outcomes = [
+                {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 1, "status": "ok", "manifest": "cases/a/trial1/manifest.json"},
+                {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 2, "status": "ok", "manifest": "cases/a/trial2/manifest.json"},
+                {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 3, "status": "ok", "manifest": "cases/a/trial3/manifest.json"},
+            ]
+            v_true = {"functional_correctness": True, "performance_measurement": True, "affinity": True,
+                      "memory_policy_application": True, "placement_observed": True, "numa_placement": True}
+            v_unknown = {"functional_correctness": True, "performance_measurement": None, "affinity": None,
+                         "memory_policy_application": None, "placement_observed": None, "numa_placement": None}
+            v_false = {"functional_correctness": True, "performance_measurement": False, "affinity": False,
+                       "memory_policy_application": True, "placement_observed": None, "numa_placement": False}
+            # perf-valid trial: 2.0s for 1000 bytes => 500 B/s => 0.001 MB/s (rounded in report)
+            manifests = {
+                "cases/a/trial1/manifest.json": self._dist_manifest(complete=True, correct=True, wall=2.0, consumed=1000, validity=v_true),
+                "cases/a/trial2/manifest.json": self._dist_manifest(complete=True, correct=True, wall=0.5, consumed=1000, validity=v_unknown),
+                "cases/a/trial3/manifest.json": self._dist_manifest(complete=True, correct=True, wall=0.25, consumed=1000, validity=v_false),
+            }
+            make_campaign(tmp, outcomes, manifests)
+            rc, text, err = run_report(tmp)
+            self.assertEqual(rc, 0, msg=err + "\n" + text)
+            # only trial 1 is performance-valid: median engine wall 2.000, throughput 0.001 MB/s
+            self.assertIn("| sc | fixed_faa | 3 | 3/3 | 1/3 | 1/3 | 0.001 | 2.000 |", text)
+            self.assertIn("func-but-perf-invalid/unknown=2", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_no_performance_valid_trials_obvious(self):
+        tmp = tempfile.mkdtemp(prefix='rptnoperf_')
+        try:
+            outcomes = [
+                {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 1, "status": "ok", "manifest": "cases/a/trial1/manifest.json"},
+            ]
+            v_unknown = {"functional_correctness": True, "performance_measurement": None, "affinity": None,
+                         "memory_policy_application": None, "placement_observed": None, "numa_placement": None}
+            manifests = {
+                "cases/a/trial1/manifest.json": self._dist_manifest(complete=True, correct=True, wall=1.5, consumed=1000, validity=v_unknown),
+            }
+            make_campaign(tmp, outcomes, manifests)
+            rc, text, err = run_report(tmp)
+            self.assertEqual(rc, 0, msg=err + "\n" + text)
+            self.assertIn("NO PERFORMANCE-VALID TRIALS", text)
+            # headline performance medians must not substitute functional values
+            self.assertIn("| sc | fixed_faa | 1 | 1/1 | 0/1 | 0/1 | n/a | n/a |", text)
+            # functional-but-perf-invalid/unknown trial retained in detail with raw throughput info
+            self.assertIn("engine_wall=1.500000", text)
+            self.assertIn("valid[func=true perf=unknown", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_mixed_full_scan_and_none_not_comparable(self):
+        tmp = tempfile.mkdtemp(prefix='rptmixk_')
+        try:
+            outcomes = [
+                {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 1, "status": "ok", "manifest": "cases/a/trial1/manifest.json"},
+                {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 2, "status": "ok", "manifest": "cases/a/trial2/manifest.json"},
+            ]
+            v_true = {"functional_correctness": True, "performance_measurement": True, "affinity": True,
+                      "memory_policy_application": True, "placement_observed": True, "numa_placement": True}
+            manifests = {
+                "cases/a/trial1/manifest.json": self._dist_manifest(complete=True, correct=True, wall=1.0, consumed=1000, validity=v_true, kernel='full_byte_scan', scan_bytes=1000, scan_ok=True),
+                "cases/a/trial2/manifest.json": self._dist_manifest(complete=True, correct=True, wall=0.5, consumed=1000, validity=v_true, kernel='none', scan_bytes=0, scan_ok=True),
+            }
+            make_campaign(tmp, outcomes, manifests)
+            rc, text, err = run_report(tmp)
+            self.assertEqual(rc, 0, msg=err + "\n" + text)
+            self.assertIn("MIXED KERNELS (full_byte_scan/none)", text)
+            self.assertIn("not comparable", text.lower())
+            # no headline performance medians when mixed kernels not comparable
+            self.assertIn("| sc | fixed_faa | 2 | 2/2 | 2/2 | 2/2 | n/a | n/a |", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_functional_but_perf_invalid_unknown_trials_retained_with_evidence(self):
+        tmp = tempfile.mkdtemp(prefix='rptretain_')
+        try:
+            outcomes = [
+                {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 1, "status": "ok", "manifest": "cases/a/trial1/manifest.json"},
+            ]
+            v = {"functional_correctness": True, "performance_measurement": False, "affinity": False,
+                 "memory_policy_application": True, "placement_observed": None, "numa_placement": False}
+            manifests = {
+                "cases/a/trial1/manifest.json": self._dist_manifest(complete=True, correct=True, wall=3.0, consumed=2000, validity=v),
+            }
+            make_campaign(tmp, outcomes, manifests)
+            rc, text, err = run_report(tmp)
+            self.assertEqual(rc, 0, msg=err + "\n" + text)
+            # retained in detail with raw throughput-relevant info and validity reasons/dimensions
+            self.assertIn("engine_wall=3.000000", text)
+            self.assertIn("scanned=2000 consumed=2000", text)
+            self.assertIn("perf=false", text)
+            self.assertIn("affinity=false", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == '__main__':
+    unittest.main()
+
 
 
 if __name__ == '__main__':
