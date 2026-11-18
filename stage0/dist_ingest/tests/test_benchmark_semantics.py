@@ -944,6 +944,115 @@ class TestCampaignScenarioValidation(unittest.TestCase):
         finally:
             shutil.rmtree(out, ignore_errors=True)
 
+    def test_malformed_explicit_phys_nodes_rejected_before_timed_trials(self):
+        cases = [
+            ('0,,1', 'small'),
+            ('0,1,', 'small'),
+            (',0,1', 'small'),
+            ('0, ,1', 'small'),
+            ('0,a', 'small'),
+        ]
+        for phys, scen in cases:
+            with self.subTest(phys_nodes=phys):
+                out = tempfile.mkdtemp(prefix='dist_camp_malph_')
+                os.rmdir(out)
+                try:
+                    cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                           '--out', out, '--campaign-id', 'test-malformed-phys',
+                           '--scenarios', scen, '--phys-nodes', phys, '--trials', '1']
+                    p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+                    self.assertNotEqual(p.returncode, 0, msg=p.stdout + '\n' + p.stderr)
+                    combined = (p.stderr + p.stdout).lower()
+                    self.assertIn('before timed trials', combined)
+                    self.assertTrue(('malformed' in combined) or ('phys-nodes' in combined), msg=p.stderr + p.stdout)
+                    self._assert_no_timed_trial_manifests(out)
+                finally:
+                    shutil.rmtree(out, ignore_errors=True)
+
+    def test_explicit_phys_nodes_whitespace_around_valid_ids_allowed(self):
+        out = tempfile.mkdtemp(prefix='dist_camp_ws_')
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--quick', '--out', out, '--campaign-id', 'test-phys-ws',
+                   '--scenarios', 'small', '--candidates', 'fixed_faa',
+                   '--trials', '1', '--seed', 'ws1',
+                   '--phys-nodes', ' 0 , 2 ']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-2000:] + "\n" + p.stdout[-1000:])
+            with open(os.path.join(out, 'prevalidation.json')) as fh:
+                pv = json.load(fh)
+            self.assertEqual(pv['explicit_physical_node_ids'], [0, 2])
+            self.assertTrue(pv['physical_node_mapping'].get('explicit_mapping_validated'))
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_duplicate_scenario_ids_rejected_before_timed_trials(self):
+        out = tempfile.mkdtemp(prefix='dist_camp_dupscen_')
+        os.rmdir(out)
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--out', out, '--campaign-id', 'test-dup-scen',
+                   '--scenarios', 'equal,equal', '--trials', '1']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertNotEqual(p.returncode, 0, msg=p.stdout + '\n' + p.stderr)
+            combined = p.stderr + p.stdout
+            self.assertIn('before timed trials', combined)
+            self.assertIn('duplicate', combined.lower())
+            self.assertIn('equal', combined)
+            self._assert_no_timed_trial_manifests(out)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_profile_nodes2_quick_rejected(self):
+        out = tempfile.mkdtemp(prefix='dist_camp_p2q_')
+        os.rmdir(out)
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--out', out, '--campaign-id', 'test-p2q',
+                   '--profile', 'nodes2', '--quick', '--trials', '1']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertNotEqual(p.returncode, 0, msg=p.stdout + '\n' + p.stderr)
+            combined = p.stderr + p.stdout
+            self.assertIn('nodes2', combined)
+            self.assertIn('non-quick', combined.lower())
+            self.assertIn('--quick', combined)
+            self._assert_no_timed_trial_manifests(out)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_profile_nodes4_quick_rejected(self):
+        out = tempfile.mkdtemp(prefix='dist_camp_p4q_')
+        os.rmdir(out)
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--out', out, '--campaign-id', 'test-p4q',
+                   '--profile', 'nodes4', '--quick', '--trials', '1']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertNotEqual(p.returncode, 0, msg=p.stdout + '\n' + p.stderr)
+            combined = p.stderr + p.stdout
+            self.assertIn('nodes4', combined)
+            self.assertIn('non-quick', combined.lower())
+            self.assertIn('--quick', combined)
+            self._assert_no_timed_trial_manifests(out)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_profile_full_quick_supported_with_unambiguous_provenance(self):
+        p, out = self._run_preflight_only(['--profile', 'full', '--quick', '--trials', '1'])
+        try:
+            self.assertTrue(os.path.exists(os.path.join(out, 'prevalidation.json')),
+                            msg=p.stdout + '\n' + p.stderr)
+            self._assert_no_timed_trial_manifests(out)
+            with open(os.path.join(out, 'prevalidation.json')) as fh:
+                pv = json.load(fh)
+            self.assertEqual([s['id'] for s in pv['selected_scenarios']], ['equal', 'slow_one', 'stall_recover', 'small'])
+            self.assertEqual(pv.get('scenario_profile_requested'), 'full')
+            self.assertEqual(pv.get('scenario_profile_effective'), 'full_quick')
+            self.assertFalse(pv.get('scenario_profile_overridden', False))
+            self.assertTrue(pv.get('profile_quick'))
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
     def test_unknown_scenario_id_mixed_with_valid_rejected(self):
         out = tempfile.mkdtemp(prefix='dist_camp_unknown_')
         os.rmdir(out)
@@ -993,25 +1102,10 @@ class TestCampaignScenarioValidation(unittest.TestCase):
             shutil.rmtree(out, ignore_errors=True)
 
     def test_actual_profile_full_selects_full_default_set(self):
-        # on 4-node host full set includes nodes8 (8 nodes) and must be rejected before timed trials,
-        # but the CLI/profile selection itself must be the full default set; preflight writes no
-        # selection file on validation failure, so verify via explicit rejection of nodes8 while
-        # confirming profile requested/effective intent through a compatible selection path is separate.
-        # Instead: run with --profile full on non-quick; prevalidation will fail due to nodes8 incompatibility
-        # but we must assert actual selection was the full set. To observe selection, request full profile
-        # with scenarios filtered to a subset is not the same; so use --scenarios listing full set explicitly
-        # is not profile. Better: run profile full and check that failure message references nodes8 (selected),
-        # and also run with --scenarios equal to the full set? No.
-        # Alternative: test selection logic by using quick mode? quick has different set. Not matching requirement.
-        # Use a targeted helper: invoke with --profile full and a custom PATH that makes 'make' fail is not helpful
-        # because preflight fails before build due to nodes8 on this host. So test that --profile full requests
-        # full effective profile in a case where it can be recorded: run with --profile full but constrain to
-        # compatible scenarios via --scenarios? that would be override (case 9). Not the same.
-        # Pragmatic: run with --scenarios listing the exact full default set explicitly (to allow observing selection
-        # via preflight-only if compatible? nodes8 still incompatible) — not possible on this host.
-        # Therefore: verify that --profile full maps to full scenario selection by checking the script accepts
-        # profile and, on a host where it fails, the incompatibility is for nodes8 (part of full set) proving
-        # nodes8 was selected. And separately verify effective provenance for default-full selection case below.
+        # --profile full selects the full default non-quick set via CLI. On this 4-usable-node host
+        # the set includes nodes8 and is correctly rejected before timed trials; the rejection of
+        # nodes8 evidences nodes8/full-set selection. Full-quick selection and metadata are tested
+        # separately (profile full is supported in quick mode with unambiguous provenance).
         out = tempfile.mkdtemp(prefix='dist_camp_fullprof_')
         os.rmdir(out)
         try:

@@ -49,7 +49,7 @@ python3 stage0/env_capture.py --out /tmp/env-pre.json --run-id preflight
 
 ## Scenario profiles, minimum node counts, and topology compatibility
 
-The campaign driver validates selected scenario IDs and node counts against topology/mapping **before executing timed trials**. If `--scenarios` is explicitly supplied, unknown scenario IDs are rejected before timed trials (even when other requested IDs are valid). If a selected scenario cannot be satisfied by the selected hardware/mapping, the campaign fails before timed trials with a clear diagnostic (it must not begin a campaign containing scenarios the selected hardware cannot support, and unsupported scenarios are never marked successful).
+The campaign driver validates selected scenario IDs and node counts against topology/mapping **before executing timed trials**. If `--scenarios` is explicitly supplied, unknown scenario IDs and duplicate scenario IDs are rejected before timed trials (even when other requested IDs are valid), and prevalidation/provenance/execution-plan agree on the selected scenario set. If a selected scenario cannot be satisfied by the selected hardware/mapping, the campaign fails before timed trials with a clear diagnostic (it must not begin a campaign containing scenarios the selected hardware cannot support, and unsupported scenarios are never marked successful).
 
 ### Documented executable profiles (default/non-quick scenario set)
 
@@ -64,7 +64,7 @@ Convenience: `--profile nodes2|nodes4|full` sets the corresponding scenario sele
 ### `--phys-nodes` compatibility rules (explicit physical-node mapping)
 
 - `--phys-nodes <comma-separated-ids>` selects explicit physical NUMA nodes in logical order. A **single `--phys-nodes` list cannot map scenarios having different logical-node counts**.
-- **Explicit mappings are validated during preflight using `run_dist.resolve_topology()` with the same mapping and pinning semantics as trials** (not just count/list-shape checks). Preflight rejects malformed lists, duplicate IDs, offline/unknown IDs, nodes outside allowed memory-node set, no/indeterminate memory, missing/unparsable CPU lists, nodes without allowed CPUs when pinning is required, and any mapping `resolve_topology()` cannot establish.
+- **Explicit mappings are validated during preflight using `run_dist.resolve_topology()` with the same mapping and pinning semantics as trials** (not just count/list-shape checks). Raw list syntax is validated first: leading/trailing/consecutive commas, empty elements, and non-integer elements are rejected before build/trial setup (ordinary whitespace around valid integer IDs is allowed). Topology validation then rejects duplicate IDs, offline/unknown IDs, nodes outside allowed memory-node set, no/indeterminate memory, missing/unparsable CPU lists, nodes without allowed CPUs when pinning is required, and any mapping `resolve_topology()` cannot establish.
 - **Explicit-mapping campaigns are restricted to scenarios whose logical node count equals the number of nodes in `--phys-nodes`.** If any selected scenario's node count does not match, the campaign is rejected **before timed trials** with a clear diagnostic.
 - Therefore, a mixed-count profile (e.g. the 4-node profile contains 2-node and 4-node scenarios) **cannot** be run with one explicit `--phys-nodes` list. To use explicit mapping, select only scenarios with a matching node count (e.g. only 4-node scenarios with `--phys-nodes` of length 4, or only 2-node scenarios with length 2), or use **automatic topology selection** (no `--phys-nodes`).
 - **Automatic topology selection** may support the default mixed-count campaign/profile when enough usable nodes exist (each selected scenario's node count must be <= available usable nodes discovered on the host); the driver validates this before timed trials.
@@ -183,8 +183,8 @@ Functional correctness, performance-measurement, affinity, memory-policy applica
 ## Campaign options
 
 - `--quick` small local smoke (not for physical-NUMA decisions; not a documented rental profile).
-- `--profile nodes2|nodes4|full` convenience scenario profile (sets `--scenarios` unless explicit).
-- `--scenarios <csv>` / `--candidates <csv>` to subset.
+- `--profile nodes2|nodes4|full` convenience scenario profile (sets `--scenarios` unless explicit). `--profile nodes2/nodes4` describe the non-quick scenario set and are rejected with `--quick`; `--profile full --quick` is supported and provenance records requested/effective profile and `profile_quick` unambiguously for the resulting quick selection.
+- `--scenarios <csv>` / `--candidates <csv>` to subset (explicit `--scenarios` rejects unknown and duplicate IDs before timed trials).
 - `--trials N` (>=3 recommended for decisive cases).
 - `--seed SEED` deterministic random seed for reproducible candidate/scenario ordering.
 - `--shuffle-scenarios` randomize scenario-block order (reproducible by seed).

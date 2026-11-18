@@ -83,16 +83,23 @@ PROFILE_NODES4="equal,slow_one,fast_one,asymmetric,stall_recover,nodes2,large_se
 # Full profile: default full scenario set (subject to topology validation; 8+ usable nodes).
 PROFILE_FULL=""
 
+PROFILE_KIND=""
 if [ -n "$PROFILE" ]; then
   case "$PROFILE" in
-    nodes2|2|2node|two) _ps="$PROFILE_NODES2" ;;
-    nodes4|4|4node|four) _ps="$PROFILE_NODES4" ;;
-    full|8|8plus|eight) _ps="$PROFILE_FULL" ;;
+    nodes2|2|2node|two) PROFILE_KIND="nodes2"; _ps="$PROFILE_NODES2" ;;
+    nodes4|4|4node|four) PROFILE_KIND="nodes4"; _ps="$PROFILE_NODES4" ;;
+    full|8|8plus|eight) PROFILE_KIND="full"; _ps="$PROFILE_FULL" ;;
     *) echo "dist-campaign: unknown --profile '$PROFILE' (expected nodes2|nodes4|full)" >&2; exit 2 ;;
   esac
   if [ "$SCEN_FILTER_EXPLICIT" -eq 0 ]; then
     SCEN_FILTER="$_ps"
   fi
+fi
+
+# nodes2/nodes4 profiles describe the non-quick scenario set; reject semantically invalid quick combination.
+if [ "$QUICK" -eq 1 ] && { [ "$PROFILE_KIND" = "nodes2" ] || [ "$PROFILE_KIND" = "nodes4" ]; }; then
+  echo "dist-campaign: --profile $PROFILE describes the non-quick scenario set and cannot be used with --quick (use --profile full --quick or select quick-compatible scenarios explicitly)" >&2
+  exit 2
 fi
 
 if [ -z "$SOURCE_SHA" ]; then
@@ -164,9 +171,21 @@ for d in scen_defs:
 
 # Scenario selection (preserve valid filtering behavior and documented profile selections)
 if scen_filter_explicit:
-    requested_ids = [s for s in scen_filter.split(',') if s != '']
-    if not requested_ids:
-        print("dist-campaign: --scenarios supplied but empty", file=sys.stderr)
+    raw_ids = scen_filter.split(',')
+    requested_ids = [s.strip() for s in raw_ids]
+    if not requested_ids or any(s == '' for s in requested_ids):
+        print("dist-campaign: --scenarios contains empty/malformed scenario id elements", file=sys.stderr)
+        print('dist-campaign: scenario/topology validation failed before timed trials: invalid --scenarios list', file=sys.stderr)
+        sys.exit(2)
+    # reject duplicate scenario IDs to keep prevalidation/provenance/execution-plan consistent
+    seen_ids = set()
+    dups = []
+    for sid in requested_ids:
+        if sid in seen_ids and sid not in dups:
+            dups.append(sid)
+        seen_ids.add(sid)
+    if dups:
+        print('dist-campaign: scenario/topology validation failed before timed trials: duplicate scenario id(s): %s' % ','.join(dups), file=sys.stderr)
         sys.exit(2)
     unknown = [sid for sid in requested_ids if sid not in available_by_id]
     if unknown:
@@ -176,10 +195,10 @@ if scen_filter_explicit:
         print('dist-campaign: scenario/topology validation failed before timed trials: unknown scenario id(s): %s' % ','.join(unknown), file=sys.stderr)
         sys.exit(2)
     selected = [available_by_id[sid] for sid in requested_ids]
-    scenarios_filter_record = scen_filter
+    scenarios_filter_record = ','.join(requested_ids)
 else:
     if scen_filter:
-        scen_set = set([s for s in scen_filter.split(',') if s])
+        scen_set = set([s.strip() for s in scen_filter.split(',') if s.strip() != ''])
         selected = [available_by_id[sid] for sid in available_ids if sid in scen_set]
         scenarios_filter_record = scen_filter
     else:
@@ -198,7 +217,11 @@ if scen_filter_explicit:
 else:
     profile_overridden = False
     if requested_profile:
-        effective_profile = requested_profile
+        # nodes2/nodes4+quick rejected earlier; full+quick is supported and must be unambiguous
+        if quick and requested_profile == 'full':
+            effective_profile = 'full_quick'
+        else:
+            effective_profile = requested_profile
     else:
         # no explicit profile requested
         if (not quick) and selected_ids == available_ids:
@@ -254,35 +277,56 @@ mapping_mode = 'auto'
 resolved_explicit_mapping = None
 if phys_nodes:
     mapping_mode = 'explicit'
-    # For explicit mapping, all selected scenarios must share one logical node count
-    # (single explicit list cannot map differing logical node counts).
-    if len(selected_counts) != 1:
-        errors.append("explicit --phys-nodes requires all selected scenarios to have the same logical node count; selected counts: %s" % selected_counts)
+    # Strict raw --phys-nodes validation before invoking resolve_topology() (topology/usability
+    # authority remains resolve_topology). Reject leading/trailing/consecutive commas, empty
+    # elements, and non-integer elements; allow ordinary whitespace around valid integer IDs.
+    raw_phys = phys_nodes.split(',')
+    phys_malformed = False
+    phys_parsed = []
+    if raw_phys == ['']:
+        phys_malformed = True
+    if (not phys_malformed) and (phys_nodes.startswith(',') or phys_nodes.endswith(',')):
+        phys_malformed = True
+    if not phys_malformed:
+        for tok in raw_phys:
+            st = tok.strip()
+            if st == '':
+                phys_malformed = True
+                break
+            try:
+                phys_parsed.append(int(st))
+            except ValueError:
+                phys_malformed = True
+                break
+    if phys_malformed:
+        errors.append("malformed --phys-nodes list: %r (reject leading/trailing/consecutive commas, empty elements, and non-integer elements)" % phys_nodes)
+        explicit_ids = None
+        explicit_count = None
     else:
-        logical_count = selected_counts[0]
-        # Validate the actual explicit mapping using run_dist.resolve_topology() with the
-        # same mapping string and pinning semantics as trials will use (no_pin=False).
-        try:
-            lmap, pcpu, tinfo, terr = run_dist.resolve_topology(logical_count, phys_nodes, no_pin=False)
-        except Exception as e:
-            lmap, pcpu, tinfo, terr = [], [], {}, ['resolve_topology exception: %s' % e]
-        # Always report the parsed/requested explicit IDs for provenance when parseable
-        try:
-            explicit_ids = [int(x) for x in phys_nodes.split(',') if x.strip() != '']
-            explicit_count = len(explicit_ids)
-        except Exception:
-            explicit_ids = None
-            explicit_count = None
-        if terr or not lmap:
-            if terr:
-                for te in terr:
-                    errors.append('explicit physical-node mapping invalid for selected logical node count %d: %s' % (logical_count, te))
-            else:
-                errors.append('explicit physical-node mapping could not be established for selected logical node count %d' % logical_count)
+        explicit_ids = list(phys_parsed)
+        explicit_count = len(phys_parsed)
+        # For explicit mapping, all selected scenarios must share one logical node count
+        # (single explicit list cannot map differing logical node counts).
+        if len(selected_counts) != 1:
+            errors.append("explicit --phys-nodes requires all selected scenarios to have the same logical node count; selected counts: %s" % selected_counts)
         else:
-            resolved_explicit_mapping = list(lmap)
-            explicit_ids = list(lmap)  # mapping accepted by preflight (same as trials will resolve)
-            explicit_count = len(lmap)
+            logical_count = selected_counts[0]
+            # Validate the actual explicit mapping using run_dist.resolve_topology() with the
+            # same mapping string and pinning semantics as trials will use (no_pin=False).
+            try:
+                lmap, pcpu, tinfo, terr = run_dist.resolve_topology(logical_count, phys_nodes, no_pin=False)
+            except Exception as e:
+                lmap, pcpu, tinfo, terr = [], [], {}, ['resolve_topology exception: %s' % e]
+            if terr or not lmap:
+                if terr:
+                    for te in terr:
+                        errors.append('explicit physical-node mapping invalid for selected logical node count %d: %s' % (logical_count, te))
+                else:
+                    errors.append('explicit physical-node mapping could not be established for selected logical node count %d' % logical_count)
+            else:
+                resolved_explicit_mapping = list(lmap)
+                explicit_ids = list(lmap)  # mapping accepted by preflight (same as trials will resolve)
+                explicit_count = len(lmap)
 else:
     # automatic: require discovered usable topology and sufficient usable nodes per scenario
     if topo_discovery_err and host_usable_count == 0:
