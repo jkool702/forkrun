@@ -143,80 +143,155 @@ fi
 echo "=== dist-ingest campaign: topology/scenario pre-validation"
 export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
 PREVAL_FILE="$OUT/prevalidation.json"
-python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" <<'PY'
+python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" <<'PY'
 import json, os, sys
-out, scen_filter, phys_nodes, profile, quick, preval_path = sys.argv[1:7]
+out, scen_filter, phys_nodes, profile, quick, preval_path, scen_filter_explicit = sys.argv[1:8]
 quick = quick == '1'
-scen_defs = [l for l in os.environ.get('DIST_SCEN_DEFS','').split('\n') if l.strip()]
-scen_set = set([s for s in scen_filter.split(',') if s]) if scen_filter else None
-def allowed_scen(s): return scen_set is None or s in scen_set
-selected = []
+scen_filter_explicit = scen_filter_explicit == '1'
+requested_profile = profile or None
+scen_defs = [l for l in os.environ.get('DIST_SCEN_DEFS', '').split('\n') if l.strip()]
+available_ids = []
+available_by_id = {}
 for d in scen_defs:
     parts = d.split('|')
     sid = parts[0]
-    if not allowed_scen(sid):
-        continue
+    available_ids.append(sid)
     try:
         nodes = int(parts[2])
     except Exception:
         nodes = None
-    selected.append({'id': sid, 'nodes': nodes, 'def': d})
+    available_by_id[sid] = {'id': sid, 'nodes': nodes, 'def': d}
+
+# Scenario selection (preserve valid filtering behavior and documented profile selections)
+if scen_filter_explicit:
+    requested_ids = [s for s in scen_filter.split(',') if s != '']
+    if not requested_ids:
+        print("dist-campaign: --scenarios supplied but empty", file=sys.stderr)
+        sys.exit(2)
+    unknown = [sid for sid in requested_ids if sid not in available_by_id]
+    if unknown:
+        for sid in unknown:
+            print('dist-campaign: unknown scenario id requested: %s (available in %s mode: %s)' % (
+                sid, 'quick' if quick else 'non-quick', ','.join(available_ids)), file=sys.stderr)
+        print('dist-campaign: scenario/topology validation failed before timed trials: unknown scenario id(s): %s' % ','.join(unknown), file=sys.stderr)
+        sys.exit(2)
+    selected = [available_by_id[sid] for sid in requested_ids]
+    scenarios_filter_record = scen_filter
+else:
+    if scen_filter:
+        scen_set = set([s for s in scen_filter.split(',') if s])
+        selected = [available_by_id[sid] for sid in available_ids if sid in scen_set]
+        scenarios_filter_record = scen_filter
+    else:
+        selected = [available_by_id[sid] for sid in available_ids]
+        scenarios_filter_record = None
+
 if not selected:
     print("dist-campaign: no scenarios selected (check --scenarios/--profile)", file=sys.stderr)
     sys.exit(2)
 
-# determine available usable nodes / explicit mapping
-explicit = None
-if phys_nodes:
-    try:
-        explicit = [int(x) for x in phys_nodes.split(',') if x.strip() != '']
-    except ValueError:
-        print("dist-campaign: invalid --phys-nodes list: %r" % phys_nodes, file=sys.stderr)
-        sys.exit(2)
-    available_usable = len(explicit)
-    mapping_mode = 'explicit'
+# Effective profile/selection provenance
+selected_ids = [s['id'] for s in selected]
+if scen_filter_explicit:
+    effective_profile = 'custom'
+    profile_overridden = bool(requested_profile)
 else:
-    mapping_mode = 'auto'
-    available_usable = None
-    topo_err = None
-    try:
-        repo = os.getcwd()
-        sys.path.insert(0, os.path.join(repo, 'stage0', 'dist_ingest'))
-        import run_dist
-        # request large count to learn usable set; on insufficient it returns usable_nodes_auto
-        l,p,info,err = run_dist.resolve_topology(999, None, no_pin=False)
-        if l:
-            available_usable = len(l)
-        else:
-            usable = info.get('usable_nodes_auto') or []
-            if usable:
-                available_usable = len(usable)
-            elif info.get('online_known') is False:
-                topo_err = 'online-node information unknown; cannot validate selected scenario node counts'
-            else:
-                available_usable = 0
-                topo_err = '; '.join(err) if err else 'no usable NUMA nodes discovered'
-    except Exception as e:
-        topo_err = 'topology probe failed: %s' % e
-    if available_usable is None:
-        print('dist-campaign: topology validation failed before timed trials: %s' % (topo_err or 'unknown'), file=sys.stderr)
-        sys.exit(2)
-
-# validate selected scenarios before any timed trials
-errors = []
-for s in selected:
-    n = s['nodes']
-    if n is None:
-        errors.append("scenario %s has invalid node count" % s['id'])
-        continue
-    if mapping_mode == 'explicit':
-        # explicit --phys-nodes must match each selected scenario's logical node count
-        # (single list cannot map differing logical node counts)
-        if n != len(explicit):
-            errors.append("scenario %s requires %d logical node(s) but --phys-nodes provides %d; explicit mapping campaigns must select only scenarios whose node count matches the list" % (s['id'], n, len(explicit)))
+    profile_overridden = False
+    if requested_profile:
+        effective_profile = requested_profile
     else:
-        if n > available_usable:
-            errors.append("scenario %s requires %d node(s) but only %d usable node(s) available; select a compatible profile/scenario set for this topology" % (s['id'], n, available_usable))
+        # no explicit profile requested
+        if (not quick) and selected_ids == available_ids:
+            effective_profile = 'full'
+        elif quick and selected_ids == available_ids:
+            effective_profile = 'quick_default'
+        else:
+            effective_profile = 'custom'
+
+# Topology discovery (actual usable nodes on host) and mapping validation
+repo = os.getcwd()
+sys.path.insert(0, os.path.join(repo, 'stage0', 'dist_ingest'))
+try:
+    import run_dist
+except Exception as e:
+    print('dist-campaign: topology validation failed before timed trials: cannot import run_dist: %s' % e, file=sys.stderr)
+    sys.exit(2)
+
+# Discover host usable nodes (actual usable nodes discovered on the host)
+host_usable_node_ids = []
+host_usable_count = 0
+topo_discovery_err = None
+try:
+    l, p, info, err = run_dist.resolve_topology(999, None, no_pin=False)
+    if l:
+        host_usable_node_ids = list(l)
+        host_usable_count = len(l)
+    else:
+        usable = info.get('usable_nodes_auto') or []
+        host_usable_node_ids = list(usable)
+        host_usable_count = len(usable)
+        if host_usable_count == 0 and info.get('online_known') is False:
+            topo_discovery_err = 'online-node information unknown; cannot validate selected scenario node counts'
+        elif host_usable_count == 0:
+            topo_discovery_err = '; '.join(err) if err else 'no usable NUMA nodes discovered'
+except Exception as e:
+    topo_discovery_err = 'topology probe failed: %s' % e
+
+if host_usable_count is None:
+    host_usable_count = 0
+
+errors = []
+
+# Distinct logical node counts selected
+selected_counts = sorted({s['nodes'] for s in selected if s['nodes'] is not None})
+for s in selected:
+    if s['nodes'] is None:
+        errors.append("scenario %s has invalid node count" % s['id'])
+
+explicit_ids = None
+explicit_count = None
+mapping_mode = 'auto'
+resolved_explicit_mapping = None
+if phys_nodes:
+    mapping_mode = 'explicit'
+    # For explicit mapping, all selected scenarios must share one logical node count
+    # (single explicit list cannot map differing logical node counts).
+    if len(selected_counts) != 1:
+        errors.append("explicit --phys-nodes requires all selected scenarios to have the same logical node count; selected counts: %s" % selected_counts)
+    else:
+        logical_count = selected_counts[0]
+        # Validate the actual explicit mapping using run_dist.resolve_topology() with the
+        # same mapping string and pinning semantics as trials will use (no_pin=False).
+        try:
+            lmap, pcpu, tinfo, terr = run_dist.resolve_topology(logical_count, phys_nodes, no_pin=False)
+        except Exception as e:
+            lmap, pcpu, tinfo, terr = [], [], {}, ['resolve_topology exception: %s' % e]
+        # Always report the parsed/requested explicit IDs for provenance when parseable
+        try:
+            explicit_ids = [int(x) for x in phys_nodes.split(',') if x.strip() != '']
+            explicit_count = len(explicit_ids)
+        except Exception:
+            explicit_ids = None
+            explicit_count = None
+        if terr or not lmap:
+            if terr:
+                for te in terr:
+                    errors.append('explicit physical-node mapping invalid for selected logical node count %d: %s' % (logical_count, te))
+            else:
+                errors.append('explicit physical-node mapping could not be established for selected logical node count %d' % logical_count)
+        else:
+            resolved_explicit_mapping = list(lmap)
+            explicit_ids = list(lmap)  # mapping accepted by preflight (same as trials will resolve)
+            explicit_count = len(lmap)
+else:
+    # automatic: require discovered usable topology and sufficient usable nodes per scenario
+    if topo_discovery_err and host_usable_count == 0:
+        errors.append('topology validation failed: %s' % topo_discovery_err)
+    else:
+        for s in selected:
+            n = s['nodes']
+            if n is not None and n > host_usable_count:
+                errors.append("scenario %s requires %d node(s) but only %d usable node(s) discovered on host; select a compatible profile/scenario set for this topology" % (s['id'], n, host_usable_count))
 
 if errors:
     for e in errors:
@@ -224,21 +299,35 @@ if errors:
     sys.exit(2)
 
 prov = {
-    'scenario_profile': profile or None,
+    'scenario_profile_requested': requested_profile,
+    'scenario_profile_effective': effective_profile,
+    'scenario_profile_overridden': bool(profile_overridden),
+    # backward-compatible field: effective profile/selection marker (not the requested profile when overridden)
+    'scenario_profile': effective_profile,
     'profile_quick': bool(quick),
-    'available_usable_nodes': available_usable,
+    # actual usable nodes discovered on the host (distinct from explicit selection count)
+    'host_usable_nodes': host_usable_node_ids,
+    'host_usable_node_count': host_usable_count,
+    'available_usable_nodes': host_usable_count,
+    'explicit_physical_node_ids': explicit_ids,
+    'explicit_selected_node_count': explicit_count,
+    'selected_scenario_logical_node_counts': selected_counts,
     'physical_node_mapping': {
         'mode': mapping_mode,
-        'phys_nodes': explicit,
-        'note': 'explicit mapping requires each selected scenario logical node count to equal len(phys_nodes); automatic selection may serve mixed-count scenarios when enough usable nodes exist',
+        'phys_nodes': explicit_ids,
+        'explicit_mapping_validated': bool(mapping_mode == 'explicit' and resolved_explicit_mapping is not None),
+        'resolved_logical_to_physical': resolved_explicit_mapping,
+        'note': 'explicit mapping validated via run_dist.resolve_topology() with the same mapping/pinning semantics as trials; explicit mapping requires each selected scenario logical node count to equal the explicit selection count. automatic selection may serve mixed-count scenarios when enough usable nodes exist.',
     },
     'selected_scenarios': [{'id': s['id'], 'nodes': s['nodes']} for s in selected],
-    'scenarios_filter': scen_filter or None,
+    'scenarios_filter': scenarios_filter_record,
+    'scenarios_filter_explicit': bool(scen_filter_explicit),
 }
 os.makedirs(out, exist_ok=True)
 with open(preval_path, 'w') as f:
     json.dump(prov, f, indent=2, sort_keys=True)
-print('prevalidation ok: selected=%s available_usable=%s mapping=%s' % ([s['id'] for s in selected], available_usable, mapping_mode), file=sys.stderr)
+print('prevalidation ok: selected=%s host_usable=%s mapping=%s' % (
+    selected_ids, host_usable_count, mapping_mode), file=sys.stderr)
 PY
 PREVAL_RC=$?
 if [ "$PREVAL_RC" -ne 0 ]; then
@@ -452,9 +541,18 @@ doc={"schema":"dist-campaign/4","campaign_id":cid,"source_sha":sha,"trials":int(
         "notes": "strict flags/kernel applied identically per comparable dist-engine candidate spec; strict mode must not silently fall back"
      },
      "scenario_profile": (preval or {}).get('scenario_profile'),
+     "scenario_profile_requested": (preval or {}).get('scenario_profile_requested'),
+     "scenario_profile_effective": (preval or {}).get('scenario_profile_effective'),
+     "scenario_profile_overridden": (preval or {}).get('scenario_profile_overridden'),
+     "host_usable_nodes": (preval or {}).get('host_usable_nodes'),
+     "host_usable_node_count": (preval or {}).get('host_usable_node_count'),
      "available_usable_nodes": (preval or {}).get('available_usable_nodes'),
+     "explicit_physical_node_ids": (preval or {}).get('explicit_physical_node_ids'),
+     "explicit_selected_node_count": (preval or {}).get('explicit_selected_node_count'),
+     "selected_scenario_logical_node_counts": (preval or {}).get('selected_scenario_logical_node_counts'),
      "selected_scenarios": (preval or {}).get('selected_scenarios'),
      "physical_node_mapping": (preval or {}).get('physical_node_mapping'),
+     "scenarios_filter_explicit": (preval or {}).get('scenarios_filter_explicit'),
      "outcomes":rows,"all_ok":all_ok,"finished_epoch":time.time()}
 with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,indent=2,sort_keys=True)
 PY
