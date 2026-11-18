@@ -106,6 +106,28 @@ def load_lib():
     lib.di_test_set_pread_seam.restype = ctypes.c_int
     lib.di_test_pread_seam_fired.argtypes = [ctypes.c_void_p]
     lib.di_test_pread_seam_fired.restype = ctypes.c_int
+    lib.di_test_probe_affinity_mask_size.argtypes = [ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_int)]
+    lib.di_test_probe_affinity_mask_size.restype = ctypes.c_int
+    lib.di_test_pin_role_with_inject.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+                                                 ctypes.POINTER(DiAffinityRole),
+                                                 ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    lib.di_test_pin_role_with_inject.restype = ctypes.c_int
+    lib.di_test_sample_indices.argtypes = [ctypes.c_uint64, ctypes.c_uint64,
+                                           ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint64,
+                                           ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64)]
+    lib.di_test_sample_indices.restype = ctypes.c_int
+    lib.di_test_classify_placement.argtypes = [ctypes.c_int, ctypes.c_long, ctypes.c_int,
+                                               ctypes.POINTER(ctypes.c_int),
+                                               ctypes.POINTER(ctypes.c_uint64),
+                                               ctypes.POINTER(ctypes.c_uint64),
+                                               ctypes.POINTER(ctypes.c_uint64)]
+    lib.di_test_classify_placement.restype = ctypes.c_int
+    lib.di_test_set_placement_seam.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    lib.di_test_set_placement_seam.restype = ctypes.c_int
+    lib.di_test_set_create_fail_seam.argtypes = [ctypes.c_int]
+    lib.di_test_set_create_fail_seam.restype = ctypes.c_int
+    lib.di_test_set_push_fail_seam.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.di_test_set_push_fail_seam.restype = ctypes.c_int
     return lib
 
 
@@ -422,3 +444,290 @@ class TestAllocationTeardown(unittest.TestCase):
             lib.di_destroy(eng2); lib.di_destroy(eng1)
         finally:
             os.close(fd); os.unlink(path)
+
+
+
+class TestPlacementValidityTriState(unittest.TestCase):
+    """Closeout §1: placement_observed_all_sampled_on_target tri-state semantics."""
+
+    def _pl(self, **kw):
+        d = {
+            "sample_other_node_pages": 0,
+            "sampling_unavailable": False,
+            "sampling_not_performed": False,
+            "sample_unknown_pages": 0,
+            "sampled_pages": 10,
+            "sample_target_match_pages": 10,
+        }
+        d.update(kw)
+        return {"placement": d}
+
+    def test_all_sampled_pages_matching_true(self):
+        nodes = [self._pl(sample_target_match_pages=10, sample_other_node_pages=0, sample_unknown_pages=0, sampled_pages=10)]
+        self.assertIs(run_dist._placement_observed_all_sampled_on_target(nodes), True)
+
+    def test_at_least_one_observed_mismatch_false(self):
+        nodes = [self._pl(sample_target_match_pages=9, sample_other_node_pages=1, sampled_pages=10)]
+        self.assertIs(run_dist._placement_observed_all_sampled_on_target(nodes), False)
+
+    def test_unknown_per_page_results_null(self):
+        nodes = [self._pl(sample_target_match_pages=9, sample_unknown_pages=1, sampled_pages=10)]
+        self.assertIs(run_dist._placement_observed_all_sampled_on_target(nodes), None)
+
+    def test_query_failure_unavailable_null(self):
+        nodes = [self._pl(sampling_unavailable=True, sample_unknown_pages=10, sampled_pages=10)]
+        self.assertIs(run_dist._placement_observed_all_sampled_on_target(nodes), None)
+
+    def test_sampling_not_performed_null(self):
+        nodes = [self._pl(sampling_not_performed=True, sampled_pages=0, sample_target_match_pages=0)]
+        self.assertIs(run_dist._placement_observed_all_sampled_on_target(nodes), None)
+
+    def test_mixed_mismatch_and_unavailable_false(self):
+        # mismatch in one allocation/node and unavailable in another => false
+        n1 = self._pl(sample_other_node_pages=1, sample_target_match_pages=9, sampled_pages=10)
+        n2 = self._pl(sampling_unavailable=True, sample_unknown_pages=10, sampled_pages=10)
+        self.assertIs(run_dist._placement_observed_all_sampled_on_target([n1, n2]), False)
+        self.assertIs(run_dist._placement_observed_all_sampled_on_target([n2, n1]), False)
+
+
+class TestAffinityCloseout(unittest.TestCase):
+    """Closeout §3/§6: CPU mask safety, probe, inject/pthread error semantics."""
+
+    def setUp(self):
+        self.lib = load_lib()
+
+    def test_int_max_rejected_without_overflow(self):
+        arr = (ctypes.c_int * 1)(2**31 - 1)
+        rc = self.lib.di_test_cpu_mask_check(arr, 1, 0)
+        self.assertLess(rc, 0)
+
+    def test_above_cpuset_size_guaranteed_path(self):
+        # guarantee a CPU ID above CPU_SETSIZE and exercise above-boundary path
+        try:
+            import resource
+        except Exception:
+            pass
+        # CPU_SETSIZE is typically 1024 on Linux; use 2048 to be above
+        big_id = 2048
+        arr = (ctypes.c_int * 1)(big_id)
+        rc = self.lib.di_test_cpu_mask_check(arr, 1, 1)
+        self.assertEqual(rc, 1, "expected above-boundary CPU mask path to succeed, rc=%s" % rc)
+
+    def test_probe_affinity_mask_size(self):
+        sz = ctypes.c_size_t(0)
+        err = ctypes.c_int(0)
+        rc = self.lib.di_test_probe_affinity_mask_size(ctypes.byref(sz), ctypes.byref(err))
+        if rc == 0:
+            self.assertGreater(sz.value, 0)
+        else:
+            # if probing unavailable on platform, must report explicitly
+            self.assertNotEqual(err.value, 0)
+
+    def test_injected_pthread_error_retained_despite_stale_errno(self):
+        # actual pthread return code retained even when errno contains different value
+        role = DiAffinityRole()
+        cpus = (ctypes.c_int * 1)(0)
+        # inject set failure rc=EINVAL (22) while errno is stale EPERM (1)
+        rc = self.lib.di_test_pin_role_with_inject(cpus, 1, ctypes.byref(role), 1, 22, 0, 1)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(role.requested, 1)
+        self.assertEqual(role.error, 22)
+
+    def test_injected_query_failure_classification(self):
+        role = DiAffinityRole()
+        cpus = (ctypes.c_int * 1)(0)
+        # set succeeds (0), query fails with EPERM code
+        rc = self.lib.di_test_pin_role_with_inject(cpus, 1, ctypes.byref(role), 1, 0, 1, 99)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(role.requested, 1)
+        self.assertEqual(role.set_applied, 1)
+        self.assertEqual(role.query_succeeded, 0)
+        self.assertEqual(role.error, 1)
+        self.assertEqual(role.matched, 0)
+
+    def test_distinct_ingestor_consumer_affinity_results_independent(self):
+        # controlled: give distinct outcomes to two roles and confirm independence
+        role_ing = DiAffinityRole()
+        role_con = DiAffinityRole()
+        cpus = (ctypes.c_int * 1)(0)
+        # ingestor: set fails with 22; consumer: set succeeds, query fails with 1
+        self.lib.di_test_pin_role_with_inject(cpus, 1, ctypes.byref(role_ing), 1, 22, 0, 0)
+        self.lib.di_test_pin_role_with_inject(cpus, 1, ctypes.byref(role_con), 1, 0, 1, 0)
+        self.assertTrue(role_ing.requested and role_con.requested)
+        self.assertEqual(role_ing.error, 22)
+        self.assertEqual(role_ing.set_applied, 0)
+        self.assertEqual(role_ing.query_succeeded, 0)
+        self.assertEqual(role_con.error, 1)
+        self.assertEqual(role_con.set_applied, 1)
+        self.assertEqual(role_con.query_succeeded, 0)
+        # results remain independent (distinct outcomes preserved)
+        self.assertNotEqual((role_ing.set_applied, role_ing.query_succeeded, role_ing.error),
+                            (role_con.set_applied, role_con.query_succeeded, role_con.error))
+
+
+class TestPlacementSamplingCloseout(unittest.TestCase):
+    """Closeout §4: deterministic sampling indices and classification."""
+
+    def setUp(self):
+        self.lib = load_lib()
+
+    def test_sample_indices_large_allocation_distributed_no_duplicates(self):
+        # >1024 pages: distributed across full allocation, first/last, no dupes, respects limit
+        total_pages = 5000
+        sample_limit = 1024
+        idxs = (ctypes.c_uint64 * sample_limit)()
+        out_count = ctypes.c_uint64(0)
+        out_spacing = ctypes.c_uint64(0)
+        rc = self.lib.di_test_sample_indices(total_pages, sample_limit, idxs, sample_limit,
+                                             ctypes.byref(out_count), ctypes.byref(out_spacing))
+        self.assertEqual(rc, 0)
+        n = out_count.value
+        self.assertGreater(n, 0)
+        self.assertLessEqual(n, sample_limit)
+        vals = [idxs[i] for i in range(n)]
+        self.assertEqual(vals[0], 0)
+        self.assertEqual(vals[-1], total_pages - 1)
+        self.assertEqual(len(vals), len(set(vals)))
+        self.assertTrue(all(0 <= v < total_pages for v in vals))
+        self.assertEqual(vals, sorted(vals))
+
+    def test_sample_indices_below_limit_complete(self):
+        total_pages = 100
+        sample_limit = 1024
+        idxs = (ctypes.c_uint64 * 200)()
+        out_count = ctypes.c_uint64(0)
+        out_spacing = ctypes.c_uint64(0)
+        rc = self.lib.di_test_sample_indices(total_pages, sample_limit, idxs, 200,
+                                             ctypes.byref(out_count), ctypes.byref(out_spacing))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out_count.value, total_pages)
+        vals = [idxs[i] for i in range(out_count.value)]
+        self.assertEqual(vals, list(range(total_pages)))
+
+    def test_classify_target_other_negative_query_fail(self):
+        tm = ctypes.c_uint64(); on = ctypes.c_uint64(); un = ctypes.c_uint64()
+        # per-page: target node 0, other node 1, negative status
+        st = (ctypes.c_int * 3)(0, 1, -2)
+        rc = self.lib.di_test_classify_placement(0, 0, 3, st, ctypes.byref(tm), ctypes.byref(on), ctypes.byref(un))
+        self.assertEqual(rc, 0)
+        self.assertEqual((tm.value, on.value, un.value), (1, 1, 1))
+        # whole-query failure => all unknown
+        tm2 = ctypes.c_uint64(); on2 = ctypes.c_uint64(); un2 = ctypes.c_uint64()
+        st2 = (ctypes.c_int * 2)(0, 0)
+        rc = self.lib.di_test_classify_placement(0, -1, 2, st2, ctypes.byref(tm2), ctypes.byref(on2), ctypes.byref(un2))
+        self.assertEqual(rc, 0)
+        self.assertEqual((tm2.value, on2.value, un2.value), (0, 0, 2))
+
+
+class TestFailureInjectionCloseout(unittest.TestCase):
+    """Closeout §5: partial create, queue-push failure, shutdown/teardown."""
+
+    def setUp(self):
+        self.lib = load_lib()
+        self.lib.di_test_set_create_fail_seam(-1)
+
+    def tearDown(self):
+        self.lib.di_test_set_create_fail_seam(-1)
+
+    def test_partial_engine_creation_failure_and_teardown(self):
+        # fail after 1 node initialized out of 2 => di_create returns NULL, no leak/corruption
+        self.lib.di_test_set_create_fail_seam(1)
+        path = make_file(1024*1024)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            st = os.fstat(fd)
+            cons = (DiConsumerCfg * 2)()
+            for i in range(2): cons[i].mode = 2
+            cfg = DiConfig(); cfg.num_nodes = 2; cfg.policy = DI_POLICY_FIXED_FAA
+            cfg.params = base_params(); cfg.consumers = ctypes.cast(cons, ctypes.POINTER(DiConsumerCfg))
+            eng = self.lib.di_create(fd, st.st_size, ctypes.byref(cfg))
+            self.assertFalse(eng)
+        finally:
+            os.close(fd); os.unlink(path)
+        # repeated after partial failure
+        self.lib.di_test_set_create_fail_seam(-1)
+        for _ in range(3):
+            path = make_file(256*1024)
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                st = os.fstat(fd)
+                cons = (DiConsumerCfg * 1)(); cons[0].mode = 2
+                cfg = DiConfig(); cfg.num_nodes = 1; cfg.policy = DI_POLICY_FIXED_FAA
+                cfg.params = base_params(); cfg.consumers = ctypes.cast(cons, ctypes.POINTER(DiConsumerCfg))
+                eng = self.lib.di_create(fd, st.st_size, ctypes.byref(cfg))
+                self.assertTrue(eng)
+                self.lib.di_destroy(eng)
+            finally:
+                os.close(fd); os.unlink(path)
+
+    def test_queue_push_failure_cleanup(self):
+        # inject push failure => run stops/fails cleanly, no leaked chunk (ingestor frees/rolls back)
+        path = make_file(4*1024*1024)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            st = os.fstat(fd)
+            cons = (DiConsumerCfg * 1)(); cons[0].mode = 2
+            cfg = DiConfig(); cfg.num_nodes = 1; cfg.policy = DI_POLICY_FIXED_FAA
+            cfg.params = base_params(base_quantum=512*1024, max_backlog=4*1024*1024)
+            cfg.consumers = ctypes.cast(cons, ctypes.POINTER(DiConsumerCfg))
+            eng = self.lib.di_create(fd, st.st_size, ctypes.byref(cfg))
+            self.assertTrue(eng)
+            self.lib.di_test_set_push_fail_seam(eng, 1)  # fail on first push attempt
+            res = DiResult(); rc = self.lib.di_run(eng, ctypes.byref(res))
+            self.lib.di_destroy(eng)
+            self.assertNotEqual(rc, 0)
+        finally:
+            os.close(fd); os.unlink(path)
+
+    def test_shutdown_with_queued_or_inflight_allocations(self):
+        # slow consumer creates queued/in-flight state; stop/teardown must free safely
+        path = make_file(8*1024*1024)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            st = os.fstat(fd)
+            cons = (DiConsumerCfg * 2)()
+            cons[0].mode = 1; cons[0].bytes_per_sec = 512*1024
+            cons[1].mode = 2
+            cfg = DiConfig(); cfg.num_nodes = 2; cfg.policy = DI_POLICY_FIXED_FAA
+            cfg.params = base_params(base_quantum=512*1024, max_backlog=2*1024*1024)
+            cfg.consumers = ctypes.cast(cons, ctypes.POINTER(DiConsumerCfg))
+            eng = self.lib.di_create(fd, st.st_size, ctypes.byref(cfg))
+            self.assertTrue(eng)
+            res = DiResult(); rc = self.lib.di_run(eng, ctypes.byref(res))
+            self.lib.di_destroy(eng)
+            self.assertEqual(rc, 0)
+            self.assertEqual(int(res.total_consumed), st.st_size)
+        finally:
+            os.close(fd); os.unlink(path)
+
+    def test_hugepage_accounting_relationships(self):
+        lib = load_lib()
+        path = make_file(2*1024*1024)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            st = os.fstat(fd)
+            cons = (DiConsumerCfg * 1)(); cons[0].mode = 2
+            cfg = DiConfig(); cfg.num_nodes = 1; cfg.policy = DI_POLICY_FIXED_FAA
+            params = base_params(); params.prefer_hugepage = 1
+            cfg.params = params
+            cfg.consumers = ctypes.cast(cons, ctypes.POINTER(DiConsumerCfg))
+            eng = lib.di_create(fd, st.st_size, ctypes.byref(cfg))
+            self.assertTrue(eng)
+            res = DiResult(); rc = lib.di_run(eng, ctypes.byref(res))
+            lib.di_destroy(eng)
+            self.assertEqual(rc, 0)
+            n = res.nodes[0]
+            req = int(n.hugepage_map_requested_bytes)
+            obt = int(n.hugepage_map_obtained_bytes)
+            fb = int(n.hugepage_fallback_bytes)
+            self.assertGreaterEqual(req, 0)
+            self.assertGreaterEqual(obt, 0)
+            self.assertGreaterEqual(fb, 0)
+            # accounting relationships: obtained+fallback should not exceed requested;
+            # when hugepages requested, allocations are accounted as obtained or fallback.
+            if req > 0:
+                self.assertLessEqual(obt + fb, req)
+                self.assertGreater(obt + fb, 0)
+        finally:
+            os.close(fd); os.unlink(path)
+

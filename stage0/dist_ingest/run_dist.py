@@ -372,12 +372,15 @@ def _node_mem_state(node_id):
     return "unknown"
 
 
-def resolve_topology(requested_nodes, phys_nodes_spec=None):
+def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False):
     """Return (logical_to_phys, per_node_cpus, topology_info, errors).
 
-    Addendum A §6: unknown Mems_allowed/meminfo represented as uncertainty;
-    automatic selection does not present uncertain nodes as verified usable;
-    explicit selection that cannot be validated fails clearly.
+    Closeout §2: unknown online-node information must not produce a verified
+    physical-node selection; unknown allowed-CPU information must not be treated
+    as an unrestricted CPU set. --no-pin permits a documented less-restrictive
+    path (CPU affinity/pinning facts not required/verified) but does NOT verify
+    unknown topology; memory/online/mems-allowed facts still must be established
+    unless explicitly stated otherwise.
     """
     errors = []
     allowed_cpus, cpus_known = _allowed_cpus()
@@ -387,6 +390,12 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None):
     online, online_known = _online_nodes()
 
     def node_usable_auto(nid):
+        # online/mems/memory must be established; CPU affinity facts may be
+        # relaxed only in the explicit --no-pin sense (auto still requires a
+        # verified usable CPU set for node selection unless we cannot establish
+        # anything). Unknown allowed-CPU info must not be treated as unrestricted.
+        if not online_known:
+            return False, [], "online_unknown"
         if not mems_known:
             return False, [], "mems_allowed_unknown"
         if nid not in allowed_mems_set:
@@ -397,19 +406,27 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None):
         if mstate == "unknown":
             return False, [], "memory_unknown"
         cpus, cpu_list_known = _node_cpus(nid)
-        if not cpu_list_known or not cpus:
-            return False, [], "cpu_unknown_or_empty"
-        if cpus_known and allowed_cpus_set:
-            cpus = [c for c in cpus if c in allowed_cpus_set]
-        elif cpus_known and not allowed_cpus_set:
-            return False, [], "no_allowed_cpus"
+        if not cpu_list_known:
+            return False, [], "cpu_unknown"
+        if not cpus:
+            return False, [], "cpu_empty"
+        # allowed-CPU set must be known to be treated as a restriction; unknown
+        # allowed-CPU info must not be treated as unrestricted.
+        if not cpus_known:
+            return False, [], "cpus_allowed_unknown"
+        cpus = [c for c in cpus if c in allowed_cpus_set]
         if not cpus:
             return False, [], "no_allowed_cpus_on_node"
         return True, cpus, "ok"
 
     usable = []
     node_states = {}
-    for nid in online:
+    if online_known:
+        scan_nodes = online
+    else:
+        # unknown online-node info: cannot produce verified selection; record state
+        scan_nodes = list(online) if online else []
+    for nid in scan_nodes:
         ok, cpus, reason = node_usable_auto(nid)
         node_states[nid] = {"usable_auto": ok, "reason": reason, "mem_state": _node_mem_state(nid)}
         if ok:
@@ -429,11 +446,14 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None):
         if errors:
             return [], [], {"mode": "explicit", "explicit": explicit, "requested_nodes": requested_nodes,
                             "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
-                            "node_states": node_states}, errors
+                            "online_known": online_known, "node_states": node_states}, errors
         # validate each explicit node - must be fully validated, no silent uncertainty
         logical_to_phys = []
         per_node_cpus = []
         for nid in explicit:
+            if not online_known:
+                errors.append("physical node %d cannot be validated: online-node information unknown" % nid)
+                continue
             if nid not in online:
                 errors.append("physical node %d not online/known" % nid)
                 continue
@@ -451,29 +471,69 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None):
                 errors.append("physical node %d has no memory" % nid)
                 continue
             cpus, cpu_list_known = _node_cpus(nid)
-            if not cpu_list_known or cpus == [] and _read_first("/sys/devices/system/node/node%d/cpulist" % nid) is None:
+            if not cpu_list_known:
                 errors.append("physical node %d cpu list missing/unparsable" % nid)
                 continue
-            if cpus_known and allowed_cpus_set:
+            if not no_pin:
+                # pinning requested: allowed-CPU info must be known and CPUs valid
+                if not cpus_known:
+                    errors.append("physical node %d cannot be validated for pinning: Cpus_allowed_list unknown" % nid)
+                    continue
                 cpus = [c for c in cpus if c in allowed_cpus_set]
-            if not cpus:
-                errors.append("physical node %d has no allowed CPUs" % nid)
-                continue
+                if not cpus:
+                    errors.append("physical node %d has no allowed CPUs for pinning" % nid)
+                    continue
+            else:
+                # --no-pin: CPU affinity/pinning not required; do not treat unknown
+                # Cpus_allowed_list as unrestricted/verified, but allow selection
+                # without verified pinning CPU set. Record uncertainty in info.
+                if cpus_known and allowed_cpus_set:
+                    # still useful to report filtered view, but not required
+                    filtered = [c for c in cpus if c in allowed_cpus_set]
+                    cpus = filtered if filtered else cpus
             logical_to_phys.append(nid)
-            per_node_cpus.append(cpus)
+            per_node_cpus.append(cpus if (not no_pin or cpus) else [])
         info = {"mode": "explicit", "online": online, "online_known": online_known,
                 "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
                 "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
                 "usable_nodes_auto": [n for n,_ in usable],
                 "logical_to_physical": logical_to_phys, "node_states": node_states,
-                "explicit": explicit}
+                "explicit": explicit, "no_pin": bool(no_pin),
+                "topology_verified": (online_known and mems_known and (cpus_known or no_pin) and len(errors) == 0),
+                "topology_facts_established": {
+                    "online_nodes": bool(online_known),
+                    "mems_allowed": bool(mems_known),
+                    "cpus_allowed": bool(cpus_known),
+                    "per_node_memory": True,  # checked per selected node when successful
+                    "per_node_cpulist": True,  # checked per selected node when successful
+                    "cpu_affinity_verified": bool(cpus_known and not no_pin),
+                },
+                "topology_unknowns": [k for k, v in {
+                    "online_nodes": not online_known,
+                    "mems_allowed": not mems_known,
+                    "cpus_allowed": not cpus_known,
+                }.items() if v]}
         if errors:
             return [], [], info, errors
         if requested_nodes and requested_nodes != len(logical_to_phys):
             errors.append("requested --nodes %d but --phys-nodes selects %d node(s)" % (requested_nodes, len(logical_to_phys)))
             return [], [], info, errors
+        # Under --no-pin, do not label unknown CPU-allowance topology as verified affinity.
+        if no_pin and not cpus_known:
+            info["topology_verified"] = False
         return logical_to_phys, per_node_cpus, info, []
 
+    # automatic selection requires fully verified topology for a verified selection
+    if not online_known:
+        return [], [], {"mode": "auto", "requested_nodes": max(1, requested_nodes), "online": online,
+                        "online_known": False, "allowed_cpus_count": len(allowed_cpus),
+                        "cpus_allowed_known": cpus_known, "mems_allowed_known": mems_known,
+                        "mems_allowed": allowed_mems, "usable_nodes_auto": [],
+                        "node_states": node_states, "logical_to_physical": [],
+                        "topology_verified": False,
+                        "topology_unknowns": ["online_nodes"] + ([k for k,v in {"mems_allowed":not mems_known,"cpus_allowed":not cpus_known}.items() if v])}, [
+            "online-node information unknown; cannot produce a verified physical-node selection"
+        ]
     n = max(1, requested_nodes)
     if len(usable) < n:
         reasons = {nid: st["reason"] for nid, st in node_states.items() if not st["usable_auto"]}
@@ -481,7 +541,8 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None):
                         "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
                         "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
                         "usable_nodes_auto": [nid for nid,_ in usable],
-                        "node_states": node_states, "logical_to_physical": []}, [
+                        "node_states": node_states, "logical_to_physical": [],
+                        "topology_verified": False}, [
             "insufficient verified usable NUMA nodes: requested %d, have %d usable (%s); excluded/uncertain=%s" %
             (n, len(usable), [nid for nid,_ in usable], reasons)
         ]
@@ -492,7 +553,8 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None):
             "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
             "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
             "usable_nodes_auto": [nid for nid,_ in usable],
-            "logical_to_physical": logical_to_phys, "node_states": node_states}
+            "logical_to_physical": logical_to_phys, "node_states": node_states,
+            "topology_verified": True, "no_pin": bool(no_pin)}
     return logical_to_phys, per_node_cpus, info, []
 
 
@@ -513,6 +575,32 @@ def build_ctypes_topology(logical_to_phys, per_node_cpus):
     cpu_list_ptrs = PtrArr(*[ctypes.cast(a, ctypes.POINTER(ctypes.c_int)) for a in cpu_list_arrays])
     keepalive = (phys_nodes_arr, cpu_counts_arr, cpu_list_arrays, cpu_list_ptrs)
     return phys_nodes_arr, cpu_counts_arr, cpu_list_ptrs, keepalive
+
+
+
+def _placement_observed_all_sampled_on_target(nodes_out):
+    """Tri-state physical-placement observation validity (Addendum A closeout).
+    true: all relevant nodes sampled, all sampled pages classifiable, every sampled matched target.
+    false: at least one sampled page observed on a different node.
+    null: sampling incomplete/unavailable/not performed or unknown page results, with no observed mismatch.
+    """
+    if not nodes_out:
+        return None
+    saw_mismatch = False
+    saw_unknown = False
+    for nd in nodes_out:
+        pl = nd.get("placement", {})
+        if int(pl.get("sample_other_node_pages", 0) or 0) > 0:
+            saw_mismatch = True
+        sampled = int(pl.get("sampled_pages", 0) or 0)
+        if (pl.get("sampling_unavailable") or pl.get("sampling_not_performed") or
+                int(pl.get("sample_unknown_pages", 0) or 0) > 0 or sampled == 0):
+            saw_unknown = True
+    if saw_mismatch:
+        return False
+    if saw_unknown:
+        return None
+    return True
 
 
 def _affinity_valid(res, strict_affinity):
@@ -581,7 +669,7 @@ def main():
     lib = load_lib()
     policy = POLICY_MAP[args.candidate]
 
-    logical_to_phys, per_node_cpus, topo_info, topo_errors = resolve_topology(args.nodes, args.phys_nodes)
+    logical_to_phys, per_node_cpus, topo_info, topo_errors = resolve_topology(args.nodes, args.phys_nodes, no_pin=bool(args.no_pin))
     if topo_errors:
         os.close(fd)
         raise SystemExit("topology resolution failed: " + "; ".join(topo_errors))
@@ -653,6 +741,7 @@ def main():
     affinity_valid = _affinity_valid(res, bool(args.strict_affinity))
     placement_policy_valid = _placement_policy_valid(res, bool(args.strict_mbind))
 
+    placement_obs = _placement_observed_all_sampled_on_target(nodes_out)
     out = {
         "candidate": args.candidate,
         "policy": res.policy,
@@ -688,19 +777,16 @@ def main():
         "placement_semantics": {
             "mbind_policy": "MPOL_PREFERRED requested; mbind_policy_applied reflects syscall success only, not physical placement proof",
             "strict_mbind_meaning": "strict enforcement of successful policy application (mbind syscall), not hard physical placement guarantee",
-            "placement_sampling": "observed page placement sampled independently of mbind result; all_sampled_on_target_node means all sampled pages observed on target node only (not all pages examined)",
+            "placement_sampling": "observed page placement sampled independently of mbind result; all_sampled_on_target_node means all sampled pages observed on target node only (not all pages examined). sample_limit and sample_spacing_pages are per-allocation sampling parameters recorded per node (spacing reflects the last allocation sampled, not an aggregate over all samples).",
             "preferred_mismatch_is_not_syscall_failure": True,
+            "placement_observed_all_sampled_on_target_meaning": "tri-state: true=all relevant nodes sampled, all sampled pages classifiable, every sampled page matched target; false=at least one sampled page observed on a different node; null=sampling incomplete/unavailable/not performed or included unknown page results with no observed mismatch",
         },
         "validity": {
             "functional_correct": functional_correct,
             "affinity_valid": affinity_valid,
             "placement_policy_valid": placement_policy_valid,
-            # backward-compatible alias: now means policy-application validity, not physical proof
             "placement_valid": placement_policy_valid,
-            "placement_observed_all_sampled_on_target": all(
-                (nd["placement"]["sampling_unavailable"] or nd["placement"]["sampling_not_performed"] or nd["placement"]["all_sampled_on_target_node"])
-                for nd in nodes_out
-            ),
+            "placement_observed_all_sampled_on_target": placement_obs,
         },
         "correct": functional_correct,
     }

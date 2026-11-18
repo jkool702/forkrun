@@ -200,3 +200,89 @@ class TestTopologyUncertainty(unittest.TestCase):
     def test_malformed_phys_nodes_rejected(self):
         phys, cpus, info, errs = run_dist.resolve_topology(2, phys_nodes_spec="a,b")
         self.assertNotEqual(errs, [])
+
+
+
+class TestTopologyCloseout(unittest.TestCase):
+    """Closeout §2: enforce topology uncertainty consistently."""
+
+    def _patch(self, status_text, online, node_cpus, node_mem_raw):
+        def fake_read_first(p):
+            if p == "/proc/self/status":
+                return status_text
+            if p == "/sys/devices/system/node/online":
+                return online
+            for nid, raw in node_mem_raw.items():
+                if p == f"/sys/devices/system/node/node{nid}/meminfo":
+                    return raw
+            for nid, lst in node_cpus.items():
+                if p == f"/sys/devices/system/node/node{nid}/cpulist":
+                    return lst
+            return None
+        return [
+            mock.patch.object(run_dist, "_read_first", side_effect=fake_read_first),
+            mock.patch.object(run_dist.os, "sched_getaffinity", side_effect=OSError("no sched"), create=True),
+        ]
+
+    def test_missing_cpus_allowed_auto_rejected(self):
+        status = "Mems_allowed_list:\t0\n"  # missing Cpus_allowed_list
+        with self._patch(status, "0\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[0], \
+             self._patch(status, "0\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1)
+        self.assertNotEqual(errs, [])
+        self.assertFalse(info.get("cpus_allowed_known", True))
+
+    def test_malformed_cpus_allowed_auto_rejected(self):
+        status = "Cpus_allowed_list:\tbogus\nMems_allowed_list:\t0\n"
+        with self._patch(status, "0\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[0], \
+             self._patch(status, "0\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1)
+        self.assertNotEqual(errs, [])
+        self.assertFalse(info.get("cpus_allowed_known", True))
+
+    def test_missing_online_node_data_auto_rejected(self):
+        status = "Cpus_allowed_list:\t0\nMems_allowed_list:\t0\n"
+        with self._patch(status, None, {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[0], \
+             self._patch(status, None, {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1)
+        self.assertNotEqual(errs, [])
+        self.assertFalse(info.get("online_known", True))
+
+    def test_malformed_online_node_data_auto_rejected(self):
+        status = "Cpus_allowed_list:\t0\nMems_allowed_list:\t0\n"
+        with self._patch(status, "bogus\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[0], \
+             self._patch(status, "bogus\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1)
+        self.assertNotEqual(errs, [])
+        self.assertFalse(info.get("online_known", True))
+
+    def test_explicit_missing_online_fails_clearly(self):
+        status = "Cpus_allowed_list:\t0\nMems_allowed_list:\t0\n"
+        with self._patch(status, None, {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[0], \
+             self._patch(status, None, {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1, phys_nodes_spec="0")
+        self.assertNotEqual(errs, [])
+        self.assertTrue(any("online-node" in e for e in errs))
+
+    def test_explicit_missing_cpus_allowed_fails_when_pinning(self):
+        status = "Mems_allowed_list:\t0\n"
+        with self._patch(status, "0\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[0], \
+             self._patch(status, "0\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1, phys_nodes_spec="0", no_pin=False)
+        self.assertNotEqual(errs, [])
+        self.assertTrue(any("Cpus_allowed" in e or "pinning" in e for e in errs))
+
+    def test_explicit_no_pin_allows_unknown_cpus_allowed_with_documented_uncertainty(self):
+        # --no-pin permits less restrictive path: CPU affinity not required/verified,
+        # but unknown topology not labeled verified.
+        status = "Mems_allowed_list:\t0\n"  # Cpus_allowed unknown
+        with self._patch(status, "0\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[0], \
+             self._patch(status, "0\n", {0: "0"}, {0: "Node 0 MemTotal: 100 kB\n"})[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1, phys_nodes_spec="0", no_pin=True)
+        self.assertEqual(errs, [])
+        self.assertEqual(phys, [0])
+        self.assertFalse(info.get("cpus_allowed_known", True))
+        self.assertFalse(info.get("topology_verified", True))
+        self.assertIn("cpus_allowed", info.get("topology_unknowns", []))
+        self.assertFalse(info.get("topology_facts_established", {}).get("cpu_affinity_verified", True))
+

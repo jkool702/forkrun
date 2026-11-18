@@ -196,14 +196,45 @@ int di_num_nodes(const di_engine_t *eng);
 int di_debug_node_accounting(di_engine_t *eng, int node,
                              uint64_t *published, uint64_t *inflight,
                              uint64_t *outstanding, uint64_t *effective);
-/* Narrow test seams (S3/S4 validation only). Engine-local and synchronized (Addendum A §7). */
+/* Narrow test seams (validation only). Engine-local and synchronized where noted. */
 int di_test_set_pread_seam(di_engine_t *eng, int mode, int counter, uint64_t threshold);
 int di_test_pread_seam_fired(di_engine_t *eng);
 int di_test_check_2m_alignment(size_t len); /* returns 1 if usable buffer 2MiB-aligned */
-/* Addendum A §3: CPU mask build/verify logic, independent of pinning a real thread.
- * require_above_cpuset_size: if nonzero, fail unless max CPU id >= CPU_SETSIZE.
- * Returns 1 on valid/match, negative on error. */
+
+/* CPU mask build/verify helpers (independent of pinning a real thread). */
 int di_test_cpu_mask_check(const int *cpus, int ncpus, int require_above_cpuset_size);
+/* Probe kernel affinity mask size (bytes) for current thread. Returns size on
+ * success, negative on error (error code in *out_err if non-NULL). */
+int di_test_probe_affinity_mask_size(size_t *out_size, int *out_err);
+/* Pin-thread role helper with injected pthread return/errno for testability.
+ * If inject_set_rc/query_rc != 0 behavior is simulated: inject_set_rc is used as
+ * pthread_setaffinity_np return (0 => proceed to query), inject_query_rc as
+ * pthread_getaffinity_np return, inject_errno sets errno around calls. Pass
+ * inject=0 to use real pthread calls. */
+int di_test_pin_role_with_inject(const int *cpus, int ncpus, di_affinity_role_t *out,
+                                 int inject, int inject_set_rc, int inject_query_rc,
+                                 int inject_errno);
+
+/* Placement sampling helpers. */
+int di_test_sample_indices(uint64_t total_pages, uint64_t sample_limit,
+                           uint64_t *out_indices, uint64_t max_out,
+                           uint64_t *out_count, uint64_t *out_spacing);
+/* Classification helper: applies move_pages-like result classification into the
+ * provided counters (all must be non-NULL). status array has count entries
+ * (per-page node id or negative). rc is move_pages return (0=per-page, <0=query
+ * failure). Returns 0 on success. */
+int di_test_classify_placement(int phys_node, long rc, int count, const int *status,
+                               uint64_t *target_match, uint64_t *other_node,
+                               uint64_t *unknown);
+/* Engine-local placement seam: override move_pages classification for next
+ * sampling calls (0=off). mode: 1=force query failure rc, 2=force per-page
+ * statuses from pattern (0=target,1=other,2=negative). */
+int di_test_set_placement_seam(di_engine_t *eng, int mode, int rc_or_unused,
+                               int pattern_len, const int *pattern);
+
+/* Failure-injection seams. */
+int di_test_set_create_fail_seam(int fail_after_nodes); /* -1 disables */
+int di_test_set_push_fail_seam(di_engine_t *eng, int fail_on_nth); /* 0 disables */
 
 /* Policy decision (exposed for unit tests). Computes claim bytes for node i
  * given per-node effective backlogs/headrooms (bytes). headrooms[i] is the

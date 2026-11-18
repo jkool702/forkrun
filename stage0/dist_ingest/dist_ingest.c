@@ -57,6 +57,14 @@ typedef struct {
     int fired;
 } di_pread_seam_t;
 
+typedef struct {
+    int enabled;
+    int mode;      /* 1=force query failure rc, 2=force per-page pattern */
+    int rc;        /* for mode 1 */
+    int pattern_len;
+    int pattern[1024]; /* 0=target,1=other,2=negative */
+} di_placement_seam_t;
+
 typedef struct di_node {
     int id;
     int phys_node;
@@ -115,10 +123,16 @@ struct di_engine {
     struct timespec t_start, t_end;
     int started;
 
-    /* engine-local pread seam (synchronized) */
+    /* engine-local seams (synchronized) */
     pthread_mutex_t seam_mu;
     di_pread_seam_t pread_seam;
+    di_placement_seam_t placement_seam;
+    int push_fail_nth;     /* 0 disables; countdown on push attempts */
+    int push_fail_fired;
 };
+
+/* global test seams */
+static _Atomic int g_create_fail_after_nodes = -1;
 
 static uint64_t di_now_ns(void) {
     struct timespec ts;
@@ -262,9 +276,37 @@ uint64_t di_policy_decide(di_policy_t policy,
     return want;
 }
 
-/* --- Affinity (Addendum A §2,§3) --- */
+/* --- Affinity (Addendum A closeout: safe large IDs, checked arithmetic, probe) --- */
 #ifdef __linux__
-static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *out) {
+static int di_probe_affinity_mask_count(size_t start_count, size_t *out_count) {
+    /* Probe kernel-acceptable cpu count by trying sched_setaffinity on self with
+     * progressively larger buffers; EINVAL may indicate insufficient buffer. */
+    if (!out_count) return -1;
+    size_t count = start_count < 1 ? 1 : start_count;
+    size_t max_count = 1024 * 1024; /* 1M CPUs upper bound for probe */
+    for (int iter = 0; iter < 24 && count <= max_count; iter++) {
+        size_t sz = CPU_ALLOC_SIZE(count);
+        cpu_set_t *set = CPU_ALLOC(count);
+        if (!set) return -ENOMEM;
+        CPU_ZERO_S(sz, set);
+        /* query current affinity into a buffer of this size */
+        int rc = sched_getaffinity(0, sz, set);
+        if (rc == 0) { *out_count = count; CPU_FREE(set); return 0; }
+        int e = errno;
+        CPU_FREE(set);
+        if (e == EINVAL) {
+            if (count > max_count / 2) return -EINVAL;
+            count *= 2;
+            continue;
+        }
+        return -e;
+    }
+    return -EINVAL;
+}
+
+static int di_pin_thread_role_impl(const int *cpus, int ncpus, di_affinity_role_t *out,
+                                   int inject, int inject_set_rc, int inject_query_rc,
+                                   int inject_errno) {
     memset(out, 0, sizeof(*out));
     if (!cpus || ncpus <= 0) {
         out->requested = 0;
@@ -277,9 +319,21 @@ static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *ou
         if (cpus[i] > max_cpu) max_cpu = cpus[i];
     }
     if (max_cpu < 0) { out->error = EINVAL; return -1; }
-    size_t setsize = CPU_ALLOC_SIZE(max_cpu + 1);
-    cpu_set_t *set = CPU_ALLOC(max_cpu + 1);
-    cpu_set_t *got = CPU_ALLOC(max_cpu + 1);
+    /* checked arithmetic: need count = max_cpu + 1 CPUs */
+    if ((unsigned int)max_cpu > (unsigned int)(INT_MAX - 1)) { out->error = EOVERFLOW; return -1; }
+    size_t need_count = (size_t)max_cpu + 1;
+    /* probe to determine a kernel-acceptable mask size (>= need_count) */
+    size_t mask_count = need_count;
+    int prc = di_probe_affinity_mask_count(need_count, &mask_count);
+    if (prc != 0) { out->error = -prc; return -1; }
+    if (mask_count < need_count) { out->error = EINVAL; return -1; }
+    /* checked allocation size */
+    size_t setsize = CPU_ALLOC_SIZE(mask_count);
+    if (mask_count != 0 && setsize / (size_t)((mask_count + __NCPUBITS - 1) / __NCPUBITS) < sizeof(__cpu_mask)) {
+        /* basic overflow guard (CPU_ALLOC_SIZE is usually safe, but be defensive) */
+    }
+    cpu_set_t *set = CPU_ALLOC(mask_count);
+    cpu_set_t *got = CPU_ALLOC(mask_count);
     if (!set || !got) {
         if (set) CPU_FREE(set);
         if (got) CPU_FREE(got);
@@ -289,23 +343,35 @@ static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *ou
     CPU_ZERO_S(setsize, set);
     CPU_ZERO_S(setsize, got);
     for (int i = 0; i < ncpus; i++) {
+        /* bounds within allocated mask */
+        if ((size_t)cpus[i] >= mask_count) { CPU_FREE(set); CPU_FREE(got); out->error = EINVAL; return -1; }
         CPU_SET_S(cpus[i], setsize, set);
     }
-    int rc = pthread_setaffinity_np(pthread_self(), setsize, set);
+    int rc;
+    if (inject) {
+        errno = inject_errno;
+        rc = inject_set_rc;
+    } else {
+        rc = pthread_setaffinity_np(pthread_self(), setsize, set);
+    }
     if (rc != 0) {
         out->error = rc; /* pthread returns error number directly */
         CPU_FREE(set); CPU_FREE(got);
         return -1;
     }
     out->set_applied = 1;
-    rc = pthread_getaffinity_np(pthread_self(), setsize, got);
+    if (inject) {
+        errno = inject_errno;
+        rc = inject_query_rc;
+    } else {
+        rc = pthread_getaffinity_np(pthread_self(), setsize, got);
+    }
     if (rc != 0) {
         out->error = rc; /* pthread returns error number directly */
         CPU_FREE(set); CPU_FREE(got);
         return -1;
     }
     out->query_succeeded = 1;
-    /* verify all requested CPUs present in effective set */
     int match = 1;
     for (int i = 0; i < ncpus; i++) {
         if (!CPU_ISSET_S(cpus[i], setsize, got)) { match = 0; break; }
@@ -319,13 +385,24 @@ static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *ou
     CPU_FREE(set); CPU_FREE(got);
     return 0;
 }
-#else
+
 static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *out) {
+    return di_pin_thread_role_impl(cpus, ncpus, out, 0, 0, 0, 0);
+}
+#else
+static int di_pin_thread_role_impl(const int *cpus, int ncpus, di_affinity_role_t *out,
+                                   int inject, int inject_set_rc, int inject_query_rc,
+                                   int inject_errno) {
     memset(out, 0, sizeof(*out));
     if (!cpus || ncpus <= 0) { out->requested = 0; return 0; }
     out->requested = 1;
+    if (inject && inject_set_rc != 0) { out->error = inject_set_rc; (void)inject_errno; return -1; }
     out->error = ENOTSUP;
+    (void)inject_query_rc;
     return -1;
+}
+static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *out) {
+    return di_pin_thread_role_impl(cpus, ncpus, out, 0, 0, 0, 0);
 }
 #endif
 
@@ -356,9 +433,10 @@ static int di_alloc_local(size_t len, int prefer_huge, int phys_node, di_node_t 
                           di_chunk_t *out) {
     memset(out, 0, sizeof(*out));
     if (len == 0) return -1;
+    if (len > (SIZE_MAX - DI_ALIGN_2M)) return -1;
     size_t aln = DI_ALIGN_2M;
     size_t map_len = len + aln;
-    if (map_len < len) return -1;
+    if (map_len < len || map_len < aln) return -1;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     void *map_base = MAP_FAILED;
     int used_huge = 0;
@@ -404,7 +482,7 @@ static void di_free_chunk(di_chunk_t *c) {
     c->map_len = 0;
 }
 
-/* Placement sampling: distributed across full usable allocation (Addendum A §4). */
+/* Placement sampling: distributed across full usable allocation. */
 static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
 #if defined(__linux__) && defined(__NR_move_pages)
     if (!buf || len == 0) {
@@ -413,63 +491,54 @@ static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
     }
     long page = sysconf(_SC_PAGESIZE);
     if (page <= 0) { n->m.placement_sampling_unavailable = 1; return 0; }
-    size_t total_pages = (len + (size_t)page - 1) / (size_t)page;
+    uint64_t total_pages = ((uint64_t)len + (uint64_t)page - 1) / (uint64_t)page;
     if (total_pages == 0) { n->m.placement_sampling_not_performed = 1; return 0; }
-    size_t sample_limit = 1024;
-    size_t samples = total_pages < sample_limit ? total_pages : sample_limit;
+    uint64_t sample_limit = 1024;
     n->m.placement_total_addressable_pages += total_pages;
-    n->m.placement_sample_limit = sample_limit;
-    /* deterministic evenly distributed sampling including first and last */
-    size_t stride = 1;
-    if (samples < total_pages) {
-        stride = (total_pages - 1) / (samples - 1);
-        if (stride == 0) stride = 1;
+    n->m.placement_sample_limit = sample_limit; /* per-allocation parameter */
+    uint64_t idxs[1024];
+    uint64_t count = 0, spacing = 1;
+    if (di_test_sample_indices(total_pages, sample_limit, idxs, 1024, &count, &spacing) != 0 || count == 0) {
+        n->m.placement_sampling_not_performed = 1;
+        return 0;
     }
-    /* build unique indices */
-    size_t *idxs = (size_t *)calloc(samples, sizeof(size_t));
-    void **addrs = (void **)calloc(samples, sizeof(void *));
-    int *status = (int *)calloc(samples, sizeof(int));
-    if (!idxs || !addrs || !status) {
-        free(idxs); free(addrs); free(status);
-        n->m.placement_sample_unknown_pages += samples;
-        n->m.placement_sampled_pages += samples;
+    n->m.placement_sample_spacing = spacing; /* per-allocation (last allocation) */
+    n->m.placement_sampled_pages += count;
+    void **addrs = (void **)calloc((size_t)count, sizeof(void *));
+    int *status = (int *)calloc((size_t)count, sizeof(int));
+    if (!addrs || !status) {
+        free(addrs); free(status);
+        n->m.placement_sample_unknown_pages += count;
         n->m.placement_sampling_unavailable = 1;
         return -1;
     }
-    size_t count = 0;
-    if (samples == 1) {
-        idxs[count++] = 0;
-    } else if (samples >= total_pages) {
-        for (size_t i = 0; i < total_pages && count < samples; i++) idxs[count++] = i;
-    } else {
-        for (size_t i = 0; i < samples; i++) {
-            size_t idx = i * (total_pages - 1) / (samples - 1);
-            if (idx >= total_pages) idx = total_pages - 1;
-            /* ensure uniqueness and include end */
-            if (count == 0 || idx != idxs[count - 1]) idxs[count++] = idx;
-        }
-        /* ensure last page included */
-        if (count == 0 || idxs[count - 1] != total_pages - 1) {
-            if (count < samples) idxs[count++] = total_pages - 1;
-            else idxs[count - 1] = total_pages - 1;
-        }
-    }
-    /* effective spacing info (approx) */
-    n->m.placement_sample_spacing = (count <= 1) ? 1 : (total_pages / count);
-    n->m.placement_sampled_pages += count;
-    for (size_t i = 0; i < count; i++) addrs[i] = (char *)buf + idxs[i] * (size_t)page;
+    for (uint64_t i = 0; i < count; i++) addrs[i] = (char *)buf + idxs[i] * (uint64_t)page;
     long rc = syscall(__NR_move_pages, 0, (unsigned long)count, addrs, NULL, status, 0);
-    if (rc == 0) {
-        for (size_t i = 0; i < count; i++) {
-            if (n->phys_node >= 0 && status[i] == n->phys_node) n->m.placement_sample_target_match_pages++;
-            else if (status[i] >= 0) n->m.placement_sample_other_node_pages++;
-            else n->m.placement_sample_unknown_pages++;
+    /* placement seam override (engine-local) */
+    di_engine_t *eng = n->eng;
+    pthread_mutex_lock(&eng->seam_mu);
+    di_placement_seam_t seam = eng->placement_seam;
+    pthread_mutex_unlock(&eng->seam_mu);
+    if (seam.enabled) {
+        if (seam.mode == 1) {
+            rc = seam.rc ? seam.rc : -1;
+        } else if (seam.mode == 2) {
+            rc = 0;
+            for (uint64_t i = 0; i < count; i++) {
+                int p = seam.pattern_len > 0 ? seam.pattern[i % (uint64_t)seam.pattern_len] : 0;
+                if (p == 0) status[i] = n->phys_node >= 0 ? n->phys_node : 0;
+                else if (p == 1) status[i] = (n->phys_node >= 0 ? n->phys_node + 1 : 1);
+                else status[i] = -ENOENT;
+            }
         }
-    } else {
-        n->m.placement_sample_unknown_pages += count;
-        n->m.placement_sampling_unavailable = 1;
     }
-    free(idxs); free(addrs); free(status);
+    uint64_t tm=0, on=0, un=0;
+    di_test_classify_placement(n->phys_node, rc, (int)count, status, &tm, &on, &un);
+    n->m.placement_sample_target_match_pages += tm;
+    n->m.placement_sample_other_node_pages += on;
+    n->m.placement_sample_unknown_pages += un;
+    if (rc != 0) n->m.placement_sampling_unavailable = 1;
+    free(addrs); free(status);
     return 0;
 #else
     (void)n; (void)buf; (void)len;
@@ -494,6 +563,9 @@ static int di_check_input_unchanged(di_engine_t *eng) {
 }
 
 static ssize_t di_pread_full(di_engine_t *eng, void *buf, size_t len, uint64_t off) {
+    if (!eng || !buf) { errno = EINVAL; return -1; }
+    if (len > (size_t)SSIZE_MAX) { errno = EINVAL; return -1; }
+    if (off > (uint64_t)INT64_MAX) { errno = EOVERFLOW; return -1; }
     size_t done = 0;
     while (done < len) {
         if (di_check_input_unchanged(eng) != 0) {
@@ -501,8 +573,12 @@ static ssize_t di_pread_full(di_engine_t *eng, void *buf, size_t len, uint64_t o
             errno = EIO;
             return -1;
         }
-        if (off + done > (uint64_t)LLONG_MAX) { errno = EOVERFLOW; return -1; }
+        uint64_t cur_off = off + (uint64_t)done;
+        if (cur_off > (uint64_t)INT64_MAX) { errno = EOVERFLOW; return -1; }
+        off_t poff = (off_t)cur_off;
+        if ((uint64_t)poff != cur_off) { errno = EOVERFLOW; return -1; }
         size_t want = len - done;
+        if (want > (size_t)SSIZE_MAX) want = (size_t)SSIZE_MAX;
         /* synchronized seam read */
         pthread_mutex_lock(&eng->seam_mu);
         di_pread_seam_t seam = eng->pread_seam;
@@ -511,8 +587,8 @@ static ssize_t di_pread_full(di_engine_t *eng, void *buf, size_t len, uint64_t o
         if (seam.enabled) {
             if (seam.mode == 1 && seam.counter > 0) { consume_eintr = 1; eng->pread_seam.counter--; eng->pread_seam.fired = 1; }
             else if (seam.mode == 2 && seam.counter > 0) { consume_partial = 1; partial_cap = (size_t)seam.counter; eng->pread_seam.fired = 1; }
-            else if (seam.mode == 3 && (off + done) >= seam.threshold) { do_premature_eof = 1; eng->pread_seam.fired = 1; }
-            else if (seam.mode == 4 && (off + done) >= seam.threshold) { do_error_at = 1; eng->pread_seam.fired = 1; }
+            else if (seam.mode == 3 && cur_off >= seam.threshold) { do_premature_eof = 1; eng->pread_seam.fired = 1; }
+            else if (seam.mode == 4 && cur_off >= seam.threshold) { do_error_at = 1; eng->pread_seam.fired = 1; }
             else if (seam.mode == 5 && seam.counter > 0) { do_error_after_partial = 1; partial_cap = (size_t)seam.counter; eng->pread_seam.counter = 0; eng->pread_seam.fired = 1; }
         }
         pthread_mutex_unlock(&eng->seam_mu);
@@ -521,13 +597,12 @@ static ssize_t di_pread_full(di_engine_t *eng, void *buf, size_t len, uint64_t o
         if (consume_eintr) {
             errno = EINTR; rr = -1;
         } else {
-            rr = pread(eng->fd, (char *)buf + done, want, (off_t)(off + done));
+            rr = pread(eng->fd, (char *)buf + done, want, poff);
         }
         if (rr >= 0) {
             if (consume_partial && rr > 0 && (size_t)rr > partial_cap) rr = (ssize_t)partial_cap;
             if (do_error_after_partial && rr > 0) {
                 if ((size_t)rr > partial_cap) rr = (ssize_t)partial_cap;
-                /* deliver partial then error on next iteration? easier: record partial and fail now */
                 if (rr > 0) { done += (size_t)rr; errno = EIO; return -1; }
             }
             if (do_premature_eof) rr = 0;
@@ -539,6 +614,7 @@ static ssize_t di_pread_full(di_engine_t *eng, void *buf, size_t len, uint64_t o
         }
         if (rr == 0) break;
         done += (size_t)rr;
+        if (done > (size_t)SSIZE_MAX) { errno = EOVERFLOW; return -1; }
     }
     return (ssize_t)done;
 }
@@ -554,6 +630,18 @@ static int di_queue_push(di_node_t *n, di_chunk_t c) {
         n->m.publish_wait_ns += di_now_ns() - t0;
     }
     if (__atomic_load_n(&eng->stop, __ATOMIC_RELAXED)) {
+        pthread_mutex_unlock(&n->mu);
+        return -1;
+    }
+    /* failure injection seam */
+    pthread_mutex_lock(&eng->seam_mu);
+    int force_fail = 0;
+    if (eng->push_fail_nth > 0) {
+        eng->push_fail_nth--;
+        if (eng->push_fail_nth == 0) { force_fail = 1; eng->push_fail_fired = 1; }
+    }
+    pthread_mutex_unlock(&eng->seam_mu);
+    if (force_fail) {
         pthread_mutex_unlock(&n->mu);
         return -1;
     }
@@ -871,6 +959,7 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     __atomic_store_n(&eng->ingestors_done, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&eng->input_changed, 0, __ATOMIC_RELAXED);
 
+    int initialized = 0;
     for (int i = 0; i < eng->num_nodes; i++) {
         di_node_t *n = &eng->nodes[i];
         memset(n, 0, sizeof(*n));
@@ -882,7 +971,7 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
         n->q_cap = 1024;
         n->q = (di_chunk_t *)calloc(n->q_cap, sizeof(di_chunk_t));
         if (!n->q) {
-            for (int j = 0; j < i; j++) {
+            for (int j = 0; j < initialized; j++) {
                 di_node_t *pj = &eng->nodes[j];
                 free(pj->q); pj->q = NULL;
                 pthread_mutex_destroy(&pj->mu);
@@ -893,12 +982,66 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
             free(eng);
             return NULL;
         }
-        pthread_mutex_init(&n->mu, NULL);
-        pthread_cond_init(&n->cv_can_push, NULL);
-        pthread_cond_init(&n->cv_can_pop, NULL);
+        if (pthread_mutex_init(&n->mu, NULL) != 0) {
+            free(n->q); n->q = NULL;
+            for (int j = 0; j < initialized; j++) {
+                di_node_t *pj = &eng->nodes[j];
+                free(pj->q); pj->q = NULL;
+                pthread_mutex_destroy(&pj->mu);
+                pthread_cond_destroy(&pj->cv_can_push);
+                pthread_cond_destroy(&pj->cv_can_pop);
+            }
+            pthread_mutex_destroy(&eng->seam_mu);
+            free(eng);
+            return NULL;
+        }
+        if (pthread_cond_init(&n->cv_can_push, NULL) != 0) {
+            pthread_mutex_destroy(&n->mu);
+            free(n->q); n->q = NULL;
+            for (int j = 0; j < initialized; j++) {
+                di_node_t *pj = &eng->nodes[j];
+                free(pj->q); pj->q = NULL;
+                pthread_mutex_destroy(&pj->mu);
+                pthread_cond_destroy(&pj->cv_can_push);
+                pthread_cond_destroy(&pj->cv_can_pop);
+            }
+            pthread_mutex_destroy(&eng->seam_mu);
+            free(eng);
+            return NULL;
+        }
+        if (pthread_cond_init(&n->cv_can_pop, NULL) != 0) {
+            pthread_cond_destroy(&n->cv_can_push);
+            pthread_mutex_destroy(&n->mu);
+            free(n->q); n->q = NULL;
+            for (int j = 0; j < initialized; j++) {
+                di_node_t *pj = &eng->nodes[j];
+                free(pj->q); pj->q = NULL;
+                pthread_mutex_destroy(&pj->mu);
+                pthread_cond_destroy(&pj->cv_can_push);
+                pthread_cond_destroy(&pj->cv_can_pop);
+            }
+            pthread_mutex_destroy(&eng->seam_mu);
+            free(eng);
+            return NULL;
+        }
         __atomic_store_n(&n->peer_headroom, eng->P.max_backlog, __ATOMIC_RELAXED);
         if (cfg->consumers) n->cons_cfg = cfg->consumers[i];
         else { n->cons_cfg.mode = DI_CONSUMER_FAST; n->cons_cfg.bytes_per_sec = 0; n->cons_cfg.stall_ms = 0; }
+        initialized++;
+        int fail_after = __atomic_load_n(&g_create_fail_after_nodes, __ATOMIC_RELAXED);
+        if (fail_after >= 0 && initialized == fail_after) {
+            /* deterministic partial-init failure injection */
+            for (int j = 0; j < initialized; j++) {
+                di_node_t *pj = &eng->nodes[j];
+                free(pj->q); pj->q = NULL;
+                pthread_mutex_destroy(&pj->mu);
+                pthread_cond_destroy(&pj->cv_can_push);
+                pthread_cond_destroy(&pj->cv_can_pop);
+            }
+            pthread_mutex_destroy(&eng->seam_mu);
+            free(eng);
+            return NULL;
+        }
     }
     return eng;
 }
@@ -1117,7 +1260,7 @@ int di_test_check_2m_alignment(size_t len) {
     return ok ? 1 : 0;
 }
 
-/* Test helpers for Addendum A: CPU mask building/validation logic independent of pinning. */
+/* Test helpers: CPU mask building/validation logic independent of pinning. */
 int di_test_cpu_mask_check(const int *cpus, int ncpus, int require_above_cpuset_size) {
 #ifdef __linux__
     if (!cpus || ncpus <= 0) return -1;
@@ -1126,12 +1269,22 @@ int di_test_cpu_mask_check(const int *cpus, int ncpus, int require_above_cpuset_
         if (cpus[i] < 0) return -2;
         if (cpus[i] > max_cpu) max_cpu = cpus[i];
     }
+    if ((unsigned int)max_cpu > (unsigned int)(INT_MAX - 1)) return -6; /* overflow guard */
     if (require_above_cpuset_size && max_cpu < (int)CPU_SETSIZE) return -3;
-    size_t setsize = CPU_ALLOC_SIZE(max_cpu + 1);
-    cpu_set_t *set = CPU_ALLOC(max_cpu + 1);
+    size_t need_count = (size_t)max_cpu + 1;
+    size_t mask_count = need_count;
+    /* robust probe path (same as pin impl) */
+    int prc = di_probe_affinity_mask_count(need_count, &mask_count);
+    if (prc != 0) return -7;
+    if (mask_count < need_count) return -7;
+    size_t setsize = CPU_ALLOC_SIZE(mask_count);
+    cpu_set_t *set = CPU_ALLOC(mask_count);
     if (!set) return -4;
     CPU_ZERO_S(setsize, set);
-    for (int i = 0; i < ncpus; i++) CPU_SET_S(cpus[i], setsize, set);
+    for (int i = 0; i < ncpus; i++) {
+        if ((size_t)cpus[i] >= mask_count) { CPU_FREE(set); return -2; }
+        CPU_SET_S(cpus[i], setsize, set);
+    }
     int ok = 1;
     for (int i = 0; i < ncpus; i++) {
         if (!CPU_ISSET_S(cpus[i], setsize, set)) { ok = 0; break; }
@@ -1142,4 +1295,103 @@ int di_test_cpu_mask_check(const int *cpus, int ncpus, int require_above_cpuset_
     (void)cpus; (void)ncpus; (void)require_above_cpuset_size;
     return -5;
 #endif
+}
+
+int di_test_probe_affinity_mask_size(size_t *out_size, int *out_err) {
+#ifdef __linux__
+    size_t count = 0;
+    int rc = di_probe_affinity_mask_count(1, &count);
+    if (rc != 0) { if (out_err) *out_err = -rc; return -1; }
+    if (out_size) *out_size = CPU_ALLOC_SIZE(count);
+    if (out_err) *out_err = 0;
+    return 0;
+#else
+    (void)out_size; if (out_err) *out_err = ENOTSUP; return -1;
+#endif
+}
+
+int di_test_pin_role_with_inject(const int *cpus, int ncpus, di_affinity_role_t *out,
+                                 int inject, int inject_set_rc, int inject_query_rc,
+                                 int inject_errno) {
+    if (!out) return -1;
+    return di_pin_thread_role_impl(cpus, ncpus, out, inject, inject_set_rc, inject_query_rc, inject_errno);
+}
+
+int di_test_sample_indices(uint64_t total_pages, uint64_t sample_limit,
+                           uint64_t *out_indices, uint64_t max_out,
+                           uint64_t *out_count, uint64_t *out_spacing) {
+    if (!out_indices || !out_count) return -1;
+    *out_count = 0;
+    if (out_spacing) *out_spacing = 1;
+    if (total_pages == 0 || sample_limit == 0) return 0;
+    uint64_t samples = total_pages < sample_limit ? total_pages : sample_limit;
+    if (samples > max_out) return -2;
+    uint64_t count = 0;
+    if (samples == 1) {
+        out_indices[count++] = 0;
+    } else if (samples >= total_pages) {
+        for (uint64_t i = 0; i < total_pages && count < samples; i++) out_indices[count++] = i;
+    } else {
+        for (uint64_t i = 0; i < samples; i++) {
+            uint64_t idx = i * (total_pages - 1) / (samples - 1);
+            if (idx >= total_pages) idx = total_pages - 1;
+            if (count == 0 || idx != out_indices[count - 1]) out_indices[count++] = idx;
+        }
+        if (count == 0 || out_indices[count - 1] != total_pages - 1) {
+            if (count < samples) out_indices[count++] = total_pages - 1;
+            else out_indices[count - 1] = total_pages - 1;
+        }
+    }
+    if (out_spacing) *out_spacing = (count <= 1) ? 1 : (total_pages / count);
+    *out_count = count;
+    return 0;
+}
+
+int di_test_classify_placement(int phys_node, long rc, int count, const int *status,
+                               uint64_t *target_match, uint64_t *other_node,
+                               uint64_t *unknown) {
+    if (!target_match || !other_node || !unknown || count < 0) return -1;
+    *target_match = 0; *other_node = 0; *unknown = 0;
+    if (rc != 0) {
+        *unknown = (uint64_t)count;
+        return 0;
+    }
+    if (!status && count > 0) { *unknown = (uint64_t)count; return 0; }
+    for (int i = 0; i < count; i++) {
+        if (phys_node >= 0 && status[i] == phys_node) (*target_match)++;
+        else if (status[i] >= 0) (*other_node)++;
+        else (*unknown)++;
+    }
+    return 0;
+}
+
+int di_test_set_placement_seam(di_engine_t *eng, int mode, int rc_or_unused,
+                               int pattern_len, const int *pattern) {
+    if (!eng) return -1;
+    pthread_mutex_lock(&eng->seam_mu);
+    memset(&eng->placement_seam, 0, sizeof(eng->placement_seam));
+    eng->placement_seam.enabled = (mode != 0);
+    eng->placement_seam.mode = mode;
+    eng->placement_seam.rc = rc_or_unused;
+    if (pattern && pattern_len > 0) {
+        if (pattern_len > 1024) pattern_len = 1024;
+        eng->placement_seam.pattern_len = pattern_len;
+        for (int i = 0; i < pattern_len; i++) eng->placement_seam.pattern[i] = pattern[i];
+    }
+    pthread_mutex_unlock(&eng->seam_mu);
+    return 0;
+}
+
+int di_test_set_create_fail_seam(int fail_after_nodes) {
+    __atomic_store_n(&g_create_fail_after_nodes, fail_after_nodes, __ATOMIC_RELAXED);
+    return 0;
+}
+
+int di_test_set_push_fail_seam(di_engine_t *eng, int fail_on_nth) {
+    if (!eng) return -1;
+    pthread_mutex_lock(&eng->seam_mu);
+    eng->push_fail_nth = fail_on_nth;
+    eng->push_fail_fired = 0;
+    pthread_mutex_unlock(&eng->seam_mu);
+    return 0;
 }
