@@ -22,11 +22,16 @@ DI_MAX_NODES = 64
 DI_POLICY_FIXED_FAA = 1
 DI_POLICY_LOCAL_ADAPTIVE = 2
 DI_POLICY_RELATIVE_ADAPTIVE = 3
+DI_POLICY_CENTRALIZED_INGEST = 4
 
 POLICY_MAP = {
     "fixed_faa": DI_POLICY_FIXED_FAA,
     "local_adaptive": DI_POLICY_LOCAL_ADAPTIVE,
     "relative_adaptive": DI_POLICY_RELATIVE_ADAPTIVE,
+    # Section 5: in-engine centralized control baseline (same engine/consumers/
+    # work units/measurement boundaries as distributed candidates).
+    "centralized_ingest": DI_POLICY_CENTRALIZED_INGEST,
+    "centralized": DI_POLICY_CENTRALIZED_INGEST,
 }
 
 CONSUMER_MODE = {
@@ -742,8 +747,19 @@ def main():
     placement_policy_valid = _placement_policy_valid(res, bool(args.strict_mbind))
 
     placement_obs = _placement_observed_all_sampled_on_target(nodes_out)
+    engine_model = "dist_ingest_experimental"
+    comparability = {
+        "engine": engine_model,
+        "consumers": "simulated_per_node (dist_ingest)",
+        "work_units": "byte-range reservations/chunks",
+        "measurement_boundaries": "di_run wall + per-node ingest/consumer CPU/backlog/reservation metrics",
+        "centralized_baseline": bool(res.policy == DI_POLICY_CENTRALIZED_INGEST),
+        "note": "Comparable only among dist_ingest_experimental candidates run with same consumers/work units/measurement boundaries. Production forkrun results, if any, are separate reference only.",
+    }
     out = {
         "candidate": args.candidate,
+        "engine_model": engine_model,
+        "comparability": comparability,
         "policy": res.policy,
         "num_nodes": res.num_nodes,
         "input": args.input,

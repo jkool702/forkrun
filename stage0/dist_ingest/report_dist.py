@@ -101,15 +101,18 @@ def main():
     lines.append("**Schema:** `%s`  " % camp.get("schema"))
     lines.append("**All trials OK:** %s" % camp.get("all_ok"))
     lines.append("")
-    lines.append("> NOTE: This campaign exercises experimental prototypes in an isolated harness. "
-                 "Fake/local NUMA results are NOT evidence of real NUMA scalability or memory locality. "
-                 "Control (existing forkrun path) and dist-engine candidates are measured through "
-                 "different execution models; compare within the stated model and treat cross-model "
-                 "comparisons as indicative, not definitive.")
+    lines.append("> NOTE (Section 5 comparability): Dist-engine candidates "
+                 "(`centralized_ingest`, `fixed_faa`, `local_adaptive`, `relative_adaptive`) run on the "
+                 "SAME experimental engine, consumer implementation, work units, and measurement boundaries "
+                 "and are the apples-to-apples comparison set for ingestion architecture. "
+                 "`production_ref`/forkrun results, if present, use a different execution model and are "
+                 "**reference only** (not apples-to-apples with dist_ingest). Fake/local NUMA results are "
+                 "NOT evidence of real NUMA scalability or memory locality.")
     lines.append("")
 
     scenarios = sorted({s for s, c in groups.keys()})
-    candidates = ["control", "fixed_faa", "local_adaptive", "relative_adaptive"]
+    # Comparable dist-engine set first; production reference reported separately.
+    candidates = ["centralized_ingest", "fixed_faa", "local_adaptive", "relative_adaptive", "production_ref", "control"]
     lines.append("## Comparative summary (median of valid trials)")
     lines.append("")
     header = "| scenario | candidate | valid/total | correct | throughput (MB/s) | wall s | reservations | ingest CPU s | notes |"
@@ -152,7 +155,7 @@ def main():
     lines.append("")
     for scen in scenarios:
         for cand in candidates:
-            if cand == "control":
+            if cand in ("control", "production_ref"):
                 continue
             recs = [r for r in groups.get((scen,cand),[]) if not r.get("invalid") and r.get("dist")]
             if not recs:
@@ -197,7 +200,8 @@ def main():
     lines.append("## Interpretation notes")
     lines.append("")
     lines.append("- **Correctness first:** any candidate with overlap/loss/dup or incorrect totals is not viable regardless of speed.")
-    lines.append("- **Control vs dist:** control uses the existing forkrun pipeline; dist candidates use the isolated experimental ingestion engine with simulated consumers. Differences in execution model limit direct comparability.")
+    lines.append("- **Comparable set (Section 5):** centralized_ingest vs fixed_faa/local_adaptive/relative_adaptive share the same dist_ingest experimental engine, simulated per-node consumers, byte-range work units, and di_run measurement boundaries.")
+    lines.append("- **Production reference:** production_ref/control uses the existing forkrun pipeline and is reported separately as reference only (not apples-to-apples with dist_ingest).")
     lines.append("- **Fake/local NUMA:** placement and locality numbers are best-effort observations on this host; they do not establish physical multi-socket behavior.")
     lines.append("- **Pipe ingestion:** out of initial bake-off for dist candidates unless explicitly enabled and validated; file ingestion is the primary target.")
     lines.append("- **Decision:** prefer simpler policy if performance/correctness/locality are equivalent. Retain centralized control if competitive. No production adoption implied.")

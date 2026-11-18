@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # One-command comparative campaign for distributed-ingestion prototypes.
-# Runs: centralized control (existing forkrun path, file workloads) and
-# fixed_faa / local_adaptive / relative_adaptive (experimental dist engine)
+# Section 5 comparability: runs centralized_ingest (dist-engine control) and
+# fixed_faa / local_adaptive / relative_adaptive on the SAME experimental engine,
+# consumer implementation, work units, and measurement boundaries.
+# production_ref (optional) runs existing forkrun path as SEPARATE reference only
+# (not apples-to-apples vs dist_ingest engine).
 # across defined scenarios. Immutable output directory, raw artifacts kept.
 #
 # No physical hardware rental. Fake NUMA / local only.
@@ -27,7 +30,7 @@ CAMPAIGN_ID=""
 SOURCE_SHA=""
 QUICK=0
 SCEN_FILTER=""
-CAND_FILTER="control,fixed_faa,local_adaptive,relative_adaptive"
+CAND_FILTER="centralized_ingest,fixed_faa,local_adaptive,relative_adaptive"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -157,15 +160,27 @@ d={
   "input": inp,
   "timeout": 600,
 }
-if cand == "control":
-  # Existing centralized control: run via forkrun (file source) with comparable settings.
+if cand in ("production_ref", "forkrun_control"):
+  # Production forkrun reference ONLY (separate execution model; not apples-to-apples
+  # with dist_ingest engine candidates/measurements).
   d.update({
     "mode": "udf",
     "workers": max(2, int(nodes)),
     "nodes": "auto" if int(nodes) > 1 else "1",
-    "candidate": "control",
+    "candidate": cand,
+    "reference_only": True,
+  })
+elif cand == "control":
+  # Back-compat alias for production reference path.
+  d.update({
+    "mode": "udf",
+    "workers": max(2, int(nodes)),
+    "nodes": "auto" if int(nodes) > 1 else "1",
+    "candidate": "production_ref",
+    "reference_only": True,
   })
 else:
+  # Dist-engine candidate (comparable set): same engine/consumers/work units/measurement.
   d.update({
     "ingest_candidate": cand,
     "dist_nodes": int(nodes),

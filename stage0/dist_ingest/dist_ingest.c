@@ -118,6 +118,7 @@ struct di_engine {
     _Atomic int input_changed;
 
     int num_nodes;
+    int centralized_ingest; /* policy 4: single ingestor distributes to all nodes */
     di_node_t nodes[DI_MAX_NODES];
 
     struct timespec t_start, t_end;
@@ -222,7 +223,7 @@ uint64_t di_policy_decide(di_policy_t policy,
 
     uint64_t claim_quanta = 0;
 
-    if (policy == DI_POLICY_FIXED_FAA) {
+    if (policy == DI_POLICY_FIXED_FAA || policy == DI_POLICY_CENTRALIZED_INGEST) {
         if (hr_i >= quantum) claim_quanta = 1;
         else claim_quanta = 0;
     } else if (policy == DI_POLICY_LOCAL_ADAPTIVE) {
@@ -753,6 +754,144 @@ static void *di_consumer_thread(void *arg) {
     return NULL;
 }
 
+/* Returns: 1 = made progress (reserved/read/published or terminal), 0 = no progress now (should wait), -1 = stop/fatal */
+static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
+    pthread_mutex_lock(&n->mu);
+    uint64_t eff = di_node_eff(n);
+    pthread_mutex_unlock(&n->mu);
+    uint64_t hr_i = (eng->P.max_backlog > eff) ? (eng->P.max_backlog - eff) : 0;
+
+    uint64_t want = 0;
+    if (eng->cfg.policy == DI_POLICY_RELATIVE_ADAPTIVE && eng->P.enable_peer_headroom) {
+        uint64_t t0p = di_now_ns();
+        uint64_t headrooms[DI_MAX_NODES];
+        uint64_t effs[DI_MAX_NODES];
+        for (int i = 0; i < eng->num_nodes; i++) {
+            headrooms[i] = __atomic_load_n(&eng->nodes[i].peer_headroom, __ATOMIC_RELAXED);
+            effs[i] = (eng->P.max_backlog > headrooms[i]) ? (eng->P.max_backlog - headrooms[i]) : eng->P.max_backlog;
+        }
+        headrooms[n->id] = hr_i; effs[n->id] = eff;
+        want = di_policy_decide(eng->cfg.policy, &eng->P, eng->num_nodes, n->id, effs, headrooms);
+        n->m.peer_observe_ns += di_now_ns() - t0p;
+        n->m.peer_observe_count++;
+    } else if (eng->cfg.policy == DI_POLICY_RELATIVE_ADAPTIVE) {
+        uint64_t headrooms[DI_MAX_NODES]; uint64_t effs[DI_MAX_NODES];
+        for (int i=0;i<eng->num_nodes;i++){ headrooms[i]=__atomic_load_n(&eng->nodes[i].peer_headroom,__ATOMIC_RELAXED); effs[i]=0; }
+        headrooms[n->id]=hr_i; effs[n->id]=eff;
+        want = di_policy_decide(eng->cfg.policy, &eng->P, eng->num_nodes, n->id, effs, headrooms);
+    } else {
+        uint64_t headrooms[DI_MAX_NODES]; uint64_t effs[DI_MAX_NODES];
+        for (int i=0;i<eng->num_nodes;i++){ headrooms[i]=0; effs[i]=0; }
+        headrooms[n->id]=hr_i; effs[n->id]=eff;
+        want = di_policy_decide(eng->cfg.policy, &eng->P, eng->num_nodes, n->id, effs, headrooms);
+    }
+
+    pthread_mutex_lock(&n->mu);
+    eff = di_node_eff(n);
+    int can = di_can_admit(eng->P.max_backlog, eff, n->outstanding, want, eng->P.one_outstanding_per_node);
+    if (!can || want == 0) {
+        n->m.zero_claims++;
+        pthread_mutex_unlock(&n->mu);
+        uint64_t go = __atomic_load_n(&eng->next_offset, __ATOMIC_ACQUIRE);
+        if (go >= eng->file_size) {
+            pthread_mutex_lock(&n->mu);
+            int outst = (n->outstanding > 0 || n->consumer_inflight_backlog > 0 || n->published_backlog > 0);
+            pthread_mutex_unlock(&n->mu);
+            if (!outst) return 1; /* node drained, no more work for it */
+        }
+        return 0;
+    }
+    n->outstanding = di_u64_add_sat(n->outstanding, want);
+    eff = di_node_eff(n);
+    if (eff > n->max_effective_backlog) n->max_effective_backlog = eff;
+    di_publish_headroom(n);
+    pthread_mutex_unlock(&n->mu);
+
+    uint64_t start = __atomic_fetch_add(&eng->next_offset, want, __ATOMIC_ACQ_REL);
+    if (start >= eng->file_size) {
+        pthread_mutex_lock(&n->mu);
+        if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
+        di_publish_headroom(n);
+        pthread_mutex_unlock(&n->mu);
+        return 1;
+    }
+    uint64_t req_len = want;
+    uint64_t avail = (eng->file_size > start) ? (eng->file_size - start) : 0;
+    uint64_t assigned = req_len < avail ? req_len : avail;
+    if (assigned < want) {
+        pthread_mutex_lock(&n->mu);
+        uint64_t delta = want - assigned;
+        if (n->outstanding >= delta) n->outstanding -= delta; else n->outstanding = 0;
+        di_publish_headroom(n);
+        pthread_mutex_unlock(&n->mu);
+    }
+    if (assigned == 0) {
+        pthread_mutex_lock(&n->mu);
+        if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
+        di_publish_headroom(n);
+        pthread_mutex_unlock(&n->mu);
+        return 1;
+    }
+
+    di_chunk_t c;
+    if (di_alloc_local((size_t)assigned, eng->P.prefer_hugepage, n->phys_node, n, &c) != 0) {
+        n->m.last_error = DI_ERR_NOMEM;
+        di_engine_stop(eng);
+        pthread_mutex_lock(&n->mu);
+        if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
+        di_publish_headroom(n);
+        pthread_mutex_unlock(&n->mu);
+        return -1;
+    }
+    c.len = assigned;
+
+    uint64_t t0r = di_now_ns();
+    ssize_t rr = di_pread_full(eng, c.buf, (size_t)assigned, start);
+    n->m.read_wait_ns += di_now_ns() - t0r;
+    if (rr < 0) {
+        n->m.last_error = DI_ERR_IO;
+        di_free_chunk(&c);
+        di_engine_stop(eng);
+        pthread_mutex_lock(&n->mu);
+        if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
+        di_publish_headroom(n);
+        pthread_mutex_unlock(&n->mu);
+        return -1;
+    }
+    uint64_t act = (uint64_t)rr;
+    if (act < assigned) {
+        __atomic_store_n(&eng->input_changed, 1, __ATOMIC_RELEASE);
+        n->m.last_error = DI_ERR_IO;
+        di_free_chunk(&c);
+        di_engine_stop(eng);
+        pthread_mutex_lock(&n->mu);
+        if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
+        di_publish_headroom(n);
+        pthread_mutex_unlock(&n->mu);
+        return -1;
+    }
+
+    n->m.reservations++;
+    n->m.bytes_reserved_req += req_len;
+    n->m.bytes_assigned += assigned;
+    n->m.bytes_read += act;
+    di_hist_add(n->m.res_hist, req_len);
+    di_record_res(n, start, req_len, assigned, act);
+    di_sample_placement(n, c.buf, act);
+
+    c.off = start; c.len = act;
+    if (di_queue_push(n, c) != 0) {
+        di_free_chunk(&c);
+        pthread_mutex_lock(&n->mu);
+        if (n->outstanding >= act) n->outstanding -= act; else n->outstanding = 0;
+        di_publish_headroom(n);
+        pthread_cond_broadcast(&n->cv_can_push);
+        pthread_mutex_unlock(&n->mu);
+        return -1;
+    }
+    return 1;
+}
+
 static void *di_ingestor_thread(void *arg) {
     di_node_t *n = (di_node_t *)arg;
     di_engine_t *eng = n->eng;
@@ -763,45 +902,55 @@ static void *di_ingestor_thread(void *arg) {
     }
     uint64_t c0 = di_thread_cpu_ns();
 
+    if (eng->centralized_ingest) {
+        /* Single ingestor distributes to all node queues (Section 5 baseline). */
+        int rr = 0;
+        for (;;) {
+            if (__atomic_load_n(&eng->stop, __ATOMIC_RELAXED)) break;
+            int progressed = 0;
+            int all_done = 1;
+            for (int k = 0; k < eng->num_nodes; k++) {
+                int t = (rr + k) % eng->num_nodes;
+                di_node_t *tn = &eng->nodes[t];
+                uint64_t go = __atomic_load_n(&eng->next_offset, __ATOMIC_ACQUIRE);
+                pthread_mutex_lock(&tn->mu);
+                int outst = (tn->outstanding > 0 || tn->consumer_inflight_backlog > 0 || tn->published_backlog > 0);
+                pthread_mutex_unlock(&tn->mu);
+                if (go < eng->file_size || outst) all_done = 0;
+                int rc = di_ingest_step(tn, eng);
+                if (rc < 0) { progressed = -1; break; }
+                if (rc == 1) {
+                    /* step may have reserved/published or found node terminal-for-now */
+                    progressed = 1;
+                }
+            }
+            rr = (rr + 1) % eng->num_nodes;
+            if (progressed < 0) break;
+            uint64_t go = __atomic_load_n(&eng->next_offset, __ATOMIC_ACQUIRE);
+            if (all_done && go >= eng->file_size) break;
+            if (progressed == 0) {
+                uint64_t t0w = di_now_ns();
+                struct timespec ts; ts.tv_sec=0; ts.tv_nsec=200000;
+                nanosleep(&ts,NULL);
+                n->m.claim_wait_ns += di_now_ns() - t0w;
+            }
+        }
+        n->m.ingest_cpu_ns = di_thread_cpu_ns() - c0;
+        __atomic_store_n(&eng->ingestors_done, eng->num_nodes, __ATOMIC_RELEASE);
+        for (int j = 0; j < eng->num_nodes; j++) {
+            pthread_mutex_lock(&eng->nodes[j].mu);
+            pthread_cond_broadcast(&eng->nodes[j].cv_can_pop);
+            pthread_cond_broadcast(&eng->nodes[j].cv_can_push);
+            pthread_mutex_unlock(&eng->nodes[j].mu);
+        }
+        return NULL;
+    }
+
     for (;;) {
         if (__atomic_load_n(&eng->stop, __ATOMIC_RELAXED)) break;
-
-        pthread_mutex_lock(&n->mu);
-        uint64_t eff = di_node_eff(n);
-        pthread_mutex_unlock(&n->mu);
-        uint64_t hr_i = (eng->P.max_backlog > eff) ? (eng->P.max_backlog - eff) : 0;
-
-        uint64_t want = 0;
-        if (eng->cfg.policy == DI_POLICY_RELATIVE_ADAPTIVE && eng->P.enable_peer_headroom) {
-            uint64_t t0p = di_now_ns();
-            uint64_t headrooms[DI_MAX_NODES];
-            uint64_t effs[DI_MAX_NODES];
-            for (int i = 0; i < eng->num_nodes; i++) {
-                headrooms[i] = __atomic_load_n(&eng->nodes[i].peer_headroom, __ATOMIC_RELAXED);
-                effs[i] = (eng->P.max_backlog > headrooms[i]) ? (eng->P.max_backlog - headrooms[i]) : eng->P.max_backlog;
-            }
-            headrooms[n->id] = hr_i; effs[n->id] = eff;
-            want = di_policy_decide(eng->cfg.policy, &eng->P, eng->num_nodes, n->id, effs, headrooms);
-            n->m.peer_observe_ns += di_now_ns() - t0p;
-            n->m.peer_observe_count++;
-        } else if (eng->cfg.policy == DI_POLICY_RELATIVE_ADAPTIVE) {
-            uint64_t headrooms[DI_MAX_NODES]; uint64_t effs[DI_MAX_NODES];
-            for (int i=0;i<eng->num_nodes;i++){ headrooms[i]=__atomic_load_n(&eng->nodes[i].peer_headroom,__ATOMIC_RELAXED); effs[i]=0; }
-            headrooms[n->id]=hr_i; effs[n->id]=eff;
-            want = di_policy_decide(eng->cfg.policy, &eng->P, eng->num_nodes, n->id, effs, headrooms);
-        } else {
-            uint64_t headrooms[DI_MAX_NODES]; uint64_t effs[DI_MAX_NODES];
-            for (int i=0;i<eng->num_nodes;i++){ headrooms[i]=0; effs[i]=0; }
-            headrooms[n->id]=hr_i; effs[n->id]=eff;
-            want = di_policy_decide(eng->cfg.policy, &eng->P, eng->num_nodes, n->id, effs, headrooms);
-        }
-
-        pthread_mutex_lock(&n->mu);
-        eff = di_node_eff(n);
-        int can = di_can_admit(eng->P.max_backlog, eff, n->outstanding, want, eng->P.one_outstanding_per_node);
-        if (!can || want == 0) {
-            n->m.zero_claims++;
-            pthread_mutex_unlock(&n->mu);
+        int rc = di_ingest_step(n, eng);
+        if (rc < 0) break;
+        if (rc == 0) {
             uint64_t t0w = di_now_ns();
             struct timespec ts; ts.tv_sec=0; ts.tv_nsec=200000;
             nanosleep(&ts,NULL);
@@ -815,93 +964,13 @@ static void *di_ingestor_thread(void *arg) {
             }
             continue;
         }
-        n->outstanding = di_u64_add_sat(n->outstanding, want);
-        eff = di_node_eff(n);
-        if (eff > n->max_effective_backlog) n->max_effective_backlog = eff;
-        di_publish_headroom(n);
-        pthread_mutex_unlock(&n->mu);
-
-        uint64_t start = __atomic_fetch_add(&eng->next_offset, want, __ATOMIC_ACQ_REL);
-        if (start >= eng->file_size) {
+        /* progressed/terminal-for-step; loop continues to re-evaluate */
+        uint64_t go = __atomic_load_n(&eng->next_offset, __ATOMIC_ACQUIRE);
+        if (go >= eng->file_size) {
             pthread_mutex_lock(&n->mu);
-            if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
-            di_publish_headroom(n);
+            int outst = (n->outstanding > 0 || n->consumer_inflight_backlog > 0 || n->published_backlog > 0);
             pthread_mutex_unlock(&n->mu);
-            break;
-        }
-        uint64_t req_len = want;
-        uint64_t avail = (eng->file_size > start) ? (eng->file_size - start) : 0;
-        uint64_t assigned = req_len < avail ? req_len : avail;
-        if (assigned < want) {
-            pthread_mutex_lock(&n->mu);
-            uint64_t delta = want - assigned;
-            if (n->outstanding >= delta) n->outstanding -= delta; else n->outstanding = 0;
-            di_publish_headroom(n);
-            pthread_mutex_unlock(&n->mu);
-        }
-        if (assigned == 0) {
-            pthread_mutex_lock(&n->mu);
-            if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
-            di_publish_headroom(n);
-            pthread_mutex_unlock(&n->mu);
-            break;
-        }
-
-        di_chunk_t c;
-        if (di_alloc_local((size_t)assigned, eng->P.prefer_hugepage, n->phys_node, n, &c) != 0) {
-            n->m.last_error = DI_ERR_NOMEM;
-            di_engine_stop(eng);
-            pthread_mutex_lock(&n->mu);
-            if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
-            di_publish_headroom(n);
-            pthread_mutex_unlock(&n->mu);
-            break;
-        }
-        c.len = assigned;
-
-        uint64_t t0r = di_now_ns();
-        ssize_t rr = di_pread_full(eng, c.buf, (size_t)assigned, start);
-        n->m.read_wait_ns += di_now_ns() - t0r;
-        if (rr < 0) {
-            n->m.last_error = DI_ERR_IO;
-            di_free_chunk(&c);
-            di_engine_stop(eng);
-            pthread_mutex_lock(&n->mu);
-            if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
-            di_publish_headroom(n);
-            pthread_mutex_unlock(&n->mu);
-            break;
-        }
-        uint64_t act = (uint64_t)rr;
-        if (act < assigned) {
-            __atomic_store_n(&eng->input_changed, 1, __ATOMIC_RELEASE);
-            n->m.last_error = DI_ERR_IO;
-            di_free_chunk(&c);
-            di_engine_stop(eng);
-            pthread_mutex_lock(&n->mu);
-            if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
-            di_publish_headroom(n);
-            pthread_mutex_unlock(&n->mu);
-            break;
-        }
-
-        n->m.reservations++;
-        n->m.bytes_reserved_req += req_len;
-        n->m.bytes_assigned += assigned;
-        n->m.bytes_read += act;
-        di_hist_add(n->m.res_hist, req_len);
-        di_record_res(n, start, req_len, assigned, act);
-        di_sample_placement(n, c.buf, act);
-
-        c.off = start; c.len = act;
-        if (di_queue_push(n, c) != 0) {
-            di_free_chunk(&c);
-            pthread_mutex_lock(&n->mu);
-            if (n->outstanding >= act) n->outstanding -= act; else n->outstanding = 0;
-            di_publish_headroom(n);
-            pthread_cond_broadcast(&n->cv_can_push);
-            pthread_mutex_unlock(&n->mu);
-            break;
+            if (!outst) break;
         }
     }
 
@@ -932,6 +1001,7 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     eng->file_size = file_size;
     eng->cfg = *cfg;
     eng->num_nodes = cfg->num_nodes;
+    eng->centralized_ingest = (cfg->policy == DI_POLICY_CENTRALIZED_INGEST);
     eng->P = cfg->params;
     if (eng->P.base_quantum == 0) eng->P.base_quantum = DI_QUANTUM_DEFAULT;
     if (eng->P.max_backlog == 0) eng->P.max_backlog = 64ULL * eng->P.base_quantum;
@@ -1094,11 +1164,20 @@ int di_run(di_engine_t *eng, di_result_t *result) {
             rc = DI_ERR_THREAD; di_engine_stop(eng);
         }
     }
-    for (int i = 0; i < eng->num_nodes; i++) {
-        if (rc == 0 && pthread_create(&eng->nodes[i].ing_tid, NULL, di_ingestor_thread, &eng->nodes[i]) == 0) {
-            eng->nodes[i].has_ing = 1;
+    if (eng->centralized_ingest) {
+        /* Section 5: single in-engine ingestor distributes to all node queues. */
+        if (rc == 0 && pthread_create(&eng->nodes[0].ing_tid, NULL, di_ingestor_thread, &eng->nodes[0]) == 0) {
+            eng->nodes[0].has_ing = 1;
         } else if (rc == 0) {
             rc = DI_ERR_THREAD; di_engine_stop(eng);
+        }
+    } else {
+        for (int i = 0; i < eng->num_nodes; i++) {
+            if (rc == 0 && pthread_create(&eng->nodes[i].ing_tid, NULL, di_ingestor_thread, &eng->nodes[i]) == 0) {
+                eng->nodes[i].has_ing = 1;
+            } else if (rc == 0) {
+                rc = DI_ERR_THREAD; di_engine_stop(eng);
+            }
         }
     }
 

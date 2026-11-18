@@ -20,10 +20,15 @@ extern "C" {
 #define DI_MAX_NODES 64
 
 typedef enum {
-    DI_POLICY_CENTRALIZED_CONTROL = 0, /* run existing control path externally */
+    DI_POLICY_CENTRALIZED_CONTROL = 0, /* legacy/external; not run by this engine */
     DI_POLICY_FIXED_FAA = 1,
     DI_POLICY_LOCAL_ADAPTIVE = 2,
     DI_POLICY_RELATIVE_ADAPTIVE = 3,
+    /* Section 5: in-engine centralized control baseline. Same engine/consumers/
+     * work units/measurement as distributed candidates, but a single ingestor
+     * thread reserves/reads and round-robin dispatches chunks to all node queues
+     * (centralized scheduling/distribution) instead of one ingestor per node. */
+    DI_POLICY_CENTRALIZED_INGEST = 4,
 } di_policy_t;
 
 typedef enum {

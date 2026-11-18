@@ -366,10 +366,16 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     python_dir = python_path or os.path.join(REPO, "python")
 
     # Experimental distributed-ingest candidates (WO-NUMA-DISTRIBUTED-INGEST).
-    # Selected by spec["ingest_candidate"] in {fixed_faa, local_adaptive,
-    # relative_adaptive}. "control"/absent use the existing forkrun child.
+    # Section 5 comparability: distributed candidates and centralized control
+    # run on the same experimental dist_ingest engine, consumer implementation,
+    # work units, and measurement boundaries. Production forkrun "control"/absent
+    # remains a separate reference path only (not apples-to-apples).
     ingest_candidate = spec.get("ingest_candidate")
-    use_dist = ingest_candidate in ("fixed_faa", "local_adaptive", "relative_adaptive")
+    dist_engine_candidates = {
+        "fixed_faa", "local_adaptive", "relative_adaptive",
+        "centralized_ingest", "centralized",
+    }
+    use_dist = ingest_candidate in dist_engine_candidates
 
     script = child_script or CHILD_SCRIPT
 
