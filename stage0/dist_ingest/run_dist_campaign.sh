@@ -19,8 +19,11 @@ usage: run_dist_campaign.sh [options]
   --trials N           trials per case (default 3)
   --quick              small local smoke (1 trial, small corpus, subset)
   --scenarios LIST     comma-separated scenario ids (default: all)
-  --candidates LIST    comma-separated: control,fixed_faa,local_adaptive,relative_adaptive
+  --candidates LIST    comma-separated (default: centralized_ingest,fixed_faa,local_adaptive,relative_adaptive)
   --source-sha SHA
+  --seed SEED          deterministic random seed for candidate/scenario ordering
+  --shuffle-scenarios  randomize scenario-block order (reproducible by seed)
+  --cache-policy TEXT  explicit cache/warm-up assumption recorded in manifest
 EOF
 }
 
@@ -31,6 +34,9 @@ SOURCE_SHA=""
 QUICK=0
 SCEN_FILTER=""
 CAND_FILTER="centralized_ingest,fixed_faa,local_adaptive,relative_adaptive"
+SEED=""
+SHUFFLE_SCENARIOS=0
+CACHE_POLICY="best_effort_os_cache (no privileged cold-cache control; limitation explicit)"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -41,6 +47,9 @@ while [ "$#" -gt 0 ]; do
     --scenarios) SCEN_FILTER=${2:?}; shift 2 ;;
     --candidates) CAND_FILTER=${2:?}; shift 2 ;;
     --source-sha) SOURCE_SHA=${2:?}; shift 2 ;;
+    --seed) SEED=${2:?}; shift 2 ;;
+    --shuffle-scenarios) SHUFFLE_SCENARIOS=1; shift ;;
+    --cache-policy) CACHE_POLICY=${2:?}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "dist-campaign: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -54,6 +63,10 @@ if [ -z "$CAMPAIGN_ID" ]; then
 fi
 if [ -z "$OUT" ]; then
   OUT="stage0/dist_ingest/runs/$CAMPAIGN_ID"
+fi
+if [ -z "$SEED" ]; then
+  # deterministic default seed recorded for reproducibility
+  SEED="$CAMPAIGN_ID"
 fi
 
 if [ -e "$OUT" ]; then
@@ -127,42 +140,83 @@ fi
 IFS=',' read -ra CANDS <<< "$CAND_FILTER"
 FAILURES=()
 OUTCOMES="$OUT/.outcomes.tsv"
+ORDER_LOG="$OUT/execution-order.jsonl"
 : > "$OUTCOMES"
+: > "$ORDER_LOG"
 
-should_run_scen() {
-  local s=$1
-  [ -z "$SCEN_FILTER" ] && return 0
-  [[ ",$SCEN_FILTER," == *",$s,"* ]]
-}
-should_run_cand() {
-  local c=$1
-  [[ ",$CAND_FILTER," == *",$c,"* ]]
-}
+# Build and execute randomized/interleaved plan (Section 7). Candidate order is
+# shuffled within each (scenario,trial) block; scenario-block order optionally
+# shuffled. Seed and actual execution order recorded for reproducibility.
+PLAN_FILE="$OUT/.run_plan.tsv"
+export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
+python3 - "$OUT" "$SEED" "$TRIALS" "$SCEN_FILTER" "$CAND_FILTER" "$SHUFFLE_SCENARIOS" "$PLAN_FILE" <<'PY'
+import json, os, random, sys
+out, seed, trials, scen_filter, cand_filter, shuf_sc, plan_path = sys.argv[1:8]
+trials = int(trials)
+shuf_sc = shuf_sc == '1'
+scen_defs = [l for l in os.environ.get('DIST_SCEN_DEFS','').split('\n') if l.strip()]
+scen_set = set([s for s in scen_filter.split(',') if s]) if scen_filter else None
+cand_list = [c for c in cand_filter.split(',') if c]
+def allowed_scen(s): return scen_set is None or s in scen_set
+scens = []
+for d in scen_defs:
+    sid = d.split('|',1)[0]
+    if allowed_scen(sid): scens.append(d)
+rng_scen = random.Random(str(seed) + '|scenarios')
+if shuf_sc:
+    rng_scen.shuffle(scens)
+blocks = []
+for d in scens:
+    sid = d.split('|',1)[0]
+    for t in range(1, trials+1):
+        cands = list(cand_list)
+        random.Random(str(seed)+'|'+sid+'|'+str(t)).shuffle(cands)
+        blocks.append((sid,d,t,cands))
+with open(plan_path,'w') as f:
+    for sid,d,t,cands in blocks:
+        f.write('\t'.join([sid,d,str(t),','.join(cands)])+'\n')
+# record plan summary
+with open(os.path.join(out,'execution-plan.json'),'w') as f:
+    json.dump({'seed':seed,'shuffle_scenarios':shuf_sc,'trials':trials,
+               'scenarios':[b[0] for b in blocks if b[2]==1] if shuf_sc else [d.split('|',1)[0] for d in scens],
+               'blocks':[{'scenario':b[0],'trial':b[2],'candidate_order':b[3]} for b in blocks]}, f, indent=2, sort_keys=True)
+PY
 
-for scen_def in "${SCENARIOS[@]}"; do
-  IFS='|' read -r sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra <<< "$scen_def"
-  should_run_scen "$sid" || continue
-  for cand in "${CANDS[@]}"; do
-    should_run_cand "$cand" || continue
+while IFS=$'\t' read -r sid scen_def t cand_csv; do
+  [ -z "$sid" ] && continue
+  IFS='|' read -r _sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra <<< "$scen_def"
+  IFS=',' read -ra BLOCK_CANDS <<< "$cand_csv"
+  echo "BLOCK scenario=$sid trial=$t order=$cand_csv" >&2
+  printf '{"scenario":"%s","trial":%s,"candidate_order":[%s]}\n' "$sid" "$t" "$(python3 - <<PY "$cand_csv"
+import json,sys; print(','.join(json.dumps(x) for x in sys.argv[1].split(',') if x))
+PY
+)" >> "$ORDER_LOG"
+  for cand in "${BLOCK_CANDS[@]}"; do
+    [ -z "$cand" ] && continue
     case_id="${sid}__${cand}"
-    for t in $(seq 1 "$TRIALS"); do
-      out="$OUT/cases/$case_id/trial$t"
-      mkdir -p "$out" || exit 1
-      spec="$out/spec.json"
-      input_path="$OUT/$inp"
-      # build spec
-      python3 - "$spec" "$sid" "$cand" "$case_id" "$input_path" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" <<'PY'
+    out="$OUT/cases/$case_id/trial$t"
+    # Re-running a failed block must not overwrite earlier raw evidence.
+    if [ -e "$out/manifest.json" ]; then
+      echo "SKIP existing evidence: $case_id trial$t" >&2
+      prev=skipped_existing
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$prev" "cases/$case_id/trial$t/manifest.json" >> "$OUTCOMES"
+      continue
+    fi
+    mkdir -p "$out" || exit 1
+    spec="$out/spec.json"
+    input_path="$OUT/$inp"
+    # build spec
+    python3 - "$spec" "$sid" "$cand" "$case_id" "$input_path" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" "$SEED" <<'PY'
 import json, sys
-(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog)=sys.argv[1:14]
+(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed)=sys.argv[1:15]
 d={
   "id": cid,
   "scenario": sid,
   "input": inp,
   "timeout": 600,
+  "campaign_seed": seed,
 }
 if cand in ("production_ref", "forkrun_control"):
-  # Production forkrun reference ONLY (separate execution model; not apples-to-apples
-  # with dist_ingest engine candidates/measurements).
   d.update({
     "mode": "udf",
     "workers": max(2, int(nodes)),
@@ -171,7 +225,6 @@ if cand in ("production_ref", "forkrun_control"):
     "reference_only": True,
   })
 elif cand == "control":
-  # Back-compat alias for production reference path.
   d.update({
     "mode": "udf",
     "workers": max(2, int(nodes)),
@@ -180,7 +233,6 @@ elif cand == "control":
     "reference_only": True,
   })
 else:
-  # Dist-engine candidate (comparable set): same engine/consumers/work units/measurement.
   d.update({
     "ingest_candidate": cand,
     "dist_nodes": int(nodes),
@@ -195,26 +247,25 @@ else:
   })
 with open(spec,'w') as f: json.dump(d,f,indent=2,sort_keys=True)
 PY
-      if python3 stage0/run_case.py --spec "$spec" --out "$out" \
-           --campaign-id "$CAMPAIGN_ID" --trial "$t" --source-sha "$SOURCE_SHA"; then
-        status=ok
-      else
-        status=failed
-        FAILURES+=("$case_id trial$t")
-        echo "TRIAL FAILED: $case_id trial$t" >&2
-      fi
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$status" "cases/$case_id/trial$t/manifest.json" >> "$OUTCOMES"
-    done
+    if python3 stage0/run_case.py --spec "$spec" --out "$out" \
+         --campaign-id "$CAMPAIGN_ID" --trial "$t" --source-sha "$SOURCE_SHA"; then
+      status=ok
+    else
+      status=failed
+      FAILURES+=("$case_id trial$t")
+      echo "TRIAL FAILED: $case_id trial$t" >&2
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$status" "cases/$case_id/trial$t/manifest.json" >> "$OUTCOMES"
   done
-done
+done < "$PLAN_FILE"
 
 python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" \
   || echo "WARN: env-after capture failed" >&2
 
-# campaign manifest (simple)
-python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" <<'PY'
+# campaign manifest (Section 7: seed, actual execution order, cache assumptions)
+python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" <<'PY'
 import json, os, sys, time
-out,cid,sha,trials,outcomes=sys.argv[1:6]
+out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc=sys.argv[1:9]
 rows=[]
 with open(outcomes) as f:
     for line in f:
@@ -222,8 +273,22 @@ with open(outcomes) as f:
         if not line: continue
         case,scen,cand,t,status,man=line.split('\t')
         rows.append({"case":case,"scenario":scen,"candidate":cand,"trial":int(t),"status":status,"manifest":man})
-doc={"schema":"dist-campaign/1","campaign_id":cid,"source_sha":sha,"trials":int(trials),
-     "outcomes":rows,"all_ok":all(r['status']=='ok' for r in rows),"finished_epoch":time.time()}
+order=[]
+op=os.path.join(out,'execution-order.jsonl')
+if os.path.isfile(op):
+    with open(op) as f:
+        for line in f:
+            line=line.strip()
+            if line: order.append(json.loads(line))
+plan=None
+pp=os.path.join(out,'execution-plan.json')
+if os.path.isfile(pp):
+    with open(pp) as f: plan=json.load(f)
+all_ok = all(r['status'] in ('ok','skipped_existing') for r in rows) if rows else False
+doc={"schema":"dist-campaign/2","campaign_id":cid,"source_sha":sha,"trials":int(trials),
+     "randomization":{"seed":seed,"shuffle_scenarios":(shuf_sc=='1'),"execution_order":order,"plan":plan},
+     "cache_policy":cache_policy,
+     "outcomes":rows,"all_ok":all_ok,"finished_epoch":time.time()}
 with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,indent=2,sort_keys=True)
 PY
 

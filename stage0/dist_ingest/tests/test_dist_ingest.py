@@ -16,6 +16,7 @@ DI_MAX_NODES = 64
 DI_POLICY_FIXED_FAA = 1
 DI_POLICY_LOCAL_ADAPTIVE = 2
 DI_POLICY_RELATIVE_ADAPTIVE = 3
+DI_POLICY_CENTRALIZED_INGEST = 4
 
 
 class DiPolicyParams(ctypes.Structure):
@@ -33,6 +34,7 @@ class DiPolicyParams(ctypes.Structure):
         ("strict_mbind", ctypes.c_int),
         ("one_outstanding_per_node", ctypes.c_int),
         ("enable_peer_headroom", ctypes.c_int),
+        ("consumer_kernel", ctypes.c_int),
     ]
 
 
@@ -339,7 +341,7 @@ class TestEngineCorrectness(unittest.TestCase):
             nodes = rng.randint(1, 6)
             quantum = rng.choice([4096, 65536, 262144, 1048576])
             max_backlog = rng.choice([quantum*2, quantum*8, quantum*32])
-            pol = rng.choice([DI_POLICY_FIXED_FAA, DI_POLICY_LOCAL_ADAPTIVE, DI_POLICY_RELATIVE_ADAPTIVE])
+            pol = rng.choice([DI_POLICY_FIXED_FAA, DI_POLICY_LOCAL_ADAPTIVE, DI_POLICY_RELATIVE_ADAPTIVE, DI_POLICY_CENTRALIZED_INGEST])
             path = make_file(size)
             try:
                 rc, res, sz = run_engine(path, pol, num_nodes=nodes, quantum=quantum, max_backlog=max_backlog,
@@ -349,6 +351,42 @@ class TestEngineCorrectness(unittest.TestCase):
                 self.assertEqual(int(res.total_consumed), size)
             finally:
                 os.unlink(path)
+
+
+class TestCentralizedEngine(unittest.TestCase):
+    """Section 5: in-engine centralized control baseline (same engine/consumers/work units)."""
+
+    def _assert_correct(self, rc, res, file_size):
+        self.assertEqual(rc, 0)
+        self.assertFalse(res.overlap_detected)
+        self.assertFalse(res.duplicate_detected)
+        self.assertFalse(res.lost_detected)
+        self.assertEqual(int(res.input_changed), 0)
+        self.assertEqual(int(res.total_consumed), file_size)
+        self.assertEqual(int(res.total_published), file_size)
+
+    def test_centralized_correctness_multi_node(self):
+        for size in (0, 1, 4096, 2*1024*1024 + 7, 5*1024*1024):
+            path = make_file(size)
+            try:
+                rc, res, sz = run_engine(path, DI_POLICY_CENTRALIZED_INGEST, num_nodes=4, quantum=512*1024, max_backlog=4*1024*1024)
+                self._assert_correct(rc, res, sz)
+            finally:
+                os.unlink(path)
+
+    def test_centralized_cli(self):
+        path = make_file(2*1024*1024)
+        try:
+            p = subprocess.run([sys.executable, os.path.join(PKG,'run_dist.py'),
+                                '--candidate','centralized_ingest','--input',path,'--nodes','2','--no-pin'],
+                               capture_output=True,text=True,cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-800:] + "\n" + p.stdout[-400:])
+            self.assertIn('CHILD_DONE', p.stdout)
+            self.assertIn('DIST_RESULT', p.stderr)
+            self.assertIn('"engine_model": "dist_ingest_experimental"', p.stderr)
+            self.assertIn('"centralized_baseline": true', p.stderr)
+        finally:
+            os.unlink(path)
 
 
 class TestRunnerCLI(unittest.TestCase):

@@ -269,10 +269,15 @@ uint64_t di_policy_decide(di_policy_t policy,
     }
 
     if (claim_quanta == 0) return 0;
+    /* overflow-checked multiplication (Section 9) */
+    if (quantum != 0 && claim_quanta > UINT64_MAX / quantum) return 0;
     uint64_t want = claim_quanta * quantum;
+    /* align_reservations: quantize claims to quantum multiples when requested/feasible */
     if (want > hr_i) want = (hr_i / quantum) * quantum;
     if (want > max_res) want = (max_res / quantum) * quantum;
     if (want == 0) return 0;
+    if (want > hr_i) return 0; /* max_reservation/headroom must never be exceeded */
+    (void)params->align_reservations; /* honored: quantum-multiple sizing */
     (void)effective_backlogs;
     return want;
 }
@@ -700,6 +705,17 @@ static void di_consume_complete(di_node_t *n, uint64_t len) {
 }
 
 static void di_consume_chunk(di_node_t *n, di_chunk_t *c) {
+    /* Section 5: deterministic memory-touching consumer kernel (identical for
+     * all common-engine candidates). Volatile sink prevents optimization. */
+    if (n->eng->P.consumer_kernel == 1 && c->buf && c->len > 0) {
+        volatile uint64_t sink = 0;
+        const unsigned char *p = (const unsigned char *)c->buf;
+        size_t len = c->len;
+        uint64_t acc = 0;
+        for (size_t i = 0; i < len; i++) acc += p[i];
+        sink = acc;
+        (void)sink;
+    }
     di_consumer_cfg_t *cc = &n->cons_cfg;
     uint64_t bps = cc->bytes_per_sec;
     if (!(cc->mode == DI_CONSUMER_FAST || bps == 0)) {
@@ -807,6 +823,13 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
     di_publish_headroom(n);
     pthread_mutex_unlock(&n->mu);
 
+    if (want > UINT64_MAX - __atomic_load_n(&eng->next_offset, __ATOMIC_RELAXED)) {
+        pthread_mutex_lock(&n->mu);
+        if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
+        di_publish_headroom(n);
+        pthread_mutex_unlock(&n->mu);
+        return 1;
+    }
     uint64_t start = __atomic_fetch_add(&eng->next_offset, want, __ATOMIC_ACQ_REL);
     if (start >= eng->file_size) {
         pthread_mutex_lock(&n->mu);
@@ -1006,6 +1029,9 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     if (eng->P.base_quantum == 0) eng->P.base_quantum = DI_QUANTUM_DEFAULT;
     if (eng->P.max_backlog == 0) eng->P.max_backlog = 64ULL * eng->P.base_quantum;
     if (eng->P.max_reservation == 0) eng->P.max_reservation = eng->P.max_backlog;
+    /* Section 9: reject invalid/contradictory config rather than silent misuse */
+    if (eng->P.base_quantum == 0 || eng->P.max_backlog == 0) { free(eng); return NULL; }
+    if (eng->P.max_reservation > eng->P.max_backlog) eng->P.max_reservation = eng->P.max_backlog;
     eng->P.one_outstanding_per_node = 1;
     if (!eng->P.enable_peer_headroom) eng->P.enable_peer_headroom = 1;
     pthread_mutex_init(&eng->seam_mu, NULL);

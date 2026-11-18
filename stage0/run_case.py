@@ -675,8 +675,21 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
         incomplete.append("child returncode %s" % manifest.get("returncode"))
     if "child_report" not in manifest:
         incomplete.append("missing child_report")
-    if not diag["queue_present"]:
-        incomplete.append("missing STAGE0_DIAG/STAGE0_FINAL telemetry")
+    is_dist_engine = (manifest.get("dist_result") is not None) or (spec.get("ingest_candidate") in {
+        "fixed_faa", "local_adaptive", "relative_adaptive", "centralized_ingest", "centralized",
+    })
+    if is_dist_engine:
+        # Section 8: DIST_RESULT is authoritative for experimental dist-engine
+        # candidates; do not require fabricated STAGE0_DIAG/STAGE0_FINAL time-series.
+        dr = manifest.get("dist_result") or {}
+        if "dist_result" not in manifest:
+            incomplete.append("missing dist_result")
+        else:
+            if not dr.get("correct", False):
+                incomplete.append("dist_result not correct (functional validity failed)")
+    else:
+        if not diag["queue_present"]:
+            incomplete.append("missing STAGE0_DIAG/STAGE0_FINAL telemetry")
     if manifest.get("producer_returncode") not in (None, 0):
         incomplete.append("producer returncode %s"
                           % manifest.get("producer_returncode"))

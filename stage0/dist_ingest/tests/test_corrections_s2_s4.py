@@ -29,6 +29,7 @@ class DiPolicyParams(ctypes.Structure):
         ("strict_mbind", ctypes.c_int),
         ("one_outstanding_per_node", ctypes.c_int),
         ("enable_peer_headroom", ctypes.c_int),
+        ("consumer_kernel", ctypes.c_int),
     ]
 
 

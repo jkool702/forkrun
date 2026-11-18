@@ -57,6 +57,7 @@ class DiPolicyParams(ctypes.Structure):
         ("strict_mbind", ctypes.c_int),
         ("one_outstanding_per_node", ctypes.c_int),
         ("enable_peer_headroom", ctypes.c_int),
+        ("consumer_kernel", ctypes.c_int),
     ]
 
 
@@ -191,19 +192,24 @@ def affinity_role_to_dict(r):
     }
 
 
-def node_metrics_to_dict(m, idx):
+def node_metrics_to_dict(m, idx, requested_phys_node=None):
     # placement_sample_all_matched is a narrow summary: all sampled pages observed on
     # preferred/target node. It does NOT imply every page in allocation was examined and
     # does NOT imply mbind syscall success/failure by itself.
     sampled = int(m.placement_sampled_pages)
+    total_pages = int(m.placement_total_addressable_pages)
+    limit = int(m.placement_sample_limit)
     all_sampled_match = (
         sampled > 0 and
         int(m.placement_sample_target_match_pages) == sampled and
         int(m.placement_sample_other_node_pages) == 0 and
         int(m.placement_sample_unknown_pages) == 0
     )
+    sampling_complete = bool(sampled > 0 and total_pages > 0 and sampled >= total_pages)
+    sampling_partial = bool(sampled > 0 and total_pages > sampled)
     return {
         "node": idx,
+        "requested_physical_node": requested_phys_node,
         "reservations": m.reservations,
         "bytes_reserved_req": m.bytes_reserved_req,
         "bytes_assigned": m.bytes_assigned,
@@ -227,28 +233,53 @@ def node_metrics_to_dict(m, idx):
         "peer_observe_ns": m.peer_observe_ns,
         "peer_observe_count": m.peer_observe_count,
         "placement": {
-            "total_addressable_pages": int(m.placement_total_addressable_pages),
+            "requested_physical_node": requested_phys_node,
+            "total_addressable_pages": total_pages,
             "sampled_pages": sampled,
-            "sample_limit": int(m.placement_sample_limit),
+            "sample_limit_per_allocation": limit,
             "sample_spacing_pages": int(m.placement_sample_spacing),
+            "local_pages_on_target_node": int(m.placement_sample_target_match_pages),
+            "remote_pages_other_node": int(m.placement_sample_other_node_pages),
+            "unknown_pages": int(m.placement_sample_unknown_pages),
+            # backward-compatible aliases
             "sample_target_match_pages": int(m.placement_sample_target_match_pages),
             "sample_other_node_pages": int(m.placement_sample_other_node_pages),
             "sample_unknown_pages": int(m.placement_sample_unknown_pages),
             "sampling_unavailable": bool(m.placement_sampling_unavailable),
             "sampling_not_performed": bool(m.placement_sampling_not_performed),
+            "sampling_complete": sampling_complete,
+            "sampling_partial": sampling_partial,
             "all_sampled_on_target_node": bool(all_sampled_match),
         },
         "memory_policy": {
+            "requested": bool(m.mbind_policy_requested),
+            "success": bool(m.mbind_policy_applied),
+            "failure": bool(m.mbind_policy_requested and not m.mbind_policy_applied),
+            "error": int(m.mbind_error),
+            # aliases
             "mbind_policy_requested": bool(m.mbind_policy_requested),
             "mbind_policy_applied": bool(m.mbind_policy_applied),
             "mbind_error": int(m.mbind_error),
             "strict_mbind_failed": bool(m.strict_mbind_failed),
         },
         "affinity": {
+            "requested_physical_node": requested_phys_node,
             "ingestor": affinity_role_to_dict(m.affinity_ingestor),
             "consumer": affinity_role_to_dict(m.affinity_consumer),
+            "effective_verified": bool(
+                (not m.affinity_ingestor.requested or m.affinity_ingestor.matched) and
+                (not m.affinity_consumer.requested or m.affinity_consumer.matched)
+            ),
             "strict_affinity_failed": bool(m.strict_affinity_failed),
         },
+        "hugepages": {
+            "requested_bytes": int(m.hugepage_map_requested_bytes),
+            "mapping_obtained_bytes": int(m.hugepage_map_obtained_bytes),
+            "ordinary_fallback_bytes": int(m.hugepage_fallback_bytes),
+            "observed_huge_kb": int(m.hugepage_observed_kb),
+            "observed_available": bool(int(m.hugepage_observed_kb) > 0),
+        },
+        # aliases preserved
         "hugepage_map_requested_bytes": m.hugepage_map_requested_bytes,
         "hugepage_map_obtained_bytes": m.hugepage_map_obtained_bytes,
         "hugepage_fallback_bytes": m.hugepage_fallback_bytes,
@@ -262,6 +293,9 @@ def node_metrics_to_dict(m, idx):
 
 
 def emit_stage0_lines(res, policy_name):
+    """Section 8: emit a distinctly labeled distributed-ingest summary.
+    Do NOT emit fabricated STAGE0_DIAG time-series samples; DIST_RESULT is the
+    authoritative source for experimental dist-engine measurements."""
     t_ms = int(res.wall_seconds * 1000)
     total_cpu = res.ingest_cpu_ns
     q_parts = []
@@ -270,12 +304,11 @@ def emit_stage0_lines(res, policy_name):
         nm = res.nodes[i]
         q_parts.append("n%d:%d,%d" % (i, nm.chunks_published, nm.chunks_consumed))
         b_parts.append("n%d:%d,%d" % (i, nm.current_outstanding, nm.current_published_backlog))
-    line = ("STAGE0_FINAL src=dist-ingest t_ms=%d t_us=%d moved=%d major=0 tgt=%d "
+    line = ("STAGE0_DIST_SUMMARY src=dist-ingest t_ms=%d t_us=%d moved=%d major=0 tgt=%d "
             "lim=0 gated_ms=0 cpu_ns=%d q=%s b=%s policy=%s"
             % (t_ms, int(res.wall_seconds * 1e6), res.total_consumed, res.num_nodes - 1,
                total_cpu, ";".join(q_parts), ";".join(b_parts), policy_name))
     print(line, file=sys.stderr)
-    print(line.replace("STAGE0_FINAL", "STAGE0_DIAG", 1), file=sys.stderr)
 
 
 def _parse_id_list(raw):
@@ -740,13 +773,23 @@ def main():
 
     emit_stage0_lines(res, args.candidate)
 
-    nodes_out = [node_metrics_to_dict(res.nodes[i], i) for i in range(res.num_nodes)]
+    nodes_out = [node_metrics_to_dict(res.nodes[i], i, logical_to_phys[i] if i < len(logical_to_phys) else None) for i in range(res.num_nodes)]
     functional_correct = (rc == 0 and not res.overlap_detected and not res.duplicate_detected and not res.lost_detected
                           and not res.input_changed and res.total_consumed == st.st_size)
     affinity_valid = _affinity_valid(res, bool(args.strict_affinity))
     placement_policy_valid = _placement_policy_valid(res, bool(args.strict_mbind))
 
     placement_obs = _placement_observed_all_sampled_on_target(nodes_out)
+    # Section 6: separate validity classifications. A trial may be valid for one
+    # purpose and invalid for another; do not collapse into a single misleading flag.
+    performance_measurement_valid = bool(functional_correct and affinity_valid)
+    numa_placement_valid = None  # tri-state: True verified, False mismatch, None unknown/incomplete
+    if placement_obs is False or (args.strict_mbind and not placement_policy_valid):
+        numa_placement_valid = False
+    elif placement_obs is True and placement_policy_valid and affinity_valid:
+        numa_placement_valid = True
+    else:
+        numa_placement_valid = None
     engine_model = "dist_ingest_experimental"
     comparability = {
         "engine": engine_model,
@@ -798,6 +841,10 @@ def main():
             "placement_observed_all_sampled_on_target_meaning": "tri-state: true=all relevant nodes sampled, all sampled pages classifiable, every sampled page matched target; false=at least one sampled page observed on a different node; null=sampling incomplete/unavailable/not performed or included unknown page results with no observed mismatch",
         },
         "validity": {
+            "functional_correctness": functional_correct,
+            "performance_measurement": performance_measurement_valid,
+            "numa_placement": numa_placement_valid,
+            # detailed/compat fields
             "functional_correct": functional_correct,
             "affinity_valid": affinity_valid,
             "placement_policy_valid": placement_policy_valid,

@@ -20,7 +20,7 @@ class DiPolicyParams(ctypes.Structure):
         ("relative_rounding", ctypes.c_int), ("local_max_claim_quanta", ctypes.c_uint64),
         ("align_reservations", ctypes.c_int), ("prefer_hugepage", ctypes.c_int),
         ("strict_affinity", ctypes.c_int), ("strict_mbind", ctypes.c_int),
-        ("one_outstanding_per_node", ctypes.c_int), ("enable_peer_headroom", ctypes.c_int),
+        ("one_outstanding_per_node", ctypes.c_int), ("enable_peer_headroom", ctypes.c_int), ("consumer_kernel", ctypes.c_int),
     ]
 
 

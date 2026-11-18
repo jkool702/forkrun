@@ -77,6 +77,9 @@ typedef struct {
     /* Experiment */
     int one_outstanding_per_node; /* enforced as 1 in prototype */
     int enable_peer_headroom;     /* publish/read advisory headroom */
+    /* Section 5: deterministic consumer kernel for common-engine comparability.
+     * 0=none (rate-limit/stall only), 1=full byte-scan sum (memory-touch, default). */
+    int consumer_kernel;
 } di_policy_params_t;
 
 typedef struct {
