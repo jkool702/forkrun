@@ -88,6 +88,7 @@ class DiNodeMetrics(ctypes.Structure):
         ("bytes_read", ctypes.c_uint64),
         ("bytes_published", ctypes.c_uint64),
         ("bytes_consumed", ctypes.c_uint64),
+        ("consumer_bytes_scanned", ctypes.c_uint64),
         ("chunks_published", ctypes.c_uint64),
         ("chunks_consumed", ctypes.c_uint64),
         ("zero_claims", ctypes.c_uint64),
@@ -126,6 +127,9 @@ class DiNodeMetrics(ctypes.Structure):
         ("mbind_policy_requested", ctypes.c_int),
         ("mbind_policy_applied", ctypes.c_int),
         ("mbind_error", ctypes.c_int),
+        ("mbind_requested_count", ctypes.c_uint64),
+        ("mbind_success_count", ctypes.c_uint64),
+        ("mbind_failure_count", ctypes.c_uint64),
         ("strict_mbind_failed", ctypes.c_int),
         ("strict_affinity_failed", ctypes.c_int),
         ("last_error", ctypes.c_int),
@@ -140,6 +144,7 @@ class DiResult(ctypes.Structure):
         ("total_read", ctypes.c_uint64),
         ("total_published", ctypes.c_uint64),
         ("total_consumed", ctypes.c_uint64),
+        ("total_consumer_bytes_scanned", ctypes.c_uint64),
         ("reservations_total", ctypes.c_uint64),
         ("eof_offset", ctypes.c_uint64),
         ("overlap_detected", ctypes.c_int),
@@ -192,7 +197,7 @@ def affinity_role_to_dict(r):
     }
 
 
-def node_metrics_to_dict(m, idx, requested_phys_node=None):
+def node_metrics_to_dict(m, idx, requested_phys_node=None, policy=None):
     # placement_sample_all_matched is a narrow summary: all sampled pages observed on
     # preferred/target node. It does NOT imply every page in allocation was examined and
     # does NOT imply mbind syscall success/failure by itself.
@@ -207,6 +212,40 @@ def node_metrics_to_dict(m, idx, requested_phys_node=None):
     )
     sampling_complete = bool(sampled > 0 and total_pages > 0 and sampled >= total_pages)
     sampling_partial = bool(sampled > 0 and total_pages > sampled)
+
+    mbind_req_c = int(getattr(m, "mbind_requested_count", 0))
+    mbind_suc_c = int(getattr(m, "mbind_success_count", 0))
+    mbind_fail_c = int(getattr(m, "mbind_failure_count", 0))
+    mbind_requested = bool(m.mbind_policy_requested) or mbind_req_c > 0
+    # compatibility: all requested operations succeeded (and >=1 requested)
+    mbind_all_ok = bool(mbind_requested and mbind_fail_c == 0 and (mbind_suc_c > 0 or bool(m.mbind_policy_applied)))
+
+    # Role applicability by actual topology/architecture (not by thread existence alone).
+    # centralized_ingest: single ingestor on central node (node 0) + all consumers.
+    # distributed: ingestor+consumer per configured logical node.
+    ingestor_required = True
+    if policy == DI_POLICY_CENTRALIZED_INGEST:
+        ingestor_required = (idx == 0)
+    consumer_required = True
+
+    ing = affinity_role_to_dict(m.affinity_ingestor)
+    con = affinity_role_to_dict(m.affinity_consumer)
+    ing["required"] = bool(ingestor_required)
+    ing["applicable"] = bool(ingestor_required)
+    con["required"] = bool(consumer_required)
+    con["applicable"] = bool(consumer_required)
+
+    def _role_verified(rdict, required):
+        if not required:
+            return None  # N/A
+        if not rdict["requested"]:
+            return None  # not requested => cannot be established/verified
+        ok = bool(rdict["set_applied"] and rdict["query_succeeded"] and rdict["matched"])
+        return True if ok else False
+
+    ing_v = _role_verified(ing, ingestor_required)
+    con_v = _role_verified(con, consumer_required)
+
     return {
         "node": idx,
         "requested_physical_node": requested_phys_node,
@@ -216,6 +255,7 @@ def node_metrics_to_dict(m, idx, requested_phys_node=None):
         "bytes_read": m.bytes_read,
         "bytes_published": m.bytes_published,
         "bytes_consumed": m.bytes_consumed,
+        "consumer_bytes_scanned": int(getattr(m, "consumer_bytes_scanned", 0)),
         "chunks_published": m.chunks_published,
         "chunks_consumed": m.chunks_consumed,
         "zero_claims": m.zero_claims,
@@ -252,23 +292,28 @@ def node_metrics_to_dict(m, idx, requested_phys_node=None):
             "all_sampled_on_target_node": bool(all_sampled_match),
         },
         "memory_policy": {
-            "requested": bool(m.mbind_policy_requested),
-            "success": bool(m.mbind_policy_applied),
-            "failure": bool(m.mbind_policy_requested and not m.mbind_policy_applied),
+            "requested": bool(mbind_requested),
+            "requested_count": mbind_req_c,
+            "success_count": mbind_suc_c,
+            "failure_count": mbind_fail_c,
+            "success": bool(mbind_all_ok),
+            "failure": bool(mbind_fail_c > 0),
+            "all_requested_succeeded": bool(mbind_all_ok),
             "error": int(m.mbind_error),
-            # aliases
-            "mbind_policy_requested": bool(m.mbind_policy_requested),
-            "mbind_policy_applied": bool(m.mbind_policy_applied),
+            # aliases (compatibility: all requested succeeded, not merely any)
+            "mbind_policy_requested": bool(mbind_requested),
+            "mbind_policy_applied": bool(mbind_all_ok),
             "mbind_error": int(m.mbind_error),
             "strict_mbind_failed": bool(m.strict_mbind_failed),
         },
         "affinity": {
             "requested_physical_node": requested_phys_node,
-            "ingestor": affinity_role_to_dict(m.affinity_ingestor),
-            "consumer": affinity_role_to_dict(m.affinity_consumer),
+            "ingestor": ing,
+            "consumer": con,
+            "ingestor_verified": ing_v,
+            "consumer_verified": con_v,
             "effective_verified": bool(
-                (not m.affinity_ingestor.requested or m.affinity_ingestor.matched) and
-                (not m.affinity_consumer.requested or m.affinity_consumer.matched)
+                (ing_v is not False) and (con_v is not False) and (ing_v is True or con_v is True or (ing_v is None and con_v is None))
             ),
             "strict_affinity_failed": bool(m.strict_affinity_failed),
         },
@@ -641,31 +686,87 @@ def _placement_observed_all_sampled_on_target(nodes_out):
     return True
 
 
-def _affinity_valid(res, strict_affinity):
-    for i in range(res.num_nodes):
-        nm = res.nodes[i]
-        if nm.strict_affinity_failed:
-            return False
-        if strict_affinity:
-            if nm.affinity_ingestor.requested and not nm.affinity_ingestor.matched:
-                return False
-            if nm.affinity_consumer.requested and not nm.affinity_consumer.matched:
-                return False
+def _affinity_role_factual(rdict, required):
+    """Factual tri-state for one role (independent of strict enforcement).
+    required=False => N/A (None). required=True: requested+applied+queried+matched => True;
+    requested but failed/not matched => False; not requested => None (cannot be established)."""
+    if not required:
+        return None
+    if not rdict.get("requested"):
+        return None
+    ok = bool(rdict.get("set_applied") and rdict.get("query_succeeded") and rdict.get("matched"))
+    return True if ok else False
+
+
+def _affinity_valid_factual(nodes_out):
+    """Factual tri-state affinity validity independent of --strict-affinity.
+    Evaluated only over roles required by actual topology/architecture.
+    true: all required requested roles successfully applied, queried, matched.
+    false: at least one required requested role failed or did not match.
+    null: required affinity not requested or cannot be established (and no required failure)."""
+    if not nodes_out:
+        return None
+    saw_false = False
+    saw_unknown = False
+    saw_verified = False
+    for nd in nodes_out:
+        aff = nd.get("affinity", {})
+        for role_name in ("ingestor", "consumer"):
+            r = aff.get(role_name, {})
+            v = _affinity_role_factual(r, bool(r.get("required", False)))
+            if v is False:
+                saw_false = True
+            elif v is True:
+                saw_verified = True
+            elif bool(r.get("required", False)):
+                # required but unknown/unrequested
+                saw_unknown = True
+    if saw_false:
+        return False
+    if saw_unknown:
+        return None
+    if saw_verified:
+        return True
+    return None
+
+
+def _memory_policy_valid_factual(nodes_out):
+    """Factual tri-state memory-policy application validity independent of --strict-mbind.
+    true: >=1 policy application required and every requested application succeeded.
+    false: >=1 requested application failed.
+    null: no policy application requested or cannot be established."""
+    if not nodes_out:
+        return None
+    total_req = 0
+    total_fail = 0
+    for nd in nodes_out:
+        mp = nd.get("memory_policy", {})
+        req = int(mp.get("requested_count", 0) or 0)
+        fail = int(mp.get("failure_count", 0) or 0)
+        # fall back to booleans if counts absent
+        if req == 0 and mp.get("requested"):
+            req = 1
+            if mp.get("failure") or (mp.get("requested") and not mp.get("all_requested_succeeded", mp.get("success"))):
+                fail = 1
+        total_req += req
+        total_fail += fail
+    if total_req <= 0:
+        return None
+    if total_fail > 0:
+        return False
     return True
 
 
-def _placement_policy_valid(res, strict_mbind):
-    # strict_mbind means strict enforcement of successful policy application (mbind),
-    # not a guarantee of hard physical placement. Mismatch under MPOL_PREFERRED is not
-    # a policy-application failure.
-    for i in range(res.num_nodes):
-        nm = res.nodes[i]
-        if nm.strict_mbind_failed:
-            return False
-        if strict_mbind:
-            if nm.mbind_policy_requested and not nm.mbind_policy_applied:
-                return False
-    return True
+def _performance_measurement_valid(functional_correct, affinity_valid):
+    # Useful for performance comparison only when functionally correct and affinity
+    # is factually verified. Unknown/unverified affinity => not verified (unknown).
+    if not functional_correct:
+        return False
+    if affinity_valid is True:
+        return True
+    if affinity_valid is False:
+        return False
+    return None
 
 
 def main():
@@ -695,6 +796,9 @@ def main():
     ap.add_argument("--slow-mode", default=None, choices=sorted(CONSUMER_MODE.keys()))
     ap.add_argument("--slow-bps", type=int, default=0)
     ap.add_argument("--slow-stall-ms", type=int, default=0)
+    ap.add_argument("--consumer-kernel", default="full_byte_scan",
+                    choices=["full_byte_scan", "none"],
+                    help="deterministic consumer kernel: full_byte_scan (default, memory-touch) or none (explicit opt-out)")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
@@ -730,6 +834,7 @@ def main():
     params.strict_mbind = 1 if args.strict_mbind else 0
     params.one_outstanding_per_node = 1
     params.enable_peer_headroom = 1
+    params.consumer_kernel = 1 if args.consumer_kernel == "full_byte_scan" else 0
 
     cons_arr = (DiConsumerCfg * n)()
     for i in range(n):
@@ -773,31 +878,37 @@ def main():
 
     emit_stage0_lines(res, args.candidate)
 
-    nodes_out = [node_metrics_to_dict(res.nodes[i], i, logical_to_phys[i] if i < len(logical_to_phys) else None) for i in range(res.num_nodes)]
+    nodes_out = [node_metrics_to_dict(res.nodes[i], i, logical_to_phys[i] if i < len(logical_to_phys) else None, policy=policy) for i in range(res.num_nodes)]
     functional_correct = (rc == 0 and not res.overlap_detected and not res.duplicate_detected and not res.lost_detected
                           and not res.input_changed and res.total_consumed == st.st_size)
-    affinity_valid = _affinity_valid(res, bool(args.strict_affinity))
-    placement_policy_valid = _placement_policy_valid(res, bool(args.strict_mbind))
-
+    affinity_valid = _affinity_valid_factual(nodes_out)
+    placement_policy_valid = _memory_policy_valid_factual(nodes_out)
     placement_obs = _placement_observed_all_sampled_on_target(nodes_out)
-    # Section 6: separate validity classifications. A trial may be valid for one
-    # purpose and invalid for another; do not collapse into a single misleading flag.
-    performance_measurement_valid = bool(functional_correct and affinity_valid)
-    numa_placement_valid = None  # tri-state: True verified, False mismatch, None unknown/incomplete
-    if placement_obs is False or (args.strict_mbind and not placement_policy_valid):
+    performance_measurement_valid = _performance_measurement_valid(functional_correct, affinity_valid)
+
+    # Overall NUMA-placement validity (tri-state, factual; strict flags affect enforcement, not truth):
+    # true requires successful required policy application (true), verified required affinity (true),
+    # and positive placement observations (true). Observed mismatch => false. Otherwise unknown.
+    if placement_obs is False:
         numa_placement_valid = False
-    elif placement_obs is True and placement_policy_valid and affinity_valid:
+    elif (placement_obs is True and placement_policy_valid is True and affinity_valid is True):
         numa_placement_valid = True
+    elif (affinity_valid is False or placement_policy_valid is False):
+        numa_placement_valid = False
     else:
         numa_placement_valid = None
+
     engine_model = "dist_ingest_experimental"
+    consumer_kernel_name = "full_byte_scan" if params.consumer_kernel == 1 else "none"
     comparability = {
         "engine": engine_model,
         "consumers": "simulated_per_node (dist_ingest)",
         "work_units": "byte-range reservations/chunks",
         "measurement_boundaries": "di_run wall + per-node ingest/consumer CPU/backlog/reservation metrics",
         "centralized_baseline": bool(res.policy == DI_POLICY_CENTRALIZED_INGEST),
-        "note": "Comparable only among dist_ingest_experimental candidates run with same consumers/work units/measurement boundaries. Production forkrun results, if any, are separate reference only.",
+        "consumer_kernel": consumer_kernel_name,
+        "consumer_kernel_id": int(params.consumer_kernel),
+        "note": "Comparable only among dist_ingest_experimental candidates run with same consumers/work units/measurement boundaries and identical consumer kernel/params. Production forkrun results, if any, are separate reference only.",
     }
     out = {
         "candidate": args.candidate,
@@ -815,6 +926,7 @@ def main():
         "total_read": res.total_read,
         "total_published": res.total_published,
         "total_consumed": res.total_consumed,
+        "total_consumer_bytes_scanned": int(getattr(res, "total_consumer_bytes_scanned", 0)),
         "reservations_total": res.reservations_total,
         "overlap_detected": bool(res.overlap_detected),
         "duplicate_detected": bool(res.duplicate_detected),
@@ -824,6 +936,20 @@ def main():
         "consumer_cpu_ns": res.consumer_cpu_ns,
         "res_hist": list(res.res_hist),
         "nodes": nodes_out,
+        "consumer_kernel": {
+            "name": consumer_kernel_name,
+            "id": int(params.consumer_kernel),
+            "params": {
+                "consumer_mode_arg": args.consumer_mode,
+                "consumer_bps": int(args.consumer_bps),
+                "consumer_stall_ms": int(args.consumer_stall_ms),
+            },
+            "scan_bytes_evidence": {
+                "total_consumer_bytes_scanned": int(getattr(res, "total_consumer_bytes_scanned", 0)),
+                "total_consumed": int(res.total_consumed),
+                "scan_equals_consumed": bool(int(getattr(res, "total_consumer_bytes_scanned", 0)) == int(res.total_consumed)) if consumer_kernel_name == "full_byte_scan" else bool(int(getattr(res, "total_consumer_bytes_scanned", 0)) == 0),
+            },
+        },
         "topology": {
             **topo_info,
             "requested_nodes_arg": args.nodes,
@@ -835,14 +961,22 @@ def main():
         },
         "placement_semantics": {
             "mbind_policy": "MPOL_PREFERRED requested; mbind_policy_applied reflects syscall success only, not physical placement proof",
-            "strict_mbind_meaning": "strict enforcement of successful policy application (mbind syscall), not hard physical placement guarantee",
+            "mbind_policy_applied_meaning": "compatibility field: true only when >=1 policy application requested and every requested application succeeded (not merely any)",
+            "strict_mbind_meaning": "strict enforcement of successful policy application (mbind syscall), not hard physical placement guarantee; strictness controls abort/enforcement, not factual validity reporting",
+            "strict_affinity_meaning": "strictness controls abort/enforcement, not factual validity reporting",
             "placement_sampling": "observed page placement sampled independently of mbind result; all_sampled_on_target_node means all sampled pages observed on target node only (not all pages examined). sample_limit and sample_spacing_pages are per-allocation sampling parameters recorded per node (spacing reflects the last allocation sampled, not an aggregate over all samples).",
             "preferred_mismatch_is_not_syscall_failure": True,
             "placement_observed_all_sampled_on_target_meaning": "tri-state: true=all relevant nodes sampled, all sampled pages classifiable, every sampled page matched target; false=at least one sampled page observed on a different node; null=sampling incomplete/unavailable/not performed or included unknown page results with no observed mismatch",
+            "affinity_validity_meaning": "tri-state factual: true=all required requested roles set/query/matched; false=any required requested role failed/not matched; null=required affinity not requested or cannot be established",
+            "memory_policy_validity_meaning": "tri-state factual: true=>=1 requested and every requested application succeeded; false=>=1 requested application failed; null=no policy application requested or cannot be established",
+            "numa_placement_validity_meaning": "tri-state: true requires successful required policy application, verified required affinity, and positive placement observations; false on observed mismatch or required affinity/policy failure evidence; null otherwise",
         },
         "validity": {
             "functional_correctness": functional_correct,
             "performance_measurement": performance_measurement_valid,
+            "affinity": affinity_valid,
+            "memory_policy_application": placement_policy_valid,
+            "placement_observed": placement_obs,
             "numa_placement": numa_placement_valid,
             # detailed/compat fields
             "functional_correct": functional_correct,

@@ -420,6 +420,8 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
             cmd += ["--prefer-hugepage"]
         if spec.get("phys_nodes"):
             cmd += ["--phys-nodes", str(spec.get("phys_nodes"))]
+        if spec.get("consumer_kernel") is not None:
+            cmd += ["--consumer-kernel", str(spec.get("consumer_kernel"))]
         if spec.get("strict_affinity"):
             cmd += ["--strict-affinity"]
         if spec.get("strict_mbind"):

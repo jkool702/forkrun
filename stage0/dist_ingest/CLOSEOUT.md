@@ -1,139 +1,121 @@
-# WO-NUMA-DIST-INGEST-CORRECTIONS-AND-VALIDATION-2 — Closeout Report
+# WO-NUMA-DIST-INGEST-BENCHMARK-SEMANTICS-AND-RENTAL-DRIVER-CORRECTIONS-1 — Closeout Report
 
-**Work order:** `WO-NUMA-DIST-INGEST-CORRECTIONS-AND-VALIDATION-2` (corrective and validation; not a rewrite).  
-**Status:** corrective implementation, Section 5 comparable benchmark harness, and validation completed on this host through the committed checkpoints below. **No physical-NUMA hardware rented. No production adoption claimed.**
+**Work order:** `WO-NUMA-DIST-INGEST-BENCHMARK-SEMANTICS-AND-RENTAL-DRIVER-CORRECTIONS-1` (focused post-closeout correction checkpoint).  
+**Supplements:** completed `WO-NUMA-DIST-INGEST-CORRECTIONS-AND-VALIDATION-2` (Sections 1–14, preserved). Does **not** replace prior work, invalidate checkpoint history, or reimplement the ingestion architecture.  
+**Status:** corrections implemented, validated, and committed on this host. **No physical-NUMA hardware rented. No production adoption started. No pipe-ingestion work or NUMA-ingest redesign started.**
 
 ## 1. Repository state
 
 - **Branch:** `NEW/REFACTOR5.1`
-- **Starting baseline (prototype suite):** `419c0ce1cdd57e06168ba2d91c0d1400e79489e6` (preserved)
-- **Corrective checkpoints (this WO lineage, pushed):**
-  - `7e3a4d08` — `dist-ingest: apply WO-NUMA-DIST-INGEST-CORRECTIONS-AND-VALIDATION-2 sections 1-4 (checkpoint)`
-  - `f9bc3541` — `dist-ingest: apply WO-NUMA-DIST-INGEST-CORRECTIONS-AND-VALIDATION-2 Addendum A checkpoint`
-  - `b542dc6d` — `dist-ingest: apply WO-NUMA-DIST-INGEST-ADDENDUM-A-CLOSEOUT-1 checkpoint` (Addendum A closeout accepted)
-  - `68d3efcb` — `dist-ingest: section 5 comparable engine benchmark and centralized baseline` (Section 5 comparability/benchmark)
-- **Final HEAD (this closeout):** to be recorded by the final commit created with this closeout (see git history).
-- **Working-tree status at closeout:** clean after final commit/push (intended).
-- **Frozen files modified:** **none** (`forkrun_ring.c`, `forkrun_ring.h`, `forkrun_substrate.h`, `substratestubs.c` untouched).
-- **Isolation:** experimental changes confined to `stage0/dist_ingest/` plus necessary, backward-compatible Stage 0 integration (`stage0/run_case.py`, dist campaign/report/docs); production ingestion/frontend behavior unchanged.
+- **Starting/expected HEAD (before this correction):** `f5fd2691c07bf6eeccdd7ce91f5c3c1cb64a3e2e` (verified)
+- **Prior preserved checkpoints:** `419c0ce1`, `7e3a4d08`, `f9bc3541`, `b542dc6d`, `68d3efcb`, `f5fd2691` (all preserved/pushed lineage)
+- **Final HEAD (this checkpoint):** see commit recorded for `dist-ingest: apply WO-NUMA-DIST-INGEST-BENCHMARK-SEMANTICS-AND-RENTAL-DRIVER-CORRECTIONS-1`
+- **Working-tree status at closeout:** clean after commit/push (intended)
+- **Frozen production files modified:** **none** (`forkrun_ring.c`, `forkrun_ring.h`, `forkrun_substrate.h`, `substratestubs.c` untouched; verified)
+- **Isolation:** changes confined to `stage0/dist_ingest/` and necessary Stage 0 runner/report integration (`stage0/run_case.py`); production ingestion/frontend behavior unchanged.
 
-### Files in scope (key)
+### Files changed in this correction
 
-- `stage0/dist_ingest/dist_ingest.{h,c}`, `stage0/libdist_ingest.so` (gitignored build artifact)
-- `stage0/dist_ingest/run_dist.py`, `run_dist_campaign.sh`, `report_dist.py`
-- `stage0/dist_ingest/tests/{test_dist_ingest.py,test_addendum_a.py,test_topology_resolution.py,test_corrections_s2_s4.py,test_corrections_s3.py}`
-- `stage0/dist_ingest/{RENTAL_RECIPE.md,CLOSEOUT.md,PIPE_INGESTION.md}`
-- `stage0/run_case.py`
+- `stage0/dist_ingest/dist_ingest.h`, `stage0/dist_ingest/dist_ingest.c` (consumer kernel execution/accounting, mbind per-attempt requested/succeeded/failed accounting and compatibility semantics, result/metric fields)
+- `stage0/dist_ingest/run_dist.py` (kernel CLI/default/wiring/provenance, scan-byte evidence, factual tri-state affinity/memory-policy/combined validity independent of strictness, topology-aware required role accounting, struct mirrors)
+- `stage0/dist_ingest/run_dist_campaign.sh` (explicit `--consumer-kernel`, `--strict-affinity`, `--strict-mbind`, `--phys-nodes`; explicit per-candidate spec fields; campaign manifest config recording)
+- `stage0/run_case.py` (forward `consumer_kernel` and strict/phys options to runner)
+- `stage0/dist_ingest/report_dist.py` (dist-engine authoritative `DIST_RESULT.wall_seconds`, harness wall separate; `valid/total` counts all attempted trials including failed/missing/unreadable; separate validity dimensions with `unknown` distinct from `false`; consumer-kernel/scan evidence surfaced)
+- `stage0/dist_ingest/tests/*` ctypes struct sync + new deterministic tests: `tests/test_benchmark_semantics.py`, `tests/test_report_dist.py`
+- `stage0/dist_ingest/CLOSEOUT.md`, `stage0/dist_ingest/RENTAL_RECIPE.md` (final verified semantics)
 
-## 2. Defect resolution (by work-order section)
+## 2. P0 — Consumer memory-touching kernel enabled, wired, and evidenced
 
-### Section 1 (P0) — Real NUMA topology, CPU affinity, and memory placement
-- **Original defect:** runner did not wire real topology/CPU lists/phys nodes to engine; no effective affinity/placement establishment or verification.
-- **Correction:** topology resolution/provenance in `run_dist.py` (online nodes, per-node CPUs/memory, allowed CPU/mem sets, cpuset/cgroup restrictions respected where discoverable, logical→physical mapping, explicit `--phys-nodes`, duplicate/insufficient/invalid rejection, strict validation of unknown topology facts). Properly typed/lifetime-safe ctypes topology structures. Per-role CPU affinity (ingestor/consumer) pinned to configured physical-node CPU sets with pthread return-code handling, set/query/verification and matched/effective reporting; strict-affinity failure marking. Memory placement via `mbind(MPOL_PREFERRED)` on configured physical node before first touch where applicable, with syscall success/error recorded (not physical-placement proof), strict-mbind mode, and independent placement sampling (`move_pages`) with unknown/permission-denied preserved as unknown. Dynamic/safe CPU-mask sizing and kernel-mask probing (Addendum A closeout).
-- **Regression tests/evidence:** `tests/test_topology_resolution.py` (sparse IDs, restricted/missing/malformed CPU/mem/online info, explicit selection failures, `--no-pin` documented uncertainty), `tests/test_addendum_a.py` affinity/CPU-mask/probe/inject tests, placement/validity helper tests.
-- **Result:** implemented and tested on host fixtures/fake-local environment. **Physical placement/locality not proven on this host.**
+- **Finding addressed:** C scanned only when `consumer_kernel == 1`, but runner/campaign never set it (zero-initialized => none), so the claimed default full byte-scan was not executed in normal runs.
+- **Correction:** normal runner and campaign now use **`full_byte_scan` by default** with explicit opt-out **`none`** (`--consumer-kernel full_byte_scan|none`). Wired end-to-end: `run_dist.py` arg parsing + `DiPolicyParams.consumer_kernel`, C engine scan execution, `run_case.py` spec→runner forwarding, `run_dist_campaign.sh` options and **explicit per-comparable-candidate spec field** (no undocumented default reliance), `DIST_RESULT`/`comparability`/`consumer_kernel` provenance and scan evidence, and `report_dist.py` display.
+- **C API/header semantics clarified:** zero-initialized `consumer_kernel` means `0` (none) at C API level; runner/campaign default is `1` (`full_byte_scan`) and callers must set explicitly.
+- **Evidence of execution:** per-node and aggregate `consumer_bytes_scanned` metrics (C engine, copied in results). `full_byte_scan`: each successfully consumed chunk scanned exactly once and scan count increases by chunk length; on functionally correct complete run aggregate scanned bytes == aggregate consumed bytes (verified). `none`: scanned bytes remain zero (verified). Not inferred from CPU time alone.
+- **Comparability:** campaign writes the same selected kernel/params for `centralized_ingest`, `fixed_faa`, `local_adaptive`, `relative_adaptive` in each comparison block.
+- **Tests:** runner default selects `full_byte_scan`; explicit `none` disables scan; full scan reports exact consumed bytes and per-node equality for all four common-engine policies; `none` reports zero for all policies; provenance identifies actual kernel; campaign-generated specs explicitly include selected kernel and strict options; end-to-end campaign smoke verifies kernel reaches C engine via scan-byte evidence in manifests/dist results (not just CLI acceptance).
 
-### Section 2 (P0) — Effective-backlog accounting
-- **Original defect:** consumer dequeue dropped `published_backlog` before completion, inflating apparent headroom.
-- **Correction:** three-part accounting per node: `effective_backlog = published_backlog + consumer_inflight_backlog + outstanding_reservation_backlog`. Lifecycle: admit(reserve outstanding) → FAA reserve → read outstanding → publish (outstanding→published) → dequeue (published→consumer_inflight) → completion/release (consumer_inflight removed). Headroom increases only after buffer release. Peer headroom published after relevant transitions; admission authoritative; one-outstanding-per-node invariant enforced; overflow-safe summation.
-- **Regression tests:** `tests/test_corrections_s2_s4.py` (dequeue-before-completion does not reduce effective backlog; headroom after release; max effective bounded), debug accounting helpers; stress cases in `test_dist_ingest.py`.
-- **Result:** corrected and regression-tested.
+## 3. P0 — Affinity validity factual, topology-aware, independent of strictness
 
-### Section 3 (P0) — Partial-read and EOF handling
-- **Original defect:** single `pread`/limited retry treated short reads as final/complete in ways that could gap coverage.
-- **Correction:** robust positioned-read loop handling `EINTR`, positive partial reads, genuine zero-byte EOF, permanent I/O errors, offset/length/`SSIZE_MAX`/`off_t` conversion guards, and overflow checks. File treated as immutable for campaign trials with metadata captured to detect obvious changes; truncation/change marks run incomplete/invalid rather than silently accepting gaps. Requested/assigned/read/published byte accounting kept distinct; exact non-overlapping coverage verified over expected file range.
-- **Regression tests:** `tests/test_corrections_s3.py` (repeated EINTR/partial fills, premature EOF, truncation detection, final partial reservation, multi-ingestor coverage invariants) with engine-local seams/helpers.
-- **Result:** corrected and regression-tested (seam-assisted where syscall fault injection required).
+- **Finding addressed:** prior validity depended on strict mode in ways that could report true despite requested failures in non-strict mode.
+- **Correction:** factual tri-state affinity validity computed **independently of `--strict-affinity`** (strictness controls enforcement/abort, not truth):
+  - **`true`:** all required, requested role results successfully applied, queried, and matched.
+  - **`false`:** at least one required requested role failed or did not match.
+  - **`null`:** required affinity not requested or cannot be established.
+- **Per-role reporting:** requested, set applied, query succeeded, matched, error, strict failure/enforcement consequence; role applicability/requirement by actual topology.
+- **Topology/architecture role requirements:** distributed policies (`fixed_faa`, `local_adaptive`, `relative_adaptive`) require ingestor + consumer per configured logical node. `centralized_ingest` requires its single ingestor (central/selected node, node 0) + all configured consumers; other nodes' nonexistent ingestor roles are **not applicable** (not failures). `--no-pin` does not claim verified affinity (factual result `null` where roles not requested). Strict affinity still aborts/fails run on required failure; non-strict may complete but factual affinity remains false/unknown as appropriate.
+- **Tests:** helper-level factual tri-state and independence from strictness; no-pin => unknown; centralized vs distributed role requirements; engine-level affinity failure in strict mode aborts/fails run with factual false; engine-level affinity failure in non-strict mode reports factual false.
 
-### Section 4 (P0) — Allocation ownership, alignment, and deallocation
-- **Original defect:** allocator mismatch (`mmap`/`posix_memalign` fallback with `munmap`/`free` confusion risk), 2 MiB virtual alignment not guaranteed, hugepage reporting conflated.
-- **Correction:** explicit allocation ownership (original mapping base/len recorded; matching `munmap` deallocation), 2 MiB-aligned usable buffers/mappings for requested alignment, overflow-checked allocation sizing, single deallocation per allocation across success/failure/shutdown paths. Hugepage reporting separated: requested, mapping obtained, ordinary fallback, observed backing where available/unknown.
-- **Regression tests:** alignment/ownership/lifecycle tests (`test_dist_ingest.py`, `test_corrections_s2_s4.py`, `test_addendum_a.py` hugepage-accounting relationships; alignment helper).
-- **Result:** corrected and regression-tested. Hugepage-success accounting not proven on this host.
+## 4. P0 — Memory-policy (mbind) validity factual per-attempt accounting
 
-### Section 5 (P0) — Meaningful and comparable consumer workloads / benchmark separation
-- **Original defect:** synthetic consumers did not touch memory; control vs dist candidates were not comparable (different execution/measurement models).
-- **Correction:** 
-  - **Common-engine architectural comparison (same engine/consumers/work units/measurement):** added in-engine **`centralized_ingest`** (policy 4) baseline — single ingestor reserves/reads and round-robin dispatches to all node queues — sharing the same experimental engine, per-node consumers/queues, allocation/read/publication machinery, work units, and `di_run` measurement boundaries with `fixed_faa`, `local_adaptive`, `relative_adaptive`.
-  - **Deterministic memory-touching consumer kernel:** default full byte-scan (volatile-sunk accumulation, not optimized away) identical across common-engine candidates; configurable rate-limited/stall behavior retained for backpressure tests; kernel/params reported in provenance/comparability metadata.
-  - **Timing/measurement:** engine wall, ingest/read/publish/claim/consume wait components, per-ingestor/per-consumer CPU (direct thread CPU deltas) exposed; identical boundaries across common-engine candidates.
-  - **Production forkrun reference:** retained as **separate reference only** (`production_ref`); explicitly not apples-to-apples with dist-engine candidates and not used for direct speedup claims against them.
-- **Regression tests/evidence:** `test_dist_ingest.py` centralized correctness/CLI cases and randomized stress including policy 4; campaign smoke runs (`centralized_ingest` vs `fixed_faa`) correct and comparable.
-- **Result:** implemented and locally validated. Not evidence of production end-to-end speedup.
+- **Finding addressed:** prior booleans could not represent mixed requested outcomes and non-strict validity could hide failures.
+- **Correction (C engine):** per-node per-attempt tracking across all allocation attempts where policy requested: `mbind_requested_count`, `mbind_success_count`, `mbind_failure_count`; actual error information preserved (not erased by later success). Compatibility fields: `mbind_policy_requested` = any requested; `mbind_policy_applied` = **all requested applications succeeded and >=1 requested** (not merely any).
+- **Factual validity (independent of `--strict-mbind`):**
+  - **`true`:** >=1 policy application required/requested and every requested application succeeded.
+  - **`false`:** >=1 requested application failed.
+  - **`null`:** no policy application requested or cannot be established.
+- **Semantics preserved:** `mbind` syscall application is distinct from observed physical placement and from `MPOL_PREFERRED` mismatch (preferred success not physical locality proof). Strict mbind controls enforcement/abort, not factual reporting.
+- **Tests:** no-request case (engine direct), all-success/mixed/all-failed/no-request factual helpers, strict and non-strict produce identical factual validity classifications.
 
-### Section 6 (P1) — Placement measurement and reporting
-- **Correction:** per-node reporting includes requested physical node, affinity role results (requested/set/query/matched/error, strict failures, effective-verified summary), memory-policy requested/success/failure/error (and aliases), placement sampling totals and breakdown (local-on-target/remote-other/unknown, sampled vs total addressable, per-allocation sample limit/spacing, sampling complete/partial/unavailable/not-performed), hugepage requested/obtained/fallback/observed, and explicit semantics. **Separate validity classifications:** `functional_correctness`, `performance_measurement`, `numa_placement` (tri-state/explicit) alongside detailed compat fields; `correct` retained as functional correctness (not a collapse of all dimensions). Unknown/incomplete placement does not become verified.
-- **Result:** strengthened and reported; observation-based (not physical proof).
+## 5. P0 — Combined validity classifications
 
-### Section 7 (P1) — Campaign randomization and execution fairness
-- **Correction:** `run_dist_campaign.sh` shuffles candidate order within each (scenario,trial) comparison block using a recorded deterministic seed; optional reproducible scenario-block shuffle (`--shuffle-scenarios`); actual execution order and plan recorded (`campaign-manifest.json` schema v2, `execution-order.jsonl`, `execution-plan.json`); cache/warm-up assumption explicitly recorded (`--cache-policy`, default best-effort/uncontrolled with limitation stated). Re-running into existing case/trial evidence does not overwrite `manifest.json`. Configurations/corpora identical within comparison blocks.
-- **Result:** implemented; reproducibility/smoke verified.
+- **Separate dimensions (tri-state where applicable):** functional correctness, performance-measurement, affinity, memory-policy application, placement observed, overall NUMA-placement. `unknown` distinct from `false`; strict flags affect enforcement only.
+- **Rules applied:** requested affinity failure must not yield `affinity_valid=true`; requested mbind failure must not yield memory-policy validity true; unknown/unrequested affinity or policy not promoted to verified; observed placement mismatch remains false; `numa_placement=true` requires verified required affinity, successful required policy application, and positive placement observations. Field meanings documented in `DIST_RESULT.placement_semantics`/validity.
+- **Report:** does not equate `manifest.complete`/functional correctness with all validity; surfaces per-dimension validity and supports different conclusions per trial.
 
-### Section 8 (P1) — Synthetic telemetry separation
-- **Correction:** `DIST_RESULT` is authoritative for dist-engine measurements. `run_dist.py` no longer emits fabricated `STAGE0_DIAG` time-series snapshots; emits distinct `STAGE0_DIST_SUMMARY` label. `stage0/run_case.py` treats dist-engine candidates complete via their own result payload/functional validation (not fabricated Stage 0 diagnostic samples), preserving original semantics for production Stage 0 paths. Per-ingestor CPU measured directly per thread; aggregate ingest CPU is the sum of distinct ingestor-thread CPU deltas (centralized mode records one ingestor, no duplication into other nodes).
-- **Result:** implemented.
+## 6. P0 — Strict physical-NUMA campaign configuration
 
-### Section 9 (P1) — Arithmetic, admission, and configuration validation
-- **Correction:** overflow guards for policy claim multiplication and defensive cursor-advance check; config normalization/validation (quantum/backlog defaults, `max_reservation` clamped to `max_backlog`, invalid base cases rejected); admission preserves `want <= headroom` and max-backlog invariant; quantum-multiple sizing enforced consistently (alignment intent honored). Relative policy continues to use sum of peer headrooms (128-bit intermediates) with configurable rounding. Policy arithmetic tests (including single-node/zero-peer/relative/caps) retained/extended.
-- **Result:** audited and hardened (targeted); extreme `SSIZE_MAX`/`off_t` paths not exhaustively exercised through every boundary as a standalone ABI case beyond guards and existing tests.
+- **Campaign driver:** `run_dist_campaign.sh` exposes `--strict-affinity`, `--strict-mbind`, `--consumer-kernel`, and documented `--phys-nodes` selection. Explicit per-comparable-candidate spec records strict/kernel/phys settings; `run_case.py` forwards to `run_dist.py`; settings recorded in specs, manifests/`DIST_RESULT` provenance, campaign manifest config, and report. Identical per comparison block. No silent fallback from requested strict settings (strict failures surface as trial/run failures or invalidity per enforcement/validity semantics).
+- **Phys-node note:** explicit physical-node mapping must be compatible with scenario node counts; incompatible application is not silently applied (runner/topology validation rejects).
+- **Recipe:** `RENTAL_RECIPE.md` updated with verified strict one-command example and labeling (local quick-smoke may remain non-strict but labeled).
 
-### Section 10 (P1) — Failure, shutdown, and ownership paths
-- **Correction/audit:** reservation rollback and buffer ownership enforced on allocation/read/publish failures and stop paths; queue-push failure frees chunk and rolls back outstanding; di_create partial-init/create-fail cleanup; thread create/join/stop wakeups; di_destroy drains queued chunks/frees recs after joined run. Result not marked correct on early stop/unresolved/inconsistent totals. Fault-injection seams/tests cover push failure, partial create, read/EOF/truncation/error paths, shutdown with queued/in-flight work.
-- **Result:** audited with targeted fault-injection coverage; thread-creation failure not directly injected.
+## 7. P1 — Report timing and trial denominators
 
-### Section 11 — Validation
-- **Dist-ingest suite (normal):** **86/86 OK** (`python3 -m unittest discover -s stage0/dist_ingest/tests`).
-- **Stage 0 regression:** **81/81 OK** (`python3 -m unittest stage0.tests.test_stage0`).
-- **Targeted existing:** **7/7 OK** (`python3 -m unittest python.tests.test_numa_drain_guard`).
-- **ASan + UBSan runtime (actual instrumented runs, dist-ingest suite):** **86/86 OK**. Build: `gcc -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined ...` (gcc 16.2.1). Run: `LD_PRELOAD=/lib64/libasan.so.8:/lib64/libubsan.so.1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:allocator_may_return_null=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1` → OK, exit 0. **Note:** `detect_leaks=0` (not a leak-sanitizer pass).
-- **TSan runtime (actual instrumented run, dist-ingest suite):** **86/86 OK**. Build: `gcc -O1 -g -fno-omit-frame-pointer -fsanitize=thread ...`. Run: `LD_PRELOAD=/lib64/libtsan.so.2 TSAN_OPTIONS=halt_on_error=1:history_size=7` → OK, exit 0.
-- **Concurrency/stress:** randomized engine stress (sizes/nodes/quanta/backlogs/policies including centralized, consumer modes), backpressure/stall-recovery, exact coverage and backlog-bound checks in covered cases; randomized seeds recorded in tests where applicable.
-- **Campaign smoke (comparable set):** quick randomized campaigns completed successfully (e.g. `centralized_ingest` vs `fixed_faa`, seed recorded, all trials correct, report generated).
-- **Fake-NUMA limitations:** fake/local NUMA used for exercising behavior/topology handling; **not** evidence of physical CPU/memory locality, remote-memory penalties, multi-socket scaling, or real hugepage distribution.
+- **Dist-engine wall time:** comparative/report uses `DIST_RESULT.wall_seconds` as authoritative engine wall time; outer harness duration (`manifest.wall_s`) retained separately/diagnostic. Production references continue to use their existing timing source (not combined into purportedly comparable field).
+- **Valid/total denominators:** every attempted candidate/trial represented in relevant group regardless of status or manifest availability (failed, missing manifest, unreadable manifest, incomplete included); denominator counts attempted trials, not only readable successful manifests.
+- **Tests:** successful complete, failed, missing manifest, unreadable manifest, incomplete, and mixture cases covered (`tests/test_report_dist.py`).
 
-### Section 12 — Physical-NUMA campaign readiness
-- **Updated:** `RENTAL_RECIPE.md` (comparable dist-engine set, strict preflight/placement-affinity verification, randomization/seed/cache/validity semantics, artifact/interpretation guidance), `PIPE_INGESTION.md` retained (pipe excluded from dist bake-off), `CLOSEOUT.md` (this report), campaign/report comparability labeling and provenance.
-- **Campaign capability:** `run_dist_campaign.sh` runs comparable dist-engine candidates with recorded seed/order/cache policy, manifests/reports, and raw artifacts; supports `production_ref` only as separate reference.
-- **Hardware rental:** **not performed**.
+## 8. P1 — Report validity dimensions and workload evidence
 
-## 3. NUMA topology and placement
+- **Surfaced (dist trials):** functional correctness, performance-measurement, affinity, memory-policy application, placement observed, overall NUMA-placement; `unknown` shown distinctly from `false`. Consumer kernel configuration and scan-byte evidence included so measured workload is visible.
 
-- **Discovery/mapping:** online/allowed CPU/mem sets and per-node CPU/memory facts resolved with uncertainty handling; logical→physical mapping explicit; duplicate/sparse/invalid/insufficient cases rejected or reported per mode; `--no-pin` documents unverified affinity facts without claiming verified topology.
-- **Affinity:** per-role (ingestor/consumer) pthread affinity set/query/verify with direct error codes; dynamic/probed CPU-mask sizing; strict-affinity semantics.
-- **Memory policy:** `mbind(MPOL_PREFERRED)` requested per configured physical node (before first touch where applicable), syscall outcome recorded separately from observed placement; strict-mbind enforces policy-application success (not physical guarantee).
-- **Placement sampling:** independent `move_pages`-based sampling with per-allocation limit/spacing/complete-partial reporting and tri-state observation validity (`true`/`false`/`null`); unknown/permission-denied not counted as local/remote.
-- **Hugepages:** requested/obtained/fallback/observed distinguished; optional; success not proven on this host.
+## 9. Documentation and schema/provenance
 
-## 4. Backlog and reservation correctness
+- **Updated:** `CLOSEOUT.md`, `RENTAL_RECIPE.md` (final verified execution path, strict campaign command, actual validity semantics). `DIST_RESULT`/campaign schema fields extended with factual validity dimensions, mbind counts, consumer kernel/scan evidence, and campaign config recording (backward-compatible aliases retained where applicable).
 
-- **Effective backlog:** `published_backlog + consumer_inflight_backlog + outstanding_reservation_backlog` (overflow-safe), updated at each lifecycle transition, never admitted above `max_backlog` by policy/admission; peer headroom advisory.
-- **Reservation lifecycle:** admit → FAA reserve → read (outstanding) → publish (outstanding→published) → consume dequeue (published→inflight) → complete/release (inflight removed); one outstanding per node. Failures/stop produce rollback or explicit invalid/incomplete outcomes.
-- **Read/EOF:** robust `pread` handling, distinct requested/assigned/read/published accounting, exact coverage verification, input-mutation detection.
-- **Ownership/deallocation:** explicit mapping ownership with matching `munmap`; single final disposition per reservation/allocation in covered paths.
+## 10. Validation
 
-## 5. Comparative campaign
+- **Normal suites (this checkout, rebuilt .so):**
+  - `python3 -m unittest discover -s stage0/dist_ingest/tests -v` → **114/114 OK**
+  - `python3 -m unittest stage0.tests.test_stage0` → **81/81 OK**
+  - `python3 -m unittest python.tests.test_numa_drain_guard` → **7/7 OK**
+- **ASan + UBSan runtime (instrumented dist-ingest suite):** **114/114 OK**
+  - Build: `gcc -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fPIC -shared -o stage0/libdist_ingest.so stage0/dist_ingest/dist_ingest.c -lpthread -lm -lnuma` (gcc 16.2.1)
+  - Run: `LD_PRELOAD=/lib64/libasan.so.8:/lib64/libubsan.so.1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:allocator_may_return_null=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 python3 -m unittest discover -s stage0/dist_ingest/tests -v` → OK, exit 0
+  - **Note:** `detect_leaks=0` (not a leak-sanitizer pass)
+- **TSan runtime (instrumented dist-ingest suite):** **114/114 OK**
+  - Build: `gcc -O1 -g -fno-omit-frame-pointer -fsanitize=thread -fPIC -shared -o stage0/libdist_ingest.so stage0/dist_ingest/dist_ingest.c -lpthread -lm -lnuma` (gcc 16.2.1)
+  - Run: `LD_PRELOAD=/lib64/libtsan.so.2 TSAN_OPTIONS=halt_on_error=1:history_size=7 python3 -m unittest discover -s stage0/dist_ingest/tests -v` → OK, exit 0
+- **Added deterministic coverage:** active/inactive consumer kernels and all four common-engine policies with exact scan-byte evidence; affinity factual validity (helpers, no-pin/unrequested, centralized vs distributed roles, strict abort with factual false, non-strict factual false); mbind no-request/all-success/mixed/all-failed factual helpers and strict/non-strict identical factual classification; combined validity constraints; campaign explicit kernel/strict spec forwarding and end-to-end kernel-reaching-C-engine smoke; report timing boundaries, failed/missing/unreadable/incomplete denominators, per-dimension validity with unknown distinct from false.
 
-- **Common-engine set (apples-to-apples):** `centralized_ingest`, `fixed_faa`, `local_adaptive`, `relative_adaptive` — same `dist_ingest` engine, simulated per-node consumers, byte-range chunk work units, deterministic memory-touch consumer kernel (default), and identical measurement boundaries.
-- **Production reference:** `production_ref` (existing forkrun) reported separately, different model, no direct speedup ratio claimed against dist-engine candidates.
-- **Randomization/provenance:** recorded seed, per-block candidate order, optional scenario shuffle, execution plan/log, cache-policy assumption, source SHA/spec/provenance fields.
-- **Validity:** functional, performance-measurement, and NUMA-placement tracked separately; incomplete/invalid trials identified.
+## 11. Scope boundaries (honored)
 
-## 6. Known limitations / caveats
+- No redo of centralized-ingest architecture; no replacement of existing common-engine design.
+- No modification of frozen production files.
+- No pipe-ingestion candidates, no production adoption, no NUMA-ingest redesign, no physical-NUMA rental.
+- No weakening/removal of existing validation.
+- Synthetic consumer not claimed equivalent to production worker pipeline.
+- `MPOL_PREFERRED` success not claimed as physical locality proof.
 
-- No physical multi-node NUMA validation in this environment; fake/local NUMA results are **not** evidence of physical locality/scaling/remote penalties.
-- `mbind(MPOL_PREFERRED)` success and placement sampling observations are **not** proof of physical placement; unknown observations remain unknown.
+## 12. Remaining limitations
+
+- No physical multi-node NUMA validation; fake/local results not evidence of physical locality/scaling/remote penalties.
+- `mbind(MPOL_PREFERRED)` syscall success and placement sampling observations are not physical placement proof; unknown remains unknown.
 - Hugepage-success accounting not proven on this host.
-- Extreme `SSIZE_MAX`/`off_t` boundary cases not exhaustively exercised through every internal path; guards present.
 - ASan validation used `detect_leaks=0` (no leak-sanitizer claim).
+- Extreme `SSIZE_MAX`/`off_t` boundary cases not exhaustively exercised end-to-end beyond guards/tests.
 - Pipe ingestion excluded from dist-candidate bake-off.
-- Consumer workload is a representative deterministic memory-touch kernel in the experimental engine, not the production scanner/worker pipeline; do not claim production end-to-end speedup from synthetic/common-engine comparisons.
 
-## 7. Readiness assessment
+## 13. Readiness / confirmation
 
-**CONDITIONALLY READY (for physical-NUMA characterization of the experimental ingestion architecture)**
-
-- **Rationale:** topology/affinity/placement wiring and semantics corrected and reported with explicit uncertainty/validity separation; effective-backlog/read/allocation/shutdown correctness addressed with regression and sanitizer runtime coverage (ASan+UBSan+TSan, dist suite); a comparable common-engine benchmark (centralized baseline vs distributed policies) is established with deterministic consumer kernel, separated telemetry/provenance, and reproducible randomized campaign mechanics.
-- **Not sufficient to claim:** production adoption readiness, production end-to-end speedup, or physical-NUMA locality/scaling conclusions.
-- **Prerequisites for decision-grade physical results:** clean measured commit on real (non-fake) multi-node hardware, >=3 trials, verified strict affinity/memory-policy/placement evidence per preflight, recorded topology/kernel/governor/cache assumptions, and interpretation within the documented validity/comparability limits.
-
-**Final instruction honored:** priority given to real topology/placement, correct backlog/read/allocation behavior, meaningful comparable workloads, campaign validity/reproducibility, and runtime validation before declaring physical-rental readiness.
+- **Physical-NUMA campaign driver readiness (for planned rental characterization):** campaign now executes the claimed workload by default with scan-byte proof, and validity/reporting machinery does not promote failed/unknown NUMA evidence to success. **Conditionally ready** for physical-NUMA characterization subject to preflight/strict settings on real (non-fake) multi-node hardware and documented validity/comparability limits.
+- **Not implied:** production adoption readiness or production end-to-end speedup.
+- **Confirmation:** no physical-NUMA rental or production adoption was started.

@@ -39,6 +39,7 @@ class DiNodeMetrics(ctypes.Structure):
     _fields_ = [
         ("reservations", ctypes.c_uint64), ("bytes_reserved_req", ctypes.c_uint64), ("bytes_assigned", ctypes.c_uint64),
         ("bytes_read", ctypes.c_uint64), ("bytes_published", ctypes.c_uint64), ("bytes_consumed", ctypes.c_uint64),
+        ("consumer_bytes_scanned", ctypes.c_uint64),
         ("chunks_published", ctypes.c_uint64), ("chunks_consumed", ctypes.c_uint64), ("zero_claims", ctypes.c_uint64),
         ("claim_wait_ns", ctypes.c_uint64), ("read_wait_ns", ctypes.c_uint64), ("publish_wait_ns", ctypes.c_uint64),
         ("consume_wait_ns", ctypes.c_uint64), ("current_published_backlog", ctypes.c_uint64),
@@ -57,7 +58,7 @@ class DiNodeMetrics(ctypes.Structure):
         ("res_hist", ctypes.c_uint64 * 20),
         ("affinity_ingestor", DiAffinityRole), ("affinity_consumer", DiAffinityRole),
         ("mbind_policy_requested", ctypes.c_int), ("mbind_policy_applied", ctypes.c_int),
-        ("mbind_error", ctypes.c_int), ("strict_mbind_failed", ctypes.c_int),
+        ("mbind_error", ctypes.c_int), ("mbind_requested_count", ctypes.c_uint64), ("mbind_success_count", ctypes.c_uint64), ("mbind_failure_count", ctypes.c_uint64), ("strict_mbind_failed", ctypes.c_int),
         ("strict_affinity_failed", ctypes.c_int), ("last_error", ctypes.c_int),
     ]
 
@@ -66,6 +67,7 @@ class DiResult(ctypes.Structure):
     _fields_ = [
         ("total_bytes", ctypes.c_uint64), ("total_reserved_req", ctypes.c_uint64), ("total_assigned", ctypes.c_uint64),
         ("total_read", ctypes.c_uint64), ("total_published", ctypes.c_uint64), ("total_consumed", ctypes.c_uint64),
+        ("total_consumer_bytes_scanned", ctypes.c_uint64),
         ("reservations_total", ctypes.c_uint64), ("eof_offset", ctypes.c_uint64),
         ("overlap_detected", ctypes.c_int), ("duplicate_detected", ctypes.c_int), ("lost_detected", ctypes.c_int),
         ("input_changed", ctypes.c_int), ("wall_seconds", ctypes.c_double),

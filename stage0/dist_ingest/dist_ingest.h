@@ -78,7 +78,9 @@ typedef struct {
     int one_outstanding_per_node; /* enforced as 1 in prototype */
     int enable_peer_headroom;     /* publish/read advisory headroom */
     /* Section 5: deterministic consumer kernel for common-engine comparability.
-     * 0=none (rate-limit/stall only), 1=full byte-scan sum (memory-touch, default). */
+     * 0=none (rate-limit/stall only), 1=full byte-scan sum (memory-touch).
+     * Runner/campaign default: 1 (full_byte_scan). At the C API level a
+     * zero-initialized field means 0 (none); callers must set explicitly. */
     int consumer_kernel;
 } di_policy_params_t;
 
@@ -114,6 +116,7 @@ typedef struct {
     uint64_t bytes_read;              /* sum of bytes actually read */
     uint64_t bytes_published;
     uint64_t bytes_consumed;
+    uint64_t consumer_bytes_scanned;  /* bytes touched by consumer kernel (proof of execution) */
     uint64_t chunks_published;
     uint64_t chunks_consumed;
     uint64_t zero_claims;             /* admission denied / chose zero */
@@ -153,11 +156,14 @@ typedef struct {
     di_affinity_role_t affinity_ingestor;
     di_affinity_role_t affinity_consumer;
     /* Memory-policy application (syscall result; NOT physical placement proof) */
-    int mbind_policy_requested;
-    int mbind_policy_applied;         /* mbind() call succeeded */
-    int mbind_error;                  /* actual mbind error if failed */
+    int mbind_policy_requested;       /* compatibility: any application requested */
+    int mbind_policy_applied;         /* compatibility: all requested applications succeeded (and >=1 requested) */
+    int mbind_error;                  /* last/representative actual mbind error if any failed */
+    uint64_t mbind_requested_count;   /* policy applications requested (all allocation attempts) */
+    uint64_t mbind_success_count;     /* policy applications succeeded */
+    uint64_t mbind_failure_count;     /* policy applications failed */
     int strict_mbind_failed;          /* strict enforcement of successful policy application failed */
-    int strict_affinity_failed;       /* aggregate: either required role failed under strict affinity */
+    int strict_affinity_failed;       /* aggregate: required role failed under strict affinity (run enforcement) */
     int last_error;
 } di_node_metrics_t;
 
@@ -168,6 +174,7 @@ typedef struct {
     uint64_t total_read;
     uint64_t total_published;
     uint64_t total_consumed;
+    uint64_t total_consumer_bytes_scanned;
     uint64_t reservations_total;
     uint64_t eof_offset;
     int overlap_detected;

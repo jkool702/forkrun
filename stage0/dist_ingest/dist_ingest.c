@@ -413,24 +413,49 @@ static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *ou
 #endif
 
 /* --- mbind (policy application; not physical placement proof) --- */
+static void di_mbind_update_compat(di_node_t *n) {
+    n->m.mbind_policy_requested = (n->m.mbind_requested_count > 0) ? 1 : 0;
+    /* compatibility: all requested applications succeeded (and >=1 requested) */
+    n->m.mbind_policy_applied =
+        (n->m.mbind_requested_count > 0 && n->m.mbind_failure_count == 0) ? 1 : 0;
+}
+
 static int di_mbind_node(void *addr, size_t len, int phys_node, di_node_t *n) {
-    n->m.mbind_policy_requested = (phys_node >= 0);
     if (phys_node < 0) return 0;
+    /* Track every allocation attempt where policy application was requested. */
+    n->m.mbind_requested_count++;
+    di_mbind_update_compat(n);
 #ifdef __linux__
-    unsigned long maxnode = (unsigned long)phys_node + 2;
-    size_t mask_bytes = (maxnode + 7UL) / 8UL;
-    size_t mask_ul = (mask_bytes + sizeof(unsigned long) - 1) / sizeof(unsigned long);
-    unsigned long *mask = (unsigned long *)calloc(mask_ul ? mask_ul : 1, sizeof(unsigned long));
-    if (!mask) { n->m.mbind_error = ENOMEM; return -1; }
-    mask[phys_node / (int)(sizeof(unsigned long) * 8)] |= 1UL << (phys_node % (int)(sizeof(unsigned long) * 8));
-    long rc = mbind(addr, len, MPOL_PREFERRED, mask, maxnode, 0);
-    int err = errno;
-    free(mask);
-    if (rc != 0) { n->m.mbind_error = err ? err : EINVAL; return -1; }
-    n->m.mbind_policy_applied = 1;
-    return 0;
+    {
+        unsigned long maxnode = (unsigned long)phys_node + 2;
+        size_t mask_bytes = (maxnode + 7UL) / 8UL;
+        size_t mask_ul = (mask_bytes + sizeof(unsigned long) - 1) / sizeof(unsigned long);
+        unsigned long *mask = (unsigned long *)calloc(mask_ul ? mask_ul : 1, sizeof(unsigned long));
+        if (!mask) {
+            n->m.mbind_failure_count++;
+            if (n->m.mbind_error == 0) n->m.mbind_error = ENOMEM;
+            di_mbind_update_compat(n);
+            return -1;
+        }
+        mask[phys_node / (int)(sizeof(unsigned long) * 8)] |= 1UL << (phys_node % (int)(sizeof(unsigned long) * 8));
+        long rc = mbind(addr, len, MPOL_PREFERRED, mask, maxnode, 0);
+        int err = errno;
+        free(mask);
+        if (rc != 0) {
+            n->m.mbind_failure_count++;
+            /* Preserve actual error information; do not erase earlier failure evidence. */
+            if (n->m.mbind_error == 0) n->m.mbind_error = err ? err : EINVAL;
+            di_mbind_update_compat(n);
+            return -1;
+        }
+        n->m.mbind_success_count++;
+        di_mbind_update_compat(n);
+        return 0;
+    }
 #else
-    n->m.mbind_error = ENOTSUP;
+    n->m.mbind_failure_count++;
+    if (n->m.mbind_error == 0) n->m.mbind_error = ENOTSUP;
+    di_mbind_update_compat(n);
     return -1;
 #endif
 }
@@ -706,7 +731,8 @@ static void di_consume_complete(di_node_t *n, uint64_t len) {
 
 static void di_consume_chunk(di_node_t *n, di_chunk_t *c) {
     /* Section 5: deterministic memory-touching consumer kernel (identical for
-     * all common-engine candidates). Volatile sink prevents optimization. */
+     * all common-engine candidates). Volatile sink prevents optimization.
+     * Each successfully consumed chunk is scanned exactly once when enabled. */
     if (n->eng->P.consumer_kernel == 1 && c->buf && c->len > 0) {
         volatile uint64_t sink = 0;
         const unsigned char *p = (const unsigned char *)c->buf;
@@ -715,6 +741,7 @@ static void di_consume_chunk(di_node_t *n, di_chunk_t *c) {
         for (size_t i = 0; i < len; i++) acc += p[i];
         sink = acc;
         (void)sink;
+        n->m.consumer_bytes_scanned += c->len;
     }
     di_consumer_cfg_t *cc = &n->cons_cfg;
     uint64_t bps = cc->bytes_per_sec;
@@ -1257,6 +1284,7 @@ int di_run(di_engine_t *eng, di_result_t *result) {
         result->total_read += n->m.bytes_read;
         result->total_published += n->m.bytes_published;
         result->total_consumed += n->m.bytes_consumed;
+        result->total_consumer_bytes_scanned += n->m.consumer_bytes_scanned;
         result->reservations_total += n->m.reservations;
         result->ingest_cpu_ns += n->m.ingest_cpu_ns;
         result->consumer_cpu_ns += n->m.consumer_cpu_ns;

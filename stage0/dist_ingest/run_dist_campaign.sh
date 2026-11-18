@@ -24,6 +24,10 @@ usage: run_dist_campaign.sh [options]
   --seed SEED          deterministic random seed for candidate/scenario ordering
   --shuffle-scenarios  randomize scenario-block order (reproducible by seed)
   --cache-policy TEXT  explicit cache/warm-up assumption recorded in manifest
+  --consumer-kernel K  full_byte_scan (default) or none (explicit diagnostic opt-out)
+  --strict-affinity    require verified affinity for all required roles (abort on failure)
+  --strict-mbind       require successful mbind policy application (abort on failure)
+  --phys-nodes LIST    explicit physical NUMA node ids (documented; must be compatible with scenario node counts or runs will fail)
 EOF
 }
 
@@ -37,6 +41,10 @@ CAND_FILTER="centralized_ingest,fixed_faa,local_adaptive,relative_adaptive"
 SEED=""
 SHUFFLE_SCENARIOS=0
 CACHE_POLICY="best_effort_os_cache (no privileged cold-cache control; limitation explicit)"
+CONSUMER_KERNEL="full_byte_scan"
+STRICT_AFFINITY=0
+STRICT_MBIND=0
+PHYS_NODES=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -50,6 +58,10 @@ while [ "$#" -gt 0 ]; do
     --seed) SEED=${2:?}; shift 2 ;;
     --shuffle-scenarios) SHUFFLE_SCENARIOS=1; shift ;;
     --cache-policy) CACHE_POLICY=${2:?}; shift 2 ;;
+    --consumer-kernel) CONSUMER_KERNEL=${2:?}; shift 2 ;;
+    --strict-affinity) STRICT_AFFINITY=1; shift ;;
+    --strict-mbind) STRICT_MBIND=1; shift ;;
+    --phys-nodes) PHYS_NODES=${2:?}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "dist-campaign: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -206,9 +218,9 @@ PY
     spec="$out/spec.json"
     input_path="$OUT/$inp"
     # build spec
-    python3 - "$spec" "$sid" "$cand" "$case_id" "$input_path" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" "$SEED" <<'PY'
+    python3 - "$spec" "$sid" "$cand" "$case_id" "$input_path" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" "$SEED" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" <<'PY'
 import json, sys
-(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed)=sys.argv[1:15]
+(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed,consumer_kernel,strict_affinity,strict_mbind,phys_nodes)=sys.argv[1:19]
 d={
   "id": cid,
   "scenario": sid,
@@ -244,7 +256,13 @@ else:
     "slow_mode": smode,
     "slow_bps": int(sbps),
     "slow_stall_ms": int(sstall),
+    # Explicitly written per comparable candidate (no undocumented default reliance).
+    "consumer_kernel": consumer_kernel,
+    "strict_affinity": bool(int(strict_affinity)),
+    "strict_mbind": bool(int(strict_mbind)),
   })
+  if phys_nodes:
+    d["phys_nodes"] = phys_nodes
 with open(spec,'w') as f: json.dump(d,f,indent=2,sort_keys=True)
 PY
     if python3 stage0/run_case.py --spec "$spec" --out "$out" \
@@ -262,10 +280,10 @@ done < "$PLAN_FILE"
 python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" \
   || echo "WARN: env-after capture failed" >&2
 
-# campaign manifest (Section 7: seed, actual execution order, cache assumptions)
-python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" <<'PY'
+# campaign manifest (Section 7: seed, actual execution order, cache assumptions; strict/kernel config recorded)
+python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" <<'PY'
 import json, os, sys, time
-out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc=sys.argv[1:9]
+out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc,consumer_kernel,strict_affinity,strict_mbind,phys_nodes=sys.argv[1:13]
 rows=[]
 with open(outcomes) as f:
     for line in f:
@@ -285,9 +303,16 @@ pp=os.path.join(out,'execution-plan.json')
 if os.path.isfile(pp):
     with open(pp) as f: plan=json.load(f)
 all_ok = all(r['status'] in ('ok','skipped_existing') for r in rows) if rows else False
-doc={"schema":"dist-campaign/2","campaign_id":cid,"source_sha":sha,"trials":int(trials),
+doc={"schema":"dist-campaign/3","campaign_id":cid,"source_sha":sha,"trials":int(trials),
      "randomization":{"seed":seed,"shuffle_scenarios":(shuf_sc=='1'),"execution_order":order,"plan":plan},
      "cache_policy":cache_policy,
+     "campaign_config":{
+        "consumer_kernel": consumer_kernel,
+        "strict_affinity": strict_affinity=='1',
+        "strict_mbind": strict_mbind=='1',
+        "phys_nodes": phys_nodes or None,
+        "notes": "strict flags/kernel applied identically per comparable dist-engine candidate spec; strict mode must not silently fall back"
+     },
      "outcomes":rows,"all_ok":all_ok,"finished_epoch":time.time()}
 with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,indent=2,sort_keys=True)
 PY
