@@ -42,12 +42,20 @@ typedef struct {
 } di_chunk_t;
 
 typedef struct {
-    /* reservation record for correctness validation */
     uint64_t off;
     uint64_t len_req;
     uint64_t len_assigned;
     uint64_t len_act;
 } di_resrec_t;
+
+/* --- narrow test seam for S3 fault injection (engine-local, Addendum A §7) --- */
+typedef struct {
+    int enabled;
+    int mode;            /* 0=off,1=eintr_count,2=partial_max,3=premature_eof_at,4=error_at,5=error_after_partial */
+    int counter;         /* remaining injections / partial max bytes / bytes before error */
+    uint64_t threshold;  /* byte offset threshold for modes 3/4 */
+    int fired;
+} di_pread_seam_t;
 
 typedef struct di_node {
     int id;
@@ -58,17 +66,15 @@ typedef struct di_node {
     int has_ing;
     int has_cons;
 
-    /* queue of published chunks (consumer drains) */
     di_chunk_t *q;
     unsigned q_cap;
-    unsigned q_head; /* next pop */
-    unsigned q_tail; /* next push */
+    unsigned q_head;
+    unsigned q_tail;
     unsigned q_count;
     pthread_mutex_t mu;
-    pthread_cond_t cv_can_push; /* space/backlog released */
-    pthread_cond_t cv_can_pop;  /* data available */
+    pthread_cond_t cv_can_push;
+    pthread_cond_t cv_can_pop;
 
-    /* accounting (bytes), protected by mu */
     uint64_t published_backlog;
     uint64_t consumer_inflight_backlog;
     uint64_t outstanding;
@@ -76,17 +82,14 @@ typedef struct di_node {
     uint64_t max_consumer_inflight_backlog;
     uint64_t max_effective_backlog;
 
-    /* advisory headroom published for peers (atomic, bytes) */
     _Atomic uint64_t peer_headroom;
 
     di_node_metrics_t m;
     di_consumer_cfg_t cons_cfg;
 
-    /* reservation records */
     di_resrec_t *recs;
     size_t recs_n, recs_cap;
 
-    /* affinity */
     const int *cpus;
     int ncpus;
 } di_node_t;
@@ -101,9 +104,9 @@ struct di_engine {
     di_config_t cfg;
     di_policy_params_t P;
 
-    _Atomic uint64_t next_offset; /* global FAA cursor (bytes) */
-    _Atomic int stop;             /* fatal/error stop */
-    _Atomic int ingestors_done;   /* count of ingestors finished */
+    _Atomic uint64_t next_offset;
+    _Atomic int stop;
+    _Atomic int ingestors_done;
     _Atomic int input_changed;
 
     int num_nodes;
@@ -111,6 +114,10 @@ struct di_engine {
 
     struct timespec t_start, t_end;
     int started;
+
+    /* engine-local pread seam (synchronized) */
+    pthread_mutex_t seam_mu;
+    di_pread_seam_t pread_seam;
 };
 
 static uint64_t di_now_ns(void) {
@@ -255,51 +262,80 @@ uint64_t di_policy_decide(di_policy_t policy,
     return want;
 }
 
-static int di_pin_thread(const int *cpus, int ncpus, di_node_t *n) {
-    if (!cpus || ncpus <= 0) {
-        n->m.affinity_requested = 0;
-        return 0;
-    }
-    n->m.affinity_requested = 1;
+/* --- Affinity (Addendum A §2,§3) --- */
 #ifdef __linux__
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    int any = 0;
-    for (int i = 0; i < ncpus; i++) {
-        if (cpus[i] >= 0 && cpus[i] < CPU_SETSIZE) { CPU_SET(cpus[i], &set); any = 1; }
+static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (!cpus || ncpus <= 0) {
+        out->requested = 0;
+        return 0; /* intentionally unrequested */
     }
-    if (!any) { n->m.affinity_error = EINVAL; return -1; }
-    int rc = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
-    if (rc != 0) { n->m.affinity_error = rc; return -1; }
-    n->m.affinity_applied = 1;
-    /* verify effective affinity */
-    cpu_set_t got;
-    CPU_ZERO(&got);
-    if (pthread_getaffinity_np(pthread_self(), sizeof(got), &got) != 0) {
-        n->m.affinity_error = errno ? errno : EINVAL;
+    out->requested = 1;
+    int max_cpu = -1;
+    for (int i = 0; i < ncpus; i++) {
+        if (cpus[i] < 0) { out->error = EINVAL; return -1; }
+        if (cpus[i] > max_cpu) max_cpu = cpus[i];
+    }
+    if (max_cpu < 0) { out->error = EINVAL; return -1; }
+    size_t setsize = CPU_ALLOC_SIZE(max_cpu + 1);
+    cpu_set_t *set = CPU_ALLOC(max_cpu + 1);
+    cpu_set_t *got = CPU_ALLOC(max_cpu + 1);
+    if (!set || !got) {
+        if (set) CPU_FREE(set);
+        if (got) CPU_FREE(got);
+        out->error = ENOMEM;
         return -1;
     }
+    CPU_ZERO_S(setsize, set);
+    CPU_ZERO_S(setsize, got);
     for (int i = 0; i < ncpus; i++) {
-        if (cpus[i] >= 0 && cpus[i] < CPU_SETSIZE && !CPU_ISSET(cpus[i], &got)) {
-            n->m.affinity_error = EPERM;
-            return -1;
-        }
+        CPU_SET_S(cpus[i], setsize, set);
     }
-    n->m.affinity_verified = 1;
+    int rc = pthread_setaffinity_np(pthread_self(), setsize, set);
+    if (rc != 0) {
+        out->error = rc; /* pthread returns error number directly */
+        CPU_FREE(set); CPU_FREE(got);
+        return -1;
+    }
+    out->set_applied = 1;
+    rc = pthread_getaffinity_np(pthread_self(), setsize, got);
+    if (rc != 0) {
+        out->error = rc; /* pthread returns error number directly */
+        CPU_FREE(set); CPU_FREE(got);
+        return -1;
+    }
+    out->query_succeeded = 1;
+    /* verify all requested CPUs present in effective set */
+    int match = 1;
+    for (int i = 0; i < ncpus; i++) {
+        if (!CPU_ISSET_S(cpus[i], setsize, got)) { match = 0; break; }
+    }
+    out->matched = match;
+    if (!match) {
+        out->error = EPERM;
+        CPU_FREE(set); CPU_FREE(got);
+        return -1;
+    }
+    CPU_FREE(set); CPU_FREE(got);
     return 0;
-#else
-    n->m.affinity_error = ENOTSUP;
-    return -1;
-#endif
 }
+#else
+static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (!cpus || ncpus <= 0) { out->requested = 0; return 0; }
+    out->requested = 1;
+    out->error = ENOTSUP;
+    return -1;
+}
+#endif
 
+/* --- mbind (policy application; not physical placement proof) --- */
 static int di_mbind_node(void *addr, size_t len, int phys_node, di_node_t *n) {
-    n->m.mbind_requested = (phys_node >= 0);
+    n->m.mbind_policy_requested = (phys_node >= 0);
     if (phys_node < 0) return 0;
 #ifdef __linux__
     unsigned long maxnode = (unsigned long)phys_node + 2;
     size_t mask_bytes = (maxnode + 7UL) / 8UL;
-    /* round up to unsigned long */
     size_t mask_ul = (mask_bytes + sizeof(unsigned long) - 1) / sizeof(unsigned long);
     unsigned long *mask = (unsigned long *)calloc(mask_ul ? mask_ul : 1, sizeof(unsigned long));
     if (!mask) { n->m.mbind_error = ENOMEM; return -1; }
@@ -308,7 +344,7 @@ static int di_mbind_node(void *addr, size_t len, int phys_node, di_node_t *n) {
     int err = errno;
     free(mask);
     if (rc != 0) { n->m.mbind_error = err ? err : EINVAL; return -1; }
-    n->m.mbind_applied = 1;
+    n->m.mbind_policy_applied = 1;
     return 0;
 #else
     n->m.mbind_error = ENOTSUP;
@@ -321,9 +357,8 @@ static int di_alloc_local(size_t len, int prefer_huge, int phys_node, di_node_t 
     memset(out, 0, sizeof(*out));
     if (len == 0) return -1;
     size_t aln = DI_ALIGN_2M;
-    /* over-allocate to guarantee 2MiB-aligned usable buffer */
     size_t map_len = len + aln;
-    if (map_len < len) return -1; /* overflow */
+    if (map_len < len) return -1;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     void *map_base = MAP_FAILED;
     int used_huge = 0;
@@ -331,25 +366,20 @@ static int di_alloc_local(size_t len, int prefer_huge, int phys_node, di_node_t 
 #ifdef MAP_HUGETLB
     if (prefer_huge && map_len >= DI_ALIGN_2M) {
         map_base = mmap(NULL, map_len, PROT_READ | PROT_WRITE, flags | MAP_HUGETLB, -1, 0);
-        if (map_base != MAP_FAILED) {
-            used_huge = 1;
-        }
+        if (map_base != MAP_FAILED) used_huge = 1;
     }
 #endif
     if (map_base == MAP_FAILED) {
         map_base = mmap(NULL, map_len, PROT_READ | PROT_WRITE, flags, -1, 0);
     }
-    if (map_base == MAP_FAILED) {
-        return -1;
-    }
+    if (map_base == MAP_FAILED) return -1;
     uintptr_t addr = (uintptr_t)map_base;
     uintptr_t aligned = (addr + aln - 1) & ~(uintptr_t)(aln - 1);
     void *usable = (void *)aligned;
-    /* apply mbind to full mapping */
     int mbind_rc = di_mbind_node(map_base, map_len, phys_node, n);
     if (mbind_rc != 0 && n->eng->P.strict_mbind) {
         munmap(map_base, map_len);
-        n->m.placement_strict_failed = 1;
+        n->m.strict_mbind_failed = 1;
         return -1;
     }
     out->buf = usable;
@@ -363,8 +393,6 @@ static int di_alloc_local(size_t len, int prefer_huge, int phys_node, di_node_t 
         if (used_huge) n->m.hugepage_map_obtained_bytes += len;
         else n->m.hugepage_fallback_bytes += len;
     }
-    /* observed hugepage backing not reliably available; leave 0 */
-    (void)usable;
     return 0;
 }
 
@@ -376,71 +404,78 @@ static void di_free_chunk(di_chunk_t *c) {
     c->map_len = 0;
 }
 
+/* Placement sampling: distributed across full usable allocation (Addendum A §4). */
 static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
 #if defined(__linux__) && defined(__NR_move_pages)
-    if (!buf || len == 0) return 0;
+    if (!buf || len == 0) {
+        n->m.placement_sampling_not_performed = 1;
+        return 0;
+    }
     long page = sysconf(_SC_PAGESIZE);
-    if (page <= 0) return 0;
+    if (page <= 0) { n->m.placement_sampling_unavailable = 1; return 0; }
     size_t total_pages = (len + (size_t)page - 1) / (size_t)page;
-    size_t sample_cap = 1024;
-    size_t pages = total_pages < sample_cap ? total_pages : sample_cap;
-    n->m.placement_samples += pages;
-    n->m.placement_sample_cap = sample_cap;
-    void **addrs = (void **)calloc(pages, sizeof(void *));
-    int *status = (int *)calloc(pages, sizeof(int));
-    if (!addrs || !status) { free(addrs); free(status); n->m.unknown_pages += pages; return -1; }
-    for (size_t i = 0; i < pages; i++) addrs[i] = (char *)buf + i * (size_t)page;
-    long rc = syscall(__NR_move_pages, 0, (unsigned long)pages, addrs, NULL, status, 0);
+    if (total_pages == 0) { n->m.placement_sampling_not_performed = 1; return 0; }
+    size_t sample_limit = 1024;
+    size_t samples = total_pages < sample_limit ? total_pages : sample_limit;
+    n->m.placement_total_addressable_pages += total_pages;
+    n->m.placement_sample_limit = sample_limit;
+    /* deterministic evenly distributed sampling including first and last */
+    size_t stride = 1;
+    if (samples < total_pages) {
+        stride = (total_pages - 1) / (samples - 1);
+        if (stride == 0) stride = 1;
+    }
+    /* build unique indices */
+    size_t *idxs = (size_t *)calloc(samples, sizeof(size_t));
+    void **addrs = (void **)calloc(samples, sizeof(void *));
+    int *status = (int *)calloc(samples, sizeof(int));
+    if (!idxs || !addrs || !status) {
+        free(idxs); free(addrs); free(status);
+        n->m.placement_sample_unknown_pages += samples;
+        n->m.placement_sampled_pages += samples;
+        n->m.placement_sampling_unavailable = 1;
+        return -1;
+    }
+    size_t count = 0;
+    if (samples == 1) {
+        idxs[count++] = 0;
+    } else if (samples >= total_pages) {
+        for (size_t i = 0; i < total_pages && count < samples; i++) idxs[count++] = i;
+    } else {
+        for (size_t i = 0; i < samples; i++) {
+            size_t idx = i * (total_pages - 1) / (samples - 1);
+            if (idx >= total_pages) idx = total_pages - 1;
+            /* ensure uniqueness and include end */
+            if (count == 0 || idx != idxs[count - 1]) idxs[count++] = idx;
+        }
+        /* ensure last page included */
+        if (count == 0 || idxs[count - 1] != total_pages - 1) {
+            if (count < samples) idxs[count++] = total_pages - 1;
+            else idxs[count - 1] = total_pages - 1;
+        }
+    }
+    /* effective spacing info (approx) */
+    n->m.placement_sample_spacing = (count <= 1) ? 1 : (total_pages / count);
+    n->m.placement_sampled_pages += count;
+    for (size_t i = 0; i < count; i++) addrs[i] = (char *)buf + idxs[i] * (size_t)page;
+    long rc = syscall(__NR_move_pages, 0, (unsigned long)count, addrs, NULL, status, 0);
     if (rc == 0) {
-        for (size_t i = 0; i < pages; i++) {
-            if (n->phys_node >= 0 && status[i] == n->phys_node) n->m.local_pages++;
-            else if (status[i] >= 0) n->m.remote_pages++;
-            else n->m.unknown_pages++; /* negative => unknown/permission denied etc */
+        for (size_t i = 0; i < count; i++) {
+            if (n->phys_node >= 0 && status[i] == n->phys_node) n->m.placement_sample_target_match_pages++;
+            else if (status[i] >= 0) n->m.placement_sample_other_node_pages++;
+            else n->m.placement_sample_unknown_pages++;
         }
     } else {
-        n->m.unknown_pages += pages;
+        n->m.placement_sample_unknown_pages += count;
+        n->m.placement_sampling_unavailable = 1;
     }
-    free(addrs); free(status);
+    free(idxs); free(addrs); free(status);
+    return 0;
 #else
     (void)n; (void)buf; (void)len;
+    n->m.placement_sampling_unavailable = 1;
+    return 0;
 #endif
-    return 0;
-}
-
-/* --- narrow test seam for S3 fault injection (no effect unless enabled) --- */
-typedef struct {
-    int enabled;
-    int mode;            /* 0=off,1=eintr_count,2=partial_max,3=premature_eof_at,4=error_at */
-    int counter;         /* remaining injections / partial max bytes */
-    uint64_t threshold;  /* byte offset threshold for modes 3/4 */
-    int fired;
-} di_test_pread_seam_t;
-static di_test_pread_seam_t g_pread_seam = {0,0,0,0,0};
-
-int di_test_set_pread_seam(int mode, int counter, uint64_t threshold) {
-    g_pread_seam.enabled = (mode != 0);
-    g_pread_seam.mode = mode;
-    g_pread_seam.counter = counter;
-    g_pread_seam.threshold = threshold;
-    g_pread_seam.fired = 0;
-    return 0;
-}
-int di_test_pread_seam_fired(void) { return g_pread_seam.fired; }
-
-int di_test_check_2m_alignment(size_t len) {
-    di_node_t dummy;
-    memset(&dummy, 0, sizeof(dummy));
-    di_engine_t eng;
-    memset(&eng, 0, sizeof(eng));
-    eng.P.strict_mbind = 0;
-    dummy.eng = &eng;
-    dummy.phys_node = -1;
-    di_chunk_t c;
-    if (di_alloc_local(len, 0, -1, &dummy, &c) != 0) return -1;
-    uintptr_t a = (uintptr_t)c.buf;
-    int ok = ((a & (DI_ALIGN_2M - 1)) == 0);
-    di_free_chunk(&c);
-    return ok ? 1 : 0;
 }
 
 static int di_check_input_unchanged(di_engine_t *eng) {
@@ -458,7 +493,6 @@ static int di_check_input_unchanged(di_engine_t *eng) {
     return 0;
 }
 
-/* Robust positioned read: fill [off, off+len) unless genuine EOF/error. */
 static ssize_t di_pread_full(di_engine_t *eng, void *buf, size_t len, uint64_t off) {
     size_t done = 0;
     while (done < len) {
@@ -469,37 +503,41 @@ static ssize_t di_pread_full(di_engine_t *eng, void *buf, size_t len, uint64_t o
         }
         if (off + done > (uint64_t)LLONG_MAX) { errno = EOVERFLOW; return -1; }
         size_t want = len - done;
-        /* fault injection seam */
-        int inject_eintr = 0;
-        if (g_pread_seam.enabled) {
-            if (g_pread_seam.mode == 1 && g_pread_seam.counter > 0) {
-                g_pread_seam.counter--; g_pread_seam.fired = 1; inject_eintr = 1;
-            }
+        /* synchronized seam read */
+        pthread_mutex_lock(&eng->seam_mu);
+        di_pread_seam_t seam = eng->pread_seam;
+        int consume_eintr = 0, consume_partial = 0, do_premature_eof = 0, do_error_at = 0, do_error_after_partial = 0;
+        size_t partial_cap = 0;
+        if (seam.enabled) {
+            if (seam.mode == 1 && seam.counter > 0) { consume_eintr = 1; eng->pread_seam.counter--; eng->pread_seam.fired = 1; }
+            else if (seam.mode == 2 && seam.counter > 0) { consume_partial = 1; partial_cap = (size_t)seam.counter; eng->pread_seam.fired = 1; }
+            else if (seam.mode == 3 && (off + done) >= seam.threshold) { do_premature_eof = 1; eng->pread_seam.fired = 1; }
+            else if (seam.mode == 4 && (off + done) >= seam.threshold) { do_error_at = 1; eng->pread_seam.fired = 1; }
+            else if (seam.mode == 5 && seam.counter > 0) { do_error_after_partial = 1; partial_cap = (size_t)seam.counter; eng->pread_seam.counter = 0; eng->pread_seam.fired = 1; }
         }
+        pthread_mutex_unlock(&eng->seam_mu);
+
         ssize_t rr;
-        if (inject_eintr) {
-            errno = EINTR;
-            rr = -1;
+        if (consume_eintr) {
+            errno = EINTR; rr = -1;
         } else {
             rr = pread(eng->fd, (char *)buf + done, want, (off_t)(off + done));
         }
-        if (g_pread_seam.enabled && rr >= 0) {
-            if (g_pread_seam.mode == 2 && g_pread_seam.counter > 0 && rr > 0) { /* partial max */
-                size_t cap = (size_t)g_pread_seam.counter;
-                if ((size_t)rr > cap) { rr = (ssize_t)cap; g_pread_seam.fired = 1; }
-            } else if (g_pread_seam.mode == 3 && (off + done) >= g_pread_seam.threshold) { /* premature EOF */
-                rr = 0; g_pread_seam.fired = 1;
-            } else if (g_pread_seam.mode == 4 && (off + done) >= g_pread_seam.threshold) { /* error */
-                errno = EIO; rr = -1; g_pread_seam.fired = 1;
+        if (rr >= 0) {
+            if (consume_partial && rr > 0 && (size_t)rr > partial_cap) rr = (ssize_t)partial_cap;
+            if (do_error_after_partial && rr > 0) {
+                if ((size_t)rr > partial_cap) rr = (ssize_t)partial_cap;
+                /* deliver partial then error on next iteration? easier: record partial and fail now */
+                if (rr > 0) { done += (size_t)rr; errno = EIO; return -1; }
             }
+            if (do_premature_eof) rr = 0;
+            if (do_error_at) { errno = EIO; rr = -1; }
         }
         if (rr < 0) {
             if (errno == EINTR) continue;
             return -1;
         }
-        if (rr == 0) {
-            break; /* EOF */
-        }
+        if (rr == 0) break;
         done += (size_t)rr;
     }
     return (ssize_t)done;
@@ -522,7 +560,6 @@ static int di_queue_push(di_node_t *n, di_chunk_t c) {
     n->q[n->q_tail] = c;
     n->q_tail = (n->q_tail + 1) % n->q_cap;
     n->q_count++;
-    /* accounting: move outstanding -> published */
     if (n->outstanding >= c.len) n->outstanding -= c.len; else n->outstanding = 0;
     n->published_backlog = di_u64_add_sat(n->published_backlog, c.len);
     if (n->published_backlog > n->max_published_backlog) n->max_published_backlog = n->published_backlog;
@@ -545,7 +582,7 @@ static int di_queue_pop(di_node_t *n, di_chunk_t *out, int *ing_done) {
         if (done || __atomic_load_n(&eng->stop, __ATOMIC_RELAXED)) {
             if (ing_done) *ing_done = 1;
             pthread_mutex_unlock(&n->mu);
-            return 0; /* empty & done */
+            return 0;
         }
         uint64_t t0 = di_now_ns();
         pthread_cond_wait(&n->cv_can_pop, &n->mu);
@@ -554,12 +591,10 @@ static int di_queue_pop(di_node_t *n, di_chunk_t *out, int *ing_done) {
     *out = n->q[n->q_head];
     n->q_head = (n->q_head + 1) % n->q_cap;
     n->q_count--;
-    /* move published -> consumer inflight (no headroom change) */
     if (n->published_backlog >= out->len) n->published_backlog -= out->len; else n->published_backlog = 0;
     n->consumer_inflight_backlog = di_u64_add_sat(n->consumer_inflight_backlog, out->len);
     if (n->consumer_inflight_backlog > n->max_consumer_inflight_backlog)
         n->max_consumer_inflight_backlog = n->consumer_inflight_backlog;
-    /* effective unchanged, but republish headroom for consistency */
     di_publish_headroom(n);
     pthread_cond_signal(&n->cv_can_push);
     pthread_mutex_unlock(&n->mu);
@@ -570,7 +605,6 @@ static int di_queue_pop(di_node_t *n, di_chunk_t *out, int *ing_done) {
 static void di_consume_complete(di_node_t *n, uint64_t len) {
     pthread_mutex_lock(&n->mu);
     if (n->consumer_inflight_backlog >= len) n->consumer_inflight_backlog -= len; else n->consumer_inflight_backlog = 0;
-    /* headroom increases now */
     di_publish_headroom(n);
     pthread_cond_signal(&n->cv_can_push);
     pthread_mutex_unlock(&n->mu);
@@ -578,11 +612,8 @@ static void di_consume_complete(di_node_t *n, uint64_t len) {
 
 static void di_consume_chunk(di_node_t *n, di_chunk_t *c) {
     di_consumer_cfg_t *cc = &n->cons_cfg;
-    /* STALL initial sleep is handled once at consumer thread start */
     uint64_t bps = cc->bytes_per_sec;
-    if (cc->mode == DI_CONSUMER_FAST || bps == 0) {
-        /* immediate */
-    } else {
+    if (!(cc->mode == DI_CONSUMER_FAST || bps == 0)) {
         if (bps > 0) {
             uint64_t ns = (c->len * 1000000000ULL) / bps;
             struct timespec ts;
@@ -597,13 +628,23 @@ static void di_consume_chunk(di_node_t *n, di_chunk_t *c) {
     di_consume_complete(n, c->len);
 }
 
+static void di_engine_stop(di_engine_t *eng) {
+    __atomic_store_n(&eng->stop, 1, __ATOMIC_RELEASE);
+    for (int i = 0; i < eng->num_nodes; i++) {
+        pthread_mutex_lock(&eng->nodes[i].mu);
+        pthread_cond_broadcast(&eng->nodes[i].cv_can_pop);
+        pthread_cond_broadcast(&eng->nodes[i].cv_can_push);
+        pthread_mutex_unlock(&eng->nodes[i].mu);
+    }
+}
+
 static void *di_consumer_thread(void *arg) {
     di_node_t *n = (di_node_t *)arg;
-    /* affinity */
-    int pin_rc = di_pin_thread(n->cpus, n->ncpus, n);
-    if (pin_rc != 0 && n->eng->P.strict_affinity) {
-        n->m.placement_strict_failed = 1;
-        di_engine_stop(n->eng);
+    di_engine_t *eng = n->eng;
+    int pin_rc = di_pin_thread_role(n->cpus, n->ncpus, &n->m.affinity_consumer);
+    if (pin_rc != 0 && eng->P.strict_affinity && n->m.affinity_consumer.requested) {
+        n->m.affinity_consumer.strict_failed = 1;
+        di_engine_stop(eng); /* atomic stop is safe; no shared metric flag write */
     }
     uint64_t c0 = di_thread_cpu_ns();
     if (n->cons_cfg.mode == DI_CONSUMER_STALL && n->cons_cfg.stall_ms > 0) {
@@ -624,23 +665,12 @@ static void *di_consumer_thread(void *arg) {
     return NULL;
 }
 
-static void di_engine_stop(di_engine_t *eng) {
-    __atomic_store_n(&eng->stop, 1, __ATOMIC_RELEASE);
-    /* wake all */
-    for (int i = 0; i < eng->num_nodes; i++) {
-        pthread_mutex_lock(&eng->nodes[i].mu);
-        pthread_cond_broadcast(&eng->nodes[i].cv_can_pop);
-        pthread_cond_broadcast(&eng->nodes[i].cv_can_push);
-        pthread_mutex_unlock(&eng->nodes[i].mu);
-    }
-}
-
 static void *di_ingestor_thread(void *arg) {
     di_node_t *n = (di_node_t *)arg;
     di_engine_t *eng = n->eng;
-    int pin_rc = di_pin_thread(n->cpus, n->ncpus, n);
-    if (pin_rc != 0 && eng->P.strict_affinity) {
-        n->m.placement_strict_failed = 1;
+    int pin_rc = di_pin_thread_role(n->cpus, n->ncpus, &n->m.affinity_ingestor);
+    if (pin_rc != 0 && eng->P.strict_affinity && n->m.affinity_ingestor.requested) {
+        n->m.affinity_ingestor.strict_failed = 1;
         di_engine_stop(eng);
     }
     uint64_t c0 = di_thread_cpu_ns();
@@ -648,7 +678,6 @@ static void *di_ingestor_thread(void *arg) {
     for (;;) {
         if (__atomic_load_n(&eng->stop, __ATOMIC_RELAXED)) break;
 
-        /* snapshot accounting for admission/policy */
         pthread_mutex_lock(&n->mu);
         uint64_t eff = di_node_eff(n);
         pthread_mutex_unlock(&n->mu);
@@ -663,8 +692,7 @@ static void *di_ingestor_thread(void *arg) {
                 headrooms[i] = __atomic_load_n(&eng->nodes[i].peer_headroom, __ATOMIC_RELAXED);
                 effs[i] = (eng->P.max_backlog > headrooms[i]) ? (eng->P.max_backlog - headrooms[i]) : eng->P.max_backlog;
             }
-            headrooms[n->id] = hr_i;
-            effs[n->id] = eff;
+            headrooms[n->id] = hr_i; effs[n->id] = eff;
             want = di_policy_decide(eng->cfg.policy, &eng->P, eng->num_nodes, n->id, effs, headrooms);
             n->m.peer_observe_ns += di_now_ns() - t0p;
             n->m.peer_observe_count++;
@@ -687,7 +715,7 @@ static void *di_ingestor_thread(void *arg) {
             n->m.zero_claims++;
             pthread_mutex_unlock(&n->mu);
             uint64_t t0w = di_now_ns();
-            struct timespec ts; ts.tv_sec=0; ts.tv_nsec=200000; /* 0.2ms */
+            struct timespec ts; ts.tv_sec=0; ts.tv_nsec=200000;
             nanosleep(&ts,NULL);
             n->m.claim_wait_ns += di_now_ns() - t0w;
             uint64_t go = __atomic_load_n(&eng->next_offset, __ATOMIC_ACQUIRE);
@@ -699,14 +727,12 @@ static void *di_ingestor_thread(void *arg) {
             }
             continue;
         }
-        /* admit */
         n->outstanding = di_u64_add_sat(n->outstanding, want);
         eff = di_node_eff(n);
         if (eff > n->max_effective_backlog) n->max_effective_backlog = eff;
         di_publish_headroom(n);
         pthread_mutex_unlock(&n->mu);
 
-        /* FAA reserve */
         uint64_t start = __atomic_fetch_add(&eng->next_offset, want, __ATOMIC_ACQ_REL);
         if (start >= eng->file_size) {
             pthread_mutex_lock(&n->mu);
@@ -718,7 +744,6 @@ static void *di_ingestor_thread(void *arg) {
         uint64_t req_len = want;
         uint64_t avail = (eng->file_size > start) ? (eng->file_size - start) : 0;
         uint64_t assigned = req_len < avail ? req_len : avail;
-        /* bytes beyond EOF in reservation are not real input; reduce outstanding for excess now */
         if (assigned < want) {
             pthread_mutex_lock(&n->mu);
             uint64_t delta = want - assigned;
@@ -727,7 +752,6 @@ static void *di_ingestor_thread(void *arg) {
             pthread_mutex_unlock(&n->mu);
         }
         if (assigned == 0) {
-            /* nothing to read */
             pthread_mutex_lock(&n->mu);
             if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
             di_publish_headroom(n);
@@ -761,10 +785,7 @@ static void *di_ingestor_thread(void *arg) {
             break;
         }
         uint64_t act = (uint64_t)rr;
-        /* if we couldn't fill assigned bytes, input must have ended/changed unexpectedly
-           unless it's genuine EOF at file_size boundary - but assigned was capped to file_size-start */
         if (act < assigned) {
-            /* premature EOF / truncation relative to captured file */
             __atomic_store_n(&eng->input_changed, 1, __ATOMIC_RELEASE);
             n->m.last_error = DI_ERR_IO;
             di_free_chunk(&c);
@@ -786,7 +807,6 @@ static void *di_ingestor_thread(void *arg) {
 
         c.off = start; c.len = act;
         if (di_queue_push(n, c) != 0) {
-            /* publication failed (stopped) - rollback outstanding for this chunk was moved in push? no, push failed before move */
             di_free_chunk(&c);
             pthread_mutex_lock(&n->mu);
             if (n->outstanding >= act) n->outstanding -= act; else n->outstanding = 0;
@@ -799,7 +819,6 @@ static void *di_ingestor_thread(void *arg) {
 
     n->m.ingest_cpu_ns = di_thread_cpu_ns() - c0;
     __atomic_fetch_add(&eng->ingestors_done, 1, __ATOMIC_ACQ_REL);
-    /* wake consumers to notice completion (do not force stop on clean path) */
     for (int j = 0; j < eng->num_nodes; j++) {
         pthread_mutex_lock(&eng->nodes[j].mu);
         pthread_cond_broadcast(&eng->nodes[j].cv_can_pop);
@@ -811,6 +830,14 @@ static void *di_ingestor_thread(void *arg) {
 
 di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     if (!cfg || cfg->num_nodes < 1 || cfg->num_nodes > DI_MAX_NODES) return NULL;
+    /* Section 5: reject duplicate physical node IDs at C boundary */
+    if (cfg->phys_nodes) {
+        for (int i = 0; i < cfg->num_nodes; i++) {
+            for (int j = i + 1; j < cfg->num_nodes; j++) {
+                if (cfg->phys_nodes[i] == cfg->phys_nodes[j]) return NULL;
+            }
+        }
+    }
     di_engine_t *eng = (di_engine_t *)calloc(1, sizeof(*eng));
     if (!eng) return NULL;
     eng->fd = fd;
@@ -821,10 +848,11 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     if (eng->P.base_quantum == 0) eng->P.base_quantum = DI_QUANTUM_DEFAULT;
     if (eng->P.max_backlog == 0) eng->P.max_backlog = 64ULL * eng->P.base_quantum;
     if (eng->P.max_reservation == 0) eng->P.max_reservation = eng->P.max_backlog;
-    eng->P.one_outstanding_per_node = 1; /* enforced */
+    eng->P.one_outstanding_per_node = 1;
     if (!eng->P.enable_peer_headroom) eng->P.enable_peer_headroom = 1;
+    pthread_mutex_init(&eng->seam_mu, NULL);
+    memset(&eng->pread_seam, 0, sizeof(eng->pread_seam));
 
-    /* capture file identity for immutability checks */
     struct stat st;
     if (fstat(fd, &st) == 0) {
         eng->file_dev = (uint64_t)st.st_dev;
@@ -843,7 +871,6 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     __atomic_store_n(&eng->ingestors_done, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&eng->input_changed, 0, __ATOMIC_RELAXED);
 
-    int ok_nodes = 0;
     for (int i = 0; i < eng->num_nodes; i++) {
         di_node_t *n = &eng->nodes[i];
         memset(n, 0, sizeof(*n));
@@ -855,7 +882,6 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
         n->q_cap = 1024;
         n->q = (di_chunk_t *)calloc(n->q_cap, sizeof(di_chunk_t));
         if (!n->q) {
-            /* cleanup partial: destroy nodes [0..i-1] */
             for (int j = 0; j < i; j++) {
                 di_node_t *pj = &eng->nodes[j];
                 free(pj->q); pj->q = NULL;
@@ -863,6 +889,7 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
                 pthread_cond_destroy(&pj->cv_can_push);
                 pthread_cond_destroy(&pj->cv_can_pop);
             }
+            pthread_mutex_destroy(&eng->seam_mu);
             free(eng);
             return NULL;
         }
@@ -872,9 +899,7 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
         __atomic_store_n(&n->peer_headroom, eng->P.max_backlog, __ATOMIC_RELAXED);
         if (cfg->consumers) n->cons_cfg = cfg->consumers[i];
         else { n->cons_cfg.mode = DI_CONSUMER_FAST; n->cons_cfg.bytes_per_sec = 0; n->cons_cfg.stall_ms = 0; }
-        ok_nodes++;
     }
-    (void)ok_nodes;
     return eng;
 }
 
@@ -882,19 +907,17 @@ void di_destroy(di_engine_t *eng) {
     if (!eng) return;
     for (int i = 0; i < eng->num_nodes; i++) {
         di_node_t *n = &eng->nodes[i];
-        /* free any leftover queued chunks */
         for (unsigned k = 0; k < n->q_count; k++) {
             unsigned idx = (n->q_head + k) % n->q_cap;
             di_free_chunk(&n->q[idx]);
         }
-        /* if any consumer inflight chunks remain (shouldn't in normal destroy after run), cannot reach them here
-           because they were popped; normal lifecycle frees on consume. */
         free(n->q);
         free(n->recs);
         pthread_mutex_destroy(&n->mu);
         pthread_cond_destroy(&n->cv_can_push);
         pthread_cond_destroy(&n->cv_can_pop);
     }
+    pthread_mutex_destroy(&eng->seam_mu);
     free(eng);
 }
 
@@ -915,36 +938,31 @@ int di_run(di_engine_t *eng, di_result_t *result) {
     result->num_nodes = eng->num_nodes;
     result->total_bytes = eng->file_size;
 
-    if (eng->cfg.policy == DI_POLICY_CENTRALIZED_CONTROL) {
-        return DI_ERR_INVAL;
-    }
+    if (eng->cfg.policy == DI_POLICY_CENTRALIZED_CONTROL) return DI_ERR_INVAL;
 
     clock_gettime(CLOCK_MONOTONIC, &eng->t_start);
     eng->started = 1;
 
     int rc = 0;
-    int created_cons = 0, created_ing = 0;
     for (int i = 0; i < eng->num_nodes; i++) {
         if (pthread_create(&eng->nodes[i].cons_tid, NULL, di_consumer_thread, &eng->nodes[i]) == 0) {
-            eng->nodes[i].has_cons = 1; created_cons++;
+            eng->nodes[i].has_cons = 1;
         } else {
             rc = DI_ERR_THREAD; di_engine_stop(eng);
         }
     }
     for (int i = 0; i < eng->num_nodes; i++) {
         if (rc == 0 && pthread_create(&eng->nodes[i].ing_tid, NULL, di_ingestor_thread, &eng->nodes[i]) == 0) {
-            eng->nodes[i].has_ing = 1; created_ing++;
+            eng->nodes[i].has_ing = 1;
         } else if (rc == 0) {
             rc = DI_ERR_THREAD; di_engine_stop(eng);
         }
     }
 
-    /* join ingestors */
     for (int i = 0; i < eng->num_nodes; i++) {
         if (eng->nodes[i].has_ing) pthread_join(eng->nodes[i].ing_tid, NULL);
     }
     __atomic_store_n(&eng->ingestors_done, eng->num_nodes, __ATOMIC_RELEASE);
-    /* wake consumers */
     for (int i = 0; i < eng->num_nodes; i++) {
         pthread_mutex_lock(&eng->nodes[i].mu);
         pthread_cond_broadcast(&eng->nodes[i].cv_can_pop);
@@ -954,7 +972,6 @@ int di_run(di_engine_t *eng, di_result_t *result) {
     for (int i = 0; i < eng->num_nodes; i++) {
         if (eng->nodes[i].has_cons) pthread_join(eng->nodes[i].cons_tid, NULL);
     }
-    (void)created_cons; (void)created_ing;
 
     clock_gettime(CLOCK_MONOTONIC, &eng->t_end);
     result->wall_seconds = (eng->t_end.tv_sec - eng->t_start.tv_sec)
@@ -970,6 +987,15 @@ int di_run(di_engine_t *eng, di_result_t *result) {
     size_t pos = 0;
     for (int i = 0; i < eng->num_nodes; i++) {
         di_node_t *n = &eng->nodes[i];
+        /* aggregate strict affinity decision safely after joins (no concurrent writes) */
+        n->m.strict_affinity_failed = 0;
+        if (eng->P.strict_affinity) {
+            if (n->m.affinity_ingestor.requested && n->m.affinity_ingestor.strict_failed) n->m.strict_affinity_failed = 1;
+            if (n->m.affinity_consumer.requested && n->m.affinity_consumer.strict_failed) n->m.strict_affinity_failed = 1;
+            /* also treat unmatched/unverified as failure for required role */
+            if (n->m.affinity_ingestor.requested && (!n->m.affinity_ingestor.matched)) n->m.strict_affinity_failed = 1;
+            if (n->m.affinity_consumer.requested && (!n->m.affinity_consumer.matched)) n->m.strict_affinity_failed = 1;
+        }
         result->nodes[i] = n->m;
         result->nodes[i].current_published_backlog = n->published_backlog;
         result->nodes[i].current_consumer_inflight_backlog = n->consumer_inflight_backlog;
@@ -987,7 +1013,7 @@ int di_run(di_engine_t *eng, di_result_t *result) {
         result->ingest_cpu_ns += n->m.ingest_cpu_ns;
         result->consumer_cpu_ns += n->m.consumer_cpu_ns;
         for (int b=0;b<20;b++) result->res_hist[b]+=n->m.res_hist[b];
-        if (all) {
+        if (all && n->recs_n > 0 && n->recs) {
             memcpy(all + pos, n->recs, n->recs_n * sizeof(*all));
             pos += n->recs_n;
         }
@@ -1013,9 +1039,7 @@ int di_run(di_engine_t *eng, di_result_t *result) {
             else { result->duplicate_detected = 1; }
         }
         if (cur < eng->file_size) result->lost_detected = 1;
-        if (covered != eng->file_size) {
-            if (covered < eng->file_size) result->lost_detected = 1;
-        }
+        if (covered != eng->file_size) { if (covered < eng->file_size) result->lost_detected = 1; }
         (void)covered;
     } else if (eng->file_size == 0) {
         /* ok */
@@ -1025,12 +1049,11 @@ int di_run(di_engine_t *eng, di_result_t *result) {
     free(all);
 
     if (__atomic_load_n(&eng->input_changed, __ATOMIC_ACQUIRE)) rc = DI_ERR_IO;
-    /* if any node had placement strict failure or last_error indicating fatal issue, treat as error */
     for (int i = 0; i < eng->num_nodes; i++) {
-        if (result->nodes[i].placement_strict_failed && rc == 0) rc = DI_ERR_STATE;
+        if (result->nodes[i].strict_affinity_failed && rc == 0) rc = DI_ERR_STATE;
+        if (result->nodes[i].strict_mbind_failed && rc == 0) rc = DI_ERR_STATE;
         if (result->nodes[i].last_error != 0 && rc == 0) rc = DI_ERR_STATE;
     }
-    /* stop requested due to fatal error paths */
     if (__atomic_load_n(&eng->stop, __ATOMIC_RELAXED) && rc == 0) rc = DI_ERR_STATE;
     if (rc == 0 && (result->overlap_detected || result->duplicate_detected || result->lost_detected)) rc = DI_ERR_STATE;
     if (rc == 0 && result->total_consumed != eng->file_size) rc = DI_ERR_STATE;
@@ -1057,4 +1080,66 @@ int di_debug_node_accounting(di_engine_t *eng, int node,
     if (outstanding) *outstanding = o;
     if (effective) *effective = e;
     return 0;
+}
+
+int di_test_set_pread_seam(di_engine_t *eng, int mode, int counter, uint64_t threshold) {
+    if (!eng) return -1;
+    pthread_mutex_lock(&eng->seam_mu);
+    eng->pread_seam.enabled = (mode != 0);
+    eng->pread_seam.mode = mode;
+    eng->pread_seam.counter = counter;
+    eng->pread_seam.threshold = threshold;
+    eng->pread_seam.fired = 0;
+    pthread_mutex_unlock(&eng->seam_mu);
+    return 0;
+}
+int di_test_pread_seam_fired(di_engine_t *eng) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->seam_mu);
+    int f = eng->pread_seam.fired;
+    pthread_mutex_unlock(&eng->seam_mu);
+    return f;
+}
+
+int di_test_check_2m_alignment(size_t len) {
+    di_node_t dummy;
+    memset(&dummy, 0, sizeof(dummy));
+    di_engine_t eng;
+    memset(&eng, 0, sizeof(eng));
+    eng.P.strict_mbind = 0;
+    dummy.eng = &eng;
+    dummy.phys_node = -1;
+    di_chunk_t c;
+    if (di_alloc_local(len, 0, -1, &dummy, &c) != 0) return -1;
+    uintptr_t a = (uintptr_t)c.buf;
+    int ok = ((a & (DI_ALIGN_2M - 1)) == 0);
+    di_free_chunk(&c);
+    return ok ? 1 : 0;
+}
+
+/* Test helpers for Addendum A: CPU mask building/validation logic independent of pinning. */
+int di_test_cpu_mask_check(const int *cpus, int ncpus, int require_above_cpuset_size) {
+#ifdef __linux__
+    if (!cpus || ncpus <= 0) return -1;
+    int max_cpu = -1;
+    for (int i = 0; i < ncpus; i++) {
+        if (cpus[i] < 0) return -2;
+        if (cpus[i] > max_cpu) max_cpu = cpus[i];
+    }
+    if (require_above_cpuset_size && max_cpu < (int)CPU_SETSIZE) return -3;
+    size_t setsize = CPU_ALLOC_SIZE(max_cpu + 1);
+    cpu_set_t *set = CPU_ALLOC(max_cpu + 1);
+    if (!set) return -4;
+    CPU_ZERO_S(setsize, set);
+    for (int i = 0; i < ncpus; i++) CPU_SET_S(cpus[i], setsize, set);
+    int ok = 1;
+    for (int i = 0; i < ncpus; i++) {
+        if (!CPU_ISSET_S(cpus[i], setsize, set)) { ok = 0; break; }
+    }
+    CPU_FREE(set);
+    return ok ? 1 : 0;
+#else
+    (void)cpus; (void)ncpus; (void)require_above_cpuset_size;
+    return -5;
+#endif
 }

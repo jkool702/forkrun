@@ -44,7 +44,6 @@ def main():
     camp = load_json(os.path.join(args.campaign, "campaign-manifest.json"))
     outcomes = camp.get("outcomes", [])
 
-    # group: (scenario,candidate) -> [trial info]
     groups = defaultdict(list)
     invalid = []
     for o in outcomes:
@@ -82,7 +81,6 @@ def main():
                 rec["reservations"] = dr.get("reservations_total")
                 rec["ingest_cpu_ns"] = dr.get("ingest_cpu_ns")
             else:
-                # control: derive from child report
                 rec["dist"] = None
                 rec["correct"] = rec["complete"]
                 b = rec["bytes"] or 0
@@ -110,7 +108,6 @@ def main():
                  "comparisons as indicative, not definitive.")
     lines.append("")
 
-    # Summary table per scenario
     scenarios = sorted({s for s, c in groups.keys()})
     candidates = ["control", "fixed_faa", "local_adaptive", "relative_adaptive"]
     lines.append("## Comparative summary (median of valid trials)")
@@ -132,7 +129,6 @@ def main():
             thr_mb = (thr / 1e6) if thr else None
             wall = med("wall_s") or med("map_s")
             resv = med("reservations")
-            cpu = None
             cpu_vals = []
             for r in valids:
                 if r.get("dist"):
@@ -152,7 +148,6 @@ def main():
                 fmt(thr_mb), fmt(wall), fmt(resv, 0), fmt(cpu), "; ".join(notes)))
     lines.append("")
 
-    # Correctness and backlog/placement details for dist candidates
     lines.append("## Dist-candidate details (per valid trial aggregate)")
     lines.append("")
     for scen in scenarios:
@@ -173,15 +168,21 @@ def main():
                     dr.get("wall_seconds",0), dr.get("reservations_total",0),
                     sum(n.get("zero_claims",0) for n in dr.get("nodes",[]))))
                 for n in dr.get("nodes",[]):
+                    pl = n.get("placement", {})
+                    mp = n.get("memory_policy", {})
+                    aff = n.get("affinity", {})
                     lines.append("  - node %d: pub=%d cons=%d max_eff_backlog=%d max_pub_backlog=%d "
-                                 "peer_obs=%d local_pages=%d remote_pages=%d huge_kb=%d err=%s" % (
+                                 "peer_obs=%d target_match_pages=%s other_pages=%s unknown_pages=%s "
+                                 "mbind_applied=%s strict_affinity_failed=%s huge_observed_kb=%s err=%s" % (
                         n.get("node"), n.get("bytes_published"), n.get("bytes_consumed"),
                         n.get("max_effective_backlog"), n.get("max_published_backlog"),
-                        n.get("peer_observe_count"), n.get("local_pages"), n.get("remote_pages"),
-                        n.get("hugepage_kb"), n.get("last_error")))
+                        n.get("peer_observe_count"),
+                        pl.get("sample_target_match_pages"), pl.get("sample_other_node_pages"),
+                        pl.get("sample_unknown_pages"),
+                        mp.get("mbind_policy_applied"), aff.get("strict_affinity_failed"),
+                        n.get("hugepage_observed_kb"), n.get("last_error")))
             lines.append("")
 
-    # Invalid/incomplete
     lines.append("## Invalid / incomplete / failed trials")
     lines.append("")
     if not invalid:
@@ -193,7 +194,6 @@ def main():
                 r.get("invalid_reason","invalid"), r.get("manifest_path")))
     lines.append("")
 
-    # Interpretation notes
     lines.append("## Interpretation notes")
     lines.append("")
     lines.append("- **Correctness first:** any candidate with overlap/loss/dup or incorrect totals is not viable regardless of speed.")

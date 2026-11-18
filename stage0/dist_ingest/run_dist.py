@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """Run experimental distributed-ingestion candidates and emit metrics.
 
-This is the isolated harness for WO-NUMA-DISTRIBUTED-INGEST-PROTOTYPE-SUITE-1.
-It runs one candidate over a regular file (file-first; pipe experimental
-support is separate/deferred) and prints:
-  - STAGE0_DIAG/STAGE0_FINAL-compatible queue/backlog summary lines (best-effort)
-  - DIST_RESULT <json> with full metrics/provenance
-  - CHILD_DONE <json> compatible with stage0/run_case.py
-
-It does NOT modify or depend on the frozen production ring engine.
+Isolated harness for dist-ingest prototype. Does NOT modify frozen production
+ring engine. Addendum A: per-role affinity, separated mbind policy vs observed
+placement, topology uncertainty/duplicate-node validation, explicit provenance.
 """
 
 import argparse
@@ -68,6 +63,17 @@ class DiConsumerCfg(ctypes.Structure):
     ]
 
 
+class DiAffinityRole(ctypes.Structure):
+    _fields_ = [
+        ("requested", ctypes.c_int),
+        ("set_applied", ctypes.c_int),
+        ("query_succeeded", ctypes.c_int),
+        ("matched", ctypes.c_int),
+        ("error", ctypes.c_int),
+        ("strict_failed", ctypes.c_int),
+    ]
+
+
 class DiNodeMetrics(ctypes.Structure):
     _fields_ = [
         ("reservations", ctypes.c_uint64),
@@ -92,11 +98,15 @@ class DiNodeMetrics(ctypes.Structure):
         ("max_effective_backlog", ctypes.c_uint64),
         ("peer_observe_ns", ctypes.c_uint64),
         ("peer_observe_count", ctypes.c_uint64),
-        ("placement_samples", ctypes.c_uint64),
-        ("placement_sample_cap", ctypes.c_uint64),
-        ("local_pages", ctypes.c_uint64),
-        ("remote_pages", ctypes.c_uint64),
-        ("unknown_pages", ctypes.c_uint64),
+        ("placement_total_addressable_pages", ctypes.c_uint64),
+        ("placement_sampled_pages", ctypes.c_uint64),
+        ("placement_sample_limit", ctypes.c_uint64),
+        ("placement_sample_spacing", ctypes.c_uint64),
+        ("placement_sample_target_match_pages", ctypes.c_uint64),
+        ("placement_sample_other_node_pages", ctypes.c_uint64),
+        ("placement_sample_unknown_pages", ctypes.c_uint64),
+        ("placement_sampling_unavailable", ctypes.c_int),
+        ("placement_sampling_not_performed", ctypes.c_int),
         ("hugepage_map_requested_bytes", ctypes.c_uint64),
         ("hugepage_map_obtained_bytes", ctypes.c_uint64),
         ("hugepage_fallback_bytes", ctypes.c_uint64),
@@ -105,14 +115,13 @@ class DiNodeMetrics(ctypes.Structure):
         ("ingest_cpu_ns", ctypes.c_uint64),
         ("consumer_cpu_ns", ctypes.c_uint64),
         ("res_hist", ctypes.c_uint64 * 20),
-        ("affinity_requested", ctypes.c_int),
-        ("affinity_applied", ctypes.c_int),
-        ("affinity_verified", ctypes.c_int),
-        ("affinity_error", ctypes.c_int),
-        ("mbind_requested", ctypes.c_int),
-        ("mbind_applied", ctypes.c_int),
+        ("affinity_ingestor", DiAffinityRole),
+        ("affinity_consumer", DiAffinityRole),
+        ("mbind_policy_requested", ctypes.c_int),
+        ("mbind_policy_applied", ctypes.c_int),
         ("mbind_error", ctypes.c_int),
-        ("placement_strict_failed", ctypes.c_int),
+        ("strict_mbind_failed", ctypes.c_int),
+        ("strict_affinity_failed", ctypes.c_int),
         ("last_error", ctypes.c_int),
     ]
 
@@ -166,7 +175,28 @@ def load_lib():
     return lib
 
 
+def affinity_role_to_dict(r):
+    return {
+        "requested": bool(r.requested),
+        "set_applied": bool(r.set_applied),
+        "query_succeeded": bool(r.query_succeeded),
+        "matched": bool(r.matched),
+        "error": int(r.error),
+        "strict_failed": bool(r.strict_failed),
+    }
+
+
 def node_metrics_to_dict(m, idx):
+    # placement_sample_all_matched is a narrow summary: all sampled pages observed on
+    # preferred/target node. It does NOT imply every page in allocation was examined and
+    # does NOT imply mbind syscall success/failure by itself.
+    sampled = int(m.placement_sampled_pages)
+    all_sampled_match = (
+        sampled > 0 and
+        int(m.placement_sample_target_match_pages) == sampled and
+        int(m.placement_sample_other_node_pages) == 0 and
+        int(m.placement_sample_unknown_pages) == 0
+    )
     return {
         "node": idx,
         "reservations": m.reservations,
@@ -191,11 +221,29 @@ def node_metrics_to_dict(m, idx):
         "max_effective_backlog": m.max_effective_backlog,
         "peer_observe_ns": m.peer_observe_ns,
         "peer_observe_count": m.peer_observe_count,
-        "placement_samples": m.placement_samples,
-        "placement_sample_cap": m.placement_sample_cap,
-        "local_pages": m.local_pages,
-        "remote_pages": m.remote_pages,
-        "unknown_pages": m.unknown_pages,
+        "placement": {
+            "total_addressable_pages": int(m.placement_total_addressable_pages),
+            "sampled_pages": sampled,
+            "sample_limit": int(m.placement_sample_limit),
+            "sample_spacing_pages": int(m.placement_sample_spacing),
+            "sample_target_match_pages": int(m.placement_sample_target_match_pages),
+            "sample_other_node_pages": int(m.placement_sample_other_node_pages),
+            "sample_unknown_pages": int(m.placement_sample_unknown_pages),
+            "sampling_unavailable": bool(m.placement_sampling_unavailable),
+            "sampling_not_performed": bool(m.placement_sampling_not_performed),
+            "all_sampled_on_target_node": bool(all_sampled_match),
+        },
+        "memory_policy": {
+            "mbind_policy_requested": bool(m.mbind_policy_requested),
+            "mbind_policy_applied": bool(m.mbind_policy_applied),
+            "mbind_error": int(m.mbind_error),
+            "strict_mbind_failed": bool(m.strict_mbind_failed),
+        },
+        "affinity": {
+            "ingestor": affinity_role_to_dict(m.affinity_ingestor),
+            "consumer": affinity_role_to_dict(m.affinity_consumer),
+            "strict_affinity_failed": bool(m.strict_affinity_failed),
+        },
         "hugepage_map_requested_bytes": m.hugepage_map_requested_bytes,
         "hugepage_map_obtained_bytes": m.hugepage_map_obtained_bytes,
         "hugepage_fallback_bytes": m.hugepage_fallback_bytes,
@@ -204,38 +252,24 @@ def node_metrics_to_dict(m, idx):
         "ingest_cpu_ns": m.ingest_cpu_ns,
         "consumer_cpu_ns": m.consumer_cpu_ns,
         "res_hist": list(m.res_hist),
-        "affinity_requested": m.affinity_requested,
-        "affinity_applied": m.affinity_applied,
-        "affinity_verified": m.affinity_verified,
-        "affinity_error": m.affinity_error,
-        "mbind_requested": m.mbind_requested,
-        "mbind_applied": m.mbind_applied,
-        "mbind_error": m.mbind_error,
-        "placement_strict_failed": m.placement_strict_failed,
-        "last_error": m.last_error,
+        "last_error": int(m.last_error),
     }
 
 
 def emit_stage0_lines(res, policy_name):
-    # Best-effort telemetry in STAGE0_* form so existing parsers can pick up
-    # queue/backlog presence. These are experimental-ingest measurements, not
-    # ring engine internals.
     t_ms = int(res.wall_seconds * 1000)
     total_cpu = res.ingest_cpu_ns
     q_parts = []
     b_parts = []
     for i in range(res.num_nodes):
         nm = res.nodes[i]
-        # q: published chunks, consumed chunks (ingest->queue proxy)
         q_parts.append("n%d:%d,%d" % (i, nm.chunks_published, nm.chunks_consumed))
-        # b: outstanding/published backlog bytes snapshot
         b_parts.append("n%d:%d,%d" % (i, nm.current_outstanding, nm.current_published_backlog))
     line = ("STAGE0_FINAL src=dist-ingest t_ms=%d t_us=%d moved=%d major=0 tgt=%d "
             "lim=0 gated_ms=0 cpu_ns=%d q=%s b=%s policy=%s"
             % (t_ms, int(res.wall_seconds * 1e6), res.total_consumed, res.num_nodes - 1,
                total_cpu, ";".join(q_parts), ";".join(b_parts), policy_name))
     print(line, file=sys.stderr)
-    # A synthetic DIAG line to satisfy queue_present heuristics when needed.
     print(line.replace("STAGE0_FINAL", "STAGE0_DIAG", 1), file=sys.stderr)
 
 
@@ -250,14 +284,16 @@ def _parse_id_list(raw):
             try:
                 start, end = int(a), int(b)
             except ValueError:
-                continue
+                return None  # malformed
             if end >= start:
                 out.extend(range(start, end + 1))
+            else:
+                return None
         else:
             try:
                 out.append(int(part))
             except ValueError:
-                continue
+                return None
     return out
 
 
@@ -269,125 +305,198 @@ def _read_first(path):
         return None
 
 
-def _allowed_cpus():
-    # Respect actual process allowed CPU set (cpuset/cgroup/sched affinity).
-    try:
-        return sorted(os.sched_getaffinity(0))
-    except Exception:
-        pass
-    raw = _read_first("/proc/self/status") or ""
+def _status_list(field):
+    """Return (values_or_none, known). known=False => unreadable/missing/ambiguous."""
+    raw = _read_first("/proc/self/status")
+    if raw is None:
+        return None, False
     for line in raw.splitlines():
-        if line.startswith("Cpus_allowed_list:"):
-            return _parse_id_list(line.split(":", 1)[1])
-    return []
+        if line.startswith(field + ":"):
+            rest = line.split(":", 1)[1].strip()
+            if rest == "":
+                return None, False
+            parsed = _parse_id_list(rest)
+            if parsed is None:
+                return None, False
+            return parsed, True
+    return None, False
+
+
+def _allowed_cpus():
+    try:
+        return sorted(os.sched_getaffinity(0)), True
+    except Exception:
+        vals, known = _status_list("Cpus_allowed_list")
+        return (sorted(vals) if known and vals is not None else []), known
 
 
 def _allowed_mems():
-    raw = _read_first("/proc/self/status") or ""
-    for line in raw.splitlines():
-        if line.startswith("Mems_allowed_list:"):
-            return _parse_id_list(line.split(":", 1)[1])
-    return []
+    vals, known = _status_list("Mems_allowed_list")
+    return (sorted(vals) if known and vals is not None else []), known
 
 
 def _online_nodes():
     raw = _read_first("/sys/devices/system/node/online")
     if raw is None:
-        return [0]
+        return [0], False
     nodes = _parse_id_list(raw)
-    return nodes or [0]
+    if nodes is None:
+        return [0], False
+    return (nodes or [0]), True
 
 
 def _node_cpus(node_id):
     raw = _read_first("/sys/devices/system/node/node%d/cpulist" % node_id)
-    return _parse_id_list(raw) if raw is not None else []
+    if raw is None:
+        return [], False
+    parsed = _parse_id_list(raw)
+    if parsed is None:
+        return [], False
+    return parsed, True
 
 
-def _node_has_memory(node_id):
+def _node_mem_state(node_id):
+    """Return 'has', 'none', or 'unknown' (missing/unparsable)."""
     mi = _read_first("/sys/devices/system/node/node%d/meminfo" % node_id)
     if mi is None:
-        return False
+        return "unknown"
     for line in mi.splitlines():
         if line.startswith("Node %d MemTotal:" % node_id):
             parts = line.split()
             if len(parts) >= 4:
                 try:
-                    return int(parts[3]) > 0
+                    return "has" if int(parts[3]) > 0 else "none"
                 except ValueError:
-                    return False
-    # if meminfo exists but format unexpected, be conservative
-    return True
+                    return "unknown"
+    # meminfo exists but MemTotal unparsable/unexpected
+    return "unknown"
 
 
 def resolve_topology(requested_nodes, phys_nodes_spec=None):
     """Return (logical_to_phys, per_node_cpus, topology_info, errors).
 
-    logical_to_phys: list[int] length requested_nodes (or fewer impossible -> errors)
-    per_node_cpus: list[list[int]] filtered to allowed CPUs
+    Addendum A §6: unknown Mems_allowed/meminfo represented as uncertainty;
+    automatic selection does not present uncertain nodes as verified usable;
+    explicit selection that cannot be validated fails clearly.
     """
     errors = []
-    allowed_cpus = set(_allowed_cpus())
-    allowed_mems = set(_allowed_mems())
-    online = _online_nodes()
-    # usable physical nodes: online, in allowed mems (if known), have memory
-    usable = []
-    for nid in online:
-        if allowed_mems and nid not in allowed_mems:
-            continue
-        if not _node_has_memory(nid):
-            continue
-        # need at least one allowed CPU on node for affinity/pinning usefulness
-        cpus = [c for c in _node_cpus(nid) if (not allowed_cpus or c in allowed_cpus)]
+    allowed_cpus, cpus_known = _allowed_cpus()
+    allowed_cpus_set = set(allowed_cpus)
+    allowed_mems, mems_known = _allowed_mems()
+    allowed_mems_set = set(allowed_mems)
+    online, online_known = _online_nodes()
+
+    def node_usable_auto(nid):
+        if not mems_known:
+            return False, [], "mems_allowed_unknown"
+        if nid not in allowed_mems_set:
+            return False, [], "mem_not_allowed"
+        mstate = _node_mem_state(nid)
+        if mstate == "none":
+            return False, [], "no_memory"
+        if mstate == "unknown":
+            return False, [], "memory_unknown"
+        cpus, cpu_list_known = _node_cpus(nid)
+        if not cpu_list_known or not cpus:
+            return False, [], "cpu_unknown_or_empty"
+        if cpus_known and allowed_cpus_set:
+            cpus = [c for c in cpus if c in allowed_cpus_set]
+        elif cpus_known and not allowed_cpus_set:
+            return False, [], "no_allowed_cpus"
         if not cpus:
-            continue
-        usable.append((nid, cpus))
+            return False, [], "no_allowed_cpus_on_node"
+        return True, cpus, "ok"
+
+    usable = []
+    node_states = {}
+    for nid in online:
+        ok, cpus, reason = node_usable_auto(nid)
+        node_states[nid] = {"usable_auto": ok, "reason": reason, "mem_state": _node_mem_state(nid)}
+        if ok:
+            usable.append((nid, cpus))
 
     if phys_nodes_spec:
-        # explicit physical node list in order
         try:
             explicit = [int(x) for x in phys_nodes_spec.split(",") if x.strip() != ""]
         except ValueError:
             return [], [], {}, ["invalid --phys-nodes: %r" % (phys_nodes_spec,)]
-        phys_to_cpus = {nid: cpus for nid, cpus in usable}
+        # §5: reject duplicates
+        seen = set()
+        for nid in explicit:
+            if nid in seen:
+                errors.append("duplicate physical node id in --phys-nodes: %d" % nid)
+            seen.add(nid)
+        if errors:
+            return [], [], {"mode": "explicit", "explicit": explicit, "requested_nodes": requested_nodes,
+                            "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                            "node_states": node_states}, errors
+        # validate each explicit node - must be fully validated, no silent uncertainty
         logical_to_phys = []
         per_node_cpus = []
         for nid in explicit:
-            if nid not in phys_to_cpus:
-                errors.append("physical node %d not usable (online/allowed/memory/cpu)" % nid)
+            if nid not in online:
+                errors.append("physical node %d not online/known" % nid)
+                continue
+            if not mems_known:
+                errors.append("physical node %d cannot be validated: Mems_allowed unknown" % nid)
+                continue
+            if nid not in allowed_mems_set:
+                errors.append("physical node %d not in allowed mems" % nid)
+                continue
+            mstate = _node_mem_state(nid)
+            if mstate == "unknown":
+                errors.append("physical node %d cannot be validated: memory information missing/unparsable" % nid)
+                continue
+            if mstate == "none":
+                errors.append("physical node %d has no memory" % nid)
+                continue
+            cpus, cpu_list_known = _node_cpus(nid)
+            if not cpu_list_known or cpus == [] and _read_first("/sys/devices/system/node/node%d/cpulist" % nid) is None:
+                errors.append("physical node %d cpu list missing/unparsable" % nid)
+                continue
+            if cpus_known and allowed_cpus_set:
+                cpus = [c for c in cpus if c in allowed_cpus_set]
+            if not cpus:
+                errors.append("physical node %d has no allowed CPUs" % nid)
                 continue
             logical_to_phys.append(nid)
-            per_node_cpus.append(phys_to_cpus[nid])
+            per_node_cpus.append(cpus)
+        info = {"mode": "explicit", "online": online, "online_known": online_known,
+                "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
+                "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                "usable_nodes_auto": [n for n,_ in usable],
+                "logical_to_physical": logical_to_phys, "node_states": node_states,
+                "explicit": explicit}
         if errors:
-            return [], [], {"requested_nodes": requested_nodes, "online": online,
-                            "allowed_cpus": sorted(allowed_cpus), "allowed_mems": sorted(allowed_mems),
-                            "usable": usable, "explicit": explicit}, errors
-        # if requested_nodes differs, honor explicit list length but must be >=1
+            return [], [], info, errors
         if requested_nodes and requested_nodes != len(logical_to_phys):
             errors.append("requested --nodes %d but --phys-nodes selects %d node(s)" % (requested_nodes, len(logical_to_phys)))
-            return [], [], {"requested_nodes": requested_nodes, "explicit": explicit}, errors
-        info = {"mode": "explicit", "online": online, "allowed_cpus_count": len(allowed_cpus),
-                "allowed_mems": sorted(allowed_mems), "usable_nodes": [n for n,_ in usable],
-                "logical_to_physical": logical_to_phys}
+            return [], [], info, errors
         return logical_to_phys, per_node_cpus, info, []
 
-    # automatic selection of usable nodes
     n = max(1, requested_nodes)
     if len(usable) < n:
-        return [], [], {"requested_nodes": n, "online": online, "allowed_cpus_count": len(allowed_cpus),
-                        "allowed_mems": sorted(allowed_mems), "usable_nodes": [nid for nid,_ in usable]}, [
-            "insufficient usable NUMA nodes: requested %d, have %d usable (%s)" % (n, len(usable), [nid for nid,_ in usable])
+        reasons = {nid: st["reason"] for nid, st in node_states.items() if not st["usable_auto"]}
+        return [], [], {"mode": "auto", "requested_nodes": n, "online": online, "online_known": online_known,
+                        "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
+                        "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                        "usable_nodes_auto": [nid for nid,_ in usable],
+                        "node_states": node_states, "logical_to_physical": []}, [
+            "insufficient verified usable NUMA nodes: requested %d, have %d usable (%s); excluded/uncertain=%s" %
+            (n, len(usable), [nid for nid,_ in usable], reasons)
         ]
     picked = usable[:n]
     logical_to_phys = [nid for nid, _ in picked]
     per_node_cpus = [cpus for _, cpus in picked]
-    info = {"mode": "auto", "online": online, "allowed_cpus_count": len(allowed_cpus),
-            "allowed_mems": sorted(allowed_mems), "usable_nodes": [nid for nid,_ in usable],
-            "logical_to_physical": logical_to_phys}
+    info = {"mode": "auto", "online": online, "online_known": online_known,
+            "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
+            "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+            "usable_nodes_auto": [nid for nid,_ in usable],
+            "logical_to_physical": logical_to_phys, "node_states": node_states}
     return logical_to_phys, per_node_cpus, info, []
 
 
 def build_ctypes_topology(logical_to_phys, per_node_cpus):
-    """Return (phys_nodes_arr, cpu_counts_arr, cpu_list_arrays, cpu_list_ptrs, keepalive) lifetime-safe."""
     n = len(logical_to_phys)
     PhysArr = ctypes.c_int * n
     phys_nodes_arr = PhysArr(*[int(x) for x in logical_to_phys])
@@ -406,15 +515,40 @@ def build_ctypes_topology(logical_to_phys, per_node_cpus):
     return phys_nodes_arr, cpu_counts_arr, cpu_list_ptrs, keepalive
 
 
+def _affinity_valid(res, strict_affinity):
+    for i in range(res.num_nodes):
+        nm = res.nodes[i]
+        if nm.strict_affinity_failed:
+            return False
+        if strict_affinity:
+            if nm.affinity_ingestor.requested and not nm.affinity_ingestor.matched:
+                return False
+            if nm.affinity_consumer.requested and not nm.affinity_consumer.matched:
+                return False
+    return True
+
+
+def _placement_policy_valid(res, strict_mbind):
+    # strict_mbind means strict enforcement of successful policy application (mbind),
+    # not a guarantee of hard physical placement. Mismatch under MPOL_PREFERRED is not
+    # a policy-application failure.
+    for i in range(res.num_nodes):
+        nm = res.nodes[i]
+        if nm.strict_mbind_failed:
+            return False
+        if strict_mbind:
+            if nm.mbind_policy_requested and not nm.mbind_policy_applied:
+                return False
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--candidate", default="fixed_faa",
-                    choices=sorted(POLICY_MAP.keys()),
-                    help="distributed ingestion policy")
+    ap.add_argument("--candidate", default="fixed_faa", choices=sorted(POLICY_MAP.keys()))
     ap.add_argument("--input", required=True)
     ap.add_argument("--nodes", type=int, default=2)
     ap.add_argument("--phys-nodes", default=None,
-                    help="explicit physical NUMA node ids, comma-separated (logical order)")
+                    help="explicit physical NUMA node ids, comma-separated (logical order); duplicates rejected")
     ap.add_argument("--base-quantum", type=int, default=2 * 1024 * 1024)
     ap.add_argument("--max-backlog", type=int, default=64 * 1024 * 1024)
     ap.add_argument("--max-reservation", type=int, default=0)
@@ -425,15 +559,13 @@ def main():
     ap.add_argument("--prefer-hugepage", action="store_true")
     ap.add_argument("--no-align", action="store_true")
     ap.add_argument("--strict-affinity", action="store_true")
-    ap.add_argument("--strict-mbind", action="store_true")
-    ap.add_argument("--no-pin", action="store_true",
-                    help="intentionally unpinned run (do not pass cpu lists)")
-    ap.add_argument("--consumer-mode", default="fast",
-                    choices=sorted(CONSUMER_MODE.keys()))
+    ap.add_argument("--strict-mbind", action="store_true",
+                    help="strict enforcement of successful mbind policy application (not hard physical placement guarantee)")
+    ap.add_argument("--no-pin", action="store_true")
+    ap.add_argument("--consumer-mode", default="fast", choices=sorted(CONSUMER_MODE.keys()))
     ap.add_argument("--consumer-bps", type=int, default=0)
     ap.add_argument("--consumer-stall-ms", type=int, default=0)
-    ap.add_argument("--slow-node", type=int, default=-1,
-                    help="node index to make slow/stalled for scenarios")
+    ap.add_argument("--slow-node", type=int, default=-1)
     ap.add_argument("--slow-mode", default=None, choices=sorted(CONSUMER_MODE.keys()))
     ap.add_argument("--slow-bps", type=int, default=0)
     ap.add_argument("--slow-stall-ms", type=int, default=0)
@@ -449,7 +581,6 @@ def main():
     lib = load_lib()
     policy = POLICY_MAP[args.candidate]
 
-    # Topology resolution and wiring (S1 corrective).
     logical_to_phys, per_node_cpus, topo_info, topo_errors = resolve_topology(args.nodes, args.phys_nodes)
     if topo_errors:
         os.close(fd)
@@ -490,7 +621,6 @@ def main():
     cfg.policy = policy
     cfg.params = params
     cfg.consumers = ctypes.cast(cons_arr, ctypes.POINTER(DiConsumerCfg))
-    # lifetime-safe topology wiring
     phys_arr, counts_arr, cpu_ptrs, topo_keepalive = build_ctypes_topology(logical_to_phys, per_node_cpus)
     cfg.phys_nodes = ctypes.cast(phys_arr, ctypes.c_void_p)
     if args.no_pin:
@@ -503,7 +633,7 @@ def main():
     eng = lib.di_create(fd, st.st_size, ctypes.byref(cfg))
     if not eng:
         os.close(fd)
-        raise SystemExit("di_create failed")
+        raise SystemExit("di_create failed (invalid config or allocation failure)")
 
     res = DiResult()
     t0 = time.monotonic()
@@ -517,17 +647,12 @@ def main():
 
     emit_stage0_lines(res, args.candidate)
 
-    # validity signals (S1/S6 groundwork)
-    affinity_ok = True
-    placement_ok = True
-    for i in range(res.num_nodes):
-        nm = res.nodes[i]
-        if args.strict_affinity and (not nm.affinity_verified or nm.placement_strict_failed):
-            affinity_ok = False
-        if args.strict_mbind and (nm.mbind_requested and not nm.mbind_applied or nm.placement_strict_failed):
-            placement_ok = False
-        if nm.placement_strict_failed:
-            placement_ok = False
+    nodes_out = [node_metrics_to_dict(res.nodes[i], i) for i in range(res.num_nodes)]
+    functional_correct = (rc == 0 and not res.overlap_detected and not res.duplicate_detected and not res.lost_detected
+                          and not res.input_changed and res.total_consumed == st.st_size)
+    affinity_valid = _affinity_valid(res, bool(args.strict_affinity))
+    placement_policy_valid = _placement_policy_valid(res, bool(args.strict_mbind))
+
     out = {
         "candidate": args.candidate,
         "policy": res.policy,
@@ -550,7 +675,7 @@ def main():
         "ingest_cpu_ns": res.ingest_cpu_ns,
         "consumer_cpu_ns": res.consumer_cpu_ns,
         "res_hist": list(res.res_hist),
-        "nodes": [node_metrics_to_dict(res.nodes[i], i) for i in range(res.num_nodes)],
+        "nodes": nodes_out,
         "topology": {
             **topo_info,
             "requested_nodes_arg": args.nodes,
@@ -560,24 +685,33 @@ def main():
             "strict_mbind": bool(args.strict_mbind),
             "per_node_cpus": per_node_cpus,
         },
-        "validity": {
-            "functional_correct": (rc == 0 and not res.overlap_detected and not res.duplicate_detected and not res.lost_detected
-                                   and not res.input_changed and res.total_consumed == st.st_size),
-            "affinity_valid": affinity_ok,
-            "placement_valid": placement_ok,
+        "placement_semantics": {
+            "mbind_policy": "MPOL_PREFERRED requested; mbind_policy_applied reflects syscall success only, not physical placement proof",
+            "strict_mbind_meaning": "strict enforcement of successful policy application (mbind syscall), not hard physical placement guarantee",
+            "placement_sampling": "observed page placement sampled independently of mbind result; all_sampled_on_target_node means all sampled pages observed on target node only (not all pages examined)",
+            "preferred_mismatch_is_not_syscall_failure": True,
         },
-        "correct": (rc == 0 and not res.overlap_detected and not res.duplicate_detected and not res.lost_detected
-                    and not res.input_changed and res.total_consumed == st.st_size),
+        "validity": {
+            "functional_correct": functional_correct,
+            "affinity_valid": affinity_valid,
+            "placement_policy_valid": placement_policy_valid,
+            # backward-compatible alias: now means policy-application validity, not physical proof
+            "placement_valid": placement_policy_valid,
+            "placement_observed_all_sampled_on_target": all(
+                (nd["placement"]["sampling_unavailable"] or nd["placement"]["sampling_not_performed"] or nd["placement"]["all_sampled_on_target_node"])
+                for nd in nodes_out
+            ),
+        },
+        "correct": functional_correct,
     }
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as fh:
             json.dump(out, fh, indent=2, sort_keys=True)
     print("DIST_RESULT " + json.dumps(out, sort_keys=True), file=sys.stderr)
-    # CHILD_DONE for stage0/run_case.py compatibility (treat consumed bytes as output/records proxy)
     child = {
         "elapsed_s": res.wall_seconds if res.wall_seconds > 0 else elapsed,
         "completed_bytes": res.total_consumed,
-        "completed_records": res.total_consumed,  # byte-stream proxy
+        "completed_records": res.total_consumed,
         "rec_per_s": (res.total_consumed / res.wall_seconds) if res.wall_seconds > 0 else 0,
         "completed_output_bytes_per_s": (res.total_consumed / res.wall_seconds) if res.wall_seconds > 0 else 0,
     }

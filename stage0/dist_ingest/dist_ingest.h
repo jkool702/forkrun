@@ -67,8 +67,8 @@ typedef struct {
     int align_reservations;       /* align FAA offsets to quantum when feasible */
     int prefer_hugepage;          /* best-effort hints/alloc alignment */
     /* Placement/affinity strictness */
-    int strict_affinity;          /* fail/mark invalid if affinity cannot be set/verified */
-    int strict_mbind;             /* fail/mark invalid if memory policy cannot be established/verified */
+    int strict_affinity;          /* fail if either required thread role cannot be set/verified */
+    int strict_mbind;             /* fail if memory policy application (mbind) cannot be established */
     /* Experiment */
     int one_outstanding_per_node; /* enforced as 1 in prototype */
     int enable_peer_headroom;     /* publish/read advisory headroom */
@@ -87,6 +87,16 @@ typedef struct {
     /* Optional logical->physical node id for reporting/mbind hints. */
     const int *phys_nodes;
 } di_config_t;
+
+/* Per-role CPU affinity result (Addendum A §2,§3). */
+typedef struct {
+    int requested;        /* affinity was requested for this role */
+    int set_applied;      /* pthread_setaffinity_np succeeded */
+    int query_succeeded;  /* pthread_getaffinity_np succeeded */
+    int matched;          /* queried affinity matched requested CPU set */
+    int error;            /* actual pthread/set/query error code (0 if none) */
+    int strict_failed;    /* this role failed under strict affinity */
+} di_affinity_role_t;
 
 /* Per-node metrics snapshot (monotonic counters/totals). */
 typedef struct {
@@ -112,12 +122,16 @@ typedef struct {
     uint64_t max_effective_backlog;
     uint64_t peer_observe_ns;         /* time spent sampling peer headroom */
     uint64_t peer_observe_count;
-    /* Placement/buffer stats */
-    uint64_t placement_samples;
-    uint64_t placement_sample_cap;
-    uint64_t local_pages;
-    uint64_t remote_pages;
-    uint64_t unknown_pages;
+    /* Observed placement sampling (independent of mbind syscall result) */
+    uint64_t placement_total_addressable_pages;
+    uint64_t placement_sampled_pages;
+    uint64_t placement_sample_limit;
+    uint64_t placement_sample_spacing;          /* stride in pages (1 => contiguous) */
+    uint64_t placement_sample_target_match_pages; /* observed on preferred/target phys node */
+    uint64_t placement_sample_other_node_pages;   /* observed on a different node */
+    uint64_t placement_sample_unknown_pages;      /* unknown/unqueryable per-page */
+    int placement_sampling_unavailable;           /* sampling not performed/unavailable */
+    int placement_sampling_not_performed;         /* no eligible pages sampled yet */
     /* Hugepage reporting (distinguish requested/obtained/fallback/observed) */
     uint64_t hugepage_map_requested_bytes;
     uint64_t hugepage_map_obtained_bytes;
@@ -127,15 +141,15 @@ typedef struct {
     uint64_t ingest_cpu_ns;           /* per-ingestor thread CPU */
     uint64_t consumer_cpu_ns;         /* per-consumer thread CPU */
     uint64_t res_hist[20];            /* reservation size histogram */
-    /* Affinity/memory policy status */
-    int affinity_requested;
-    int affinity_applied;
-    int affinity_verified;
-    int affinity_error;
-    int mbind_requested;
-    int mbind_applied;                /* mbind call succeeded */
-    int mbind_error;
-    int placement_strict_failed;
+    /* Affinity (per-role, no shared concurrent writes) */
+    di_affinity_role_t affinity_ingestor;
+    di_affinity_role_t affinity_consumer;
+    /* Memory-policy application (syscall result; NOT physical placement proof) */
+    int mbind_policy_requested;
+    int mbind_policy_applied;         /* mbind() call succeeded */
+    int mbind_error;                  /* actual mbind error if failed */
+    int strict_mbind_failed;          /* strict enforcement of successful policy application failed */
+    int strict_affinity_failed;       /* aggregate: either required role failed under strict affinity */
     int last_error;
 } di_node_metrics_t;
 
@@ -182,10 +196,14 @@ int di_num_nodes(const di_engine_t *eng);
 int di_debug_node_accounting(di_engine_t *eng, int node,
                              uint64_t *published, uint64_t *inflight,
                              uint64_t *outstanding, uint64_t *effective);
-/* Narrow test seams (S3/S4 validation only). */
-int di_test_set_pread_seam(int mode, int counter, uint64_t threshold);
-int di_test_pread_seam_fired(void);
+/* Narrow test seams (S3/S4 validation only). Engine-local and synchronized (Addendum A §7). */
+int di_test_set_pread_seam(di_engine_t *eng, int mode, int counter, uint64_t threshold);
+int di_test_pread_seam_fired(di_engine_t *eng);
 int di_test_check_2m_alignment(size_t len); /* returns 1 if usable buffer 2MiB-aligned */
+/* Addendum A §3: CPU mask build/verify logic, independent of pinning a real thread.
+ * require_above_cpuset_size: if nonzero, fail unless max CPU id >= CPU_SETSIZE.
+ * Returns 1 on valid/match, negative on error. */
+int di_test_cpu_mask_check(const int *cpus, int ncpus, int require_above_cpuset_size);
 
 /* Policy decision (exposed for unit tests). Computes claim bytes for node i
  * given per-node effective backlogs/headrooms (bytes). headrooms[i] is the

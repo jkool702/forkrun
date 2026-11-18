@@ -123,3 +123,80 @@ class TestTopologyResolution(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTopologyUncertainty(unittest.TestCase):
+    """Addendum A §6: preserve uncertainty in topology discovery."""
+
+    def _patch_status(self, status_text, online, node_cpus, node_mem_raw):
+        def fake_read_first(path):
+            if path == "/proc/self/status":
+                return status_text
+            if path == "/sys/devices/system/node/online":
+                return online
+            for nid, raw in node_mem_raw.items():
+                if path == f"/sys/devices/system/node/node{nid}/meminfo":
+                    return raw
+            for nid, lst in node_cpus.items():
+                if path == f"/sys/devices/system/node/node{nid}/cpulist":
+                    return lst
+            return None
+        return [
+            mock.patch.object(run_dist, "_read_first", side_effect=fake_read_first),
+            mock.patch.object(run_dist.os, "sched_getaffinity", side_effect=OSError("no sched"), create=True),
+        ]
+
+    def test_mems_allowed_unreadable_auto_not_verified(self):
+        # missing Mems_allowed_list => unknown; auto must not present nodes as verified usable
+        status = "Cpus_allowed_list:\t0,1\n"  # no Mems_allowed_list
+        patches = self._patch_status(status, "0,1\n", {0:"0",1:"1"},
+                                     {0:"Node 0 MemTotal: 100 kB\n", 1:"Node 1 MemTotal: 100 kB\n"})
+        with patches[0], patches[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1)
+        self.assertNotEqual(errs, [])
+        self.assertEqual(phys, [])
+        self.assertFalse(info.get("mems_allowed_known", True))
+
+    def test_mems_allowed_malformed_auto_not_verified(self):
+        status = "Cpus_allowed_list:\t0\nMems_allowed_list:\tbogus\n"
+        patches = self._patch_status(status, "0\n", {0:"0"}, {0:"Node 0 MemTotal: 100 kB\n"})
+        with patches[0], patches[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1)
+        self.assertNotEqual(errs, [])
+        self.assertFalse(info.get("mems_allowed_known", True))
+
+    def test_meminfo_missing_explicit_fails_clearly(self):
+        status = "Cpus_allowed_list:\t0\nMems_allowed_list:\t0\n"
+        patches = self._patch_status(status, "0\n", {0:"0"}, {0: None})  # meminfo missing
+        with patches[0], patches[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1, phys_nodes_spec="0")
+        self.assertNotEqual(errs, [])
+        self.assertTrue(any("memory information" in e or "cannot be validated" in e for e in errs))
+
+    def test_meminfo_unparsable_explicit_fails_clearly(self):
+        status = "Cpus_allowed_list:\t0\nMems_allowed_list:\t0\n"
+        patches = self._patch_status(status, "0\n", {0:"0"}, {0:"garbage\n"})
+        with patches[0], patches[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1, phys_nodes_spec="0")
+        self.assertNotEqual(errs, [])
+
+    def test_mems_allowed_unreadable_explicit_fails_clearly(self):
+        status = "Cpus_allowed_list:\t0\n"
+        patches = self._patch_status(status, "0\n", {0:"0"}, {0:"Node 0 MemTotal: 100 kB\n"})
+        with patches[0], patches[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(1, phys_nodes_spec="0")
+        self.assertNotEqual(errs, [])
+        self.assertTrue(any("Mems_allowed" in e for e in errs))
+
+    def test_duplicate_phys_nodes_rejected_runner(self):
+        status = "Cpus_allowed_list:\t0,1\nMems_allowed_list:\t0,1\n"
+        patches = self._patch_status(status, "0,1\n", {0:"0",1:"1"},
+                                     {0:"Node 0 MemTotal: 100 kB\n", 1:"Node 1 MemTotal: 100 kB\n"})
+        with patches[0], patches[1]:
+            phys, cpus, info, errs = run_dist.resolve_topology(2, phys_nodes_spec="0,0")
+        self.assertNotEqual(errs, [])
+        self.assertTrue(any("duplicate" in e for e in errs))
+
+    def test_malformed_phys_nodes_rejected(self):
+        phys, cpus, info, errs = run_dist.resolve_topology(2, phys_nodes_spec="a,b")
+        self.assertNotEqual(errs, [])

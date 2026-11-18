@@ -1,6 +1,5 @@
 import ctypes
 import os
-import sys
 import tempfile
 import threading
 import time
@@ -34,95 +33,65 @@ class DiPolicyParams(ctypes.Structure):
 
 
 class DiConsumerCfg(ctypes.Structure):
+    _fields_ = [("mode", ctypes.c_int), ("bytes_per_sec", ctypes.c_uint64), ("stall_ms", ctypes.c_uint64)]
+
+
+class DiAffinityRole(ctypes.Structure):
     _fields_ = [
-        ("mode", ctypes.c_int),
-        ("bytes_per_sec", ctypes.c_uint64),
-        ("stall_ms", ctypes.c_uint64),
+        ("requested", ctypes.c_int),
+        ("set_applied", ctypes.c_int),
+        ("query_succeeded", ctypes.c_int),
+        ("matched", ctypes.c_int),
+        ("error", ctypes.c_int),
+        ("strict_failed", ctypes.c_int),
     ]
 
 
 class DiNodeMetrics(ctypes.Structure):
     _fields_ = [
-        ("reservations", ctypes.c_uint64),
-        ("bytes_reserved_req", ctypes.c_uint64),
-        ("bytes_assigned", ctypes.c_uint64),
-        ("bytes_read", ctypes.c_uint64),
-        ("bytes_published", ctypes.c_uint64),
-        ("bytes_consumed", ctypes.c_uint64),
-        ("chunks_published", ctypes.c_uint64),
-        ("chunks_consumed", ctypes.c_uint64),
-        ("zero_claims", ctypes.c_uint64),
-        ("claim_wait_ns", ctypes.c_uint64),
-        ("read_wait_ns", ctypes.c_uint64),
-        ("publish_wait_ns", ctypes.c_uint64),
-        ("consume_wait_ns", ctypes.c_uint64),
-        ("current_published_backlog", ctypes.c_uint64),
-        ("current_consumer_inflight_backlog", ctypes.c_uint64),
-        ("current_outstanding", ctypes.c_uint64),
-        ("current_effective_backlog", ctypes.c_uint64),
-        ("max_published_backlog", ctypes.c_uint64),
-        ("max_consumer_inflight_backlog", ctypes.c_uint64),
-        ("max_effective_backlog", ctypes.c_uint64),
-        ("peer_observe_ns", ctypes.c_uint64),
-        ("peer_observe_count", ctypes.c_uint64),
-        ("placement_samples", ctypes.c_uint64),
-        ("placement_sample_cap", ctypes.c_uint64),
-        ("local_pages", ctypes.c_uint64),
-        ("remote_pages", ctypes.c_uint64),
-        ("unknown_pages", ctypes.c_uint64),
-        ("hugepage_map_requested_bytes", ctypes.c_uint64),
-        ("hugepage_map_obtained_bytes", ctypes.c_uint64),
-        ("hugepage_fallback_bytes", ctypes.c_uint64),
-        ("hugepage_observed_kb", ctypes.c_uint64),
-        ("alloc_bytes", ctypes.c_uint64),
-        ("ingest_cpu_ns", ctypes.c_uint64),
-        ("consumer_cpu_ns", ctypes.c_uint64),
+        ("reservations", ctypes.c_uint64), ("bytes_reserved_req", ctypes.c_uint64), ("bytes_assigned", ctypes.c_uint64),
+        ("bytes_read", ctypes.c_uint64), ("bytes_published", ctypes.c_uint64), ("bytes_consumed", ctypes.c_uint64),
+        ("chunks_published", ctypes.c_uint64), ("chunks_consumed", ctypes.c_uint64), ("zero_claims", ctypes.c_uint64),
+        ("claim_wait_ns", ctypes.c_uint64), ("read_wait_ns", ctypes.c_uint64), ("publish_wait_ns", ctypes.c_uint64),
+        ("consume_wait_ns", ctypes.c_uint64), ("current_published_backlog", ctypes.c_uint64),
+        ("current_consumer_inflight_backlog", ctypes.c_uint64), ("current_outstanding", ctypes.c_uint64),
+        ("current_effective_backlog", ctypes.c_uint64), ("max_published_backlog", ctypes.c_uint64),
+        ("max_consumer_inflight_backlog", ctypes.c_uint64), ("max_effective_backlog", ctypes.c_uint64),
+        ("peer_observe_ns", ctypes.c_uint64), ("peer_observe_count", ctypes.c_uint64),
+        ("placement_total_addressable_pages", ctypes.c_uint64), ("placement_sampled_pages", ctypes.c_uint64),
+        ("placement_sample_limit", ctypes.c_uint64), ("placement_sample_spacing", ctypes.c_uint64),
+        ("placement_sample_target_match_pages", ctypes.c_uint64), ("placement_sample_other_node_pages", ctypes.c_uint64),
+        ("placement_sample_unknown_pages", ctypes.c_uint64),
+        ("placement_sampling_unavailable", ctypes.c_int), ("placement_sampling_not_performed", ctypes.c_int),
+        ("hugepage_map_requested_bytes", ctypes.c_uint64), ("hugepage_map_obtained_bytes", ctypes.c_uint64),
+        ("hugepage_fallback_bytes", ctypes.c_uint64), ("hugepage_observed_kb", ctypes.c_uint64),
+        ("alloc_bytes", ctypes.c_uint64), ("ingest_cpu_ns", ctypes.c_uint64), ("consumer_cpu_ns", ctypes.c_uint64),
         ("res_hist", ctypes.c_uint64 * 20),
-        ("affinity_requested", ctypes.c_int),
-        ("affinity_applied", ctypes.c_int),
-        ("affinity_verified", ctypes.c_int),
-        ("affinity_error", ctypes.c_int),
-        ("mbind_requested", ctypes.c_int),
-        ("mbind_applied", ctypes.c_int),
-        ("mbind_error", ctypes.c_int),
-        ("placement_strict_failed", ctypes.c_int),
-        ("last_error", ctypes.c_int),
+        ("affinity_ingestor", DiAffinityRole), ("affinity_consumer", DiAffinityRole),
+        ("mbind_policy_requested", ctypes.c_int), ("mbind_policy_applied", ctypes.c_int),
+        ("mbind_error", ctypes.c_int), ("strict_mbind_failed", ctypes.c_int),
+        ("strict_affinity_failed", ctypes.c_int), ("last_error", ctypes.c_int),
     ]
 
 
 class DiResult(ctypes.Structure):
     _fields_ = [
-        ("total_bytes", ctypes.c_uint64),
-        ("total_reserved_req", ctypes.c_uint64),
-        ("total_assigned", ctypes.c_uint64),
-        ("total_read", ctypes.c_uint64),
-        ("total_published", ctypes.c_uint64),
-        ("total_consumed", ctypes.c_uint64),
-        ("reservations_total", ctypes.c_uint64),
-        ("eof_offset", ctypes.c_uint64),
-        ("overlap_detected", ctypes.c_int),
-        ("duplicate_detected", ctypes.c_int),
-        ("lost_detected", ctypes.c_int),
-        ("input_changed", ctypes.c_int),
-        ("wall_seconds", ctypes.c_double),
-        ("ingest_cpu_ns", ctypes.c_uint64),
-        ("consumer_cpu_ns", ctypes.c_uint64),
-        ("num_nodes", ctypes.c_int),
-        ("policy", ctypes.c_int),
-        ("nodes", DiNodeMetrics * DI_MAX_NODES),
-        ("res_hist", ctypes.c_uint64 * 20),
+        ("total_bytes", ctypes.c_uint64), ("total_reserved_req", ctypes.c_uint64), ("total_assigned", ctypes.c_uint64),
+        ("total_read", ctypes.c_uint64), ("total_published", ctypes.c_uint64), ("total_consumed", ctypes.c_uint64),
+        ("reservations_total", ctypes.c_uint64), ("eof_offset", ctypes.c_uint64),
+        ("overlap_detected", ctypes.c_int), ("duplicate_detected", ctypes.c_int), ("lost_detected", ctypes.c_int),
+        ("input_changed", ctypes.c_int), ("wall_seconds", ctypes.c_double),
+        ("ingest_cpu_ns", ctypes.c_uint64), ("consumer_cpu_ns", ctypes.c_uint64),
+        ("num_nodes", ctypes.c_int), ("policy", ctypes.c_int),
+        ("nodes", DiNodeMetrics * DI_MAX_NODES), ("res_hist", ctypes.c_uint64 * 20),
     ]
 
 
 class DiConfig(ctypes.Structure):
     _fields_ = [
-        ("num_nodes", ctypes.c_int),
-        ("policy", ctypes.c_int),
-        ("params", DiPolicyParams),
+        ("num_nodes", ctypes.c_int), ("policy", ctypes.c_int), ("params", DiPolicyParams),
         ("consumers", ctypes.POINTER(DiConsumerCfg)),
-        ("cpu_lists", ctypes.c_void_p),
-        ("cpu_counts", ctypes.c_void_p),
-        ("phys_nodes", ctypes.c_void_p),
+        ("cpu_lists", ctypes.c_void_p), ("cpu_counts", ctypes.c_void_p), ("phys_nodes", ctypes.c_void_p),
     ]
 
 
@@ -156,11 +125,8 @@ def make_file(size):
 
 class TestEffectiveBacklogLifecycle(unittest.TestCase):
     def test_consumer_inflight_counts_in_effective_backlog(self):
-        # Repro/validation for S2: bytes dequeued but not yet completed must remain in
-        # effective_backlog as consumer_inflight (not freed at dequeue).
         lib = load_lib()
         quantum = 1024 * 1024
-        # 3 chunks: while consumer holds one in-flight, ingestor must not treat it as free.
         path = make_file(3 * quantum)
         fd = os.open(path, os.O_RDONLY)
         try:
@@ -168,7 +134,7 @@ class TestEffectiveBacklogLifecycle(unittest.TestCase):
             params = DiPolicyParams()
             params.base_quantum = quantum
             params.max_reservation = 0
-            params.max_backlog = 2 * quantum  # allow at most 2q effective
+            params.max_backlog = 2 * quantum
             params.relative_rounding = 1
             params.local_max_claim_quanta = 0
             params.align_reservations = 1
@@ -178,8 +144,8 @@ class TestEffectiveBacklogLifecycle(unittest.TestCase):
             params.one_outstanding_per_node = 1
             params.enable_peer_headroom = 1
             cons = (DiConsumerCfg * 1)()
-            cons[0].mode = 1  # slow
-            cons[0].bytes_per_sec = 2 * 1024 * 1024  # ~0.5s per 1MB chunk
+            cons[0].mode = 1
+            cons[0].bytes_per_sec = 2 * 1024 * 1024
             cons[0].stall_ms = 0
             cfg = DiConfig()
             cfg.num_nodes = 1
@@ -204,11 +170,9 @@ class TestEffectiveBacklogLifecycle(unittest.TestCase):
                 if lib.di_debug_node_accounting(eng, 0, ctypes.byref(p), ctypes.byref(inf), ctypes.byref(o), ctypes.byref(e)) == 0:
                     if inf.value > 0:
                         seen_inflight['v'] = True
-                        # effective must include inflight (and never drop at dequeue)
                         self.assertEqual(e.value, lib.di_effective_backlog(p.value, inf.value, o.value))
                     if e.value > max_eff_seen['v']:
                         max_eff_seen['v'] = e.value
-                    # invariant under observation
                     self.assertLessEqual(e.value, 2 * quantum)
                 time.sleep(0.005)
             t.join(timeout=10)
@@ -233,7 +197,6 @@ class TestAllocationProperties(unittest.TestCase):
 
     def test_repeated_runs_no_leak_or_corruption(self):
         lib = load_lib()
-        # repeated alloc/free stress through engine lifecycle
         for size in (0, 1, 4096, 1024*1024, 2*1024*1024 + 7):
             path = make_file(size)
             fd = os.open(path, os.O_RDONLY)

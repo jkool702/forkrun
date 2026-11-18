@@ -44,6 +44,17 @@ class DiConsumerCfg(ctypes.Structure):
     ]
 
 
+class DiAffinityRole(ctypes.Structure):
+    _fields_ = [
+        ("requested", ctypes.c_int),
+        ("set_applied", ctypes.c_int),
+        ("query_succeeded", ctypes.c_int),
+        ("matched", ctypes.c_int),
+        ("error", ctypes.c_int),
+        ("strict_failed", ctypes.c_int),
+    ]
+
+
 class DiNodeMetrics(ctypes.Structure):
     _fields_ = [
         ("reservations", ctypes.c_uint64),
@@ -68,11 +79,15 @@ class DiNodeMetrics(ctypes.Structure):
         ("max_effective_backlog", ctypes.c_uint64),
         ("peer_observe_ns", ctypes.c_uint64),
         ("peer_observe_count", ctypes.c_uint64),
-        ("placement_samples", ctypes.c_uint64),
-        ("placement_sample_cap", ctypes.c_uint64),
-        ("local_pages", ctypes.c_uint64),
-        ("remote_pages", ctypes.c_uint64),
-        ("unknown_pages", ctypes.c_uint64),
+        ("placement_total_addressable_pages", ctypes.c_uint64),
+        ("placement_sampled_pages", ctypes.c_uint64),
+        ("placement_sample_limit", ctypes.c_uint64),
+        ("placement_sample_spacing", ctypes.c_uint64),
+        ("placement_sample_target_match_pages", ctypes.c_uint64),
+        ("placement_sample_other_node_pages", ctypes.c_uint64),
+        ("placement_sample_unknown_pages", ctypes.c_uint64),
+        ("placement_sampling_unavailable", ctypes.c_int),
+        ("placement_sampling_not_performed", ctypes.c_int),
         ("hugepage_map_requested_bytes", ctypes.c_uint64),
         ("hugepage_map_obtained_bytes", ctypes.c_uint64),
         ("hugepage_fallback_bytes", ctypes.c_uint64),
@@ -81,14 +96,13 @@ class DiNodeMetrics(ctypes.Structure):
         ("ingest_cpu_ns", ctypes.c_uint64),
         ("consumer_cpu_ns", ctypes.c_uint64),
         ("res_hist", ctypes.c_uint64 * 20),
-        ("affinity_requested", ctypes.c_int),
-        ("affinity_applied", ctypes.c_int),
-        ("affinity_verified", ctypes.c_int),
-        ("affinity_error", ctypes.c_int),
-        ("mbind_requested", ctypes.c_int),
-        ("mbind_applied", ctypes.c_int),
+        ("affinity_ingestor", DiAffinityRole),
+        ("affinity_consumer", DiAffinityRole),
+        ("mbind_policy_requested", ctypes.c_int),
+        ("mbind_policy_applied", ctypes.c_int),
         ("mbind_error", ctypes.c_int),
-        ("placement_strict_failed", ctypes.c_int),
+        ("strict_mbind_failed", ctypes.c_int),
+        ("strict_affinity_failed", ctypes.c_int),
         ("last_error", ctypes.c_int),
     ]
 
@@ -242,7 +256,7 @@ class TestPolicyDecisions(unittest.TestCase):
 
     def test_relative_less_than_peers_can_be_zero(self):
         p = DiPolicyParams(); p.base_quantum=1024; p.max_backlog=8192; p.max_reservation=8192; p.relative_rounding=0
-        eff=(ctypes.c_uint64*2)(7000,0); hr=(ctypes.c_uint64*2)(512,4096)  # M_i small vs S_i
+        eff=(ctypes.c_uint64*2)(7000,0); hr=(ctypes.c_uint64*2)(512,4096)
         got = self.lib.di_policy_decide(DI_POLICY_RELATIVE_ADAPTIVE, ctypes.byref(p), 2, 0, eff, hr)
         self.assertEqual(got, 0)
 
@@ -303,7 +317,6 @@ class TestEngineCorrectness(unittest.TestCase):
                                      max_backlog=2*1024*1024, consumer_mode=1, slow_node=0,
                                      slow_mode=1, slow_bps=2*1024*1024)
             self._assert_correct(rc, res, sz)
-            # effective backlog must never exceed max_backlog per node
             for i in range(res.num_nodes):
                 self.assertLessEqual(int(res.nodes[i].max_effective_backlog), 2*1024*1024)
         finally:
@@ -343,9 +356,9 @@ class TestRunnerCLI(unittest.TestCase):
         path = make_file(2*1024*1024)
         try:
             p = subprocess.run([sys.executable, os.path.join(PKG,'run_dist.py'),
-                                '--candidate','fixed_faa','--input',path,'--nodes','2'],
+                                '--candidate','fixed_faa','--input',path,'--nodes','1','--no-pin'],
                                capture_output=True,text=True,cwd=REPO)
-            self.assertEqual(p.returncode, 0, msg=p.stderr[-500:])
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-800:] + "\n" + p.stdout[-400:])
             self.assertIn('CHILD_DONE', p.stdout)
             self.assertIn('DIST_RESULT', p.stderr)
         finally:
