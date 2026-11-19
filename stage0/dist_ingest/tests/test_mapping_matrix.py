@@ -480,6 +480,46 @@ class TestResolveMappingPlan(unittest.TestCase):
         self.assertEqual(prov.get("mapping_profile"), "cross_socket_spread")
         self.assertIn("pairwise_numa_distances", prov)
 
+    def test_resolve_mapping_plan_uses_injected_affinity_fixture_not_host(self):
+        # Synthetic cross-socket topology; success/failure must follow the injected
+        # affinity/topology fixture regardless of actual host CPU affinity. The same
+        # fixture inputs must govern inventory discovery, usable-node determination,
+        # mapping selection, and final concrete mapping validation.
+        with tempfile.TemporaryDirectory() as td:
+            cpu_packages = {0: 0, 1: 0, 2: 1, 3: 1}
+            nodes = {
+                0: {"cpulist": "0,1", "mem_total_kb": 1024},
+                1: {"cpulist": "2,3", "mem_total_kb": 1024},
+            }
+            dist = {0: [10, 32], 1: [32, 10]}
+            sysfs, proc = make_sysfs(td, online="0,1", nodes=nodes, cpu_packages=cpu_packages,
+                                     node_distances=dist, status_cpus="0-3", status_mems="0,1")
+
+            def allow_all(_pid=0):
+                return {0, 1, 2, 3}
+
+            def allow_none_on_nodes(_pid=0):
+                # Restrictive affinity excludes every node CPU in the fixture.
+                return {99}
+
+            variants_ok, _inv_ok, errs_ok = run_dist.resolve_mapping_plan(
+                2, profiles=["cross_socket_spread"], no_pin=False,
+                sysfs_root=sysfs, proc_root=proc, sched_getaffinity=allow_all)
+            self.assertEqual(errs_ok, [], errs_ok)
+            self.assertTrue(variants_ok and variants_ok[0].get("supported"), variants_ok)
+            self.assertEqual(variants_ok[0].get("logical_to_physical"), [0, 1])
+            prov = variants_ok[0].get("mapping_provenance") or {}
+            self.assertTrue(prov)
+
+            variants_bad, _inv_bad, _errs_bad = run_dist.resolve_mapping_plan(
+                2, profiles=["cross_socket_spread"], no_pin=False,
+                sysfs_root=sysfs, proc_root=proc, sched_getaffinity=allow_none_on_nodes)
+            # Same topology fixture, different injected affinity => cannot establish a
+            # supported/validated concrete mapping (no allowed CPUs on nodes), independent of host.
+            self.assertTrue(variants_bad)
+            self.assertFalse(variants_bad[0].get("supported"), variants_bad)
+            self.assertIsNotNone(variants_bad[0].get("reason"))
+
 
 if __name__ == "__main__":
     unittest.main()

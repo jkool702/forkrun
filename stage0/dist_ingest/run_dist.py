@@ -850,7 +850,8 @@ def resolve_mapping_plan(requested_nodes, profiles=None, phys_nodes_spec=None, n
         spec = ",".join(str(x) for x in phys)
         # Validate concrete mapping with the SAME authority/path trials use.
         l2p, cpus, info, terr = resolve_topology(
-            n, phys_nodes_spec=spec, no_pin=no_pin, sysfs_root=sysfs_root, proc_root=proc_root)
+            n, phys_nodes_spec=spec, no_pin=no_pin, sysfs_root=sysfs_root, proc_root=proc_root,
+            sched_getaffinity=sched_getaffinity)
         supported = (len(terr) == 0 and l2p == phys)
         reason = cand.get("reason")
         if terr:

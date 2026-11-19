@@ -1440,7 +1440,196 @@ class TestCampaignPlanSemanticsC1Corrections(unittest.TestCase):
             shutil.rmtree(out_real, ignore_errors=True)
 
 
+
+class TestCampaignEmptyPlanAndPartialMatrixC1Final(unittest.TestCase):
+    """WO C1 final: empty executable plan rejection and partial matrix preservation."""
+
+    @staticmethod
+    def _write(path, content):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(content)
+
+    def _make_fake_topology(self, root, *, online, nodes, cpu_packages, node_distances,
+                            status_cpus, status_mems):
+        sysfs = os.path.join(root, 'sys')
+        proc = os.path.join(root, 'proc')
+        node_base = os.path.join(sysfs, 'devices', 'system', 'node')
+        cpu_base = os.path.join(sysfs, 'devices', 'system', 'cpu')
+        os.makedirs(node_base, exist_ok=True)
+        os.makedirs(cpu_base, exist_ok=True)
+        self._write(os.path.join(node_base, 'online'), online + '\n')
+        for cid, pkg in cpu_packages.items():
+            tdir = os.path.join(cpu_base, 'cpu%d' % cid, 'topology')
+            self._write(os.path.join(tdir, 'physical_package_id'), str(pkg) + '\n')
+            self._write(os.path.join(tdir, 'core_id'), str(cid) + '\n')
+        for nid, nd in nodes.items():
+            ndir = os.path.join(node_base, 'node%d' % nid)
+            os.makedirs(ndir, exist_ok=True)
+            if 'cpulist' in nd:
+                self._write(os.path.join(ndir, 'cpulist'), str(nd['cpulist']) + '\n')
+            if 'meminfo_raw' in nd:
+                self._write(os.path.join(ndir, 'meminfo'), nd['meminfo_raw'])
+            else:
+                total = nd.get('mem_total_kb', 0)
+                free = nd.get('mem_free_kb', total)
+                self._write(os.path.join(ndir, 'meminfo'),
+                            'Node %d MemTotal:       %d kB\nNode %d MemFree:        %d kB\n'
+                            % (nid, total, nid, free))
+        if node_distances is not None:
+            for nid, row in node_distances.items():
+                if isinstance(row, str):
+                    content = row
+                else:
+                    content = ' '.join(str(x) for x in row)
+                self._write(os.path.join(node_base, 'node%d' % nid, 'distance'), content + '\n')
+        self._write(os.path.join(proc, 'self', 'status'),
+                    'Cpus_allowed_list:\t%s\nMems_allowed_list:\t%s\n' % (status_cpus, status_mems))
+        return sysfs, proc
+
+    def _nps1_2node_fixture(self, root, *, mem_kb=1024):
+        # Two nodes, same physical socket/package (single-socket multi-NUMA fixture).
+        cpu_packages = {0: 0, 1: 0, 2: 0, 3: 0}
+        nodes = {
+            0: {'cpulist': '0,1', 'mem_total_kb': mem_kb},
+            1: {'cpulist': '2,3', 'mem_total_kb': mem_kb},
+        }
+        dist = {0: [10, 12], 1: [12, 10]}
+        return self._make_fake_topology(root, online='0,1', nodes=nodes, cpu_packages=cpu_packages,
+                                        node_distances=dist, status_cpus='0-3', status_mems='0,1')
+
+    def _zero_usable_inventory_fixture(self, root):
+        # Inventory available (nodes online, cpus/distances/topology present) but no usable memory.
+        cpu_packages = {0: 0, 1: 0, 2: 1, 3: 1}
+        nodes = {
+            0: {'cpulist': '0,1', 'mem_total_kb': 0},
+            1: {'cpulist': '2,3', 'mem_total_kb': 0},
+        }
+        dist = {0: [10, 32], 1: [32, 10]}
+        return self._make_fake_topology(root, online='0,1', nodes=nodes, cpu_packages=cpu_packages,
+                                        node_distances=dist, status_cpus='0-3', status_mems='0,1')
+
+    def _assert_no_timed_trial_manifests(self, out):
+        self.assertFalse(os.path.exists(os.path.join(out, 'campaign-manifest.json')),
+                         'campaign must not complete with timed trials')
+        cases_dir = os.path.join(out, 'cases')
+        trial_evidence = []
+        if os.path.isdir(cases_dir):
+            for root, dirs, files in os.walk(cases_dir):
+                if 'manifest.json' in files:
+                    trial_evidence.append(os.path.join(root, 'manifest.json'))
+        self.assertEqual(trial_evidence, [], 'no timed trial manifests expected before timed trials')
+
+    def _run(self, extra_args, *, plan_only, sysfs_root, proc_root, source_sha='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'):
+        out = tempfile.mkdtemp(prefix='dist_camp_emptyplan_')
+        os.rmdir(out)
+        cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh']
+        if plan_only:
+            cmd.append('--plan-only')
+        cmd += ['--out', out, '--campaign-id', 'test-empty-plan',
+                '--source-sha', source_sha] + list(extra_args)
+        env = dict(os.environ)
+        env['DIST_SYSFS_ROOT'] = sysfs_root
+        env['DIST_PROC_ROOT'] = proc_root
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO, env=env)
+        return p, out
+
+    def _load_preval(self, out):
+        with open(os.path.join(out, 'prevalidation.json')) as fh:
+            return json.load(fh)
+
+    def _assert_empty_plan_rejected(self, p, out):
+        self.assertNotEqual(p.returncode, 0, msg=p.stdout + '\n' + p.stderr)
+        self.assertIn('before timed trials', (p.stderr + p.stdout).lower())
+        self.assertFalse(os.path.exists(os.path.join(out, 'execution-plan.json')),
+                         'successful execution plan must not be written for an entirely non-executable campaign')
+        self.assertFalse(os.path.exists(os.path.join(out, '.run_plan.tsv')),
+                         'successful run plan must not be written for an entirely non-executable campaign')
+        self._assert_no_timed_trial_manifests(out)
+        pv = self._load_preval(out)
+        self.assertEqual(pv.get('status'), 'failed')
+        errs = pv.get('errors') or []
+        self.assertTrue(any('no executable' in str(e).lower() or 'entirely non-executable' in str(e).lower() for e in errs), errs)
+        return pv
+
+    def test_zero_usable_nodes_with_inventory_available_rejected(self):
+        for plan_only in (True, False):
+            with self.subTest(plan_only=plan_only):
+                with tempfile.TemporaryDirectory() as td:
+                    sysfs, proc = self._zero_usable_inventory_fixture(td)
+                    p, out = self._run(['--scenarios', 'small', '--mapping-profiles', 'matrix',
+                                        '--candidates', 'fixed_faa', '--trials', '1', '--seed', 'z1'],
+                                       plan_only=plan_only, sysfs_root=sysfs, proc_root=proc)
+                    try:
+                        pv = self._assert_empty_plan_rejected(p, out)
+                        self.assertEqual(pv.get('host_usable_node_count'), 0)
+                        self.assertIsInstance(pv.get('unsupported_mappings'), list)
+                    finally:
+                        shutil.rmtree(out, ignore_errors=True)
+
+    def test_zero_supported_mapping_variants_for_all_selected_cases_rejected(self):
+        # 2-node single-socket topology: selecting only 4-node scenarios in matrix mode
+        # yields inventory available but no supported mapping variants for selected cases.
+        for plan_only in (True, False):
+            with self.subTest(plan_only=plan_only):
+                with tempfile.TemporaryDirectory() as td:
+                    sysfs, proc = self._nps1_2node_fixture(td, mem_kb=1024)
+                    p, out = self._run(['--scenarios', 'equal', '--mapping-profiles', 'matrix',
+                                        '--candidates', 'fixed_faa', '--trials', '1', '--seed', 'z2'],
+                                       plan_only=plan_only, sysfs_root=sysfs, proc_root=proc)
+                    try:
+                        pv = self._assert_empty_plan_rejected(p, out)
+                        self.assertEqual(pv.get('host_usable_node_count'), 2)
+                        self.assertTrue(pv.get('unsupported_mappings'),
+                                        'unsupported mappings must be recorded explicitly')
+                        for um in pv.get('unsupported_mappings') or []:
+                            self.assertIn('equal', um.get('applies_to_scenarios') or [])
+                            self.assertTrue(um.get('reason'))
+                    finally:
+                        shutil.rmtree(out, ignore_errors=True)
+
+    def test_partially_supported_matrix_runs_supported_and_records_unsupported(self):
+        # Single-socket 2-node fixture: 2-node cases have supported mapping variants (e.g.
+        # intra_socket/all_nodes) while 4-node cases and single-socket cross_socket_spread
+        # are unsupported and must be recorded explicitly without making the plan fatal.
+        for plan_only in (True, False):
+            with self.subTest(plan_only=plan_only):
+                with tempfile.TemporaryDirectory() as td:
+                    sysfs, proc = self._nps1_2node_fixture(td, mem_kb=1024)
+                    args = ['--quick', '--scenarios', 'small,equal', '--mapping-profiles', 'matrix',
+                            '--candidates', 'fixed_faa', '--trials', '1', '--seed', 'partial1']
+                    p, out = self._run(args, plan_only=plan_only, sysfs_root=sysfs, proc_root=proc)
+                    try:
+                        self.assertEqual(p.returncode, 0, msg=p.stderr[-4000:] + '\n' + p.stdout[-2000:])
+                        self.assertTrue(os.path.exists(os.path.join(out, 'execution-plan.json')))
+                        with open(os.path.join(out, 'execution-plan.json')) as fh:
+                            plan = json.load(fh)
+                        blocks = plan.get('blocks') or []
+                        self.assertTrue(blocks, 'supported cases must produce executable blocks')
+                        block_scenarios = sorted({b.get('scenario') for b in blocks})
+                        self.assertIn('small', block_scenarios)
+                        self.assertNotIn('equal', block_scenarios)
+                        pv = self._load_preval(out)
+                        unsupported = pv.get('unsupported_mappings') or []
+                        self.assertTrue(unsupported, 'unsupported mappings must be recorded explicitly')
+                        self.assertTrue(any('equal' in (u.get('applies_to_scenarios') or []) for u in unsupported),
+                                        unsupported)
+                        self.assertTrue(all((u.get('reason') or '').strip() for u in unsupported), unsupported)
+                        if plan_only:
+                            self.assertFalse(os.path.exists(os.path.join(out, 'campaign-manifest.json')))
+                            self._assert_no_timed_trial_manifests(out)
+                        else:
+                            self.assertTrue(os.path.exists(os.path.join(out, 'campaign-manifest.json')),
+                                            'real campaign with supported cases must complete successfully')
+                            with open(os.path.join(out, 'campaign-manifest.json')) as fh:
+                                cm = json.load(fh)
+                            outcomes = cm.get('outcomes') or []
+                            self.assertTrue(outcomes, 'supported cases must execute timed trials')
+                            self.assertTrue(all(o.get('scenario') == 'small' for o in outcomes), outcomes)
+                    finally:
+                        shutil.rmtree(out, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
-
 

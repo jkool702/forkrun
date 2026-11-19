@@ -239,6 +239,10 @@ except Exception as e:
     print('dist-campaign: topology validation failed before timed trials: cannot import topology modules: %s' % e, file=sys.stderr)
     sys.exit(2)
 
+# Optional fixture roots for deterministic preflight/topology testing (defaults preserve real-host behavior).
+sysfs_root = os.environ.get('DIST_SYSFS_ROOT', '/sys')
+proc_root = os.environ.get('DIST_PROC_ROOT', '/proc')
+
 # Parse mapping profiles
 raw_mp = [p.strip() for p in mapping_profiles_arg.split(',') if p.strip()]
 if not raw_mp:
@@ -260,11 +264,11 @@ host_usable_node_ids = []
 host_usable_count = 0
 topo_discovery_err = None
 try:
-    inv = run_dist.discover_topology_inventory()
+    inv = run_dist.discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root)
 except Exception as e:
     inv = None
 try:
-    l, p, info, err = run_dist.resolve_topology(999, None, no_pin=False)
+    l, p, info, err = run_dist.resolve_topology(999, None, no_pin=False, sysfs_root=sysfs_root, proc_root=proc_root)
     if l:
         host_usable_node_ids = list(l)
         host_usable_count = len(l)
@@ -375,7 +379,7 @@ if 'explicit' in req_profiles_base or phys_nodes:
             else:
                 logical_count = selected_counts[0]
                 try:
-                    lmap, pcpu, tinfo, terr = run_dist.resolve_topology(logical_count, phys_nodes, no_pin=False)
+                    lmap, pcpu, tinfo, terr = run_dist.resolve_topology(logical_count, phys_nodes, no_pin=False, sysfs_root=sysfs_root, proc_root=proc_root)
                 except Exception as e:
                     lmap, pcpu, tinfo, terr = [], [], {}, ['resolve_topology exception: %s' % e]
                 if terr or not lmap:
@@ -388,7 +392,7 @@ if 'explicit' in req_profiles_base or phys_nodes:
                     explicit_count_input = len(lmap)
                     prov_m = None
                     try:
-                        invx = run_dist.discover_topology_inventory()
+                        invx = run_dist.discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root)
                         prov_m = topo_mod.build_mapping_provenance(invx or {}, 'explicit', 'explicit', lmap, pcpu, False, tinfo)
                     except Exception:
                         prov_m = None
@@ -418,7 +422,7 @@ elif req_profiles_base == ['auto'] or req_profiles_base == ['default']:
                 continue
             if n not in by_count:
                 try:
-                    lmap, pcpu, tinfo, terr = run_dist.resolve_topology(n, None, no_pin=False)
+                    lmap, pcpu, tinfo, terr = run_dist.resolve_topology(n, None, no_pin=False, sysfs_root=sysfs_root, proc_root=proc_root)
                 except Exception as e:
                     lmap, pcpu, tinfo, terr = [], [], {}, ['resolve_topology exception: %s' % e]
                 if terr or not lmap:
@@ -428,7 +432,7 @@ elif req_profiles_base == ['auto'] or req_profiles_base == ['default']:
                 else:
                     prov = None
                     try:
-                        invx = run_dist.discover_topology_inventory()
+                        invx = run_dist.discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root)
                         prov = topo_mod.build_mapping_provenance(invx or {}, 'auto', 'auto', lmap, pcpu, False, tinfo)
                     except Exception:
                         prov = None
@@ -460,7 +464,7 @@ else:
         # expand requested profiles per distinct scenario node count
         for n in selected_counts:
             try:
-                variants, invx, terrs = run_dist.resolve_mapping_plan(n, profiles=req_profiles_base, phys_nodes_spec=None, no_pin=False)
+                variants, invx, terrs = run_dist.resolve_mapping_plan(n, profiles=req_profiles_base, phys_nodes_spec=None, no_pin=False, sysfs_root=sysfs_root, proc_root=proc_root)
             except Exception as e:
                 variants, invx, terrs = [], inv, ['mapping plan failed for %d nodes: %s' % (n, e)]
             if terrs:
@@ -508,6 +512,16 @@ if not errors:
                 expanded.append(mm)
     for m in expanded:
         plan_cases.append(m)
+
+# A campaign with zero executable (scenario, mapping, candidate) cases must fail
+# preflight before build/corpus/timed-trial setup. In matrix/profile modes this
+# can occur when inventory is available but no mapping variant is supported for
+# any selected case (unsupported mappings are still reported explicitly).
+if not errors and not plan_cases:
+    errors.append(
+        'no executable (scenario, mapping, candidate) cases: selected plan is entirely non-executable '
+        '(zero supported mappings for selected scenarios/candidates). Unsupported mappings, if any, are '
+        'recorded explicitly; refusing to build, generate corpora, or run timed trials.')
 
 # Preflight must validate every mapping in complete selected plan before timed trials.
 # (all entries in plan_cases are already resolved/validated above)

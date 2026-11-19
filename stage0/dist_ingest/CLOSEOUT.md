@@ -94,6 +94,41 @@
 - Legacy `--mapping-profiles auto` default behavior unchanged (documented as legacy/non-topology-aware); physical-rental invocation guidance requires explicit topology-aware profile selection.
 - **Stopped for independent review after this correction checkpoint. Do not start checkpoint 2. No physical rental. No production adoption.**
 
+## C1.9 Final correction — `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C1-FINAL-CHECK-2` (pre-C2)
+
+**Purpose:** final C1 correction for campaign preflight empty-plan handling and topology-test determinism before checkpoint 2. Preserves existing C1 implementation and prior commits; no architecture redesign, no physical rental, no production adoption.
+
+- **Branch:** `NEW/REFACTOR5.1`
+- **Starting HEAD (correction):** `d7137f09f82d57ea99b147dabf68412f915d7a2b`
+- **Frozen production files modified:** **none** (`forkrun_ring.c`, `forkrun_ring.h`, `forkrun_substrate.h`, `substratestubs.c` untouched)
+- **C files changed:** **none**. No sanitizer rerun required.
+
+### Empty executable-plan rejection and partial-matrix behavior (`stage0/dist_ingest/run_dist_campaign.sh`)
+
+- A campaign with zero executable `(scenario, mapping, candidate)` cases now fails preflight before build, corpus generation, or timed-trial setup. The reason is recorded in `prevalidation.json` (`status=failed`, explicit error); no successful `execution-plan.json`/`.run_plan.tsv` and no successful campaign completion manifest are produced. `--plan-only` also returns nonzero for an entirely non-executable plan.
+- Partial topology support in matrix mode is preserved: supported `(scenario, mapping)` cases remain executable while unsupported mappings/scenarios are explicitly identified with reasons and recorded in prevalidation/plan provenance; only an entirely empty executable plan (or another existing hard preflight failure) is fatal.
+- Deterministic synthetic-root campaign preflight support added via `DIST_SYSFS_ROOT`/`DIST_PROC_ROOT` (defaults preserve real-host behavior) to enable fixture-driven campaign tests.
+
+### Injected affinity discovery propagation (`stage0/dist_ingest/run_dist.py`)
+
+- `resolve_mapping_plan()` now passes `sched_getaffinity` to the final concrete-mapping `resolve_topology()` validation call (in addition to existing propagation), so inventory discovery, usable-node determination, mapping selection, and final concrete mapping validation all honor the same injected fixture inputs (`sysfs_root`, `proc_root`, `sched_getaffinity`) where applicable. Real-host affinity verification is unchanged.
+
+### Tests and validation
+
+- `stage0/dist_ingest/tests/test_benchmark_semantics.py`: deterministic campaign tests for zero usable nodes with inventory available (rejected), zero supported mapping variants for all selected cases (rejected), partially supported matrix running supported cases while recording unsupported ones, empty-plan rejection before timed-trial manifests, and plan-only vs real-campaign behavior.
+- `stage0/dist_ingest/tests/test_mapping_matrix.py`: deterministic test proving synthetic `resolve_mapping_plan()` success/failure follows the injected affinity/topology fixture regardless of actual host CPU affinity.
+- **Exact validation (this correction, local/fake-NUMA host):**
+  - `python3 -m unittest discover -s stage0/dist_ingest/tests -v` → **190/190 OK** (28.081s)
+  - `python3 -m unittest stage0.tests.test_stage0` → **81/81 OK** (16.292s)
+  - `python3 -m unittest python.tests.test_numa_drain_guard` → **7/7 OK** (0.000s)
+  - `python3 -m unittest python.tests.test_numa` → **36 tests, OK (skipped=1)** (3.466s)
+- These validate driver/preflight/topology/mapping/usability/provenance behavior only; they do **not** establish physical NUMA locality or scaling.
+
+### Remaining limitations (unchanged)
+
+- No checkpoint 2–5 work performed; no `RENTAL_READINESS.md`; full WO-1 validations/sanitizers/stress pending later checkpoints. No physical multi-node NUMA validation. No physical rental. No production adoption.
+- **Stopped for independent review after this final C1 correction. Do not start checkpoint 2 until reviewed.**
+
 ---
 
 # WO-NUMA-DIST-INGEST-CAMPAIGN-PREFLIGHT-FINAL-CLEANUP-4 — Closeout
