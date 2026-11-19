@@ -50,6 +50,50 @@
 - Checkpoint 5: EPYC stage/orchestration integration and final rehearsal.
 - Full WO-1 required validations/sanitizers/stress and creation/update of `RENTAL_READINESS.md` (and final `CLOSEOUT.md`/`RENTAL_RECIPE.md`/EPYC docs) remain pending subsequent checkpoints. **No physical rental. No production adoption.**
 
+## C1.8 Correction checkpoint — `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C1-CORRECTIONS-1` (pre-C2)
+
+**Purpose:** narrow correction to C1 campaign plan-generation semantics and `cross_socket_spread` meaning before checkpoint 2. Preserves C1 topology inventory/mapping model/interfaces and prior commits; no architecture redesign, no physical rental, no production adoption.
+
+- **Branch:** `NEW/REFACTOR5.1`
+- **Starting HEAD (correction):** `f6906bff1acea559129521e5dae1ddcdfdd55626` (C1 committed)
+- **Frozen production files modified:** **none** (`forkrun_ring.c`, `forkrun_ring.h`, `forkrun_substrate.h`, `substratestubs.c` untouched)
+- **C files changed:** **none**. No sanitizer rerun required for this correction.
+
+### CLI → execution-plan propagation and candidate/plan validation (`stage0/dist_ingest/run_dist_campaign.sh`)
+
+- The embedded plan-generation/preflight Python now receives the actual shell/CLI values **explicitly** as positional arguments for trials, candidate filter, seed, and scenario-order shuffling (`TRIALS`, `CAND_FILTER`, `SEED`, `SHUFFLE_SCENARIOS`) instead of reading ambient `DIST_*` environment values. `--plan-only` and a real campaign with identical arguments therefore generate/use the **same** selected plan.
+- Candidate selection is validated before build and before timed-trial manifests: candidate list must be nonempty (including empty/malformed elements rejected), every requested candidate must be recognized (dist-engine candidates plus `centralized`/control/reference aliases accepted by the campaign), and duplicate candidate IDs are rejected. Invalid selection fails before timed-trial manifests. (`--candidates` now accepts an explicit empty argument value so empty selection is rejected by campaign validation rather than mis-parsed by shell option handling.)
+- Requested/executed plan parameters are recorded in provenance/plan artifacts: `prevalidation.json` and `execution-plan.json` include `trials`, `candidates`, `seed`, `shuffle_scenarios`/randomization fields consistent with the validated plan; `execution-plan.json` remains the authoritative block plan used by execution.
+
+### Genuine `cross_socket_spread` semantics (`stage0/dist_ingest/topology.py`)
+
+- `cross_socket_spread` is supported only when socket membership is known and unambiguous for the selected usable nodes, at least two distinct sockets exist among the available usable nodes, the logical node count is >= 2, and the selected mapping actually contains nodes from at least two distinct sockets. A logical node count of 1 cannot qualify.
+- Unsupported cases are reported with a clear reason and are never substituted with an intra-socket mapping; `spans_sockets` agrees with the support decision. Intended behavior preserved on NPS1/NPS2/NPS4 systems; single-socket multi-NUMA/fake-NUMA (one physical socket) and unknown/ambiguous socket membership do not produce supported cross-socket mappings.
+
+### Usable-node validation consolidation and fixture determinism (`stage0/dist_ingest/run_dist.py`, `stage0/dist_ingest/topology.py`)
+
+- Automatic usable-node evaluation is consolidated in `run_dist._verified_usable_nodes()` and shared by `resolve_topology()` and `resolve_mapping_plan()` so both paths use the same authoritative usability rules for online nodes, allowed memory-node membership, per-node memory presence/known state, per-node CPU-list validity, and effective allowed-CPU availability (no second, subtly different usable-node definition).
+- CPU-affinity discovery is injectable for deterministic synthetic topology tests via an explicit `sched_getaffinity` callback threaded through `discover_topology_inventory()` / `_allowed_cpus()` / `resolve_topology()` / `resolve_mapping_plan()` and the topology discovery path. Real-host runs preserve actual `os.sched_getaffinity()` verification/behavior. Concrete mappings still pass through the existing authoritative topology-validation path (`resolve_topology()` explicit-mapping validation) before being marked supported.
+- `--mapping-profiles auto` preserves the **legacy** first-N-usable-nodes selection and is **not** a substitute for topology-aware experimental coverage. **Physical-NUMA rental must use an explicit topology-aware mapping-profile selection (normally `--mapping-profiles matrix`) rather than silently relying on legacy `auto`.** Legacy default behavior is unchanged; see `RENTAL_RECIPE.md`.
+
+### Regression/topology tests and validation
+
+- `stage0/dist_ingest/tests/test_benchmark_semantics.py`: added `TestCampaignPlanSemanticsC1Corrections` covering `--quick` = 1 trial/case, `--trials 5`, `--candidates fixed_faa` plans/executes only `fixed_faa`, unknown candidate rejected before timed-trial manifests, empty candidate list rejected, specified seed recorded and reproducible candidate order, `--shuffle-scenarios` actually shuffles scenario/mapping-block order by seed, and `--plan-only` vs real campaign agreement on the selected plan (including plan/provenance fields).
+- `stage0/dist_ingest/tests/test_mapping_matrix.py`: added/updated deterministic topology tests for single-socket multi-NUMA and fake-NUMA-several-nodes-one-socket `cross_socket_spread` unsupported, NPS1 two-node cross-socket supported/spanning, NPS4 four-node cross-socket supported/spans both sockets, logical-count-1 cross-socket unsupported, and unknown/ambiguous socket membership never producing a supported cross-socket mapping; synthetic tests use injectable affinity discovery for host-independent determinism.
+- **Exact validation (this correction, local/fake-NUMA host):**
+  - `python3 -m unittest discover -s stage0/dist_ingest/tests -v` → **186/186 OK** (26.666s)
+  - `python3 -m unittest stage0.tests.test_stage0` → **81/81 OK** (16.005s)
+  - `python3 -m unittest python.tests.test_numa_drain_guard` → **7/7 OK** (0.000s)
+  - `python3 -m unittest python.tests.test_numa` → **36 tests, OK (skipped=1)** (3.322s)
+- These validate driver/CLI-plan/topology/mapping/usability/provenance behavior only; they do **not** establish physical NUMA locality or scaling.
+
+### Remaining limitations (C1 correction scope)
+
+- No checkpoint 2–5 work performed (placement-sampling/isolation, sweeps/workloads/duration qualification, env/telemetry/reporting/calibration, EPYC orchestration/rehearsal). No `RENTAL_READINESS.md` yet; final WO-1 validations/sanitizers/stress pending later checkpoints.
+- No physical multi-node NUMA validation; local/fake-NUMA results are not evidence of physical locality/scaling/remote-memory penalties. `mbind(MPOL_PREFERRED)` syscall success and placement sampling observations are not physical placement proof; `unknown` remains `unknown`.
+- Legacy `--mapping-profiles auto` default behavior unchanged (documented as legacy/non-topology-aware); physical-rental invocation guidance requires explicit topology-aware profile selection.
+- **Stopped for independent review after this correction checkpoint. Do not start checkpoint 2. No physical rental. No production adoption.**
+
 ---
 
 # WO-NUMA-DIST-INGEST-CAMPAIGN-PREFLIGHT-FINAL-CLEANUP-4 — Closeout

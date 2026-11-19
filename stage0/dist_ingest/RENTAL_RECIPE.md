@@ -49,7 +49,9 @@ python3 stage0/env_capture.py --out /tmp/env-pre.json --run-id preflight
 
 ## Scenario profiles, minimum node counts, and topology compatibility
 
-The campaign driver validates selected scenario IDs and node counts against topology/mapping **before executing timed trials**. If `--scenarios` is explicitly supplied, unknown scenario IDs and duplicate scenario IDs are rejected before timed trials (even when other requested IDs are valid), and prevalidation/provenance/execution-plan agree on the selected scenario set. If a selected scenario cannot be satisfied by the selected hardware/mapping, the campaign fails before timed trials with a clear diagnostic (it must not begin a campaign containing scenarios the selected hardware cannot support, and unsupported scenarios are never marked successful).
+The campaign driver validates selected scenario IDs and node counts against topology/mapping **before executing timed trials**. If `--scenarios` is explicitly supplied, unknown scenario IDs and duplicate scenario IDs are rejected before timed trials (even when other requested IDs are valid), and prevalidation/provenance/execution-plan agree on the selected scenario set. Candidate selection (`--candidates`) is likewise validated before build/timed-trial manifests (nonempty, recognized, no duplicates); `--trials`/`--seed`/`--shuffle-scenarios` are part of the validated execution plan and `--plan-only` reports the same plan an actual campaign would execute. If a selected scenario cannot be satisfied by the selected hardware/mapping, the campaign fails before timed trials with a clear diagnostic (it must not begin a campaign containing scenarios the selected hardware cannot support, and unsupported scenarios are never marked successful).
+
+**Mapping-profile selection for physical NUMA:** `--mapping-profiles auto` preserves the **legacy** first-N-usable-nodes selection and is **not** topology-aware experimental coverage. For physical-NUMA rental/decision-grade runs, use an explicit topology-aware mapping-profile selection — normally `--mapping-profiles matrix` (or an explicit topology-aware profile subset such as `cross_socket_spread,intra_socket,all_nodes`) — so concrete mappings are topology-derived, validated, and recorded with mapping provenance. Do not silently rely on legacy `auto` for physical-NUMA experimental coverage. Unsupported mappings are reported explicitly and never substituted.
 
 ### Documented executable profiles (default/non-quick scenario set)
 
@@ -79,6 +81,7 @@ TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
   --out stage0/dist_ingest/runs/<campaign-id-2n> \
   --campaign-id <campaign-id-2n> \
   --scenarios nodes2,small,tiny \
+  --mapping-profiles matrix \
   --candidates centralized_ingest,fixed_faa,local_adaptive,relative_adaptive \
   --consumer-kernel full_byte_scan \
   --strict-affinity \
@@ -92,13 +95,14 @@ TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
   --out stage0/dist_ingest/runs/<campaign-id-4n> \
   --campaign-id <campaign-id-4n> \
   --scenarios equal,slow_one,fast_one,asymmetric,stall_recover,nodes2,large_seq,small,tiny,boundary,backpressure \
+  --mapping-profiles matrix \
   --candidates centralized_ingest,fixed_faa,local_adaptive,relative_adaptive \
   --consumer-kernel full_byte_scan \
   --strict-affinity \
   --strict-mbind
 ```
 
-If using explicit `--phys-nodes` on a 4-node host, select only scenarios whose node count matches the list length (example: 4-node scenarios with 4 explicit nodes):
+If using explicit `--phys-nodes` on a 4-node host, select only scenarios whose node count matches the list length (example: 4-node scenarios with 4 explicit nodes). Explicit `--phys-nodes` provides a concrete physical mapping (validated via the authoritative topology path); mapping-profile matrix expansion is not used in that explicit-mapping form:
 
 ```bash
 TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
@@ -118,6 +122,7 @@ TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
 TRIALS=3 bash stage0/dist_ingest/run_dist_campaign.sh \
   --out stage0/dist_ingest/runs/<campaign-id-full> \
   --campaign-id <campaign-id-full> \
+  --mapping-profiles matrix \
   --candidates centralized_ingest,fixed_faa,local_adaptive,relative_adaptive \
   --consumer-kernel full_byte_scan \
   --strict-affinity \
@@ -184,10 +189,11 @@ Functional correctness, performance-measurement, affinity, memory-policy applica
 
 - `--quick` small local smoke (not for physical-NUMA decisions; not a documented rental profile).
 - `--profile nodes2|nodes4|full` convenience scenario profile (sets `--scenarios` unless explicit). `--profile nodes2/nodes4` describe the non-quick scenario set and are rejected with `--quick`; `--profile full --quick` is supported and provenance records requested/effective profile and `profile_quick` unambiguously for the resulting quick selection.
-- `--scenarios <csv>` / `--candidates <csv>` to subset (explicit `--scenarios` rejects unknown and duplicate IDs before timed trials).
+- `--mapping-profiles <csv|matrix|all>` mapping-profile selection (e.g. `cross_socket_spread,intra_socket,all_nodes`, or `matrix`/`all` to expand topology-aware coverage per scenario). **Physical-NUMA rental must use an explicit topology-aware selection, normally `--mapping-profiles matrix`.** `--mapping-profiles auto` is legacy first-N-usable-nodes selection (not topology-aware experimental coverage) and must not be the silent default for physical-NUMA experimental coverage.
+- `--scenarios <csv>` / `--candidates <csv>` to subset (explicit `--scenarios` rejects unknown and duplicate IDs before timed trials; candidates are validated before build/timed-trial manifests as nonempty, recognized, and non-duplicate).
 - `--trials N` (>=3 recommended for decisive cases).
 - `--seed SEED` deterministic random seed for reproducible candidate/scenario ordering.
-- `--shuffle-scenarios` randomize scenario-block order (reproducible by seed).
+- `--shuffle-scenarios` randomize scenario/mapping-block order (reproducible by seed).
 - `--cache-policy TEXT` explicit cache/warm-up assumption recorded in manifest.
 - `--consumer-kernel full_byte_scan|none` workload kernel (default `full_byte_scan`; explicitly written per comparable candidate spec).
 - `--strict-affinity` / `--strict-mbind` strict enforcement (abort on required failure); recorded in specs/manifests/campaign config and reported alongside factual validity.

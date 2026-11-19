@@ -68,7 +68,9 @@ while [ "$#" -gt 0 ]; do
     --scenarios) SCEN_FILTER=${2:?}; SCEN_FILTER_EXPLICIT=1; shift 2 ;;
     --profile) PROFILE=${2:?}; shift 2 ;;
     --mapping-profiles) MAPPING_PROFILES=${2:?}; shift 2 ;;
-    --candidates) CAND_FILTER=${2:?}; shift 2 ;;
+    --candidates)
+      [ "$#" -ge 2 ] || { echo "dist-campaign: --candidates requires an argument" >&2; exit 2; }
+      CAND_FILTER=$2; shift 2 ;;
     --source-sha) SOURCE_SHA=${2:?}; shift 2 ;;
     --seed) SEED=${2:?}; shift 2 ;;
     --shuffle-scenarios) SHUFFLE_SCENARIOS=1; shift ;;
@@ -150,9 +152,10 @@ fi
 echo "=== dist-ingest campaign: topology/scenario pre-validation"
 export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
 PREVAL_FILE="$OUT/prevalidation.json"
-python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" "$MAPPING_PROFILES" <<'PY'
+python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" "$MAPPING_PROFILES" "$TRIALS" "$CAND_FILTER" "$SEED" "$SHUFFLE_SCENARIOS" <<'PY'
 import json, os, re, sys
-out, scen_filter, phys_nodes, profile, quick, preval_path, scen_filter_explicit, mapping_profiles_arg = sys.argv[1:9]
+(out, scen_filter, phys_nodes, profile, quick, preval_path,
+ scen_filter_explicit, mapping_profiles_arg, trials_arg, cand_filter_arg, seed_arg, shuf_sc_arg) = sys.argv[1:13]
 quick = quick == '1'
 scen_filter_explicit = scen_filter_explicit == '1'
 requested_profile = profile or None
@@ -281,6 +284,53 @@ selected_counts = sorted({s['nodes'] for s in selected if s['nodes'] is not None
 for s in selected:
     if s['nodes'] is None:
         errors.append("scenario %s has invalid node count" % s['id'])
+
+# Candidate/trial/randomization validation (must fail before timed-trial manifests).
+# Use the actual CLI/shell values passed in (not ambient env) so plan-only and
+# execution plans are identical.
+RECOGNIZED_CANDIDATES = {
+    'fixed_faa', 'local_adaptive', 'relative_adaptive',
+    'centralized_ingest', 'centralized',
+    'production_ref', 'control', 'forkrun_control',
+}
+_raw_cands = cand_filter_arg.split(',') if cand_filter_arg is not None else []
+cand_tokens = [c.strip() for c in _raw_cands]
+if len(cand_tokens) == 0 or any(c == '' for c in cand_tokens):
+    errors.append('candidate list must be nonempty and must not contain empty/malformed elements')
+plan_candidates = []
+_seen_cands = set()
+_dup_cands = []
+_unknown_cands = []
+for c in cand_tokens:
+    if c == '':
+        continue
+    if c in _seen_cands:
+        if c not in _dup_cands:
+            _dup_cands.append(c)
+        continue
+    _seen_cands.add(c)
+    if c not in RECOGNIZED_CANDIDATES:
+        _unknown_cands.append(c)
+    else:
+        plan_candidates.append(c)
+if _dup_cands:
+    errors.append('duplicate candidate id(s): %s' % ','.join(_dup_cands))
+if _unknown_cands:
+    errors.append('unknown candidate id(s): %s' % ','.join(_unknown_cands))
+if not plan_candidates and not any('candidate' in e for e in errors):
+    errors.append('candidate list must be nonempty')
+
+try:
+    plan_trials_n = int(trials_arg)
+except Exception:
+    plan_trials_n = None
+    errors.append('invalid --trials value: %r' % (trials_arg,))
+if plan_trials_n is not None and plan_trials_n < 1:
+    errors.append('--trials must be >= 1 (got %s)' % plan_trials_n)
+
+plan_seed = str(seed_arg) if seed_arg is not None else ''
+# shuffle flag passed as shell 0/1
+plan_shuffle_scenarios = str(shuf_sc_arg) in ('1', 'true', 'True', 'yes')
 
 mapping_plan = []  # list of concrete mappings to run
 unsupported_mappings = []
@@ -552,12 +602,13 @@ with open(preval_path, 'w') as f:
     json.dump(prov, f, indent=2, sort_keys=True)
 
 # Emit execution plan for bash: scenario_id \t scen_def \t trial \t cand_csv \t mapping_id \t mapping_profile \t mapping_variant \t phys_nodes
-# Also write structured plan
+# Also write structured plan. Use the actual validated CLI/shell values so
+# plan-only and real execution agree exactly.
 exec_plan = []
-cand_list = [c for c in os.environ.get('DIST_CAND_FILTER','centralized_ingest,fixed_faa,local_adaptive,relative_adaptive').split(',') if c]
-trials_n = int(os.environ.get('DIST_TRIALS','3'))
-seed = os.environ.get('DIST_SEED','')
-shuf_sc = os.environ.get('DIST_SHUFFLE_SCENARIOS','0') == '1'
+cand_list = list(plan_candidates)
+trials_n = int(plan_trials_n)
+seed = str(plan_seed)
+shuf_sc = bool(plan_shuffle_scenarios)
 import random
 # group by (scenario,mapping) preserving scenario order
 sm_keys = []
@@ -596,8 +647,25 @@ for key in sm_keys:
             'logical_to_physical': m.get('logical_to_physical'),
             'phys_nodes': m.get('phys_nodes'),
         })
+
+# Record requested/executed plan parameters in prevalidation for provenance and tests.
+prov['candidates_requested'] = list(plan_candidates)
+prov['candidates'] = list(plan_candidates)
+prov['trials'] = trials_n
+prov['seed'] = seed
+prov['shuffle_scenarios'] = bool(shuf_sc)
+prov['randomization'] = {
+    'seed': seed,
+    'shuffle_scenarios': bool(shuf_sc),
+    'trials': trials_n,
+    'candidates': list(plan_candidates),
+}
+with open(preval_path, 'w') as f:
+    json.dump(prov, f, indent=2, sort_keys=True)
+
 with open(os.path.join(out, 'execution-plan.json'), 'w') as f:
     json.dump({'seed': seed, 'shuffle_scenarios': shuf_sc, 'trials': trials_n,
+               'candidates': list(plan_candidates),
                'mapping_profiles_requested': raw_mp, 'mapping_mode': prov['physical_node_mapping']['mode'],
                'blocks': exec_plan, 'unsupported_mappings': prov['unsupported_mappings']}, f, indent=2, sort_keys=True)
 with open(os.path.join(out, '.run_plan.tsv'), 'w') as f:
@@ -606,8 +674,8 @@ with open(os.path.join(out, '.run_plan.tsv'), 'w') as f:
             b['scenario'], b['scenario_def'], str(b['trial']), ','.join(b['candidate_order']),
             b['mapping_id'] or '', b.get('mapping_profile') or '', b.get('mapping_variant') or '', b.get('phys_nodes') or ''
         ]) + '\n')
-print('prevalidation ok: selected=%s mappings=%d unsupported=%d' % (
-    selected_ids, len(plan_cases), len(unsupported_mappings)), file=sys.stderr)
+print('prevalidation ok: selected=%s mappings=%d unsupported=%d candidates=%s trials=%d seed=%s shuffle=%s' % (
+    selected_ids, len(plan_cases), len(unsupported_mappings), plan_candidates, trials_n, seed, shuf_sc), file=sys.stderr)
 PY
 PREVAL_RC=$?
 if [ "$PREVAL_RC" -ne 0 ]; then

@@ -11,6 +11,25 @@ import run_dist  # noqa: E402
 import topology  # noqa: E402
 
 
+def _no_sched(_pid=0):
+    raise OSError("no sched_getaffinity in synthetic fixture")
+
+
+def disc_topo(sysfs, proc):
+    return topology.discover_topology(sysfs_root=sysfs, proc_root=proc,
+                                      sched_getaffinity=_no_sched)
+
+
+def resolve_plan(*args, **kwargs):
+    kwargs.setdefault("sched_getaffinity", _no_sched)
+    return run_dist.resolve_mapping_plan(*args, **kwargs)
+
+
+def resolve_topo(*args, **kwargs):
+    kwargs.setdefault("sched_getaffinity", _no_sched)
+    return run_dist.resolve_topology(*args, **kwargs)
+
+
 def _write(path, content):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -108,7 +127,7 @@ class TestTopologyInventory(unittest.TestCase):
                 dist[i] = row
             sysfs, proc = make_sysfs(td, online=online, nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="0-31", status_mems="0-7")
-            inv = topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+            inv = disc_topo(sysfs, proc)
 
         self.assertEqual(inv["online_nodes"], list(range(8)))
         self.assertTrue(inv["online_known"])
@@ -140,7 +159,7 @@ class TestTopologyInventory(unittest.TestCase):
             dist = {2: [10, 20, 30], 5: [20, 10, 30], 9: [30, 30, 10]}
             sysfs, proc = make_sysfs(td, online=online, nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="10,11,20,30,31", status_mems="2,5,9")
-            inv = topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+            inv = disc_topo(sysfs, proc)
         self.assertEqual(inv["online_nodes"], [2, 5, 9])
         self.assertEqual(inv["nodes"][2]["socket_id"], 0)
         self.assertEqual(inv["nodes"][5]["socket_id"], 0)
@@ -160,7 +179,7 @@ class TestTopologyInventory(unittest.TestCase):
             dist = {0: [10, 20, 20], 1: [20, 10, 20], 3: [20, 20, 10]}
             sysfs, proc = make_sysfs(td, online=online, nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="0,1", status_mems="0,1,3")
-            inv = topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+            inv = disc_topo(sysfs, proc)
         self.assertEqual(inv["nodes"][1]["mem_state"], "none")
         self.assertEqual(inv["nodes"][3]["cpus"], [])
         self.assertTrue(inv["nodes"][3]["cpus_known"])
@@ -177,7 +196,7 @@ class TestTopologyInventory(unittest.TestCase):
             dist = {0: [10, 20], 1: [20, 10]}
             sysfs, proc = make_sysfs(td, online=online, nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="0", status_mems="0")
-            inv = topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+            inv = disc_topo(sysfs, proc)
         self.assertEqual(inv["allowed_cpus"], [0])
         self.assertEqual(inv["allowed_mem_nodes"], [0])
         self.assertEqual(inv["nodes"][1]["effective_allowed_cpus"], [])
@@ -190,7 +209,7 @@ class TestTopologyInventory(unittest.TestCase):
             dist = {0: [10, 20], 1: "bad"}  # invalid
             sysfs, proc = make_sysfs(td, online=online, nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="0,1", status_mems="0,1")
-            inv = topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+            inv = disc_topo(sysfs, proc)
         self.assertFalse(inv["distance"]["complete"])
         self.assertIn("distance_matrix", inv["unknowns"])
         self.assertFalse(inv["distance"]["rows"][1]["known"])
@@ -204,7 +223,7 @@ class TestTopologyInventory(unittest.TestCase):
             dist = {0: [10, 20], 1: [20, 10]}
             sysfs, proc = make_sysfs(td, online=online, nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="0,1,2", status_mems="0,1")
-            inv = topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+            inv = disc_topo(sysfs, proc)
         self.assertTrue(inv["nodes"][0]["socket_ambiguous"])
         self.assertIsNone(inv["nodes"][0]["socket_id"])
         self.assertIn("node0.socket", inv["unknowns"])
@@ -236,7 +255,7 @@ class TestMappingProfiles(unittest.TestCase):
             dist[i] = row
         sysfs, proc = make_sysfs(td.name, online="0-7", nodes=nodes, cpu_packages=cpu_packages,
                                  node_distances=dist, status_cpus="0-31", status_mems="0-7")
-        return topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+        return disc_topo(sysfs, proc)
 
     def test_nps4_cross_socket_not_all_socket0(self):
         inv = self._nps4_inv()
@@ -284,7 +303,7 @@ class TestMappingProfiles(unittest.TestCase):
             dist = {0: [10, 32], 1: [32, 10]}
             sysfs, proc = make_sysfs(td, online="0,1", nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="0-3", status_mems="0,1")
-            inv = topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+            inv = disc_topo(sysfs, proc)
         usable = [0, 1]
         for count in (4, 8):
             for prof in ("cross_socket_spread", "intra_socket", "all_nodes"):
@@ -319,7 +338,7 @@ class TestMappingProfiles(unittest.TestCase):
                 dist[i] = row
             sysfs, proc = make_sysfs(td, online="0-3", nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="0-7", status_mems="0-3")
-            inv = topology.discover_topology(sysfs_root=sysfs, proc_root=proc)
+            inv = disc_topo(sysfs, proc)
         usable = [0, 1, 2, 3]
         # 2-node intra-socket supported (each socket has 2)
         intra2 = topology.select_mapping_profiles(inv, 2, usable, requested_profiles=["intra_socket"])
@@ -333,6 +352,115 @@ class TestMappingProfiles(unittest.TestCase):
         self.assertTrue(all4[0]["supported"])
         self.assertEqual(set(all4[0]["logical_to_physical"]), {0, 1, 2, 3})
 
+    def test_single_socket_multi_numa_cross_socket_unsupported(self):
+        # 4 NUMA nodes, all on the same physical socket/package.
+        with tempfile.TemporaryDirectory() as td:
+            cpu_packages = {}
+            nodes = {}
+            for nid in range(4):
+                cpus = [nid * 2, nid * 2 + 1]
+                nodes[nid] = {"cpulist": ",".join(str(c) for c in cpus), "mem_total_kb": 1024}
+                for c in cpus:
+                    cpu_packages[c] = 0  # single socket
+            dist = {i: [10 if i == j else 12 for j in range(4)] for i in range(4)}
+            sysfs, proc = make_sysfs(td, online="0-3", nodes=nodes, cpu_packages=cpu_packages,
+                                     node_distances=dist, status_cpus="0-7", status_mems="0-3")
+            inv = disc_topo(sysfs, proc)
+        variants = topology.select_mapping_profiles(inv, 2, [0, 1, 2, 3], requested_profiles=["cross_socket_spread"])
+        self.assertEqual(len(variants), 1)
+        v = variants[0]
+        self.assertFalse(v["supported"])
+        self.assertIsNotNone(v.get("reason"))
+        self.assertIn("socket", (v.get("reason") or "").lower())
+        self.assertNotEqual(v.get("spans_sockets"), True)
+
+    def test_fake_numa_several_nodes_one_physical_socket_unsupported(self):
+        # Fake/logical NUMA partitioning: several nodes presented, one physical socket.
+        with tempfile.TemporaryDirectory() as td:
+            cpu_packages = {0: 3, 1: 3, 2: 3, 3: 3, 4: 3, 5: 3}
+            nodes = {
+                0: {"cpulist": "0,1", "mem_total_kb": 512},
+                1: {"cpulist": "2,3", "mem_total_kb": 512},
+                2: {"cpulist": "4,5", "mem_total_kb": 512},
+            }
+            dist = {0: [10, 10, 10], 1: [10, 10, 10], 2: [10, 10, 10]}
+            sysfs, proc = make_sysfs(td, online="0-2", nodes=nodes, cpu_packages=cpu_packages,
+                                     node_distances=dist, status_cpus="0-5", status_mems="0-2")
+            inv = disc_topo(sysfs, proc)
+        for count in (2, 3):
+            variants = topology.select_mapping_profiles(inv, count, [0, 1, 2], requested_profiles=["cross_socket_spread"])
+            v = variants[0]
+            self.assertFalse(v["supported"], (count, v))
+            self.assertIsNotNone(v.get("reason"))
+            self.assertNotEqual(v.get("spans_sockets"), True)
+
+    def test_cross_socket_spread_requires_more_than_one_logical_node(self):
+        with tempfile.TemporaryDirectory() as td:
+            cpu_packages = {0: 0, 1: 1}
+            nodes = {0: {"cpulist": "0", "mem_total_kb": 100}, 1: {"cpulist": "1", "mem_total_kb": 100}}
+            dist = {0: [10, 20], 1: [20, 10]}
+            sysfs, proc = make_sysfs(td, online="0,1", nodes=nodes, cpu_packages=cpu_packages,
+                                     node_distances=dist, status_cpus="0,1", status_mems="0,1")
+            inv = disc_topo(sysfs, proc)
+        variants = topology.select_mapping_profiles(inv, 1, [0, 1], requested_profiles=["cross_socket_spread"])
+        self.assertFalse(variants[0]["supported"])
+        self.assertIsNotNone(variants[0].get("reason"))
+
+    def test_nps1_two_node_cross_socket_supported_and_spans(self):
+        with tempfile.TemporaryDirectory() as td:
+            cpu_packages = {0: 0, 1: 0, 2: 1, 3: 1}
+            nodes = {0: {"cpulist": "0,1", "mem_total_kb": 100}, 1: {"cpulist": "2,3", "mem_total_kb": 100}}
+            dist = {0: [10, 32], 1: [32, 10]}
+            sysfs, proc = make_sysfs(td, online="0,1", nodes=nodes, cpu_packages=cpu_packages,
+                                     node_distances=dist, status_cpus="0-3", status_mems="0,1")
+            inv = disc_topo(sysfs, proc)
+        variants = topology.select_mapping_profiles(inv, 2, [0, 1], requested_profiles=["cross_socket_spread"])
+        v = variants[0]
+        self.assertTrue(v["supported"], v.get("reason"))
+        self.assertEqual(set(v["logical_to_physical"]), {0, 1})
+        self.assertIs(v.get("spans_sockets"), True)
+        self.assertEqual(len({inv["nodes"][n]["socket_id"] for n in v["logical_to_physical"]}), 2)
+
+    def test_nps4_four_node_cross_socket_supported_and_spans_both_sockets(self):
+        inv = self._nps4_inv()
+        usable = list(range(8))
+        variants = topology.select_mapping_profiles(inv, 4, usable, requested_profiles=["cross_socket_spread"])
+        self.assertEqual(len(variants), 1)
+        v = variants[0]
+        self.assertTrue(v["supported"], v.get("reason"))
+        phys = v["logical_to_physical"]
+        self.assertEqual(len(phys), 4)
+        sockets = {inv["nodes"][n]["socket_id"] for n in phys}
+        self.assertEqual(sockets, {0, 1}, phys)
+        self.assertIs(v.get("spans_sockets"), True)
+
+    def test_unknown_or_ambiguous_socket_membership_never_supports_cross_socket(self):
+        # Ambiguous: node spans two packages.
+        with tempfile.TemporaryDirectory() as td:
+            cpu_packages = {0: 0, 1: 1, 2: 1}
+            nodes = {0: {"cpulist": "0,1", "mem_total_kb": 100}, 1: {"cpulist": "2", "mem_total_kb": 100}}
+            dist = {0: [10, 20], 1: [20, 10]}
+            sysfs, proc = make_sysfs(td, online="0,1", nodes=nodes, cpu_packages=cpu_packages,
+                                     node_distances=dist, status_cpus="0-2", status_mems="0,1")
+            inv = disc_topo(sysfs, proc)
+        variants = topology.select_mapping_profiles(inv, 2, [0, 1], requested_profiles=["cross_socket_spread"])
+        v = variants[0]
+        self.assertFalse(v["supported"])
+        self.assertNotEqual(v.get("spans_sockets"), True)
+
+        # Unknown: missing cpu package info / empty cpulist on a node.
+        with tempfile.TemporaryDirectory() as td:
+            cpu_packages = {0: 0}
+            nodes = {0: {"cpulist": "0", "mem_total_kb": 100}, 1: {"cpulist": "", "mem_total_kb": 100}}
+            dist = {0: [10, 20], 1: [20, 10]}
+            sysfs, proc = make_sysfs(td, online="0,1", nodes=nodes, cpu_packages=cpu_packages,
+                                     node_distances=dist, status_cpus="0", status_mems="0,1")
+            inv = disc_topo(sysfs, proc)
+        variants = topology.select_mapping_profiles(inv, 2, [0, 1], requested_profiles=["cross_socket_spread"])
+        v = variants[0]
+        self.assertFalse(v["supported"])
+        self.assertNotEqual(v.get("spans_sockets"), True)
+
 
 class TestResolveMappingPlan(unittest.TestCase):
     def test_validates_concrete_mapping_via_resolve_topology(self):
@@ -342,7 +470,7 @@ class TestResolveMappingPlan(unittest.TestCase):
             dist = {0: [10, 32], 1: [32, 10]}
             sysfs, proc = make_sysfs(td, online="0,1", nodes=nodes, cpu_packages=cpu_packages,
                                      node_distances=dist, status_cpus="0,2", status_mems="0,1")
-            variants, inv, errs = run_dist.resolve_mapping_plan(
+            variants, inv, errs = resolve_plan(
                 2, profiles=["cross_socket_spread"], sysfs_root=sysfs, proc_root=proc)
         self.assertEqual(errs, [])
         supported = [v for v in variants if v.get("supported")]

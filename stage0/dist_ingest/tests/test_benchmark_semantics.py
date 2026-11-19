@@ -1215,6 +1215,232 @@ class TestCampaignScenarioValidation(unittest.TestCase):
             shutil.rmtree(out, ignore_errors=True)
 
 
+class TestCampaignPlanSemanticsC1Corrections(unittest.TestCase):
+    """WO C1 corrections: CLI-to-execution-plan propagation, candidate validation, and shuffle/seed semantics."""
+
+    def _assert_no_timed_trial_manifests(self, out):
+        self.assertFalse(os.path.exists(os.path.join(out, 'campaign-manifest.json')),
+                         'campaign must not complete with timed trials')
+        cases_dir = os.path.join(out, 'cases')
+        trial_evidence = []
+        if os.path.isdir(cases_dir):
+            for root, dirs, files in os.walk(cases_dir):
+                if 'manifest.json' in files:
+                    trial_evidence.append(os.path.join(root, 'manifest.json'))
+        self.assertEqual(trial_evidence, [], 'no timed trial manifests expected before timed trials')
+
+    def _run_plan_only(self, extra_args, source_sha='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'):
+        out = tempfile.mkdtemp(prefix='dist_camp_plan_')
+        os.rmdir(out)
+        cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+               '--plan-only', '--out', out, '--campaign-id', 'test-plan',
+               '--source-sha', source_sha] + list(extra_args)
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+        return p, out
+
+    def _run_real_campaign(self, extra_args, source_sha='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'):
+        out = tempfile.mkdtemp(prefix='dist_camp_real_')
+        os.rmdir(out)
+        cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+               '--out', out, '--campaign-id', 'test-real',
+               '--source-sha', source_sha] + list(extra_args)
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+        return p, out
+
+    def _load_plan(self, out):
+        with open(os.path.join(out, 'execution-plan.json')) as fh:
+            return json.load(fh)
+
+    def _load_preval(self, out):
+        with open(os.path.join(out, 'prevalidation.json')) as fh:
+            return json.load(fh)
+
+    def _cases_in_blocks(self, plan):
+        return sorted({(b['scenario'], b['mapping_id']) for b in plan.get('blocks', [])})
+
+    def test_quick_produces_one_trial_per_case(self):
+        p, out = self._run_plan_only(['--quick', '--scenarios', 'small', '--candidates', 'fixed_faa,local_adaptive', '--seed', 'q1'])
+        try:
+            self.assertEqual(p.returncode, 0, msg=p.stderr + '\n' + p.stdout)
+            plan = self._load_plan(out)
+            self.assertEqual(plan.get('trials'), 1)
+            self.assertTrue(plan.get('blocks'))
+            cases = self._cases_in_blocks(plan)
+            self.assertTrue(cases)
+            for case in cases:
+                trials = sorted([b['trial'] for b in plan['blocks'] if (b['scenario'], b['mapping_id']) == case])
+                self.assertEqual(trials, [1], (case, trials))
+            for b in plan['blocks']:
+                self.assertEqual(b['trial'], 1)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_trials_five_produces_five_trials_per_case(self):
+        p, out = self._run_plan_only(['--scenarios', 'small', '--candidates', 'fixed_faa', '--trials', '5', '--seed', 't5'])
+        try:
+            self.assertEqual(p.returncode, 0, msg=p.stderr + '\n' + p.stdout)
+            plan = self._load_plan(out)
+            self.assertEqual(plan.get('trials'), 5)
+            cases = self._cases_in_blocks(plan)
+            self.assertTrue(cases)
+            for case in cases:
+                trials = sorted([b['trial'] for b in plan['blocks'] if (b['scenario'], b['mapping_id']) == case])
+                self.assertEqual(trials, [1, 2, 3, 4, 5], (case, trials))
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_candidates_fixed_faa_plans_and_executes_only_fixed_faa(self):
+        args = ['--quick', '--scenarios', 'small', '--candidates', 'fixed_faa', '--trials', '1', '--seed', 'onlyfaa']
+        p, out = self._run_real_campaign(args)
+        try:
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-3000:] + '\n' + p.stdout[-2000:])
+            plan = self._load_plan(out)
+            self.assertEqual(plan.get('candidates'), ['fixed_faa'])
+            self.assertTrue(plan.get('blocks'))
+            for b in plan['blocks']:
+                self.assertEqual(b.get('candidate_order'), ['fixed_faa'], b)
+            with open(os.path.join(out, 'campaign-manifest.json')) as fh:
+                cm = json.load(fh)
+            outcomes = cm.get('outcomes') or []
+            self.assertTrue(outcomes)
+            self.assertTrue(all(o.get('candidate') == 'fixed_faa' for o in outcomes), outcomes)
+            # execution evidence exists for fixed_faa only
+            found_cands = set()
+            cases_dir = os.path.join(out, 'cases')
+            for root, dirs, files in os.walk(cases_dir):
+                if 'manifest.json' in files:
+                    with open(os.path.join(root, 'manifest.json')) as fh:
+                        m = json.load(fh)
+                    spec = m.get('spec') or {}
+                    cand = spec.get('ingest_candidate') or spec.get('candidate')
+                    if cand:
+                        found_cands.add(cand)
+            self.assertEqual(found_cands, {'fixed_faa'}, found_cands)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_unknown_candidate_rejected_before_timed_trials(self):
+        out = tempfile.mkdtemp(prefix='dist_camp_unkcand_')
+        os.rmdir(out)
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--out', out, '--campaign-id', 'test-unk-cand',
+                   '--scenarios', 'small', '--candidates', 'fixed_faa,not_a_real_candidate',
+                   '--trials', '1']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertNotEqual(p.returncode, 0, msg=p.stdout + '\n' + p.stderr)
+            combined = (p.stderr + p.stdout).lower()
+            self.assertIn('before timed trials', combined)
+            self.assertIn('not_a_real_candidate', p.stderr + p.stdout)
+            self.assertIn('unknown', combined)
+            self._assert_no_timed_trial_manifests(out)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_empty_candidate_list_rejected(self):
+        out = tempfile.mkdtemp(prefix='dist_camp_emptycand_')
+        os.rmdir(out)
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--out', out, '--campaign-id', 'test-empty-cand',
+                   '--scenarios', 'small', '--candidates', '',
+                   '--trials', '1']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertNotEqual(p.returncode, 0, msg=p.stdout + '\n' + p.stderr)
+            combined = (p.stderr + p.stdout).lower()
+            self.assertIn('before timed trials', combined)
+            self.assertTrue(('candidate' in combined and ('empty' in combined or 'nonempty' in combined)), p.stderr + p.stdout)
+            self._assert_no_timed_trial_manifests(out)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_specified_seed_recorded_and_reproducible_candidate_order(self):
+        args = ['--scenarios', 'small', '--candidates', 'fixed_faa,local_adaptive,relative_adaptive',
+                '--trials', '3', '--seed', 'repro-seed-42']
+        p1, out1 = self._run_plan_only(args)
+        p2, out2 = self._run_plan_only(args)
+        try:
+            self.assertEqual(p1.returncode, 0, msg=p1.stderr + '\n' + p1.stdout)
+            self.assertEqual(p2.returncode, 0, msg=p2.stderr + '\n' + p2.stdout)
+            plan1 = self._load_plan(out1)
+            plan2 = self._load_plan(out2)
+            self.assertEqual(plan1.get('seed'), 'repro-seed-42')
+            self.assertEqual(plan2.get('seed'), 'repro-seed-42')
+            self.assertEqual(self._load_preval(out1).get('seed'), 'repro-seed-42')
+            # reproducible candidate order for identical args+seed
+            orders1 = [(b['scenario'], b['mapping_id'], b['trial'], tuple(b['candidate_order'])) for b in plan1['blocks']]
+            orders2 = [(b['scenario'], b['mapping_id'], b['trial'], tuple(b['candidate_order'])) for b in plan2['blocks']]
+            self.assertEqual(orders1, orders2)
+            # sanity: with 3 candidates and 3 trials there should be at least some variation/order recorded
+            self.assertTrue(all(set(o[3]) == {'fixed_faa', 'local_adaptive', 'relative_adaptive'} for o in orders1))
+        finally:
+            shutil.rmtree(out1, ignore_errors=True)
+            shutil.rmtree(out2, ignore_errors=True)
+
+    def test_shuffle_scenarios_shuffles_mapping_blocks_with_seed(self):
+        # Two scenarios/mapping blocks in quick mode: use two small 2-node scenarios if both selected?
+        # quick includes small (2-node) and also equal/slow_one/stall_recover (4-node). With auto mapping
+        # we get different mapping blocks per node-count; use --scenarios small,equal? but in quick mode
+        # scenario set is the quick set; selecting explicit subset works. 'equal' is 4-node, 'small' 2-node.
+        base = ['--quick', '--scenarios', 'small,equal', '--candidates', 'fixed_faa', '--trials', '1', '--seed', 'shuffle-seed-7']
+        p_ns, out_ns = self._run_plan_only(base)
+        p_sh, out_sh = self._run_plan_only(base + ['--shuffle-scenarios'])
+        p_sh2, out_sh2 = self._run_plan_only(base + ['--shuffle-scenarios'])
+        try:
+            self.assertEqual(p_ns.returncode, 0, msg=p_ns.stderr + '\n' + p_ns.stdout)
+            self.assertEqual(p_sh.returncode, 0, msg=p_sh.stderr + '\n' + p_sh.stdout)
+            self.assertEqual(p_sh2.returncode, 0, msg=p_sh2.stderr + '\n' + p_sh2.stdout)
+            plan_ns = self._load_plan(out_ns)
+            plan_sh = self._load_plan(out_sh)
+            plan_sh2 = self._load_plan(out_sh2)
+            self.assertFalse(plan_ns.get('shuffle_scenarios'))
+            self.assertTrue(plan_sh.get('shuffle_scenarios'))
+            self.assertEqual(plan_sh.get('seed'), 'shuffle-seed-7')
+            seq_ns = [(b['scenario'], b['mapping_id'], b['trial']) for b in plan_ns['blocks']]
+            seq_sh = [(b['scenario'], b['mapping_id'], b['trial']) for b in plan_sh['blocks']]
+            seq_sh2 = [(b['scenario'], b['mapping_id'], b['trial']) for b in plan_sh2['blocks']]
+            # same set of blocks, reproducible when shuffled with same seed
+            self.assertEqual(sorted(seq_ns), sorted(seq_sh))
+            self.assertEqual(seq_sh, seq_sh2)
+            # shuffle actually changes block order for this seed/selection (deterministic expectation)
+            self.assertNotEqual(seq_ns, seq_sh, 'shuffle_scenarios should change scenario/mapping-block order for this seed')
+        finally:
+            shutil.rmtree(out_ns, ignore_errors=True)
+            shutil.rmtree(out_sh, ignore_errors=True)
+            shutil.rmtree(out_sh2, ignore_errors=True)
+
+    def test_plan_only_and_real_campaign_agree_on_selected_plan(self):
+        args = ['--quick', '--scenarios', 'small', '--candidates', 'fixed_faa,local_adaptive',
+                '--trials', '2', '--seed', 'agree-seed']
+        p_plan, out_plan = self._run_plan_only(args)
+        p_real, out_real = self._run_real_campaign(args)
+        try:
+            self.assertEqual(p_plan.returncode, 0, msg=p_plan.stderr + '\n' + p_plan.stdout)
+            self.assertEqual(p_real.returncode, 0, msg=p_real.stderr[-3000:] + '\n' + p_real.stdout[-2000:])
+            plan_only = self._load_plan(out_plan)
+            plan_real = self._load_plan(out_real)
+            # identical selected plan fields
+            for k in ('seed', 'shuffle_scenarios', 'trials', 'candidates', 'mapping_profiles_requested', 'mapping_mode'):
+                self.assertEqual(plan_only.get(k), plan_real.get(k), k)
+            # block-level agreement (scenario/mapping/trial/candidate order)
+            def norm_blocks(plan):
+                return [(b['scenario'], b['mapping_id'], b.get('mapping_profile'), b.get('mapping_variant'),
+                         b['trial'], tuple(b['candidate_order']), tuple(b.get('logical_to_physical') or []))
+                        for b in plan.get('blocks', [])]
+            self.assertEqual(norm_blocks(plan_only), norm_blocks(plan_real))
+            # campaign manifest records the same plan
+            with open(os.path.join(out_real, 'campaign-manifest.json')) as fh:
+                cm = json.load(fh)
+            manifest_plan = ((cm.get('randomization') or {}).get('plan') or {})
+            for k in ('seed', 'shuffle_scenarios', 'trials', 'candidates'):
+                self.assertEqual(plan_only.get(k), manifest_plan.get(k), k)
+            self.assertEqual(norm_blocks(plan_only), norm_blocks(manifest_plan))
+        finally:
+            shutil.rmtree(out_plan, ignore_errors=True)
+            shutil.rmtree(out_real, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
+
 

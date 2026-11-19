@@ -415,9 +415,10 @@ def _status_list(field, proc_root="/proc"):
     return None, False
 
 
-def _allowed_cpus(proc_root="/proc"):
+def _allowed_cpus(proc_root="/proc", sched_getaffinity=None):
+    sga = sched_getaffinity or os.sched_getaffinity
     try:
-        return sorted(os.sched_getaffinity(0)), True
+        return sorted(sga(0)), True
     except Exception:
         vals, known = _status_list("Cpus_allowed_list", proc_root=proc_root)
         return (sorted(vals) if known and vals is not None else []), known
@@ -465,12 +466,17 @@ def _node_mem_state(node_id, sysfs_root="/sys"):
     return "unknown"
 
 
-def discover_topology_inventory(sysfs_root="/sys", proc_root="/proc"):
-    """Reusable topology inventory (facts). Uses run_dist readers for patchability."""
+def discover_topology_inventory(sysfs_root="/sys", proc_root="/proc", sched_getaffinity=None):
+    """Reusable topology inventory (facts). Uses run_dist readers for patchability.
+
+    sched_getaffinity: injectable CPU-affinity discovery callback for deterministic
+    synthetic topology tests. Defaults to os.sched_getaffinity for real-host runs.
+    """
     if _topology_mod is None:
         return None
+    sga = sched_getaffinity or os.sched_getaffinity
     def _sga(_pid):
-        return os.sched_getaffinity(0)
+        return sga(0)
     return _topology_mod.discover_topology(
         sysfs_root=sysfs_root,
         proc_root=proc_root,
@@ -492,8 +498,57 @@ def _inventory_topology_info(inv, base_info):
     return info
 
 
+def _verified_usable_nodes(online, online_known, mems_known, allowed_mems_set,
+                            cpus_known, allowed_cpus_set, sysfs_root="/sys"):
+    """Authoritative automatic usability evaluation for verified node selection.
+
+    Returns (usable, node_states, scan_nodes) where usable is a list of
+    (nid, cpus) in scan order for nodes that pass all verified-usability checks.
+    node_states records per-node usability/reason/memory state for scanned nodes.
+    """
+    usable = []
+    node_states = {}
+    if online_known:
+        scan_nodes = list(online)
+    else:
+        # unknown online-node info: cannot produce verified selection; record state
+        scan_nodes = list(online) if online else []
+    for nid in scan_nodes:
+        if not online_known:
+            ok, cpus, reason = False, [], "online_unknown"
+        elif not mems_known:
+            ok, cpus, reason = False, [], "mems_allowed_unknown"
+        elif nid not in allowed_mems_set:
+            ok, cpus, reason = False, [], "mem_not_allowed"
+        else:
+            mstate = _node_mem_state(nid, sysfs_root=sysfs_root)
+            if mstate == "none":
+                ok, cpus, reason = False, [], "no_memory"
+            elif mstate == "unknown":
+                ok, cpus, reason = False, [], "memory_unknown"
+            else:
+                cpus_raw, cpu_list_known = _node_cpus(nid, sysfs_root=sysfs_root)
+                if not cpu_list_known:
+                    ok, cpus, reason = False, [], "cpu_unknown"
+                elif not cpus_raw:
+                    ok, cpus, reason = False, [], "cpu_empty"
+                elif not cpus_known:
+                    ok, cpus, reason = False, [], "cpus_allowed_unknown"
+                else:
+                    cpus_f = [c for c in cpus_raw if c in allowed_cpus_set]
+                    if not cpus_f:
+                        ok, cpus, reason = False, [], "no_allowed_cpus_on_node"
+                    else:
+                        ok, cpus, reason = True, cpus_f, "ok"
+        node_states[nid] = {"usable_auto": ok, "reason": reason, "mem_state": _node_mem_state(nid, sysfs_root=sysfs_root)}
+        if ok:
+            usable.append((nid, cpus))
+    return usable, node_states, scan_nodes
+
+
 def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False,
-                     sysfs_root="/sys", proc_root="/proc", mapping_profile=None):
+                     sysfs_root="/sys", proc_root="/proc", mapping_profile=None,
+                     sched_getaffinity=None):
     """Return (logical_to_phys, per_node_cpus, topology_info, errors).
 
     Authoritative CPU/memory usability validation for dist-ingest runs.
@@ -511,55 +566,15 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False,
     resolve_mapping_plan().
     """
     errors = []
-    inv = discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root)
-    allowed_cpus, cpus_known = _allowed_cpus(proc_root=proc_root)
+    inv = discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root, sched_getaffinity=sched_getaffinity)
+    allowed_cpus, cpus_known = _allowed_cpus(proc_root=proc_root, sched_getaffinity=sched_getaffinity)
     allowed_cpus_set = set(allowed_cpus)
     allowed_mems, mems_known = _allowed_mems(proc_root=proc_root)
     allowed_mems_set = set(allowed_mems)
     online, online_known = _online_nodes(sysfs_root=sysfs_root)
 
-    def node_usable_auto(nid):
-        # online/mems/memory must be established; CPU affinity facts may be
-        # relaxed only in the explicit --no-pin sense (auto still requires a
-        # verified usable CPU set for node selection unless we cannot establish
-        # anything). Unknown allowed-CPU info must not be treated as unrestricted.
-        if not online_known:
-            return False, [], "online_unknown"
-        if not mems_known:
-            return False, [], "mems_allowed_unknown"
-        if nid not in allowed_mems_set:
-            return False, [], "mem_not_allowed"
-        mstate = _node_mem_state(nid, sysfs_root=sysfs_root)
-        if mstate == "none":
-            return False, [], "no_memory"
-        if mstate == "unknown":
-            return False, [], "memory_unknown"
-        cpus, cpu_list_known = _node_cpus(nid, sysfs_root=sysfs_root)
-        if not cpu_list_known:
-            return False, [], "cpu_unknown"
-        if not cpus:
-            return False, [], "cpu_empty"
-        # allowed-CPU set must be known to be treated as a restriction; unknown
-        # allowed-CPU info must not be treated as unrestricted.
-        if not cpus_known:
-            return False, [], "cpus_allowed_unknown"
-        cpus = [c for c in cpus if c in allowed_cpus_set]
-        if not cpus:
-            return False, [], "no_allowed_cpus_on_node"
-        return True, cpus, "ok"
-
-    usable = []
-    node_states = {}
-    if online_known:
-        scan_nodes = online
-    else:
-        # unknown online-node info: cannot produce verified selection; record state
-        scan_nodes = list(online) if online else []
-    for nid in scan_nodes:
-        ok, cpus, reason = node_usable_auto(nid)
-        node_states[nid] = {"usable_auto": ok, "reason": reason, "mem_state": _node_mem_state(nid, sysfs_root=sysfs_root)}
-        if ok:
-            usable.append((nid, cpus))
+    usable, node_states, _scan_nodes = _verified_usable_nodes(
+        online, online_known, mems_known, allowed_mems_set, cpus_known, allowed_cpus_set, sysfs_root=sysfs_root)
 
     if phys_nodes_spec:
         try:
@@ -777,7 +792,7 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False,
 
 
 def resolve_mapping_plan(requested_nodes, profiles=None, phys_nodes_spec=None, no_pin=False,
-                         sysfs_root="/sys", proc_root="/proc"):
+                         sysfs_root="/sys", proc_root="/proc", sched_getaffinity=None):
     """Resolve concrete mapping variants for planning/preflight.
 
     Returns (variants, inventory, errors). Each variant includes support/reason
@@ -786,7 +801,7 @@ def resolve_mapping_plan(requested_nodes, profiles=None, phys_nodes_spec=None, n
     """
     if _topology_mod is None:
         return [], None, ["topology module unavailable"]
-    inv = discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root)
+    inv = discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root, sched_getaffinity=sched_getaffinity)
     if profiles is None:
         profiles = ["cross_socket_spread", "intra_socket", "all_nodes"]
     errors = []
@@ -795,7 +810,7 @@ def resolve_mapping_plan(requested_nodes, profiles=None, phys_nodes_spec=None, n
         # Explicit concrete mapping (single variant). Validate via resolve_topology.
         l2p, cpus, info, terr = resolve_topology(
             requested_nodes, phys_nodes_spec=phys_nodes_spec, no_pin=no_pin,
-            sysfs_root=sysfs_root, proc_root=proc_root)
+            sysfs_root=sysfs_root, proc_root=proc_root, sched_getaffinity=sched_getaffinity)
         variant = {
             "profile": "explicit",
             "variant": "explicit",
@@ -812,36 +827,15 @@ def resolve_mapping_plan(requested_nodes, profiles=None, phys_nodes_spec=None, n
             errors.extend(terr)
         return [variant], inv, errors
 
-    # Auto/profile-based: determine verified usable set through resolve_topology's
-    # validation authority by probing for max available? easier: use resolve_topology
-    # to get usable_nodes_auto and node states via a request for 1 (or requested) then
-    # select from usable set; but we need the usable CPU map. Call resolve_topology in
-    # a way that exposes usable info: it already computes usable list internally.
-    # Request the logical count to get usable set in info regardless of success? no.
-    # Instead, derive usable set by trying to validate each online node? better reuse
-    # resolve_topology's logic by calling it repeatedly is wrong; so compute usable via
-    # a helper path: ask for n=1 and inspect errors/info, or directly compute using
-    # same helpers (they are the authoritative ones here).
+    # Auto/profile-based: derive verified usable set using the same authoritative
+    # usability rules as resolve_topology() (no duplicated usable-node logic).
     online, online_known = _online_nodes(sysfs_root=sysfs_root)
-    allowed_cpus, cpus_known = _allowed_cpus(proc_root=proc_root)
+    allowed_cpus, cpus_known = _allowed_cpus(proc_root=proc_root, sched_getaffinity=sched_getaffinity)
     allowed_cpus_set = set(allowed_cpus)
     allowed_mems, mems_known = _allowed_mems(proc_root=proc_root)
     allowed_mems_set = set(allowed_mems)
-    usable = []
-    if online_known and mems_known:
-        for nid in online:
-            mstate = _node_mem_state(nid, sysfs_root=sysfs_root)
-            if nid not in allowed_mems_set or mstate in ("none", "unknown"):
-                continue
-            cpus, cpu_list_known = _node_cpus(nid, sysfs_root=sysfs_root)
-            if not cpu_list_known or not cpus:
-                continue
-            if not cpus_known:
-                continue
-            cpus_f = [c for c in cpus if c in allowed_cpus_set]
-            if not cpus_f:
-                continue
-            usable.append((nid, cpus_f))
+    usable, _node_states, _scan_nodes = _verified_usable_nodes(
+        online, online_known, mems_known, allowed_mems_set, cpus_known, allowed_cpus_set, sysfs_root=sysfs_root)
     usable_ids = [nid for nid, _ in usable]
     usable_cpu_map = {nid: cpus for nid, cpus in usable}
 

@@ -546,17 +546,33 @@ def select_mapping_profiles(
             groups, gerr = _group_by_socket(inv, usable)
             if gerr:
                 r["reason"] = "cannot compute cross_socket_spread: %s" % gerr
-            elif logical_node_count < 1:
-                r["reason"] = "logical_node_count must be >= 1"
+            elif logical_node_count < 2:
+                r["reason"] = "cross_socket_spread requires logical_node_count >= 2 (a single node cannot span sockets)"
             elif logical_node_count > len(usable):
                 r["reason"] = "insufficient usable nodes (%d < %d)" % (len(usable), logical_node_count)
+            elif not groups or len(groups) < 2:
+                r["reason"] = "cross_socket_spread requires at least two distinct sockets among available usable nodes"
             else:
                 chosen = _spread_across_sockets(groups or {}, logical_node_count)
                 if chosen is None:
                     r["reason"] = "cannot spread %d nodes across available sockets" % logical_node_count
                 else:
-                    r["supported"] = True
-                    r["logical_to_physical"] = chosen
+                    # Genuine crossing required: selected mapping must contain nodes from >=2 sockets.
+                    chosen_sockets = set()
+                    socket_known = True
+                    for nid in chosen:
+                        nd = (inv.get("nodes") or {}).get(nid, {})
+                        if not nd.get("socket_ids_known") or nd.get("socket_ambiguous"):
+                            socket_known = False
+                            break
+                        chosen_sockets.add(nd.get("socket_id"))
+                    if not socket_known:
+                        r["reason"] = "cannot establish unambiguous socket membership for selected cross-socket mapping"
+                    elif len(chosen_sockets) < 2:
+                        r["reason"] = "selected mapping does not span at least two distinct sockets"
+                    else:
+                        r["supported"] = True
+                        r["logical_to_physical"] = chosen
             results.append(r)
             continue
 
