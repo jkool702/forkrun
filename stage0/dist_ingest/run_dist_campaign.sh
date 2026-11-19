@@ -14,25 +14,29 @@ cd "$(dirname "$0")/../.."
 usage() {
   cat <<'EOF'
 usage: run_dist_campaign.sh [options]
-  --out DIR            campaign directory (must be absent/empty)
-  --campaign-id ID     unique id
-  --trials N           trials per case (default 3)
-  --quick              small local smoke (1 trial, small corpus, subset)
-  --scenarios LIST     comma-separated scenario ids (default: all in selected profile)
-  --profile NAME       scenario profile: nodes2 (2-node: nodes2,small,tiny),
-                       nodes4 (4-node: four-node + compatible two-node, excludes nodes8),
-                       full (default full set; 8+ usable nodes). Sets --scenarios unless explicit.
-  --candidates LIST    comma-separated (default: centralized_ingest,fixed_faa,local_adaptive,relative_adaptive)
+  --out DIR                campaign directory (must be absent/empty)
+  --campaign-id ID         unique id
+  --trials N               trials per case (default 3)
+  --quick                  small local smoke (1 trial, small corpus, subset)
+  --scenarios LIST         comma-separated scenario ids (default: all in selected profile)
+  --profile NAME           scenario profile: nodes2|nodes4|full (sets --scenarios unless explicit)
+  --mapping-profiles LIST  mapping profiles per scenario: auto (legacy, default),
+                           cross_socket_spread,intra_socket,all_nodes,explicit,matrix
+                           (matrix => all applicable supported among cross_socket_spread,intra_socket,all_nodes)
+  --candidates LIST        comma-separated (default: centralized_ingest,fixed_faa,local_adaptive,relative_adaptive)
   --source-sha SHA
-  --seed SEED          deterministic random seed for candidate/scenario ordering
-  --shuffle-scenarios  randomize scenario-block order (reproducible by seed)
-  --cache-policy TEXT  explicit cache/warm-up assumption recorded in manifest
-  --consumer-kernel K  full_byte_scan (default) or none (explicit diagnostic opt-out)
-  --strict-affinity    require verified affinity for all required roles (abort on failure)
-  --strict-mbind       require successful mbind policy application (abort on failure)
-  --phys-nodes LIST    explicit physical NUMA node ids (comma-separated). Must be compatible
-                       with every selected scenario's logical node count (count must match);
-                       incompatible/mixed-count selections are rejected before timed trials.
+  --seed SEED              deterministic random seed for candidate/scenario ordering
+  --shuffle-scenarios      randomize scenario-block order (reproducible by seed)
+  --cache-policy TEXT      explicit cache/warm-up assumption recorded in manifest
+  --consumer-kernel K      full_byte_scan (default) or none (explicit diagnostic opt-out)
+  --strict-affinity        require verified affinity for all required roles (abort on failure)
+  --strict-mbind           require successful mbind policy application (abort on failure)
+  --phys-nodes LIST        explicit physical NUMA node ids (comma-separated). Backward-compatible
+                           global explicit mapping override (all selected scenarios must share
+                           the same logical node count). For mixed-count mappings use
+                           --mapping-profiles (profile-based expansion).
+  --plan-only              validate/generate complete plan and exit before builds/corpora/trials
+  --dry-run                alias for --plan-only
 EOF
 }
 
@@ -44,6 +48,7 @@ QUICK=0
 SCEN_FILTER=""
 SCEN_FILTER_EXPLICIT=0
 PROFILE=""
+MAPPING_PROFILES="auto"
 CAND_FILTER="centralized_ingest,fixed_faa,local_adaptive,relative_adaptive"
 SEED=""
 SHUFFLE_SCENARIOS=0
@@ -52,6 +57,7 @@ CONSUMER_KERNEL="full_byte_scan"
 STRICT_AFFINITY=0
 STRICT_MBIND=0
 PHYS_NODES=""
+PLAN_ONLY=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -61,6 +67,7 @@ while [ "$#" -gt 0 ]; do
     --quick) QUICK=1; TRIALS=1; shift ;;
     --scenarios) SCEN_FILTER=${2:?}; SCEN_FILTER_EXPLICIT=1; shift 2 ;;
     --profile) PROFILE=${2:?}; shift 2 ;;
+    --mapping-profiles) MAPPING_PROFILES=${2:?}; shift 2 ;;
     --candidates) CAND_FILTER=${2:?}; shift 2 ;;
     --source-sha) SOURCE_SHA=${2:?}; shift 2 ;;
     --seed) SEED=${2:?}; shift 2 ;;
@@ -70,17 +77,15 @@ while [ "$#" -gt 0 ]; do
     --strict-affinity) STRICT_AFFINITY=1; shift ;;
     --strict-mbind) STRICT_MBIND=1; shift ;;
     --phys-nodes) PHYS_NODES=${2:?}; shift 2 ;;
+    --plan-only|--dry-run) PLAN_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "dist-campaign: unknown arg $1" >&2; exit 2 ;;
   esac
 done
 
 # Documented executable scenario profiles (default/non-quick scenario set).
-# 2-node profile: scenarios configured for two nodes.
 PROFILE_NODES2="nodes2,small,tiny"
-# 4-node profile: four-node scenarios plus compatible two-node scenarios; excludes eight-node.
 PROFILE_NODES4="equal,slow_one,fast_one,asymmetric,stall_recover,nodes2,large_seq,small,tiny,boundary,backpressure"
-# Full profile: default full scenario set (subject to topology validation; 8+ usable nodes).
 PROFILE_FULL=""
 
 PROFILE_KIND=""
@@ -96,7 +101,6 @@ if [ -n "$PROFILE" ]; then
   fi
 fi
 
-# nodes2/nodes4 profiles describe the non-quick scenario set; reject semantically invalid quick combination.
 if [ "$QUICK" -eq 1 ] && { [ "$PROFILE_KIND" = "nodes2" ] || [ "$PROFILE_KIND" = "nodes4" ]; }; then
   echo "dist-campaign: --profile $PROFILE describes the non-quick scenario set and cannot be used with --quick (use --profile full --quick or select quick-compatible scenarios explicitly)" >&2
   exit 2
@@ -112,7 +116,6 @@ if [ -z "$OUT" ]; then
   OUT="stage0/dist_ingest/runs/$CAMPAIGN_ID"
 fi
 if [ -z "$SEED" ]; then
-  # deterministic default seed recorded for reproducibility
   SEED="$CAMPAIGN_ID"
 fi
 
@@ -123,9 +126,6 @@ if [ -e "$OUT" ]; then
 fi
 mkdir -p "$OUT/cases" "$OUT/env" "$OUT/corpora" || exit 1
 
-# Scenario definitions (id|input_rel|nodes|consumer_mode|consumer_bps|slow_node|slow_mode|slow_bps|slow_stall_ms|max_backlog|extra)
-# Required scenarios covered: equal/slow/fast/asymmetric consumers, temp stall+recovery,
-# varying node counts, large sequential file, small/short-final/boundary, backpressure.
 SCENARIOS=()
 if [ "$QUICK" -eq 1 ]; then
   SCENARIOS+=("equal|corpora/large.bin|4|fast|0|-1|fast|0|0|33554432|")
@@ -150,9 +150,9 @@ fi
 echo "=== dist-ingest campaign: topology/scenario pre-validation"
 export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
 PREVAL_FILE="$OUT/prevalidation.json"
-python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" <<'PY'
-import json, os, sys
-out, scen_filter, phys_nodes, profile, quick, preval_path, scen_filter_explicit = sys.argv[1:8]
+python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" "$MAPPING_PROFILES" <<'PY'
+import json, os, re, sys
+out, scen_filter, phys_nodes, profile, quick, preval_path, scen_filter_explicit, mapping_profiles_arg = sys.argv[1:9]
 quick = quick == '1'
 scen_filter_explicit = scen_filter_explicit == '1'
 requested_profile = profile or None
@@ -169,7 +169,7 @@ for d in scen_defs:
         nodes = None
     available_by_id[sid] = {'id': sid, 'nodes': nodes, 'def': d}
 
-# Scenario selection (preserve valid filtering behavior and documented profile selections)
+# Scenario selection
 if scen_filter_explicit:
     raw_ids = scen_filter.split(',')
     requested_ids = [s.strip() for s in raw_ids]
@@ -177,7 +177,6 @@ if scen_filter_explicit:
         print("dist-campaign: --scenarios contains empty/malformed scenario id elements", file=sys.stderr)
         print('dist-campaign: scenario/topology validation failed before timed trials: invalid --scenarios list', file=sys.stderr)
         sys.exit(2)
-    # reject duplicate scenario IDs to keep prevalidation/provenance/execution-plan consistent
     seen_ids = set()
     dups = []
     for sid in requested_ids:
@@ -209,7 +208,6 @@ if not selected:
     print("dist-campaign: no scenarios selected (check --scenarios/--profile)", file=sys.stderr)
     sys.exit(2)
 
-# Effective profile/selection provenance
 selected_ids = [s['id'] for s in selected]
 if scen_filter_explicit:
     effective_profile = 'custom'
@@ -217,13 +215,11 @@ if scen_filter_explicit:
 else:
     profile_overridden = False
     if requested_profile:
-        # nodes2/nodes4+quick rejected earlier; full+quick is supported and must be unambiguous
         if quick and requested_profile == 'full':
             effective_profile = 'full_quick'
         else:
             effective_profile = requested_profile
     else:
-        # no explicit profile requested
         if (not quick) and selected_ids == available_ids:
             effective_profile = 'full'
         elif quick and selected_ids == available_ids:
@@ -231,19 +227,39 @@ else:
         else:
             effective_profile = 'custom'
 
-# Topology discovery (actual usable nodes on host) and mapping validation
 repo = os.getcwd()
 sys.path.insert(0, os.path.join(repo, 'stage0', 'dist_ingest'))
 try:
     import run_dist
+    import topology as topo_mod
 except Exception as e:
-    print('dist-campaign: topology validation failed before timed trials: cannot import run_dist: %s' % e, file=sys.stderr)
+    print('dist-campaign: topology validation failed before timed trials: cannot import topology modules: %s' % e, file=sys.stderr)
     sys.exit(2)
 
-# Discover host usable nodes (actual usable nodes discovered on the host)
+# Parse mapping profiles
+raw_mp = [p.strip() for p in mapping_profiles_arg.split(',') if p.strip()]
+if not raw_mp:
+    raw_mp = ['auto']
+if phys_nodes and raw_mp == ['auto']:
+    # backward-compatible explicit override
+    raw_mp = ['explicit']
+matrix_mode = ('matrix' in raw_mp or 'all' in raw_mp)
+if matrix_mode:
+    req_profiles_base = ['cross_socket_spread', 'intra_socket', 'all_nodes']
+else:
+    req_profiles_base = [p for p in raw_mp if p not in ('matrix', 'all')]
+    if not req_profiles_base:
+        req_profiles_base = ['auto']
+
+# Discover inventory / usable nodes
+inv = None
 host_usable_node_ids = []
 host_usable_count = 0
 topo_discovery_err = None
+try:
+    inv = run_dist.discover_topology_inventory()
+except Exception as e:
+    inv = None
 try:
     l, p, info, err = run_dist.resolve_topology(999, None, no_pin=False)
     if l:
@@ -260,109 +276,273 @@ try:
 except Exception as e:
     topo_discovery_err = 'topology probe failed: %s' % e
 
-if host_usable_count is None:
-    host_usable_count = 0
-
 errors = []
-
-# Distinct logical node counts selected
 selected_counts = sorted({s['nodes'] for s in selected if s['nodes'] is not None})
 for s in selected:
     if s['nodes'] is None:
         errors.append("scenario %s has invalid node count" % s['id'])
 
-explicit_ids = None
-explicit_count = None
-mapping_mode = 'auto'
+mapping_plan = []  # list of concrete mappings to run
+unsupported_mappings = []
+
+# Validate/resolve mappings
 resolved_explicit_mapping = None
-if phys_nodes:
-    mapping_mode = 'explicit'
-    # Strict raw --phys-nodes validation before invoking resolve_topology() (topology/usability
-    # authority remains resolve_topology). Reject leading/trailing/consecutive commas, empty
-    # elements, and non-integer elements; allow ordinary whitespace around valid integer IDs.
-    raw_phys = phys_nodes.split(',')
-    phys_malformed = False
-    phys_parsed = []
-    if raw_phys == ['']:
-        phys_malformed = True
-    if (not phys_malformed) and (phys_nodes.startswith(',') or phys_nodes.endswith(',')):
-        phys_malformed = True
-    if not phys_malformed:
-        for tok in raw_phys:
-            st = tok.strip()
-            if st == '':
-                phys_malformed = True
-                break
-            try:
-                phys_parsed.append(int(st))
-            except ValueError:
-                phys_malformed = True
-                break
-    if phys_malformed:
-        errors.append("malformed --phys-nodes list: %r (reject leading/trailing/consecutive commas, empty elements, and non-integer elements)" % phys_nodes)
-        explicit_ids = None
-        explicit_count = None
+explicit_mapping_validated = False
+explicit_ids_input = None
+explicit_count_input = None
+if 'explicit' in req_profiles_base or phys_nodes:
+    if not phys_nodes:
+        errors.append('mapping profile explicit requires --phys-nodes')
     else:
-        explicit_ids = list(phys_parsed)
-        explicit_count = len(phys_parsed)
-        # For explicit mapping, all selected scenarios must share one logical node count
-        # (single explicit list cannot map differing logical node counts).
-        if len(selected_counts) != 1:
-            errors.append("explicit --phys-nodes requires all selected scenarios to have the same logical node count; selected counts: %s" % selected_counts)
+        mapping_mode = 'explicit'
+        raw_phys = phys_nodes.split(',')
+        phys_malformed = False
+        phys_parsed = []
+        if raw_phys == [''] or phys_nodes.startswith(',') or phys_nodes.endswith(','):
+            phys_malformed = True
+        if not phys_malformed:
+            for tok in raw_phys:
+                st = tok.strip()
+                if st == '':
+                    phys_malformed = True
+                    break
+                try:
+                    phys_parsed.append(int(st))
+                except ValueError:
+                    phys_malformed = True
+                    break
+        if phys_malformed:
+            errors.append("malformed --phys-nodes list: %r (reject leading/trailing/consecutive commas, empty elements, and non-integer elements)" % phys_nodes)
+            explicit_ids_input = None
+            explicit_count_input = None
         else:
-            logical_count = selected_counts[0]
-            # Validate the actual explicit mapping using run_dist.resolve_topology() with the
-            # same mapping string and pinning semantics as trials will use (no_pin=False).
-            try:
-                lmap, pcpu, tinfo, terr = run_dist.resolve_topology(logical_count, phys_nodes, no_pin=False)
-            except Exception as e:
-                lmap, pcpu, tinfo, terr = [], [], {}, ['resolve_topology exception: %s' % e]
-            if terr or not lmap:
-                if terr:
-                    for te in terr:
+            explicit_ids_input = list(phys_parsed)
+            explicit_count_input = len(phys_parsed)
+            # For explicit mapping, all selected scenarios must share one logical node count
+            # (single explicit list cannot map differing logical node counts).
+            if len(selected_counts) != 1:
+                errors.append("explicit --phys-nodes requires all selected scenarios to have the same logical node count; selected counts: %s" % selected_counts)
+            else:
+                logical_count = selected_counts[0]
+                try:
+                    lmap, pcpu, tinfo, terr = run_dist.resolve_topology(logical_count, phys_nodes, no_pin=False)
+                except Exception as e:
+                    lmap, pcpu, tinfo, terr = [], [], {}, ['resolve_topology exception: %s' % e]
+                if terr or not lmap:
+                    for te in (terr or ['explicit mapping could not be established']):
                         errors.append('explicit physical-node mapping invalid for selected logical node count %d: %s' % (logical_count, te))
                 else:
-                    errors.append('explicit physical-node mapping could not be established for selected logical node count %d' % logical_count)
-            else:
-                resolved_explicit_mapping = list(lmap)
-                explicit_ids = list(lmap)  # mapping accepted by preflight (same as trials will resolve)
-                explicit_count = len(lmap)
-else:
-    # automatic: require discovered usable topology and sufficient usable nodes per scenario
+                    resolved_explicit_mapping = list(lmap)
+                    explicit_mapping_validated = True
+                    explicit_ids_input = list(lmap)  # mapping accepted by preflight (same as trials will resolve)
+                    explicit_count_input = len(lmap)
+                    prov_m = None
+                    try:
+                        invx = run_dist.discover_topology_inventory()
+                        prov_m = topo_mod.build_mapping_provenance(invx or {}, 'explicit', 'explicit', lmap, pcpu, False, tinfo)
+                    except Exception:
+                        prov_m = None
+                    mapping_plan.append({
+                        'mapping_profile': 'explicit',
+                        'mapping_variant': 'explicit',
+                        'mapping_id': topo_mod.mapping_case_id_component('explicit', 'explicit', lmap),
+                        'logical_node_count': logical_count,
+                        'logical_to_physical': list(lmap),
+                        'phys_nodes': ','.join(str(x) for x in lmap),
+                        'supported': True,
+                        'reason': None,
+                        'topology_info': tinfo,
+                        'mapping_provenance': prov_m,
+                        'applies_to_scenarios': [s['id'] for s in selected],
+                    })
+elif req_profiles_base == ['auto'] or req_profiles_base == ['default']:
+    mapping_mode = 'auto'
     if topo_discovery_err and host_usable_count == 0:
         errors.append('topology validation failed: %s' % topo_discovery_err)
     else:
+        # one concrete mapping per scenario node-count using legacy auto selection
+        by_count = {}
         for s in selected:
             n = s['nodes']
-            if n is not None and n > host_usable_count:
-                errors.append("scenario %s requires %d node(s) but only %d usable node(s) discovered on host; select a compatible profile/scenario set for this topology" % (s['id'], n, host_usable_count))
+            if n is None:
+                continue
+            if n not in by_count:
+                try:
+                    lmap, pcpu, tinfo, terr = run_dist.resolve_topology(n, None, no_pin=False)
+                except Exception as e:
+                    lmap, pcpu, tinfo, terr = [], [], {}, ['resolve_topology exception: %s' % e]
+                if terr or not lmap:
+                    for te in (terr or ['auto mapping could not be established']):
+                        errors.append('scenario %s requires %d node(s): %s' % (s['id'], n, te))
+                    by_count[n] = None
+                else:
+                    prov = None
+                    try:
+                        invx = run_dist.discover_topology_inventory()
+                        prov = topo_mod.build_mapping_provenance(invx or {}, 'auto', 'auto', lmap, pcpu, False, tinfo)
+                    except Exception:
+                        prov = None
+                    by_count[n] = {
+                        'mapping_profile': 'auto',
+                        'mapping_variant': 'auto',
+                        'mapping_id': topo_mod.mapping_case_id_component('auto', 'auto', lmap),
+                        'logical_node_count': n,
+                        'logical_to_physical': list(lmap),
+                        'phys_nodes': ','.join(str(x) for x in lmap),
+                        'supported': True,
+                        'reason': None,
+                        'topology_info': tinfo,
+                        'mapping_provenance': prov,
+                    }
+        for s in selected:
+            n = s['nodes']
+            if n is None or by_count.get(n) is None:
+                continue
+            m = dict(by_count[n])
+            m['applies_to_scenarios'] = [s['id']]
+            # store per-scenario mapping entries (same concrete mapping may appear per scenario)
+            mapping_plan.append({**m, 'scenario_id': s['id']})
+else:
+    mapping_mode = 'profiles'
+    if topo_discovery_err and host_usable_count == 0 and inv is None:
+        errors.append('topology validation failed: %s' % topo_discovery_err)
+    else:
+        # expand requested profiles per distinct scenario node count
+        for n in selected_counts:
+            try:
+                variants, invx, terrs = run_dist.resolve_mapping_plan(n, profiles=req_profiles_base, phys_nodes_spec=None, no_pin=False)
+            except Exception as e:
+                variants, invx, terrs = [], inv, ['mapping plan failed for %d nodes: %s' % (n, e)]
+            if terrs:
+                errors.extend(['%d-node mapping plan: %s' % (n, te) for te in terrs])
+            scen_ids_n = [s['id'] for s in selected if s['nodes'] == n]
+            for v in variants:
+                entry = {
+                    'mapping_profile': v.get('profile'),
+                    'mapping_variant': v.get('variant'),
+                    'logical_node_count': n,
+                    'logical_to_physical': v.get('logical_to_physical') or [],
+                    'supported': bool(v.get('supported')),
+                    'reason': v.get('reason'),
+                    'topology_info': v.get('topology_info'),
+                    'mapping_provenance': v.get('mapping_provenance'),
+                    'applies_to_scenarios': scen_ids_n,
+                }
+                if v.get('supported') and v.get('logical_to_physical'):
+                    entry['phys_nodes'] = ','.join(str(x) for x in v['logical_to_physical'])
+                    entry['mapping_id'] = topo_mod.mapping_case_id_component(v.get('profile'), v.get('variant'), v['logical_to_physical'])
+                else:
+                    entry['mapping_id'] = '%s:unsupported' % (v.get('variant') or v.get('profile') or 'mapping')
+                if entry['supported']:
+                    mapping_plan.append(entry)
+                else:
+                    unsupported_mappings.append(entry)
+        # in strict requested mode (not matrix), unsupported requested profiles are errors
+        if not matrix_mode and unsupported_mappings:
+            for um in unsupported_mappings:
+                errors.append('requested mapping unsupported for %d-node scenarios %s: %s (%s)' % (
+                    um.get('logical_node_count'), um.get('applies_to_scenarios'), um.get('mapping_variant'), um.get('reason')))
+
+# Build case plan entries: (scenario, mapping, candidate) for supported mappings
+plan_cases = []
+if not errors:
+    # normalize: ensure each mapping_plan entry has scenario association; for profile mode it's per node-count
+    expanded = []
+    for m in mapping_plan:
+        if 'scenario_id' in m:
+            expanded.append(m)
+        else:
+            for sid in m.get('applies_to_scenarios') or []:
+                mm = dict(m)
+                mm['scenario_id'] = sid
+                expanded.append(mm)
+    for m in expanded:
+        plan_cases.append(m)
+
+# Preflight must validate every mapping in complete selected plan before timed trials.
+# (all entries in plan_cases are already resolved/validated above)
 
 if errors:
     for e in errors:
         print('dist-campaign: scenario/topology validation failed before timed trials: ' + e, file=sys.stderr)
+    # still write a prevalidation record for diagnostics
+    prov = {
+        'status': 'failed',
+        'errors': errors,
+        'scenario_profile_requested': requested_profile,
+        'scenario_profile_effective': effective_profile,
+        'scenario_profile_overridden': bool(profile_overridden),
+        'scenario_profile': effective_profile,
+        'profile_quick': bool(quick),
+        'host_usable_nodes': host_usable_node_ids,
+        'host_usable_node_count': host_usable_count,
+        'selected_scenario_logical_node_counts': selected_counts,
+        'selected_scenarios': [{'id': s['id'], 'nodes': s['nodes']} for s in selected],
+        'scenarios_filter': scenarios_filter_record,
+        'scenarios_filter_explicit': bool(scen_filter_explicit),
+        'mapping_profiles_requested': raw_mp,
+        'mapping_mode': ('explicit' if phys_nodes else ('matrix' if matrix_mode else 'profiles' if req_profiles_base not in (['auto'], ['default']) else 'auto')),
+        'unsupported_mappings': unsupported_mappings,
+    }
+    os.makedirs(out, exist_ok=True)
+    with open(preval_path, 'w') as f:
+        json.dump(prov, f, indent=2, sort_keys=True)
     sys.exit(2)
 
+def _safe_id(s):
+    return re.sub(r'[^A-Za-z0-9_.:-]+', '-', str(s))
+
+_eff_map_mode = ('explicit' if phys_nodes else ('matrix' if matrix_mode else 'profiles' if req_profiles_base not in (['auto'], ['default']) else 'auto'))
+_eff_explicit_ids = None
+_eff_explicit_count = None
+_eff_resolved_explicit = None
+_eff_explicit_validated = False
+if phys_nodes and plan_cases:
+    _eff_resolved_explicit = list(plan_cases[0].get('logical_to_physical') or [])
+    _eff_explicit_ids = _eff_resolved_explicit
+    _eff_explicit_count = len(_eff_resolved_explicit)
+    _eff_explicit_validated = bool(explicit_mapping_validated and _eff_resolved_explicit)
+elif explicit_mapping_validated and resolved_explicit_mapping is not None:
+    _eff_resolved_explicit = list(resolved_explicit_mapping)
+    _eff_explicit_ids = _eff_resolved_explicit
+    _eff_explicit_count = len(_eff_resolved_explicit)
+    _eff_explicit_validated = True
+
 prov = {
+    'status': 'ok',
     'scenario_profile_requested': requested_profile,
     'scenario_profile_effective': effective_profile,
     'scenario_profile_overridden': bool(profile_overridden),
-    # backward-compatible field: effective profile/selection marker (not the requested profile when overridden)
     'scenario_profile': effective_profile,
     'profile_quick': bool(quick),
-    # actual usable nodes discovered on the host (distinct from explicit selection count)
     'host_usable_nodes': host_usable_node_ids,
     'host_usable_node_count': host_usable_count,
     'available_usable_nodes': host_usable_count,
-    'explicit_physical_node_ids': explicit_ids,
-    'explicit_selected_node_count': explicit_count,
+    'explicit_physical_node_ids': _eff_explicit_ids,
+    'explicit_selected_node_count': _eff_explicit_count,
     'selected_scenario_logical_node_counts': selected_counts,
     'physical_node_mapping': {
-        'mode': mapping_mode,
-        'phys_nodes': explicit_ids,
-        'explicit_mapping_validated': bool(mapping_mode == 'explicit' and resolved_explicit_mapping is not None),
-        'resolved_logical_to_physical': resolved_explicit_mapping,
-        'note': 'explicit mapping validated via run_dist.resolve_topology() with the same mapping/pinning semantics as trials; explicit mapping requires each selected scenario logical node count to equal the explicit selection count. automatic selection may serve mixed-count scenarios when enough usable nodes exist.',
+        'mode': _eff_map_mode,
+        'profiles_requested': raw_mp,
+        'phys_nodes': _eff_explicit_ids,
+        'explicit_mapping_validated': bool(_eff_explicit_validated),
+        'resolved_logical_to_physical': _eff_resolved_explicit,
+        'note': ('explicit mapping validated via run_dist.resolve_topology() with the same mapping/pinning semantics as trials; explicit mapping requires each selected scenario logical node count to equal the explicit selection count.'
+                 if _eff_map_mode == 'explicit' else
+                 'Each case carries a concrete resolved logical_to_physical mapping passed to every trial. Unsupported requested mappings are reported explicitly.'),
     },
+    'mapping_plan_cases': [{
+        'scenario': c['scenario_id'], 'mapping_profile': c.get('mapping_profile'),
+        'mapping_variant': c.get('mapping_variant'), 'mapping_id': c.get('mapping_id'),
+        'logical_node_count': c.get('logical_node_count'), 'logical_to_physical': c.get('logical_to_physical'),
+        'supported': c.get('supported'), 'reason': c.get('reason'),
+        'spans_sockets': (c.get('mapping_provenance') or {}).get('spans_sockets'),
+    } for c in plan_cases],
+    'unsupported_mappings': [{
+        'mapping_profile': u.get('mapping_profile'), 'mapping_variant': u.get('mapping_variant'),
+        'mapping_id': u.get('mapping_id'), 'logical_node_count': u.get('logical_node_count'),
+        'applies_to_scenarios': u.get('applies_to_scenarios'), 'reason': u.get('reason'),
+    } for u in unsupported_mappings],
     'selected_scenarios': [{'id': s['id'], 'nodes': s['nodes']} for s in selected],
     'scenarios_filter': scenarios_filter_record,
     'scenarios_filter_explicit': bool(scen_filter_explicit),
@@ -370,15 +550,83 @@ prov = {
 os.makedirs(out, exist_ok=True)
 with open(preval_path, 'w') as f:
     json.dump(prov, f, indent=2, sort_keys=True)
-print('prevalidation ok: selected=%s host_usable=%s mapping=%s' % (
-    selected_ids, host_usable_count, mapping_mode), file=sys.stderr)
+
+# Emit execution plan for bash: scenario_id \t scen_def \t trial \t cand_csv \t mapping_id \t mapping_profile \t mapping_variant \t phys_nodes
+# Also write structured plan
+exec_plan = []
+cand_list = [c for c in os.environ.get('DIST_CAND_FILTER','centralized_ingest,fixed_faa,local_adaptive,relative_adaptive').split(',') if c]
+trials_n = int(os.environ.get('DIST_TRIALS','3'))
+seed = os.environ.get('DIST_SEED','')
+shuf_sc = os.environ.get('DIST_SHUFFLE_SCENARIOS','0') == '1'
+import random
+# group by (scenario,mapping) preserving scenario order
+sm_keys = []
+sm_map = {}
+for c in plan_cases:
+    key = (c['scenario_id'], c['mapping_id'])
+    if key not in sm_map:
+        sm_map[key] = c
+        sm_keys.append(key)
+scen_order = [s['id'] for s in selected]
+# stable order by scenario then mapping
+def sm_sort_key(k):
+    try:
+        si = scen_order.index(k[0])
+    except ValueError:
+        si = 9999
+    return (si, k[1])
+sm_keys = sorted(sm_keys, key=sm_sort_key)
+if shuf_sc:
+    random.Random(str(seed) + '|scenario_mapping_blocks').shuffle(sm_keys)
+
+for key in sm_keys:
+    m = sm_map[key]
+    sid = m['scenario_id']
+    for t in range(1, trials_n + 1):
+        cands = list(cand_list)
+        random.Random(str(seed)+'|'+sid+'|'+m['mapping_id']+'|'+str(t)).shuffle(cands)
+        exec_plan.append({
+            'scenario': sid,
+            'scenario_def': available_by_id[sid]['def'],
+            'trial': t,
+            'candidate_order': cands,
+            'mapping_id': m['mapping_id'],
+            'mapping_profile': m.get('mapping_profile'),
+            'mapping_variant': m.get('mapping_variant'),
+            'logical_to_physical': m.get('logical_to_physical'),
+            'phys_nodes': m.get('phys_nodes'),
+        })
+with open(os.path.join(out, 'execution-plan.json'), 'w') as f:
+    json.dump({'seed': seed, 'shuffle_scenarios': shuf_sc, 'trials': trials_n,
+               'mapping_profiles_requested': raw_mp, 'mapping_mode': prov['physical_node_mapping']['mode'],
+               'blocks': exec_plan, 'unsupported_mappings': prov['unsupported_mappings']}, f, indent=2, sort_keys=True)
+with open(os.path.join(out, '.run_plan.tsv'), 'w') as f:
+    for b in exec_plan:
+        f.write('\t'.join([
+            b['scenario'], b['scenario_def'], str(b['trial']), ','.join(b['candidate_order']),
+            b['mapping_id'] or '', b.get('mapping_profile') or '', b.get('mapping_variant') or '', b.get('phys_nodes') or ''
+        ]) + '\n')
+print('prevalidation ok: selected=%s mappings=%d unsupported=%d' % (
+    selected_ids, len(plan_cases), len(unsupported_mappings)), file=sys.stderr)
 PY
 PREVAL_RC=$?
 if [ "$PREVAL_RC" -ne 0 ]; then
   exit "$PREVAL_RC"
 fi
 
+# plan-only mode: complete plan written, no builds/corpora/timed trials
+if [ "$PLAN_ONLY" -eq 1 ]; then
+  echo "dist-campaign plan-only complete: $OUT" >&2
+  echo "  prevalidation: $OUT/prevalidation.json" >&2
+  echo "  execution-plan: $OUT/execution-plan.json" >&2
+  exit 0
+fi
+
 export FORKRUN_DIAG_QUEUE=1
+export DIST_TRIALS="$TRIALS"
+export DIST_SEED="$SEED"
+export DIST_SHUFFLE_SCENARIOS="$SHUFFLE_SCENARIOS"
+export DIST_CAND_FILTER="$CAND_FILTER"
 
 echo "=== dist-ingest campaign: build"
 make -f Makefile.substrate python-substrate >/dev/null 2>&1 || echo "WARN: python-substrate build issue (continuing)"
@@ -389,7 +637,6 @@ python3 stage0/env_capture.py --out "$OUT/env/env-before.json" --run-id "$CAMPAI
   || { echo "dist-campaign: env-before failed" >&2; exit 1; }
 
 echo "=== dist-ingest campaign: corpora"
-# Deterministic corpora for scenarios (file ingestion first).
 python3 - "$OUT" "$QUICK" <<'PY'
 import os, sys
 out, quick = sys.argv[1], sys.argv[2] == '1'
@@ -397,7 +644,7 @@ os.makedirs(os.path.join(out,'corpora'), exist_ok=True)
 def make(path, size):
     if os.path.exists(path): return
     with open(path,'wb') as f:
-        chunk = b'abcdefghij' * 102400  # 1MB-ish pattern
+        chunk = b'abcdefghij' * 102400
         rem = size
         while rem > 0:
             n = min(rem, len(chunk))
@@ -415,82 +662,47 @@ else:
 print('corpora ready')
 PY
 
-
-IFS=',' read -ra CANDS <<< "$CAND_FILTER"
 FAILURES=()
 OUTCOMES="$OUT/.outcomes.tsv"
 ORDER_LOG="$OUT/execution-order.jsonl"
 : > "$OUTCOMES"
 : > "$ORDER_LOG"
 
-# Build and execute randomized/interleaved plan (Section 7). Candidate order is
-# shuffled within each (scenario,trial) block; scenario-block order optionally
-# shuffled. Seed and actual execution order recorded for reproducibility.
 PLAN_FILE="$OUT/.run_plan.tsv"
-export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
-python3 - "$OUT" "$SEED" "$TRIALS" "$SCEN_FILTER" "$CAND_FILTER" "$SHUFFLE_SCENARIOS" "$PLAN_FILE" <<'PY'
-import json, os, random, sys
-out, seed, trials, scen_filter, cand_filter, shuf_sc, plan_path = sys.argv[1:8]
-trials = int(trials)
-shuf_sc = shuf_sc == '1'
-scen_defs = [l for l in os.environ.get('DIST_SCEN_DEFS','').split('\n') if l.strip()]
-scen_set = set([s for s in scen_filter.split(',') if s]) if scen_filter else None
-cand_list = [c for c in cand_filter.split(',') if c]
-def allowed_scen(s): return scen_set is None or s in scen_set
-scens = []
-for d in scen_defs:
-    sid = d.split('|',1)[0]
-    if allowed_scen(sid): scens.append(d)
-rng_scen = random.Random(str(seed) + '|scenarios')
-if shuf_sc:
-    rng_scen.shuffle(scens)
-blocks = []
-for d in scens:
-    sid = d.split('|',1)[0]
-    for t in range(1, trials+1):
-        cands = list(cand_list)
-        random.Random(str(seed)+'|'+sid+'|'+str(t)).shuffle(cands)
-        blocks.append((sid,d,t,cands))
-with open(plan_path,'w') as f:
-    for sid,d,t,cands in blocks:
-        f.write('\t'.join([sid,d,str(t),','.join(cands)])+'\n')
-# record plan summary
-with open(os.path.join(out,'execution-plan.json'),'w') as f:
-    json.dump({'seed':seed,'shuffle_scenarios':shuf_sc,'trials':trials,
-               'scenarios':[b[0] for b in blocks if b[2]==1] if shuf_sc else [d.split('|',1)[0] for d in scens],
-               'blocks':[{'scenario':b[0],'trial':b[2],'candidate_order':b[3]} for b in blocks]}, f, indent=2, sort_keys=True)
-PY
-
-while IFS=$'\t' read -r sid scen_def t cand_csv; do
+while IFS=$'\t' read -r sid scen_def t cand_csv map_id map_profile map_variant map_phys; do
   [ -z "$sid" ] && continue
   IFS='|' read -r _sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra <<< "$scen_def"
   IFS=',' read -ra BLOCK_CANDS <<< "$cand_csv"
-  echo "BLOCK scenario=$sid trial=$t order=$cand_csv" >&2
-  printf '{"scenario":"%s","trial":%s,"candidate_order":[%s]}\n' "$sid" "$t" "$(python3 - <<PY "$cand_csv"
+  echo "BLOCK scenario=$sid mapping=$map_id trial=$t order=$cand_csv" >&2
+  printf '{"scenario":"%s","mapping_id":"%s","mapping_profile":"%s","trial":%s,"candidate_order":[%s]}\n' \
+    "$sid" "$map_id" "$map_profile" "$t" "$(python3 - <<PY "$cand_csv"
 import json,sys; print(','.join(json.dumps(x) for x in sys.argv[1].split(',') if x))
 PY
 )" >> "$ORDER_LOG"
   for cand in "${BLOCK_CANDS[@]}"; do
     [ -z "$cand" ] && continue
-    case_id="${sid}__${cand}"
-    out="$OUT/cases/$case_id/trial$t"
-    # Re-running a failed block must not overwrite earlier raw evidence.
-    if [ -e "$out/manifest.json" ]; then
+    # mapping identity in case identity (checkpoint 1)
+    safe_map=$(python3 -c "import re,sys; print(re.sub(r'[^A-Za-z0-9_.:-]+','-',sys.argv[1]))" "$map_id")
+    case_id="${sid}__${safe_map}__${cand}"
+    outdir="$OUT/cases/$case_id/trial$t"
+    if [ -e "$outdir/manifest.json" ]; then
       echo "SKIP existing evidence: $case_id trial$t" >&2
       prev=skipped_existing
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$prev" "cases/$case_id/trial$t/manifest.json" >> "$OUTCOMES"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$prev" "cases/$case_id/trial$t/manifest.json" "$map_id" "$map_profile" >> "$OUTCOMES"
       continue
     fi
-    mkdir -p "$out" || exit 1
-    spec="$out/spec.json"
+    mkdir -p "$outdir" || exit 1
+    spec="$outdir/spec.json"
     input_path="$OUT/$inp"
-    # build spec
-    python3 - "$spec" "$sid" "$cand" "$case_id" "$input_path" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" "$SEED" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" <<'PY'
+    python3 - "$spec" "$sid" "$cand" "$case_id" "$input_path" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" "$SEED" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$map_phys" "$map_id" "$map_profile" "$map_variant" <<'PY'
 import json, sys
-(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed,consumer_kernel,strict_affinity,strict_mbind,phys_nodes)=sys.argv[1:19]
+(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed,consumer_kernel,strict_affinity,strict_mbind,map_phys,map_id,map_profile,map_variant)=sys.argv[1:22]
 d={
   "id": cid,
   "scenario": sid,
+  "mapping_id": map_id or None,
+  "mapping_profile": map_profile or None,
+  "mapping_variant": map_variant or None,
   "input": inp,
   "timeout": 600,
   "campaign_seed": seed,
@@ -523,16 +735,16 @@ else:
     "slow_mode": smode,
     "slow_bps": int(sbps),
     "slow_stall_ms": int(sstall),
-    # Explicitly written per comparable candidate (no undocumented default reliance).
     "consumer_kernel": consumer_kernel,
     "strict_affinity": bool(int(strict_affinity)),
     "strict_mbind": bool(int(strict_mbind)),
   })
-  if phys_nodes:
-    d["phys_nodes"] = phys_nodes
+  # Same resolved mapping passed to every trial in that case
+  if map_phys:
+    d["phys_nodes"] = map_phys
 with open(spec,'w') as f: json.dump(d,f,indent=2,sort_keys=True)
 PY
-    if python3 stage0/run_case.py --spec "$spec" --out "$out" \
+    if python3 stage0/run_case.py --spec "$spec" --out "$outdir" \
          --campaign-id "$CAMPAIGN_ID" --trial "$t" --source-sha "$SOURCE_SHA"; then
       status=ok
     else
@@ -540,24 +752,30 @@ PY
       FAILURES+=("$case_id trial$t")
       echo "TRIAL FAILED: $case_id trial$t" >&2
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$status" "cases/$case_id/trial$t/manifest.json" >> "$OUTCOMES"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$status" "cases/$case_id/trial$t/manifest.json" "$map_id" "$map_profile" >> "$OUTCOMES"
   done
 done < "$PLAN_FILE"
 
 python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" \
   || echo "WARN: env-after capture failed" >&2
 
-# campaign manifest (Section 7: seed, actual execution order, cache assumptions; strict/kernel config recorded)
-python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" <<'PY'
+python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" "$MAPPING_PROFILES" <<'PY'
 import json, os, sys, time
-out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc,consumer_kernel,strict_affinity,strict_mbind,phys_nodes=sys.argv[1:13]
+out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc,consumer_kernel,strict_affinity,strict_mbind,phys_nodes,mapping_profiles=sys.argv[1:14]
 rows=[]
 with open(outcomes) as f:
     for line in f:
         line=line.rstrip('\n')
         if not line: continue
-        case,scen,cand,t,status,man=line.split('\t')
-        rows.append({"case":case,"scenario":scen,"candidate":cand,"trial":int(t),"status":status,"manifest":man})
+        parts = line.split('\t')
+        # new format: case,scenario,candidate,trial,status,manifest,mapping_id,mapping_profile
+        if len(parts) >= 8:
+            case,scen,cand,t,status,man,map_id,map_prof = parts[:8]
+        else:
+            case,scen,cand,t,status,man = parts[:6]
+            map_id = None; map_prof = None
+        rows.append({"case":case,"scenario":scen,"candidate":cand,"trial":int(t),"status":status,
+                     "manifest":man,"mapping_id":map_id,"mapping_profile":map_prof})
 order=[]
 op=os.path.join(out,'execution-order.jsonl')
 if os.path.isfile(op):
@@ -574,7 +792,7 @@ ppath=os.path.join(out,'prevalidation.json')
 if os.path.isfile(ppath):
     with open(ppath) as f: preval=json.load(f)
 all_ok = all(r['status'] in ('ok','skipped_existing') for r in rows) if rows else False
-doc={"schema":"dist-campaign/4","campaign_id":cid,"source_sha":sha,"trials":int(trials),
+doc={"schema":"dist-campaign/5","campaign_id":cid,"source_sha":sha,"trials":int(trials),
      "randomization":{"seed":seed,"shuffle_scenarios":(shuf_sc=='1'),"execution_order":order,"plan":plan},
      "cache_policy":cache_policy,
      "campaign_config":{
@@ -582,6 +800,7 @@ doc={"schema":"dist-campaign/4","campaign_id":cid,"source_sha":sha,"trials":int(
         "strict_affinity": strict_affinity=='1',
         "strict_mbind": strict_mbind=='1',
         "phys_nodes": phys_nodes or None,
+        "mapping_profiles": mapping_profiles,
         "notes": "strict flags/kernel applied identically per comparable dist-engine candidate spec; strict mode must not silently fall back"
      },
      "scenario_profile": (preval or {}).get('scenario_profile'),
@@ -596,6 +815,8 @@ doc={"schema":"dist-campaign/4","campaign_id":cid,"source_sha":sha,"trials":int(
      "selected_scenario_logical_node_counts": (preval or {}).get('selected_scenario_logical_node_counts'),
      "selected_scenarios": (preval or {}).get('selected_scenarios'),
      "physical_node_mapping": (preval or {}).get('physical_node_mapping'),
+     "mapping_plan_cases": (preval or {}).get('mapping_plan_cases'),
+     "unsupported_mappings": (preval or {}).get('unsupported_mappings'),
      "scenarios_filter_explicit": (preval or {}).get('scenarios_filter_explicit'),
      "outcomes":rows,"all_ok":all_ok,"finished_epoch":time.time()}
 with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,indent=2,sort_keys=True)

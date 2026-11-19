@@ -354,7 +354,19 @@ def emit_stage0_lines(res, policy_name):
     print(line, file=sys.stderr)
 
 
+try:
+    from . import topology as _topology_mod  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        import topology as _topology_mod  # type: ignore
+    except Exception:
+        _topology_mod = None
+
+
 def _parse_id_list(raw):
+    if _topology_mod is not None:
+        vals, ok = _topology_mod.parse_id_list(raw)
+        return vals if ok else None
     out = []
     for part in (raw or "").strip().split(","):
         part = part.strip()
@@ -386,9 +398,9 @@ def _read_first(path):
         return None
 
 
-def _status_list(field):
+def _status_list(field, proc_root="/proc"):
     """Return (values_or_none, known). known=False => unreadable/missing/ambiguous."""
-    raw = _read_first("/proc/self/status")
+    raw = _read_first(os.path.join(proc_root, "self", "status"))
     if raw is None:
         return None, False
     for line in raw.splitlines():
@@ -403,21 +415,21 @@ def _status_list(field):
     return None, False
 
 
-def _allowed_cpus():
+def _allowed_cpus(proc_root="/proc"):
     try:
         return sorted(os.sched_getaffinity(0)), True
     except Exception:
-        vals, known = _status_list("Cpus_allowed_list")
+        vals, known = _status_list("Cpus_allowed_list", proc_root=proc_root)
         return (sorted(vals) if known and vals is not None else []), known
 
 
-def _allowed_mems():
-    vals, known = _status_list("Mems_allowed_list")
+def _allowed_mems(proc_root="/proc"):
+    vals, known = _status_list("Mems_allowed_list", proc_root=proc_root)
     return (sorted(vals) if known and vals is not None else []), known
 
 
-def _online_nodes():
-    raw = _read_first("/sys/devices/system/node/online")
+def _online_nodes(sysfs_root="/sys"):
+    raw = _read_first(os.path.join(sysfs_root, "devices", "system", "node", "online"))
     if raw is None:
         return [0], False
     nodes = _parse_id_list(raw)
@@ -426,8 +438,8 @@ def _online_nodes():
     return (nodes or [0]), True
 
 
-def _node_cpus(node_id):
-    raw = _read_first("/sys/devices/system/node/node%d/cpulist" % node_id)
+def _node_cpus(node_id, sysfs_root="/sys"):
+    raw = _read_first(os.path.join(sysfs_root, "devices", "system", "node", "node%d" % node_id, "cpulist"))
     if raw is None:
         return [], False
     parsed = _parse_id_list(raw)
@@ -436,9 +448,9 @@ def _node_cpus(node_id):
     return parsed, True
 
 
-def _node_mem_state(node_id):
+def _node_mem_state(node_id, sysfs_root="/sys"):
     """Return 'has', 'none', or 'unknown' (missing/unparsable)."""
-    mi = _read_first("/sys/devices/system/node/node%d/meminfo" % node_id)
+    mi = _read_first(os.path.join(sysfs_root, "devices", "system", "node", "node%d" % node_id, "meminfo"))
     if mi is None:
         return "unknown"
     for line in mi.splitlines():
@@ -453,22 +465,58 @@ def _node_mem_state(node_id):
     return "unknown"
 
 
-def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False):
+def discover_topology_inventory(sysfs_root="/sys", proc_root="/proc"):
+    """Reusable topology inventory (facts). Uses run_dist readers for patchability."""
+    if _topology_mod is None:
+        return None
+    def _sga(_pid):
+        return os.sched_getaffinity(0)
+    return _topology_mod.discover_topology(
+        sysfs_root=sysfs_root,
+        proc_root=proc_root,
+        read_first=_read_first,
+        sched_getaffinity=_sga,
+    )
+
+
+def _inventory_topology_info(inv, base_info):
+    if not inv:
+        return base_info
+    info = dict(base_info)
+    info["inventory"] = inv
+    info["node_to_socket"] = inv.get("node_to_socket")
+    info["distance"] = inv.get("distance")
+    info["cpu_topology_summary"] = inv.get("cpu_topology")
+    info["effective_process_cpuset"] = inv.get("effective_process_cpuset")
+    info["inventory_unknowns"] = inv.get("unknowns")
+    return info
+
+
+def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False,
+                     sysfs_root="/sys", proc_root="/proc", mapping_profile=None):
     """Return (logical_to_phys, per_node_cpus, topology_info, errors).
 
-    Closeout §2: unknown online-node information must not produce a verified
-    physical-node selection; unknown allowed-CPU information must not be treated
-    as an unrestricted CPU set. --no-pin permits a documented less-restrictive
-    path (CPU affinity/pinning facts not required/verified) but does NOT verify
-    unknown topology; memory/online/mems-allowed facts still must be established
-    unless explicitly stated otherwise.
+    Authoritative CPU/memory usability validation for dist-ingest runs.
+    Unknown online-node information must not produce a verified physical-node
+    selection; unknown allowed-CPU information must not be treated as an
+    unrestricted CPU set. --no-pin permits a documented less-restrictive path
+    (CPU affinity/pinning facts not required/verified) but does NOT verify
+    unknown topology; memory/online/mems-allowed facts still must be
+    established unless explicitly stated otherwise.
+
+    mapping_profile: when set for automatic selection (no phys_nodes_spec),
+    selects from verified usable nodes using topology-aware mapping
+    (cross_socket_spread, intra_socket, all_nodes). intra_socket requires a
+    socket-qualified variant via mapping_profile="intra_socket:socketN" or
+    resolve_mapping_plan().
     """
     errors = []
-    allowed_cpus, cpus_known = _allowed_cpus()
+    inv = discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root)
+    allowed_cpus, cpus_known = _allowed_cpus(proc_root=proc_root)
     allowed_cpus_set = set(allowed_cpus)
-    allowed_mems, mems_known = _allowed_mems()
+    allowed_mems, mems_known = _allowed_mems(proc_root=proc_root)
     allowed_mems_set = set(allowed_mems)
-    online, online_known = _online_nodes()
+    online, online_known = _online_nodes(sysfs_root=sysfs_root)
 
     def node_usable_auto(nid):
         # online/mems/memory must be established; CPU affinity facts may be
@@ -481,12 +529,12 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False):
             return False, [], "mems_allowed_unknown"
         if nid not in allowed_mems_set:
             return False, [], "mem_not_allowed"
-        mstate = _node_mem_state(nid)
+        mstate = _node_mem_state(nid, sysfs_root=sysfs_root)
         if mstate == "none":
             return False, [], "no_memory"
         if mstate == "unknown":
             return False, [], "memory_unknown"
-        cpus, cpu_list_known = _node_cpus(nid)
+        cpus, cpu_list_known = _node_cpus(nid, sysfs_root=sysfs_root)
         if not cpu_list_known:
             return False, [], "cpu_unknown"
         if not cpus:
@@ -509,7 +557,7 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False):
         scan_nodes = list(online) if online else []
     for nid in scan_nodes:
         ok, cpus, reason = node_usable_auto(nid)
-        node_states[nid] = {"usable_auto": ok, "reason": reason, "mem_state": _node_mem_state(nid)}
+        node_states[nid] = {"usable_auto": ok, "reason": reason, "mem_state": _node_mem_state(nid, sysfs_root=sysfs_root)}
         if ok:
             usable.append((nid, cpus))
 
@@ -525,9 +573,10 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False):
                 errors.append("duplicate physical node id in --phys-nodes: %d" % nid)
             seen.add(nid)
         if errors:
-            return [], [], {"mode": "explicit", "explicit": explicit, "requested_nodes": requested_nodes,
-                            "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
-                            "online_known": online_known, "node_states": node_states}, errors
+            info = {"mode": "explicit", "explicit": explicit, "requested_nodes": requested_nodes,
+                    "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                    "online_known": online_known, "node_states": node_states}
+            return [], [], _inventory_topology_info(inv, info), errors
         # validate each explicit node - must be fully validated, no silent uncertainty
         logical_to_phys = []
         per_node_cpus = []
@@ -544,14 +593,14 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False):
             if nid not in allowed_mems_set:
                 errors.append("physical node %d not in allowed mems" % nid)
                 continue
-            mstate = _node_mem_state(nid)
+            mstate = _node_mem_state(nid, sysfs_root=sysfs_root)
             if mstate == "unknown":
                 errors.append("physical node %d cannot be validated: memory information missing/unparsable" % nid)
                 continue
             if mstate == "none":
                 errors.append("physical node %d has no memory" % nid)
                 continue
-            cpus, cpu_list_known = _node_cpus(nid)
+            cpus, cpu_list_known = _node_cpus(nid, sysfs_root=sysfs_root)
             if not cpu_list_known:
                 errors.append("physical node %d cpu list missing/unparsable" % nid)
                 continue
@@ -577,9 +626,10 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False):
         info = {"mode": "explicit", "online": online, "online_known": online_known,
                 "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
                 "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
-                "usable_nodes_auto": [n for n,_ in usable],
+                "usable_nodes_auto": [n for n, _ in usable],
                 "logical_to_physical": logical_to_phys, "node_states": node_states,
                 "explicit": explicit, "no_pin": bool(no_pin),
+                "mapping_profile": mapping_profile or "explicit",
                 "topology_verified": (online_known and mems_known and (cpus_known or no_pin) and len(errors) == 0),
                 "topology_facts_established": {
                     "online_nodes": bool(online_known),
@@ -595,48 +645,234 @@ def resolve_topology(requested_nodes, phys_nodes_spec=None, no_pin=False):
                     "cpus_allowed": not cpus_known,
                 }.items() if v]}
         if errors:
-            return [], [], info, errors
+            return [], [], _inventory_topology_info(inv, info), errors
         if requested_nodes and requested_nodes != len(logical_to_phys):
             errors.append("requested --nodes %d but --phys-nodes selects %d node(s)" % (requested_nodes, len(logical_to_phys)))
-            return [], [], info, errors
+            return [], [], _inventory_topology_info(inv, info), errors
         # Under --no-pin, do not label unknown CPU-allowance topology as verified affinity.
         if no_pin and not cpus_known:
             info["topology_verified"] = False
-        return logical_to_phys, per_node_cpus, info, []
+        return logical_to_phys, per_node_cpus, _inventory_topology_info(inv, info), []
 
     # automatic selection requires fully verified topology for a verified selection
     if not online_known:
-        return [], [], {"mode": "auto", "requested_nodes": max(1, requested_nodes), "online": online,
-                        "online_known": False, "allowed_cpus_count": len(allowed_cpus),
-                        "cpus_allowed_known": cpus_known, "mems_allowed_known": mems_known,
-                        "mems_allowed": allowed_mems, "usable_nodes_auto": [],
-                        "node_states": node_states, "logical_to_physical": [],
-                        "topology_verified": False,
-                        "topology_unknowns": ["online_nodes"] + ([k for k,v in {"mems_allowed":not mems_known,"cpus_allowed":not cpus_known}.items() if v])}, [
+        info = {"mode": "auto", "requested_nodes": max(1, requested_nodes), "online": online,
+                "online_known": False, "allowed_cpus_count": len(allowed_cpus),
+                "cpus_allowed_known": cpus_known, "mems_allowed_known": mems_known,
+                "mems_allowed": allowed_mems, "usable_nodes_auto": [],
+                "node_states": node_states, "logical_to_physical": [],
+                "mapping_profile": mapping_profile or "auto",
+                "topology_verified": False,
+                "topology_unknowns": ["online_nodes"] + ([k for k, v in {"mems_allowed": not mems_known, "cpus_allowed": not cpus_known}.items() if v])}
+        return [], [], _inventory_topology_info(inv, info), [
             "online-node information unknown; cannot produce a verified physical-node selection"
         ]
     n = max(1, requested_nodes)
-    if len(usable) < n:
-        reasons = {nid: st["reason"] for nid, st in node_states.items() if not st["usable_auto"]}
-        return [], [], {"mode": "auto", "requested_nodes": n, "online": online, "online_known": online_known,
+    usable_ids = [nid for nid, _ in usable]
+    usable_cpu_map = {nid: cpus for nid, cpus in usable}
+
+    # Topology-aware mapping profiles (auto mode). Explicit concrete mapping is
+    # always validated through this same function via phys_nodes_spec.
+    selected_ids = None
+    profile_used = mapping_profile or "auto"
+    if mapping_profile and mapping_profile not in ("auto", "default"):
+        if _topology_mod is None or inv is None:
+            info = {"mode": "auto", "requested_nodes": n, "online": online, "online_known": online_known,
+                    "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
+                    "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                    "usable_nodes_auto": usable_ids, "node_states": node_states,
+                    "logical_to_physical": [], "mapping_profile": mapping_profile,
+                    "topology_verified": False}
+            return [], [], _inventory_topology_info(inv, info), [
+                "topology inventory unavailable; cannot resolve mapping profile %r" % (mapping_profile,)
+            ]
+        # intra_socket must be socket-qualified for a single concrete selection.
+        req_profiles = [mapping_profile]
+        variants = _topology_mod.select_mapping_profiles(inv, n, usable_ids, requested_profiles=req_profiles)
+        if mapping_profile == "intra_socket":
+            # ambiguous for single resolution; caller must use resolve_mapping_plan/select concrete variant.
+            supported = [v for v in variants if v.get("supported")]
+            if len(supported) == 1:
+                selected_ids = list(supported[0].get("logical_to_physical") or [])
+                profile_used = supported[0].get("variant") or mapping_profile
+            else:
+                reasons = [v.get("reason") for v in variants if v.get("reason")]
+                info = {"mode": "auto", "requested_nodes": n, "online": online, "online_known": online_known,
                         "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
                         "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
-                        "usable_nodes_auto": [nid for nid,_ in usable],
-                        "node_states": node_states, "logical_to_physical": [],
-                        "topology_verified": False}, [
-            "insufficient verified usable NUMA nodes: requested %d, have %d usable (%s); excluded/uncertain=%s" %
-            (n, len(usable), [nid for nid,_ in usable], reasons)
+                        "usable_nodes_auto": usable_ids, "node_states": node_states,
+                        "logical_to_physical": [], "mapping_profile": mapping_profile,
+                        "mapping_variants": variants, "topology_verified": False}
+                if not supported:
+                    return [], [], _inventory_topology_info(inv, info), [
+                        "mapping profile intra_socket unsupported for %d node(s): %s" % (n, "; ".join([r for r in reasons if r]) or "no suitable socket")
+                    ]
+                return [], [], _inventory_topology_info(inv, info), [
+                    "mapping profile intra_socket is ambiguous (multiple sockets supported); specify a socket-qualified variant (e.g. intra_socket:socket0)"
+                ]
+        else:
+            v = variants[0] if variants else None
+            if not v or not v.get("supported"):
+                reason = (v or {}).get("reason") or "unsupported mapping profile"
+                info = {"mode": "auto", "requested_nodes": n, "online": online, "online_known": online_known,
+                        "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
+                        "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                        "usable_nodes_auto": usable_ids, "node_states": node_states,
+                        "logical_to_physical": [], "mapping_profile": mapping_profile,
+                        "mapping_variants": variants, "topology_verified": False}
+                return [], [], _inventory_topology_info(inv, info), [
+                    "mapping profile %s unsupported for %d node(s): %s" % (mapping_profile, n, reason)
+                ]
+            selected_ids = list(v.get("logical_to_physical") or [])
+            profile_used = v.get("variant") or mapping_profile
+    else:
+        # legacy/default automatic selection: first N verified usable nodes.
+        if len(usable) < n:
+            reasons = {nid: st["reason"] for nid, st in node_states.items() if not st["usable_auto"]}
+            info = {"mode": "auto", "requested_nodes": n, "online": online, "online_known": online_known,
+                    "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
+                    "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                    "usable_nodes_auto": usable_ids, "node_states": node_states,
+                    "logical_to_physical": [], "mapping_profile": profile_used,
+                    "topology_verified": False}
+            return [], [], _inventory_topology_info(inv, info), [
+                "insufficient verified usable NUMA nodes: requested %d, have %d usable (%s); excluded/uncertain=%s" %
+                (n, len(usable), usable_ids, reasons)
+            ]
+        selected_ids = usable_ids[:n]
+
+    if selected_ids is None or len(selected_ids) != n:
+        info = {"mode": "auto", "requested_nodes": n, "online": online, "online_known": online_known,
+                "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
+                "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                "usable_nodes_auto": usable_ids, "node_states": node_states,
+                "logical_to_physical": [], "mapping_profile": profile_used,
+                "topology_verified": False}
+        return [], [], _inventory_topology_info(inv, info), [
+            "could not resolve %d-node mapping (profile=%s)" % (n, profile_used)
         ]
-    picked = usable[:n]
-    logical_to_phys = [nid for nid, _ in picked]
-    per_node_cpus = [cpus for _, cpus in picked]
+
+    # Reuse verified usable-node CPU sets (same validation authority).
+    per_node_cpus = [list(usable_cpu_map[nid]) for nid in selected_ids if nid in usable_cpu_map]
+    if len(per_node_cpus) != len(selected_ids):
+        info = {"mode": "auto", "requested_nodes": n, "online": online, "online_known": online_known,
+                "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
+                "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
+                "usable_nodes_auto": usable_ids, "node_states": node_states,
+                "logical_to_physical": [], "mapping_profile": profile_used,
+                "topology_verified": False}
+        return [], [], _inventory_topology_info(inv, info), [
+            "resolved mapping contains node(s) not in verified usable set: %s" % (selected_ids,)
+        ]
+
     info = {"mode": "auto", "online": online, "online_known": online_known,
             "allowed_cpus_count": len(allowed_cpus), "cpus_allowed_known": cpus_known,
             "mems_allowed_known": mems_known, "mems_allowed": allowed_mems,
-            "usable_nodes_auto": [nid for nid,_ in usable],
-            "logical_to_physical": logical_to_phys, "node_states": node_states,
-            "topology_verified": True, "no_pin": bool(no_pin)}
-    return logical_to_phys, per_node_cpus, info, []
+            "usable_nodes_auto": usable_ids,
+            "logical_to_physical": list(selected_ids), "node_states": node_states,
+            "topology_verified": True, "no_pin": bool(no_pin),
+            "mapping_profile": profile_used,
+            "requested_nodes": n}
+    return list(selected_ids), per_node_cpus, _inventory_topology_info(inv, info), []
+
+
+def resolve_mapping_plan(requested_nodes, profiles=None, phys_nodes_spec=None, no_pin=False,
+                         sysfs_root="/sys", proc_root="/proc"):
+    """Resolve concrete mapping variants for planning/preflight.
+
+    Returns (variants, inventory, errors). Each variant includes support/reason
+    and, when supported, a fully validated concrete mapping (validated via the
+    same explicit-mapping path as trials).
+    """
+    if _topology_mod is None:
+        return [], None, ["topology module unavailable"]
+    inv = discover_topology_inventory(sysfs_root=sysfs_root, proc_root=proc_root)
+    if profiles is None:
+        profiles = ["cross_socket_spread", "intra_socket", "all_nodes"]
+    errors = []
+
+    if phys_nodes_spec:
+        # Explicit concrete mapping (single variant). Validate via resolve_topology.
+        l2p, cpus, info, terr = resolve_topology(
+            requested_nodes, phys_nodes_spec=phys_nodes_spec, no_pin=no_pin,
+            sysfs_root=sysfs_root, proc_root=proc_root)
+        variant = {
+            "profile": "explicit",
+            "variant": "explicit",
+            "logical_node_count": len(l2p) if l2p else requested_nodes,
+            "logical_to_physical": l2p,
+            "supported": len(terr) == 0 and bool(l2p),
+            "reason": "; ".join(terr) if terr else None,
+            "per_node_cpus": cpus,
+            "topology_info": info,
+            "mapping_provenance": _topology_mod.build_mapping_provenance(
+                inv or {}, "explicit", "explicit", l2p, cpus, no_pin, info) if l2p else None,
+        }
+        if terr:
+            errors.extend(terr)
+        return [variant], inv, errors
+
+    # Auto/profile-based: determine verified usable set through resolve_topology's
+    # validation authority by probing for max available? easier: use resolve_topology
+    # to get usable_nodes_auto and node states via a request for 1 (or requested) then
+    # select from usable set; but we need the usable CPU map. Call resolve_topology in
+    # a way that exposes usable info: it already computes usable list internally.
+    # Request the logical count to get usable set in info regardless of success? no.
+    # Instead, derive usable set by trying to validate each online node? better reuse
+    # resolve_topology's logic by calling it repeatedly is wrong; so compute usable via
+    # a helper path: ask for n=1 and inspect errors/info, or directly compute using
+    # same helpers (they are the authoritative ones here).
+    online, online_known = _online_nodes(sysfs_root=sysfs_root)
+    allowed_cpus, cpus_known = _allowed_cpus(proc_root=proc_root)
+    allowed_cpus_set = set(allowed_cpus)
+    allowed_mems, mems_known = _allowed_mems(proc_root=proc_root)
+    allowed_mems_set = set(allowed_mems)
+    usable = []
+    if online_known and mems_known:
+        for nid in online:
+            mstate = _node_mem_state(nid, sysfs_root=sysfs_root)
+            if nid not in allowed_mems_set or mstate in ("none", "unknown"):
+                continue
+            cpus, cpu_list_known = _node_cpus(nid, sysfs_root=sysfs_root)
+            if not cpu_list_known or not cpus:
+                continue
+            if not cpus_known:
+                continue
+            cpus_f = [c for c in cpus if c in allowed_cpus_set]
+            if not cpus_f:
+                continue
+            usable.append((nid, cpus_f))
+    usable_ids = [nid for nid, _ in usable]
+    usable_cpu_map = {nid: cpus for nid, cpus in usable}
+
+    n = max(1, requested_nodes)
+    candidates = _topology_mod.select_mapping_profiles(inv or {}, n, usable_ids, requested_profiles=profiles)
+    out = []
+    for cand in candidates:
+        if not cand.get("supported"):
+            out.append({**cand, "per_node_cpus": [], "topology_info": None, "mapping_provenance": None})
+            continue
+        phys = list(cand.get("logical_to_physical") or [])
+        spec = ",".join(str(x) for x in phys)
+        # Validate concrete mapping with the SAME authority/path trials use.
+        l2p, cpus, info, terr = resolve_topology(
+            n, phys_nodes_spec=spec, no_pin=no_pin, sysfs_root=sysfs_root, proc_root=proc_root)
+        supported = (len(terr) == 0 and l2p == phys)
+        reason = cand.get("reason")
+        if terr:
+            reason = "; ".join(terr)
+        prov = _topology_mod.build_mapping_provenance(inv or {}, cand.get("profile"), cand.get("variant"), l2p or phys, cpus or [usable_cpu_map.get(x, []) for x in phys], no_pin, info)
+        out.append({
+            **cand,
+            "logical_to_physical": l2p or phys,
+            "supported": supported,
+            "reason": reason,
+            "per_node_cpus": cpus or [list(usable_cpu_map.get(x, [])) for x in phys],
+            "topology_info": info,
+            "mapping_provenance": prov,
+            "validation_errors": terr,
+        })
+    return out, inv, errors
 
 
 def build_ctypes_topology(logical_to_phys, per_node_cpus):
@@ -826,6 +1062,12 @@ def main():
     ap.add_argument("--nodes", type=int, default=2)
     ap.add_argument("--phys-nodes", default=None,
                     help="explicit physical NUMA node ids, comma-separated (logical order); duplicates rejected")
+    ap.add_argument("--mapping-profile", default=None,
+                    help="topology-aware mapping profile for automatic selection (cross_socket_spread, intra_socket:socketN, all_nodes) or provenance label")
+    ap.add_argument("--mapping-variant", default=None,
+                    help="mapping variant identifier for provenance/reporting")
+    ap.add_argument("--sysfs-root", default="/sys", help="sysfs root for topology discovery (testing)")
+    ap.add_argument("--proc-root", default="/proc", help="proc root for topology discovery (testing)")
     ap.add_argument("--base-quantum", type=int, default=2 * 1024 * 1024)
     ap.add_argument("--max-backlog", type=int, default=64 * 1024 * 1024)
     ap.add_argument("--max-reservation", type=int, default=0)
@@ -861,7 +1103,13 @@ def main():
     lib = load_lib()
     policy = POLICY_MAP[args.candidate]
 
-    logical_to_phys, per_node_cpus, topo_info, topo_errors = resolve_topology(args.nodes, args.phys_nodes, no_pin=bool(args.no_pin))
+    _map_profile = args.mapping_profile
+    if args.phys_nodes and not _map_profile:
+        _map_profile = "explicit"
+    logical_to_phys, per_node_cpus, topo_info, topo_errors = resolve_topology(
+        args.nodes, args.phys_nodes, no_pin=bool(args.no_pin),
+        sysfs_root=args.sysfs_root, proc_root=args.proc_root,
+        mapping_profile=(None if args.phys_nodes else _map_profile))
     if topo_errors:
         os.close(fd)
         raise SystemExit("topology resolution failed: " + "; ".join(topo_errors))
@@ -869,6 +1117,7 @@ def main():
     if n < 1 or n > DI_MAX_NODES:
         os.close(fd)
         raise SystemExit("invalid resolved node count %d" % n)
+    _mapping_variant = args.mapping_variant or topo_info.get("mapping_profile") or _map_profile or ("explicit" if args.phys_nodes else "auto")
 
     params = DiPolicyParams()
     params.base_quantum = args.base_quantum
@@ -965,6 +1214,49 @@ def main():
         "consumer_kernel_id": int(params.consumer_kernel),
         "note": "Comparable only among dist_ingest_experimental candidates run with same consumers/work units/measurement boundaries and identical consumer kernel/params. Production forkrun results, if any, are separate reference only.",
     }
+    _inv = topo_info.get("inventory") if isinstance(topo_info, dict) else None
+    if _inv is None and _topology_mod is not None:
+        try:
+            _inv = discover_topology_inventory(sysfs_root=args.sysfs_root, proc_root=args.proc_root)
+        except Exception:
+            _inv = None
+    _map_profile_out = _map_profile or topo_info.get("mapping_profile") or ("explicit" if args.phys_nodes else "auto")
+    if _topology_mod is not None and _inv is not None:
+        try:
+            mapping_provenance = _topology_mod.build_mapping_provenance(
+                _inv, _map_profile_out, _mapping_variant, logical_to_phys,
+                per_node_cpus, bool(args.no_pin), topo_info, affinity_valid=affinity_valid)
+        except Exception:
+            mapping_provenance = {
+                "mapping_profile": _map_profile_out,
+                "mapping_variant": _mapping_variant,
+                "logical_to_physical": logical_to_phys,
+                "logical_to_physical_map": {str(i): nid for i, nid in enumerate(logical_to_phys)},
+                "numa_node_to_socket": {},
+                "per_node_cpu_lists": {},
+                "pairwise_numa_distances": {"complete": False, "pairs": {}},
+                "spans_sockets": None,
+                "all_requested_affinity_roles_verified": affinity_valid,
+                "topology_facts_unavailable": list((topo_info or {}).get("topology_unknowns") or []),
+                "provenance_error": "mapping_provenance_build_failed",
+            }
+    else:
+        mapping_provenance = {
+            "mapping_profile": _map_profile_out,
+            "mapping_variant": _mapping_variant,
+            "logical_to_physical": logical_to_phys,
+            "logical_to_physical_map": {str(i): nid for i, nid in enumerate(logical_to_phys)},
+            "numa_node_to_socket": {},
+            "per_node_cpu_lists": {str(nid): {"logical_node_index": i, "physical_node": nid,
+                                  "selected_cpus_for_pinning": list(per_node_cpus[i]) if i < len(per_node_cpus) else [],
+                                  "pinning_requested": not bool(args.no_pin)}
+                                   for i, nid in enumerate(logical_to_phys)},
+            "pairwise_numa_distances": {"complete": False, "pairs": {}},
+            "spans_sockets": None,
+            "all_requested_affinity_roles_verified": affinity_valid,
+            "topology_facts_unavailable": list((topo_info or {}).get("topology_unknowns") or ["inventory_unavailable"]),
+            "no_pin": bool(args.no_pin),
+        }
     out = {
         "candidate": args.candidate,
         "engine_model": engine_model,
@@ -1014,6 +1306,7 @@ def main():
             "strict_mbind": bool(args.strict_mbind),
             "per_node_cpus": per_node_cpus,
         },
+        "mapping_provenance": mapping_provenance,
         "placement_semantics": {
             "mbind_policy": "MPOL_PREFERRED requested; mbind_policy_applied reflects syscall success only, not physical placement proof",
             "mbind_policy_applied_meaning": "compatibility field: true only when >=1 policy application requested and every requested application succeeded (not merely any)",

@@ -419,7 +419,18 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
         if spec.get("prefer_hugepage"):
             cmd += ["--prefer-hugepage"]
         if spec.get("phys_nodes"):
-            cmd += ["--phys-nodes", str(spec.get("phys_nodes"))]
+            pn = spec.get("phys_nodes")
+            if isinstance(pn, (list, tuple)):
+                pn = ",".join(str(x) for x in pn)
+            cmd += ["--phys-nodes", str(pn)]
+        if spec.get("mapping_profile"):
+            cmd += ["--mapping-profile", str(spec.get("mapping_profile"))]
+        if spec.get("mapping_variant"):
+            cmd += ["--mapping-variant", str(spec.get("mapping_variant"))]
+        if spec.get("sysfs_root"):
+            cmd += ["--sysfs-root", str(spec.get("sysfs_root"))]
+        if spec.get("proc_root"):
+            cmd += ["--proc-root", str(spec.get("proc_root"))]
         if spec.get("consumer_kernel") is not None:
             cmd += ["--consumer-kernel", str(spec.get("consumer_kernel"))]
         if spec.get("strict_affinity"):

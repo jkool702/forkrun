@@ -183,6 +183,7 @@ class TestReportDist(unittest.TestCase):
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             self.assertIn("1/2", text)
+            self.assertIn("| sc | legacy | fixed_faa | 2 |", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -210,7 +211,7 @@ class TestReportDist(unittest.TestCase):
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # only trial 1 is performance-valid: median engine wall 2.000, throughput 0.001 MB/s
-            self.assertIn("| sc | fixed_faa | 3 | 3/3 | 1/3 | 1/3 | 0.001 | 2.000 |", text)
+            self.assertIn("| sc | legacy | fixed_faa | 3 | 3/3 | 1/3 | 1/3 | 0.001 | 2.000 |", text)
             self.assertIn("func-but-perf-invalid/unknown=2", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -231,7 +232,7 @@ class TestReportDist(unittest.TestCase):
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             self.assertIn("NO PERFORMANCE-VALID TRIALS", text)
             # headline performance medians must not substitute functional values
-            self.assertIn("| sc | fixed_faa | 1 | 1/1 | 0/1 | 0/1 | n/a | n/a |", text)
+            self.assertIn("| sc | legacy | fixed_faa | 1 | 1/1 | 0/1 | 0/1 | n/a | n/a |", text)
             # functional-but-perf-invalid/unknown trial retained in detail with raw throughput info
             self.assertIn("engine_wall=1.500000", text)
             self.assertIn("valid[func=true perf=unknown", text)
@@ -257,7 +258,7 @@ class TestReportDist(unittest.TestCase):
             self.assertIn("MIXED KERNELS (full_byte_scan/none)", text)
             self.assertIn("not comparable", text.lower())
             # no headline performance medians when mixed kernels not comparable
-            self.assertIn("| sc | fixed_faa | 2 | 2/2 | 2/2 | 2/2 | n/a | n/a |", text)
+            self.assertIn("| sc | legacy | fixed_faa | 2 | 2/2 | 2/2 | 2/2 | n/a | n/a |", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

@@ -70,8 +70,11 @@ def main():
     for o in outcomes:
         scen = o.get("scenario") or o.get("case", "").split("__")[0]
         cand = o.get("candidate") or (o.get("case", "").split("__")[-1] if "__" in o.get("case", "") else "unknown")
+        mapping_id = o.get("mapping_id") or o.get("mapping_variant") or "legacy"
         mpath = os.path.join(args.campaign, o.get("manifest", ""))
-        rec = {"scenario": scen, "candidate": cand, "trial": o.get("trial"), "status": o.get("status"),
+        rec = {"scenario": scen, "candidate": cand, "mapping_id": mapping_id,
+               "mapping_profile": o.get("mapping_profile"),
+               "trial": o.get("trial"), "status": o.get("status"),
                "manifest_path": mpath, "invalid": False}
 
         def mark_invalid(reason):
@@ -81,14 +84,14 @@ def main():
 
         if o.get("status") != "ok" or not os.path.isfile(mpath):
             mark_invalid("trial status %s or missing manifest" % o.get("status"))
-            groups[(scen, cand)].append(rec)
+            groups[(scen, rec.get("mapping_id") or "legacy", cand)].append(rec)
             continue
 
         try:
             m = load_json(mpath)
         except Exception as e:
             mark_invalid("manifest unreadable: %s" % e)
-            groups[(scen, cand)].append(rec)
+            groups[(scen, rec.get("mapping_id") or "legacy", cand)].append(rec)
             continue
 
         rec["manifest"] = m
@@ -120,6 +123,14 @@ def main():
             rec["v_mempolicy"] = safe_validity(dr, "memory_policy_application", "placement_policy_valid")
             rec["v_placement_obs"] = safe_validity(dr, "placement_observed", "placement_observed_all_sampled_on_target")
             rec["v_numa_placement"] = safe_validity(dr, "numa_placement")
+            # mapping identity/provenance (checkpoint 1)
+            mp = dr.get("mapping_provenance") or {}
+            if rec.get("mapping_id") in (None, "legacy"):
+                rec["mapping_id"] = mp.get("mapping_variant") or mp.get("mapping_profile") or rec.get("mapping_id") or "legacy"
+            rec["mapping_profile"] = rec.get("mapping_profile") or mp.get("mapping_profile")
+            rec["mapping_variant"] = mp.get("mapping_variant")
+            rec["logical_to_physical"] = mp.get("logical_to_physical") or safe_get(dr, "topology", "logical_to_physical")
+            rec["spans_sockets"] = mp.get("spans_sockets")
         else:
             rec["dist"] = None
             rec["is_dist_engine"] = False
@@ -136,11 +147,14 @@ def main():
             rec["v_mempolicy"] = None
             rec["v_placement_obs"] = None
             rec["v_numa_placement"] = None
+            if rec.get("mapping_id") in (None, "legacy"):
+                spec = m.get("spec") or {}
+                rec["mapping_id"] = spec.get("mapping_variant") or spec.get("mapping_id") or rec.get("mapping_id") or "legacy"
 
         if not rec.get("complete", False):
             mark_invalid("incomplete: %s" % rec.get("incomplete_reasons_manifest"))
 
-        groups[(scen, cand)].append(rec)
+        groups[(scen, rec.get("mapping_id") or "legacy", cand)].append(rec)
 
     lines = []
     lines.append("# Distributed Ingestion Prototype — Comparative Campaign Report")
@@ -172,108 +186,125 @@ def main():
                  "Headline performance medians use performance-valid trials only; full-byte-scan and `none` results are not combined into one comparable summary.")
     lines.append("")
 
-    scenarios = sorted({s for s, c in groups.keys()})
+    scenarios = sorted({s for s, m, c in groups.keys()})
+    mappings = sorted({m for s, m, c in groups.keys()})
     candidates = ["centralized_ingest", "fixed_faa", "local_adaptive", "relative_adaptive", "production_ref", "control"]
+
+    if camp.get("unsupported_mappings"):
+        lines.append("## Unsupported mappings (reported explicitly; not run)")
+        lines.append("")
+        for um in camp.get("unsupported_mappings") or []:
+            lines.append("- profile=%s variant=%s nodes=%s scenarios=%s reason=%s" % (
+                um.get("mapping_profile"), um.get("mapping_variant"), um.get("logical_node_count"),
+                um.get("applies_to_scenarios"), um.get("reason")))
+        lines.append("")
 
     lines.append("## Comparative summary (headline performance medians from performance-valid trials only)")
     lines.append("")
-    header = ("| scenario | candidate | attempted | func complete | perf valid | numa-place valid | "
+    header = ("| scenario | mapping | candidate | attempted | func complete | perf valid | numa-place valid | "
               "throughput (MB/s) | engine wall s | harness wall s | reservations | kernel | scanned/consumed | notes |")
-    sep = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"
+    sep = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"
     lines.append(header); lines.append(sep)
     for scen in scenarios:
-        for cand in candidates:
-            recs = groups.get((scen, cand), [])
-            if not recs:
-                continue
-            total = len(recs)
-            # complete/functionally correct trials (readable, complete, functionally correct)
-            func_valids = [r for r in recs if (not r.get("invalid")) and r.get("correct_functional") is True and r.get("complete") is True]
-            # performance-valid trials only for headline performance stats
-            perf_valids = [r for r in func_valids if r.get("v_perf") is True]
-            numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
+        for map_id in mappings:
+            for cand in candidates:
+                recs = groups.get((scen, map_id, cand), [])
+                if not recs:
+                    continue
+                total = len(recs)
+                # complete/functionally correct trials (readable, complete, functionally correct)
+                func_valids = [r for r in recs if (not r.get("invalid")) and r.get("correct_functional") is True and r.get("complete") is True]
+                # performance-valid trials only for headline performance stats
+                perf_valids = [r for r in func_valids if r.get("v_perf") is True]
+                numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
 
-            def med(key, src):
-                vals = [r.get(key) for r in src if r.get(key) is not None]
-                return statistics.median(vals) if vals else None
+                def med(key, src):
+                    vals = [r.get(key) for r in src if r.get(key) is not None]
+                    return statistics.median(vals) if vals else None
 
-            kernels_func = sorted({str(r.get("consumer_kernel")) for r in func_valids if r.get("consumer_kernel") is not None})
-            kernels_perf = sorted({str(r.get("consumer_kernel")) for r in perf_valids if r.get("consumer_kernel") is not None})
-            kernel = ",".join(kernels_func) if kernels_func else "n/a"
-            mixed_kernel_func = len(kernels_func) > 1
-            mixed_kernel_perf = len(kernels_perf) > 1
-            # do not combine full-scan and no-kernel into one comparable campaign summary
-            noncomparable_kernel_mix = (("full_byte_scan" in kernels_func and "none" in kernels_func) or
-                                        ("full_byte_scan" in kernels_perf and "none" in kernels_perf))
+                kernels_func = sorted({str(r.get("consumer_kernel")) for r in func_valids if r.get("consumer_kernel") is not None})
+                kernels_perf = sorted({str(r.get("consumer_kernel")) for r in perf_valids if r.get("consumer_kernel") is not None})
+                kernel = ",".join(kernels_func) if kernels_func else "n/a"
+                mixed_kernel_func = len(kernels_func) > 1
+                mixed_kernel_perf = len(kernels_perf) > 1
+                # do not combine full-scan and no-kernel into one comparable campaign summary
+                noncomparable_kernel_mix = (("full_byte_scan" in kernels_func and "none" in kernels_func) or
+                                            ("full_byte_scan" in kernels_perf and "none" in kernels_perf))
 
-            perf_for_medians = [] if noncomparable_kernel_mix else perf_valids
-            thr = med("throughput_bps", perf_for_medians)
-            thr_mb = (thr / 1e6) if thr else None
-            wall = med("engine_wall_s", perf_for_medians)
-            hwall = med("harness_wall_s", func_valids)  # diagnostic harness duration
-            resv = med("reservations", perf_for_medians)
+                perf_for_medians = [] if noncomparable_kernel_mix else perf_valids
+                thr = med("throughput_bps", perf_for_medians)
+                thr_mb = (thr / 1e6) if thr else None
+                wall = med("engine_wall_s", perf_for_medians)
+                hwall = med("harness_wall_s", func_valids)  # diagnostic harness duration
+                resv = med("reservations", perf_for_medians)
 
-            scan_s = "n/a"
-            if not noncomparable_kernel_mix and perf_for_medians:
-                scan_vals = [r.get("scan_bytes") for r in perf_for_medians if r.get("scan_bytes") is not None]
-                cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in perf_for_medians if r.get("dist")]
-                if scan_vals or cons_vals:
-                    s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
-                    c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
-                    scan_s = "%s/%s" % (s_med, c_med)
-            elif func_valids and not noncomparable_kernel_mix:
-                # show evidence context from functionally-correct trials even if no perf-valid headline medians
-                scan_vals = [r.get("scan_bytes") for r in func_valids if r.get("scan_bytes") is not None]
-                cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in func_valids if r.get("dist")]
-                if scan_vals or cons_vals:
-                    s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
-                    c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
-                    scan_s = "%s/%s" % (s_med, c_med)
+                scan_s = "n/a"
+                if not noncomparable_kernel_mix and perf_for_medians:
+                    scan_vals = [r.get("scan_bytes") for r in perf_for_medians if r.get("scan_bytes") is not None]
+                    cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in perf_for_medians if r.get("dist")]
+                    if scan_vals or cons_vals:
+                        s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
+                        c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
+                        scan_s = "%s/%s" % (s_med, c_med)
+                elif func_valids and not noncomparable_kernel_mix:
+                    # show evidence context from functionally-correct trials even if no perf-valid headline medians
+                    scan_vals = [r.get("scan_bytes") for r in func_valids if r.get("scan_bytes") is not None]
+                    cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in func_valids if r.get("dist")]
+                    if scan_vals or cons_vals:
+                        s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
+                        c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
+                        scan_s = "%s/%s" % (s_med, c_med)
 
-            notes = []
-            bad = total - len([r for r in recs if not r.get("invalid")])
-            if bad:
-                notes.append("failed/invalid/incomplete=%d" % bad)
-            if len(func_valids) == 0:
-                notes.append("NO FUNCTIONALLY-VALID TRIALS")
-            if len(perf_valids) == 0:
-                notes.append("NO PERFORMANCE-VALID TRIALS")
-            if noncomparable_kernel_mix:
-                notes.append("MIXED KERNELS (full_byte_scan/none) — not comparable")
-            perf_invalid_or_unknown = [r for r in func_valids if r.get("v_perf") is not True]
-            if perf_invalid_or_unknown:
-                notes.append("func-but-perf-invalid/unknown=%d" % len(perf_invalid_or_unknown))
-            lines.append("| %s | %s | %d | %d/%d | %d/%d | %d/%d | %s | %s | %s | %s | %s | %s | %s |" % (
-                scen, cand, total, len(func_valids), total, len(perf_valids), total,
-                numa_true, total, fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
+                notes = []
+                bad = total - len([r for r in recs if not r.get("invalid")])
+                if bad:
+                    notes.append("failed/invalid/incomplete=%d" % bad)
+                if len(func_valids) == 0:
+                    notes.append("NO FUNCTIONALLY-VALID TRIALS")
+                if len(perf_valids) == 0:
+                    notes.append("NO PERFORMANCE-VALID TRIALS")
+                if noncomparable_kernel_mix:
+                    notes.append("MIXED KERNELS (full_byte_scan/none) — not comparable")
+                perf_invalid_or_unknown = [r for r in func_valids if r.get("v_perf") is not True]
+                if perf_invalid_or_unknown:
+                    notes.append("func-but-perf-invalid/unknown=%d" % len(perf_invalid_or_unknown))
+                lines.append("| %s | %s | %s | %d | %d/%d | %d/%d | %d/%d | %s | %s | %s | %s | %s | %s | %s |" % (
+                    scen, map_id, cand, total, len(func_valids), total, len(perf_valids), total,
+                    numa_true, total, fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
     lines.append("")
 
     lines.append("## Dist-candidate validity and workload evidence (per trial)")
     lines.append("")
     for scen in scenarios:
-        for cand in candidates:
-            if cand in ("control", "production_ref"):
-                continue
-            recs = groups.get((scen, cand), [])
-            if not recs:
-                continue
-            lines.append("### %s / %s (attempted=%d)" % (scen, cand, len(recs)))
-            lines.append("")
-            for r in recs:
-                dr = r.get("dist")
-                if not dr:
-                    lines.append("- trial %s: invalid=%s reasons=%s" % (r.get("trial"), r.get("invalid"), r.get("invalid_reasons")))
+        for map_id in mappings:
+            for cand in candidates:
+                if cand in ("control", "production_ref"):
                     continue
-                lines.append("- trial %s: complete=%s invalid=%s kernel=%s scanned=%s consumed=%s scan_ok=%s "
-                             "engine_wall=%.6fs harness_wall=%s valid[func=%s perf=%s affinity=%s mempolicy=%s placement_obs=%s numa=%s] "
-                             "correct=%s overlap=%s lost=%s dup=%s reservations=%s rc=%s" % (
-                    r.get("trial"), r.get("complete"), r.get("invalid"),
-                    r.get("consumer_kernel"), r.get("scan_bytes"), dr.get("total_consumed"), fmt_tri(r.get("scan_equals_consumed")),
-                    float(dr.get("wall_seconds") or 0.0), fmt(r.get("harness_wall_s")),
-                    fmt_tri(r.get("v_functional")), fmt_tri(r.get("v_perf")), fmt_tri(r.get("v_affinity")),
-                    fmt_tri(r.get("v_mempolicy")), fmt_tri(r.get("v_placement_obs")), fmt_tri(r.get("v_numa_placement")),
-                    dr.get("correct"), dr.get("overlap_detected"), dr.get("lost_detected"), dr.get("duplicate_detected"),
-                    dr.get("reservations_total"), dr.get("rc")))
+                recs = groups.get((scen, map_id, cand), [])
+                if not recs:
+                    continue
+                lines.append("### %s / %s / %s (attempted=%d)" % (scen, map_id, cand, len(recs)))
+                lines.append("")
+                for r in recs:
+                    dr = r.get("dist")
+                    if not dr:
+                        lines.append("- trial %s: invalid=%s reasons=%s" % (r.get("trial"), r.get("invalid"), r.get("invalid_reasons")))
+                        continue
+                    lines.append("- trial %s: complete=%s invalid=%s kernel=%s scanned=%s consumed=%s scan_ok=%s "
+                                 "engine_wall=%.6fs harness_wall=%s valid[func=%s perf=%s affinity=%s mempolicy=%s placement_obs=%s numa=%s] "
+                                 "correct=%s overlap=%s lost=%s dup=%s reservations=%s rc=%s" % (
+                        r.get("trial"), r.get("complete"), r.get("invalid"),
+                        r.get("consumer_kernel"), r.get("scan_bytes"), dr.get("total_consumed"), fmt_tri(r.get("scan_equals_consumed")),
+                        float(dr.get("wall_seconds") or 0.0), fmt(r.get("harness_wall_s")),
+                        fmt_tri(r.get("v_functional")), fmt_tri(r.get("v_perf")), fmt_tri(r.get("v_affinity")),
+                        fmt_tri(r.get("v_mempolicy")), fmt_tri(r.get("v_placement_obs")), fmt_tri(r.get("v_numa_placement")),
+                        dr.get("correct"), dr.get("overlap_detected"), dr.get("lost_detected"), dr.get("duplicate_detected"),
+                        dr.get("reservations_total"), dr.get("rc")))
+                    mpv = dr.get("mapping_provenance") or {}
+                    if mpv:
+                        lines.append("  - mapping: profile=%s variant=%s phys=%s spans_sockets=%s affinity_verified=%s" % (
+                            mpv.get("mapping_profile"), mpv.get("mapping_variant"), mpv.get("logical_to_physical"),
+                            mpv.get("spans_sockets"), fmt_tri(mpv.get("all_requested_affinity_roles_verified"))))
                 for n in dr.get("nodes", []):
                     pl = n.get("placement", {})
                     mp = n.get("memory_policy", {})
@@ -305,8 +336,8 @@ def main():
     else:
         for r in invalid:
             reasons = r.get("invalid_reasons") or [r.get("invalid_reason", "invalid")]
-            lines.append("- %s / %s trial %s: %s (%s)" % (
-                r.get("scenario"), r.get("candidate"), r.get("trial"),
+            lines.append("- %s / %s / %s trial %s: %s (%s)" % (
+                r.get("scenario"), r.get("mapping_id"), r.get("candidate"), r.get("trial"),
                 "; ".join([str(x) for x in reasons]), r.get("manifest_path")))
     lines.append("")
 
