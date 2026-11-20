@@ -102,6 +102,7 @@ def main():
         cr = m.get("child_report") or {}
         rec["bytes"] = cr.get("completed_bytes")
         rec["rec_per_s"] = cr.get("rec_per_s")
+        spec = m.get("spec") or {}
         dr = m.get("dist_result")
         if dr:
             rec["dist"] = dr
@@ -123,6 +124,12 @@ def main():
             rec["v_mempolicy"] = safe_validity(dr, "memory_policy_application", "placement_policy_valid")
             rec["v_placement_obs"] = safe_validity(dr, "placement_observed", "placement_observed_all_sampled_on_target")
             rec["v_numa_placement"] = safe_validity(dr, "numa_placement")
+            # C2: trial class / measurement integrity / linkage
+            mi = dr.get("measurement_integrity") or {}
+            rec["trial_class"] = dr.get("trial_class") or safe_get(dr, "comparability", "trial_class") or spec.get("trial_class") or "performance"
+            rec["placement_sampling"] = mi.get("placement_sampling") or safe_get(dr, "comparability", "placement_sampling") or spec.get("placement_sampling") or "off"
+            rec["linked_performance_trial"] = dr.get("linked_performance_trial") or mi.get("linked_performance_trial") or spec.get("linked_performance_trial")
+            rec["timing_tainted_by_in_run_sampling"] = mi.get("timing_tainted_by_in_run_sampling")
             # mapping identity/provenance (checkpoint 1)
             mp = dr.get("mapping_provenance") or {}
             if rec.get("mapping_id") in (None, "legacy"):
@@ -134,6 +141,10 @@ def main():
         else:
             rec["dist"] = None
             rec["is_dist_engine"] = False
+            rec["trial_class"] = spec.get("trial_class") or "performance"
+            rec["placement_sampling"] = spec.get("placement_sampling") or "off"
+            rec["linked_performance_trial"] = spec.get("linked_performance_trial")
+            rec["timing_tainted_by_in_run_sampling"] = None
             rec["engine_wall_s"] = rec.get("map_s") or rec.get("wall_s_harness")
             rec["harness_wall_s"] = m.get("wall_s")
             rec["correct_functional"] = bool(rec.get("complete", False))
@@ -148,7 +159,6 @@ def main():
             rec["v_placement_obs"] = None
             rec["v_numa_placement"] = None
             if rec.get("mapping_id") in (None, "legacy"):
-                spec = m.get("spec") or {}
                 rec["mapping_id"] = spec.get("mapping_variant") or spec.get("mapping_id") or rec.get("mapping_id") or "legacy"
 
         if not rec.get("complete", False):
@@ -183,7 +193,9 @@ def main():
     lines.append("> Validity dimensions are separate: functional correctness, performance-measurement, affinity, "
                  "memory-policy application, observed placement, and overall NUMA-placement. "
                  "`unknown` is distinct from `false`. `manifest.complete`/functional correctness is not all-validity. "
-                 "Headline performance medians use performance-valid trials only; full-byte-scan and `none` results are not combined into one comparable summary.")
+                 "Headline performance medians use performance-valid trials only; full-byte-scan and `none` results are not combined into one comparable summary. "
+                 "C2: performance trials (`placement_sampling=off`, trial_class=performance) are isolated from in-run move_pages sampling overhead; "
+                 "placement-validation experiments (`placement_sampling=on`, trial_class=placement_validation) are distinct, linked experiments and must not be mixed into performance headline statistics.")
     lines.append("")
 
     scenarios = sorted({s for s, m, c in groups.keys()})
@@ -212,8 +224,12 @@ def main():
                 if not recs:
                     continue
                 total = len(recs)
+                # C2: placement-validation experiments are distinct from performance trials and
+                # must not be mixed into performance headline statistics.
+                perf_class_recs = [r for r in recs if (r.get("trial_class") or "performance") == "performance"]
+                placement_class_recs = [r for r in recs if (r.get("trial_class") or "performance") == "placement_validation"]
                 # complete/functionally correct trials (readable, complete, functionally correct)
-                func_valids = [r for r in recs if (not r.get("invalid")) and r.get("correct_functional") is True and r.get("complete") is True]
+                func_valids = [r for r in perf_class_recs if (not r.get("invalid")) and r.get("correct_functional") is True and r.get("complete") is True]
                 # performance-valid trials only for headline performance stats
                 perf_valids = [r for r in func_valids if r.get("v_perf") is True]
                 numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
@@ -256,22 +272,48 @@ def main():
                         scan_s = "%s/%s" % (s_med, c_med)
 
                 notes = []
-                bad = total - len([r for r in recs if not r.get("invalid")])
+                bad = len(perf_class_recs) - len([r for r in perf_class_recs if not r.get("invalid")])
                 if bad:
-                    notes.append("failed/invalid/incomplete=%d" % bad)
+                    notes.append("invalid/incomplete=%d" % bad)
                 if len(func_valids) == 0:
-                    notes.append("NO FUNCTIONALLY-VALID TRIALS")
+                    notes.append("no-functionally-valid-trials")
                 if len(perf_valids) == 0:
-                    notes.append("NO PERFORMANCE-VALID TRIALS")
+                    if noncomparable_kernel_mix:
+                        notes.append("no-comparable-perf-headline (kernel mix)")
+                    else:
+                        notes.append("no-performance-valid-trials")
                 if noncomparable_kernel_mix:
-                    notes.append("MIXED KERNELS (full_byte_scan/none) — not comparable")
+                    notes.append("mixed-kernels-not-comparable")
                 perf_invalid_or_unknown = [r for r in func_valids if r.get("v_perf") is not True]
                 if perf_invalid_or_unknown:
                     notes.append("func-but-perf-invalid/unknown=%d" % len(perf_invalid_or_unknown))
-                lines.append("| %s | %s | %s | %d | %d/%d | %d/%d | %d/%d | %s | %s | %s | %s | %s | %s | %s |" % (
-                    scen, map_id, cand, total, len(func_valids), total, len(perf_valids), total,
-                    numa_true, total, fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
+                if placement_class_recs:
+                    notes.append("placement-validation=%d(distinct,excluded)" % len(placement_class_recs))
+                lines.append("| %s | %s | %s | %d | %d | %d | %d | %s | %s | %s | %s | %s | %s | %s |" % (
+                    scen, map_id, cand, len(perf_class_recs), len(func_valids), len(perf_valids), numa_true,
+                    fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
     lines.append("")
+
+    # C2: placement-validation experiments reported separately (distinct, linked)
+    placement_trials = [r for recs in groups.values() for r in recs if (r.get("trial_class") or "performance") == "placement_validation"]
+    if placement_trials:
+        lines.append("## Placement-validation experiments (distinct from performance trials; not mixed into headline statistics)")
+        lines.append("")
+        lines.append("| scenario | mapping | candidate | trial | linked perf trial | placement sampling | complete | func correct | placement observed | numa placement | notes |")
+        lines.append("|---|---|---|---:|---|---|---|---|---|---|---|")
+        for r in sorted(placement_trials, key=lambda x: (str(x.get("scenario") or ""), str(x.get("mapping_id") or ""), str(x.get("candidate") or ""), int(x.get("trial") or 0))):
+            pnotes = []
+            if r.get("invalid"):
+                pnotes.extend([str(x) for x in (r.get("invalid_reasons") or ["invalid"])])
+            if r.get("timing_tainted_by_in_run_sampling"):
+                pnotes.append("timing-tainted-by-sampling")
+            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                r.get("scenario"), r.get("mapping_id"), r.get("candidate"), fmt(r.get("trial")),
+                r.get("linked_performance_trial") or "n/a", r.get("placement_sampling") or "n/a",
+                fmt_tri(r.get("complete")), fmt_tri(r.get("v_functional")),
+                fmt_tri(r.get("v_placement_obs")), fmt_tri(r.get("v_numa_placement")),
+                "; ".join(pnotes) if pnotes else ""))
+        lines.append("")
 
     lines.append("## Dist-candidate validity and workload evidence (per trial)")
     lines.append("")
@@ -290,10 +332,11 @@ def main():
                     if not dr:
                         lines.append("- trial %s: invalid=%s reasons=%s" % (r.get("trial"), r.get("invalid"), r.get("invalid_reasons")))
                         continue
-                    lines.append("- trial %s: complete=%s invalid=%s kernel=%s scanned=%s consumed=%s scan_ok=%s "
+                    lines.append("- trial %s (class=%s, placement_sampling=%s, linked=%s): complete=%s invalid=%s kernel=%s scanned=%s consumed=%s scan_ok=%s "
                                  "engine_wall=%.6fs harness_wall=%s valid[func=%s perf=%s affinity=%s mempolicy=%s placement_obs=%s numa=%s] "
                                  "correct=%s overlap=%s lost=%s dup=%s reservations=%s rc=%s" % (
-                        r.get("trial"), r.get("complete"), r.get("invalid"),
+                        r.get("trial"), r.get("trial_class"), r.get("placement_sampling"), r.get("linked_performance_trial") or "n/a",
+                        r.get("complete"), r.get("invalid"),
                         r.get("consumer_kernel"), r.get("scan_bytes"), dr.get("total_consumed"), fmt_tri(r.get("scan_equals_consumed")),
                         float(dr.get("wall_seconds") or 0.0), fmt(r.get("harness_wall_s")),
                         fmt_tri(r.get("v_functional")), fmt_tri(r.get("v_perf")), fmt_tri(r.get("v_affinity")),
@@ -347,6 +390,7 @@ def main():
     lines.append("- **Comparable set:** centralized_ingest vs fixed_faa/local_adaptive/relative_adaptive share the same dist_ingest engine, consumers, work units, measurement boundaries, and (per block) consumer kernel/params.")
     lines.append("- **Timing:** dist-engine comparative wall time is `DIST_RESULT.wall_seconds`; harness duration is separate/diagnostic.")
     lines.append("- **Headline performance:** throughput/engine wall-time/reservation medians use performance-valid trials only (not false/unknown performance validity). Functionally-correct but performance-invalid/unknown trials are retained in detailed evidence with raw throughput and validity reasons; `unknown` != `false`.")
+    lines.append("- **Measurement integrity (C2):** performance trials run with `placement_sampling=off` (no in-run move_pages sampling overhead). Placement-validation experiments run with `placement_sampling=on` as distinct, linked trials (timing tainted by sampling) and are excluded from performance headline statistics.")
     lines.append("- **Workload comparability:** full-byte-scan and no-kernel (`none`) results are not combined into one comparable performance summary.")
     lines.append("- **Production reference:** production_ref/control is separate reference only (not apples-to-apples).")
     lines.append("- **Fake/local NUMA:** not evidence of physical locality/scalability. `MPOL_PREFERRED` success is not physical placement proof.")

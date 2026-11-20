@@ -513,8 +513,18 @@ static void di_free_chunk(di_chunk_t *c) {
     c->map_len = 0;
 }
 
-/* Placement sampling: distributed across full usable allocation. */
+/* Placement sampling: distributed across full usable allocation.
+ * C2: in-run sampling (move_pages/syscall path) is enabled only when
+ * P.placement_sampling == 1 (placement-validation experiments). When 0
+ * (performance-isolated default), sampling is not performed so timed
+ * measurement trials incur no treatment-dependent sampling overhead. */
 static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
+    if (!n || !n->eng) return 0;
+    if (n->eng->P.placement_sampling == 0) {
+        /* Performance-isolated: do not invoke move_pages or sampling work in the timed path. */
+        n->m.placement_sampling_not_performed = 1;
+        return 0;
+    }
 #if defined(__linux__) && defined(__NR_move_pages)
     if (!buf || len == 0) {
         n->m.placement_sampling_not_performed = 1;
@@ -572,7 +582,7 @@ static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
     free(addrs); free(status);
     return 0;
 #else
-    (void)n; (void)buf; (void)len;
+    (void)buf; (void)len;
     n->m.placement_sampling_unavailable = 1;
     return 0;
 #endif
@@ -1091,6 +1101,9 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
         n->phys_node = (cfg->phys_nodes ? cfg->phys_nodes[i] : -1);
         n->cpus = (cfg->cpu_lists ? cfg->cpu_lists[i] : NULL);
         n->ncpus = (cfg->cpu_counts ? cfg->cpu_counts[i] : 0);
+        /* C2: performance-isolated runs never perform in-run placement sampling. */
+        if (eng->P.placement_sampling == 0)
+            n->m.placement_sampling_not_performed = 1;
         n->q_cap = 1024;
         n->q = (di_chunk_t *)calloc(n->q_cap, sizeof(di_chunk_t));
         if (!n->q) {

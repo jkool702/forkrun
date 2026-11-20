@@ -58,6 +58,7 @@ class DiPolicyParams(ctypes.Structure):
         ("one_outstanding_per_node", ctypes.c_int),
         ("enable_peer_headroom", ctypes.c_int),
         ("consumer_kernel", ctypes.c_int),
+        ("placement_sampling", ctypes.c_int),
     ]
 
 
@@ -1033,14 +1034,34 @@ def _scan_evidence_valid(consumer_kernel_name, total_consumer_bytes_scanned, tot
     return scanned == 0
 
 
-def _performance_measurement_valid(functional_correct, affinity_valid, consumer_kernel_name, total_consumer_bytes_scanned, total_consumed):
+def _placement_sampling_mode_name(mode):
+    # C2: 0=off/performance-isolated, 1=on/in-run placement-validation (timing tainted)
+    try:
+        m = int(mode)
+    except Exception:
+        m = 0
+    return "on" if m == 1 else "off"
+
+
+def _trial_class_for_sampling(placement_sampling_mode):
+    return "placement_validation" if _placement_sampling_mode_name(placement_sampling_mode) == "on" else "performance"
+
+
+def _performance_measurement_valid(functional_correct, affinity_valid, consumer_kernel_name, total_consumer_bytes_scanned, total_consumed,
+                                   placement_sampling_mode=0):
     """Factual tri-state performance-measurement validity.
-    Requires functional correctness, verified affinity, and evidenced consumer workload.
-    Independent failures (functional false, affinity false, scan evidence false) => false.
-    Missing/indeterminate scan evidence => unknown unless another independent failure already makes it false."""
+    Requires functional correctness, verified affinity, evidenced consumer workload,
+    and measurement integrity (in-run placement sampling off). Independent failures
+    (functional false, affinity false, scan evidence false, sampling-tainted timing)
+    => false. Missing/indeterminate scan evidence => unknown unless another
+    independent failure already makes it false."""
     if not functional_correct:
         return False
     if affinity_valid is False:
+        return False
+    # C2: in-run move_pages sampling imposes treatment-dependent overhead on the timed
+    # candidate; placement-validation experiments are not clean performance measurements.
+    if _placement_sampling_mode_name(placement_sampling_mode) == "on":
         return False
     scan_ok = _scan_evidence_valid(consumer_kernel_name, total_consumer_bytes_scanned, total_consumed)
     if scan_ok is False:
@@ -1086,6 +1107,13 @@ def main():
     ap.add_argument("--consumer-kernel", default="full_byte_scan",
                     choices=["full_byte_scan", "none"],
                     help="deterministic consumer kernel: full_byte_scan (default, memory-touch) or none (explicit opt-out)")
+    ap.add_argument("--placement-sampling", default="off", choices=["on", "off"],
+                    help="in-run placement sampling mode: off (default, performance-isolated; no move_pages overhead in timed path) "
+                         "or on (placement-validation experiment; incurs treatment-dependent overhead and is not a clean performance measurement)")
+    ap.add_argument("--trial-class", default=None, choices=["performance", "placement_validation"],
+                    help="explicit trial/experiment class label (defaults from --placement-sampling: off->performance, on->placement_validation)")
+    ap.add_argument("--linked-performance-trial", default=None,
+                    help="identifier of the corresponding performance trial for a placement-validation experiment (provenance/linkage)")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
@@ -1129,6 +1157,11 @@ def main():
     params.one_outstanding_per_node = 1
     params.enable_peer_headroom = 1
     params.consumer_kernel = 1 if args.consumer_kernel == "full_byte_scan" else 0
+    placement_sampling_mode = 1 if getattr(args, "placement_sampling", "off") == "on" else 0
+    params.placement_sampling = placement_sampling_mode
+    placement_sampling_name = _placement_sampling_mode_name(placement_sampling_mode)
+    trial_class = getattr(args, "trial_class", None) or _trial_class_for_sampling(placement_sampling_mode)
+    linked_performance_trial = getattr(args, "linked_performance_trial", None)
 
     cons_arr = (DiConsumerCfg * n)()
     for i in range(n):
@@ -1182,7 +1215,8 @@ def main():
     _total_scanned = getattr(res, "total_consumer_bytes_scanned", None)
     _total_consumed_res = getattr(res, "total_consumed", None)
     performance_measurement_valid = _performance_measurement_valid(
-        functional_correct, affinity_valid, consumer_kernel_name, _total_scanned, _total_consumed_res)
+        functional_correct, affinity_valid, consumer_kernel_name, _total_scanned, _total_consumed_res,
+        placement_sampling_mode=placement_sampling_mode)
 
     # Overall NUMA-placement validity (tri-state, factual; strict flags affect enforcement, not truth):
     # true requires successful required policy application (true), verified required affinity (true),
@@ -1207,7 +1241,12 @@ def main():
         "centralized_baseline": bool(res.policy == DI_POLICY_CENTRALIZED_INGEST),
         "consumer_kernel": consumer_kernel_name,
         "consumer_kernel_id": int(params.consumer_kernel),
-        "note": "Comparable only among dist_ingest_experimental candidates run with same consumers/work units/measurement boundaries and identical consumer kernel/params. Production forkrun results, if any, are separate reference only.",
+        "placement_sampling": placement_sampling_name,
+        "placement_sampling_mode": int(placement_sampling_mode),
+        "trial_class": trial_class,
+        "note": "Comparable only among dist_ingest_experimental candidates run with same consumers/work units/measurement boundaries and identical consumer kernel/params. "
+                "Performance trials (placement_sampling=off) are performance-isolated; placement-validation trials (placement_sampling=on) incur in-run move_pages overhead and must not be mixed into performance headline statistics. "
+                "Production forkrun results, if any, are separate reference only.",
     }
     _inv = topo_info.get("inventory") if isinstance(topo_info, dict) else None
     if _inv is None and _topology_mod is not None:
@@ -1255,6 +1294,15 @@ def main():
     out = {
         "candidate": args.candidate,
         "engine_model": engine_model,
+        "trial_class": trial_class,
+        "measurement_integrity": {
+            "placement_sampling": placement_sampling_name,
+            "placement_sampling_mode": int(placement_sampling_mode),
+            "timing_tainted_by_in_run_sampling": bool(placement_sampling_name == "on"),
+            "performance_isolated": bool(placement_sampling_name == "off"),
+            "linked_performance_trial": linked_performance_trial,
+        },
+        "linked_performance_trial": linked_performance_trial,
         "comparability": comparability,
         "policy": res.policy,
         "num_nodes": res.num_nodes,
@@ -1308,11 +1356,13 @@ def main():
             "strict_mbind_meaning": "strict enforcement of successful policy application (mbind syscall), not hard physical placement guarantee; strictness controls abort/enforcement, not factual validity reporting",
             "strict_affinity_meaning": "strictness controls abort/enforcement, not factual validity reporting",
             "placement_sampling": "observed page placement sampled independently of mbind result; all_sampled_on_target_node means all sampled pages observed on target node only (not all pages examined). sample_limit and sample_spacing_pages are per-allocation sampling parameters recorded per node (spacing reflects the last allocation sampled, not an aggregate over all samples).",
+            "placement_sampling_mode_meaning": "C2: off=performance-isolated (no in-run move_pages sampling; placement observation not performed; timed measurement not tainted by sampling). on=placement-validation experiment (in-run move_pages sampling enabled; timing tainted and must not be mixed with performance headline statistics).",
             "preferred_mismatch_is_not_syscall_failure": True,
             "placement_observed_all_sampled_on_target_meaning": "tri-state: true=all relevant nodes sampled, all sampled pages classifiable, every sampled page matched target; false=at least one sampled page observed on a different node; null=sampling incomplete/unavailable/not performed or included unknown page results with no observed mismatch",
             "affinity_validity_meaning": "tri-state factual: true=all required requested roles set/query/matched; false=any required requested role failed/not matched; null=required affinity not requested or cannot be established",
             "memory_policy_validity_meaning": "tri-state factual: true=>=1 requested and every requested application succeeded; false=>=1 requested application failed; null=no policy application requested or cannot be established",
             "numa_placement_validity_meaning": "tri-state: true requires successful required policy application, verified required affinity, and positive placement observations; false on observed mismatch or required affinity/policy failure evidence; null otherwise",
+            "performance_measurement_integrity": "performance trials must run with placement_sampling=off; placement-validation trials (placement_sampling=on) are distinct experiments and are not performance-valid measurements",
         },
         "validity": {
             "functional_correctness": functional_correct,

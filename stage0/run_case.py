@@ -433,6 +433,12 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
             cmd += ["--proc-root", str(spec.get("proc_root"))]
         if spec.get("consumer_kernel") is not None:
             cmd += ["--consumer-kernel", str(spec.get("consumer_kernel"))]
+        if spec.get("placement_sampling") is not None:
+            cmd += ["--placement-sampling", str(spec.get("placement_sampling"))]
+        if spec.get("trial_class") is not None:
+            cmd += ["--trial-class", str(spec.get("trial_class"))]
+        if spec.get("linked_performance_trial") is not None:
+            cmd += ["--linked-performance-trial", str(spec.get("linked_performance_trial"))]
         if spec.get("strict_affinity"):
             cmd += ["--strict-affinity"]
         if spec.get("strict_mbind"):

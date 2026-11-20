@@ -30,6 +30,7 @@ class DiPolicyParams(ctypes.Structure):
         ("one_outstanding_per_node", ctypes.c_int),
         ("enable_peer_headroom", ctypes.c_int),
         ("consumer_kernel", ctypes.c_int),
+        ("placement_sampling", ctypes.c_int),
     ]
 
 

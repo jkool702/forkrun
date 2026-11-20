@@ -129,6 +129,59 @@
 - No checkpoint 2–5 work performed; no `RENTAL_READINESS.md`; full WO-1 validations/sanitizers/stress pending later checkpoints. No physical multi-node NUMA validation. No physical rental. No production adoption.
 - **Stopped for independent review after this final C1 correction. Do not start checkpoint 2 until reviewed.**
 
+## C2 — Placement-sampling isolation and measurement integrity (checkpoint 2, pre-C3)
+
+**Work order:** `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-AND-EXPERIMENT-COMPLETION-1`, checkpoint 2.  
+**Purpose:** isolate placement sampling from timed performance measurement so `move_pages()` sampling does not impose treatment-dependent overhead on the timed candidate being evaluated; keep placement validation as a distinct, linked experiment; do not expand into parameter sweeps or workload changes. Preserves C1/C1-correction behavior and prior commits; no architecture redesign, no physical rental, no production adoption.
+
+- **Branch:** `NEW/REFACTOR5.1`
+- **Starting HEAD (C2):** `da78449bbda7173e2055e6c77637c12bc5d25501` (C1 final correction, reviewed/closed)
+- **Frozen production files modified:** **none** (`forkrun_ring.c`, `forkrun_ring.h`, `forkrun_substrate.h`, `substratestubs.c` untouched)
+- **Experimental C changed:** `stage0/dist_ingest/dist_ingest.c`, `stage0/dist_ingest/dist_ingest.h` only (isolated dist-ingest prototype; not production ABI/frozen engine). `stage0/libdist_ingest.so` rebuilt.
+- **Sanitizers:** no frozen production C changes; no sanitizer rerun required for this checkpoint.
+
+### Placement-sampling mode and measurement integrity (experimental engine)
+
+- Added `di_policy_params_t.placement_sampling` (`stage0/dist_ingest/dist_ingest.h/.c`): `0` = **off** (performance-isolated default), `1` = **on** (placement-validation experiment).
+- When `placement_sampling==0`, `di_sample_placement()` performs **no in-run `move_pages`/sampling work** in the timed path and reports sampling not performed (`placement_sampled_pages==0`, `placement_sampling_not_performed` set for nodes); performance-isolated trials do not incur treatment-dependent sampling overhead.
+- When `placement_sampling==1`, in-run `move_pages` sampling runs as before for placement-validation experiments (timing is tainted by sampling overhead and must not be treated as a clean performance measurement).
+
+### Trial classes, validity, and provenance (`run_dist.py`)
+
+- CLI: `--placement-sampling {off,on}` (default `off`), `--trial-class {performance,placement_validation}` (defaults from placement sampling mode), `--linked-performance-trial <id/path>` for placement-validation provenance/linkage.
+- `DIST_RESULT` now records `trial_class`, `measurement_integrity` (`placement_sampling`, mode, `performance_isolated`, `timing_tainted_by_in_run_sampling`, linked performance trial), `linked_performance_trial`, and comparability/placement-semantics notes distinguishing performance-isolated vs placement-validation experiments.
+- Performance-measurement validity (`validity.performance_measurement`) is **false** when in-run placement sampling is enabled (`placement_sampling=on`), in addition to existing functional/affinity/scan-evidence requirements. Placement observations remain reported separately; `placement_observed`/NUMA-placement validity are not conflated with performance-measurement validity.
+
+### Campaign, case runner, and reporting
+
+- `stage0/run_case.py`: forwards `placement_sampling`, `trial_class`, and `linked_performance_trial` to `run_dist.py`.
+- `stage0/dist_ingest/run_dist_campaign.sh`: `--placement-experiments off|paired` (default `off`). Performance trials for dist-ingest candidates run with `placement_sampling=off` (`trial_class=performance`). `paired` runs an additional linked placement-validation experiment per performance trial (`placement_sampling=on`, `trial_class=placement_validation`, distinct case id `...__placement_validation`, linked to the corresponding performance trial manifest). Plan/prevalidation/execution-plan/outcomes/campaign manifest record placement-experiment mode, trial class, placement sampling mode, and linkage.
+- `stage0/dist_ingest/report_dist.py`: separates performance and placement-validation trial classes; headline/summary performance medians and performance-valid denominators use **performance-class, performance-valid trials only** (placement-validation experiments excluded). Placement-validation experiments are reported in a distinct section with linkage and timing-taint/provenance; they are not mixed into performance headline statistics.
+
+### Tests (C2)
+
+- Updated ctypes `DiPolicyParams` mirrors in dist-ingest tests to include `placement_sampling`; updated `test_addendum_a.py` placement-sampling case to explicitly enable in-run sampling for placement-validation behavior.
+- Added deterministic C2 coverage in `stage0/dist_ingest/tests/test_benchmark_semantics.py` (`TestCheckpoint2PlacementSamplingIsolation`): engine-level performance mode (`placement_sampling=0`) performs no in-run sampling (`sampled_pages==0`, `sampling_not_performed` set) across policies; placement-validation mode (`placement_sampling=1`) performs in-run sampling when available; performance-measurement validity is false when sampling-tainted; `run_dist.py` default is performance-isolated and placement-validation CLI runs are distinct/linked/tainted/non-performance-valid.
+- Added deterministic reporting coverage in `stage0/dist_ingest/tests/test_report_dist.py` (`TestCheckpoint2PlacementSamplingReporting`): placement-validation trials are excluded from headline performance stats and reported separately with linkage/timing-taint notes.
+- Existing report-dist assertions adjusted only where required by the C2-compatible summary format (performance-class denominators/notes) while preserving intent.
+
+### Validation (checkpoint 2, local/fake-NUMA host)
+
+- **Exact validation:**
+  - `python3 -m unittest discover -s stage0/dist_ingest/tests -v` → **196/196 OK** (28.172s)
+  - `python3 -m unittest stage0.tests.test_stage0` → **81/81 OK** (16.414s)
+  - `python3 -m unittest python.tests.test_numa_drain_guard` → **7/7 OK** (0.000s)
+  - `python3 -m unittest python.tests.test_numa` → **36 tests, OK (skipped=1)** (3.340s)
+- Targeted C2 smoke checks: performance-isolated default `run_dist.py` reports `trial_class=performance`, `placement_sampling=off`, `sampled_pages=0`, `sampling_not_performed=true`; placement-validation `run_dist.py --placement-sampling on --linked-performance-trial ...` reports `trial_class=placement_validation`, `placement_sampling=on`, linked trial, `timing_tainted_by_in_run_sampling=true`, `validity.performance_measurement=false`, and in-run sampling performed when available.
+- These validate driver/harness/reporting/measurement-integrity behavior only on this local/fake-NUMA host; they do **not** establish physical NUMA locality, placement, or scaling.
+
+### Remaining limitations (C2 scope)
+
+- No checkpoint 3–5 work performed (parameter sweeps, workload expansion, duration qualification, cache policies; environment/telemetry/reporting improvements, binary provenance, calibration utility; EPYC stage/orchestration integration and final rehearsal). No `RENTAL_READINESS.md` yet; full WO-1 validations/sanitizers/stress pending later checkpoints.
+- No physical multi-node NUMA validation/rental; local/fake-NUMA results are not evidence of physical locality/scaling/remote-memory penalties. `mbind(MPOL_PREFERRED)` syscall success and placement sampling observations are not physical placement proof; `unknown` remains `unknown`.
+- `placement_sampling` defaults to off for performance-isolated measurement; placement-validation experiments are observational diagnostics and remain timing-tainted by in-run sampling (not suitable for headline performance comparison).
+- **Stopped for independent review after this C2 checkpoint. Do not start checkpoint 3. No physical rental. No production adoption.**
+
 ---
 
 # WO-NUMA-DIST-INGEST-CAMPAIGN-PREFLIGHT-FINAL-CLEANUP-4 — Closeout

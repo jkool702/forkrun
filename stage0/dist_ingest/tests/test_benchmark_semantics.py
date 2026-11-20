@@ -37,6 +37,7 @@ class DiPolicyParams(ctypes.Structure):
         ("align_reservations", ctypes.c_int), ("prefer_hugepage", ctypes.c_int),
         ("strict_affinity", ctypes.c_int), ("strict_mbind", ctypes.c_int),
         ("one_outstanding_per_node", ctypes.c_int), ("enable_peer_headroom", ctypes.c_int), ("consumer_kernel", ctypes.c_int),
+        ("placement_sampling", ctypes.c_int),
     ]
 
 
@@ -131,7 +132,7 @@ def make_file(size):
     return path
 
 
-def run_engine(path, policy, num_nodes=2, quantum=512*1024, max_backlog=8*1024*1024, consumer_kernel=1):
+def run_engine(path, policy, num_nodes=2, quantum=512*1024, max_backlog=8*1024*1024, consumer_kernel=1, placement_sampling=0):
     lib = load_lib()
     st = os.stat(path)
     fd = os.open(path, os.O_RDONLY)
@@ -149,6 +150,7 @@ def run_engine(path, policy, num_nodes=2, quantum=512*1024, max_backlog=8*1024*1
         params.one_outstanding_per_node = 1
         params.enable_peer_headroom = 1
         params.consumer_kernel = consumer_kernel
+        params.placement_sampling = placement_sampling
         cons = (DiConsumerCfg * num_nodes)()
         for i in range(num_nodes):
             cons[i].mode = 2  # fast
@@ -439,6 +441,111 @@ class TestCombinedValidity(unittest.TestCase):
         self.assertIsNone(numa)
 
 
+
+class TestCheckpoint2PlacementSamplingIsolation(unittest.TestCase):
+    """C2: isolate placement sampling from timed performance measurement."""
+
+    def test_engine_performance_mode_no_in_run_sampling(self):
+        # placement_sampling=0 (performance-isolated default): no in-run move_pages sampling
+        path = make_file(2 * 1024 * 1024)
+        try:
+            for name, pol in POLICIES:
+                with self.subTest(candidate=name):
+                    rc, res, sz = run_engine(path, pol, num_nodes=2, placement_sampling=0)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(res.total_consumed, sz)
+                    for i in range(res.num_nodes):
+                        n = res.nodes[i]
+                        self.assertEqual(int(n.placement_sampled_pages), 0,
+                                         msg='performance-isolated trial must not perform in-run placement sampling')
+                        self.assertTrue(bool(n.placement_sampling_not_performed),
+                                        msg='placement sampling must be marked not performed when placement_sampling=off')
+                        self.assertFalse(bool(n.placement_sampling_unavailable),
+                                         msg='sampling-off path must not report sampling unavailable')
+        finally:
+            os.unlink(path)
+
+    def test_engine_placement_validation_mode_samples_in_run(self):
+        # placement_sampling=1: distinct placement-validation experiment performs in-run sampling
+        path = make_file(2 * 1024 * 1024)
+        try:
+            for name, pol in POLICIES:
+                with self.subTest(candidate=name):
+                    rc, res, sz = run_engine(path, pol, num_nodes=2, placement_sampling=1)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(res.total_consumed, sz)
+                    total_sampled = 0
+                    for i in range(res.num_nodes):
+                        n = res.nodes[i]
+                        self.assertFalse(bool(n.placement_sampling_not_performed),
+                                         msg='placement-validation experiment must perform in-run sampling')
+                        self.assertGreaterEqual(int(n.placement_sampled_pages), 0)
+                        total_sampled += int(n.placement_sampled_pages)
+                    # On a normal Linux host move_pages sampling is available and allocations are sampled.
+                    self.assertGreater(total_sampled, 0,
+                                       msg='placement-validation experiment must sample pages in-run when sampling is available')
+        finally:
+            os.unlink(path)
+
+    def test_performance_measurement_invalid_when_sampling_tainted(self):
+        # C2: in-run placement sampling taints timing; not a clean performance measurement.
+        self.assertIs(run_dist._performance_measurement_valid(True, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+        self.assertIs(run_dist._performance_measurement_valid(True, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=0), True)
+        # independent failures still false
+        self.assertIs(run_dist._performance_measurement_valid(True, False, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+        self.assertIs(run_dist._performance_measurement_valid(False, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+
+    def test_run_dist_default_performance_isolated(self):
+        path = make_file(1024 * 1024)
+        try:
+            p = subprocess.run([sys.executable, os.path.join(PKG, 'run_dist.py'),
+                                '--candidate', 'fixed_faa', '--input', path, '--nodes', '2', '--no-pin'],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-1200:] + "\n" + p.stdout[-400:])
+            dr = parse_dist_result(p.stderr)
+            self.assertIsNotNone(dr)
+            self.assertEqual(dr.get('trial_class'), 'performance')
+            mi = dr.get('measurement_integrity') or {}
+            self.assertEqual(mi.get('placement_sampling'), 'off')
+            self.assertTrue(mi.get('performance_isolated'))
+            self.assertFalse(mi.get('timing_tainted_by_in_run_sampling'))
+            self.assertIsNone(dr.get('linked_performance_trial'))
+            self.assertEqual((dr.get('comparability') or {}).get('placement_sampling'), 'off')
+            for n in dr.get('nodes', []):
+                pl = n.get('placement') or {}
+                self.assertEqual(pl.get('sampled_pages'), 0)
+                self.assertTrue(pl.get('sampling_not_performed'))
+        finally:
+            os.unlink(path)
+
+    def test_run_dist_placement_validation_distinct_linked_tainted(self):
+        path = make_file(1024 * 1024)
+        try:
+            linked = 'cases/equal__legacy__fixed_faa/trial1/manifest.json'
+            p = subprocess.run([sys.executable, os.path.join(PKG, 'run_dist.py'),
+                                '--candidate', 'fixed_faa', '--input', path, '--nodes', '2', '--no-pin',
+                                '--placement-sampling', 'on', '--linked-performance-trial', linked],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-1200:] + "\n" + p.stdout[-400:])
+            dr = parse_dist_result(p.stderr)
+            self.assertIsNotNone(dr)
+            self.assertEqual(dr.get('trial_class'), 'placement_validation')
+            self.assertEqual(dr.get('linked_performance_trial'), linked)
+            mi = dr.get('measurement_integrity') or {}
+            self.assertEqual(mi.get('placement_sampling'), 'on')
+            self.assertEqual(mi.get('linked_performance_trial'), linked)
+            self.assertTrue(mi.get('timing_tainted_by_in_run_sampling'))
+            self.assertFalse(mi.get('performance_isolated'))
+            # C2: placement-validation experiment is not a clean performance measurement
+            self.assertIs((dr.get('validity') or {}).get('performance_measurement'), False)
+            sampled_total = sum(int((n.get('placement') or {}).get('sampled_pages') or 0) for n in dr.get('nodes', []))
+            self.assertGreater(sampled_total, 0, msg='placement-validation must perform in-run sampling when available')
+            for n in dr.get('nodes', []):
+                self.assertFalse(bool((n.get('placement') or {}).get('sampling_not_performed')))
+        finally:
+            os.unlink(path)
+
+
 if __name__ == '__main__':
     unittest.main()
 
@@ -570,6 +677,111 @@ class TestCampaignWiring(unittest.TestCase):
             self.assertGreater(found, 0, 'no dist results found in campaign manifests')
         finally:
             shutil.rmtree(out, ignore_errors=True)
+
+
+
+class TestCheckpoint2PlacementSamplingIsolation(unittest.TestCase):
+    """C2: isolate placement sampling from timed performance measurement."""
+
+    def test_engine_performance_mode_no_in_run_sampling(self):
+        # placement_sampling=0 (performance-isolated default): no in-run move_pages sampling
+        path = make_file(2 * 1024 * 1024)
+        try:
+            for name, pol in POLICIES:
+                with self.subTest(candidate=name):
+                    rc, res, sz = run_engine(path, pol, num_nodes=2, placement_sampling=0)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(res.total_consumed, sz)
+                    for i in range(res.num_nodes):
+                        n = res.nodes[i]
+                        self.assertEqual(int(n.placement_sampled_pages), 0,
+                                         msg='performance-isolated trial must not perform in-run placement sampling')
+                        self.assertTrue(bool(n.placement_sampling_not_performed),
+                                        msg='placement sampling must be marked not performed when placement_sampling=off')
+                        self.assertFalse(bool(n.placement_sampling_unavailable),
+                                         msg='sampling-off path must not report sampling unavailable')
+        finally:
+            os.unlink(path)
+
+    def test_engine_placement_validation_mode_samples_in_run(self):
+        # placement_sampling=1: distinct placement-validation experiment performs in-run sampling
+        path = make_file(2 * 1024 * 1024)
+        try:
+            for name, pol in POLICIES:
+                with self.subTest(candidate=name):
+                    rc, res, sz = run_engine(path, pol, num_nodes=2, placement_sampling=1)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(res.total_consumed, sz)
+                    total_sampled = 0
+                    for i in range(res.num_nodes):
+                        n = res.nodes[i]
+                        self.assertFalse(bool(n.placement_sampling_not_performed),
+                                         msg='placement-validation experiment must perform in-run sampling')
+                        self.assertGreaterEqual(int(n.placement_sampled_pages), 0)
+                        total_sampled += int(n.placement_sampled_pages)
+                    # On a normal Linux host move_pages sampling is available and allocations are sampled.
+                    self.assertGreater(total_sampled, 0,
+                                       msg='placement-validation experiment must sample pages in-run when sampling is available')
+        finally:
+            os.unlink(path)
+
+    def test_performance_measurement_invalid_when_sampling_tainted(self):
+        # C2: in-run placement sampling taints timing; not a clean performance measurement.
+        self.assertIs(run_dist._performance_measurement_valid(True, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+        self.assertIs(run_dist._performance_measurement_valid(True, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=0), True)
+        # independent failures still false
+        self.assertIs(run_dist._performance_measurement_valid(True, False, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+        self.assertIs(run_dist._performance_measurement_valid(False, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+
+    def test_run_dist_default_performance_isolated(self):
+        path = make_file(1024 * 1024)
+        try:
+            p = subprocess.run([sys.executable, os.path.join(PKG, 'run_dist.py'),
+                                '--candidate', 'fixed_faa', '--input', path, '--nodes', '2', '--no-pin'],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-1200:] + "\n" + p.stdout[-400:])
+            dr = parse_dist_result(p.stderr)
+            self.assertIsNotNone(dr)
+            self.assertEqual(dr.get('trial_class'), 'performance')
+            mi = dr.get('measurement_integrity') or {}
+            self.assertEqual(mi.get('placement_sampling'), 'off')
+            self.assertTrue(mi.get('performance_isolated'))
+            self.assertFalse(mi.get('timing_tainted_by_in_run_sampling'))
+            self.assertIsNone(dr.get('linked_performance_trial'))
+            self.assertEqual((dr.get('comparability') or {}).get('placement_sampling'), 'off')
+            for n in dr.get('nodes', []):
+                pl = n.get('placement') or {}
+                self.assertEqual(pl.get('sampled_pages'), 0)
+                self.assertTrue(pl.get('sampling_not_performed'))
+        finally:
+            os.unlink(path)
+
+    def test_run_dist_placement_validation_distinct_linked_tainted(self):
+        path = make_file(1024 * 1024)
+        try:
+            linked = 'cases/equal__legacy__fixed_faa/trial1/manifest.json'
+            p = subprocess.run([sys.executable, os.path.join(PKG, 'run_dist.py'),
+                                '--candidate', 'fixed_faa', '--input', path, '--nodes', '2', '--no-pin',
+                                '--placement-sampling', 'on', '--linked-performance-trial', linked],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-1200:] + "\n" + p.stdout[-400:])
+            dr = parse_dist_result(p.stderr)
+            self.assertIsNotNone(dr)
+            self.assertEqual(dr.get('trial_class'), 'placement_validation')
+            self.assertEqual(dr.get('linked_performance_trial'), linked)
+            mi = dr.get('measurement_integrity') or {}
+            self.assertEqual(mi.get('placement_sampling'), 'on')
+            self.assertEqual(mi.get('linked_performance_trial'), linked)
+            self.assertTrue(mi.get('timing_tainted_by_in_run_sampling'))
+            self.assertFalse(mi.get('performance_isolated'))
+            # C2: placement-validation experiment is not a clean performance measurement
+            self.assertIs((dr.get('validity') or {}).get('performance_measurement'), False)
+            sampled_total = sum(int((n.get('placement') or {}).get('sampled_pages') or 0) for n in dr.get('nodes', []))
+            self.assertGreater(sampled_total, 0, msg='placement-validation must perform in-run sampling when available')
+            for n in dr.get('nodes', []):
+                self.assertFalse(bool((n.get('placement') or {}).get('sampling_not_performed')))
+        finally:
+            os.unlink(path)
 
 
 if __name__ == '__main__':
@@ -1628,6 +1840,111 @@ class TestCampaignEmptyPlanAndPartialMatrixC1Final(unittest.TestCase):
                             self.assertTrue(all(o.get('scenario') == 'small' for o in outcomes), outcomes)
                     finally:
                         shutil.rmtree(out, ignore_errors=True)
+
+
+
+class TestCheckpoint2PlacementSamplingIsolation(unittest.TestCase):
+    """C2: isolate placement sampling from timed performance measurement."""
+
+    def test_engine_performance_mode_no_in_run_sampling(self):
+        # placement_sampling=0 (performance-isolated default): no in-run move_pages sampling
+        path = make_file(2 * 1024 * 1024)
+        try:
+            for name, pol in POLICIES:
+                with self.subTest(candidate=name):
+                    rc, res, sz = run_engine(path, pol, num_nodes=2, placement_sampling=0)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(res.total_consumed, sz)
+                    for i in range(res.num_nodes):
+                        n = res.nodes[i]
+                        self.assertEqual(int(n.placement_sampled_pages), 0,
+                                         msg='performance-isolated trial must not perform in-run placement sampling')
+                        self.assertTrue(bool(n.placement_sampling_not_performed),
+                                        msg='placement sampling must be marked not performed when placement_sampling=off')
+                        self.assertFalse(bool(n.placement_sampling_unavailable),
+                                         msg='sampling-off path must not report sampling unavailable')
+        finally:
+            os.unlink(path)
+
+    def test_engine_placement_validation_mode_samples_in_run(self):
+        # placement_sampling=1: distinct placement-validation experiment performs in-run sampling
+        path = make_file(2 * 1024 * 1024)
+        try:
+            for name, pol in POLICIES:
+                with self.subTest(candidate=name):
+                    rc, res, sz = run_engine(path, pol, num_nodes=2, placement_sampling=1)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(res.total_consumed, sz)
+                    total_sampled = 0
+                    for i in range(res.num_nodes):
+                        n = res.nodes[i]
+                        self.assertFalse(bool(n.placement_sampling_not_performed),
+                                         msg='placement-validation experiment must perform in-run sampling')
+                        self.assertGreaterEqual(int(n.placement_sampled_pages), 0)
+                        total_sampled += int(n.placement_sampled_pages)
+                    # On a normal Linux host move_pages sampling is available and allocations are sampled.
+                    self.assertGreater(total_sampled, 0,
+                                       msg='placement-validation experiment must sample pages in-run when sampling is available')
+        finally:
+            os.unlink(path)
+
+    def test_performance_measurement_invalid_when_sampling_tainted(self):
+        # C2: in-run placement sampling taints timing; not a clean performance measurement.
+        self.assertIs(run_dist._performance_measurement_valid(True, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+        self.assertIs(run_dist._performance_measurement_valid(True, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=0), True)
+        # independent failures still false
+        self.assertIs(run_dist._performance_measurement_valid(True, False, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+        self.assertIs(run_dist._performance_measurement_valid(False, True, 'full_byte_scan', 1000, 1000, placement_sampling_mode=1), False)
+
+    def test_run_dist_default_performance_isolated(self):
+        path = make_file(1024 * 1024)
+        try:
+            p = subprocess.run([sys.executable, os.path.join(PKG, 'run_dist.py'),
+                                '--candidate', 'fixed_faa', '--input', path, '--nodes', '2', '--no-pin'],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-1200:] + "\n" + p.stdout[-400:])
+            dr = parse_dist_result(p.stderr)
+            self.assertIsNotNone(dr)
+            self.assertEqual(dr.get('trial_class'), 'performance')
+            mi = dr.get('measurement_integrity') or {}
+            self.assertEqual(mi.get('placement_sampling'), 'off')
+            self.assertTrue(mi.get('performance_isolated'))
+            self.assertFalse(mi.get('timing_tainted_by_in_run_sampling'))
+            self.assertIsNone(dr.get('linked_performance_trial'))
+            self.assertEqual((dr.get('comparability') or {}).get('placement_sampling'), 'off')
+            for n in dr.get('nodes', []):
+                pl = n.get('placement') or {}
+                self.assertEqual(pl.get('sampled_pages'), 0)
+                self.assertTrue(pl.get('sampling_not_performed'))
+        finally:
+            os.unlink(path)
+
+    def test_run_dist_placement_validation_distinct_linked_tainted(self):
+        path = make_file(1024 * 1024)
+        try:
+            linked = 'cases/equal__legacy__fixed_faa/trial1/manifest.json'
+            p = subprocess.run([sys.executable, os.path.join(PKG, 'run_dist.py'),
+                                '--candidate', 'fixed_faa', '--input', path, '--nodes', '2', '--no-pin',
+                                '--placement-sampling', 'on', '--linked-performance-trial', linked],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-1200:] + "\n" + p.stdout[-400:])
+            dr = parse_dist_result(p.stderr)
+            self.assertIsNotNone(dr)
+            self.assertEqual(dr.get('trial_class'), 'placement_validation')
+            self.assertEqual(dr.get('linked_performance_trial'), linked)
+            mi = dr.get('measurement_integrity') or {}
+            self.assertEqual(mi.get('placement_sampling'), 'on')
+            self.assertEqual(mi.get('linked_performance_trial'), linked)
+            self.assertTrue(mi.get('timing_tainted_by_in_run_sampling'))
+            self.assertFalse(mi.get('performance_isolated'))
+            # C2: placement-validation experiment is not a clean performance measurement
+            self.assertIs((dr.get('validity') or {}).get('performance_measurement'), False)
+            sampled_total = sum(int((n.get('placement') or {}).get('sampled_pages') or 0) for n in dr.get('nodes', []))
+            self.assertGreater(sampled_total, 0, msg='placement-validation must perform in-run sampling when available')
+            for n in dr.get('nodes', []):
+                self.assertFalse(bool((n.get('placement') or {}).get('sampling_not_performed')))
+        finally:
+            os.unlink(path)
 
 
 if __name__ == '__main__':

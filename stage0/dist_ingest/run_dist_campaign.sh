@@ -29,6 +29,10 @@ usage: run_dist_campaign.sh [options]
   --shuffle-scenarios      randomize scenario-block order (reproducible by seed)
   --cache-policy TEXT      explicit cache/warm-up assumption recorded in manifest
   --consumer-kernel K      full_byte_scan (default) or none (explicit diagnostic opt-out)
+  --placement-experiments M  placement experiment mode: off (default; performance trials only,
+                           placement_sampling=off) or paired (run a linked placement-validation
+                           experiment per performance trial: placement_sampling=on, distinct
+                           trial_class=placement_validation, not mixed into performance headlines)
   --strict-affinity        require verified affinity for all required roles (abort on failure)
   --strict-mbind           require successful mbind policy application (abort on failure)
   --phys-nodes LIST        explicit physical NUMA node ids (comma-separated). Backward-compatible
@@ -54,6 +58,7 @@ SEED=""
 SHUFFLE_SCENARIOS=0
 CACHE_POLICY="best_effort_os_cache (no privileged cold-cache control; limitation explicit)"
 CONSUMER_KERNEL="full_byte_scan"
+PLACEMENT_EXPERIMENTS="off"
 STRICT_AFFINITY=0
 STRICT_MBIND=0
 PHYS_NODES=""
@@ -76,6 +81,7 @@ while [ "$#" -gt 0 ]; do
     --shuffle-scenarios) SHUFFLE_SCENARIOS=1; shift ;;
     --cache-policy) CACHE_POLICY=${2:?}; shift 2 ;;
     --consumer-kernel) CONSUMER_KERNEL=${2:?}; shift 2 ;;
+    --placement-experiments) PLACEMENT_EXPERIMENTS=${2:?}; shift 2 ;;
     --strict-affinity) STRICT_AFFINITY=1; shift ;;
     --strict-mbind) STRICT_MBIND=1; shift ;;
     --phys-nodes) PHYS_NODES=${2:?}; shift 2 ;;
@@ -751,34 +757,32 @@ ORDER_LOG="$OUT/execution-order.jsonl"
 : > "$ORDER_LOG"
 
 PLAN_FILE="$OUT/.run_plan.tsv"
-while IFS=$'\t' read -r sid scen_def t cand_csv map_id map_profile map_variant map_phys; do
-  [ -z "$sid" ] && continue
-  IFS='|' read -r _sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra <<< "$scen_def"
-  IFS=',' read -ra BLOCK_CANDS <<< "$cand_csv"
-  echo "BLOCK scenario=$sid mapping=$map_id trial=$t order=$cand_csv" >&2
-  printf '{"scenario":"%s","mapping_id":"%s","mapping_profile":"%s","trial":%s,"candidate_order":[%s]}\n' \
-    "$sid" "$map_id" "$map_profile" "$t" "$(python3 - <<PY "$cand_csv"
-import json,sys; print(','.join(json.dumps(x) for x in sys.argv[1].split(',') if x))
-PY
-)" >> "$ORDER_LOG"
-  for cand in "${BLOCK_CANDS[@]}"; do
-    [ -z "$cand" ] && continue
-    # mapping identity in case identity (checkpoint 1)
-    safe_map=$(python3 -c "import re,sys; print(re.sub(r'[^A-Za-z0-9_.:-]+','-',sys.argv[1]))" "$map_id")
-    case_id="${sid}__${safe_map}__${cand}"
-    outdir="$OUT/cases/$case_id/trial$t"
-    if [ -e "$outdir/manifest.json" ]; then
-      echo "SKIP existing evidence: $case_id trial$t" >&2
-      prev=skipped_existing
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$prev" "cases/$case_id/trial$t/manifest.json" "$map_id" "$map_profile" >> "$OUTCOMES"
-      continue
-    fi
-    mkdir -p "$outdir" || exit 1
-    spec="$outdir/spec.json"
-    input_path="$OUT/$inp"
-    python3 - "$spec" "$sid" "$cand" "$case_id" "$input_path" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" "$SEED" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$map_phys" "$map_id" "$map_profile" "$map_variant" <<'PY'
+
+run_one_experiment() {
+  local exp_case_id="$1" exp_sid="$2" exp_cand="$3" exp_trial="$4"
+  local exp_map_id="$5" exp_map_profile="$6" exp_map_variant="$7" exp_map_phys="$8"
+  local exp_inp="$9" exp_nodes="${10}" exp_cmode="${11}" exp_cbps="${12}"
+  local exp_snode="${13}" exp_smode="${14}" exp_sbps="${15}" exp_sstall="${16}" exp_mbacklog="${17}"
+  local exp_trial_class="${18}" exp_placement_sampling="${19}" exp_linked_perf="${20}"
+
+  local outdir="$OUT/cases/$exp_case_id/trial$exp_trial"
+  if [ -e "$outdir/manifest.json" ]; then
+    echo "SKIP existing evidence: $exp_case_id trial$exp_trial class=$exp_trial_class" >&2
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$exp_case_id" "$exp_sid" "$exp_cand" "$exp_trial" "skipped_existing" \
+      "cases/$exp_case_id/trial$exp_trial/manifest.json" "$exp_map_id" "$exp_map_profile" \
+      "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" >> "$OUTCOMES"
+    return 0
+  fi
+  mkdir -p "$outdir" || return 1
+  local spec="$outdir/spec.json"
+  local input_path="$OUT/$exp_inp"
+  python3 - "$spec" "$exp_sid" "$exp_cand" "$exp_case_id" "$input_path" "$exp_nodes" "$exp_cmode" "$exp_cbps" \
+    "$exp_snode" "$exp_smode" "$exp_sbps" "$exp_sstall" "$exp_mbacklog" "$SEED" "$CONSUMER_KERNEL" \
+    "$STRICT_AFFINITY" "$STRICT_MBIND" "$exp_map_phys" "$exp_map_id" "$exp_map_profile" "$exp_map_variant" \
+    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" <<'PY'
 import json, sys
-(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed,consumer_kernel,strict_affinity,strict_mbind,map_phys,map_id,map_profile,map_variant)=sys.argv[1:22]
+(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed,consumer_kernel,strict_affinity,strict_mbind,map_phys,map_id,map_profile,map_variant,trial_class,placement_sampling,linked_perf)=sys.argv[1:25]
 d={
   "id": cid,
   "scenario": sid,
@@ -820,44 +824,98 @@ else:
     "consumer_kernel": consumer_kernel,
     "strict_affinity": bool(int(strict_affinity)),
     "strict_mbind": bool(int(strict_mbind)),
+    # C2: performance-isolated by default for timed measurement trials
+    "placement_sampling": placement_sampling or "off",
+    "trial_class": trial_class or "performance",
   })
+  if linked_perf:
+    d["linked_performance_trial"] = linked_perf
   # Same resolved mapping passed to every trial in that case
   if map_phys:
     d["phys_nodes"] = map_phys
 with open(spec,'w') as f: json.dump(d,f,indent=2,sort_keys=True)
 PY
-    if python3 stage0/run_case.py --spec "$spec" --out "$outdir" \
-         --campaign-id "$CAMPAIGN_ID" --trial "$t" --source-sha "$SOURCE_SHA"; then
-      status=ok
-    else
-      status=failed
-      FAILURES+=("$case_id trial$t")
-      echo "TRIAL FAILED: $case_id trial$t" >&2
+  local status
+  if python3 stage0/run_case.py --spec "$spec" --out "$outdir" \
+       --campaign-id "$CAMPAIGN_ID" --trial "$exp_trial" --source-sha "$SOURCE_SHA"; then
+    status=ok
+  else
+    status=failed
+    FAILURES+=("$exp_case_id trial$exp_trial ($exp_trial_class)")
+    echo "TRIAL FAILED: $exp_case_id trial$exp_trial class=$exp_trial_class" >&2
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$exp_case_id" "$exp_sid" "$exp_cand" "$exp_trial" "$status" \
+    "cases/$exp_case_id/trial$exp_trial/manifest.json" "$exp_map_id" "$exp_map_profile" \
+    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" >> "$OUTCOMES"
+  return 0
+}
+
+while IFS=$'\t' read -r sid scen_def t cand_csv map_id map_profile map_variant map_phys; do
+  [ -z "$sid" ] && continue
+  IFS='|' read -r _sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra <<< "$scen_def"
+  IFS=',' read -ra BLOCK_CANDS <<< "$cand_csv"
+  echo "BLOCK scenario=$sid mapping=$map_id trial=$t order=$cand_csv placement_experiments=$PLACEMENT_EXPERIMENTS" >&2
+  printf '{"scenario":"%s","mapping_id":"%s","mapping_profile":"%s","trial":%s,"placement_experiments":"%s","candidate_order":[%s]}\n' \
+    "$sid" "$map_id" "$map_profile" "$t" "$PLACEMENT_EXPERIMENTS" "$(python3 - <<PY "$cand_csv"
+import json,sys; print(','.join(json.dumps(x) for x in sys.argv[1].split(',') if x))
+PY
+)" >> "$ORDER_LOG"
+  for cand in "${BLOCK_CANDS[@]}"; do
+    [ -z "$cand" ] && continue
+    # mapping identity in case identity (checkpoint 1)
+    safe_map=$(python3 -c "import re,sys; print(re.sub(r'[^A-Za-z0-9_.:-]+','-',sys.argv[1]))" "$map_id")
+    perf_case_id="${sid}__${safe_map}__${cand}"
+    is_dist=0
+    case "$cand" in
+      production_ref|forkrun_control|control) is_dist=0 ;;
+      *) is_dist=1 ;;
+    esac
+    # C2: performance trial (mandatory isolation for dist-ingest candidates)
+    run_one_experiment "$perf_case_id" "$sid" "$cand" "$t" \
+      "$map_id" "$map_profile" "$map_variant" "$map_phys" \
+      "$inp" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" \
+      "performance" "off" ""
+
+    # C2: optional paired placement-validation experiment (distinct, linked)
+    if [ "$PLACEMENT_EXPERIMENTS" = "paired" ] && [ "$is_dist" -eq 1 ]; then
+      pv_case_id="${perf_case_id}__placement_validation"
+      pv_link="cases/${perf_case_id}/trial${t}/manifest.json"
+      run_one_experiment "$pv_case_id" "$sid" "$cand" "$t" \
+        "$map_id" "$map_profile" "$map_variant" "$map_phys" \
+        "$inp" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" \
+        "placement_validation" "on" "$pv_link"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$case_id" "$sid" "$cand" "$t" "$status" "cases/$case_id/trial$t/manifest.json" "$map_id" "$map_profile" >> "$OUTCOMES"
   done
 done < "$PLAN_FILE"
 
 python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" \
   || echo "WARN: env-after capture failed" >&2
 
-python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" "$MAPPING_PROFILES" <<'PY'
+python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" "$MAPPING_PROFILES" "$PLACEMENT_EXPERIMENTS" <<'PY'
 import json, os, sys, time
-out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc,consumer_kernel,strict_affinity,strict_mbind,phys_nodes,mapping_profiles=sys.argv[1:14]
+out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc,consumer_kernel,strict_affinity,strict_mbind,phys_nodes,mapping_profiles,placement_experiments=sys.argv[1:15]
 rows=[]
 with open(outcomes) as f:
     for line in f:
         line=line.rstrip('\n')
         if not line: continue
         parts = line.split('\t')
-        # new format: case,scenario,candidate,trial,status,manifest,mapping_id,mapping_profile
-        if len(parts) >= 8:
+        # C2 format: case,scenario,candidate,trial,status,manifest,mapping_id,mapping_profile,trial_class,placement_sampling,linked_perf
+        if len(parts) >= 11:
+            case,scen,cand,t,status,man,map_id,map_prof,trial_class,placement_sampling,linked_perf = parts[:11]
+        elif len(parts) >= 8:
             case,scen,cand,t,status,man,map_id,map_prof = parts[:8]
+            trial_class,placement_sampling,linked_perf = 'performance','off',''
         else:
             case,scen,cand,t,status,man = parts[:6]
             map_id = None; map_prof = None
+            trial_class,placement_sampling,linked_perf = 'performance','off',''
         rows.append({"case":case,"scenario":scen,"candidate":cand,"trial":int(t),"status":status,
-                     "manifest":man,"mapping_id":map_id,"mapping_profile":map_prof})
+                     "manifest":man,"mapping_id": (map_id or None), "mapping_profile": (map_prof or None),
+                     "trial_class": (trial_class or 'performance'),
+                     "placement_sampling": (placement_sampling or 'off'),
+                     "linked_performance_trial": (linked_perf or None)})
 order=[]
 op=os.path.join(out,'execution-order.jsonl')
 if os.path.isfile(op):
@@ -883,7 +941,8 @@ doc={"schema":"dist-campaign/5","campaign_id":cid,"source_sha":sha,"trials":int(
         "strict_mbind": strict_mbind=='1',
         "phys_nodes": phys_nodes or None,
         "mapping_profiles": mapping_profiles,
-        "notes": "strict flags/kernel applied identically per comparable dist-engine candidate spec; strict mode must not silently fall back"
+        "placement_experiments": placement_experiments,
+        "notes": "strict flags/kernel applied identically per comparable dist-engine candidate spec; strict mode must not silently fall back. C2: performance trials run with placement_sampling=off (isolated); paired placement-validation experiments are distinct and linked."
      },
      "scenario_profile": (preval or {}).get('scenario_profile'),
      "scenario_profile_requested": (preval or {}).get('scenario_profile_requested'),

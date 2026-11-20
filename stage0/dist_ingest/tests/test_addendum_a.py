@@ -30,6 +30,7 @@ class DiPolicyParams(ctypes.Structure):
         ("align_reservations", ctypes.c_int), ("prefer_hugepage", ctypes.c_int),
         ("strict_affinity", ctypes.c_int), ("strict_mbind", ctypes.c_int),
         ("one_outstanding_per_node", ctypes.c_int), ("enable_peer_headroom", ctypes.c_int), ("consumer_kernel", ctypes.c_int),
+        ("placement_sampling", ctypes.c_int),
     ]
 
 
@@ -152,6 +153,9 @@ def base_params(**kw):
     p.strict_affinity = kw.get('strict_affinity', 0)
     p.strict_mbind = kw.get('strict_mbind', 0)
     p.one_outstanding_per_node = 1; p.enable_peer_headroom = 1
+    p.consumer_kernel = kw.get('consumer_kernel', 0)
+    # C2: placement_sampling=0 is performance-isolated default; set 1 for placement-validation tests.
+    p.placement_sampling = kw.get('placement_sampling', 0)
     return p
 
 
@@ -354,7 +358,8 @@ class TestPlacementSamplingAndMbind(unittest.TestCase):
             cons = (DiConsumerCfg * 1)()
             cons[0].mode = 2
             cfg = DiConfig(); cfg.num_nodes = 1; cfg.policy = DI_POLICY_FIXED_FAA
-            cfg.params = base_params(base_quantum=512*1024, max_backlog=4*1024*1024)
+            # Placement-validation experiment: enable in-run sampling explicitly.
+            cfg.params = base_params(base_quantum=512*1024, max_backlog=4*1024*1024, placement_sampling=1)
             cfg.consumers = ctypes.cast(cons, ctypes.POINTER(DiConsumerCfg))
             eng = lib.di_create(fd, st.st_size, ctypes.byref(cfg))
             self.assertTrue(eng)

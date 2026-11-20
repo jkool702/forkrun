@@ -82,6 +82,13 @@ typedef struct {
      * Runner/campaign default: 1 (full_byte_scan). At the C API level a
      * zero-initialized field means 0 (none); callers must set explicitly. */
     int consumer_kernel;
+    /* Checkpoint 2: placement sampling mode (measurement integrity).
+     * 0=off (no in-run move_pages sampling; performance-isolated default for
+     *   timed measurement trials - placement observation not performed).
+     * 1=on  (in-run move_pages sampling for placement-validation experiments;
+     *   incurs treatment-dependent overhead in the timed path and must not be
+     *   mixed with performance-comparison headline statistics). */
+    int placement_sampling;
 } di_policy_params_t;
 
 typedef struct {

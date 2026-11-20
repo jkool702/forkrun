@@ -109,9 +109,11 @@ class TestReportDist(unittest.TestCase):
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # 5 attempted trials total for scenario/candidate; only 1 functionally valid
-            self.assertIn("1/5", text)
-            # all invalid/incomplete accounted for
-            self.assertIn("failed/invalid/incomplete=4", text)
+            # 5 attempted performance trials total for scenario/candidate; only 1 functionally complete
+            self.assertIn("| sc | legacy | fixed_faa | 5 | 1 | 0 | 0 |", text)
+            # all invalid/incomplete accounted for (performance-class)
+            self.assertIn("invalid/incomplete=4", text)
+            self.assertIn("no-performance-valid-trials", text)
             self.assertIn("unreadable", text.lower())
             self.assertIn("missing manifest", text.lower())
             self.assertIn("incomplete", text.lower())
@@ -182,8 +184,9 @@ class TestReportDist(unittest.TestCase):
             make_campaign(tmp, outcomes, manifests)
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
-            self.assertIn("1/2", text)
-            self.assertIn("| sc | legacy | fixed_faa | 2 |", text)
+            # 2 attempted performance trials, 1 functionally complete, 0 perf-valid
+            self.assertIn("| sc | legacy | fixed_faa | 2 | 1 | 0 | 0 |", text)
+            self.assertIn("no-performance-valid-trials", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -211,7 +214,7 @@ class TestReportDist(unittest.TestCase):
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # only trial 1 is performance-valid: median engine wall 2.000, throughput 0.001 MB/s
-            self.assertIn("| sc | legacy | fixed_faa | 3 | 3/3 | 1/3 | 1/3 | 0.001 | 2.000 |", text)
+            self.assertIn("| sc | legacy | fixed_faa | 3 | 3 | 1 | 1 | 0.001 | 2.000 |", text)
             self.assertIn("func-but-perf-invalid/unknown=2", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -230,9 +233,9 @@ class TestReportDist(unittest.TestCase):
             make_campaign(tmp, outcomes, manifests)
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
-            self.assertIn("NO PERFORMANCE-VALID TRIALS", text)
+            self.assertIn("no-performance-valid-trials", text)
             # headline performance medians must not substitute functional values
-            self.assertIn("| sc | legacy | fixed_faa | 1 | 1/1 | 0/1 | 0/1 | n/a | n/a |", text)
+            self.assertIn("| sc | legacy | fixed_faa | 1 | 1 | 0 | 0 | n/a | n/a |", text)
             # functional-but-perf-invalid/unknown trial retained in detail with raw throughput info
             self.assertIn("engine_wall=1.500000", text)
             self.assertIn("valid[func=true perf=unknown", text)
@@ -255,10 +258,9 @@ class TestReportDist(unittest.TestCase):
             make_campaign(tmp, outcomes, manifests)
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
-            self.assertIn("MIXED KERNELS (full_byte_scan/none)", text)
-            self.assertIn("not comparable", text.lower())
+            self.assertIn("mixed-kernels-not-comparable", text)
             # no headline performance medians when mixed kernels not comparable
-            self.assertIn("| sc | legacy | fixed_faa | 2 | 2/2 | 2/2 | 2/2 | n/a | n/a |", text)
+            self.assertIn("| sc | legacy | fixed_faa | 2 | 2 | 2 | 2 | n/a | n/a |", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -287,6 +289,102 @@ class TestReportDist(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
+
+class TestCheckpoint2PlacementSamplingReporting(unittest.TestCase):
+    """C2: placement-validation experiments are distinct and excluded from headline performance stats."""
+
+    def _perf_manifest(self, wall=1.0, consumed=1000):
+        v_true = {"functional_correctness": True, "performance_measurement": True, "affinity": True,
+                  "memory_policy_application": True, "placement_observed": True, "numa_placement": True}
+        dr = {
+            "correct": True,
+            "wall_seconds": wall,
+            "total_consumed": consumed,
+            "reservations_total": 10,
+            "ingest_cpu_ns": 123456,
+            "trial_class": "performance",
+            "linked_performance_trial": None,
+            "measurement_integrity": {
+                "placement_sampling": "off",
+                "placement_sampling_mode": 0,
+                "timing_tainted_by_in_run_sampling": False,
+                "performance_isolated": True,
+                "linked_performance_trial": None,
+            },
+            "consumer_kernel": {"name": "full_byte_scan", "scan_bytes_evidence": {"total_consumer_bytes_scanned": consumed, "scan_equals_consumed": True}},
+            "nodes": [{"node": 0, "consumer_bytes_scanned": consumed, "bytes_consumed": consumed, "max_effective_backlog": 1,
+                       "affinity": {"ingestor": {"required": True, "requested": True, "applicable": True, "set_applied": True, "query_succeeded": True, "matched": True},
+                                    "consumer": {"required": True, "requested": True, "applicable": True, "set_applied": True, "query_succeeded": True, "matched": True}},
+                       "memory_policy": {"requested_count": 1, "success_count": 1, "failure_count": 0, "all_requested_succeeded": True, "error": 0},
+                       "placement": {"local_pages_on_target_node": 10, "remote_pages_other_node": 0, "unknown_pages": 0, "sampled_pages": 0, "sampling_not_performed": True}}],
+            "validity": v_true,
+            "rc": 0, "overlap_detected": False, "lost_detected": False, "duplicate_detected": False,
+        }
+        return {"complete": True, "incomplete_reasons": [], "wall_s": 1.5, "map_s": None,
+                "child_report": {"completed_bytes": consumed}, "dist_result": dr}
+
+    def _placement_validation_manifest(self, linked, wall=1.2, consumed=1000):
+        v_pv = {"functional_correctness": True, "performance_measurement": False, "affinity": True,
+                "memory_policy_application": True, "placement_observed": True, "numa_placement": True}
+        dr = {
+            "correct": True,
+            "wall_seconds": wall,
+            "total_consumed": consumed,
+            "reservations_total": 10,
+            "ingest_cpu_ns": 123456,
+            "trial_class": "placement_validation",
+            "linked_performance_trial": linked,
+            "measurement_integrity": {
+                "placement_sampling": "on",
+                "placement_sampling_mode": 1,
+                "timing_tainted_by_in_run_sampling": True,
+                "performance_isolated": False,
+                "linked_performance_trial": linked,
+            },
+            "consumer_kernel": {"name": "full_byte_scan", "scan_bytes_evidence": {"total_consumer_bytes_scanned": consumed, "scan_equals_consumed": True}},
+            "nodes": [{"node": 0, "consumer_bytes_scanned": consumed, "bytes_consumed": consumed, "max_effective_backlog": 1,
+                       "affinity": {"ingestor": {"required": True, "requested": True, "applicable": True, "set_applied": True, "query_succeeded": True, "matched": True},
+                                    "consumer": {"required": True, "requested": True, "applicable": True, "set_applied": True, "query_succeeded": True, "matched": True}},
+                       "memory_policy": {"requested_count": 1, "success_count": 1, "failure_count": 0, "all_requested_succeeded": True, "error": 0},
+                       "placement": {"local_pages_on_target_node": 10, "remote_pages_other_node": 0, "unknown_pages": 0, "sampled_pages": 10, "sampling_not_performed": False}}],
+            "validity": v_pv,
+            "rc": 0, "overlap_detected": False, "lost_detected": False, "duplicate_detected": False,
+        }
+        return {"complete": True, "incomplete_reasons": [], "wall_s": 1.7, "map_s": None,
+                "child_report": {"completed_bytes": consumed}, "dist_result": dr}
+
+    def test_placement_validation_excluded_from_headline_performance_stats(self):
+        tmp = tempfile.mkdtemp(prefix='rptc2_')
+        try:
+            linked = "cases/sc__legacy__fixed_faa/trial1/manifest.json"
+            outcomes = [
+                {"case": "sc__legacy__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 1, "status": "ok",
+                 "manifest": "cases/sc__legacy__fixed_faa/trial1/manifest.json", "mapping_id": "legacy", "mapping_profile": "auto",
+                 "trial_class": "performance", "placement_sampling": "off", "linked_performance_trial": None},
+                {"case": "sc__legacy__fixed_faa__placement_validation", "scenario": "sc", "candidate": "fixed_faa", "trial": 1, "status": "ok",
+                 "manifest": "cases/sc__legacy__fixed_faa__placement_validation/trial1/manifest.json", "mapping_id": "legacy", "mapping_profile": "auto",
+                 "trial_class": "placement_validation", "placement_sampling": "on", "linked_performance_trial": linked},
+            ]
+            manifests = {
+                "cases/sc__legacy__fixed_faa/trial1/manifest.json": self._perf_manifest(wall=2.0, consumed=1000),
+                "cases/sc__legacy__fixed_faa__placement_validation/trial1/manifest.json": self._placement_validation_manifest(linked=linked, wall=0.1, consumed=1000),
+            }
+            make_campaign(tmp, outcomes, manifests)
+            rc, text, err = run_report(tmp)
+            self.assertEqual(rc, 0, msg=err + "\n" + text)
+            # headline stats must reflect only the performance trial (2.0s, 0.001 MB/s), not the placement-validation trial
+            self.assertIn("| sc | legacy | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 2.000 |", text)
+            self.assertIn("placement-validation=1(distinct,excluded)", text)
+            # placement-validation reported separately and linked
+            self.assertIn("## Placement-validation experiments (distinct from performance trials; not mixed into headline statistics)", text)
+            self.assertIn(linked, text)
+            self.assertIn("placement_validation", text)
+            self.assertIn("timing-tainted-by-sampling", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 
