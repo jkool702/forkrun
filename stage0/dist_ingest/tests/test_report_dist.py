@@ -287,11 +287,6 @@ class TestReportDist(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
-
 
 class TestCheckpoint2PlacementSamplingReporting(unittest.TestCase):
     """C2: placement-validation experiments are distinct and excluded from headline performance stats."""
@@ -383,6 +378,48 @@ class TestCheckpoint2PlacementSamplingReporting(unittest.TestCase):
             self.assertIn(linked, text)
             self.assertIn("placement_validation", text)
             self.assertIn("timing-tainted-by-sampling", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_failed_or_unreadable_placement_validation_preserves_classification(self):
+        tmp = tempfile.mkdtemp(prefix='rptc2fail_')
+        try:
+            linked = "cases/sc__legacy__fixed_faa/trial1/manifest.json"
+            outcomes = [
+                {"case": "sc__legacy__fixed_faa", "scenario": "sc", "candidate": "fixed_faa", "trial": 1, "status": "ok",
+                 "manifest": "cases/sc__legacy__fixed_faa/trial1/manifest.json", "mapping_id": "legacy", "mapping_profile": "auto",
+                 "trial_class": "performance", "placement_sampling": "off", "linked_performance_trial": None},
+                {"case": "sc__legacy__fixed_faa__placement_validation", "scenario": "sc", "candidate": "fixed_faa", "trial": 1, "status": "failed",
+                 "manifest": "cases/pv_fail/trial1/manifest.json", "mapping_id": "legacy", "mapping_profile": "auto",
+                 "trial_class": "placement_validation", "placement_sampling": "on", "linked_performance_trial": linked},
+                {"case": "sc__legacy__fixed_faa__placement_validation", "scenario": "sc", "candidate": "fixed_faa", "trial": 2, "status": "ok",
+                 "manifest": "cases/pv_missing/trial2/manifest.json", "mapping_id": "legacy", "mapping_profile": "auto",
+                 "trial_class": "placement_validation", "placement_sampling": "on", "linked_performance_trial": linked},
+                {"case": "sc__legacy__fixed_faa__placement_validation", "scenario": "sc", "candidate": "fixed_faa", "trial": 3, "status": "ok",
+                 "manifest": "cases/pv_unreadable/trial3/manifest.json", "mapping_id": "legacy", "mapping_profile": "auto",
+                 "trial_class": "placement_validation", "placement_sampling": "on", "linked_performance_trial": linked},
+            ]
+            manifests = {
+                "cases/sc__legacy__fixed_faa/trial1/manifest.json": self._perf_manifest(wall=2.0, consumed=1000),
+                # pv_fail: no manifest file
+                # pv_missing: no manifest file
+                "cases/pv_unreadable/trial3/manifest.json": "__UNREADABLE__",
+            }
+            make_campaign(tmp, outcomes, manifests)
+            rc, text, err = run_report(tmp)
+            self.assertEqual(rc, 0, msg=err + "\n" + text)
+            # performance-class denominator/stats must include only the performance trial
+            self.assertIn("| sc | legacy | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 2.000 |", text)
+            self.assertIn("placement-validation=3(distinct,excluded)", text)
+            # failed/missing/unreadable placement-validation outcomes remain classified and linked
+            self.assertIn("## Placement-validation experiments (distinct from performance trials; not mixed into headline statistics)", text)
+            self.assertEqual(text.count("| sc | legacy | fixed_faa |"), 4)  # 1 summary row + 3 placement-validation rows
+            self.assertIn(linked, text)
+            self.assertIn("placement_validation", text)
+            self.assertIn("placement sampling | complete", text)  # section header present
+            # invalid visibility
+            self.assertIn("trial status failed or missing manifest", text)
+            self.assertIn("manifest unreadable", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

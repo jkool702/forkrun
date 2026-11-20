@@ -134,6 +134,10 @@ struct di_engine {
 
 /* global test seams */
 static _Atomic int g_create_fail_after_nodes = -1;
+/* Test-only seam/counter: placement sampler dispatch count. Not incremented on the
+ * performance-isolated hot path because call sites must not dispatch when
+ * placement_sampling==0 (C2 correction). */
+static _Atomic uint64_t g_placement_sample_calls = 0;
 
 static uint64_t di_now_ns(void) {
     struct timespec ts;
@@ -516,12 +520,13 @@ static void di_free_chunk(di_chunk_t *c) {
 /* Placement sampling: distributed across full usable allocation.
  * C2: in-run sampling (move_pages/syscall path) is enabled only when
  * P.placement_sampling == 1 (placement-validation experiments). When 0
- * (performance-isolated default), sampling is not performed so timed
- * measurement trials incur no treatment-dependent sampling overhead. */
+ * (performance-isolated default), call sites must not dispatch this function in the
+ * timed/allocation path; node metrics are initialized at engine creation. */
 static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
+    __atomic_fetch_add(&g_placement_sample_calls, 1, __ATOMIC_RELAXED);
     if (!n || !n->eng) return 0;
     if (n->eng->P.placement_sampling == 0) {
-        /* Performance-isolated: do not invoke move_pages or sampling work in the timed path. */
+        /* Defensive: performance-isolated path should not dispatch sampler. */
         n->m.placement_sampling_not_performed = 1;
         return 0;
     }
@@ -937,7 +942,9 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
     n->m.bytes_read += act;
     di_hist_add(n->m.res_hist, req_len);
     di_record_res(n, start, req_len, assigned, act);
-    di_sample_placement(n, c.buf, act);
+    /* C2 correction: do not dispatch sampler at all on the performance-isolated path. */
+    if (eng->P.placement_sampling)
+        di_sample_placement(n, c.buf, act);
 
     c.off = start; c.len = act;
     if (di_queue_push(n, c) != 0) {
@@ -1068,6 +1075,8 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     if (eng->P.max_reservation == 0) eng->P.max_reservation = eng->P.max_backlog;
     /* Section 9: reject invalid/contradictory config rather than silent misuse */
     if (eng->P.base_quantum == 0 || eng->P.max_backlog == 0) { free(eng); return NULL; }
+    /* C2 correction: placement sampling mode is binary (0=off/perf, 1=on/validation). */
+    if (eng->P.placement_sampling != 0 && eng->P.placement_sampling != 1) { free(eng); return NULL; }
     if (eng->P.max_reservation > eng->P.max_backlog) eng->P.max_reservation = eng->P.max_backlog;
     eng->P.one_outstanding_per_node = 1;
     if (!eng->P.enable_peer_headroom) eng->P.enable_peer_headroom = 1;
@@ -1540,4 +1549,12 @@ int di_test_set_push_fail_seam(di_engine_t *eng, int fail_on_nth) {
     eng->push_fail_fired = 0;
     pthread_mutex_unlock(&eng->seam_mu);
     return 0;
+}
+
+void di_test_reset_placement_sample_calls(void) {
+    __atomic_store_n(&g_placement_sample_calls, 0, __ATOMIC_RELAXED);
+}
+
+uint64_t di_test_get_placement_sample_calls(void) {
+    return __atomic_load_n(&g_placement_sample_calls, __ATOMIC_RELAXED);
 }

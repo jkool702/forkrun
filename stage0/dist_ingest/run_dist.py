@@ -1117,6 +1117,16 @@ def main():
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
+    placement_sampling_mode = 1 if getattr(args, "placement_sampling", "off") == "on" else 0
+    placement_sampling_name = _placement_sampling_mode_name(placement_sampling_mode)
+    expected_trial_class = _trial_class_for_sampling(placement_sampling_mode)
+    if args.trial_class is not None and args.trial_class != expected_trial_class:
+        raise SystemExit(
+            "inconsistent placement sampling/trial class: placement_sampling=%s requires trial_class=%s (got %s)"
+            % (placement_sampling_name, expected_trial_class, args.trial_class))
+    trial_class = expected_trial_class
+    linked_performance_trial = getattr(args, "linked_performance_trial", None)
+
     path = args.input
     if not os.path.isabs(path):
         path = os.path.join(REPO, path)
@@ -1157,11 +1167,7 @@ def main():
     params.one_outstanding_per_node = 1
     params.enable_peer_headroom = 1
     params.consumer_kernel = 1 if args.consumer_kernel == "full_byte_scan" else 0
-    placement_sampling_mode = 1 if getattr(args, "placement_sampling", "off") == "on" else 0
     params.placement_sampling = placement_sampling_mode
-    placement_sampling_name = _placement_sampling_mode_name(placement_sampling_mode)
-    trial_class = getattr(args, "trial_class", None) or _trial_class_for_sampling(placement_sampling_mode)
-    linked_performance_trial = getattr(args, "linked_performance_trial", None)
 
     cons_arr = (DiConsumerCfg * n)()
     for i in range(n):

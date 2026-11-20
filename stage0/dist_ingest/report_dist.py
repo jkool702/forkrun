@@ -75,7 +75,11 @@ def main():
         rec = {"scenario": scen, "candidate": cand, "mapping_id": mapping_id,
                "mapping_profile": o.get("mapping_profile"),
                "trial": o.get("trial"), "status": o.get("status"),
-               "manifest_path": mpath, "invalid": False}
+               "manifest_path": mpath, "invalid": False,
+               # C2 correction: campaign outcome classification is authoritative, even if manifest is failed/missing/unreadable.
+               "trial_class": (o.get("trial_class") or "performance"),
+               "placement_sampling": (o.get("placement_sampling") or "off"),
+               "linked_performance_trial": o.get("linked_performance_trial")}
 
         def mark_invalid(reason):
             rec["invalid"] = True
@@ -124,11 +128,16 @@ def main():
             rec["v_mempolicy"] = safe_validity(dr, "memory_policy_application", "placement_policy_valid")
             rec["v_placement_obs"] = safe_validity(dr, "placement_observed", "placement_observed_all_sampled_on_target")
             rec["v_numa_placement"] = safe_validity(dr, "numa_placement")
-            # C2: trial class / measurement integrity / linkage
+            # C2: trial class / measurement integrity / linkage (outcome classification authoritative)
             mi = dr.get("measurement_integrity") or {}
-            rec["trial_class"] = dr.get("trial_class") or safe_get(dr, "comparability", "trial_class") or spec.get("trial_class") or "performance"
-            rec["placement_sampling"] = mi.get("placement_sampling") or safe_get(dr, "comparability", "placement_sampling") or spec.get("placement_sampling") or "off"
-            rec["linked_performance_trial"] = dr.get("linked_performance_trial") or mi.get("linked_performance_trial") or spec.get("linked_performance_trial")
+            _outcome_tc = (o.get("trial_class") or None)
+            if not _outcome_tc:
+                rec["trial_class"] = dr.get("trial_class") or safe_get(dr, "comparability", "trial_class") or spec.get("trial_class") or rec.get("trial_class") or "performance"
+            _outcome_ps = (o.get("placement_sampling") or None)
+            if not _outcome_ps:
+                rec["placement_sampling"] = mi.get("placement_sampling") or safe_get(dr, "comparability", "placement_sampling") or spec.get("placement_sampling") or rec.get("placement_sampling") or "off"
+            if rec.get("linked_performance_trial") is None:
+                rec["linked_performance_trial"] = dr.get("linked_performance_trial") or mi.get("linked_performance_trial") or spec.get("linked_performance_trial")
             rec["timing_tainted_by_in_run_sampling"] = mi.get("timing_tainted_by_in_run_sampling")
             # mapping identity/provenance (checkpoint 1)
             mp = dr.get("mapping_provenance") or {}
@@ -141,9 +150,13 @@ def main():
         else:
             rec["dist"] = None
             rec["is_dist_engine"] = False
-            rec["trial_class"] = spec.get("trial_class") or "performance"
-            rec["placement_sampling"] = spec.get("placement_sampling") or "off"
-            rec["linked_performance_trial"] = spec.get("linked_performance_trial")
+            # Outcome classification remains authoritative; refine from spec only if outcome omitted.
+            if not (o.get("trial_class") or None):
+                rec["trial_class"] = spec.get("trial_class") or rec.get("trial_class") or "performance"
+            if not (o.get("placement_sampling") or None):
+                rec["placement_sampling"] = spec.get("placement_sampling") or rec.get("placement_sampling") or "off"
+            if rec.get("linked_performance_trial") is None:
+                rec["linked_performance_trial"] = spec.get("linked_performance_trial")
             rec["timing_tainted_by_in_run_sampling"] = None
             rec["engine_wall_s"] = rec.get("map_s") or rec.get("wall_s_harness")
             rec["harness_wall_s"] = m.get("wall_s")
@@ -348,28 +361,28 @@ def main():
                         lines.append("  - mapping: profile=%s variant=%s phys=%s spans_sockets=%s affinity_verified=%s" % (
                             mpv.get("mapping_profile"), mpv.get("mapping_variant"), mpv.get("logical_to_physical"),
                             mpv.get("spans_sockets"), fmt_tri(mpv.get("all_requested_affinity_roles_verified"))))
-                for n in dr.get("nodes", []):
-                    pl = n.get("placement", {})
-                    mp = n.get("memory_policy", {})
-                    aff = n.get("affinity", {})
-                    ing = aff.get("ingestor", {})
-                    con = aff.get("consumer", {})
-                    lines.append(
-                        "  - node %d: scanned=%s consumed=%s pub=%s max_eff=%s "
-                        "aff[ing req=%s app=%s ok=%s matched=%s applicable=%s | con req=%s app=%s ok=%s matched=%s] "
-                        "mbind[req_c=%s ok_c=%s fail_c=%s err=%s all_ok=%s] "
-                        "place[target=%s other=%s unknown=%s sampled=%s]" % (
-                            n.get("node"), n.get("consumer_bytes_scanned"), n.get("bytes_consumed"),
-                            n.get("bytes_published"), n.get("max_effective_backlog"),
-                            ing.get("requested"), ing.get("set_applied"), ing.get("query_succeeded"), ing.get("matched"), ing.get("applicable"),
-                            con.get("requested"), con.get("set_applied"), con.get("query_succeeded"), con.get("matched"),
-                            mp.get("requested_count"), mp.get("success_count"), mp.get("failure_count"), mp.get("error"), mp.get("all_requested_succeeded"),
-                            pl.get("local_pages_on_target_node", pl.get("sample_target_match_pages")),
-                            pl.get("remote_pages_other_node", pl.get("sample_other_node_pages")),
-                            pl.get("unknown_pages", pl.get("sample_unknown_pages")),
-                            pl.get("sampled_pages")))
-                if r.get("invalid_reasons"):
-                    lines.append("  - invalid reasons: %s" % r.get("invalid_reasons"))
+                    for n in dr.get("nodes", []):
+                        pl = n.get("placement", {})
+                        mp = n.get("memory_policy", {})
+                        aff = n.get("affinity", {})
+                        ing = aff.get("ingestor", {})
+                        con = aff.get("consumer", {})
+                        lines.append(
+                            "  - node %d: scanned=%s consumed=%s pub=%s max_eff=%s "
+                            "aff[ing req=%s app=%s ok=%s matched=%s applicable=%s | con req=%s app=%s ok=%s matched=%s] "
+                            "mbind[req_c=%s ok_c=%s fail_c=%s err=%s all_ok=%s] "
+                            "place[target=%s other=%s unknown=%s sampled=%s]" % (
+                                n.get("node"), n.get("consumer_bytes_scanned"), n.get("bytes_consumed"),
+                                n.get("bytes_published"), n.get("max_effective_backlog"),
+                                ing.get("requested"), ing.get("set_applied"), ing.get("query_succeeded"), ing.get("matched"), ing.get("applicable"),
+                                con.get("requested"), con.get("set_applied"), con.get("query_succeeded"), con.get("matched"),
+                                mp.get("requested_count"), mp.get("success_count"), mp.get("failure_count"), mp.get("error"), mp.get("all_requested_succeeded"),
+                                pl.get("local_pages_on_target_node", pl.get("sample_target_match_pages")),
+                                pl.get("remote_pages_other_node", pl.get("sample_other_node_pages")),
+                                pl.get("unknown_pages", pl.get("sample_unknown_pages")),
+                                pl.get("sampled_pages")))
+                    if r.get("invalid_reasons"):
+                        lines.append("  - invalid reasons: %s" % r.get("invalid_reasons"))
             lines.append("")
 
     lines.append("## Invalid / incomplete / failed / unreadable / missing trials")

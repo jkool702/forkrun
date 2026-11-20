@@ -257,6 +257,9 @@ int di_test_set_placement_seam(di_engine_t *eng, int mode, int rc_or_unused,
 /* Failure-injection seams. */
 int di_test_set_create_fail_seam(int fail_after_nodes); /* -1 disables */
 int di_test_set_push_fail_seam(di_engine_t *eng, int fail_on_nth); /* 0 disables */
+/* C2 test seam: placement sampler dispatch count (incremented only when sampler is invoked). */
+void di_test_reset_placement_sample_calls(void);
+uint64_t di_test_get_placement_sample_calls(void);
 
 /* Policy decision (exposed for unit tests). Computes claim bytes for node i
  * given per-node effective backlogs/headrooms (bytes). headrooms[i] is the

@@ -243,3 +243,72 @@ Local/fake-NUMA tests validate driver and CLI-input/topology-handling/provenance
 - Malformed explicit physical-node lists rejected before `resolve_topology()`/build/trials; quick/profile semantics and effective-profile provenance are unambiguous and consistent; duplicate scenario IDs rejected and prevalidation/provenance/execution-plan remain consistent.
 - **No physical-NUMA hardware rented. No production code changed. No further architecture or prototype expansion.**
 - **Stopped for review** at this checkpoint.
+
+
+---
+
+# WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C2-CORRECTIONS-1 — Closeout
+
+**Work order:** `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C2-CORRECTIONS-1` (C2 measurement-integrity and experiment-planning corrections).  
+**Builds on:** C2 checkpoint `6d5d12333511ec1c4b0af469049e5ecb8bb49fc1` (`dist-ingest: checkpoint 2 placement-sampling isolation and measurement integrity`) on `NEW/REFACTOR5.1` (local HEAD and `origin/NEW/REFACTOR5.1` both verified at correction start).  
+**Reviewer-reported C2 SHA mismatch:** `6d5d123356f65d0c11392c4f50bf206e1c26953f` could not be resolved; actual C2/start HEAD reported above (history not rewritten).
+
+**Status:** correction implemented and validated on this local/fake-NUMA host. **No physical-NUMA hardware rented. No production adoption started. No C3 work started.**
+
+## 1. Repository state
+
+- **Branch:** `NEW/REFACTOR5.1`
+- **Starting HEAD (before this correction):** `6d5d12333511ec1c4b0af469049e5ecb8bb49fc1` (verified; same as `origin/NEW/REFACTOR5.1` at start)
+- **Final HEAD (this correction checkpoint):** see commit recorded for this correction
+- **Remote tracking state at closeout:** `origin/NEW/REFACTOR5.1` updated to this correction commit (after push)
+- **Working-tree status at closeout:** clean after commit/push of intended source/test/doc changes only (generated/untracked build artifacts not committed)
+- **Frozen production files modified:** **none** (`forkrun_ring.c`, `forkrun_ring.h`, `forkrun_substrate.h`, `substratestubs.c` untouched; verified)
+
+## 2. Corrected hot path (P1) — `stage0/dist_ingest/dist_ingest.c`, `dist_ingest.h`
+
+- Allocation/reservation path no longer dispatches `di_sample_placement()` at all when placement sampling is disabled: call site guarded on `eng->P.placement_sampling != 0`. Once-per-node `placement_sampling_not_performed` initialization at engine creation retained.
+- `placement_sampling` validated as binary `0|1` at the C engine boundary in `di_create()` (invalid values rejected).
+- Sampling-on behavior/placement-validation metrics preserved.
+- Test-only dispatch counter/seam added (`di_test_reset_placement_sample_calls` / `di_test_get_placement_sample_calls`), incremented only on sampler invocation; no permanent per-allocation instrumentation on the performance path. Seam-based tests prove sampling-off performs no sampler dispatch per allocation and sampling-on dispatches with preserved sampling behavior/metrics.
+
+## 3. Complete paired planning and execution (P1) — `stage0/dist_ingest/run_dist_campaign.sh`
+
+- `--placement-experiments` validated as exactly `off` or `paired` before build/corpus/trial setup (invalid values rejected with no successful execution plan/prevalidation and no corpus setup).
+- Requested/effective placement-experiments mode and placement-validation run count recorded in `prevalidation.json` and `execution-plan.json`; plan-only output reports placement-validation run count.
+- For `paired`, every planned placement-validation run is represented explicitly in `execution-plan.json` (`planned_experiments`, per-block planned experiments) and in authoritative `.run_experiments.tsv`: scenario/mapping identity, candidate, trial, distinct PV case id, `trial_class=placement_validation`, `placement_sampling=on`, and linked performance-trial manifest path. Expected/planned PV run counts included.
+- Actual campaign executes exactly the paired runs represented by the explicit plan (`.run_experiments.tsv`); no runtime-only expansion. Plan-only and real paired execution agree on identities/links/counts.
+- Production-reference candidates remain separated and excluded from distributed-engine placement experiments.
+
+## 4. Report failure classification (P1) — `stage0/dist_ingest/report_dist.py`
+
+- `trial_class`, `placement_sampling`, and `linked_performance_trial` populated from campaign outcome immediately when creating report records (authoritative). Successful manifest data may refine but does not erase outcome classification when outcome provides it.
+- Failed/missing/unreadable placement-validation runs remain classified as placement-validation records (not promoted to performance class), do not enter performance-class attempt/functional-completion denominators, and remain visible with class/linkage in placement-validation/invalid reporting.
+- Minor structural fix: per-trial node/invalid-detail emission kept within per-record processing so records with missing/unreadable dist manifests do not break report generation.
+
+## 5. CLI/result consistency (P2) — `stage0/dist_ingest/run_dist.py`
+
+- `placement_sampling=off` ⇔ `trial_class=performance` and `placement_sampling=on` ⇔ `trial_class=placement_validation` enforced before engine create/run when `--trial-class` is provided; contradictions rejected with no engine execution/result emission.
+- Matching combinations remain valid; emitted `DIST_RESULT` has internally consistent sampling mode, trial class, and measurement-integrity/performance-validity fields.
+
+## 6. Test cleanup and coverage (P2 / corrections)
+
+- Exactly one `TestCheckpoint2PlacementSamplingIsolation` in `stage0/dist_ingest/tests/test_benchmark_semantics.py` and one `TestCheckpoint2PlacementSamplingReporting` in `stage0/dist_ingest/tests/test_report_dist.py`; `if __name__ == "__main__": unittest.main()` consolidated to bottom of each module. Unrelated historical tests not altered.
+- Added correction coverage: C seam-based no-dispatch (perf-off) and dispatch-on (placement-validation) tests, binary `placement_sampling` rejection at C boundary, `run_dist.py` contradiction-before-execution and matching-combination consistency tests, failed/missing/unreadable placement-validation report classification tests, and campaign tests for invalid `--placement-experiments` rejection before build/corpus/trials, plan-only off/paired explicit planning/counts/identities/links with production-reference exclusion, and real paired campaign executing exactly planned pairs.
+
+## 7. Validation
+
+- **Rebuild:** `cd stage0/dist_ingest && make` (normal build path) → `make: Nothing to be done for 'all'.` / up-to-date shared library rebuilt earlier in correction (`stage0/libdist_ingest.so`, untracked, **not committed**).
+- **Required suites (exact):**
+  - `python3 -m unittest discover -s stage0/dist_ingest/tests -v` → **206/206 OK** (29.868s)
+  - `python3 -m unittest stage0.tests.test_stage0` → **81/81 OK** (16.264s)
+  - `python3 -m unittest python.tests.test_numa_drain_guard` → **7/7 OK** (0.000s)
+  - `python3 -m unittest python.tests.test_numa` → **36 tests, OK (skipped=1)** (3.313s)
+- **Relevant C2 engine/campaign smokes (passed):** consolidated `TestCheckpoint2PlacementSamplingIsolation` (10 tests, including seam/no-dispatch/dispatch-on/binary-boundary/run_dist consistency) via `python3 -m unittest ... -v`; consolidated `TestCheckpoint2PlacementSamplingReporting` (2 tests) via `python3 -m unittest ... -v`; `TestCheckpoint2PlacementSamplingCampaignCorrections` plan-only off/paired + invalid rejection + real paired execution (4 tests) via `python3 -m unittest ... -v`.
+- **Direct module runs / consolidated guard discovery:** `python3 stage0/dist_ingest/tests/test_report_dist.py` → **10/10 OK** (all classes discovered, including consolidated C2 reporting tests). `__main__` guards consolidated to bottom of both `test_benchmark_semantics.py` and `test_report_dist.py` (verified); consolidated C2 tests discovered by unittest module/class execution as above.
+- **Scope hygiene:** no frozen production files or production sources modified; no generated/untracked build artifacts committed (`stage0/libdist_ingest.so` remains untracked). ASan/UBSan coverage **not rerun** for this correction (no sanitizer coverage implied).
+
+## 8. Remaining limitations / stop condition
+
+- C3–C5 work not started (parameter sweeps/workload expansion/duration-cache work, reporting improvements/binary provenance/calibration, EPYC stage/orchestration/rehearsal, `RENTAL_READINESS.md` as applicable later). No physical multi-node NUMA validation/rental; local/fake-NUMA results are not evidence of physical locality/scaling/remote-memory penalties.
+- `mbind(MPOL_PREFERRED)` syscall success and placement sampling observations are not physical placement proof; `unknown` remains `unknown`. Placement-validation experiments remain timing-tainted and distinct from performance measurements.
+- **Explicit confirmation:** no C3 work, no physical rental, no production adoption. **Stopped for independent review after this correction checkpoint.**

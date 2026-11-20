@@ -114,6 +114,11 @@ if [ "$QUICK" -eq 1 ] && { [ "$PROFILE_KIND" = "nodes2" ] || [ "$PROFILE_KIND" =
   exit 2
 fi
 
+if [ "$PLACEMENT_EXPERIMENTS" != "off" ] && [ "$PLACEMENT_EXPERIMENTS" != "paired" ]; then
+  echo "dist-campaign: --placement-experiments must be exactly off or paired (got: $PLACEMENT_EXPERIMENTS)" >&2
+  exit 2
+fi
+
 if [ -z "$SOURCE_SHA" ]; then
   SOURCE_SHA=$(git rev-parse HEAD) || { echo "dist-campaign: cannot resolve HEAD" >&2; exit 2; }
 fi
@@ -158,10 +163,11 @@ fi
 echo "=== dist-ingest campaign: topology/scenario pre-validation"
 export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
 PREVAL_FILE="$OUT/prevalidation.json"
-python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" "$MAPPING_PROFILES" "$TRIALS" "$CAND_FILTER" "$SEED" "$SHUFFLE_SCENARIOS" <<'PY'
+python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" "$MAPPING_PROFILES" "$TRIALS" "$CAND_FILTER" "$SEED" "$SHUFFLE_SCENARIOS" "$PLACEMENT_EXPERIMENTS" <<'PY'
 import json, os, re, sys
 (out, scen_filter, phys_nodes, profile, quick, preval_path,
- scen_filter_explicit, mapping_profiles_arg, trials_arg, cand_filter_arg, seed_arg, shuf_sc_arg) = sys.argv[1:13]
+ scen_filter_explicit, mapping_profiles_arg, trials_arg, cand_filter_arg, seed_arg, shuf_sc_arg,
+ placement_experiments) = sys.argv[1:14]
 quick = quick == '1'
 scen_filter_explicit = scen_filter_explicit == '1'
 requested_profile = profile or None
@@ -621,14 +627,16 @@ os.makedirs(out, exist_ok=True)
 with open(preval_path, 'w') as f:
     json.dump(prov, f, indent=2, sort_keys=True)
 
-# Emit execution plan for bash: scenario_id \t scen_def \t trial \t cand_csv \t mapping_id \t mapping_profile \t mapping_variant \t phys_nodes
-# Also write structured plan. Use the actual validated CLI/shell values so
-# plan-only and real execution agree exactly.
+# Emit execution plan. C2 correction: paired placement-validation experiments are part of the
+# actual, complete plan (not runtime-only expansion). plan-only must reveal every planned run.
 exec_plan = []
+planned_experiments = []
+placement_validation_run_count = 0
 cand_list = list(plan_candidates)
 trials_n = int(plan_trials_n)
 seed = str(plan_seed)
 shuf_sc = bool(plan_shuffle_scenarios)
+placement_mode = 'paired' if placement_experiments == 'paired' else 'off'
 import random
 # group by (scenario,mapping) preserving scenario order
 sm_keys = []
@@ -650,22 +658,67 @@ sm_keys = sorted(sm_keys, key=sm_sort_key)
 if shuf_sc:
     random.Random(str(seed) + '|scenario_mapping_blocks').shuffle(sm_keys)
 
+_DIST_CANDS = {'fixed_faa', 'local_adaptive', 'relative_adaptive', 'centralized_ingest', 'centralized'}
+
 for key in sm_keys:
     m = sm_map[key]
     sid = m['scenario_id']
+    safe_map = re.sub(r'[^A-Za-z0-9_.:-]+', '-', str(m.get('mapping_id') or 'legacy'))
     for t in range(1, trials_n + 1):
         cands = list(cand_list)
         random.Random(str(seed)+'|'+sid+'|'+m['mapping_id']+'|'+str(t)).shuffle(cands)
+        block_exps = []
+        for cand in cands:
+            perf_case_id = '%s__%s__%s' % (sid, safe_map, cand)
+            perf_exp = {
+                'scenario': sid,
+                'scenario_def': available_by_id[sid]['def'],
+                'trial': t,
+                'candidate': cand,
+                'case_id': perf_case_id,
+                'mapping_id': m.get('mapping_id'),
+                'mapping_profile': m.get('mapping_profile'),
+                'mapping_variant': m.get('mapping_variant'),
+                'logical_to_physical': m.get('logical_to_physical'),
+                'phys_nodes': m.get('phys_nodes'),
+                'trial_class': 'performance',
+                'placement_sampling': 'off',
+                'linked_performance_trial': None,
+            }
+            block_exps.append(perf_exp)
+            planned_experiments.append(perf_exp)
+            if placement_mode == 'paired' and cand in _DIST_CANDS:
+                pv_case_id = perf_case_id + '__placement_validation'
+                pv_link = 'cases/%s/trial%s/manifest.json' % (perf_case_id, t)
+                pv_exp = {
+                    'scenario': sid,
+                    'scenario_def': available_by_id[sid]['def'],
+                    'trial': t,
+                    'candidate': cand,
+                    'case_id': pv_case_id,
+                    'mapping_id': m.get('mapping_id'),
+                    'mapping_profile': m.get('mapping_profile'),
+                    'mapping_variant': m.get('mapping_variant'),
+                    'logical_to_physical': m.get('logical_to_physical'),
+                    'phys_nodes': m.get('phys_nodes'),
+                    'trial_class': 'placement_validation',
+                    'placement_sampling': 'on',
+                    'linked_performance_trial': pv_link,
+                }
+                block_exps.append(pv_exp)
+                planned_experiments.append(pv_exp)
+                placement_validation_run_count += 1
         exec_plan.append({
             'scenario': sid,
             'scenario_def': available_by_id[sid]['def'],
             'trial': t,
             'candidate_order': cands,
-            'mapping_id': m['mapping_id'],
+            'mapping_id': m.get('mapping_id'),
             'mapping_profile': m.get('mapping_profile'),
             'mapping_variant': m.get('mapping_variant'),
             'logical_to_physical': m.get('logical_to_physical'),
             'phys_nodes': m.get('phys_nodes'),
+            'planned_experiments': block_exps,
         })
 
 # Record requested/executed plan parameters in prevalidation for provenance and tests.
@@ -674,11 +727,16 @@ prov['candidates'] = list(plan_candidates)
 prov['trials'] = trials_n
 prov['seed'] = seed
 prov['shuffle_scenarios'] = bool(shuf_sc)
+prov['placement_experiments'] = placement_mode
+prov['placement_experiments_effective'] = placement_mode
+prov['placement_validation_run_count'] = placement_validation_run_count
+prov['planned_run_count'] = len(planned_experiments)
 prov['randomization'] = {
     'seed': seed,
     'shuffle_scenarios': bool(shuf_sc),
     'trials': trials_n,
     'candidates': list(plan_candidates),
+    'placement_experiments': placement_mode,
 }
 with open(preval_path, 'w') as f:
     json.dump(prov, f, indent=2, sort_keys=True)
@@ -686,16 +744,31 @@ with open(preval_path, 'w') as f:
 with open(os.path.join(out, 'execution-plan.json'), 'w') as f:
     json.dump({'seed': seed, 'shuffle_scenarios': shuf_sc, 'trials': trials_n,
                'candidates': list(plan_candidates),
+               'placement_experiments': placement_mode,
+               'placement_experiments_effective': placement_mode,
+               'placement_validation_run_count': placement_validation_run_count,
+               'planned_run_count': len(planned_experiments),
                'mapping_profiles_requested': raw_mp, 'mapping_mode': prov['physical_node_mapping']['mode'],
-               'blocks': exec_plan, 'unsupported_mappings': prov['unsupported_mappings']}, f, indent=2, sort_keys=True)
+               'blocks': exec_plan, 'planned_experiments': planned_experiments,
+               'unsupported_mappings': prov['unsupported_mappings']}, f, indent=2, sort_keys=True)
+# Backward-compatible block plan for older tooling
 with open(os.path.join(out, '.run_plan.tsv'), 'w') as f:
     for b in exec_plan:
         f.write('\t'.join([
             b['scenario'], b['scenario_def'], str(b['trial']), ','.join(b['candidate_order']),
             b['mapping_id'] or '', b.get('mapping_profile') or '', b.get('mapping_variant') or '', b.get('phys_nodes') or ''
         ]) + '\n')
-print('prevalidation ok: selected=%s mappings=%d unsupported=%d candidates=%s trials=%d seed=%s shuffle=%s' % (
-    selected_ids, len(plan_cases), len(unsupported_mappings), plan_candidates, trials_n, seed, shuf_sc), file=sys.stderr)
+# Authoritative explicit experiment plan executed by the runtime loop (C2 correction)
+with open(os.path.join(out, '.run_experiments.tsv'), 'w') as f:
+    for e in planned_experiments:
+        f.write('\t'.join([
+            e['scenario'], e['scenario_def'], str(e['trial']), e['candidate'],
+            e['mapping_id'] or '', e.get('mapping_profile') or '', e.get('mapping_variant') or '', e.get('phys_nodes') or '',
+            e['case_id'], e.get('trial_class') or 'performance', e.get('placement_sampling') or 'off',
+            e.get('linked_performance_trial') or '',
+        ]) + '\n')
+print('prevalidation ok: selected=%s mappings=%d unsupported=%d candidates=%s trials=%d seed=%s shuffle=%s placement_experiments=%s placement_validation_runs=%d' % (
+    selected_ids, len(plan_cases), len(unsupported_mappings), plan_candidates, trials_n, seed, shuf_sc, placement_mode, placement_validation_run_count), file=sys.stderr)
 PY
 PREVAL_RC=$?
 if [ "$PREVAL_RC" -ne 0 ]; then
@@ -704,9 +777,19 @@ fi
 
 # plan-only mode: complete plan written, no builds/corpora/timed trials
 if [ "$PLAN_ONLY" -eq 1 ]; then
+  _PV_COUNT=$(python3 - "$OUT/execution-plan.json" <<'PY'
+import json,sys
+try:
+    with open(sys.argv[1]) as f: d=json.load(f)
+    print(int(d.get('placement_validation_run_count', 0) or 0))
+except Exception:
+    print(0)
+PY
+)
   echo "dist-campaign plan-only complete: $OUT" >&2
   echo "  prevalidation: $OUT/prevalidation.json" >&2
   echo "  execution-plan: $OUT/execution-plan.json" >&2
+  echo "  placement_experiments=$PLACEMENT_EXPERIMENTS placement_validation_runs=$_PV_COUNT" >&2
   exit 0
 fi
 
@@ -756,7 +839,7 @@ ORDER_LOG="$OUT/execution-order.jsonl"
 : > "$OUTCOMES"
 : > "$ORDER_LOG"
 
-PLAN_FILE="$OUT/.run_plan.tsv"
+EXPERIMENTS_FILE="$OUT/.run_experiments.tsv"
 
 run_one_experiment() {
   local exp_case_id="$1" exp_sid="$2" exp_cand="$3" exp_trial="$4"
@@ -824,7 +907,7 @@ else:
     "consumer_kernel": consumer_kernel,
     "strict_affinity": bool(int(strict_affinity)),
     "strict_mbind": bool(int(strict_mbind)),
-    # C2: performance-isolated by default for timed measurement trials
+    # C2/C2-correction: trial class and placement sampling come from the explicit plan
     "placement_sampling": placement_sampling or "off",
     "trial_class": trial_class or "performance",
   })
@@ -851,43 +934,19 @@ PY
   return 0
 }
 
-while IFS=$'\t' read -r sid scen_def t cand_csv map_id map_profile map_variant map_phys; do
+# Execute exactly the paired/explicit runs represented by the plan (C2 correction).
+while IFS=$'\t' read -r sid scen_def t cand map_id map_profile map_variant map_phys exp_case_id exp_trial_class exp_placement_sampling exp_linked_perf; do
   [ -z "$sid" ] && continue
   IFS='|' read -r _sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra <<< "$scen_def"
-  IFS=',' read -ra BLOCK_CANDS <<< "$cand_csv"
-  echo "BLOCK scenario=$sid mapping=$map_id trial=$t order=$cand_csv placement_experiments=$PLACEMENT_EXPERIMENTS" >&2
-  printf '{"scenario":"%s","mapping_id":"%s","mapping_profile":"%s","trial":%s,"placement_experiments":"%s","candidate_order":[%s]}\n' \
-    "$sid" "$map_id" "$map_profile" "$t" "$PLACEMENT_EXPERIMENTS" "$(python3 - <<PY "$cand_csv"
-import json,sys; print(','.join(json.dumps(x) for x in sys.argv[1].split(',') if x))
-PY
-)" >> "$ORDER_LOG"
-  for cand in "${BLOCK_CANDS[@]}"; do
-    [ -z "$cand" ] && continue
-    # mapping identity in case identity (checkpoint 1)
-    safe_map=$(python3 -c "import re,sys; print(re.sub(r'[^A-Za-z0-9_.:-]+','-',sys.argv[1]))" "$map_id")
-    perf_case_id="${sid}__${safe_map}__${cand}"
-    is_dist=0
-    case "$cand" in
-      production_ref|forkrun_control|control) is_dist=0 ;;
-      *) is_dist=1 ;;
-    esac
-    # C2: performance trial (mandatory isolation for dist-ingest candidates)
-    run_one_experiment "$perf_case_id" "$sid" "$cand" "$t" \
-      "$map_id" "$map_profile" "$map_variant" "$map_phys" \
-      "$inp" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" \
-      "performance" "off" ""
-
-    # C2: optional paired placement-validation experiment (distinct, linked)
-    if [ "$PLACEMENT_EXPERIMENTS" = "paired" ] && [ "$is_dist" -eq 1 ]; then
-      pv_case_id="${perf_case_id}__placement_validation"
-      pv_link="cases/${perf_case_id}/trial${t}/manifest.json"
-      run_one_experiment "$pv_case_id" "$sid" "$cand" "$t" \
-        "$map_id" "$map_profile" "$map_variant" "$map_phys" \
-        "$inp" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" \
-        "placement_validation" "on" "$pv_link"
-    fi
-  done
-done < "$PLAN_FILE"
+  echo "RUN scenario=$sid mapping=$map_id trial=$t candidate=$cand case=$exp_case_id class=$exp_trial_class placement_sampling=$exp_placement_sampling" >&2
+  printf '{"scenario":"%s","mapping_id":"%s","mapping_profile":"%s","trial":%s,"candidate":"%s","case_id":"%s","trial_class":"%s","placement_sampling":"%s","linked_performance_trial":%s}\n' \
+    "$sid" "$map_id" "$map_profile" "$t" "$cand" "$exp_case_id" "$exp_trial_class" "$exp_placement_sampling" \
+    "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1] if sys.argv[1] else None))' "$exp_linked_perf")" >> "$ORDER_LOG"
+  run_one_experiment "$exp_case_id" "$sid" "$cand" "$t" \
+    "$map_id" "$map_profile" "$map_variant" "$map_phys" \
+    "$inp" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" \
+    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf"
+done < "$EXPERIMENTS_FILE"
 
 python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" \
   || echo "WARN: env-after capture failed" >&2
