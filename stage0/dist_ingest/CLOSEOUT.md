@@ -330,11 +330,11 @@ Local/fake-NUMA tests validate driver and CLI-input/topology-handling/provenance
 
 1. **Parameter sweeps (attributable parameter sets).** `run_dist_campaign.sh` accepts `--sweep-base-quantum`, `--sweep-max-backlog`, `--sweep-max-reservation` (comma-separated positive integer lists). The cartesian product forms explicit `parameter_sets` with stable `parameter_set_id` values and `sweep_axes` provenance recorded in `prevalidation.json`, `execution-plan.json`, `campaign-manifest.json`, `.run_experiments.tsv`, and per-outcome/per-manifest spec fields. Default (no sweep) produces `pset__default` with empty `sweep_axes`, preserving backward-compatible behavior. Parameter sets are carried through case ids/suffixes so results are not mixed across parameter sets.
 
-2. **Duration qualification (separate factual axis).** `run_dist_campaign.sh` accepts `--min-duration-seconds N` (non-negative). `stage0/run_case.py` records `duration_qualification` in `manifest.json` with `target_seconds`, effective wall seconds (engine/map/harness), and factual `meets_target`/`qualified`. This is qualification metadata, not a performance-validity override; report surfaces duration-unqualified counts without mixing with other axes.
+2. **Duration qualification (separate factual axis, with repetition).** `run_dist_campaign.sh` accepts `--min-duration-seconds N` (finite, >= 0; `nan/inf` rejected). `stage0/run_case.py` records `duration_qualification` in `manifest.json` with `target_seconds`, effective/accumulated wall seconds, pass count, per-pass summaries, `repetition_used/capped/error`, and factual `meets_target`/`qualified`. When a finite target is not met by the first pass, the harness repeats the same dist-engine measurement (bounded caps) until accumulated effective duration meets the target or the cap is reached; qualification is based on accumulated measured duration, not a post-run label alone. Report surfaces duration qualification details and duration-unqualified counts without mixing axes.
 
 3. **Workload expansion (attributable workload/scenario axis).** Non-quick campaign scenarios expanded with `medium_seq` (`corpora/medium.bin`, 16MiB), `chunkstress` (large corpus, small backlog/quantum stress), and `boundary_small_backlog` (boundary corpus, small backlog). Scenarios remain explicitly selectable via `--scenarios`; `workload_id` is recorded in plan/outcomes/manifests for attribution.
 
-4. **Cache-preconditioning policy (separate factual policy axis).** `run_dist_campaign.sh` accepts `--cache-precondition-policy` with enum `best_effort_os_cache` (default), `warm_repeat`, `drop_caches_if_privileged`; invalid values rejected before execution. `stage0/run_case.py` applies/records `_cache_precondition()` factually in `manifest.json` (`requested_policy`, actions, achieved, privileged attempted/succeeded, fallback, notes). `drop_caches_if_privileged` records actual success/failure and fallback; no privileged cold-cache control is claimed unless the action succeeded.
+4. **Cache-preconditioning policy (separate factual policy axis).** `run_dist_campaign.sh` accepts `--cache-precondition-policy` with enum `best_effort_os_cache` (default), `warm_repeat`, `drop_caches_if_privileged`; invalid values rejected before execution. `stage0/run_case.py` applies/records `_cache_precondition()` factually in `manifest.json` (`requested_policy`, actions, achieved, privileged attempted/succeeded, fallback, notes). `drop_caches_if_privileged` records actual success/failure and fallback; no privileged cold-cache control is claimed unless the action succeeded. Report surfaces per-trial cache-precondition outcomes/fallbacks and campaign-level outcome summary.
 
 ### Reporting / attribution safeguards
 
@@ -343,11 +343,18 @@ Local/fake-NUMA tests validate driver and CLI-input/topology-handling/provenance
 
 ### Validation (exact)
 
-- `python3 -m unittest discover -s stage0/dist_ingest/tests -v` → **216/216 OK** (30.451s)
+- `python3 -m unittest discover -s stage0/dist_ingest/tests -v` → **219/219 OK** (34.163s)
 - `python3 -m unittest stage0.tests.test_stage0` → **81/81 OK** (16.486s)
 - `python3 -m unittest python.tests.test_numa_drain_guard` → **7/7 OK** (0.000s)
 - `python3 -m unittest python.tests.test_numa` → **36 tests, OK (skipped=1)** (3.420s)
-- C3 focused tests added in `stage0/dist_ingest/tests/test_benchmark_semantics.py` (`TestC3AttributableAxes`, 10 tests) covering default no-sweep, sweep attribution/no-mixing, duration qualification recording, invalid policy/min-duration rejection, workload expansion selection, cache-precondition factual behavior, and report parameter-set grouping. Report tests updated for C3 attributable columns while preserving C2 semantics.
+- C3 focused tests added in `stage0/dist_ingest/tests/test_benchmark_semantics.py` (`TestC3AttributableAxes`, 13 tests) covering default no-sweep, sweep attribution/no-mixing, duration qualification recording, invalid policy/min-duration rejection, workload expansion selection, cache-precondition factual behavior, and report parameter-set grouping. Report tests updated for C3 attributable columns while preserving C2 semantics.
+
+### C3 correction (independent review)
+
+- **P1 duration qualification:** `--min-duration-seconds` now requires finite >= 0; `nan/inf/-inf` rejected in campaign prevalidation. `stage0/run_case.py` extends short dist-engine measurements by bounded repetition until accumulated effective duration meets target or cap is reached; manifest records passes/accumulated/meets_target/repetition_capped. This makes measurements longer, not just labeled.
+- **P2 cache outcomes in report:** report includes per-trial cache-precondition requested/achieved/privileged/fallback details and campaign-level outcome/fallback summary.
+- **P2 runtime tests:** added real multi-parameter-set campaign test (distinct parameter sets flow through runtime TSV parser to specs/manifests/outcomes/report rows), meaningful duration qualification pass/fail tests, non-finite duration rejection tests, and report cache-outcome surfacing test.
+- **Validation (C3 correction):** dist-ingest 219/219 OK; stage0 81/81 OK; numa_drain_guard 7/7 OK; numa 36 OK (skipped=1).
 
 ### Limitations / explicit stop
 

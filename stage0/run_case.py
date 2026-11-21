@@ -34,6 +34,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
@@ -696,12 +697,20 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     manifest["map_s"] = (manifest.get("child_report") or {}).get(
         "elapsed_s")
     # C3: duration qualification (separate attributable axis; factual).
+    # C3-correction: if a finite target is set and the first pass is shorter,
+    # repeat the same measurement until accumulated effective duration meets the
+    # target (bounded). Repetition extends measurement; it does not fabricate it.
     dq_target = spec.get("min_duration_seconds")
     if dq_target is None:
         dq_target = spec.get("duration_qualification_seconds")
     try:
         dq_target = float(dq_target) if dq_target is not None else None
     except Exception:
+        dq_target = None
+    if dq_target is not None and (not math.isfinite(dq_target) or dq_target < 0):
+        # invalid target should have been rejected by campaign prevalidation;
+        # record factually here rather than silently treating as no target.
+        manifest["duration_qualification_error"] = "invalid min_duration_seconds (must be finite and >= 0)"
         dq_target = None
     dr_wall = ((manifest.get("dist_result") or {}).get("wall_seconds"))
     try:
@@ -713,13 +722,109 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
         effective_wall = float(effective_wall)
     except Exception:
         effective_wall = float(dt)
-    manifest["duration_qualification"] = {
-        "target_seconds": dq_target,
-        "effective_wall_seconds": effective_wall,
+    dq_passes = [{
+        "pass": 1,
+        "effective_wall_seconds": float(effective_wall),
         "wall_seconds_harness": float(dt),
         "wall_seconds_engine_or_map": dr_wall if dr_wall is not None else manifest.get("map_s"),
-        "meets_target": (None if dq_target is None else bool(effective_wall >= dq_target)),
-        "qualified": (None if dq_target is None else bool(effective_wall >= dq_target)),
+        "complete": bool(manifest.get("complete", not incomplete if 'incomplete' in locals() else True)),
+        "dist_result_rc": (manifest.get("dist_result") or {}).get("rc") if isinstance(manifest.get("dist_result"), dict) else None,
+    }]
+    accumulated = float(effective_wall) if effective_wall is not None else 0.0
+    dq_cap_passes = 30
+    dq_cap_total_s = max(float(dq_target) * 10.0, 300.0) if dq_target is not None else 0.0
+    dq_repetition_capped = False
+    dq_repetition_error = None
+    if dq_target is not None and dq_target > 0 and accumulated < float(dq_target):
+        # Only repeat when we have a runnable dist-engine command and a sane base run.
+        can_repeat = bool(use_dist and 'cmd' in locals() and cmd and not timed_out)
+        if can_repeat:
+            pass_n = 2
+            while accumulated < float(dq_target) and pass_n <= dq_cap_passes and accumulated < dq_cap_total_s:
+                pass_dir = os.path.join(out_dir, "duration_passes", "pass%d" % pass_n)
+                os.makedirs(pass_dir, exist_ok=True)
+                # Re-run same command; isolate pass json output to avoid clobbering.
+                pass_cmd = list(cmd)
+                for i, tok in enumerate(pass_cmd):
+                    if tok == "--json-out" and i + 1 < len(pass_cmd):
+                        pass_cmd[i + 1] = os.path.join(pass_dir, "dist_result.json")
+                t_p0 = time.monotonic()
+                try:
+                    p = subprocess.run(pass_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, cwd=REPO, timeout=max(float(spec.get("timeout", 300)), float(dq_target) * 2.0),
+                                       start_new_session=True)
+                    p_stdout, p_stderr, p_rc = p.stdout, p.stderr, p.returncode
+                except subprocess.TimeoutExpired as te:
+                    p_stdout = (te.stdout or "") if isinstance(te.stdout, str) else ""
+                    p_stderr = (te.stderr or "") if isinstance(te.stderr, str) else ""
+                    p_rc = 124
+                    try:
+                        os.killpg(te.args[0] if False else 0, 0)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    p_stdout, p_stderr, p_rc = "", str(e), 125
+                dt_p = time.monotonic() - t_p0
+                pass_dr = None
+                pass_map = None
+                for line in (p_stderr or "").splitlines():
+                    if line.startswith("DIST_RESULT "):
+                        try:
+                            pass_dr = json.loads(line[len("DIST_RESULT "):])
+                        except Exception:
+                            pass
+                for line in (p_stdout or "").splitlines():
+                    if line.startswith("CHILD_DONE "):
+                        try:
+                            pass_map = (json.loads(line[len("CHILD_DONE "):]) or {}).get("elapsed_s")
+                        except Exception:
+                            pass
+                p_dr_wall = (pass_dr or {}).get("wall_seconds") if isinstance(pass_dr, dict) else None
+                try:
+                    p_dr_wall = float(p_dr_wall) if p_dr_wall is not None else None
+                except Exception:
+                    p_dr_wall = None
+                p_eff = p_dr_wall if p_dr_wall is not None else (pass_map if pass_map is not None else dt_p)
+                try:
+                    p_eff = float(p_eff)
+                except Exception:
+                    p_eff = float(dt_p)
+                accumulated += float(p_eff)
+                dq_passes.append({
+                    "pass": pass_n,
+                    "effective_wall_seconds": float(p_eff),
+                    "wall_seconds_harness": float(dt_p),
+                    "wall_seconds_engine_or_map": p_dr_wall if p_dr_wall is not None else pass_map,
+                    "complete": bool(p_rc == 0 and isinstance(pass_dr, dict) and pass_dr.get("correct")),
+                    "dist_result_rc": (pass_dr or {}).get("rc") if isinstance(pass_dr, dict) else p_rc,
+                })
+                try:
+                    with open(os.path.join(pass_dir, "stdout.log"), "w") as fh:
+                        fh.write(p_stdout or "")
+                    with open(os.path.join(pass_dir, "stderr.log"), "w") as fh:
+                        fh.write(p_stderr or "")
+                    with open(os.path.join(pass_dir, "pass-summary.json"), "w") as fh:
+                        json.dump(dq_passes[-1], fh, indent=2, sort_keys=True)
+                except Exception:
+                    pass
+                pass_n += 1
+            if accumulated < float(dq_target):
+                dq_repetition_capped = True
+        else:
+            dq_repetition_error = "repetition unavailable (requires dist-engine command, non-timeout base run)"
+    manifest["duration_qualification"] = {
+        "target_seconds": dq_target,
+        "effective_wall_seconds": float(effective_wall),
+        "accumulated_effective_wall_seconds": float(accumulated),
+        "wall_seconds_harness": float(dt),
+        "wall_seconds_engine_or_map": dr_wall if dr_wall is not None else manifest.get("map_s"),
+        "passes": dq_passes,
+        "pass_count": len(dq_passes),
+        "repetition_used": len(dq_passes) > 1,
+        "repetition_capped": dq_repetition_capped,
+        "repetition_error": dq_repetition_error,
+        "meets_target": (None if dq_target is None else bool(accumulated >= float(dq_target))),
+        "qualified": (None if dq_target is None else bool(accumulated >= float(dq_target))),
     }
     diag = _parse_diag(stderr)
     cpu_peak_total, per_pid = cpu_peak

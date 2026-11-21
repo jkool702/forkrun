@@ -2211,14 +2211,67 @@ class TestC3AttributableAxes(unittest.TestCase):
                 self.assertEqual(rec3.get('fallback'), 'best_effort_os_cache')
                 self.assertFalse(rec3.get('achieved'))
 
+    def test_invalid_min_duration_nonfinite_rejected(self):
+        for bad in ('nan', 'inf', '-inf', 'NaN', 'Infinity', '-Infinity'):
+            p, out = self._run_plan_only([
+                '--quick', '--scenarios', 'small', '--candidates', 'fixed_faa',
+                '--min-duration-seconds', bad,
+            ])
+            try:
+                self.assertNotEqual(p.returncode, 0, msg=bad)
+                combined = p.stdout + '\n' + p.stderr
+                self.assertIn('min-duration-seconds', combined)
+            finally:
+                shutil.rmtree(out, ignore_errors=True)
+
     def test_run_case_duration_qualification_factual(self):
-        # Duration qualification is recorded in manifest; verify logic via a small direct call.
-        # We test the computation shape by constructing a minimal manifest-like check.
+        # C3-correction: exercise actual duration qualification calculation.
         import stage0.run_case as rc
-        # verify helper exists and cache policies are enumerated
-        self.assertIn('best_effort_os_cache', rc.CACHE_PRECONDITION_POLICIES)
-        self.assertIn('warm_repeat', rc.CACHE_PRECONDITION_POLICIES)
-        self.assertIn('drop_caches_if_privileged', rc.CACHE_PRECONDITION_POLICIES)
+        with tempfile.TemporaryDirectory(prefix='c3_dq_') as td:
+            inp = os.path.join(td, 'tiny.bin')
+            with open(inp, 'wb') as fh:
+                fh.write(b'x' * (1024 * 1024))
+            # Passing case: very small target.
+            spec_pass = {
+                'id': 'dq-pass', 'ingest_candidate': 'fixed_faa', 'dist_nodes': 2,
+                'input': inp, 'timeout': 120, 'base_quantum': 2 * 1024 * 1024,
+                'max_backlog': 16 * 1024 * 1024, 'consumer_mode': 'fast', 'consumer_bps': 0,
+                'slow_node': -1, 'slow_mode': 'fast', 'slow_bps': 0, 'slow_stall_ms': 0,
+                'min_duration_seconds': 0.0001,
+            }
+            outp = os.path.join(td, 'pass')
+            m = rc.run_case(spec_pass, outp, campaign_id='c3dq', trial=1, source_sha='deadbeef')
+            dq = m.get('duration_qualification') or {}
+            self.assertEqual(dq.get('target_seconds'), 0.0001)
+            self.assertIn(dq.get('meets_target'), (True, False))
+            self.assertIsInstance(dq.get('effective_wall_seconds'), float)
+            self.assertIsInstance(dq.get('accumulated_effective_wall_seconds'), float)
+            self.assertGreaterEqual(dq.get('pass_count', 0), 1)
+            self.assertIsInstance(dq.get('passes'), list)
+            # If it ran at all, effective wall >= 0 and accumulated >= effective.
+            self.assertGreaterEqual(dq['accumulated_effective_wall_seconds'], dq['effective_wall_seconds'])
+            if dq['effective_wall_seconds'] >= 0.0001:
+                self.assertTrue(dq['meets_target'])
+                self.assertFalse(dq.get('repetition_used'))
+
+            # Failing case: target high enough to require repetition but capped.
+            # Cap is 30 passes; with a tiny input each pass is short, so accumulated
+            # stays below target and meets_target becomes False factually.
+            spec_fail = {
+                'id': 'dq-fail', 'ingest_candidate': 'fixed_faa', 'dist_nodes': 2,
+                'input': inp, 'timeout': 120, 'base_quantum': 2 * 1024 * 1024,
+                'max_backlog': 16 * 1024 * 1024, 'consumer_mode': 'fast', 'consumer_bps': 0,
+                'slow_node': -1, 'slow_mode': 'fast', 'slow_bps': 0, 'slow_stall_ms': 0,
+                'min_duration_seconds': 60.0,
+            }
+            out2 = os.path.join(td, 'fail')
+            m2 = rc.run_case(spec_fail, out2, campaign_id='c3dq', trial=2, source_sha='deadbeef')
+            dq2 = m2.get('duration_qualification') or {}
+            self.assertEqual(dq2.get('target_seconds'), 60.0)
+            self.assertFalse(dq2.get('meets_target'))
+            self.assertGreaterEqual(dq2.get('pass_count', 0), 2)
+            self.assertTrue(dq2.get('repetition_used'))
+            self.assertTrue(dq2.get('repetition_capped'))
 
     def test_report_groups_by_parameter_set_no_mixing(self):
         # C3: report must not mix different parameter sets in the same summary row.
@@ -2276,6 +2329,117 @@ class TestC3AttributableAxes(unittest.TestCase):
             self.assertIn('| sc | legacy | pset__base_quantum=2097152 | fixed_faa |', text)
             self.assertIn('| sc | legacy | pset__base_quantum=4194304 | fixed_faa |', text)
             self.assertIn('C3 experimental axes', text)
+
+    def test_report_surfaces_cache_precondition_outcomes(self):
+        # C3-correction: actual per-trial cache outcomes/fallbacks must be visible in report.
+        with tempfile.TemporaryDirectory(prefix='c3_rpt_cache_') as td:
+            camp = {
+                'schema': 'dist-campaign/5', 'campaign_id': 'c3', 'source_sha': 'dead', 'all_ok': True,
+                'cache_precondition_policy': 'drop_caches_if_privileged',
+                'outcomes': [
+                    {'case': 'sc__legacy__fixed_faa', 'scenario': 'sc', 'candidate': 'fixed_faa', 'trial': 1, 'status': 'ok',
+                     'manifest': 'cases/a/trial1/manifest.json', 'mapping_id': 'legacy', 'mapping_profile': 'auto',
+                     'trial_class': 'performance', 'placement_sampling': 'off', 'parameter_set_id': 'pset__default',
+                     'cache_precondition_policy': 'drop_caches_if_privileged'},
+                ],
+            }
+            os.makedirs(os.path.join(td, 'cases', 'a', 'trial1'), exist_ok=True)
+            m = {
+                'schema': 'stage0-case/3', 'complete': True, 'incomplete_reasons': [],
+                'spec': {'parameter_set_id': 'pset__default', 'cache_precondition_policy': 'drop_caches_if_privileged'},
+                'cache_precondition': {
+                    'requested_policy': 'drop_caches_if_privileged',
+                    'policy': 'drop_caches_if_privileged',
+                    'achieved': False,
+                    'privileged_action_attempted': True,
+                    'privileged_action_succeeded': False,
+                    'fallback': 'best_effort_os_cache',
+                    'notes': ['drop_caches not available/permitted; no cold-cache control claimed'],
+                    'actions': [{'action': 'write_drop_caches_3', 'path': '/proc/sys/vm/drop_caches', 'ok': False, 'error': 'Permission denied'}],
+                },
+                'dist_result': {
+                    'schema': 'dist-run/1', 'rc': 0, 'wall_seconds': 1.0, 'correct': True,
+                    'reservations_total': 10, 'total_consumed': 1000, 'overlap_detected': False, 'lost_detected': False, 'duplicate_detected': False,
+                    'comparability': {'parameter_set_id': 'pset__default', 'consumer_kernel': 'full_byte_scan'},
+                    'consumer_kernel': {'name': 'full_byte_scan', 'scan_bytes_evidence': {'total_consumer_bytes_scanned': 1000, 'scan_equals_consumed': True}},
+                    'validity': {
+                        'functional_correctness': {'functional_correct': True},
+                        'performance_measurement': {'performance_measurement_valid': True},
+                        'affinity': {'affinity_valid': True},
+                        'memory_policy_application': {'memory_policy_application_valid': True, 'placement_policy_valid': True},
+                        'placement_observed': {'placement_observed_valid': True},
+                        'numa_placement': {'numa_placement_valid': True},
+                    },
+                    'nodes': [{'node': 0, 'consumer_bytes_scanned': 1000, 'bytes_consumed': 1000}],
+                },
+            }
+            with open(os.path.join(td, 'cases', 'a', 'trial1', 'manifest.json'), 'w') as fh:
+                json.dump(m, fh)
+            with open(os.path.join(td, 'campaign-manifest.json'), 'w') as fh:
+                json.dump(camp, fh)
+            report = os.path.join(REPO, 'stage0/dist_ingest/report_dist.py')
+            p = subprocess.run([sys.executable, report, '--campaign', td, '--out', os.path.join(td, 'r.md')],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr + '\n' + p.stdout)
+            with open(os.path.join(td, 'r.md')) as fh:
+                text = fh.read()
+            self.assertIn('cache_precondition', text)
+            self.assertIn('fallback', text)
+            self.assertIn('privileged_succeeded=false', text.lower().replace(' ', ''))
+
+    def test_real_sweep_campaign_records_distinct_parameter_sets(self):
+        # C3-correction: real campaign with multiple parameter sets must pass distinct
+        # values through runtime TSV parser into specs/manifests/outcomes and report rows.
+        out = tempfile.mkdtemp(prefix='c3_real_sweep_')
+        os.rmdir(out)
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--quick', '--out', out, '--campaign-id', 'c3-real-sweep',
+                   '--scenarios', 'small', '--candidates', 'fixed_faa',
+                   '--trials', '1', '--seed', 'c3rs',
+                   '--sweep-base-quantum', '2097152,4194304',
+                   '--min-duration-seconds', '0.0001',
+                   '--cache-precondition-policy', 'best_effort_os_cache']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-3000:] + '\n' + p.stdout[-2000:])
+            plan = self._load(out, 'execution-plan.json')
+            self.assertEqual(plan.get('sweep_axes'), ['base_quantum'])
+            psets = plan.get('parameter_sets') or []
+            self.assertEqual(len(psets), 2)
+            exps = plan.get('planned_experiments') or []
+            self.assertEqual(len(exps), 2)
+            bqs = sorted({(e.get('parameter_set') or {}).get('base_quantum') for e in exps})
+            self.assertEqual(bqs, [2097152, 4194304])
+            cm = self._load(out, 'campaign-manifest.json')
+            outcomes = cm.get('outcomes') or []
+            self.assertEqual(len(outcomes), 2)
+            o_psets = sorted({o.get('parameter_set_id') for o in outcomes})
+            self.assertEqual(len(o_psets), 2)
+            for o in outcomes:
+                mpath = os.path.join(out, o.get('manifest', ''))
+                self.assertTrue(os.path.exists(mpath), mpath)
+                m = self._load(out, o.get('manifest'))
+                spec = m.get('spec') or {}
+                psid = o.get('parameter_set_id')
+                self.assertIn(psid, o_psets)
+                self.assertEqual(spec.get('parameter_set_id'), psid)
+                ps = spec.get('parameter_set') or {}
+                self.assertEqual(ps.get('parameter_set_id'), psid)
+                self.assertIn(ps.get('base_quantum'), [2097152, 4194304])
+                dq = m.get('duration_qualification') or {}
+                self.assertEqual(dq.get('target_seconds'), 0.0001)
+                self.assertIn(dq.get('meets_target'), (True, False))
+                self.assertGreaterEqual(dq.get('pass_count', 0), 1)
+                cp = m.get('cache_precondition') or {}
+                self.assertEqual(cp.get('requested_policy'), 'best_effort_os_cache')
+            report = os.path.join(out, 'report.md')
+            self.assertTrue(os.path.exists(report))
+            with open(report) as fh:
+                text = fh.read()
+            self.assertIn('pset__base_quantum=2097152', text)
+            self.assertIn('pset__base_quantum=4194304', text)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
 
 
 if __name__ == '__main__':

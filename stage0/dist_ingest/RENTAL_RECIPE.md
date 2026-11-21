@@ -195,8 +195,8 @@ Functional correctness, performance-measurement, affinity, memory-policy applica
 - `--seed SEED` deterministic random seed for reproducible candidate/scenario ordering.
 - `--shuffle-scenarios` randomize scenario/mapping-block order (reproducible by seed).
 - `--cache-policy TEXT` legacy explicit cache/warm-up assumption recorded in manifest (prefer `--cache-precondition-policy`).
-- `--cache-precondition-policy best_effort_os_cache|warm_repeat|drop_caches_if_privileged` C3 attributable cache-preconditioning policy. Actions/outcomes/fallbacks are recorded factually per case; `drop_caches_if_privileged` records success/failure and does not claim cold-cache control unless it succeeded.
-- `--min-duration-seconds N` C3 duration-qualification target (seconds). Recorded factually per trial as a separate axis (`meets_target`), not a performance-validity override.
+- `--cache-precondition-policy best_effort_os_cache|warm_repeat|drop_caches_if_privileged` C3 attributable cache-preconditioning policy. Actions/outcomes/fallbacks are recorded factually per case and surfaced in report; `drop_caches_if_privileged` records success/failure and does not claim cold-cache control unless it succeeded.
+- `--min-duration-seconds N` C3 duration-qualification target (seconds, finite >= 0). The harness repeats short dist-engine measurements (bounded) until accumulated effective duration meets target or cap is reached; recorded factually per trial as a separate axis (`meets_target`, passes, accumulated).
 - `--sweep-base-quantum LIST` / `--sweep-max-backlog LIST` / `--sweep-max-reservation LIST` C3 parameter sweeps (comma-separated positive integers). Cartesian-product parameter sets are planned/executed/reported as attributable `parameter_set_id` values; do not mix results across parameter sets.
 - `--consumer-kernel full_byte_scan|none` workload kernel (default `full_byte_scan`; explicitly written per comparable candidate spec).
 - `--strict-affinity` / `--strict-mbind` strict enforcement (abort on required failure); recorded in specs/manifests/campaign config and reported alongside factual validity.

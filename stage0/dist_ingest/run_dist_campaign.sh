@@ -184,7 +184,7 @@ echo "=== dist-ingest campaign: topology/scenario pre-validation"
 export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
 PREVAL_FILE="$OUT/prevalidation.json"
 python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" "$MAPPING_PROFILES" "$TRIALS" "$CAND_FILTER" "$SEED" "$SHUFFLE_SCENARIOS" "$PLACEMENT_EXPERIMENTS" "$CACHE_PRECONDITION_POLICY" "$MIN_DURATION_SECONDS" "$SWEEP_BASE_QUANTUM" "$SWEEP_MAX_BACKLOG" "$SWEEP_MAX_RESERVATION" <<'PY'
-import json, os, re, sys
+import json, math, os, re, sys
 (out, scen_filter, phys_nodes, profile, quick, preval_path,
  scen_filter_explicit, mapping_profiles_arg, trials_arg, cand_filter_arg, seed_arg, shuf_sc_arg,
  placement_experiments, cache_precondition_policy, min_duration_seconds,
@@ -384,8 +384,8 @@ if str(min_duration_seconds or '').strip() != '':
     except Exception:
         plan_min_duration_seconds = None
         errors.append('invalid --min-duration-seconds %r (expected non-negative number)' % (min_duration_seconds,))
-    if plan_min_duration_seconds is not None and plan_min_duration_seconds < 0:
-        errors.append('--min-duration-seconds must be >= 0 (got %s)' % plan_min_duration_seconds)
+    if plan_min_duration_seconds is not None and (not math.isfinite(plan_min_duration_seconds) or plan_min_duration_seconds < 0):
+        errors.append('--min-duration-seconds must be finite and >= 0 (got %r)' % (min_duration_seconds,))
 
 def _parse_sweep_list(name, raw, default):
     raw = '' if raw is None else str(raw).strip()

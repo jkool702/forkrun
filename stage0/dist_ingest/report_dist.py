@@ -191,6 +191,7 @@ def main():
         rec["cache_precondition_policy"] = (o.get("cache_precondition_policy") or spec.get("cache_precondition_policy") or
                                              spec.get("cache_policy") or (m.get("cache_precondition") or {}).get("requested_policy") or
                                              "best_effort_os_cache")
+        rec["cache_precondition"] = m.get("cache_precondition") if isinstance(m, dict) else None
         rec["min_duration_seconds"] = o.get("min_duration_seconds") if o.get("min_duration_seconds") is not None else spec.get("min_duration_seconds")
         rec["duration_qualification"] = m.get("duration_qualification") if isinstance(m, dict) else None
         rec["workload_id"] = o.get("workload_id") or spec.get("workload_id") or scen
@@ -256,8 +257,19 @@ def main():
         lines.append("")
         lines.append("- **Parameter sweep axes:** %s" % (", ".join(c3_axes) if c3_axes else "(none)"))
         lines.append("- **Parameter sets:** %s" % ", ".join(parameter_sets))
-        lines.append("- **Cache precondition policy (campaign):** %s" % (c3_cache or "n/a"))
+        lines.append("- **Cache precondition policy (campaign requested):** %s" % (c3_cache or "n/a"))
         lines.append("- **Min duration qualification (seconds):** %s" % (c3_min_dur if c3_min_dur is not None else "n/a"))
+        # Actual cache-precondition outcomes/fallbacks are per-trial facts; surface them.
+        cp_recs = [r for recs in groups.values() for r in recs if isinstance(r.get("cache_precondition"), dict)]
+        if cp_recs:
+            achieved = sum(1 for r in cp_recs if r.get("cache_precondition", {}).get("achieved") is True)
+            priv_attempted = sum(1 for r in cp_recs if r.get("cache_precondition", {}).get("privileged_action_attempted") is True)
+            priv_ok = sum(1 for r in cp_recs if r.get("cache_precondition", {}).get("privileged_action_succeeded") is True)
+            fallback_n = sum(1 for r in cp_recs if r.get("cache_precondition", {}).get("fallback"))
+            lines.append("- **Cache precondition outcomes (per-trial):** achieved=%d/%d, privileged_attempted=%d, privileged_succeeded=%d, fallback=%d" % (
+                achieved, len(cp_recs), priv_attempted, priv_ok, fallback_n))
+            if fallback_n:
+                lines.append("- **Cache precondition warning:** some trials recorded fallback; see per-trial `cache_precondition` details (do not assume privileged cold-cache control).")
         lines.append("")
 
     lines.append("## Comparative summary (headline performance medians from performance-valid trials only)")
@@ -405,6 +417,19 @@ def main():
                             lines.append("  - mapping: profile=%s variant=%s phys=%s spans_sockets=%s affinity_verified=%s" % (
                                 mpv.get("mapping_profile"), mpv.get("mapping_variant"), mpv.get("logical_to_physical"),
                                 mpv.get("spans_sockets"), fmt_tri(mpv.get("all_requested_affinity_roles_verified"))))
+                        cp = r.get("cache_precondition")
+                        if isinstance(cp, dict):
+                            lines.append("  - cache_precondition: requested=%s achieved=%s privileged_attempted=%s privileged_succeeded=%s fallback=%s" % (
+                                cp.get("requested_policy"), fmt_tri(cp.get("achieved")),
+                                fmt_tri(cp.get("privileged_action_attempted")), fmt_tri(cp.get("privileged_action_succeeded")),
+                                cp.get("fallback") or "n/a"))
+                        dq = r.get("duration_qualification")
+                        if isinstance(dq, dict):
+                            lines.append("  - duration_qualification: target=%s effective=%s accumulated=%s passes=%s meets_target=%s repetition_used=%s capped=%s" % (
+                                fmt(dq.get("target_seconds")), fmt(dq.get("effective_wall_seconds")),
+                                fmt(dq.get("accumulated_effective_wall_seconds")), dq.get("pass_count"),
+                                fmt_tri(dq.get("meets_target")), fmt_tri(dq.get("repetition_used")),
+                                fmt_tri(dq.get("repetition_capped"))))
                         for n in dr.get("nodes", []):
                             pl = n.get("placement", {})
                             mp = n.get("memory_policy", {})
