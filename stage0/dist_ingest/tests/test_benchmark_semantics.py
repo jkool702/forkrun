@@ -1897,9 +1897,6 @@ class TestCheckpoint2PlacementSamplingIsolation(unittest.TestCase):
             os.unlink(path)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 class TestCheckpoint2PlacementSamplingCampaignCorrections(unittest.TestCase):
     """C2 correction: complete paired planning, explicit execution, and validation."""
 
