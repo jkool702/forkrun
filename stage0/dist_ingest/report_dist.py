@@ -86,16 +86,22 @@ def main():
             rec.setdefault("invalid_reasons", []).append(reason)
             invalid.append(rec)
 
+        # C3 defaults for early-invalid records
+        rec["parameter_set_id"] = o.get("parameter_set_id") or "pset__default"
+        rec["cache_precondition_policy"] = o.get("cache_precondition_policy") or "best_effort_os_cache"
+        rec["min_duration_seconds"] = o.get("min_duration_seconds")
+        rec["workload_id"] = o.get("workload_id") or scen
+
         if o.get("status") != "ok" or not os.path.isfile(mpath):
             mark_invalid("trial status %s or missing manifest" % o.get("status"))
-            groups[(scen, rec.get("mapping_id") or "legacy", cand)].append(rec)
+            groups[(scen, rec.get("mapping_id") or "legacy", rec.get("parameter_set_id") or "pset__default", cand)].append(rec)
             continue
 
         try:
             m = load_json(mpath)
         except Exception as e:
             mark_invalid("manifest unreadable: %s" % e)
-            groups[(scen, rec.get("mapping_id") or "legacy", cand)].append(rec)
+            groups[(scen, rec.get("mapping_id") or "legacy", rec.get("parameter_set_id") or "pset__default", cand)].append(rec)
             continue
 
         rec["manifest"] = m
@@ -174,10 +180,25 @@ def main():
             if rec.get("mapping_id") in (None, "legacy"):
                 rec["mapping_id"] = spec.get("mapping_variant") or spec.get("mapping_id") or rec.get("mapping_id") or "legacy"
 
+        # C3 attributable axes (separate concerns)
+        spec = (m.get("spec") or {}) if isinstance(m, dict) else {}
+        dr3 = rec.get("dist") or {}
+        rec["parameter_set_id"] = (o.get("parameter_set_id") or spec.get("parameter_set_id") or
+                                   safe_get(spec, "parameter_set", "parameter_set_id") or
+                                   safe_get(dr3, "comparability", "parameter_set_id") or "pset__default")
+        rec["parameter_set"] = (o.get("parameter_set") or spec.get("parameter_set") or
+                                safe_get(dr3, "comparability", "parameter_set") or None)
+        rec["cache_precondition_policy"] = (o.get("cache_precondition_policy") or spec.get("cache_precondition_policy") or
+                                             spec.get("cache_policy") or (m.get("cache_precondition") or {}).get("requested_policy") or
+                                             "best_effort_os_cache")
+        rec["min_duration_seconds"] = o.get("min_duration_seconds") if o.get("min_duration_seconds") is not None else spec.get("min_duration_seconds")
+        rec["duration_qualification"] = m.get("duration_qualification") if isinstance(m, dict) else None
+        rec["workload_id"] = o.get("workload_id") or spec.get("workload_id") or scen
+
         if not rec.get("complete", False):
             mark_invalid("incomplete: %s" % rec.get("incomplete_reasons_manifest"))
 
-        groups[(scen, rec.get("mapping_id") or "legacy", cand)].append(rec)
+        groups[(scen, rec.get("mapping_id") or "legacy", rec.get("parameter_set_id") or "pset__default", cand)].append(rec)
 
     lines = []
     lines.append("# Distributed Ingestion Prototype — Comparative Campaign Report")
@@ -211,8 +232,10 @@ def main():
                  "placement-validation experiments (`placement_sampling=on`, trial_class=placement_validation) are distinct, linked experiments and must not be mixed into performance headline statistics.")
     lines.append("")
 
-    scenarios = sorted({s for s, m, c in groups.keys()})
-    mappings = sorted({m for s, m, c in groups.keys()})
+    # C3: grouping includes parameter_set_id to keep sweep axes attributable.
+    scenarios = sorted({k[0] for k in groups.keys()})
+    mappings = sorted({k[1] for k in groups.keys()})
+    parameter_sets = sorted({k[2] for k in groups.keys()})
     candidates = ["centralized_ingest", "fixed_faa", "local_adaptive", "relative_adaptive", "production_ref", "control"]
 
     if camp.get("unsupported_mappings"):
@@ -224,87 +247,107 @@ def main():
                 um.get("applies_to_scenarios"), um.get("reason")))
         lines.append("")
 
+    # C3 axis provenance
+    c3_axes = camp.get("sweep_axes") or (camp.get("campaign_config") or {}).get("sweep_axes") or []
+    c3_cache = camp.get("cache_precondition_policy") or (camp.get("campaign_config") or {}).get("cache_precondition_policy")
+    c3_min_dur = camp.get("min_duration_seconds") if camp.get("min_duration_seconds") is not None else (camp.get("campaign_config") or {}).get("min_duration_seconds")
+    if c3_axes or c3_cache or c3_min_dur is not None or len(parameter_sets) > 1:
+        lines.append("## C3 experimental axes (attributable; do not mix across axes)")
+        lines.append("")
+        lines.append("- **Parameter sweep axes:** %s" % (", ".join(c3_axes) if c3_axes else "(none)"))
+        lines.append("- **Parameter sets:** %s" % ", ".join(parameter_sets))
+        lines.append("- **Cache precondition policy (campaign):** %s" % (c3_cache or "n/a"))
+        lines.append("- **Min duration qualification (seconds):** %s" % (c3_min_dur if c3_min_dur is not None else "n/a"))
+        lines.append("")
+
     lines.append("## Comparative summary (headline performance medians from performance-valid trials only)")
     lines.append("")
-    header = ("| scenario | mapping | candidate | attempted | func complete | perf valid | numa-place valid | "
+    header = ("| scenario | mapping | param set | candidate | attempted | func complete | perf valid | numa-place valid | "
               "throughput (MB/s) | engine wall s | harness wall s | reservations | kernel | scanned/consumed | notes |")
-    sep = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"
+    sep = "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"
     lines.append(header); lines.append(sep)
     for scen in scenarios:
         for map_id in mappings:
-            for cand in candidates:
-                recs = groups.get((scen, map_id, cand), [])
-                if not recs:
-                    continue
-                total = len(recs)
-                # C2: placement-validation experiments are distinct from performance trials and
-                # must not be mixed into performance headline statistics.
-                perf_class_recs = [r for r in recs if (r.get("trial_class") or "performance") == "performance"]
-                placement_class_recs = [r for r in recs if (r.get("trial_class") or "performance") == "placement_validation"]
-                # complete/functionally correct trials (readable, complete, functionally correct)
-                func_valids = [r for r in perf_class_recs if (not r.get("invalid")) and r.get("correct_functional") is True and r.get("complete") is True]
-                # performance-valid trials only for headline performance stats
-                perf_valids = [r for r in func_valids if r.get("v_perf") is True]
-                numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
+            for pset_id in parameter_sets:
+                for cand in candidates:
+                    recs = groups.get((scen, map_id, pset_id, cand), [])
+                    if not recs:
+                        continue
+                    total = len(recs)
+                    # C2: placement-validation experiments are distinct from performance trials and
+                    # must not be mixed into performance headline statistics.
+                    perf_class_recs = [r for r in recs if (r.get("trial_class") or "performance") == "performance"]
+                    placement_class_recs = [r for r in recs if (r.get("trial_class") or "performance") == "placement_validation"]
+                    # complete/functionally correct trials (readable, complete, functionally correct)
+                    func_valids = [r for r in perf_class_recs if (not r.get("invalid")) and r.get("correct_functional") is True and r.get("complete") is True]
+                    # performance-valid trials only for headline performance stats
+                    perf_valids = [r for r in func_valids if r.get("v_perf") is True]
+                    numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
 
-                def med(key, src):
-                    vals = [r.get(key) for r in src if r.get(key) is not None]
-                    return statistics.median(vals) if vals else None
+                    def med(key, src):
+                        vals = [r.get(key) for r in src if r.get(key) is not None]
+                        return statistics.median(vals) if vals else None
 
-                kernels_func = sorted({str(r.get("consumer_kernel")) for r in func_valids if r.get("consumer_kernel") is not None})
-                kernels_perf = sorted({str(r.get("consumer_kernel")) for r in perf_valids if r.get("consumer_kernel") is not None})
-                kernel = ",".join(kernels_func) if kernels_func else "n/a"
-                mixed_kernel_func = len(kernels_func) > 1
-                mixed_kernel_perf = len(kernels_perf) > 1
-                # do not combine full-scan and no-kernel into one comparable campaign summary
-                noncomparable_kernel_mix = (("full_byte_scan" in kernels_func and "none" in kernels_func) or
-                                            ("full_byte_scan" in kernels_perf and "none" in kernels_perf))
+                    kernels_func = sorted({str(r.get("consumer_kernel")) for r in func_valids if r.get("consumer_kernel") is not None})
+                    kernels_perf = sorted({str(r.get("consumer_kernel")) for r in perf_valids if r.get("consumer_kernel") is not None})
+                    kernel = ",".join(kernels_func) if kernels_func else "n/a"
+                    mixed_kernel_func = len(kernels_func) > 1
+                    mixed_kernel_perf = len(kernels_perf) > 1
+                    # do not combine full-scan and no-kernel into one comparable campaign summary
+                    noncomparable_kernel_mix = (("full_byte_scan" in kernels_func and "none" in kernels_func) or
+                                                ("full_byte_scan" in kernels_perf and "none" in kernels_perf))
 
-                perf_for_medians = [] if noncomparable_kernel_mix else perf_valids
-                thr = med("throughput_bps", perf_for_medians)
-                thr_mb = (thr / 1e6) if thr else None
-                wall = med("engine_wall_s", perf_for_medians)
-                hwall = med("harness_wall_s", func_valids)  # diagnostic harness duration
-                resv = med("reservations", perf_for_medians)
+                    perf_for_medians = [] if noncomparable_kernel_mix else perf_valids
+                    thr = med("throughput_bps", perf_for_medians)
+                    thr_mb = (thr / 1e6) if thr else None
+                    wall = med("engine_wall_s", perf_for_medians)
+                    hwall = med("harness_wall_s", func_valids)  # diagnostic harness duration
+                    resv = med("reservations", perf_for_medians)
 
-                scan_s = "n/a"
-                if not noncomparable_kernel_mix and perf_for_medians:
-                    scan_vals = [r.get("scan_bytes") for r in perf_for_medians if r.get("scan_bytes") is not None]
-                    cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in perf_for_medians if r.get("dist")]
-                    if scan_vals or cons_vals:
-                        s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
-                        c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
-                        scan_s = "%s/%s" % (s_med, c_med)
-                elif func_valids and not noncomparable_kernel_mix:
-                    # show evidence context from functionally-correct trials even if no perf-valid headline medians
-                    scan_vals = [r.get("scan_bytes") for r in func_valids if r.get("scan_bytes") is not None]
-                    cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in func_valids if r.get("dist")]
-                    if scan_vals or cons_vals:
-                        s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
-                        c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
-                        scan_s = "%s/%s" % (s_med, c_med)
+                    scan_s = "n/a"
+                    if not noncomparable_kernel_mix and perf_for_medians:
+                        scan_vals = [r.get("scan_bytes") for r in perf_for_medians if r.get("scan_bytes") is not None]
+                        cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in perf_for_medians if r.get("dist")]
+                        if scan_vals or cons_vals:
+                            s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
+                            c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
+                            scan_s = "%s/%s" % (s_med, c_med)
+                    elif func_valids and not noncomparable_kernel_mix:
+                        # show evidence context from functionally-correct trials even if no perf-valid headline medians
+                        scan_vals = [r.get("scan_bytes") for r in func_valids if r.get("scan_bytes") is not None]
+                        cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in func_valids if r.get("dist")]
+                        if scan_vals or cons_vals:
+                            s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
+                            c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
+                            scan_s = "%s/%s" % (s_med, c_med)
 
-                notes = []
-                bad = len(perf_class_recs) - len([r for r in perf_class_recs if not r.get("invalid")])
-                if bad:
-                    notes.append("invalid/incomplete=%d" % bad)
-                if len(func_valids) == 0:
-                    notes.append("no-functionally-valid-trials")
-                if len(perf_valids) == 0:
+                    notes = []
+                    bad = len(perf_class_recs) - len([r for r in perf_class_recs if not r.get("invalid")])
+                    if bad:
+                        notes.append("invalid/incomplete=%d" % bad)
+                    if len(func_valids) == 0:
+                        notes.append("no-functionally-valid-trials")
+                    if len(perf_valids) == 0:
+                        if noncomparable_kernel_mix:
+                            notes.append("no-comparable-perf-headline (kernel mix)")
+                        else:
+                            notes.append("no-performance-valid-trials")
                     if noncomparable_kernel_mix:
-                        notes.append("no-comparable-perf-headline (kernel mix)")
-                    else:
-                        notes.append("no-performance-valid-trials")
-                if noncomparable_kernel_mix:
-                    notes.append("mixed-kernels-not-comparable")
-                perf_invalid_or_unknown = [r for r in func_valids if r.get("v_perf") is not True]
-                if perf_invalid_or_unknown:
-                    notes.append("func-but-perf-invalid/unknown=%d" % len(perf_invalid_or_unknown))
-                if placement_class_recs:
-                    notes.append("placement-validation=%d(distinct,excluded)" % len(placement_class_recs))
-                lines.append("| %s | %s | %s | %d | %d | %d | %d | %s | %s | %s | %s | %s | %s | %s |" % (
-                    scen, map_id, cand, len(perf_class_recs), len(func_valids), len(perf_valids), numa_true,
-                    fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
+                        notes.append("mixed-kernels-not-comparable")
+                    perf_invalid_or_unknown = [r for r in func_valids if r.get("v_perf") is not True]
+                    if perf_invalid_or_unknown:
+                        notes.append("func-but-perf-invalid/unknown=%d" % len(perf_invalid_or_unknown))
+                    if placement_class_recs:
+                        notes.append("placement-validation=%d(distinct,excluded)" % len(placement_class_recs))
+                    # C3: duration qualification visibility
+                    dq_vals = [r.get("duration_qualification") for r in func_valids if isinstance(r.get("duration_qualification"), dict)]
+                    if dq_vals and any(v.get("target_seconds") is not None for v in dq_vals):
+                        unmet = [v for v in dq_vals if v.get("meets_target") is False]
+                        if unmet:
+                            notes.append("duration-unqualified=%d" % len(unmet))
+                    lines.append("| %s | %s | %s | %s | %d | %d | %d | %d | %s | %s | %s | %s | %s | %s | %s |" % (
+                        scen, map_id, pset_id, cand, len(perf_class_recs), len(func_valids), len(perf_valids), numa_true,
+                        fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
     lines.append("")
 
     # C2: placement-validation experiments reported separately (distinct, linked)
@@ -312,16 +355,16 @@ def main():
     if placement_trials:
         lines.append("## Placement-validation experiments (distinct from performance trials; not mixed into headline statistics)")
         lines.append("")
-        lines.append("| scenario | mapping | candidate | trial | linked perf trial | placement sampling | complete | func correct | placement observed | numa placement | notes |")
-        lines.append("|---|---|---|---:|---|---|---|---|---|---|---|")
-        for r in sorted(placement_trials, key=lambda x: (str(x.get("scenario") or ""), str(x.get("mapping_id") or ""), str(x.get("candidate") or ""), int(x.get("trial") or 0))):
+        lines.append("| scenario | mapping | param set | candidate | trial | linked perf trial | placement sampling | complete | func correct | placement observed | numa placement | notes |")
+        lines.append("|---|---|---|---|---:|---|---|---|---|---|---|---|")
+        for r in sorted(placement_trials, key=lambda x: (str(x.get("scenario") or ""), str(x.get("mapping_id") or ""), str(x.get("parameter_set_id") or ""), str(x.get("candidate") or ""), int(x.get("trial") or 0))):
             pnotes = []
             if r.get("invalid"):
                 pnotes.extend([str(x) for x in (r.get("invalid_reasons") or ["invalid"])])
             if r.get("timing_tainted_by_in_run_sampling"):
                 pnotes.append("timing-tainted-by-sampling")
-            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
-                r.get("scenario"), r.get("mapping_id"), r.get("candidate"), fmt(r.get("trial")),
+            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                r.get("scenario"), r.get("mapping_id"), r.get("parameter_set_id") or "pset__default", r.get("candidate"), fmt(r.get("trial")),
                 r.get("linked_performance_trial") or "n/a", r.get("placement_sampling") or "n/a",
                 fmt_tri(r.get("complete")), fmt_tri(r.get("v_functional")),
                 fmt_tri(r.get("v_placement_obs")), fmt_tri(r.get("v_numa_placement")),
@@ -332,57 +375,58 @@ def main():
     lines.append("")
     for scen in scenarios:
         for map_id in mappings:
-            for cand in candidates:
-                if cand in ("control", "production_ref"):
-                    continue
-                recs = groups.get((scen, map_id, cand), [])
-                if not recs:
-                    continue
-                lines.append("### %s / %s / %s (attempted=%d)" % (scen, map_id, cand, len(recs)))
-                lines.append("")
-                for r in recs:
-                    dr = r.get("dist")
-                    if not dr:
-                        lines.append("- trial %s: invalid=%s reasons=%s" % (r.get("trial"), r.get("invalid"), r.get("invalid_reasons")))
+            for pset_id in parameter_sets:
+                for cand in candidates:
+                    if cand in ("control", "production_ref"):
                         continue
-                    lines.append("- trial %s (class=%s, placement_sampling=%s, linked=%s): complete=%s invalid=%s kernel=%s scanned=%s consumed=%s scan_ok=%s "
-                                 "engine_wall=%.6fs harness_wall=%s valid[func=%s perf=%s affinity=%s mempolicy=%s placement_obs=%s numa=%s] "
-                                 "correct=%s overlap=%s lost=%s dup=%s reservations=%s rc=%s" % (
-                        r.get("trial"), r.get("trial_class"), r.get("placement_sampling"), r.get("linked_performance_trial") or "n/a",
-                        r.get("complete"), r.get("invalid"),
-                        r.get("consumer_kernel"), r.get("scan_bytes"), dr.get("total_consumed"), fmt_tri(r.get("scan_equals_consumed")),
-                        float(dr.get("wall_seconds") or 0.0), fmt(r.get("harness_wall_s")),
-                        fmt_tri(r.get("v_functional")), fmt_tri(r.get("v_perf")), fmt_tri(r.get("v_affinity")),
-                        fmt_tri(r.get("v_mempolicy")), fmt_tri(r.get("v_placement_obs")), fmt_tri(r.get("v_numa_placement")),
-                        dr.get("correct"), dr.get("overlap_detected"), dr.get("lost_detected"), dr.get("duplicate_detected"),
-                        dr.get("reservations_total"), dr.get("rc")))
-                    mpv = dr.get("mapping_provenance") or {}
-                    if mpv:
-                        lines.append("  - mapping: profile=%s variant=%s phys=%s spans_sockets=%s affinity_verified=%s" % (
-                            mpv.get("mapping_profile"), mpv.get("mapping_variant"), mpv.get("logical_to_physical"),
-                            mpv.get("spans_sockets"), fmt_tri(mpv.get("all_requested_affinity_roles_verified"))))
-                    for n in dr.get("nodes", []):
-                        pl = n.get("placement", {})
-                        mp = n.get("memory_policy", {})
-                        aff = n.get("affinity", {})
-                        ing = aff.get("ingestor", {})
-                        con = aff.get("consumer", {})
-                        lines.append(
-                            "  - node %d: scanned=%s consumed=%s pub=%s max_eff=%s "
-                            "aff[ing req=%s app=%s ok=%s matched=%s applicable=%s | con req=%s app=%s ok=%s matched=%s] "
-                            "mbind[req_c=%s ok_c=%s fail_c=%s err=%s all_ok=%s] "
-                            "place[target=%s other=%s unknown=%s sampled=%s]" % (
-                                n.get("node"), n.get("consumer_bytes_scanned"), n.get("bytes_consumed"),
-                                n.get("bytes_published"), n.get("max_effective_backlog"),
-                                ing.get("requested"), ing.get("set_applied"), ing.get("query_succeeded"), ing.get("matched"), ing.get("applicable"),
-                                con.get("requested"), con.get("set_applied"), con.get("query_succeeded"), con.get("matched"),
-                                mp.get("requested_count"), mp.get("success_count"), mp.get("failure_count"), mp.get("error"), mp.get("all_requested_succeeded"),
-                                pl.get("local_pages_on_target_node", pl.get("sample_target_match_pages")),
-                                pl.get("remote_pages_other_node", pl.get("sample_other_node_pages")),
-                                pl.get("unknown_pages", pl.get("sample_unknown_pages")),
-                                pl.get("sampled_pages")))
-                    if r.get("invalid_reasons"):
-                        lines.append("  - invalid reasons: %s" % r.get("invalid_reasons"))
+                    recs = groups.get((scen, map_id, pset_id, cand), [])
+                    if not recs:
+                        continue
+                    lines.append("### %s / %s / %s / %s (attempted=%d)" % (scen, map_id, pset_id, cand, len(recs)))
+                    lines.append("")
+                    for r in recs:
+                        dr = r.get("dist")
+                        if not dr:
+                            lines.append("- trial %s: invalid=%s reasons=%s" % (r.get("trial"), r.get("invalid"), r.get("invalid_reasons")))
+                            continue
+                        lines.append("- trial %s (class=%s, placement_sampling=%s, linked=%s): complete=%s invalid=%s kernel=%s scanned=%s consumed=%s scan_ok=%s "
+                                     "engine_wall=%.6fs harness_wall=%s valid[func=%s perf=%s affinity=%s mempolicy=%s placement_obs=%s numa=%s] "
+                                     "correct=%s overlap=%s lost=%s dup=%s reservations=%s rc=%s" % (
+                            r.get("trial"), r.get("trial_class"), r.get("placement_sampling"), r.get("linked_performance_trial") or "n/a",
+                            r.get("complete"), r.get("invalid"),
+                            r.get("consumer_kernel"), r.get("scan_bytes"), dr.get("total_consumed"), fmt_tri(r.get("scan_equals_consumed")),
+                            float(dr.get("wall_seconds") or 0.0), fmt(r.get("harness_wall_s")),
+                            fmt_tri(r.get("v_functional")), fmt_tri(r.get("v_perf")), fmt_tri(r.get("v_affinity")),
+                            fmt_tri(r.get("v_mempolicy")), fmt_tri(r.get("v_placement_obs")), fmt_tri(r.get("v_numa_placement")),
+                            dr.get("correct"), dr.get("overlap_detected"), dr.get("lost_detected"), dr.get("duplicate_detected"),
+                            dr.get("reservations_total"), dr.get("rc")))
+                        mpv = dr.get("mapping_provenance") or {}
+                        if mpv:
+                            lines.append("  - mapping: profile=%s variant=%s phys=%s spans_sockets=%s affinity_verified=%s" % (
+                                mpv.get("mapping_profile"), mpv.get("mapping_variant"), mpv.get("logical_to_physical"),
+                                mpv.get("spans_sockets"), fmt_tri(mpv.get("all_requested_affinity_roles_verified"))))
+                        for n in dr.get("nodes", []):
+                            pl = n.get("placement", {})
+                            mp = n.get("memory_policy", {})
+                            aff = n.get("affinity", {})
+                            ing = aff.get("ingestor", {})
+                            con = aff.get("consumer", {})
+                            lines.append(
+                                "  - node %d: scanned=%s consumed=%s pub=%s max_eff=%s "
+                                "aff[ing req=%s app=%s ok=%s matched=%s applicable=%s | con req=%s app=%s ok=%s matched=%s] "
+                                "mbind[req_c=%s ok_c=%s fail_c=%s err=%s all_ok=%s] "
+                                "place[target=%s other=%s unknown=%s sampled=%s]" % (
+                                    n.get("node"), n.get("consumer_bytes_scanned"), n.get("bytes_consumed"),
+                                    n.get("bytes_published"), n.get("max_effective_backlog"),
+                                    ing.get("requested"), ing.get("set_applied"), ing.get("query_succeeded"), ing.get("matched"), ing.get("applicable"),
+                                    con.get("requested"), con.get("set_applied"), con.get("query_succeeded"), con.get("matched"),
+                                    mp.get("requested_count"), mp.get("success_count"), mp.get("failure_count"), mp.get("error"), mp.get("all_requested_succeeded"),
+                                    pl.get("local_pages_on_target_node", pl.get("sample_target_match_pages")),
+                                    pl.get("remote_pages_other_node", pl.get("sample_other_node_pages")),
+                                    pl.get("unknown_pages", pl.get("sample_unknown_pages")),
+                                    pl.get("sampled_pages")))
+                        if r.get("invalid_reasons"):
+                            lines.append("  - invalid reasons: %s" % r.get("invalid_reasons"))
             lines.append("")
 
     lines.append("## Invalid / incomplete / failed / unreadable / missing trials")

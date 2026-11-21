@@ -194,14 +194,17 @@ Functional correctness, performance-measurement, affinity, memory-policy applica
 - `--trials N` (>=3 recommended for decisive cases).
 - `--seed SEED` deterministic random seed for reproducible candidate/scenario ordering.
 - `--shuffle-scenarios` randomize scenario/mapping-block order (reproducible by seed).
-- `--cache-policy TEXT` explicit cache/warm-up assumption recorded in manifest.
+- `--cache-policy TEXT` legacy explicit cache/warm-up assumption recorded in manifest (prefer `--cache-precondition-policy`).
+- `--cache-precondition-policy best_effort_os_cache|warm_repeat|drop_caches_if_privileged` C3 attributable cache-preconditioning policy. Actions/outcomes/fallbacks are recorded factually per case; `drop_caches_if_privileged` records success/failure and does not claim cold-cache control unless it succeeded.
+- `--min-duration-seconds N` C3 duration-qualification target (seconds). Recorded factually per trial as a separate axis (`meets_target`), not a performance-validity override.
+- `--sweep-base-quantum LIST` / `--sweep-max-backlog LIST` / `--sweep-max-reservation LIST` C3 parameter sweeps (comma-separated positive integers). Cartesian-product parameter sets are planned/executed/reported as attributable `parameter_set_id` values; do not mix results across parameter sets.
 - `--consumer-kernel full_byte_scan|none` workload kernel (default `full_byte_scan`; explicitly written per comparable candidate spec).
 - `--strict-affinity` / `--strict-mbind` strict enforcement (abort on required failure); recorded in specs/manifests/campaign config and reported alongside factual validity.
 - `--phys-nodes LIST` explicit physical NUMA node ids; must be compatible with every selected scenario's logical node count (count match required) or the campaign is rejected before timed trials.
 
-**Randomization/fairness:** candidate order is shuffled within each (scenario,trial) block using the recorded seed; actual execution order and plan are recorded in `campaign-manifest.json`/`execution-order.jsonl`/`execution-plan.json`. Re-running into an existing case/trial directory does not overwrite earlier raw evidence.
+**Randomization/fairness:** candidate order is shuffled within each (scenario,mapping,parameter-set,trial) block using the recorded seed; actual execution order and plan are recorded in `campaign-manifest.json`/`execution-order.jsonl`/`execution-plan.json`. Re-running into an existing case/trial directory does not overwrite earlier raw evidence.
 
-**Cache assumptions:** by default recorded as best-effort OS cache (no privileged cold-cache control). Do not claim cache-controlled comparisons unless cache state was actually controlled.
+**Cache assumptions:** default policy is `best_effort_os_cache` (no privileged cold-cache control). `warm_repeat` performs factual pre-measurement reads. `drop_caches_if_privileged` attempts a privileged drop and records factual fallback when unavailable. Do not claim cache-controlled comparisons unless cache state was actually controlled.
 
 ## Expected runtime and disk
 

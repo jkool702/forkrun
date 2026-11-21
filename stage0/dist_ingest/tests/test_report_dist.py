@@ -110,7 +110,7 @@ class TestReportDist(unittest.TestCase):
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # 5 attempted trials total for scenario/candidate; only 1 functionally valid
             # 5 attempted performance trials total for scenario/candidate; only 1 functionally complete
-            self.assertIn("| sc | legacy | fixed_faa | 5 | 1 | 0 | 0 |", text)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 5 | 1 | 0 | 0 |", text)
             # all invalid/incomplete accounted for (performance-class)
             self.assertIn("invalid/incomplete=4", text)
             self.assertIn("no-performance-valid-trials", text)
@@ -185,7 +185,7 @@ class TestReportDist(unittest.TestCase):
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # 2 attempted performance trials, 1 functionally complete, 0 perf-valid
-            self.assertIn("| sc | legacy | fixed_faa | 2 | 1 | 0 | 0 |", text)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 2 | 1 | 0 | 0 |", text)
             self.assertIn("no-performance-valid-trials", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -214,7 +214,7 @@ class TestReportDist(unittest.TestCase):
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # only trial 1 is performance-valid: median engine wall 2.000, throughput 0.001 MB/s
-            self.assertIn("| sc | legacy | fixed_faa | 3 | 3 | 1 | 1 | 0.001 | 2.000 |", text)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 3 | 3 | 1 | 1 | 0.001 | 2.000 |", text)
             self.assertIn("func-but-perf-invalid/unknown=2", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -235,7 +235,7 @@ class TestReportDist(unittest.TestCase):
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             self.assertIn("no-performance-valid-trials", text)
             # headline performance medians must not substitute functional values
-            self.assertIn("| sc | legacy | fixed_faa | 1 | 1 | 0 | 0 | n/a | n/a |", text)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 0 | 0 | n/a | n/a |", text)
             # functional-but-perf-invalid/unknown trial retained in detail with raw throughput info
             self.assertIn("engine_wall=1.500000", text)
             self.assertIn("valid[func=true perf=unknown", text)
@@ -260,7 +260,7 @@ class TestReportDist(unittest.TestCase):
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             self.assertIn("mixed-kernels-not-comparable", text)
             # no headline performance medians when mixed kernels not comparable
-            self.assertIn("| sc | legacy | fixed_faa | 2 | 2 | 2 | 2 | n/a | n/a |", text)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 2 | 2 | 2 | 2 | n/a | n/a |", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -371,7 +371,7 @@ class TestCheckpoint2PlacementSamplingReporting(unittest.TestCase):
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # headline stats must reflect only the performance trial (2.0s, 0.001 MB/s), not the placement-validation trial
-            self.assertIn("| sc | legacy | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 2.000 |", text)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 2.000 |", text)
             self.assertIn("placement-validation=1(distinct,excluded)", text)
             # placement-validation reported separately and linked
             self.assertIn("## Placement-validation experiments (distinct from performance trials; not mixed into headline statistics)", text)
@@ -409,11 +409,11 @@ class TestCheckpoint2PlacementSamplingReporting(unittest.TestCase):
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # performance-class denominator/stats must include only the performance trial
-            self.assertIn("| sc | legacy | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 2.000 |", text)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 2.000 |", text)
             self.assertIn("placement-validation=3(distinct,excluded)", text)
             # failed/missing/unreadable placement-validation outcomes remain classified and linked
             self.assertIn("## Placement-validation experiments (distinct from performance trials; not mixed into headline statistics)", text)
-            self.assertEqual(text.count("| sc | legacy | fixed_faa |"), 4)  # 1 summary row + 3 placement-validation rows
+            self.assertEqual(text.count("| sc | legacy | pset__default | fixed_faa |"), 4)  # 1 summary row + 3 placement-validation rows
             self.assertIn(linked, text)
             self.assertIn("placement_validation", text)
             self.assertIn("placement sampling | complete", text)  # section header present

@@ -295,6 +295,93 @@ def _resolve_spec_paths(spec):
     return out
 
 
+# C3: cache-preconditioning policy (attributable, factual).
+CACHE_PRECONDITION_POLICIES = (
+    "best_effort_os_cache",
+    "warm_repeat",
+    "drop_caches_if_privileged",
+)
+
+
+def _cache_precondition(spec, resolved):
+    """Apply requested cache-preconditioning policy before timed measurement.
+
+    Returns a factual record; never claims privileged cold-cache control unless
+    the action actually succeeded. Policies are separate from performance axes.
+    """
+    req = str(spec.get("cache_precondition_policy") or spec.get("cache_policy") or "best_effort_os_cache")
+    # Accept legacy descriptive string as best-effort default.
+    if req.startswith("best_effort_os_cache"):
+        req = "best_effort_os_cache"
+    rec = {
+        "requested_policy": req,
+        "policy": req if req in CACHE_PRECONDITION_POLICIES else "invalid",
+        "actions": [],
+        "achieved": None,
+        "privileged_action_attempted": False,
+        "privileged_action_succeeded": False,
+        "fallback": None,
+        "notes": [],
+    }
+    if req not in CACHE_PRECONDITION_POLICIES:
+        rec["achieved"] = False
+        rec["notes"].append("unknown cache_precondition_policy")
+        return rec
+    inp = resolved.get("input") or spec.get("input")
+    if req == "best_effort_os_cache":
+        rec["actions"].append({"action": "none", "reason": "best-effort OS page cache; no privileged control"})
+        rec["achieved"] = True
+        rec["notes"].append("no privileged cold-cache control claimed")
+        return rec
+    if req == "warm_repeat":
+        # Factual warm preconditioning: read corpus into OS page cache before measurement.
+        bytes_read = 0
+        ok = False
+        err = None
+        if inp and os.path.exists(inp):
+            try:
+                with open(inp, "rb") as fh:
+                    while True:
+                        b = fh.read(4 * 1024 * 1024)
+                        if not b:
+                            break
+                        bytes_read += len(b)
+                ok = True
+            except Exception as e:
+                err = str(e)
+        else:
+            err = "input missing/unreadable for warm preconditioning"
+        rec["actions"].append({"action": "read_input_into_page_cache", "path": inp, "bytes_read": bytes_read, "ok": ok, "error": err})
+        rec["achieved"] = bool(ok)
+        if not ok:
+            rec["fallback"] = "warm_precondition_failed"
+        return rec
+    if req == "drop_caches_if_privileged":
+        rec["privileged_action_attempted"] = True
+        path = "/proc/sys/vm/drop_caches"
+        err = None
+        ok = False
+        try:
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write("3\n")
+            ok = True
+        except Exception as e:
+            err = str(e)
+        rec["actions"].append({"action": "write_drop_caches_3", "path": path, "ok": ok, "error": err})
+        rec["privileged_action_succeeded"] = bool(ok)
+        if ok:
+            rec["achieved"] = True
+            rec["notes"].append("drop_caches succeeded; actual cache state still OS/kernel dependent")
+        else:
+            # Factual fallback: no privileged control available.
+            rec["fallback"] = "best_effort_os_cache"
+            rec["achieved"] = False
+            rec["notes"].append("drop_caches not available/permitted; no cold-cache control claimed")
+        return rec
+    rec["achieved"] = False
+    return rec
+
+
 CHILD_SCRIPT = r"""
 import os, sys, json, time
 sys.path.insert(0, sys.argv[1])   # python/ dir
@@ -360,6 +447,8 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
         "started_monotonic": time.monotonic(),
         "started_epoch": time.time(),
     }
+    # C3: cache-preconditioning policy (attributable, factual; separate axis).
+    manifest["cache_precondition"] = _cache_precondition(spec, resolved)
     with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)
 
@@ -606,6 +695,32 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     # also includes the harness's post-run exactness accounting.
     manifest["map_s"] = (manifest.get("child_report") or {}).get(
         "elapsed_s")
+    # C3: duration qualification (separate attributable axis; factual).
+    dq_target = spec.get("min_duration_seconds")
+    if dq_target is None:
+        dq_target = spec.get("duration_qualification_seconds")
+    try:
+        dq_target = float(dq_target) if dq_target is not None else None
+    except Exception:
+        dq_target = None
+    dr_wall = ((manifest.get("dist_result") or {}).get("wall_seconds"))
+    try:
+        dr_wall = float(dr_wall) if dr_wall is not None else None
+    except Exception:
+        dr_wall = None
+    effective_wall = dr_wall if dr_wall is not None else (manifest.get("map_s") or dt)
+    try:
+        effective_wall = float(effective_wall)
+    except Exception:
+        effective_wall = float(dt)
+    manifest["duration_qualification"] = {
+        "target_seconds": dq_target,
+        "effective_wall_seconds": effective_wall,
+        "wall_seconds_harness": float(dt),
+        "wall_seconds_engine_or_map": dr_wall if dr_wall is not None else manifest.get("map_s"),
+        "meets_target": (None if dq_target is None else bool(effective_wall >= dq_target)),
+        "qualified": (None if dq_target is None else bool(effective_wall >= dq_target)),
+    }
     diag = _parse_diag(stderr)
     cpu_peak_total, per_pid = cpu_peak
     cpu_total = sum(comm_cpu.values()) if comm_cpu else None

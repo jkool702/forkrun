@@ -312,3 +312,45 @@ Local/fake-NUMA tests validate driver and CLI-input/topology-handling/provenance
 - C3–C5 work not started (parameter sweeps/workload expansion/duration-cache work, reporting improvements/binary provenance/calibration, EPYC stage/orchestration/rehearsal, `RENTAL_READINESS.md` as applicable later). No physical multi-node NUMA validation/rental; local/fake-NUMA results are not evidence of physical locality/scaling/remote-memory penalties.
 - `mbind(MPOL_PREFERRED)` syscall success and placement sampling observations are not physical placement proof; `unknown` remains `unknown`. Placement-validation experiments remain timing-tainted and distinct from performance measurements.
 - **Explicit confirmation:** no C3 work, no physical rental, no production adoption. **Stopped for independent review after this correction checkpoint.**
+
+## WO-NUMA-ONE-SHOT-RENTAL-PREPARATION C3 checkpoint
+
+**Purpose:** add parameter sweeps, duration qualification, workload expansion, and cache-preconditioning policy as separate attributable experimental axes in the experimental `stage0/dist_ingest/*` harness/reporting/tests/docs. No C4/C5, no physical rental, no production adoption.
+
+**Status:** C3 implemented and validated on this local/fake-NUMA host. **No physical-NUMA hardware rented. No production adoption started. No C4/C5 work started.**
+
+### Repository state
+
+- **Branch:** `NEW/REFACTOR5.1`
+- **Starting HEAD (before this C3 checkpoint):** `8b66c10ee089c9d49b66c8515f3a41873a3ed8d4` (C2 final cleanup, accepted; `origin/NEW/REFACTOR5.1` at C3 start)
+- **Final HEAD (this C3 checkpoint):** see commit recorded for this C3 checkpoint
+- **Frozen production files modified:** **none** (`forkrun_ring.c`, `forkrun_ring.h`, `forkrun_substrate.h`, `substratestubs.c` untouched)
+
+### C3 axes (separate, attributable)
+
+1. **Parameter sweeps (attributable parameter sets).** `run_dist_campaign.sh` accepts `--sweep-base-quantum`, `--sweep-max-backlog`, `--sweep-max-reservation` (comma-separated positive integer lists). The cartesian product forms explicit `parameter_sets` with stable `parameter_set_id` values and `sweep_axes` provenance recorded in `prevalidation.json`, `execution-plan.json`, `campaign-manifest.json`, `.run_experiments.tsv`, and per-outcome/per-manifest spec fields. Default (no sweep) produces `pset__default` with empty `sweep_axes`, preserving backward-compatible behavior. Parameter sets are carried through case ids/suffixes so results are not mixed across parameter sets.
+
+2. **Duration qualification (separate factual axis).** `run_dist_campaign.sh` accepts `--min-duration-seconds N` (non-negative). `stage0/run_case.py` records `duration_qualification` in `manifest.json` with `target_seconds`, effective wall seconds (engine/map/harness), and factual `meets_target`/`qualified`. This is qualification metadata, not a performance-validity override; report surfaces duration-unqualified counts without mixing with other axes.
+
+3. **Workload expansion (attributable workload/scenario axis).** Non-quick campaign scenarios expanded with `medium_seq` (`corpora/medium.bin`, 16MiB), `chunkstress` (large corpus, small backlog/quantum stress), and `boundary_small_backlog` (boundary corpus, small backlog). Scenarios remain explicitly selectable via `--scenarios`; `workload_id` is recorded in plan/outcomes/manifests for attribution.
+
+4. **Cache-preconditioning policy (separate factual policy axis).** `run_dist_campaign.sh` accepts `--cache-precondition-policy` with enum `best_effort_os_cache` (default), `warm_repeat`, `drop_caches_if_privileged`; invalid values rejected before execution. `stage0/run_case.py` applies/records `_cache_precondition()` factually in `manifest.json` (`requested_policy`, actions, achieved, privileged attempted/succeeded, fallback, notes). `drop_caches_if_privileged` records actual success/failure and fallback; no privileged cold-cache control is claimed unless the action succeeded.
+
+### Reporting / attribution safeguards
+
+- `stage0/dist_ingest/report_dist.py` groups comparative summary and per-trial detail by `(scenario, mapping, parameter_set_id, candidate)`, adds `param set` column, and includes C3 axis provenance. Placement-validation and invalid-trial sections include parameter-set attribution. Existing report tests with exact old row strings were updated to preserve intent for the new attributable column.
+- `.run_experiments.tsv` uses unit-separator (`0x1f`) delimiter to preserve empty C3 fields (bash tab IFS collapses empty fields); tests check existence and plan/manifest content.
+
+### Validation (exact)
+
+- `python3 -m unittest discover -s stage0/dist_ingest/tests -v` → **216/216 OK** (30.451s)
+- `python3 -m unittest stage0.tests.test_stage0` → **81/81 OK** (16.486s)
+- `python3 -m unittest python.tests.test_numa_drain_guard` → **7/7 OK** (0.000s)
+- `python3 -m unittest python.tests.test_numa` → **36 tests, OK (skipped=1)** (3.420s)
+- C3 focused tests added in `stage0/dist_ingest/tests/test_benchmark_semantics.py` (`TestC3AttributableAxes`, 10 tests) covering default no-sweep, sweep attribution/no-mixing, duration qualification recording, invalid policy/min-duration rejection, workload expansion selection, cache-precondition factual behavior, and report parameter-set grouping. Report tests updated for C3 attributable columns while preserving C2 semantics.
+
+### Limitations / explicit stop
+
+- No C4/C5 work performed (environment/telemetry/reporting improvements beyond C3 attribution, binary provenance, calibration utility, EPYC stage/orchestration integration, rehearsal, `RENTAL_READINESS.md` finalization as later-scope items). No physical multi-node NUMA validation/rental; local/fake-NUMA results are not evidence of physical locality/scaling/remote-memory penalties.
+- C3 parameter sweeps/qualification/workload/cache axes are experimental harness/reporting controls; they do not change production forkrun behavior. `drop_caches_if_privileged` is factual and may fall back; it is not a guaranteed cold-cache control.
+- **Explicit confirmation:** no C4/C5, no physical rental, no production adoption. **Stopped for independent review after this C3 checkpoint.**

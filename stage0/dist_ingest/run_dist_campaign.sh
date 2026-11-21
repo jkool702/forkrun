@@ -27,7 +27,13 @@ usage: run_dist_campaign.sh [options]
   --source-sha SHA
   --seed SEED              deterministic random seed for candidate/scenario ordering
   --shuffle-scenarios      randomize scenario-block order (reproducible by seed)
-  --cache-policy TEXT      explicit cache/warm-up assumption recorded in manifest
+  --cache-policy TEXT      explicit cache/warm-up assumption recorded in manifest (legacy; prefer --cache-precondition-policy)
+  --cache-precondition-policy P  C3 attributable cache-preconditioning policy: best_effort_os_cache (default),
+                           warm_repeat, or drop_caches_if_privileged (factual attempt; recorded fallback)
+  --min-duration-seconds N C3 duration qualification target seconds (factual; recorded per trial, separate axis)
+  --sweep-base-quantum L   C3 parameter sweep: comma-separated base_quantum byte values (attributable parameter sets)
+  --sweep-max-backlog L    C3 parameter sweep: comma-separated max_backlog byte values (attributable parameter sets)
+  --sweep-max-reservation L C3 parameter sweep: comma-separated max_reservation byte values (attributable parameter sets)
   --consumer-kernel K      full_byte_scan (default) or none (explicit diagnostic opt-out)
   --placement-experiments M  placement experiment mode: off (default; performance trials only,
                            placement_sampling=off) or paired (run a linked placement-validation
@@ -57,6 +63,11 @@ CAND_FILTER="centralized_ingest,fixed_faa,local_adaptive,relative_adaptive"
 SEED=""
 SHUFFLE_SCENARIOS=0
 CACHE_POLICY="best_effort_os_cache (no privileged cold-cache control; limitation explicit)"
+CACHE_PRECONDITION_POLICY="best_effort_os_cache"
+MIN_DURATION_SECONDS=""
+SWEEP_BASE_QUANTUM=""
+SWEEP_MAX_BACKLOG=""
+SWEEP_MAX_RESERVATION=""
 CONSUMER_KERNEL="full_byte_scan"
 PLACEMENT_EXPERIMENTS="off"
 STRICT_AFFINITY=0
@@ -80,6 +91,11 @@ while [ "$#" -gt 0 ]; do
     --seed) SEED=${2:?}; shift 2 ;;
     --shuffle-scenarios) SHUFFLE_SCENARIOS=1; shift ;;
     --cache-policy) CACHE_POLICY=${2:?}; shift 2 ;;
+    --cache-precondition-policy) CACHE_PRECONDITION_POLICY=${2:?}; shift 2 ;;
+    --min-duration-seconds) MIN_DURATION_SECONDS=${2:?}; shift 2 ;;
+    --sweep-base-quantum) SWEEP_BASE_QUANTUM=${2:?}; shift 2 ;;
+    --sweep-max-backlog) SWEEP_MAX_BACKLOG=${2:?}; shift 2 ;;
+    --sweep-max-reservation) SWEEP_MAX_RESERVATION=${2:?}; shift 2 ;;
     --consumer-kernel) CONSUMER_KERNEL=${2:?}; shift 2 ;;
     --placement-experiments) PLACEMENT_EXPERIMENTS=${2:?}; shift 2 ;;
     --strict-affinity) STRICT_AFFINITY=1; shift ;;
@@ -158,16 +174,21 @@ else
   SCENARIOS+=("tiny|corpora/tiny.bin|2|fast|0|-1|fast|0|0|4194304|")
   SCENARIOS+=("boundary|corpora/boundary.bin|4|fast|0|-1|fast|0|0|33554432|")
   SCENARIOS+=("backpressure|corpora/large.bin|4|slow|5000000|-1|slow|5000000|0|8388608|")
+  # C3 workload expansion (attributable workload/scenario variants; explicit selection)
+  SCENARIOS+=("medium_seq|corpora/medium.bin|4|fast|0|-1|fast|0|0|33554432|")
+  SCENARIOS+=("chunkstress|corpora/large.bin|4|fast|0|-1|fast|0|0|4194304|")
+  SCENARIOS+=("boundary_small_backlog|corpora/boundary.bin|4|fast|0|-1|fast|0|0|4194304|")
 fi
 
 echo "=== dist-ingest campaign: topology/scenario pre-validation"
 export DIST_SCEN_DEFS="$(printf '%s\n' "${SCENARIOS[@]}")"
 PREVAL_FILE="$OUT/prevalidation.json"
-python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" "$MAPPING_PROFILES" "$TRIALS" "$CAND_FILTER" "$SEED" "$SHUFFLE_SCENARIOS" "$PLACEMENT_EXPERIMENTS" <<'PY'
+python3 - "$OUT" "$SCEN_FILTER" "$PHYS_NODES" "$PROFILE" "$QUICK" "$PREVAL_FILE" "$SCEN_FILTER_EXPLICIT" "$MAPPING_PROFILES" "$TRIALS" "$CAND_FILTER" "$SEED" "$SHUFFLE_SCENARIOS" "$PLACEMENT_EXPERIMENTS" "$CACHE_PRECONDITION_POLICY" "$MIN_DURATION_SECONDS" "$SWEEP_BASE_QUANTUM" "$SWEEP_MAX_BACKLOG" "$SWEEP_MAX_RESERVATION" <<'PY'
 import json, os, re, sys
 (out, scen_filter, phys_nodes, profile, quick, preval_path,
  scen_filter_explicit, mapping_profiles_arg, trials_arg, cand_filter_arg, seed_arg, shuf_sc_arg,
- placement_experiments) = sys.argv[1:14]
+ placement_experiments, cache_precondition_policy, min_duration_seconds,
+ sweep_base_quantum, sweep_max_backlog, sweep_max_reservation) = sys.argv[1:19]
 quick = quick == '1'
 scen_filter_explicit = scen_filter_explicit == '1'
 requested_profile = profile or None
@@ -347,6 +368,94 @@ if plan_trials_n is not None and plan_trials_n < 1:
 plan_seed = str(seed_arg) if seed_arg is not None else ''
 # shuffle flag passed as shell 0/1
 plan_shuffle_scenarios = str(shuf_sc_arg) in ('1', 'true', 'True', 'yes')
+
+# C3: cache-preconditioning policy (attributable, factual enum).
+_CACHE_POLICIES = {'best_effort_os_cache', 'warm_repeat', 'drop_caches_if_privileged'}
+cache_precondition_policy = str(cache_precondition_policy or 'best_effort_os_cache').strip()
+if cache_precondition_policy not in _CACHE_POLICIES:
+    errors.append('invalid --cache-precondition-policy %r (expected one of: %s)' % (
+        cache_precondition_policy, ','.join(sorted(_CACHE_POLICIES))))
+
+# C3: duration qualification (separate attributable axis; factual threshold).
+plan_min_duration_seconds = None
+if str(min_duration_seconds or '').strip() != '':
+    try:
+        plan_min_duration_seconds = float(str(min_duration_seconds).strip())
+    except Exception:
+        plan_min_duration_seconds = None
+        errors.append('invalid --min-duration-seconds %r (expected non-negative number)' % (min_duration_seconds,))
+    if plan_min_duration_seconds is not None and plan_min_duration_seconds < 0:
+        errors.append('--min-duration-seconds must be >= 0 (got %s)' % plan_min_duration_seconds)
+
+def _parse_sweep_list(name, raw, default):
+    raw = '' if raw is None else str(raw).strip()
+    if raw == '':
+        return [default], False
+    vals = []
+    for tok in raw.split(','):
+        t = tok.strip()
+        if t == '':
+            return None, 'malformed %s: empty element in %r' % (name, raw)
+        try:
+            v = int(t, 10)
+        except Exception:
+            return None, 'malformed %s: non-integer element %r in %r' % (name, t, raw)
+        if v <= 0:
+            return None, 'invalid %s: values must be positive integers (got %r)' % (name, raw)
+        vals.append(v)
+    # preserve order but dedupe exact duplicates while keeping determinism
+    out = []
+    seen = set()
+    for v in vals:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out, False
+
+_sweep_bq, _sweep_bq_err = _parse_sweep_list('--sweep-base-quantum', sweep_base_quantum, 2 * 1024 * 1024)
+_sweep_mb, _sweep_mb_err = _parse_sweep_list('--sweep-max-backlog', sweep_max_backlog, None)  # scenario default when None
+_sweep_mr, _sweep_mr_err = _parse_sweep_list('--sweep-max-reservation', sweep_max_reservation, 0)
+for _e in (_sweep_bq_err, _sweep_mb_err, _sweep_mr_err):
+    if _e:
+        errors.append(_e)
+if not errors:
+    # If max_backlog not swept, use [None] sentinel meaning "scenario default".
+    if _sweep_mb is None:
+        _sweep_mb = [None]
+    if _sweep_bq is None:
+        _sweep_bq = [2 * 1024 * 1024]
+    if _sweep_mr is None:
+        _sweep_mr = [0]
+else:
+    _sweep_bq, _sweep_mb, _sweep_mr = [2 * 1024 * 1024], [None], [0]
+
+# C3 parameter sets: cartesian product of declared sweep axes, explicit attribution.
+parameter_sets = []
+_sweep_axes = []
+if str(sweep_base_quantum or '').strip() != '':
+    _sweep_axes.append('base_quantum')
+if str(sweep_max_backlog or '').strip() != '':
+    _sweep_axes.append('max_backlog')
+if str(sweep_max_reservation or '').strip() != '':
+    _sweep_axes.append('max_reservation')
+for bq in _sweep_bq:
+    for mb in _sweep_mb:
+        for mr in _sweep_mr:
+            ps = {
+                'base_quantum': int(bq),
+                'max_backlog': (None if mb is None else int(mb)),
+                'max_reservation': int(mr),
+                'sweep_axes': list(_sweep_axes),
+            }
+            # stable id from varied values only (or default)
+            if _sweep_axes:
+                parts = []
+                for ax in _sweep_axes:
+                    parts.append('%s=%s' % (ax, ps[ax]))
+                ps['parameter_set_id'] = 'pset__' + '__'.join(parts)
+            else:
+                ps['parameter_set_id'] = 'pset__default'
+            parameter_sets.append(ps)
 
 mapping_plan = []  # list of concrete mappings to run
 unsupported_mappings = []
@@ -622,6 +731,11 @@ prov = {
     'selected_scenarios': [{'id': s['id'], 'nodes': s['nodes']} for s in selected],
     'scenarios_filter': scenarios_filter_record,
     'scenarios_filter_explicit': bool(scen_filter_explicit),
+    # C3: attributable experimental axes (separate concerns)
+    'cache_precondition_policy': cache_precondition_policy,
+    'min_duration_seconds': plan_min_duration_seconds,
+    'sweep_axes': list(_sweep_axes),
+    'parameter_sets': parameter_sets,
 }
 os.makedirs(out, exist_ok=True)
 with open(preval_path, 'w') as f:
@@ -664,62 +778,84 @@ for key in sm_keys:
     m = sm_map[key]
     sid = m['scenario_id']
     safe_map = re.sub(r'[^A-Za-z0-9_.:-]+', '-', str(m.get('mapping_id') or 'legacy'))
-    for t in range(1, trials_n + 1):
-        cands = list(cand_list)
-        random.Random(str(seed)+'|'+sid+'|'+m['mapping_id']+'|'+str(t)).shuffle(cands)
-        block_exps = []
-        for cand in cands:
-            perf_case_id = '%s__%s__%s' % (sid, safe_map, cand)
-            perf_exp = {
-                'scenario': sid,
-                'scenario_def': available_by_id[sid]['def'],
-                'trial': t,
-                'candidate': cand,
-                'case_id': perf_case_id,
-                'mapping_id': m.get('mapping_id'),
-                'mapping_profile': m.get('mapping_profile'),
-                'mapping_variant': m.get('mapping_variant'),
-                'logical_to_physical': m.get('logical_to_physical'),
-                'phys_nodes': m.get('phys_nodes'),
-                'trial_class': 'performance',
-                'placement_sampling': 'off',
-                'linked_performance_trial': None,
-            }
-            block_exps.append(perf_exp)
-            planned_experiments.append(perf_exp)
-            if placement_mode == 'paired' and cand in _DIST_CANDS:
-                pv_case_id = perf_case_id + '__placement_validation'
-                pv_link = 'cases/%s/trial%s/manifest.json' % (perf_case_id, t)
-                pv_exp = {
+    for ps in parameter_sets:
+        psid = ps.get('parameter_set_id') or 'pset__default'
+        ps_suffix = '' if psid == 'pset__default' else ('__' + re.sub(r'[^A-Za-z0-9_.:-]+', '-', psid))
+        for t in range(1, trials_n + 1):
+            cands = list(cand_list)
+            random.Random(str(seed)+'|'+sid+'|'+m['mapping_id']+'|'+psid+'|'+str(t)).shuffle(cands)
+            block_exps = []
+            for cand in cands:
+                perf_case_id = '%s__%s__%s%s' % (sid, safe_map, cand, ps_suffix)
+                perf_exp = {
                     'scenario': sid,
+                    'workload_id': sid,
+                    'workload_class': 'scenario',
                     'scenario_def': available_by_id[sid]['def'],
                     'trial': t,
                     'candidate': cand,
-                    'case_id': pv_case_id,
+                    'case_id': perf_case_id,
                     'mapping_id': m.get('mapping_id'),
                     'mapping_profile': m.get('mapping_profile'),
                     'mapping_variant': m.get('mapping_variant'),
                     'logical_to_physical': m.get('logical_to_physical'),
                     'phys_nodes': m.get('phys_nodes'),
-                    'trial_class': 'placement_validation',
-                    'placement_sampling': 'on',
-                    'linked_performance_trial': pv_link,
+                    'trial_class': 'performance',
+                    'placement_sampling': 'off',
+                    'linked_performance_trial': None,
+                    # C3 attributable axes
+                    'parameter_set_id': psid,
+                    'parameter_set': dict(ps),
+                    'cache_precondition_policy': cache_precondition_policy,
+                    'min_duration_seconds': plan_min_duration_seconds,
                 }
-                block_exps.append(pv_exp)
-                planned_experiments.append(pv_exp)
-                placement_validation_run_count += 1
-        exec_plan.append({
-            'scenario': sid,
-            'scenario_def': available_by_id[sid]['def'],
-            'trial': t,
-            'candidate_order': cands,
-            'mapping_id': m.get('mapping_id'),
-            'mapping_profile': m.get('mapping_profile'),
-            'mapping_variant': m.get('mapping_variant'),
-            'logical_to_physical': m.get('logical_to_physical'),
-            'phys_nodes': m.get('phys_nodes'),
-            'planned_experiments': block_exps,
-        })
+                block_exps.append(perf_exp)
+                planned_experiments.append(perf_exp)
+                if placement_mode == 'paired' and cand in _DIST_CANDS:
+                    pv_case_id = perf_case_id + '__placement_validation'
+                    pv_link = 'cases/%s/trial%s/manifest.json' % (perf_case_id, t)
+                    pv_exp = {
+                        'scenario': sid,
+                        'workload_id': sid,
+                        'workload_class': 'scenario',
+                        'scenario_def': available_by_id[sid]['def'],
+                        'trial': t,
+                        'candidate': cand,
+                        'case_id': pv_case_id,
+                        'mapping_id': m.get('mapping_id'),
+                        'mapping_profile': m.get('mapping_profile'),
+                        'mapping_variant': m.get('mapping_variant'),
+                        'logical_to_physical': m.get('logical_to_physical'),
+                        'phys_nodes': m.get('phys_nodes'),
+                        'trial_class': 'placement_validation',
+                        'placement_sampling': 'on',
+                        'linked_performance_trial': pv_link,
+                        # C3 attributable axes
+                        'parameter_set_id': psid,
+                        'parameter_set': dict(ps),
+                        'cache_precondition_policy': cache_precondition_policy,
+                        'min_duration_seconds': plan_min_duration_seconds,
+                    }
+                    block_exps.append(pv_exp)
+                    planned_experiments.append(pv_exp)
+                    placement_validation_run_count += 1
+            exec_plan.append({
+                'scenario': sid,
+                'workload_id': sid,
+                'scenario_def': available_by_id[sid]['def'],
+                'trial': t,
+                'candidate_order': cands,
+                'mapping_id': m.get('mapping_id'),
+                'mapping_profile': m.get('mapping_profile'),
+                'mapping_variant': m.get('mapping_variant'),
+                'logical_to_physical': m.get('logical_to_physical'),
+                'phys_nodes': m.get('phys_nodes'),
+                'parameter_set_id': psid,
+                'parameter_set': dict(ps),
+                'cache_precondition_policy': cache_precondition_policy,
+                'min_duration_seconds': plan_min_duration_seconds,
+                'planned_experiments': block_exps,
+            })
 
 # Record requested/executed plan parameters in prevalidation for provenance and tests.
 prov['candidates_requested'] = list(plan_candidates)
@@ -731,12 +867,19 @@ prov['placement_experiments'] = placement_mode
 prov['placement_experiments_effective'] = placement_mode
 prov['placement_validation_run_count'] = placement_validation_run_count
 prov['planned_run_count'] = len(planned_experiments)
+prov['cache_precondition_policy'] = cache_precondition_policy
+prov['min_duration_seconds'] = plan_min_duration_seconds
+prov['sweep_axes'] = list(_sweep_axes)
+prov['parameter_sets'] = parameter_sets
 prov['randomization'] = {
     'seed': seed,
     'shuffle_scenarios': bool(shuf_sc),
     'trials': trials_n,
     'candidates': list(plan_candidates),
     'placement_experiments': placement_mode,
+    'cache_precondition_policy': cache_precondition_policy,
+    'min_duration_seconds': plan_min_duration_seconds,
+    'sweep_axes': list(_sweep_axes),
 }
 with open(preval_path, 'w') as f:
     json.dump(prov, f, indent=2, sort_keys=True)
@@ -748,6 +891,10 @@ with open(os.path.join(out, 'execution-plan.json'), 'w') as f:
                'placement_experiments_effective': placement_mode,
                'placement_validation_run_count': placement_validation_run_count,
                'planned_run_count': len(planned_experiments),
+               'cache_precondition_policy': cache_precondition_policy,
+               'min_duration_seconds': plan_min_duration_seconds,
+               'sweep_axes': list(_sweep_axes),
+               'parameter_sets': parameter_sets,
                'mapping_profiles_requested': raw_mp, 'mapping_mode': prov['physical_node_mapping']['mode'],
                'blocks': exec_plan, 'planned_experiments': planned_experiments,
                'unsupported_mappings': prov['unsupported_mappings']}, f, indent=2, sort_keys=True)
@@ -758,14 +905,28 @@ with open(os.path.join(out, '.run_plan.tsv'), 'w') as f:
             b['scenario'], b['scenario_def'], str(b['trial']), ','.join(b['candidate_order']),
             b['mapping_id'] or '', b.get('mapping_profile') or '', b.get('mapping_variant') or '', b.get('phys_nodes') or ''
         ]) + '\n')
-# Authoritative explicit experiment plan executed by the runtime loop (C2 correction)
+# Authoritative explicit experiment plan executed by the runtime loop (C2 correction + C3 axes).
+# Uses unit-separator (0x1f) delimiter: bash read with tab IFS collapses empty fields.
+_SEP = '\x1f'
 with open(os.path.join(out, '.run_experiments.tsv'), 'w') as f:
     for e in planned_experiments:
-        f.write('\t'.join([
+        ps = e.get('parameter_set') or {}
+        mb = ps.get('max_backlog')
+        mr = ps.get('max_reservation')
+        md = e.get('min_duration_seconds')
+        f.write(_SEP.join([
             e['scenario'], e['scenario_def'], str(e['trial']), e['candidate'],
             e['mapping_id'] or '', e.get('mapping_profile') or '', e.get('mapping_variant') or '', e.get('phys_nodes') or '',
             e['case_id'], e.get('trial_class') or 'performance', e.get('placement_sampling') or 'off',
             e.get('linked_performance_trial') or '',
+            # C3 attributable axes (appended for compatibility)
+            str(e.get('parameter_set_id') or 'pset__default'),
+            str(int(ps.get('base_quantum', 2 * 1024 * 1024))),
+            '' if mb is None else str(int(mb)),
+            str(int(0 if mr is None else mr)),
+            str(e.get('cache_precondition_policy') or 'best_effort_os_cache'),
+            '' if md is None else str(md),
+            str(e.get('workload_id') or e.get('scenario') or ''),
         ]) + '\n')
 print('prevalidation ok: selected=%s mappings=%d unsupported=%d candidates=%s trials=%d seed=%s shuffle=%s placement_experiments=%s placement_validation_runs=%d' % (
     selected_ids, len(plan_cases), len(unsupported_mappings), plan_candidates, trials_n, seed, shuf_sc, placement_mode, placement_validation_run_count), file=sys.stderr)
@@ -826,6 +987,7 @@ if quick:
     make(os.path.join(out,'corpora','tiny.bin'), 4096)
 else:
     make(os.path.join(out,'corpora','large.bin'), 256*1024*1024)
+    make(os.path.join(out,'corpora','medium.bin'), 16*1024*1024)
     make(os.path.join(out,'corpora','small.bin'), 8*1024*1024)
     make(os.path.join(out,'corpora','tiny.bin'), 4096)
     make(os.path.join(out,'corpora','boundary.bin'), 2*1024*1024 + 1)
@@ -847,14 +1009,24 @@ run_one_experiment() {
   local exp_inp="$9" exp_nodes="${10}" exp_cmode="${11}" exp_cbps="${12}"
   local exp_snode="${13}" exp_smode="${14}" exp_sbps="${15}" exp_sstall="${16}" exp_mbacklog="${17}"
   local exp_trial_class="${18}" exp_placement_sampling="${19}" exp_linked_perf="${20}"
+  # C3 attributable axes (optional, backward-compatible defaults)
+  local exp_pset_id="${21:-pset__default}"
+  local exp_base_quantum="${22:-2097152}"
+  local exp_max_backlog_override="${23:-}"
+  local exp_max_reservation="${24:-0}"
+  local exp_cache_precondition_policy="${25:-best_effort_os_cache}"
+  local exp_min_duration_seconds="${26:-}"
+  local exp_workload_id="${27:-$exp_sid}"
 
   local outdir="$OUT/cases/$exp_case_id/trial$exp_trial"
   if [ -e "$outdir/manifest.json" ]; then
-    echo "SKIP existing evidence: $exp_case_id trial$exp_trial class=$exp_trial_class" >&2
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    echo "SKIP existing evidence: $exp_case_id trial$exp_trial class=$exp_trial_class pset=$exp_pset_id" >&2
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$exp_case_id" "$exp_sid" "$exp_cand" "$exp_trial" "skipped_existing" \
       "cases/$exp_case_id/trial$exp_trial/manifest.json" "$exp_map_id" "$exp_map_profile" \
-      "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" >> "$OUTCOMES"
+      "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" \
+      "$exp_pset_id" "$exp_base_quantum" "$exp_max_backlog_override" "$exp_max_reservation" \
+      "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id" >> "$OUTCOMES"
     return 0
   fi
   mkdir -p "$outdir" || return 1
@@ -863,19 +1035,32 @@ run_one_experiment() {
   python3 - "$spec" "$exp_sid" "$exp_cand" "$exp_case_id" "$input_path" "$exp_nodes" "$exp_cmode" "$exp_cbps" \
     "$exp_snode" "$exp_smode" "$exp_sbps" "$exp_sstall" "$exp_mbacklog" "$SEED" "$CONSUMER_KERNEL" \
     "$STRICT_AFFINITY" "$STRICT_MBIND" "$exp_map_phys" "$exp_map_id" "$exp_map_profile" "$exp_map_variant" \
-    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" <<'PY'
+    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" \
+    "$exp_pset_id" "$exp_base_quantum" "$exp_max_backlog_override" "$exp_max_reservation" \
+    "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id" <<'PY'
 import json, sys
-(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed,consumer_kernel,strict_affinity,strict_mbind,map_phys,map_id,map_profile,map_variant,trial_class,placement_sampling,linked_perf)=sys.argv[1:25]
+(spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed,consumer_kernel,strict_affinity,strict_mbind,
+ map_phys,map_id,map_profile,map_variant,trial_class,placement_sampling,linked_perf,
+ pset_id,base_quantum,max_backlog_override,max_reservation,cache_precondition_policy,min_duration_seconds,workload_id)=sys.argv[1:32]
 d={
   "id": cid,
   "scenario": sid,
+  "workload_id": workload_id or sid,
   "mapping_id": map_id or None,
   "mapping_profile": map_profile or None,
   "mapping_variant": map_variant or None,
   "input": inp,
   "timeout": 600,
   "campaign_seed": seed,
+  # C3 attributable axes
+  "cache_precondition_policy": cache_precondition_policy or "best_effort_os_cache",
+  "parameter_set_id": pset_id or "pset__default",
 }
+if min_duration_seconds not in (None, "", "None"):
+    try:
+        d["min_duration_seconds"] = float(min_duration_seconds)
+    except Exception:
+        pass
 if cand in ("production_ref", "forkrun_control"):
   d.update({
     "mode": "udf",
@@ -893,11 +1078,28 @@ elif cand == "control":
     "reference_only": True,
   })
 else:
+  mb = int(mbacklog)
+  if max_backlog_override not in (None, "", "None"):
+      try:
+          mb = int(max_backlog_override)
+      except Exception:
+          mb = int(mbacklog)
+  mr = 0
+  if max_reservation not in (None, "", "None"):
+      try:
+          mr = int(max_reservation)
+      except Exception:
+          mr = 0
+  bq = 2*1024*1024
+  try:
+      bq = int(base_quantum)
+  except Exception:
+      bq = 2*1024*1024
   d.update({
     "ingest_candidate": cand,
     "dist_nodes": int(nodes),
-    "base_quantum": 2*1024*1024,
-    "max_backlog": int(mbacklog),
+    "base_quantum": bq,
+    "max_backlog": mb,
     "consumer_mode": cmode,
     "consumer_bps": int(cbps),
     "slow_node": int(snode),
@@ -910,7 +1112,16 @@ else:
     # C2/C2-correction: trial class and placement sampling come from the explicit plan
     "placement_sampling": placement_sampling or "off",
     "trial_class": trial_class or "performance",
+    # C3 attributable parameter set
+    "parameter_set": {
+        "parameter_set_id": pset_id or "pset__default",
+        "base_quantum": bq,
+        "max_backlog": mb,
+        "max_reservation": mr,
+    },
   })
+  if mr:
+      d["max_reservation"] = mr
   if linked_perf:
     d["linked_performance_trial"] = linked_perf
   # Same resolved mapping passed to every trial in that case
@@ -927,54 +1138,97 @@ PY
     FAILURES+=("$exp_case_id trial$exp_trial ($exp_trial_class)")
     echo "TRIAL FAILED: $exp_case_id trial$exp_trial class=$exp_trial_class" >&2
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$exp_case_id" "$exp_sid" "$exp_cand" "$exp_trial" "$status" \
     "cases/$exp_case_id/trial$exp_trial/manifest.json" "$exp_map_id" "$exp_map_profile" \
-    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" >> "$OUTCOMES"
+    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" \
+    "$exp_pset_id" "$exp_base_quantum" "$exp_max_backlog_override" "$exp_max_reservation" \
+    "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id" >> "$OUTCOMES"
   return 0
 }
 
-# Execute exactly the paired/explicit runs represented by the plan (C2 correction).
-while IFS=$'\t' read -r sid scen_def t cand map_id map_profile map_variant map_phys exp_case_id exp_trial_class exp_placement_sampling exp_linked_perf; do
+# Execute exactly the paired/explicit runs represented by the plan (C2 correction + C3 axes).
+# Unit-separator delimiter preserves empty fields (tab IFS collapses them).
+while IFS=$'\x1f' read -r sid scen_def t cand map_id map_profile map_variant map_phys exp_case_id exp_trial_class exp_placement_sampling exp_linked_perf \
+  exp_pset_id exp_base_quantum exp_max_backlog_override exp_max_reservation exp_cache_precondition_policy exp_min_duration_seconds exp_workload_id; do
   [ -z "$sid" ] && continue
   IFS='|' read -r _sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra <<< "$scen_def"
-  echo "RUN scenario=$sid mapping=$map_id trial=$t candidate=$cand case=$exp_case_id class=$exp_trial_class placement_sampling=$exp_placement_sampling" >&2
-  printf '{"scenario":"%s","mapping_id":"%s","mapping_profile":"%s","trial":%s,"candidate":"%s","case_id":"%s","trial_class":"%s","placement_sampling":"%s","linked_performance_trial":%s}\n' \
+  # C3 defaults for backward-compatible plans
+  exp_pset_id=${exp_pset_id:-pset__default}
+  exp_base_quantum=${exp_base_quantum:-2097152}
+  exp_max_reservation=${exp_max_reservation:-0}
+  exp_cache_precondition_policy=${exp_cache_precondition_policy:-best_effort_os_cache}
+  exp_workload_id=${exp_workload_id:-$sid}
+  echo "RUN scenario=$sid mapping=$map_id trial=$t candidate=$cand case=$exp_case_id class=$exp_trial_class placement_sampling=$exp_placement_sampling pset=$exp_pset_id cache=$exp_cache_precondition_policy" >&2
+  printf '{"scenario":"%s","mapping_id":"%s","mapping_profile":"%s","trial":%s,"candidate":"%s","case_id":"%s","trial_class":"%s","placement_sampling":"%s","linked_performance_trial":%s,"parameter_set_id":"%s","cache_precondition_policy":"%s","workload_id":"%s"}\n' \
     "$sid" "$map_id" "$map_profile" "$t" "$cand" "$exp_case_id" "$exp_trial_class" "$exp_placement_sampling" \
-    "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1] if sys.argv[1] else None))' "$exp_linked_perf")" >> "$ORDER_LOG"
+    "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1] if sys.argv[1] else None))' "$exp_linked_perf")" \
+    "$exp_pset_id" "$exp_cache_precondition_policy" "$exp_workload_id" >> "$ORDER_LOG"
   run_one_experiment "$exp_case_id" "$sid" "$cand" "$t" \
     "$map_id" "$map_profile" "$map_variant" "$map_phys" \
     "$inp" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" \
-    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf"
+    "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" \
+    "$exp_pset_id" "$exp_base_quantum" "$exp_max_backlog_override" "$exp_max_reservation" \
+    "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id"
 done < "$EXPERIMENTS_FILE"
 
 python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" \
   || echo "WARN: env-after capture failed" >&2
 
-python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" "$MAPPING_PROFILES" "$PLACEMENT_EXPERIMENTS" <<'PY'
+python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" "$MAPPING_PROFILES" "$PLACEMENT_EXPERIMENTS" "$CACHE_PRECONDITION_POLICY" "$MIN_DURATION_SECONDS" <<'PY'
 import json, os, sys, time
-out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc,consumer_kernel,strict_affinity,strict_mbind,phys_nodes,mapping_profiles,placement_experiments=sys.argv[1:15]
+(out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc,consumer_kernel,strict_affinity,strict_mbind,phys_nodes,mapping_profiles,placement_experiments,
+ cache_precondition_policy,min_duration_seconds)=sys.argv[1:17]
+def _opt_int(x):
+    x = '' if x is None else str(x).strip()
+    if x == '' or x == 'None': return None
+    try: return int(float(x))
+    except Exception: return None
+def _opt_float(x):
+    x = '' if x is None else str(x).strip()
+    if x == '' or x == 'None': return None
+    try: return float(x)
+    except Exception: return None
+
 rows=[]
 with open(outcomes) as f:
     for line in f:
         line=line.rstrip('\n')
         if not line: continue
         parts = line.split('\t')
-        # C2 format: case,scenario,candidate,trial,status,manifest,mapping_id,mapping_profile,trial_class,placement_sampling,linked_perf
-        if len(parts) >= 11:
+        # C3 format (18): case,scenario,candidate,trial,status,manifest,mapping_id,mapping_profile,trial_class,placement_sampling,linked_perf,
+        #                 parameter_set_id,base_quantum,max_backlog_override,max_reservation,cache_precondition_policy,min_duration_seconds,workload_id
+        if len(parts) >= 18:
+            (case,scen,cand,t,status,man,map_id,map_prof,trial_class,placement_sampling,linked_perf,
+             pset_id,base_quantum,max_backlog_override,max_reservation,cache_pp,min_dur,workload_id) = parts[:18]
+        elif len(parts) >= 11:
             case,scen,cand,t,status,man,map_id,map_prof,trial_class,placement_sampling,linked_perf = parts[:11]
+            pset_id,base_quantum,max_backlog_override,max_reservation,cache_pp,min_dur,workload_id = 'pset__default','2097152','','0',cache_precondition_policy or 'best_effort_os_cache',min_duration_seconds or '',scen
         elif len(parts) >= 8:
             case,scen,cand,t,status,man,map_id,map_prof = parts[:8]
             trial_class,placement_sampling,linked_perf = 'performance','off',''
+            pset_id,base_quantum,max_backlog_override,max_reservation,cache_pp,min_dur,workload_id = 'pset__default','2097152','','0',cache_precondition_policy or 'best_effort_os_cache',min_duration_seconds or '',scen
         else:
             case,scen,cand,t,status,man = parts[:6]
             map_id = None; map_prof = None
             trial_class,placement_sampling,linked_perf = 'performance','off',''
+            pset_id,base_quantum,max_backlog_override,max_reservation,cache_pp,min_dur,workload_id = 'pset__default','2097152','','0',cache_precondition_policy or 'best_effort_os_cache',min_duration_seconds or '',scen
+        bq = _opt_int(base_quantum) or 2097152
+        mb = _opt_int(max_backlog_override)
+        mr = _opt_int(max_reservation) or 0
+        md = _opt_float(min_dur)
         rows.append({"case":case,"scenario":scen,"candidate":cand,"trial":int(t),"status":status,
                      "manifest":man,"mapping_id": (map_id or None), "mapping_profile": (map_prof or None),
                      "trial_class": (trial_class or 'performance'),
                      "placement_sampling": (placement_sampling or 'off'),
-                     "linked_performance_trial": (linked_perf or None)})
+                     "linked_performance_trial": (linked_perf or None),
+                     # C3 attributable axes
+                     "parameter_set_id": (pset_id or 'pset__default'),
+                     "parameter_set": {"parameter_set_id": (pset_id or 'pset__default'),
+                                       "base_quantum": bq, "max_backlog": mb, "max_reservation": mr},
+                     "cache_precondition_policy": (cache_pp or cache_precondition_policy or 'best_effort_os_cache'),
+                     "min_duration_seconds": md,
+                     "workload_id": (workload_id or scen)})
 order=[]
 op=os.path.join(out,'execution-order.jsonl')
 if os.path.isfile(op):
@@ -1001,7 +1255,11 @@ doc={"schema":"dist-campaign/5","campaign_id":cid,"source_sha":sha,"trials":int(
         "phys_nodes": phys_nodes or None,
         "mapping_profiles": mapping_profiles,
         "placement_experiments": placement_experiments,
-        "notes": "strict flags/kernel applied identically per comparable dist-engine candidate spec; strict mode must not silently fall back. C2: performance trials run with placement_sampling=off (isolated); paired placement-validation experiments are distinct and linked."
+        "cache_precondition_policy": cache_precondition_policy,
+        "min_duration_seconds": (_opt_float(min_duration_seconds)),
+        "sweep_axes": (preval or {}).get('sweep_axes') or (plan or {}).get('sweep_axes') or [],
+        "parameter_sets": (preval or {}).get('parameter_sets') or (plan or {}).get('parameter_sets') or [],
+        "notes": "strict flags/kernel applied identically per comparable dist-engine candidate spec; strict mode must not silently fall back. C2: performance trials run with placement_sampling=off (isolated); paired placement-validation experiments are distinct and linked. C3: parameter sweeps, duration qualification, workload expansion, and cache-preconditioning policy are recorded as separate attributable axes."
      },
      "scenario_profile": (preval or {}).get('scenario_profile'),
      "scenario_profile_requested": (preval or {}).get('scenario_profile_requested'),
@@ -1018,6 +1276,10 @@ doc={"schema":"dist-campaign/5","campaign_id":cid,"source_sha":sha,"trials":int(
      "mapping_plan_cases": (preval or {}).get('mapping_plan_cases'),
      "unsupported_mappings": (preval or {}).get('unsupported_mappings'),
      "scenarios_filter_explicit": (preval or {}).get('scenarios_filter_explicit'),
+     "cache_precondition_policy": cache_precondition_policy,
+     "min_duration_seconds": (_opt_float(min_duration_seconds)),
+     "sweep_axes": (preval or {}).get('sweep_axes') or (plan or {}).get('sweep_axes') or [],
+     "parameter_sets": (preval or {}).get('parameter_sets') or (plan or {}).get('parameter_sets') or [],
      "outcomes":rows,"all_ok":all_ok,"finished_epoch":time.time()}
 with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,indent=2,sort_keys=True)
 PY
