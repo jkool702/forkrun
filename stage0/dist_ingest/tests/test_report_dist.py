@@ -529,6 +529,62 @@ class TestReportDistRepeatedTrials(unittest.TestCase):
         self.assertIn("valid=false", text)
         self.assertIn("pass 2 performance validity=unknown", text)
 
+    def _not_launched_manifest(self):
+        """Manifest where preconditioning exhausted the budget: pass 2 was
+        never launched. Pass 2 is preserved as evidence but must not count
+        as a repetition or as a failed execution."""
+        m = self._dist_manifest(complete=True, wall=1.0, consumed=1000,
+                                validity=self.V_TRUE)
+        p1 = {"pass": 1, "is_initial_pass": True, "status": "success",
+              "qualified": True, "duration_contributes": True,
+              "engine_wall_seconds": 1.0, "total_consumed": 1000,
+              "reservations_total": 10, "performance_validity": True,
+              "cache_compatible": True}
+        p2 = {"pass": 2, "is_initial_pass": False,
+              "status": "not_launched_budget_exhausted",
+              "qualified": False, "duration_contributes": False,
+              "failure_reason": "repetition budget exhausted during cache preconditioning",
+              "engine_wall_seconds": None, "total_consumed": None,
+              "reservations_total": None, "performance_validity": None,
+              "cache_compatible": True}
+        agg = {
+            "contributing_passes": [1],
+            "excluded_passes": [],
+            "pass_count": 1,
+            "aggregate_engine_wall_seconds": 1.0,
+            "aggregate_consumed_bytes": 1000,
+            "aggregate_scanned_bytes": 1000,
+            "aggregate_scan_equals_consumed": True,
+            "aggregate_reservations": 10,
+            "aggregate_throughput_bps": 1000.0,
+            "aggregate_valid": True,
+            "aggregate_invalid_reasons": [],
+        }
+        m["duration_qualification"] = {
+            "target_seconds": 999.0, "repetition_used": False,
+            "pass_count": 2,
+            "accumulated_effective_wall_seconds": 1.0,
+            "meets_target": False, "stop_reason": "repetition_budget_exhausted",
+            "duration_aggregate": agg,
+            "passes": [p1, p2],
+        }
+        m["duration_aggregate"] = agg
+        return m
+
+    def test_repeated_trial_budget_exhaustion_not_launched_pass_not_counted(self):
+        text = self._run_one_trial(self._not_launched_manifest())
+        # one-pass headline semantics: pass-1 metrics, no aggregate switch
+        row = [l for l in text.splitlines() if l.startswith("| sc | legacy | pset__default | fixed_faa |")][0]
+        self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 1.000 |", row)
+        # no duration-repeated note: repetition_used is False (no repeat launched)
+        self.assertNotIn("duration-repeated", text)
+        # the unlaunched attempt is classified separately, not as a failure
+        self.assertIn("duration-not-launched(trials=1)", text)
+        self.assertNotIn("duration-failed-passes", text)
+        self.assertIn("duration-stop=repetition_budget_exhausted", text)
+        # the not-launched pass is still preserved as evidence
+        self.assertIn("duration_pass: pass=2 initial=false status=not_launched_budget_exhausted", text)
+
     def test_repeated_trial_failed_passes_identified(self):
         text = self._run_one_trial(self._repeated_manifest(failed_pass2=True,
                                                            stop="pass_execution_failure"))

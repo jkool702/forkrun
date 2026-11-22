@@ -549,7 +549,9 @@ def _build_duration_pass_record(pass_n, is_initial, timed_out, process_rc,
         "timed_out": bool(timed_out),
         "termination_reason": ("timeout" if timed_out
                                else ("completed" if process_rc == 0
-                                     else "nonzero_exit")),
+                                     else ("not_launched"
+                                           if process_rc is None
+                                           else "nonzero_exit"))),
         "dist_result": dist_result if isinstance(dist_result, dict) else None,
         "dist_result_rc": drc,
         "dist_result_error": dist_result_error,
@@ -1256,7 +1258,15 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
                                        run.get("stdout", ""),
                                        run.get("stderr", ""),
                                        rec.get("dist_result"))
-    dq_repetition_used = len(dq_passes) > 1
+    # C3-corrections-4 (WO §2 reviewer): repetition_used means at least one
+    # repeated measurement process was actually launched, not merely that a
+    # pass record exists. A not-launched (budget-exhausted during
+    # preconditioning) record is preserved as evidence but not counted as a
+    # repetition.
+    launched_repeats = [p for p in dq_passes
+                        if p["pass"] >= 2
+                        and p["status"] != "not_launched_budget_exhausted"]
+    dq_repetition_used = bool(launched_repeats)
     dq_repetition_capped = bool(
         dq_repetition_used and dq_target is not None
         and accumulated < float(dq_target))

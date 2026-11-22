@@ -207,10 +207,18 @@ def main():
                                             else None)
         rec["accumulated_duration_s"] = (dq.get("accumulated_effective_wall_seconds")
                                          if isinstance(dq, dict) else None)
+        # C3-corrections-4 (WO §2 reviewer): failed passes are recorded
+        # separately from not-launched attempts (budget exhausted during
+        # cache preconditioning — evidence preserved, but no process ran).
         rec["duration_failed_passes"] = ([p.get("pass") for p in (dq.get("passes") or [])
                                           if isinstance(p, dict)
-                                          and p.get("duration_contributes") is False]
+                                          and p.get("duration_contributes") is False
+                                          and p.get("status") != "not_launched_budget_exhausted"]
                                          if isinstance(dq, dict) else [])
+        rec["duration_not_launched_passes"] = ([p.get("pass") for p in (dq.get("passes") or [])
+                                                if isinstance(p, dict)
+                                                and p.get("status") == "not_launched_budget_exhausted"]
+                                               if isinstance(dq, dict) else [])
         rec["duration_excluded_passes"] = agg.get("excluded_passes") or []
         rec["aggregate_invalid_reasons"] = agg.get("aggregate_invalid_reasons") or []
         # C3-corrections-2 (P1 finding 1): repeated trials must not mix
@@ -423,6 +431,14 @@ def main():
                     if failed_trials:
                         notes.append("duration-failed-passes(trials=%s)" %
                                      ",".join(str(r.get("trial")) for r in failed_trials))
+                    notlaunched_trials = [r for r in func_valids if r.get("duration_not_launched_passes")]
+                    if notlaunched_trials:
+                        notes.append("duration-not-launched(trials=%s)" %
+                                     ",".join(str(r.get("trial")) for r in notlaunched_trials))
+                    stop_reasons = sorted({r.get("duration_stop_reason")
+                                           for r in func_valids if r.get("duration_stop_reason")})
+                    if stop_reasons:
+                        notes.append("duration-stop=%s" % ",".join(stop_reasons))
                     agg_invalid = [r for r in func_valids if r.get("aggregate_invalid_reasons")]
                     if agg_invalid:
                         notes.append("duration-aggregate-invalid(trials=%d)" % len(agg_invalid))

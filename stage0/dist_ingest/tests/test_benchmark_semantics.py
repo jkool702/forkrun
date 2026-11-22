@@ -2982,8 +2982,17 @@ class TestC3DurationRepetitionCorrections(unittest.TestCase):
         self.assertEqual(runner_calls, [])
         self.assertEqual(len(passes), 2)
         p2 = passes[1]
+        # C3-corrections-4: the unlaunched pass is preserved as evidence but
+        # is NOT a repetition and is NOT a failed execution/timeout.
         self.assertEqual(p2["status"], "not_launched_budget_exhausted")
+        self.assertEqual(p2["termination_reason"], "not_launched")
         self.assertFalse(p2["duration_contributes"])
+        self.assertFalse(p2["process_success"])
+        self.assertIsNone(p2["process_returncode"])
+        self.assertFalse(accumulated > first["effective_wall_seconds"] + 1e-9)
+        # repetition_used means a repeat measurement actually launched
+        self.assertFalse(passes[0]["pass"] >= 2 and passes[0]["status"] != "not_launched_budget_exhausted")
+        self.assertFalse(any(p["pass"] >= 2 and p["status"] != "not_launched_budget_exhausted" for p in passes))
         self.assertEqual(p2["cache_precondition"]["policy"], "best_effort_os_cache")
         self.assertIn("budget", p2["failure_reason"])
 
