@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -2440,6 +2441,529 @@ class TestC3AttributableAxes(unittest.TestCase):
             self.assertIn('pset__base_quantum=4194304', text)
         finally:
             shutil.rmtree(out, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# C3-corrections-2 (WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C3-CORRECTIONS-2,
+# P1/P2): duration qualification / repetition / pass accounting fixes.
+# Deterministic fakes + injected seams (no host throughput dependence).
+# ---------------------------------------------------------------------------
+
+
+def _mk_fake_dist_result(wall=0.1, consumed=1000, scanned=None, reservations=5,
+                         correct=True, perf_validity=True, rc=0):
+    """Fake DIST_RESULT with a controlled wall/bytes/reservation/validity mix."""
+    return {
+        "rc": rc,
+        "wall_seconds": wall,
+        "correct": correct,
+        "total_consumed": consumed,
+        "total_consumer_bytes_scanned": (scanned if scanned is not None else consumed),
+        "reservations_total": reservations,
+        "consumer_kernel": {
+            "name": "full_byte_scan",
+            "scan_bytes_evidence": {
+                "total_consumer_bytes_scanned": (scanned if scanned is not None else consumed),
+                "total_consumed": consumed,
+                "scan_equals_consumed": True,
+            },
+        },
+        "validity": {"functional_correctness": correct,
+                     "performance_measurement": perf_validity},
+    }
+
+
+def _dist_behavior(dr=None, rc=0, stdout=None, timed_out=False):
+    """Fake process behavior: DIST_RESULT on stderr + CHILD_DONE on stdout."""
+    dr = dr if dr is not None else _mk_fake_dist_result()
+    if stdout is None:
+        stdout = "CHILD_DONE " + json.dumps(
+            {"elapsed_s": dr.get("wall_seconds") or 0.0,
+             "completed_bytes": dr.get("total_consumed") or 0})
+    return {"stdout": stdout,
+            "stderr": "DIST_RESULT " + json.dumps(dr, sort_keys=True),
+            "rc": rc, "timed_out": timed_out,
+            "wall_s": dr.get("wall_seconds") or 0.0}
+
+
+def _fake_popen_factory(behaviors):
+    """Fake subprocess.Popen feeding canned (stdout, stderr, rc, timed_out)."""
+    state = {"i": 0}
+
+    class FakePopen:
+        def __init__(self, cmd, **kw):
+            b = behaviors[min(state["i"], len(behaviors) - 1)]
+            state["i"] += 1
+            self._b = b
+            self.pid = 43000 + state["i"]
+            self.returncode = None
+            self._stdout = b.get("stdout", "")
+            self._stderr = b.get("stderr", "")
+
+        def communicate(self, timeout=None):
+            if self._b.get("timed_out"):
+                self.returncode = -9
+                raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+            self.returncode = self._b.get("rc", 0)
+            return self._stdout, self._stderr
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = self._b.get("rc", 0)
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    return FakePopen
+
+
+def _fake_repeat_run(dr=None, rc=0, timed_out=False, wall=0.0):
+    """Fake repeated-pass execution result in the _run_repeat_pass shape."""
+    return {"rc": rc, "stdout": "",
+            "stderr": ("DIST_RESULT " + json.dumps(dr, sort_keys=True)) if dr else "",
+            "wall_s": wall, "timed_out": timed_out,
+            "cleanup": {"label": "fake-repeat", "pgid": 1,
+                        "terminate_signals": [], "reaped": True,
+                        "group_gone": True, "members_after": []}}
+
+
+class TestC3DurationRepetitionCorrections(unittest.TestCase):
+    """C3-corrections-2: qualification/pass-accounting fixes (WO §2-6, 11)."""
+
+    # -- helper truth tables (WO §2/§6.7/§6.10) ----------------------------
+    def test_dist_pass_qualified_six_conditions(self):
+        import stage0.run_case as rc
+        dr = _mk_fake_dist_result(wall=1.0, correct=True)
+        ok, reasons = rc._dist_pass_qualified(False, 0, dr)
+        self.assertTrue(ok, reasons)
+        self.assertEqual(reasons, [])
+        # (1)/(2) timed out / process rc != 0
+        ok, reasons = rc._dist_pass_qualified(True, -9, dr)
+        self.assertFalse(ok)
+        self.assertTrue(any("timed out" in r for r in reasons))
+        ok, reasons = rc._dist_pass_qualified(False, 3, dr)
+        self.assertFalse(ok)
+        self.assertTrue(any("returncode" in r for r in reasons))
+        # (3) no parseable DIST_RESULT
+        ok, reasons = rc._dist_pass_qualified(False, 0, None)
+        self.assertFalse(ok)
+        self.assertTrue(any("DIST_RESULT" in r for r in reasons))
+        # (4) dist rc != 0
+        ok, reasons = rc._dist_pass_qualified(False, 0, dict(dr, rc=1))
+        self.assertFalse(ok)
+        self.assertTrue(any("rc=1" in r for r in reasons))
+        # (5) correct not True
+        ok, reasons = rc._dist_pass_qualified(False, 0, dict(dr, correct=False))
+        self.assertFalse(ok)
+        self.assertTrue(any("correctness" in r for r in reasons))
+        # (6) wall_seconds missing/invalid
+        for bad in (None, -1.0, float("nan"), float("inf"), "abc"):
+            ok, reasons = rc._dist_pass_qualified(False, 0, dict(dr, wall_seconds=bad))
+            self.assertFalse(ok, bad)
+            self.assertTrue(any("wall_seconds" in r for r in reasons), bad)
+
+    def test_dist_pass_wall_seconds_validation(self):
+        import stage0.run_case as rc
+        self.assertEqual(rc._dist_pass_wall_seconds({"wall_seconds": 2.5}), 2.5)
+        self.assertEqual(rc._dist_pass_wall_seconds({"wall_seconds": 0}), 0.0)
+        self.assertIsNone(rc._dist_pass_wall_seconds({}))
+        self.assertIsNone(rc._dist_pass_wall_seconds({"wall_seconds": -3}))
+        self.assertIsNone(rc._dist_pass_wall_seconds({"wall_seconds": float("nan")}))
+        self.assertIsNone(rc._dist_pass_wall_seconds({"wall_seconds": float("inf")}))
+        self.assertIsNone(rc._dist_pass_wall_seconds(None))
+
+    def test_cache_precondition_compatible_rules(self):
+        import stage0.run_case as rc
+        self.assertTrue(rc._cache_precondition_compatible(
+            {"policy": "best_effort_os_cache"}))
+        self.assertTrue(rc._cache_precondition_compatible(
+            {"policy": "warm_repeat", "achieved": True}))
+        self.assertFalse(rc._cache_precondition_compatible(
+            {"policy": "warm_repeat", "achieved": False}))
+        self.assertTrue(rc._cache_precondition_compatible(
+            {"policy": "drop_caches_if_privileged",
+             "privileged_action_succeeded": True}))
+        self.assertFalse(rc._cache_precondition_compatible(
+            {"policy": "drop_caches_if_privileged",
+             "privileged_action_succeeded": False}))
+        self.assertFalse(rc._cache_precondition_compatible({"policy": "nonsense"}))
+        self.assertFalse(rc._cache_precondition_compatible(None))
+
+    # -- run_case-level, deterministic fakes (WO §6.1-6.5) -----------------
+    def _run_case_fake(self, td, spec, behaviors, repeat_runner=None,
+                       cache_fn=None):
+        import stage0.run_case as rc
+        inp = os.path.join(td, "in.bin")
+        with open(inp, "wb") as fh:
+            fh.write(b"x" * (4 * 1024 * 1024))
+        spec = dict(spec)
+        spec["input"] = inp
+        out = os.path.join(td, "out")
+        orig_popen = rc.subprocess.Popen
+        orig_rrp = rc._run_repeat_pass
+        orig_cp = rc._cache_precondition
+        rc.subprocess.Popen = _fake_popen_factory(behaviors)
+        if repeat_runner is not None:
+            rc._run_repeat_pass = repeat_runner
+        if cache_fn is not None:
+            rc._cache_precondition = cache_fn
+        try:
+            return rc.run_case(spec, out, campaign_id="c3dq", trial=1,
+                               source_sha="deadbeef"), out
+        finally:
+            rc.subprocess.Popen = orig_popen
+            rc._run_repeat_pass = orig_rrp
+            rc._cache_precondition = orig_cp
+
+    def _base_spec(self, **kw):
+        spec = {"id": "dq-corr", "ingest_candidate": "fixed_faa",
+                "dist_nodes": 2, "timeout": 120,
+                "cache_precondition_policy": "best_effort_os_cache"}
+        spec.update(kw)
+        return spec
+
+    def test_successful_repetition_accumulates_qualified_duration(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_ok_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.1, consumed=1000, reservations=5)
+            dr2 = _mk_fake_dist_result(wall=0.4, consumed=2000, reservations=7)
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5),
+                [_dist_behavior(dr1)],
+                repeat_runner=lambda pn, ts: _fake_repeat_run(dr2, wall=dr2["wall_seconds"]))
+            dq = m["duration_qualification"]
+            self.assertTrue(dq["meets_target"])
+            self.assertTrue(dq["qualified"])
+            self.assertEqual(dq["stop_reason"], "target_reached")
+            self.assertEqual(dq["pass_count"], 2)
+            self.assertTrue(dq["repetition_used"])
+            self.assertFalse(dq["repetition_capped"])
+            self.assertAlmostEqual(dq["accumulated_effective_wall_seconds"], 0.5, places=6)
+            passes = dq["passes"]
+            self.assertTrue(passes[0]["is_initial_pass"])
+            self.assertTrue(passes[0]["qualified"])
+            self.assertTrue(passes[0]["complete"])
+            self.assertTrue(passes[1]["duration_contributes"])
+            for pd in ("pass1", "pass2"):
+                d = os.path.join(out, "duration_passes", pd)
+                self.assertTrue(os.path.exists(os.path.join(d, "pass-summary.json")))
+                self.assertTrue(os.path.exists(os.path.join(d, "stdout.log")))
+                self.assertTrue(os.path.exists(os.path.join(d, "stderr.log")))
+                self.assertTrue(os.path.exists(os.path.join(d, "dist_result.json")))
+            s1 = json.load(open(os.path.join(out, "duration_passes", "pass1",
+                                             "pass-summary.json")))
+            self.assertTrue(s1["is_initial_pass"])
+            self.assertEqual(s1["pass"], 1)
+            self.assertIsNone(s1["failure_reason"])
+            # original first-pass result intact (provenance)
+            self.assertEqual(m["dist_result"]["wall_seconds"], 0.1)
+
+    def test_failed_repeat_pass_excluded_from_accumulation(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_failrep_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.1, consumed=1000, reservations=5)
+            dr2 = _mk_fake_dist_result(wall=99.0, consumed=0, correct=False, rc=1,
+                                       reservations=0, scanned=0)
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5),
+                [_dist_behavior(dr1)],
+                repeat_runner=lambda pn, ts: _fake_repeat_run(dr2, rc=1, wall=99.0))
+            dq = m["duration_qualification"]
+            self.assertFalse(dq["meets_target"])
+            self.assertEqual(dq["stop_reason"], "pass_execution_failure")
+            self.assertEqual(dq["pass_count"], 2)
+            p2 = dq["passes"][1]
+            self.assertFalse(p2["qualified"])
+            self.assertFalse(p2["duration_contributes"])
+            self.assertEqual(p2["status"], "failed_execution")
+            self.assertIsNotNone(p2["failure_reason"])
+            # the failed pass's 99s must NOT count toward qualification
+            self.assertAlmostEqual(dq["accumulated_effective_wall_seconds"], 0.1, places=6)
+            agg = m["duration_aggregate"]
+            self.assertEqual(agg["contributing_passes"], [1])
+
+    def test_timed_out_repeat_pass_excluded(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_to_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.1, consumed=1000, reservations=5)
+            run2 = {"rc": -9, "stdout": "", "stderr": "", "wall_s": 0.0,
+                    "timed_out": True,
+                    "cleanup": {"label": "fake-repeat", "pgid": 1,
+                                "terminate_signals": ["SIGTERM"], "reaped": True,
+                                "group_gone": True, "members_after": []}}
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5),
+                [_dist_behavior(dr1)], repeat_runner=lambda pn, ts: run2)
+            dq = m["duration_qualification"]
+            self.assertEqual(dq["stop_reason"], "pass_timeout")
+            p2 = dq["passes"][1]
+            self.assertTrue(p2["timed_out"])
+            self.assertFalse(p2["duration_contributes"])
+            self.assertEqual(p2["status"], "failed_timeout")
+            # timeout duration cannot make qualification true
+            self.assertAlmostEqual(dq["accumulated_effective_wall_seconds"], 0.1, places=6)
+            self.assertFalse(dq["meets_target"])
+            self.assertEqual(p2["cleanup"]["terminate_signals"], ["SIGTERM"])
+            self.assertTrue(p2["cleanup"]["group_gone"])
+
+    def test_failed_initial_pass_never_qualifies_via_wall_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_failinit_") as td:
+            dr_fail = _mk_fake_dist_result(wall=99.0, consumed=0, correct=False,
+                                           rc=1, reservations=0, scanned=0)
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5),
+                [_dist_behavior(dr_fail, rc=1)])
+            dq = m["duration_qualification"]
+            p1 = dq["passes"][0]
+            self.assertFalse(p1["qualified"])
+            self.assertFalse(p1["complete"])
+            self.assertIsNotNone(p1["failure_reason"])
+            self.assertAlmostEqual(dq["accumulated_effective_wall_seconds"], 0.0, places=6)
+            self.assertFalse(dq["meets_target"])
+            self.assertEqual(dq["stop_reason"], "pass_execution_failure")
+            self.assertEqual(dq["pass_count"], 1)
+            self.assertFalse(dq["repetition_used"])
+            self.assertIn("duration pass 1 not qualified",
+                          "; ".join(m["incomplete_reasons"]))
+            self.assertFalse(m["complete"])
+            self.assertFalse(m["duration_aggregate"]["aggregate_valid"])
+
+    def test_timed_out_initial_pass_stop_reason(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_toinit_") as td:
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5, timeout=0.2),
+                [_dist_behavior(timed_out=True)])
+            dq = m["duration_qualification"]
+            p1 = dq["passes"][0]
+            self.assertTrue(p1["timed_out"])
+            self.assertFalse(p1["qualified"])
+            self.assertEqual(dq["stop_reason"], "pass_timeout")
+            self.assertFalse(dq["meets_target"])
+
+    def test_pass_evidence_and_first_pass_identifiable(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_ev_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.1, consumed=1000, reservations=5)
+            dr2 = _mk_fake_dist_result(wall=0.4, consumed=2000, reservations=7)
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5),
+                [_dist_behavior(dr1)],
+                repeat_runner=lambda pn, ts: _fake_repeat_run(dr2, wall=0.4))
+            passes = m["duration_qualification"]["passes"]
+            for key in ("pass", "is_initial_pass", "status", "qualified",
+                        "duration_contributes", "process_returncode",
+                        "process_success", "timed_out", "termination_reason",
+                        "dist_result", "dist_result_rc", "functional_correctness",
+                        "performance_validity", "engine_wall_seconds",
+                        "total_consumed", "total_consumer_bytes_scanned",
+                        "scan_equals_consumed", "reservations_total",
+                        "cache_precondition", "cleanup", "effective_wall_seconds",
+                        "reasons", "failure_reason", "output_dir"):
+                self.assertIn(key, passes[0], key)
+            p1, p2 = passes
+            self.assertTrue(p1["is_initial_pass"])
+            self.assertEqual(p1["engine_wall_seconds"], 0.1)
+            self.assertEqual(p1["total_consumed"], 1000)
+            self.assertEqual(p1["reservations_total"], 5)
+            self.assertIsNone(p1["failure_reason"])
+            self.assertFalse(p2["is_initial_pass"])
+            self.assertEqual(p2["pass"], 2)
+            self.assertEqual(p2["engine_wall_seconds"], 0.4)
+            self.assertEqual(p2["total_consumed"], 2000)
+            with open(os.path.join(out, "duration_passes", "pass2",
+                                   "pass-summary.json")) as fh:
+                s2 = json.load(fh)
+            self.assertEqual(s2["pass"], 2)
+            self.assertFalse(s2["is_initial_pass"])
+            self.assertTrue(s2["duration_contributes"])
+            with open(os.path.join(out, "duration_passes", "pass2",
+                                   "dist_result.json")) as fh:
+                self.assertEqual(json.load(fh)["wall_seconds"], 0.4)
+
+    def test_aggregate_arithmetic_and_validity(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_agg_") as td:
+            dr1 = _mk_fake_dist_result(wall=2.0, consumed=1000, scanned=1000, reservations=5)
+            dr2 = _mk_fake_dist_result(wall=3.0, consumed=2000, scanned=2000, reservations=7)
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=3.5),
+                [_dist_behavior(dr1)],
+                repeat_runner=lambda pn, ts: _fake_repeat_run(dr2, wall=3.0))
+            dq = m["duration_qualification"]
+            agg = m["duration_aggregate"]
+            self.assertEqual(agg["contributing_passes"], [1, 2])
+            self.assertAlmostEqual(agg["aggregate_engine_wall_seconds"], 5.0, places=6)
+            self.assertEqual(agg["aggregate_consumed_bytes"], 3000)
+            self.assertEqual(agg["aggregate_scanned_bytes"], 3000)
+            self.assertTrue(agg["aggregate_scan_equals_consumed"])
+            self.assertEqual(agg["aggregate_reservations"], 12)
+            self.assertAlmostEqual(agg["aggregate_throughput_bps"], 3000 / 5.0, places=6)
+            self.assertTrue(agg["aggregate_valid"])
+            self.assertEqual(agg["aggregate_invalid_reasons"], [])
+            # validity dimensions stay separate fields
+            p1, p2 = dq["passes"]
+            self.assertIs(p1["process_success"], True)
+            self.assertIs(p1["functional_correctness"], True)
+            self.assertIs(p1["performance_validity"], True)
+
+    def test_aggregate_validity_rejects_unknown_perf_validity(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_aggv_") as td:
+            dr1 = _mk_fake_dist_result(wall=2.0, consumed=1000, reservations=5)
+            dr2 = _mk_fake_dist_result(wall=3.0, consumed=2000, reservations=7,
+                                       perf_validity=None)
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=3.5),
+                [_dist_behavior(dr1)],
+                repeat_runner=lambda pn, ts: _fake_repeat_run(dr2, wall=3.0))
+            dq = m["duration_qualification"]
+            self.assertTrue(dq["meets_target"])  # duration qualification met
+            agg = m["duration_aggregate"]
+            # unknown performance validity is not silently promoted to valid
+            self.assertFalse(agg["aggregate_valid"])
+            self.assertTrue(any("pass 2" in r and "performance validity" in r
+                                for r in agg["aggregate_invalid_reasons"]))
+            # contributing passes are the qualified+compatible ones; pass 2
+            # contributes duration but the aggregate is invalid on it
+            self.assertEqual(agg["contributing_passes"], [1, 2])
+
+    def test_cache_precondition_recorded_per_pass(self):
+        import stage0.run_case as rc
+        with tempfile.TemporaryDirectory(prefix="c3dq_cp_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.1, consumed=1000)
+            dr2 = _mk_fake_dist_result(wall=0.4, consumed=2000)
+            spy_calls = []
+            orig = rc._cache_precondition
+
+            def spy(spec_, resolved_):
+                rec = orig(spec_, resolved_)
+                spy_calls.append(rec)
+                return rec
+
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5,
+                                    cache_precondition_policy="warm_repeat"),
+                [_dist_behavior(dr1)],
+                repeat_runner=lambda pn, ts: _fake_repeat_run(dr2, wall=0.4),
+                cache_fn=spy)
+            # applied once before pass 1 and once before each repeated pass
+            self.assertEqual(len(spy_calls), 2)
+            for p in m["duration_qualification"]["passes"]:
+                self.assertEqual(p["cache_precondition"]["requested_policy"],
+                                 "warm_repeat")
+                self.assertTrue(p["cache_precondition"]["achieved"])
+            # campaign-level summary preserved (previous C3 contract)
+            self.assertEqual(m["cache_precondition"]["requested_policy"], "warm_repeat")
+
+    def test_cache_incompatibility_stops_and_invalidates_aggregate(self):
+        import stage0.run_case as rc
+        with tempfile.TemporaryDirectory(prefix="c3dq_cpinv_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.1, consumed=1000, reservations=5)
+            dr2 = _mk_fake_dist_result(wall=0.4, consumed=2000, reservations=7)
+            orig = rc._cache_precondition
+            calls = []
+
+            def fake_cp(spec_, resolved_):
+                rec = orig(spec_, resolved_)
+                ok = (len(calls) == 0)  # pass 1: achieved; pass 2: not
+                rec["achieved"] = ok
+                rec["privileged_action_attempted"] = True
+                rec["privileged_action_succeeded"] = ok
+                calls.append(rec)
+                return rec
+
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5,
+                                    cache_precondition_policy="drop_caches_if_privileged"),
+                [_dist_behavior(dr1)],
+                repeat_runner=lambda pn, ts: _fake_repeat_run(dr2, wall=0.4),
+                cache_fn=fake_cp)
+            dq = m["duration_qualification"]
+            p2 = dq["passes"][1]
+            self.assertTrue(p2["duration_contributes"])  # qualified per P1
+            self.assertFalse(p2["cache_compatible"])     # composite-invalid per P2
+            self.assertEqual(dq["stop_reason"],
+                             "cache_precondition_incompatibility")
+            agg = m["duration_aggregate"]
+            self.assertEqual(agg["contributing_passes"], [1])
+            self.assertEqual(agg["excluded_passes"],
+                             [{"pass": 2, "reason": "cache_precondition_incompatible"}])
+            self.assertFalse(agg["aggregate_valid"])
+            self.assertTrue(any("cache" in r for r in agg["aggregate_invalid_reasons"]))
+
+    # -- loop-level: bounds, budget, cleanup (WO §5, §6.11, §6.12) ----------
+    def test_repetition_budget_enforced_and_per_pass_timeout_bounded(self):
+        import stage0.run_case as rc
+        dr0 = _mk_fake_dist_result(wall=0.01, consumed=100, reservations=1)
+        first = rc._build_duration_pass_record(
+            1, True, False, 0, dr0, None, 0.01,
+            {"policy": "best_effort_os_cache"})
+        recorded = []
+
+        def fake_runner(pass_n, timeout_s):
+            recorded.append(timeout_s)
+            time.sleep(0.005)
+            dr = _mk_fake_dist_result(wall=0.01, consumed=100, reservations=1)
+            return {"rc": 0, "stdout": "",
+                    "stderr": "DIST_RESULT " + json.dumps(dr, sort_keys=True),
+                    "wall_s": 0.01, "timed_out": False,
+                    "cleanup": {"pgid": 1, "terminate_signals": [],
+                                "reaped": True, "group_gone": True,
+                                "members_after": []}}
+
+        budget = 0.04
+        passes, accumulated, stop, runs = rc._run_duration_repetition(
+            first, ["fake-cmd"], 999.0, budget, fake_runner,
+            lambda pn: {"policy": "best_effort_os_cache"},
+            case_timeout_s=120.0, out_dir=None)
+        # every per-pass timeout is bounded by the remaining repetition budget
+        for t in recorded:
+            self.assertLessEqual(t, budget + 0.001, recorded)
+        self.assertEqual(stop, "repetition_budget_exhausted")
+        self.assertGreaterEqual(len(passes), 2)
+        self.assertTrue(all(p["duration_contributes"] for p in passes[1:]))
+
+    def test_run_repeat_pass_timeout_kills_group_and_reaps(self):
+        # A descendant in the pass process group: SIGTERM to the group kills
+        # it; nothing may remain in the group and the direct child is reaped.
+        import stage0.run_case as rc
+        script = ("import subprocess,time; subprocess.Popen(['sleep','30']); "
+                  "time.sleep(30)")
+        orig_grace = rc.KILL_GRACE_S
+        rc.KILL_GRACE_S = 1.0
+        try:
+            t0 = time.monotonic()
+            run = rc._run_repeat_pass([sys.executable, "-c", script], 0.2,
+                                      label="test-cleanup")
+            dt = time.monotonic() - t0
+        finally:
+            rc.KILL_GRACE_S = orig_grace
+        self.assertTrue(run["timed_out"])
+        cleanup = run["cleanup"]
+        self.assertIn("SIGTERM", cleanup["terminate_signals"])
+        self.assertTrue(cleanup["reaped"])
+        self.assertTrue(cleanup["group_gone"], cleanup)
+        self.assertEqual(cleanup["members_after"], [])
+        self.assertLess(dt, 20.0)
+        time.sleep(0.2)
+        self.assertEqual(rc._group_members(cleanup["pgid"]), [])
+
+    def test_run_repeat_pass_timeout_sigkill_escalation(self):
+        # A leader ignoring SIGTERM forces the SIGKILL escalation.
+        import stage0.run_case as rc
+        script = ("import signal,time; signal.signal(signal.SIGTERM, "
+                  "signal.SIG_IGN); time.sleep(30)")
+        orig_grace = rc.KILL_GRACE_S
+        rc.KILL_GRACE_S = 1.0
+        try:
+            run = rc._run_repeat_pass([sys.executable, "-c", script], 0.2,
+                                      label="test-sigkill")
+        finally:
+            rc.KILL_GRACE_S = orig_grace
+        self.assertTrue(run["timed_out"])
+        cleanup = run["cleanup"]
+        self.assertIn("SIGKILL", cleanup["terminate_signals"])
+        self.assertTrue(cleanup["reaped"])
+        self.assertTrue(cleanup["group_gone"], cleanup)
+        self.assertEqual(cleanup["members_after"], [])
 
 
 if __name__ == '__main__':

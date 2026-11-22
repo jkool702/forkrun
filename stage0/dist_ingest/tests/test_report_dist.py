@@ -47,47 +47,50 @@ def run_report(camp_dir):
     return p.returncode, text, p.stderr
 
 
+def _dist_manifest_base(complete=True, wall=1.25, harness_wall=1.80, correct=True, validity=None, consumed=1000,
+                        kernel="full_byte_scan", scan_bytes=None, scan_ok=None):
+    if scan_bytes is None:
+        scan_bytes = consumed if kernel == "full_byte_scan" else 0
+    if scan_ok is None:
+        if kernel == "full_byte_scan":
+            scan_ok = (scan_bytes == consumed)
+        else:
+            scan_ok = (scan_bytes == 0)
+    dr = {
+        "correct": correct,
+        "wall_seconds": wall,
+        "total_consumed": consumed,
+        "reservations_total": 10,
+        "ingest_cpu_ns": 123456,
+        "consumer_kernel": {"name": kernel, "scan_bytes_evidence": {"total_consumer_bytes_scanned": scan_bytes, "scan_equals_consumed": scan_ok}},
+        "nodes": [{"node": 0, "consumer_bytes_scanned": scan_bytes, "bytes_consumed": consumed, "max_effective_backlog": 1,
+                   "affinity": {"ingestor": {"required": True, "requested": False, "applicable": True, "set_applied": False, "query_succeeded": False, "matched": False},
+                                "consumer": {"required": True, "requested": False, "applicable": True, "set_applied": False, "query_succeeded": False, "matched": False}},
+                   "memory_policy": {"requested_count": 0, "success_count": 0, "failure_count": 0, "all_requested_succeeded": False, "error": 0},
+                   "placement": {"local_pages_on_target_node": 0, "remote_pages_other_node": 0, "unknown_pages": 0, "sampled_pages": 0}}],
+        "validity": validity or {
+            "functional_correctness": correct,
+            "performance_measurement": None if correct else False,
+            "affinity": None,
+            "memory_policy_application": None,
+            "placement_observed": None,
+            "numa_placement": None,
+        },
+        "rc": 0 if correct else 1,
+        "overlap_detected": False, "lost_detected": False, "duplicate_detected": False,
+    }
+    return {
+        "complete": complete,
+        "incomplete_reasons": [] if complete else ["missing child_report"],
+        "wall_s": harness_wall,
+        "map_s": None,
+        "child_report": {"completed_bytes": consumed},
+        "dist_result": dr,
+    }
+
+
 class TestReportDist(unittest.TestCase):
-    def _dist_manifest(self, complete=True, wall=1.25, harness_wall=1.80, correct=True, validity=None, consumed=1000,
-                       kernel="full_byte_scan", scan_bytes=None, scan_ok=None):
-        if scan_bytes is None:
-            scan_bytes = consumed if kernel == "full_byte_scan" else 0
-        if scan_ok is None:
-            if kernel == "full_byte_scan":
-                scan_ok = (scan_bytes == consumed)
-            else:
-                scan_ok = (scan_bytes == 0)
-        dr = {
-            "correct": correct,
-            "wall_seconds": wall,
-            "total_consumed": consumed,
-            "reservations_total": 10,
-            "ingest_cpu_ns": 123456,
-            "consumer_kernel": {"name": kernel, "scan_bytes_evidence": {"total_consumer_bytes_scanned": scan_bytes, "scan_equals_consumed": scan_ok}},
-            "nodes": [{"node": 0, "consumer_bytes_scanned": scan_bytes, "bytes_consumed": consumed, "max_effective_backlog": 1,
-                       "affinity": {"ingestor": {"required": True, "requested": False, "applicable": True, "set_applied": False, "query_succeeded": False, "matched": False},
-                                    "consumer": {"required": True, "requested": False, "applicable": True, "set_applied": False, "query_succeeded": False, "matched": False}},
-                       "memory_policy": {"requested_count": 0, "success_count": 0, "failure_count": 0, "all_requested_succeeded": False, "error": 0},
-                       "placement": {"local_pages_on_target_node": 0, "remote_pages_other_node": 0, "unknown_pages": 0, "sampled_pages": 0}}],
-            "validity": validity or {
-                "functional_correctness": correct,
-                "performance_measurement": None if correct else False,
-                "affinity": None,
-                "memory_policy_application": None,
-                "placement_observed": None,
-                "numa_placement": None,
-            },
-            "rc": 0 if correct else 1,
-            "overlap_detected": False, "lost_detected": False, "duplicate_detected": False,
-        }
-        return {
-            "complete": complete,
-            "incomplete_reasons": [] if complete else ["missing child_report"],
-            "wall_s": harness_wall,
-            "map_s": None,
-            "child_report": {"completed_bytes": consumed},
-            "dist_result": dr,
-        }
+    _dist_manifest = staticmethod(_dist_manifest_base)
 
     def test_denominators_include_failed_missing_unreadable_incomplete(self):
         tmp = tempfile.mkdtemp(prefix='rpt_')
@@ -423,6 +426,110 @@ class TestCheckpoint2PlacementSamplingReporting(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+
+
+class TestReportDistRepeatedTrials(unittest.TestCase):
+    """C3-corrections-2: repeated trials report the QUALIFIED AGGREGATE.
+
+    The headline shows the aggregate measurement for repeated trials; the
+    pass-1 result stays as provenance in the per-trial detail section.
+    Aggregate metrics are labeled separately from individual-pass metrics,
+    and invalid/excluded aggregates are reported explicitly.
+    """
+
+    _dist_manifest = staticmethod(_dist_manifest_base)
+
+    V_TRUE = {"functional_correctness": True, "performance_measurement": True,
+              "affinity": True, "memory_policy_application": True,
+              "placement_observed": True, "numa_placement": True}
+
+    def _repeated_manifest(self, pass1_wall=1.0, agg_t=5.0, agg_b=2000000,
+                           agg_scan=2000000, agg_res=20, valid=True,
+                           invalid_reasons=None, stop="target_reached",
+                           failed_pass2=False):
+        m = self._dist_manifest(complete=True, wall=pass1_wall, consumed=1000,
+                                validity=self.V_TRUE)
+        p2 = {"pass": 2, "is_initial_pass": False,
+              "engine_wall_seconds": agg_t - pass1_wall,
+              "total_consumed": agg_b - 1000,
+              "reservations_total": agg_res - 10,
+              "performance_validity": True, "cache_compatible": True,
+              "qualified": not failed_pass2, "duration_contributes": not failed_pass2}
+        if failed_pass2:
+            p2.update({"status": "failed_execution", "qualified": False,
+                       "duration_contributes": False, "failure_reason": "process returncode 1"})
+        else:
+            p2.update({"status": "success"})
+        p1 = {"pass": 1, "is_initial_pass": True, "status": "success",
+              "qualified": True, "duration_contributes": True,
+              "engine_wall_seconds": pass1_wall, "total_consumed": 1000,
+              "reservations_total": 10, "performance_validity": True,
+              "cache_compatible": True}
+        agg = {
+            "contributing_passes": ([1] if failed_pass2 else [1, 2]),
+            "excluded_passes": [],
+            "pass_count": (1 if failed_pass2 else 2),
+            "aggregate_engine_wall_seconds": agg_t,
+            "aggregate_consumed_bytes": agg_b,
+            "aggregate_scanned_bytes": agg_scan,
+            "aggregate_scan_equals_consumed": True,
+            "aggregate_reservations": agg_res,
+            "aggregate_throughput_bps": (agg_b / agg_t) if agg_t else None,
+            "aggregate_valid": valid,
+            "aggregate_invalid_reasons": (invalid_reasons or []),
+        }
+        m["duration_qualification"] = {
+            "target_seconds": 0.5, "repetition_used": True,
+            "pass_count": (1 if failed_pass2 else 2),
+            "accumulated_effective_wall_seconds": agg_t,
+            "meets_target": True, "stop_reason": stop,
+            "duration_aggregate": agg,
+            "passes": [p1, p2],
+        }
+        m["duration_aggregate"] = agg
+        return m
+
+    def _run_one_trial(self, manifest):
+        tmp = tempfile.mkdtemp(prefix='rptrep_')
+        try:
+            outcomes = [{"case": "sc__fixed_faa", "scenario": "sc",
+                         "candidate": "fixed_faa", "trial": 1, "status": "ok",
+                         "manifest": "cases/a/trial1/manifest.json"}]
+            make_campaign(tmp, outcomes, {"cases/a/trial1/manifest.json": manifest})
+            rc, text, err = run_report(tmp)
+            self.assertEqual(rc, 0, msg=err + "\n" + text)
+            return text
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_repeated_trial_headline_uses_aggregate(self):
+        # aggregate: T=5s, B=2,000,000 -> 400,000 B/s -> 0.400 MB/s; wall 5.000
+        text = self._run_one_trial(self._repeated_manifest())
+        self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | 0.400 | 5.000 |", text)
+        self.assertIn("duration-repeated(trials=1)", text)
+        # per-trial detail: aggregate metrics + pass evidence
+        self.assertIn("duration_aggregate: contributing=[1, 2] engine_wall=5.000", text)
+        self.assertIn("duration_pass: pass=1 initial=true status=success", text)
+        self.assertIn("duration_pass: pass=2 initial=false status=success", text)
+        self.assertIn("stop_reason=target_reached", text)
+
+    def test_repeated_trial_invalid_aggregate_reported_explicitly(self):
+        text = self._run_one_trial(self._repeated_manifest(
+            valid=False, invalid_reasons=["pass 2 performance validity=unknown"]))
+        # invalid aggregate: no misleading first-pass-throughput headline
+        self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | n/a | n/a |", text)
+        self.assertIn("duration-aggregate-invalid(trials=1)", text)
+        self.assertIn("valid=false", text)
+        self.assertIn("pass 2 performance validity=unknown", text)
+
+    def test_repeated_trial_failed_passes_identified(self):
+        text = self._run_one_trial(self._repeated_manifest(failed_pass2=True,
+                                                           stop="pass_execution_failure"))
+        self.assertIn("duration-failed-passes(trials=1)", text)
+        self.assertIn("duration_pass: pass=2 initial=false status=failed_execution", text)
+        self.assertIn("contributes=false", text)
+        # pass 1 remains the provenance
+        self.assertIn("duration_pass: pass=1 initial=true status=success", text)
 
 
 if __name__ == '__main__':

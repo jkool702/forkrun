@@ -194,6 +194,39 @@ def main():
         rec["cache_precondition"] = m.get("cache_precondition") if isinstance(m, dict) else None
         rec["min_duration_seconds"] = o.get("min_duration_seconds") if o.get("min_duration_seconds") is not None else spec.get("min_duration_seconds")
         rec["duration_qualification"] = m.get("duration_qualification") if isinstance(m, dict) else None
+        rec["duration_aggregate"] = m.get("duration_aggregate") if isinstance(m, dict) else None
+        # C3-corrections-2: repeated trials report the QUALIFIED AGGREGATE
+        # measurement; pass 1 stays as provenance. Explicitly distinguish
+        # aggregate from individual-pass metrics, and never silently fall
+        # back to a misleading aggregate when it is invalid/excluded.
+        dq = rec["duration_qualification"]
+        agg = rec["duration_aggregate"] or {}
+        rec["duration_stop_reason"] = dq.get("stop_reason") if isinstance(dq, dict) else None
+        rec["qualified_duration_passes"] = (dq.get("pass_count")
+                                            if isinstance(dq, dict) and dq.get("repetition_used")
+                                            else None)
+        rec["accumulated_duration_s"] = (dq.get("accumulated_effective_wall_seconds")
+                                         if isinstance(dq, dict) else None)
+        rec["duration_failed_passes"] = ([p.get("pass") for p in (dq.get("passes") or [])
+                                          if isinstance(p, dict)
+                                          and p.get("duration_contributes") is False]
+                                         if isinstance(dq, dict) else [])
+        rec["duration_excluded_passes"] = agg.get("excluded_passes") or []
+        rec["aggregate_invalid_reasons"] = agg.get("aggregate_invalid_reasons") or []
+        if isinstance(dq, dict) and dq.get("repetition_used"):
+            if agg.get("aggregate_valid"):
+                rec["throughput_bps"] = agg.get("aggregate_throughput_bps")
+                rec["engine_wall_s"] = agg.get("aggregate_engine_wall_seconds")
+                rec["reservations"] = agg.get("aggregate_reservations")
+                rec["aggregate_consumed_bytes"] = agg.get("aggregate_consumed_bytes")
+                rec["aggregate_scanned_bytes"] = agg.get("aggregate_scanned_bytes")
+                rec["aggregate_scan_equals_consumed"] = agg.get("aggregate_scan_equals_consumed")
+            else:
+                # Invalid/unknown aggregate is reported explicitly; do not
+                # reuse a pass-1 value as a misleading qualified result.
+                rec["throughput_bps"] = None
+                rec["engine_wall_s"] = None
+                rec["reservations"] = None
         rec["workload_id"] = o.get("workload_id") or spec.get("workload_id") or scen
 
         if not rec.get("complete", False):
@@ -357,6 +390,22 @@ def main():
                         unmet = [v for v in dq_vals if v.get("meets_target") is False]
                         if unmet:
                             notes.append("duration-unqualified=%d" % len(unmet))
+                    # C3-corrections-2: repeated-trial facts across the
+                    # group (aggregate validity, failed/excluded passes).
+                    rep_trials = [r for r in func_valids if r.get("qualified_duration_passes")]
+                    if rep_trials:
+                        notes.append("duration-repeated(trials=%d)" % len(rep_trials))
+                    failed_trials = [r for r in func_valids if r.get("duration_failed_passes")]
+                    if failed_trials:
+                        notes.append("duration-failed-passes(trials=%s)" %
+                                     ",".join(str(r.get("trial")) for r in failed_trials))
+                    agg_invalid = [r for r in func_valids if r.get("aggregate_invalid_reasons")]
+                    if agg_invalid:
+                        notes.append("duration-aggregate-invalid(trials=%d)" % len(agg_invalid))
+                    excl_trials = [r for r in func_valids if r.get("duration_excluded_passes")]
+                    if excl_trials:
+                        notes.append("duration-aggregate-excluded(trials=%s)" %
+                                     ",".join(str(r.get("trial")) for r in excl_trials))
                     lines.append("| %s | %s | %s | %s | %d | %d | %d | %d | %s | %s | %s | %s | %s | %s | %s |" % (
                         scen, map_id, pset_id, cand, len(perf_class_recs), len(func_valids), len(perf_valids), numa_true,
                         fmt(thr_mb), fmt(wall), fmt(hwall), fmt(resv, 0), kernel, scan_s, "; ".join(notes)))
@@ -425,11 +474,26 @@ def main():
                                 cp.get("fallback") or "n/a"))
                         dq = r.get("duration_qualification")
                         if isinstance(dq, dict):
-                            lines.append("  - duration_qualification: target=%s effective=%s accumulated=%s passes=%s meets_target=%s repetition_used=%s capped=%s" % (
+                            lines.append("  - duration_qualification: target=%s effective=%s accumulated=%s passes=%s meets_target=%s repetition_used=%s capped=%s stop_reason=%s" % (
                                 fmt(dq.get("target_seconds")), fmt(dq.get("effective_wall_seconds")),
                                 fmt(dq.get("accumulated_effective_wall_seconds")), dq.get("pass_count"),
                                 fmt_tri(dq.get("meets_target")), fmt_tri(dq.get("repetition_used")),
-                                fmt_tri(dq.get("repetition_capped"))))
+                                fmt_tri(dq.get("repetition_capped")), fmt_tri(dq.get("stop_reason"))))
+                            agg = dq.get("duration_aggregate") or {}
+                            lines.append("  - duration_aggregate: contributing=%s engine_wall=%s consumed=%s scanned=%s scan_eq_consumed=%s reservations=%s throughput_bps=%s valid=%s invalid_reasons=%s" % (
+                                agg.get("contributing_passes"), fmt(agg.get("aggregate_engine_wall_seconds")),
+                                fmt(agg.get("aggregate_consumed_bytes")), fmt(agg.get("aggregate_scanned_bytes")),
+                                fmt_tri(agg.get("aggregate_scan_equals_consumed")), fmt(agg.get("aggregate_reservations")),
+                                fmt(agg.get("aggregate_throughput_bps")), fmt_tri(agg.get("aggregate_valid")),
+                                agg.get("aggregate_invalid_reasons") or []))
+                            for pp in dq.get("passes", []):
+                                lines.append("  -   duration_pass: pass=%s initial=%s status=%s qualified=%s contributes=%s wall=%s consumed=%s scanned=%s res=%s perf_validity=%s cache_compatible=%s failure=%s" % (
+                                    pp.get("pass"), fmt_tri(pp.get("is_initial_pass")), pp.get("status"),
+                                    fmt_tri(pp.get("qualified")), fmt_tri(pp.get("duration_contributes")),
+                                    fmt(pp.get("engine_wall_seconds")), fmt(pp.get("total_consumed")),
+                                    fmt(pp.get("total_consumer_bytes_scanned")), fmt(pp.get("reservations_total")),
+                                    fmt_tri(pp.get("performance_validity")), fmt_tri(pp.get("cache_compatible")),
+                                    pp.get("failure_reason")))
                         for n in dr.get("nodes", []):
                             pl = n.get("placement", {})
                             mp = n.get("memory_policy", {})

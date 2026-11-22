@@ -383,6 +383,426 @@ def _cache_precondition(spec, resolved):
     return rec
 
 
+# ---------------------------------------------------------------------------
+# C3-correction-2: duration-qualification pass accounting (authoritative
+# helpers). One decision, one implementation: the outcome of each dist-engine
+# pass and the aggregation of qualified passes are decided here. The
+# repetition loop (_run_duration_repetition) and the pass-1 record
+# (run_case) consume these; no other code re-implements the rules.
+# ---------------------------------------------------------------------------
+
+
+def _finite_nonneg(value):
+    """Authoritative parse: float if present, finite and >= 0, else None."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or v < 0:
+        return None
+    return v
+
+
+def _dist_pass_wall_seconds(dist_result):
+    """AUTHORITATIVE engine wall_seconds of one DIST_RESULT (None if invalid)."""
+    if not isinstance(dist_result, dict):
+        return None
+    return _finite_nonneg(dist_result.get("wall_seconds"))
+
+
+def _dist_pass_qualified(timed_out, process_rc, dist_result):
+    """AUTHORITATIVE: does one dist-engine pass establish qualification?
+
+    WO §2: a pass contributes to accumulated effective duration only when ALL
+    of: (1) the process exited successfully, (2) it did not time out,
+    (3) a valid DIST_RESULT is present and parseable, (4) the result reports
+    successful execution (rc), (5) functional correctness is established
+    (correct), (6) engine wall_seconds is present, finite and valid.
+
+    Distinct validity dimensions (P1 §2): process-execution success
+    (timed_out / process_rc), functional correctness (correct), performance
+    validity (via _dist_pass_performance_validity) and duration qualification
+    (this decision) are separate -- none implies another.
+
+    Returns (qualified, reasons); reasons is empty iff qualified.
+    """
+    reasons = []
+    if timed_out:
+        reasons.append("pass timed out")
+    elif process_rc != 0:
+        reasons.append("process returncode %r" % (process_rc,))
+    if isinstance(dist_result, dict):
+        if not timed_out and dist_result.get("rc") != 0:
+            reasons.append("DIST_RESULT rc=%r" % (dist_result.get("rc"),))
+        if dist_result.get("correct") is not True:
+            reasons.append(
+                "functional correctness not established (correct=%r)"
+                % (dist_result.get("correct"),))
+        if _dist_pass_wall_seconds(dist_result) is None:
+            reasons.append("engine wall_seconds missing/invalid")
+    else:
+        reasons.append("no parseable DIST_RESULT")
+    return (not reasons), reasons
+
+
+def _dist_pass_performance_validity(dist_result):
+    """AUTHORITATIVE tri-state performance validity of one pass.
+
+    True/False/None from DIST_RESULT.validity.performance_measurement (with
+    compat aliases). None = unknown/not established.
+    """
+    v = (dist_result or {}).get("validity") or {}
+    for key in ("performance_measurement", "performance_measurement_valid",
+                "performance_valid"):
+        if key in v:
+            val = v[key]
+            if isinstance(val, bool) or val is None:
+                return val
+            return None
+    return None
+
+
+def _dist_pass_scan_evidence(dist_result):
+    """AUTHORITATIVE consumer-scan evidence for one pass."""
+    dr = dist_result if isinstance(dist_result, dict) else {}
+    ev = (dr.get("consumer_kernel") or {}).get("scan_bytes_evidence") or {}
+    return {
+        "total_consumer_bytes_scanned": ev.get("total_consumer_bytes_scanned"),
+        "total_consumed": dr.get("total_consumed"),
+        "scan_equals_consumed": ev.get("scan_equals_consumed"),
+    }
+
+
+def _cache_precondition_compatible(cache_record):
+    """AUTHORITATIVE cache-precondition compatibility rule (WO §4).
+
+    Conservative: passes whose actual cache treatment differs from the
+    policy's controlled state are not comparable in one uniformly
+    preconditioned composite measurement. A pass with unknown treatment is
+    never silently treated as compatible.
+    """
+    if not isinstance(cache_record, dict):
+        return False
+    pol = cache_record.get("policy") or "best_effort_os_cache"
+    if pol == "best_effort_os_cache":
+        # Never described as a controlled cold-cache state (factual).
+        return True
+    if pol == "warm_repeat":
+        return bool(cache_record.get("achieved"))
+    if pol == "drop_caches_if_privileged":
+        return bool(cache_record.get("privileged_action_succeeded"))
+    return False
+
+
+def _parse_dist_result_lines(stderr):
+    """Parse DIST_RESULT JSON lines from a process's stderr text."""
+    result = None
+    error = None
+    for line in (stderr or "").splitlines():
+        if not line.startswith("DIST_RESULT "):
+            continue
+        try:
+            result = json.loads(line[len("DIST_RESULT "):])
+        except ValueError:
+            if error is None:
+                error = "malformed DIST_RESULT JSON"
+    return result, error
+
+
+def _build_duration_pass_record(pass_n, is_initial, timed_out, process_rc,
+                                dist_result, dist_result_error, wall_s_harness,
+                                cache_record, cleanup=None, output_dir=None):
+    """AUTHORITATIVE per-pass evidence record for duration qualification.
+
+    Preserves complete pass-level evidence: process success/rc/timeout,
+    failure reasons, full DIST_RESULT, functional correctness, performance
+    validity, engine wall, consumed/scanned bytes, reservations, cache
+    outcome and cleanup facts. `duration_contributes` is True iff the pass is
+    qualified (WO §2); a pass that fails any qualification condition
+    contributes no duration.
+    """
+    qualified, reasons = _dist_pass_qualified(timed_out, process_rc,
+                                              dist_result)
+    wall = _dist_pass_wall_seconds(dist_result)
+    scan_ev = _dist_pass_scan_evidence(dist_result)
+    drc = dist_result.get("rc") if isinstance(dist_result, dict) else None
+    if qualified:
+        status = "success"
+    elif timed_out:
+        status = "failed_timeout"
+    else:
+        status = "failed_execution"
+    rec = {
+        "pass": pass_n,
+        "is_initial_pass": bool(is_initial),
+        "output_dir": output_dir,
+        "status": status,
+        "complete": bool(qualified),
+        "qualified": bool(qualified),
+        "duration_contributes": bool(qualified),
+        "reasons": list(reasons),
+        "failure_reason": (reasons[0] if reasons else None),
+        "process_returncode": process_rc,
+        "process_success": (not timed_out) and process_rc == 0,
+        "timed_out": bool(timed_out),
+        "termination_reason": ("timeout" if timed_out
+                               else ("completed" if process_rc == 0
+                                     else "nonzero_exit")),
+        "dist_result": dist_result if isinstance(dist_result, dict) else None,
+        "dist_result_rc": drc,
+        "dist_result_error": dist_result_error,
+        "functional_correctness": (dist_result.get("correct")
+                                   if isinstance(dist_result, dict) else None),
+        "performance_validity": _dist_pass_performance_validity(dist_result),
+        "engine_wall_seconds": wall,
+        "wall_seconds_harness": (float(wall_s_harness)
+                                 if wall_s_harness is not None else None),
+        "total_consumed": (dist_result.get("total_consumed")
+                           if isinstance(dist_result, dict) else None),
+        "total_consumer_bytes_scanned": scan_ev.get("total_consumer_bytes_scanned"),
+        "scan_equals_consumed": scan_ev.get("scan_equals_consumed"),
+        "reservations_total": (dist_result.get("reservations_total")
+                               if isinstance(dist_result, dict) else None),
+        "cache_precondition": cache_record if isinstance(cache_record, dict) else None,
+        "cache_compatible": _cache_precondition_compatible(cache_record),
+        "cleanup": cleanup,
+        "effective_wall_seconds": (float(wall) if qualified else 0.0),
+    }
+    return rec
+
+
+def _run_repeat_pass(pass_cmd, timeout_s, label="repeat-pass"):
+    """AUTHORITATIVE repeated-pass lifecycle (WO §5).
+
+    Runs one repeated dist pass in a NEW process group (start_new_session,
+    so pgid == child pid). On timeout: SIGTERM to the group -> grace ->
+    SIGKILL escalation when needed -> reap the direct child -> verify the
+    group is gone. Cleanup outcomes are recorded factually.
+    """
+    t0 = time.monotonic()
+    p = subprocess.Popen(pass_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, cwd=REPO, start_new_session=True)
+    pgid = p.pid
+    cleanup = {"label": label if label else "repeat-pass", "pgid": pgid,
+               "terminate_signals": [], "reaped": False,
+               "group_gone": None, "members_after": []}
+    timed_out = False
+    stdout = stderr = ""
+    try:
+        stdout, stderr = p.communicate(timeout=max(float(timeout_s), 0.001))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        # 1. Reliably terminate the launched process group.
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            cleanup["terminate_signals"].append("SIGTERM")
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            stdout, stderr = p.communicate(timeout=KILL_GRACE_S)
+        except subprocess.TimeoutExpired:
+            # 2. Escalate to forced termination.
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                cleanup["terminate_signals"].append("SIGKILL")
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                stdout, stderr = p.communicate(timeout=KILL_GRACE_S)
+            except subprocess.TimeoutExpired:
+                pass
+    # 3. Reap the direct child.
+    try:
+        p.wait(timeout=KILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
+    cleanup["reaped"] = p.poll() is not None
+    # 4. Verify the process group is gone.
+    verify = _verify_group_gone(pgid, label)
+    cleanup["group_gone"] = verify["gone"]
+    cleanup["members_after"] = verify["members_after"]
+    cleanup["wall_s"] = time.monotonic() - t0
+    return {"rc": p.returncode, "stdout": stdout or "", "stderr": stderr or "",
+            "wall_s": cleanup["wall_s"], "timed_out": timed_out,
+            "cleanup": cleanup}
+
+
+def _run_duration_repetition(first_pass_record, cmd, target_s, budget_s,
+                             repeat_runner, cache_precondition_fn,
+                             pass_cap=30, case_timeout_s=None, out_dir=None):
+    """AUTHORITATIVE repetition loop for duration qualification (WO §5).
+
+    Bounds: pass-count cap (pass_cap), repetition wall-clock budget
+    (budget_s from the repetition start), and per-pass timeout
+    min(case_timeout_s, remaining budget). Stops after the first
+    unsuccessful repeated pass. Every attempted pass is recorded in
+    pass_records; timeout passes contribute no duration.
+
+    repeat_runner: callable(pass_n, timeout_s) -> run dict with keys
+        stdout, stderr, timed_out, rc, wall_s, cleanup.
+    cache_precondition_fn: callable(pass_n) -> cache-precondition record,
+        applied BEFORE the pass runs (outside the timed interval).
+
+    Returns (pass_records, accumulated_effective_wall_seconds,
+    stop_reason, repeat_runs). stop_reason is one of:
+    "target_reached", "max_pass_count_reached",
+    "repetition_budget_exhausted", "pass_timeout",
+    "pass_execution_failure", "cache_precondition_incompatibility",
+    "repetition_unavailable", or None.
+    """
+    pass_records = [first_pass_record]
+    repeat_runs = {}
+    accumulated = float(sum(p["effective_wall_seconds"]
+                            for p in pass_records if p["duration_contributes"]))
+    target_s = float(target_s)
+    budget_s = float(budget_s)
+    cmd_ok = bool(cmd)
+    can_repeat = cmd_ok and first_pass_record["qualified"]
+    stop_reason = None
+    if accumulated >= target_s:
+        stop_reason = "target_reached"
+    elif not can_repeat:
+        if not cmd_ok:
+            stop_reason = "repetition_unavailable"
+        elif first_pass_record["timed_out"]:
+            stop_reason = "pass_timeout"
+        else:
+            stop_reason = "pass_execution_failure"
+    else:
+        t_start = time.monotonic()
+        pass_n = 1
+        while True:
+            if accumulated >= target_s:
+                stop_reason = "target_reached"
+                break
+            if pass_n >= pass_cap:
+                stop_reason = "max_pass_count_reached"
+                break
+            remaining_budget = budget_s - (time.monotonic() - t_start)
+            if remaining_budget <= 0:
+                stop_reason = "repetition_budget_exhausted"
+                break
+            next_pass = pass_n + 1
+            cache_record = cache_precondition_fn(next_pass)
+            if case_timeout_s is not None:
+                timeout_s = min(float(case_timeout_s), remaining_budget)
+            else:
+                timeout_s = remaining_budget
+            run = repeat_runner(next_pass, timeout_s)
+            pass_n = next_pass
+            repeat_runs[pass_n] = run
+            dr, dr_err = _parse_dist_result_lines(run.get("stderr"))
+            rec = _build_duration_pass_record(
+                pass_n=pass_n, is_initial=False,
+                timed_out=bool(run.get("timed_out")),
+                process_rc=run.get("rc"),
+                dist_result=dr, dist_result_error=dr_err,
+                wall_s_harness=run.get("wall_s"),
+                cache_record=cache_record,
+                cleanup=run.get("cleanup"),
+                output_dir=(os.path.join(out_dir, "duration_passes", "pass%d" % pass_n)
+                            if out_dir else None))
+            pass_records.append(rec)
+            if rec["timed_out"]:
+                stop_reason = "pass_timeout"
+                break
+            if not rec["qualified"]:
+                stop_reason = "pass_execution_failure"
+                break
+            # P1: a qualified pass contributes duration (the six
+            # qualification conditions are met); cache compatibility is a
+            # separate composite-validity dimension (P2).
+            accumulated += rec["effective_wall_seconds"]
+            if rec["cache_compatible"] is False:
+                stop_reason = "cache_precondition_incompatibility"
+                break
+    return pass_records, float(accumulated), stop_reason, repeat_runs
+
+
+def _build_duration_aggregate(pass_records):
+    """AUTHORITATIVE composite-measurement definition (WO §3).
+
+    Contributing passes: duration-contributing passes whose actual cache
+    treatment is compatible. Aggregate: T_agg = sum T_i, B_agg = sum B_i,
+    throughput_agg = B_agg / T_agg; scanned bytes summed per-pass with
+    scan-equals-consumed checked and once across the aggregate; reservations
+    summed with explicit aggregate semantics. Aggregate validity requires
+    every contributing pass to independently satisfy the performance-
+    validity requirements -- invalid or unknown per-pass validity is never
+    promoted to a valid aggregate.
+    """
+    contributing = [p for p in pass_records
+                    if p.get("duration_contributes")
+                    and p.get("cache_compatible") is not False]
+    excluded = [p for p in pass_records
+                if p.get("duration_contributes")
+                and p.get("cache_compatible") is False]
+    agg_wall = float(sum((p.get("engine_wall_seconds") or 0.0)
+                         for p in contributing))
+    agg_bytes = int(sum((p.get("total_consumed") or 0) for p in contributing))
+    agg_res = int(sum((p.get("reservations_total") or 0) for p in contributing))
+    agg_scanned = 0
+    scan_ok_all = True
+    for p in contributing:
+        if p.get("scan_equals_consumed") is True:
+            agg_scanned += int(p.get("total_consumer_bytes_scanned") or 0)
+        else:
+            scan_ok_all = False
+    if not contributing:
+        scan_ok_all = None
+    throughput = (agg_bytes / agg_wall) if (agg_wall > 0) else None
+    reasons = []
+    for p in contributing:
+        pv = p.get("performance_validity")
+        if pv is not True:
+            reasons.append("pass %s performance validity=%s"
+                           % (p.get("pass"),
+                              pv if pv is not None else "unknown"))
+        if p.get("cache_compatible") is False:
+            reasons.append("pass %s cache preconditioning incompatible"
+                           % p.get("pass"))
+    if excluded:
+        reasons.append("excluded cache-incompatible passes: %s"
+                       % [p.get("pass") for p in excluded])
+    if scan_ok_all is False:
+        reasons.append("aggregate scan does not equal aggregate consumed")
+    if not contributing:
+        reasons.append("no contributing passes")
+    return {
+        "contributing_passes": [p.get("pass") for p in contributing],
+        "excluded_passes": [{"pass": p.get("pass"),
+                             "reason": "cache_precondition_incompatible"}
+                            for p in excluded],
+        "pass_count": len(contributing),
+        "aggregate_engine_wall_seconds": agg_wall,
+        "aggregate_consumed_bytes": agg_bytes,
+        "aggregate_scanned_bytes": agg_scanned,
+        "aggregate_scan_equals_consumed": scan_ok_all,
+        "aggregate_reservations": agg_res,
+        "aggregate_throughput_bps": throughput,
+        "aggregate_valid": (not reasons),
+        "aggregate_invalid_reasons": reasons,
+    }
+
+
+def _write_duration_pass_files(pass_dir, pass_record, stdout_text,
+                               stderr_text, dist_result):
+    """Write pass-level evidence: logs, pass-summary, full DIST_RESULT."""
+    try:
+        os.makedirs(pass_dir, exist_ok=True)
+        with open(os.path.join(pass_dir, "stdout.log"), "w") as fh:
+            fh.write(stdout_text or "")
+        with open(os.path.join(pass_dir, "stderr.log"), "w") as fh:
+            fh.write(stderr_text or "")
+        with open(os.path.join(pass_dir, "pass-summary.json"), "w") as fh:
+            json.dump(pass_record, fh, indent=2, sort_keys=True, default=str)
+        if isinstance(dist_result, dict):
+            with open(os.path.join(pass_dir, "dist_result.json"), "w") as fh:
+                json.dump(dist_result, fh, indent=2, sort_keys=True)
+    except OSError:
+        pass
+
+
 CHILD_SCRIPT = r"""
 import os, sys, json, time
 sys.path.insert(0, sys.argv[1])   # python/ dir
@@ -697,9 +1117,18 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     manifest["map_s"] = (manifest.get("child_report") or {}).get(
         "elapsed_s")
     # C3: duration qualification (separate attributable axis; factual).
-    # C3-correction: if a finite target is set and the first pass is shorter,
-    # repeat the same measurement until accumulated effective duration meets the
-    # target (bounded). Repetition extends measurement; it does not fabricate it.
+    # C3-correction-2: qualification accounting fixes (WO-NUMA-ONE-SHOT-
+    # RENTAL-PREPARATION-C3-CORRECTIONS-2, P1/P2):
+    #  - only qualified passes contribute duration (no harness-wall fallback
+    #    for missing engine measurement time);
+    #  - failed/timed-out passes contribute nothing;
+    #  - repetition has its own wall-clock budget and process-group-aware
+    #    lifecycle; per-pass timeout = min(case timeout, remaining budget);
+    #  - cache preconditioning is applied per pass (outside the timed
+    #    interval) and per-pass outcomes are recorded;
+    #  - a composite aggregate (duration_aggregate) is built from
+    #    cache-compatible qualified passes only;
+    #  - stop reasons distinguish the stopping condition factually.
     dq_target = spec.get("min_duration_seconds")
     if dq_target is None:
         dq_target = spec.get("duration_qualification_seconds")
@@ -707,124 +1136,122 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
         dq_target = float(dq_target) if dq_target is not None else None
     except Exception:
         dq_target = None
+        manifest["duration_qualification_error"] = (
+            manifest.get("duration_qualification_error")
+            or "invalid min_duration_seconds (unparseable)")
     if dq_target is not None and (not math.isfinite(dq_target) or dq_target < 0):
-        # invalid target should have been rejected by campaign prevalidation;
-        # record factually here rather than silently treating as no target.
-        manifest["duration_qualification_error"] = "invalid min_duration_seconds (must be finite and >= 0)"
+        # Invalid targets are rejected by campaign prevalidation; run_case
+        # defends here too: the target is recorded as invalid and never used
+        # for qualification.
+        manifest["duration_qualification_error"] = (
+            manifest.get("duration_qualification_error")
+            or "invalid min_duration_seconds (must be finite and >= 0)")
         dq_target = None
     dr_wall = ((manifest.get("dist_result") or {}).get("wall_seconds"))
     try:
         dr_wall = float(dr_wall) if dr_wall is not None else None
     except Exception:
         dr_wall = None
-    effective_wall = dr_wall if dr_wall is not None else (manifest.get("map_s") or dt)
-    try:
-        effective_wall = float(effective_wall)
-    except Exception:
-        effective_wall = float(dt)
-    dq_passes = [{
-        "pass": 1,
-        "effective_wall_seconds": float(effective_wall),
-        "wall_seconds_harness": float(dt),
-        "wall_seconds_engine_or_map": dr_wall if dr_wall is not None else manifest.get("map_s"),
-        "complete": bool(manifest.get("complete", not incomplete if 'incomplete' in locals() else True)),
-        "dist_result_rc": (manifest.get("dist_result") or {}).get("rc") if isinstance(manifest.get("dist_result"), dict) else None,
-    }]
-    accumulated = float(effective_wall) if effective_wall is not None else 0.0
-    dq_cap_passes = 30
-    dq_cap_total_s = max(float(dq_target) * 10.0, 300.0) if dq_target is not None else 0.0
-    dq_repetition_capped = False
+    # Pass-1 record: authoritative qualification from completed-run evidence
+    # (process success, not timed out, parseable DIST_RESULT, dist rc
+    # success, functional correctness, valid engine wall_seconds). The old
+    # `complete` field was constructed before the final incomplete-state
+    # determination and defaulted to True; now the pass's actual status
+    # comes from _dist_pass_qualified on the authoritative inputs.
+    first_pass_record = _build_duration_pass_record(
+        pass_n=1, is_initial=True,
+        timed_out=bool(timed_out),
+        process_rc=manifest.get("returncode"),
+        dist_result=manifest.get("dist_result"),
+        dist_result_error=manifest.get("dist_result_error"),
+        wall_s_harness=float(dt),
+        cache_record=manifest["cache_precondition"],
+        cleanup={"label": "case-initial", "timed_out": bool(timed_out),
+                 "group_gone": (manifest.get("case_group_gone")
+                                or {}).get("gone")},
+        output_dir=os.path.join(out_dir, "duration_passes", "pass1"))
+    dq_passes = [first_pass_record]
+    accumulated = float(sum(p["effective_wall_seconds"] for p in dq_passes
+                            if p["duration_contributes"]))
+    _write_duration_pass_files(first_pass_record["output_dir"],
+                               first_pass_record, stdout, stderr,
+                               manifest.get("dist_result"))
+
+    # Repetition budget: explicit overall wall-clock budget for the
+    # repetition extension; default derived from the target.
+    rep_budget_raw = spec.get("min_duration_repetition_budget_s")
+    if rep_budget_raw is None and dq_target is not None:
+        rep_budget_s = max(30.0, float(dq_target) * 10.0)
+    elif rep_budget_raw is None:
+        rep_budget_s = 0.0
+    else:
+        try:
+            rep_budget_s = float(rep_budget_raw)
+        except Exception:
+            rep_budget_s = (max(30.0, float(dq_target) * 10.0)
+                            if dq_target is not None else 0.0)
+        if not math.isfinite(rep_budget_s) or rep_budget_s < 0:
+            rep_budget_s = (max(30.0, float(dq_target) * 10.0)
+                            if dq_target is not None else 0.0)
+    case_timeout_s = float(timeout)
+    repeat_runs = {}
+    stop_reason = None
+    if dq_target is not None:
+        if accumulated >= float(dq_target):
+            stop_reason = "target_reached"
+        elif float(dq_target) > 0:
+            cmd_ok = bool(use_dist and 'cmd' in locals() and cmd)
+
+            def _repeat_runner(pass_n, timeout_s, _cmd=list(cmd) if cmd_ok else None):
+                # Real lifecycle runner; `_run_duration_repetition` calls
+                # this with (pass_n, timeout_s) positionally.
+                return _run_repeat_pass(_cmd, timeout_s)
+
+            def _cache_fn(pass_n):
+                # Per-pass preconditioning, applied before each pass runs
+                # (outside the timed interval).
+                return _cache_precondition(spec, resolved)
+
+            dq_passes, accumulated, stop_reason, repeat_runs = \
+                _run_duration_repetition(
+                    first_pass_record, list(cmd) if cmd_ok else None,
+                    float(dq_target), rep_budget_s,
+                    _repeat_runner, _cache_fn, case_timeout_s=case_timeout_s,
+                    out_dir=out_dir)
+            for rec in dq_passes[1:]:
+                run = repeat_runs.get(rec["pass"]) or {}
+                _write_duration_pass_files(rec["output_dir"], rec,
+                                           run.get("stdout", ""),
+                                           run.get("stderr", ""),
+                                           rec.get("dist_result"))
+    dq_repetition_used = len(dq_passes) > 1
+    dq_repetition_capped = bool(
+        dq_repetition_used and dq_target is not None
+        and accumulated < float(dq_target))
     dq_repetition_error = None
-    if dq_target is not None and dq_target > 0 and accumulated < float(dq_target):
-        # Only repeat when we have a runnable dist-engine command and a sane base run.
-        can_repeat = bool(use_dist and 'cmd' in locals() and cmd and not timed_out)
-        if can_repeat:
-            pass_n = 2
-            while accumulated < float(dq_target) and pass_n <= dq_cap_passes and accumulated < dq_cap_total_s:
-                pass_dir = os.path.join(out_dir, "duration_passes", "pass%d" % pass_n)
-                os.makedirs(pass_dir, exist_ok=True)
-                # Re-run same command; isolate pass json output to avoid clobbering.
-                pass_cmd = list(cmd)
-                for i, tok in enumerate(pass_cmd):
-                    if tok == "--json-out" and i + 1 < len(pass_cmd):
-                        pass_cmd[i + 1] = os.path.join(pass_dir, "dist_result.json")
-                t_p0 = time.monotonic()
-                try:
-                    p = subprocess.run(pass_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       text=True, cwd=REPO, timeout=max(float(spec.get("timeout", 300)), float(dq_target) * 2.0),
-                                       start_new_session=True)
-                    p_stdout, p_stderr, p_rc = p.stdout, p.stderr, p.returncode
-                except subprocess.TimeoutExpired as te:
-                    p_stdout = (te.stdout or "") if isinstance(te.stdout, str) else ""
-                    p_stderr = (te.stderr or "") if isinstance(te.stderr, str) else ""
-                    p_rc = 124
-                    try:
-                        os.killpg(te.args[0] if False else 0, 0)
-                    except Exception:
-                        pass
-                except Exception as e:
-                    p_stdout, p_stderr, p_rc = "", str(e), 125
-                dt_p = time.monotonic() - t_p0
-                pass_dr = None
-                pass_map = None
-                for line in (p_stderr or "").splitlines():
-                    if line.startswith("DIST_RESULT "):
-                        try:
-                            pass_dr = json.loads(line[len("DIST_RESULT "):])
-                        except Exception:
-                            pass
-                for line in (p_stdout or "").splitlines():
-                    if line.startswith("CHILD_DONE "):
-                        try:
-                            pass_map = (json.loads(line[len("CHILD_DONE "):]) or {}).get("elapsed_s")
-                        except Exception:
-                            pass
-                p_dr_wall = (pass_dr or {}).get("wall_seconds") if isinstance(pass_dr, dict) else None
-                try:
-                    p_dr_wall = float(p_dr_wall) if p_dr_wall is not None else None
-                except Exception:
-                    p_dr_wall = None
-                p_eff = p_dr_wall if p_dr_wall is not None else (pass_map if pass_map is not None else dt_p)
-                try:
-                    p_eff = float(p_eff)
-                except Exception:
-                    p_eff = float(dt_p)
-                accumulated += float(p_eff)
-                dq_passes.append({
-                    "pass": pass_n,
-                    "effective_wall_seconds": float(p_eff),
-                    "wall_seconds_harness": float(dt_p),
-                    "wall_seconds_engine_or_map": p_dr_wall if p_dr_wall is not None else pass_map,
-                    "complete": bool(p_rc == 0 and isinstance(pass_dr, dict) and pass_dr.get("correct")),
-                    "dist_result_rc": (pass_dr or {}).get("rc") if isinstance(pass_dr, dict) else p_rc,
-                })
-                try:
-                    with open(os.path.join(pass_dir, "stdout.log"), "w") as fh:
-                        fh.write(p_stdout or "")
-                    with open(os.path.join(pass_dir, "stderr.log"), "w") as fh:
-                        fh.write(p_stderr or "")
-                    with open(os.path.join(pass_dir, "pass-summary.json"), "w") as fh:
-                        json.dump(dq_passes[-1], fh, indent=2, sort_keys=True)
-                except Exception:
-                    pass
-                pass_n += 1
-            if accumulated < float(dq_target):
-                dq_repetition_capped = True
-        else:
-            dq_repetition_error = "repetition unavailable (requires dist-engine command, non-timeout base run)"
+    if (dq_target is not None and dq_target > 0
+            and accumulated < float(dq_target) and not dq_repetition_used):
+        dq_repetition_error = ("repetition unavailable or stopped: %s"
+                               % (stop_reason or "unknown"))
+    duration_aggregate = _build_duration_aggregate(dq_passes)
+    manifest["duration_aggregate"] = duration_aggregate
     manifest["duration_qualification"] = {
         "target_seconds": dq_target,
-        "effective_wall_seconds": float(effective_wall),
+        "target_repetition_budget_seconds": rep_budget_s if dq_target is not None else None,
+        "effective_wall_seconds": float(dq_passes[0]["effective_wall_seconds"]),
         "accumulated_effective_wall_seconds": float(accumulated),
         "wall_seconds_harness": float(dt),
         "wall_seconds_engine_or_map": dr_wall if dr_wall is not None else manifest.get("map_s"),
         "passes": dq_passes,
         "pass_count": len(dq_passes),
-        "repetition_used": len(dq_passes) > 1,
+        "repetition_used": dq_repetition_used,
         "repetition_capped": dq_repetition_capped,
+        "repetition_budget_exhausted": stop_reason == "repetition_budget_exhausted",
         "repetition_error": dq_repetition_error,
+        "stop_reason": stop_reason,
         "meets_target": (None if dq_target is None else bool(accumulated >= float(dq_target))),
         "qualified": (None if dq_target is None else bool(accumulated >= float(dq_target))),
+        "duration_aggregate": duration_aggregate,
     }
     diag = _parse_diag(stderr)
     cpu_peak_total, per_pid = cpu_peak
@@ -917,6 +1344,12 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     is_dist_engine = (manifest.get("dist_result") is not None) or (spec.get("ingest_candidate") in {
         "fixed_faa", "local_adaptive", "relative_adaptive", "centralized_ingest", "centralized",
     })
+    # C3-correction-2 (P1): an unsuccessful initial pass must never be
+    # represented as a successful pass; when the dist-engine pass is not
+    # qualified, the case is incomplete with a factual reason.
+    if is_dist_engine and dq_passes and not dq_passes[0]["qualified"]:
+        incomplete.append("duration pass 1 not qualified: %s"
+                          % ("; ".join(dq_passes[0]["reasons"]) or "unknown"))
     if is_dist_engine:
         # Section 8: DIST_RESULT is authoritative for experimental dist-engine
         # candidates; do not require fabricated STAGE0_DIAG/STAGE0_FINAL time-series.
