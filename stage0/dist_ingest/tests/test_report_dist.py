@@ -506,6 +506,9 @@ class TestReportDistRepeatedTrials(unittest.TestCase):
         # aggregate: T=5s, B=2,000,000 -> 400,000 B/s -> 0.400 MB/s; wall 5.000
         text = self._run_one_trial(self._repeated_manifest())
         self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | 0.400 | 5.000 |", text)
+        # headline scan/consumed use the aggregate, not the pass-1 provenance
+        row = [l for l in text.splitlines() if l.startswith("| sc | legacy | pset__default | fixed_faa |")][0]
+        self.assertIn("2000000/2000000", row)
         self.assertIn("duration-repeated(trials=1)", text)
         # per-trial detail: aggregate metrics + pass evidence
         self.assertIn("duration_aggregate: contributing=[1, 2] engine_wall=5.000", text)
@@ -516,8 +519,12 @@ class TestReportDistRepeatedTrials(unittest.TestCase):
     def test_repeated_trial_invalid_aggregate_reported_explicitly(self):
         text = self._run_one_trial(self._repeated_manifest(
             valid=False, invalid_reasons=["pass 2 performance validity=unknown"]))
-        # invalid aggregate: no misleading first-pass-throughput headline
-        self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | n/a | n/a |", text)
+        row = [l for l in text.splitlines() if l.startswith("| sc | legacy | pset__default | fixed_faa |")][0]
+        # pass 1 is valid (provenance) but the invalid aggregate must exclude
+        # the trial from the perf-valid headline count: no misleading
+        # pass-1 throughput/wall is used.
+        self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 0 |", row)
+        self.assertIn("n/a", row)
         self.assertIn("duration-aggregate-invalid(trials=1)", text)
         self.assertIn("valid=false", text)
         self.assertIn("pass 2 performance validity=unknown", text)

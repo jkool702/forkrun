@@ -429,6 +429,8 @@ def _dist_pass_qualified(timed_out, process_rc, dist_result):
     reasons = []
     if timed_out:
         reasons.append("pass timed out")
+    elif process_rc is None:
+        reasons.append("no process run (pass not launched)")
     elif process_rc != 0:
         reasons.append("process returncode %r" % (process_rc,))
     if isinstance(dist_result, dict):
@@ -659,7 +661,13 @@ def _run_duration_repetition(first_pass_record, cmd, target_s, budget_s,
     cmd_ok = bool(cmd)
     can_repeat = cmd_ok and first_pass_record["qualified"]
     stop_reason = None
-    if accumulated >= target_s:
+    if first_pass_record.get("cache_compatible") is False and \
+            first_pass_record["qualified"]:
+        # P2 (WO §2 finding 2): an incompatible INITIAL pass stops
+        # repetition even when it reached the target. Pass 1 still
+        # contributes duration (P1); the aggregate excludes it (P2).
+        stop_reason = "cache_precondition_incompatibility"
+    elif accumulated >= target_s:
         stop_reason = "target_reached"
     elif not can_repeat:
         if not cmd_ok:
@@ -684,6 +692,30 @@ def _run_duration_repetition(first_pass_record, cmd, target_s, budget_s,
                 break
             next_pass = pass_n + 1
             cache_record = cache_precondition_fn(next_pass)
+            # P2 (WO §3 finding 3): preconditioning (e.g. warm_repeat
+            # reading the corpus) can consume the budget. Recalculate the
+            # remaining budget AFTER it and never launch a measurement
+            # that overruns the total repetition budget; record the
+            # preconditioning attempt on a not-launched pass record.
+            remaining_budget = budget_s - (time.monotonic() - t_start)
+            if remaining_budget <= 0:
+                pending = _build_duration_pass_record(
+                    pass_n=next_pass, is_initial=False,
+                    timed_out=False, process_rc=None,
+                    dist_result=None, dist_result_error=None,
+                    wall_s_harness=None,
+                    cache_record=cache_record,
+                    cleanup=None,
+                    output_dir=(os.path.join(out_dir, "duration_passes",
+                                             "pass%d" % next_pass)
+                                if out_dir else None))
+                pending["status"] = "not_launched_budget_exhausted"
+                pending["failure_reason"] = (
+                    "repetition budget exhausted during cache "
+                    "preconditioning")
+                pass_records.append(pending)
+                stop_reason = "repetition_budget_exhausted"
+                break
             if case_timeout_s is not None:
                 timeout_s = min(float(case_timeout_s), remaining_budget)
             else:
@@ -1196,34 +1228,34 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
     case_timeout_s = float(timeout)
     repeat_runs = {}
     stop_reason = None
-    if dq_target is not None:
-        if accumulated >= float(dq_target):
-            stop_reason = "target_reached"
-        elif float(dq_target) > 0:
-            cmd_ok = bool(use_dist and 'cmd' in locals() and cmd)
+    if dq_target is not None and float(dq_target) > 0:
+        # The authoritative loop decides all stop reasons, including
+        # initial-pass cache incompatibility (P2 finding 2) and
+        # target_reached; see _run_duration_repetition.
+        cmd_ok = bool(use_dist and 'cmd' in locals() and cmd)
 
-            def _repeat_runner(pass_n, timeout_s, _cmd=list(cmd) if cmd_ok else None):
-                # Real lifecycle runner; `_run_duration_repetition` calls
-                # this with (pass_n, timeout_s) positionally.
-                return _run_repeat_pass(_cmd, timeout_s)
+        def _repeat_runner(pass_n, timeout_s, _cmd=list(cmd) if cmd_ok else None):
+            # Real lifecycle runner; `_run_duration_repetition` calls
+            # this with (pass_n, timeout_s) positionally.
+            return _run_repeat_pass(_cmd, timeout_s)
 
-            def _cache_fn(pass_n):
-                # Per-pass preconditioning, applied before each pass runs
-                # (outside the timed interval).
-                return _cache_precondition(spec, resolved)
+        def _cache_fn(pass_n):
+            # Per-pass preconditioning, applied before each pass runs
+            # (outside the timed interval).
+            return _cache_precondition(spec, resolved)
 
-            dq_passes, accumulated, stop_reason, repeat_runs = \
-                _run_duration_repetition(
-                    first_pass_record, list(cmd) if cmd_ok else None,
-                    float(dq_target), rep_budget_s,
-                    _repeat_runner, _cache_fn, case_timeout_s=case_timeout_s,
-                    out_dir=out_dir)
-            for rec in dq_passes[1:]:
-                run = repeat_runs.get(rec["pass"]) or {}
-                _write_duration_pass_files(rec["output_dir"], rec,
-                                           run.get("stdout", ""),
-                                           run.get("stderr", ""),
-                                           rec.get("dist_result"))
+        dq_passes, accumulated, stop_reason, repeat_runs = \
+            _run_duration_repetition(
+                first_pass_record, list(cmd) if cmd_ok else None,
+                float(dq_target), rep_budget_s,
+                _repeat_runner, _cache_fn, case_timeout_s=case_timeout_s,
+                out_dir=out_dir)
+        for rec in dq_passes[1:]:
+            run = repeat_runs.get(rec["pass"]) or {}
+            _write_duration_pass_files(rec["output_dir"], rec,
+                                       run.get("stdout", ""),
+                                       run.get("stderr", ""),
+                                       rec.get("dist_result"))
     dq_repetition_used = len(dq_passes) > 1
     dq_repetition_capped = bool(
         dq_repetition_used and dq_target is not None

@@ -2889,6 +2889,104 @@ class TestC3DurationRepetitionCorrections(unittest.TestCase):
             self.assertFalse(agg["aggregate_valid"])
             self.assertTrue(any("cache" in r for r in agg["aggregate_invalid_reasons"]))
 
+    # -- P2 finding 2: initial-pass cache incompatibility (WO §2) ----------
+    def _incompatible_initial_cp(self):
+        return {"requested_policy": "drop_caches_if_privileged",
+                "policy": "drop_caches_if_privileged",
+                "achieved": False, "privileged_action_attempted": True,
+                "privileged_action_succeeded": False,
+                "fallback": "best_effort_os_cache",
+                "notes": ["drop_caches not available/permitted"],
+                "actions": [{"action": "write_drop_caches_3", "ok": False}]}
+
+    def test_incompatible_initial_pass_below_target_stops_repetition(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_cpinv_init_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.4, consumed=1000)
+            runner_calls = []
+
+            def runner(pass_n, timeout_s):
+                runner_calls.append(pass_n)
+                return _fake_repeat_run(_mk_fake_dist_result(wall=0.5, consumed=2000),
+                                        wall=0.5)
+
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.5),
+                [_dist_behavior(dr1)],
+                repeat_runner=runner,
+                cache_fn=lambda spec_, resolved_: self._incompatible_initial_cp())
+            dq = m["duration_qualification"]
+            self.assertEqual(dq["stop_reason"], "cache_precondition_incompatibility")
+            self.assertEqual(dq["pass_count"], 1)
+            self.assertFalse(dq["repetition_used"])
+            self.assertEqual(runner_calls, [])
+            # P1: pass 1 still qualifies (contributes duration); P2: the
+            # aggregate excludes it -> invalid.
+            self.assertTrue(dq["passes"][0]["duration_contributes"])
+            self.assertFalse(dq["passes"][0]["cache_compatible"])
+            agg = m["duration_aggregate"]
+            self.assertEqual(agg["contributing_passes"], [])
+            self.assertFalse(agg["aggregate_valid"])
+            self.assertEqual(agg["excluded_passes"],
+                             [{"pass": 1, "reason": "cache_precondition_incompatible"}])
+
+    def test_incompatible_initial_pass_reaching_target_reports_incompatibility(self):
+        with tempfile.TemporaryDirectory(prefix="c3dq_cpinv_tgt_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.4, consumed=1000)
+            m, out = self._run_case_fake(
+                td, self._base_spec(min_duration_seconds=0.2),
+                [_dist_behavior(dr1)],
+                cache_fn=lambda spec_, resolved_: self._incompatible_initial_cp())
+            dq = m["duration_qualification"]
+            self.assertEqual(dq["stop_reason"], "cache_precondition_incompatibility")
+            self.assertTrue(dq["meets_target"])  # 0.4 >= 0.2: duration met...
+            self.assertFalse(dq["repetition_used"])
+            self.assertEqual(dq["pass_count"], 1)
+            self.assertFalse(m["duration_aggregate"]["aggregate_valid"])
+
+    # -- P2 finding 3: preconditioning overruns the budget (WO §3) ----------
+    def test_repetition_budget_exhausted_by_preconditioning(self):
+        import stage0.run_case as rc
+        dr0 = _mk_fake_dist_result(wall=0.01, consumed=100, reservations=1)
+        first = rc._build_duration_pass_record(
+            1, True, False, 0, dr0, None, 0.01,
+            {"policy": "best_effort_os_cache"})
+        budget = 0.2
+        clock = {"t": 0.0}
+        runner_calls = []
+
+        def fake_runner(pass_n, timeout_s):
+            runner_calls.append(pass_n)
+            clock["t"] += 0.05
+            dr = _mk_fake_dist_result(wall=0.01, consumed=100, reservations=1)
+            return {"rc": 0, "stdout": "",
+                    "stderr": "DIST_RESULT " + json.dumps(dr, sort_keys=True),
+                    "wall_s": 0.01, "timed_out": False,
+                    "cleanup": {"pgid": 1, "terminate_signals": [],
+                                "reaped": True, "group_gone": True,
+                                "members_after": []}}
+
+        def fake_precondition(pass_n):
+            # preconditioning advances the clock past the remaining budget
+            clock["t"] += 0.3
+            return {"policy": "best_effort_os_cache", "achieved": True}
+
+        orig = time.monotonic
+        rc.time.monotonic = lambda: clock["t"]
+        try:
+            passes, accumulated, stop, runs = rc._run_duration_repetition(
+                first, ["fake-cmd"], 999.0, budget, fake_runner,
+                fake_precondition, case_timeout_s=120.0, out_dir=None)
+        finally:
+            rc.time.monotonic = orig
+        self.assertEqual(stop, "repetition_budget_exhausted")
+        self.assertEqual(runner_calls, [])
+        self.assertEqual(len(passes), 2)
+        p2 = passes[1]
+        self.assertEqual(p2["status"], "not_launched_budget_exhausted")
+        self.assertFalse(p2["duration_contributes"])
+        self.assertEqual(p2["cache_precondition"]["policy"], "best_effort_os_cache")
+        self.assertIn("budget", p2["failure_reason"])
+
     # -- loop-level: bounds, budget, cleanup (WO §5, §6.11, §6.12) ----------
     def test_repetition_budget_enforced_and_per_pass_timeout_bounded(self):
         import stage0.run_case as rc

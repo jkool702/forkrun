@@ -213,6 +213,24 @@ def main():
                                          if isinstance(dq, dict) else [])
         rec["duration_excluded_passes"] = agg.get("excluded_passes") or []
         rec["aggregate_invalid_reasons"] = agg.get("aggregate_invalid_reasons") or []
+        # C3-corrections-2 (P1 finding 1): repeated trials must not mix
+        # pass-1 headline data with aggregate data. Pass 1 validity and
+        # scan/consumed bytes stay as provenance (v_perf, scan_bytes,
+        # dist.total_consumed); headline uses the composite aggregate:
+        # effective performance validity = aggregate_valid, and headline
+        # scan/consumed = aggregate scan/consumed when valid.
+        if isinstance(dq, dict) and dq.get("repetition_used") and isinstance(agg, dict):
+            rec["v_perf_headline"] = bool(agg.get("aggregate_valid"))
+            if agg.get("aggregate_valid"):
+                rec["headline_scanned"] = agg.get("aggregate_scanned_bytes")
+                rec["headline_consumed"] = agg.get("aggregate_consumed_bytes")
+            else:
+                rec["headline_scanned"] = None
+                rec["headline_consumed"] = None
+        else:
+            rec["v_perf_headline"] = None
+            rec["headline_scanned"] = rec.get("scan_bytes")
+            rec["headline_consumed"] = (rec.get("dist") or {}).get("total_consumed")
         if isinstance(dq, dict) and dq.get("repetition_used"):
             if agg.get("aggregate_valid"):
                 rec["throughput_bps"] = agg.get("aggregate_throughput_bps")
@@ -326,7 +344,10 @@ def main():
                     # complete/functionally correct trials (readable, complete, functionally correct)
                     func_valids = [r for r in perf_class_recs if (not r.get("invalid")) and r.get("correct_functional") is True and r.get("complete") is True]
                     # performance-valid trials only for headline performance stats
-                    perf_valids = [r for r in func_valids if r.get("v_perf") is True]
+                    perf_valids = [r for r in func_valids
+                                   if (r.get("v_perf_headline")
+                                       if r.get("v_perf_headline") is not None
+                                       else r.get("v_perf")) is True]
                     numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
 
                     def med(key, src):
@@ -351,16 +372,16 @@ def main():
 
                     scan_s = "n/a"
                     if not noncomparable_kernel_mix and perf_for_medians:
-                        scan_vals = [r.get("scan_bytes") for r in perf_for_medians if r.get("scan_bytes") is not None]
-                        cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in perf_for_medians if r.get("dist")]
+                        scan_vals = [r.get("headline_scanned") for r in perf_for_medians if r.get("headline_scanned") is not None]
+                        cons_vals = [r.get("headline_consumed") for r in perf_for_medians if r.get("headline_consumed") is not None]
                         if scan_vals or cons_vals:
                             s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
                             c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
                             scan_s = "%s/%s" % (s_med, c_med)
                     elif func_valids and not noncomparable_kernel_mix:
                         # show evidence context from functionally-correct trials even if no perf-valid headline medians
-                        scan_vals = [r.get("scan_bytes") for r in func_valids if r.get("scan_bytes") is not None]
-                        cons_vals = [((r.get("dist") or {}).get("total_consumed")) for r in func_valids if r.get("dist")]
+                        scan_vals = [r.get("headline_scanned") for r in func_valids if r.get("headline_scanned") is not None]
+                        cons_vals = [r.get("headline_consumed") for r in func_valids if r.get("headline_consumed") is not None]
                         if scan_vals or cons_vals:
                             s_med = int(statistics.median([v for v in scan_vals if v is not None])) if any(v is not None for v in scan_vals) else "n/a"
                             c_med = int(statistics.median([v for v in cons_vals if v is not None])) if any(v is not None for v in cons_vals) else "n/a"
@@ -379,7 +400,10 @@ def main():
                             notes.append("no-performance-valid-trials")
                     if noncomparable_kernel_mix:
                         notes.append("mixed-kernels-not-comparable")
-                    perf_invalid_or_unknown = [r for r in func_valids if r.get("v_perf") is not True]
+                    perf_invalid_or_unknown = [r for r in func_valids
+                                               if (r.get("v_perf_headline")
+                                                   if r.get("v_perf_headline") is not None
+                                                   else r.get("v_perf")) is not True]
                     if perf_invalid_or_unknown:
                         notes.append("func-but-perf-invalid/unknown=%d" % len(perf_invalid_or_unknown))
                     if placement_class_recs:
