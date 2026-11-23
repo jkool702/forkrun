@@ -1185,6 +1185,14 @@ done < "$EXPERIMENTS_FILE"
 python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" --input "$C4_FIRST_INPUT" \
   || echo "WARN: env-after capture failed" >&2
 
+# C4 — 7.2: environment/topology drift detection (master WO 7.2).
+# Critical drift invalidates the campaign: trials run under different system
+# configurations are not silently aggregated. The machine-readable drift
+# report is preserved alongside the raw env manifests.
+DRIFT_RC=0
+python3 stage0/env_drift.py --before "$OUT/env/env-before.json" --after "$OUT/env/env-after.json" \
+  --out "$OUT/env/drift-report.json" || DRIFT_RC=$?
+
 python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" "$MAPPING_PROFILES" "$PLACEMENT_EXPERIMENTS" "$CACHE_PRECONDITION_POLICY" "$MIN_DURATION_SECONDS" <<'PY'
 import json, os, sys, time
 (out,cid,sha,trials,outcomes,seed,cache_policy,shuf_sc,consumer_kernel,strict_affinity,strict_mbind,phys_nodes,mapping_profiles,placement_experiments,
@@ -1291,11 +1299,25 @@ doc={"schema":"dist-campaign/5","campaign_id":cid,"source_sha":sha,"trials":int(
      "sweep_axes": (preval or {}).get('sweep_axes') or (plan or {}).get('sweep_axes') or [],
      "parameter_sets": (preval or {}).get('parameter_sets') or (plan or {}).get('parameter_sets') or [],
      "outcomes":rows,"all_ok":all_ok,"finished_epoch":time.time()}
+drift_doc=None
+drift_path=os.path.join(out,'env','drift-report.json')
+if os.path.isfile(drift_path):
+    try:
+        with open(drift_path) as f: drift_doc=json.load(f)
+    except Exception:
+        drift_doc={"campaign_valid": False, "drift_count": -1, "note": "drift-report unreadable"}
+doc["drift"]=drift_doc
+doc["drift_invalidated"]=(False if not drift_doc else (not drift_doc.get("campaign_valid", False)))
 with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,indent=2,sort_keys=True)
 PY
 
 echo "=== dist-ingest campaign: report"
 python3 stage0/dist_ingest/report_dist.py --campaign "$OUT" --out "$OUT/report.md" || echo "WARN: report generation failed" >&2
+
+if [ "$DRIFT_RC" -ne 0 ]; then
+  echo "dist-campaign: CRITICAL DRIFT detected — campaign invalidated (drift-report: $OUT/env/drift-report.json)" >&2
+  exit 1
+fi
 
 if [ "${#FAILURES[@]}" -gt 0 ]; then
   echo "dist-campaign: ${#FAILURES[@]} trial(s) failed" >&2
