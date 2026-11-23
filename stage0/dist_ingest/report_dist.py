@@ -124,6 +124,36 @@ def main():
             rec["throughput_bps"] = (dr.get("total_consumed", 0) / dr.get("wall_seconds", 1e9)) if dr.get("wall_seconds") else None
             rec["reservations"] = dr.get("reservations_total")
             rec["ingest_cpu_ns"] = dr.get("ingest_cpu_ns")
+            # C4 — additional per-trial metrics (master WO 6.4).
+            rec["consumer_cpu_ns"] = dr.get("consumer_cpu_ns")
+            rec["total_read"] = dr.get("total_read")
+            rec["total_assigned"] = dr.get("total_assigned")
+            rec["total_published"] = dr.get("total_published")
+            _nodes = dr.get("nodes") or []
+            rec["wait_ns_read"] = sum(int(n.get("read_wait_ns") or 0) for n in _nodes)
+            rec["wait_ns_claim"] = sum(int(n.get("claim_wait_ns") or 0) for n in _nodes)
+            rec["wait_ns_publish"] = sum(int(n.get("publish_wait_ns") or 0) for n in _nodes)
+            rec["wait_ns_consume"] = sum(int(n.get("consume_wait_ns") or 0) for n in _nodes)
+            rec["peer_observe_ns"] = sum(int(n.get("peer_observe_ns") or 0) for n in _nodes)
+            rec["peer_observe_count"] = sum(int(n.get("peer_observe_count") or 0) for n in _nodes)
+            rec["max_effective_backlog"] = sum(int(n.get("max_effective_backlog") or 0) for n in _nodes)
+            rec["max_published_backlog"] = sum(int(n.get("max_published_backlog") or 0) for n in _nodes)
+            rec["reservations_hist"] = dr.get("res_hist") or []
+            _pl = [n.get("placement") or {} for n in _nodes]
+            rec["placement_sampling_overhead"] = {
+                "total_addressable_pages": sum(int(p.get("total_addressable_pages") or 0) for p in _pl),
+                "sampled_pages": sum(int(p.get("sampled_pages") or 0) for p in _pl),
+                "sample_limit_per_allocation": sum(int(p.get("sample_limit_per_allocation") or 0) for p in _pl),
+            } if _pl else None
+            rec["per_node_bytes"] = [
+                {"node": n.get("node"),
+                 "bytes_assigned": n.get("bytes_assigned"),
+                 "bytes_read": n.get("bytes_read"),
+                 "bytes_published": n.get("bytes_published"),
+                 "bytes_consumed": n.get("bytes_consumed"),
+                 "chunks_published": n.get("chunks_published"),
+                 "chunks_consumed": n.get("chunks_consumed")}
+                for n in _nodes]
             rec["consumer_kernel"] = safe_get(dr, "consumer_kernel", "name", default=(safe_get(dr, "comparability", "consumer_kernel")))
             scan_ev = safe_get(dr, "consumer_kernel", "scan_bytes_evidence", default={}) or {}
             rec["scan_bytes"] = scan_ev.get("total_consumer_bytes_scanned", dr.get("total_consumer_bytes_scanned"))
@@ -501,6 +531,15 @@ def main():
                             fmt_tri(r.get("v_mempolicy")), fmt_tri(r.get("v_placement_obs")), fmt_tri(r.get("v_numa_placement")),
                             dr.get("correct"), dr.get("overlap_detected"), dr.get("lost_detected"), dr.get("duplicate_detected"),
                             dr.get("reservations_total"), dr.get("rc")))
+                        # C4 — additional per-trial metrics (master WO 6.4).
+                        lines.append("  - trial metrics: ingest_cpu_ns=%s consumer_cpu_ns=%s total_read=%s total_published=%s "
+                                     "waits[read/claim/pub/consume/peer_ns]=%s/%s/%s/%s/%s peer_observe_count=%s max_effective_backlog=%s max_published_backlog=%s "
+                                     "reservations_hist=%s placement_sampling=%s per_node_bytes=%s" % (
+                            r.get("ingest_cpu_ns"), r.get("consumer_cpu_ns"), r.get("total_read"), r.get("total_published"),
+                            r.get("wait_ns_read"), r.get("wait_ns_claim"), r.get("wait_ns_publish"), r.get("wait_ns_consume"), r.get("peer_observe_ns"),
+                            r.get("peer_observe_count"), r.get("max_effective_backlog"), r.get("max_published_backlog"),
+                            r.get("reservations_hist"), r.get("placement_sampling_overhead"),
+                            [(n.get("node"), n.get("bytes_assigned"), n.get("bytes_read"), n.get("bytes_published"), n.get("bytes_consumed")) for n in (r.get("per_node_bytes") or [])]))
                         mpv = dr.get("mapping_provenance") or {}
                         if mpv:
                             lines.append("  - mapping: profile=%s variant=%s phys=%s spans_sockets=%s affinity_verified=%s" % (
