@@ -1312,14 +1312,30 @@ doc={"schema":"dist-campaign/5","campaign_id":cid,"source_sha":sha,"trials":int(
      "parameter_sets": (preval or {}).get('parameter_sets') or (plan or {}).get('parameter_sets') or [],
      "outcomes":rows,"all_ok":all_ok,"finished_epoch":time.time()}
 drift_doc=None
+drift_error=None
 drift_path=os.path.join(out,'env','drift-report.json')
 if os.path.isfile(drift_path):
     try:
         with open(drift_path) as f: drift_doc=json.load(f)
     except Exception:
-        drift_doc={"campaign_valid": False, "drift_count": -1, "note": "drift-report unreadable"}
+        drift_doc=None
+        drift_error="drift-report unreadable"
+# C4/C5 corrections-1 (P1.4): explicit drift-assessment state; fail closed --
+# a missing or failed drift report is NOT equivalent to "no drift".
+if isinstance(drift_doc, dict) and drift_doc.get("campaign_valid"):
+    drift_assessment="valid"
+elif drift_doc is not None:
+    drift_assessment="invalidated"
+elif drift_error:
+    drift_assessment="failed"
+elif os.path.isfile(drift_path):
+    drift_assessment="unreadable"
+else:
+    drift_assessment="unavailable"
 doc["drift"]=drift_doc
-doc["drift_invalidated"]=(False if not drift_doc else (not drift_doc.get("campaign_valid", False)))
+doc["drift_assessment"]=drift_assessment
+doc["drift_invalidated"]=(drift_assessment in ("invalidated", "failed", "unavailable", "unreadable"))
+doc["drift_error"]=drift_error
 binary_prov=None
 binary_prov_path=os.path.join(out,'env','binary-provenance.json')
 if os.path.isfile(binary_prov_path):
@@ -1333,7 +1349,11 @@ with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,
 PY
 
 echo "=== dist-ingest campaign: report"
-python3 stage0/dist_ingest/report_dist.py --campaign "$OUT" --out "$OUT/report.md" || echo "WARN: report generation failed" >&2
+# P2.7/P2.10 (WO review): report-generation failure affects the final
+# status (the stage report is a declared deliverable; diagnostic
+# calibration failure remains optional).
+python3 stage0/dist_ingest/report_dist.py --campaign "$OUT" --out "$OUT/report.md" \
+  || exit 1
 
 if [ "$DRIFT_RC" -ne 0 ]; then
   echo "dist-campaign: CRITICAL DRIFT detected — campaign invalidated (drift-report: $OUT/env/drift-report.json)" >&2

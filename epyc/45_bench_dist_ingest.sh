@@ -49,13 +49,26 @@ for f in 20_benchmarks/numa5m/numa5m_part_a.csv \
 done
 
 # --- hardware calibration (WO 8) -------------------------------------------
+CALIB_RC=0
 if deadline_ok 600; then
-    run_logged "$OUTD/numa_calibration.json" "numa-calibration" \
+    # P1.1: the calibration log and the calibration JSON artifact have
+    # separate paths (run_logged appends log output to its logfile).
+    run_logged "$OUTD/numa_calibration.log" "numa-calibration" \
         python3 stage0/numa_calibrate.py \
             --out "$OUTD/numa_calibration.json" \
             --samples "${EPYC_NUMA_CALIB_SAMPLES:-3}" \
             --size-mb "${EPYC_NUMA_CALIB_SIZE_MB:-32}" || \
         log "numa-calibration produced no report (continuing; diagnostic-only stage)"
+    # P1.1 (integration check): the calibration JSON artifact must parse
+    # after the stage runs (WO review finding 1).
+    if [ -f "$OUTD/numa_calibration.json" ]; then
+        python3 - "$OUTD/numa_calibration.json" >/dev/null <<'PY' || CALIB_RC=1
+import json, sys
+with open(sys.argv[1]) as f:
+    json.load(f)
+PY
+        [ "$CALIB_RC" -eq 0 ] || { err "numa_calibration.json is not valid JSON (WO review finding 1)"; }
+    fi
 else
     stage_skip "45_bench_dist_ingest_calib" "deadline"
 fi
@@ -76,16 +89,22 @@ run_logged "$OUTD/dist_ingest_campaign.log" "dist-ingest-campaign" \
 [ -f "$CAMP/campaign-manifest.json" ] && log "campaign manifest: $CAMP/campaign-manifest.json"
 [ -f "$CAMP/report.md" ] && log "campaign report: $CAMP/report.md"
 
+# The stage assumes production-reference results (stage 41_bench_numa5m)
+# were recorded separately (WO 9.2): if 41 has not run, run it first
+# (`bash epyc/41_bench_numa5m.sh`).
+
 # The stage's own report: dist_ingest_report.md (WO 9.1: the new stage
-# retains its own immutable output directory and report).
+# retains its own immutable output directory and report). P2.7/P2.10:
+# report-generation failure affects the final status.
 banner "45 bench_dist_ingest — dist report"
 if [ -f "$CAMP/campaign-manifest.json" ]; then
     run_logged "$OUTD/dist_ingest_report.log" "dist-ingest-report" \
         python3 stage0/dist_ingest/report_dist.py \
             --campaign "$CAMP" --out "$OUTD/dist_ingest_report.md" \
-            || warn "dist-ingest report generation failed (see $OUTD/dist_ingest_report.log)"
-    [ -f "$OUTD/dist_ingest_report.md" ] && log "stage report: $OUTD/dist_ingest_report.md"
+            || { RC=1; warn "dist-ingest report generation failed (see $OUTD/dist_ingest_report.log)"; }
+    [ -f "$OUTD/dist_ingest_report.md" ] && log "stage report: $OUTD/dist_ingest_report.md" || RC=1
 fi
+[ "$RC" -eq 0 ] && [ "$CALIB_RC" -ne 0 ] && RC=1
 
 banner "45 bench_dist_ingest COMPLETE"
 exit $RC

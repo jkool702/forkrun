@@ -65,6 +65,16 @@ def main():
     camp = load_json(os.path.join(args.campaign, "campaign-manifest.json"))
     outcomes = camp.get("outcomes", [])
 
+    # C4/C5 corrections-1 (P1.4): campaign drift fail-closed — an
+    # invalidated/failed/unavailable campaign suppresses headline
+    # performance medians; a missing drift report is "unavailable",
+    # never "no drift".
+    drift = camp.get("drift")
+    drift_assessment = camp.get("drift_assessment")
+    if drift_assessment is None and isinstance(drift, dict):
+        drift_assessment = "invalidated" if drift.get("campaign_valid") is False else "valid"
+    campaign_drift_invalidated = drift_assessment in ("invalidated", "failed", "unavailable", "unreadable")
+
     groups = defaultdict(list)
     invalid = []
     for o in outcomes:
@@ -138,8 +148,20 @@ def main():
             rec["wait_ns_consume"] = sum(int(n.get("consume_wait_ns") or 0) for n in _nodes)
             rec["peer_observe_ns"] = sum(int(n.get("peer_observe_ns") or 0) for n in _nodes)
             rec["peer_observe_count"] = sum(int(n.get("peer_observe_count") or 0) for n in _nodes)
+            # C4/C5 corrections-1 (P2.5): per-node maxima can occur at
+            # different times; their sum is not the max at any instant.
+            # Preserve the per-node values and label the aggregate as a
+            # sum of node maxima (never an ordinary "max").
+            rec["max_effective_backlog_by_node"] = [
+                {"node": n.get("node"), "max_effective_backlog": n.get("max_effective_backlog")}
+                for n in _nodes]
             rec["max_effective_backlog"] = sum(int(n.get("max_effective_backlog") or 0) for n in _nodes)
+            rec["max_effective_backlog_sum_of_node_maxima"] = rec["max_effective_backlog"]
+            rec["max_published_backlog_by_node"] = [
+                {"node": n.get("node"), "max_published_backlog": n.get("max_published_backlog")}
+                for n in _nodes]
             rec["max_published_backlog"] = sum(int(n.get("max_published_backlog") or 0) for n in _nodes)
+            rec["max_published_backlog_sum_of_node_maxima"] = rec["max_published_backlog"]
             rec["reservations_hist"] = dr.get("res_hist") or []
             _pl = [n.get("placement") or {} for n in _nodes]
             rec["placement_sampling_overhead"] = {
@@ -225,6 +247,7 @@ def main():
                                              "best_effort_os_cache")
         rec["cache_precondition"] = m.get("cache_precondition") if isinstance(m, dict) else None
         rec["min_duration_seconds"] = o.get("min_duration_seconds") if o.get("min_duration_seconds") is not None else spec.get("min_duration_seconds")
+        rec["campaign_drift_invalidated"] = campaign_drift_invalidated
         rec["duration_qualification"] = m.get("duration_qualification") if isinstance(m, dict) else None
         rec["duration_aggregate"] = m.get("duration_aggregate") if isinstance(m, dict) else None
         # C3-corrections-2: repeated trials report the QUALIFIED AGGREGATE
@@ -322,6 +345,13 @@ def main():
                  "Headline performance medians use performance-valid trials only; full-byte-scan and `none` results are not combined into one comparable summary. "
                  "C2: performance trials (`placement_sampling=off`, trial_class=performance) are isolated from in-run move_pages sampling overhead; "
                  "placement-validation experiments (`placement_sampling=on`, trial_class=placement_validation) are distinct, linked experiments and must not be mixed into performance headline statistics.")
+    if campaign_drift_invalidated:
+        lines.append("")
+        _status = (drift_assessment or "unavailable").upper()
+        lines.append("> **Campaign drift status: %s** — campaign validity was not established; see `env/drift-report.json`." % _status)
+        if _status == "INVALIDATED":
+            lines.append("> Critical drift was detected during the campaign; the campaign was invalidated.")
+        lines.append("> **Headline performance medians are suppressed** — this campaign's comparative performance is not established; do not quote throughput numbers from it.")
     lines.append("")
 
     # C3: grouping includes parameter_set_id to keep sweep axes attributable.
@@ -388,6 +418,10 @@ def main():
                                    if (r.get("v_perf_headline")
                                        if r.get("v_perf_headline") is not None
                                        else r.get("v_perf")) is True]
+                    if campaign_drift_invalidated:
+                        # WO 9.5 (P1.4): fail closed — when campaign validity
+                        # is not established, suppress headline medians.
+                        perf_valids = []
                     numa_true = sum(1 for r in func_valids if r.get("v_numa_placement") is True)
 
                     def med(key, src):
@@ -448,6 +482,11 @@ def main():
                         notes.append("func-but-perf-invalid/unknown=%d" % len(perf_invalid_or_unknown))
                     if placement_class_recs:
                         notes.append("placement-validation=%d(distinct,excluded)" % len(placement_class_recs))
+                    # C4/C5 corrections-1 (P1.4): drift-invalidated campaigns
+                    # are flagged loudly in the headline notes too.
+                    if campaign_drift_invalidated:
+                        notes.append("campaign-drift-%s-headline-medians-suppressed"
+                                     % (drift_assessment or "invalidated"))
                     # C3: duration qualification visibility
                     dq_vals = [r.get("duration_qualification") for r in func_valids if isinstance(r.get("duration_qualification"), dict)]
                     if dq_vals and any(v.get("target_seconds") is not None for v in dq_vals):
@@ -538,11 +577,12 @@ def main():
                             lines.append("  - binary: libdist_ingest_sha256=%s" % (r.get("libdist_ingest_sha256"),))
                         # C4 — additional per-trial metrics (master WO 6.4).
                         lines.append("  - trial metrics: ingest_cpu_ns=%s consumer_cpu_ns=%s total_read=%s total_published=%s "
-                                     "waits[read/claim/pub/consume/peer_ns]=%s/%s/%s/%s/%s peer_observe_count=%s max_effective_backlog=%s max_published_backlog=%s "
+                                     "waits[read/claim/pub/consume/peer_ns]=%s/%s/%s/%s/%s peer_observe_count=%s "
+                                     "max_effective_backlog(sum of node maxima)=%s max_published_backlog(sum of node maxima)=%s "
                                      "reservations_hist=%s placement_sampling=%s per_node_bytes=%s" % (
                             r.get("ingest_cpu_ns"), r.get("consumer_cpu_ns"), r.get("total_read"), r.get("total_published"),
                             r.get("wait_ns_read"), r.get("wait_ns_claim"), r.get("wait_ns_publish"), r.get("wait_ns_consume"), r.get("peer_observe_ns"),
-                            r.get("peer_observe_count"), r.get("max_effective_backlog"), r.get("max_published_backlog"),
+                            r.get("peer_observe_count"), r.get("max_effective_backlog_by_node"), r.get("max_published_backlog_by_node"),
                             r.get("reservations_hist"), r.get("placement_sampling_overhead"),
                             [(n.get("node"), n.get("bytes_assigned"), n.get("bytes_read"), n.get("bytes_published"), n.get("bytes_consumed")) for n in (r.get("per_node_bytes") or [])]))
                         mpv = dr.get("mapping_provenance") or {}
@@ -624,6 +664,9 @@ def main():
     lines.append("- **Workload comparability:** full-byte-scan and no-kernel (`none`) results are not combined into one comparable performance summary.")
     lines.append("- **Production reference:** production_ref/control is separate reference only (not apples-to-apples).")
     lines.append("- **Fake/local NUMA:** not evidence of physical locality/scalability. `MPOL_PREFERRED` success is not physical placement proof.")
+    if campaign_drift_invalidated:
+        lines.append("- **Campaign drift (WO 9.5):** this campaign's `drift-report.json` records status `%s`; headline medians are suppressed. Do not quote comparative performance numbers until a drift-valid campaign is re-run."
+                     % (drift_assessment or "unavailable"))
     lines.append("")
 
     verdict = "INCONCLUSIVE (local/fake-NUMA prototype campaign)"

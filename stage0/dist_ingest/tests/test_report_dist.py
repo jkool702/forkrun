@@ -595,5 +595,100 @@ class TestReportDistRepeatedTrials(unittest.TestCase):
         self.assertIn("duration_pass: pass=1 initial=true status=success", text)
 
 
+class TestReportDistDriftFailClosed(unittest.TestCase):
+    """C4/C5 corrections-1 (P1.4): campaign drift fail-closed — an
+    invalidated/unavailable campaign suppresses headline medians; a missing
+    drift report is 'unavailable', never 'no drift'."""
+
+    V_TRUE = {"functional_correctness": True, "performance_measurement": True,
+              "affinity": True, "memory_policy_application": True,
+              "placement_observed": True, "numa_placement": True}
+
+    def _campaign_with_drift(self, tmp, drift_doc, drift_assessment):
+        camp = {
+            "schema": "dist-campaign/5", "campaign_id": "drift-test",
+            "source_sha": "dead", "all_ok": True,
+            "outcomes": [
+                {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa",
+                 "trial": 1, "status": "ok",
+                 "manifest": "cases/a/trial1/manifest.json",
+                 "mapping_id": "legacy", "trial_class": "performance",
+                 "placement_sampling": "off"},
+            ],
+            "drift": drift_doc,
+            "drift_assessment": drift_assessment,
+        }
+        os.makedirs(os.path.join(tmp, "cases/a/trial1"), exist_ok=True)
+        m = _dist_manifest_base(complete=True, wall=1.25, consumed=1000,
+                                validity=self.V_TRUE)
+        with open(os.path.join(tmp, "cases/a/trial1/manifest.json"), "w") as f:
+            json.dump(m, f)
+        with open(os.path.join(tmp, "campaign-manifest.json"), "w") as f:
+            json.dump(camp, f)
+        return camp
+
+    def _run_report(self, tmp):
+        out = os.path.join(tmp, "report.md")
+        p = subprocess.run([sys.executable, REPORT, "--campaign", tmp, "--out", out],
+                           capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(p.returncode, 0, msg=p.stderr + "\n" + p.stdout)
+        with open(out) as fh:
+            return fh.read()
+
+    def test_campaign_drift_invalidated_suppresses_headline_medians(self):
+        tmp = tempfile.mkdtemp(prefix="rptdrift1_")
+        try:
+            self._campaign_with_drift(
+                tmp,
+                drift_doc={"campaign_valid": False, "drift_count": 1,
+                           "critical": [{"field": "kernel.cmdline", "critical": True}]},
+                drift_assessment="invalidated")
+            text = self._run_report(tmp)
+            self.assertIn("Campaign drift status: INVALIDATED", text)
+            self.assertIn("Headline performance medians are suppressed", text)
+            # headline row: medians suppressed -> n/a; perf-valid count is 0
+            # (no trials qualify because the campaign is not valid).
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 0 | 1 | n/a | n/a |", text)
+            self.assertIn("campaign-drift-invalidated-headline-medians-suppressed", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_campaign_drift_unavailable_suppresses(self):
+        tmp = tempfile.mkdtemp(prefix="rptdrift2_")
+        try:
+            self._campaign_with_drift(tmp, drift_doc=None, drift_assessment="unavailable")
+            text = self._run_report(tmp)
+            self.assertIn("Campaign drift status: UNAVAILABLE", text)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 0 | 1 | n/a | n/a |", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_campaign_without_drift_fields_keeps_medians(self):
+        # Old campaigns without drift fields: medians preserved (backward compat).
+        tmp = tempfile.mkdtemp(prefix="rptdrift3_")
+        try:
+            camp = {
+                "schema": "dist-campaign/3", "campaign_id": "no-drift",
+                "source_sha": "dead", "all_ok": True,
+                "outcomes": [
+                    {"case": "sc__fixed_faa", "scenario": "sc", "candidate": "fixed_faa",
+                     "trial": 1, "status": "ok",
+                     "manifest": "cases/a/trial1/manifest.json",
+                     "mapping_id": "legacy"},
+                ],
+            }
+            os.makedirs(os.path.join(tmp, "cases/a/trial1"), exist_ok=True)
+            m = _dist_manifest_base(complete=True, wall=2.0, consumed=1000, validity=self.V_TRUE)
+            with open(os.path.join(tmp, "cases/a/trial1/manifest.json"), "w") as f:
+                json.dump(m, f)
+            with open(os.path.join(tmp, "campaign-manifest.json"), "w") as f:
+                json.dump(camp, f)
+            text = self._run_report(tmp)
+            self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 2.000 |", text)
+            self.assertNotIn("Campaign drift status", text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()

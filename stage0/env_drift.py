@@ -92,9 +92,11 @@ _DRIFT_FIELDS = [
      "transparent-hugepage shmem state changed"),
     (("thp", "defrag"), "THP defrag state", True,
      "transparent-hugepage defrag state changed"),
-    # NUMA balancing.
+    # NUMA balancing and scan delay (master WO 7.1/7.2).
     (("cpu_extra", "numa_balancing"), "NUMA balancing", True,
      "kernel.numa_balancing changed"),
+    (("cpu_extra", "numa_scan_delay"), "NUMA scan delay setting", True,
+     "kernel.numa_scan_delay changed"),
     # Cgroup CPU/memory limits.
     (("cgroup", "cpuset_cpus"), "cgroup cpuset cpus", True,
      "cgroup CPU set changed"),

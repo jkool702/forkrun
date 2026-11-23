@@ -115,20 +115,24 @@ def _free(ptr, size):
 
 def _observed_placement(ptr, size):
     """Observed per-node page counts via move_pages (the existing
-    observation mechanism; NOT a mbind()-success proxy)."""
+    observation mechanism; NOT a mbind()-success proxy).
+
+    Returns {"pages_by_node": {...}, "error": None} or
+    {"pages_by_node": None, "error": "..."} on failure.
+    """
     if not ptr:
-        return None
+        return {"pages_by_node": None, "error": "no buffer address"}
     lib = _numa()
     npages = (size + 4095) // 4096
     if npages <= 0:
-        return {}
+        return {"pages_by_node": {}, "error": None}
     page_arr = (ctypes.c_void_p * npages)()
     for i in range(npages):
         page_arr[i] = ptr + i * 4096
     status = (ctypes.c_int * npages)()
     rc = lib.move_pages(0, npages, page_arr, None, status, 0)
     if rc != 0:
-        return {"error": "move_pages rc=%d" % rc}
+        return {"pages_by_node": None, "error": "move_pages rc=%d" % rc}
     counts = {}
     for i in range(npages):
         node = status[i]
@@ -139,7 +143,7 @@ def _observed_placement(ptr, size):
         else:
             key = "not_present"
         counts[key] = counts.get(key, 0) + 1
-    return counts
+    return {"pages_by_node": counts, "error": None}
 
 
 def _summ(times_ns, size):
@@ -172,14 +176,105 @@ def _bench(dst_ptr, src_ptr, size, samples, warmup=3):
     return _summ(times, size)
 
 
+def _run_measurements(nodes, buffers, sink, buf2, size, n,
+                      bench_fn, pin_fn, place_fn):
+    """Run all local + remote read/copy benchmarks with per-measurement
+    evidence (WO review: distinguish local vs remote buffer selection and
+    exercise pinning/placement failures).
+
+    bench_fn(dst_ptr, src_ptr, size, samples) -> timing stats (_bench).
+    pin_fn(cpu) -> {"observed": [...]|None, "error": str|None}.
+    place_fn(ptr, size) -> {"pages_by_node": {...}|None, "error": str|None}.
+
+    Returns {measurement_name: {node/pair_key: result_dict}}, where each
+    result has the _bench stats plus:
+      - observed_cpu_affinity (list|None): the pinned affinity observed
+        during this measurement (per-measurement evidence).
+      - pin_error (str|None); invalid_pinning (bool).
+      - placement: {label: {"pages_by_node": {...}|None, "error": str|None}}
+        — verified placement of every buffer used by the measurement.
+      - placement_error (str|None); invalid_placement (bool).
+    """
+    measurements = {}
+
+    def _meas(dst_ptr, src_ptr, pin_result, placement_ptrs):
+        res = dict(bench_fn(dst_ptr, src_ptr, size, n))
+        pin_result = pin_result or {}
+        res["observed_cpu_affinity"] = pin_result.get("observed")
+        res["pin_error"] = pin_result.get("error")
+        res["invalid_pinning"] = bool(res["pin_error"])
+        placement = {}
+        placement_error = None
+        for label, ptr in placement_ptrs:
+            placement[label] = place_fn(ptr, size)
+            if placement[label].get("error"):
+                placement_error = placement_error or placement[label]["error"]
+        res["placement"] = placement
+        res["placement_error"] = placement_error
+        res["invalid_placement"] = bool(placement_error)
+        return res
+
+    # Local read + copy per node (pinned to the node).
+    for nd in nodes:
+        node = nd["node_id"]
+        pin = pin_fn(nd["cpu"])
+        b1, sk = buffers.get(node), sink.get(node)
+        b2 = buf2.get(node)
+        if b1 and sk:
+            measurements.setdefault("read_local", {})[nd["node_name"]] = \
+                _meas(sk, b1, pin, [("buffers", b1), ("sink", sk)])
+        if b1 and b2:
+            measurements.setdefault("copy_local", {})[nd["node_name"]] = \
+                _meas(b2, b1, pin, [("buffers", b1), ("buf2", b2)])
+
+    # Remote read + copy between node pairs (WO review: remote copy reads
+    # A (local to the thread) and writes B's buffer; dst is on the pair
+    # node B).
+    for a in nodes:
+        for b in nodes:
+            if a["node_id"] == b["node_id"]:
+                continue
+            if not (buffers.get(a["node_id"]) and buffers.get(b["node_id"])
+                    and sink.get(b["node_id"]) and buf2.get(b["node_id"])):
+                continue
+            key = "%s->%s" % (a["node_name"], b["node_name"])
+            # read_remote[A->B]: thread pinned to B, read A's buffer into
+            # B's sink (remote read from A observed while on B).
+            measurements.setdefault("read_remote", {})[key] = \
+                _meas(sink[b["node_id"]], buffers[a["node_id"]],
+                      pin_fn(b["cpu"]),
+                      [("buffers", buffers[a["node_id"]]),
+                       ("sink", sink[b["node_id"]])])
+            # copy_remote[A->B]: thread pinned to A, copy A's buffer into
+            # B's buf2 (remote copy: dst on B is remote from thread A).
+            measurements.setdefault("copy_remote", {})[key] = \
+                _meas(buf2[b["node_id"]], buffers[a["node_id"]],
+                      pin_fn(a["cpu"]),
+                      [("buffers", buffers[a["node_id"]]),
+                       ("buf2", buf2[b["node_id"]])])
+    return measurements
+
+
 def _pin(cpu):
+    """Pin the thread to `cpu`; return evidence.
+
+    Returns {"observed": [cpu...], "error": None} when the pin succeeded, or
+    {"observed": None, "error": "..."} on failure. Evidence is recorded
+    per measurement (WO review: affinity evidence per result, failures
+    marked invalid).
+    """
     if cpu is None:
-        return None
+        return {"observed": None, "error": "no CPU selected for requested placement"}
     try:
         os.sched_setaffinity(0, {cpu})
-        return sorted(os.sched_getaffinity(0))
+        observed = sorted(os.sched_getaffinity(0))
+        if cpu not in observed:
+            return {"observed": observed,
+                    "error": "sched_setaffinity(%s) did not take effect (observed %s)"
+                             % (cpu, observed)}
+        return {"observed": observed, "error": None}
     except OSError as exc:
-        return "pin error: %s" % exc
+        return {"observed": None, "error": "pin error: %s" % exc}
 
 
 def main():
@@ -234,45 +329,12 @@ def main():
         "note": "Diagnostic context only; not included in dist-ingest candidate throughput statistics.",
     }
 
-    # Local read + copy per node (pinned to the node).
-    for nd in nodes:
-        node = nd["node_id"]
-        observed = _pin(nd["cpu"])
-        if isinstance(observed, list):
-            report["observed"]["cpu_affinity_during_pinned"] = observed
-        b1, sk = buffers.get(node), sink.get(node)
-        b2 = buf2.get(node)
-        if b1 and sk:
-            report["measurements"].setdefault("read_local", {})[
-                nd["node_name"]] = _bench(sk, b1, size, n)
-        if b1 and b2:
-            report["measurements"].setdefault("copy_local", {})[
-                nd["node_name"]] = _bench(b2, b1, size, n)
-    report["observed"]["cpu_affinity_during_pinned"] = requested_affinity
-
-    # Remote read + copy between node pairs.
-    for a in nodes:
-        for b in nodes:
-            if a["node_id"] == b["node_id"]:
-                continue
-            if not (buffers.get(a["node_id"]) and buffers.get(b["node_id"])
-                    and sink.get(b["node_id"]) and buf2.get(a["node_id"])):
-                continue
-            key = "%s->%s" % (a["node_name"], b["node_name"])
-            # read_remote[A->B]: thread pinned to B, read A's buffer into
-            # B's sink (remote read from A observed while on B).
-            observed = _pin(b["cpu"])
-            if isinstance(observed, list):
-                report["observed"]["cpu_affinity_during_pinned"] = observed
-            report["measurements"].setdefault("read_remote", {})[key] = \
-                _bench(sink[b["node_id"]], buffers[a["node_id"]], size, n)
-            # copy_remote[A->B]: thread pinned to A, copy A's buffer into
-            # B's buffer (remote copy: dst B is remote from thread A).
-            observed = _pin(a["cpu"])
-            if isinstance(observed, list):
-                report["observed"]["cpu_affinity_during_pinned"] = observed
-            report["measurements"].setdefault("copy_remote", {})[key] = \
-                _bench(buf2[a["node_id"]], buffers[a["node_id"]], size, n)
+    # Run all measurements with per-measurement evidence:
+    #   observed_cpu_affinity (list|None), pin_error, invalid_pinning,
+    #   placement (verified per buffer), invalid_placement.
+    report["measurements"] = _run_measurements(
+        nodes, buffers, sink, buf2, size, n,
+        bench_fn=_bench, pin_fn=_pin, place_fn=_observed_placement)
 
     # Observed placement: move_pages-verified per buffer.
     for node in nodes:

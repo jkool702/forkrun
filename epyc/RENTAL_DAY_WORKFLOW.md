@@ -7,8 +7,16 @@ records what was actually executed on the rehearsal host.
 The rental entry point is:
 
 ```bash
-bash epyc/55_agent_supervise.sh --hours 12   # or: bash epyc/run_all.sh --only 00_preflight,10_setup,45_bench_dist_ingest
+bash epyc/55_agent_supervise.sh --hours 12   # or: bash epyc/run_all.sh --only 00_preflight,10_setup,41_bench_numa5m,45_bench_dist_ingest
 ```
+
+The `41_bench_numa5m` stage is part of the full selection: step 2 identifies
+its F-NUMA1 topology sanity gate as the final gate for physical-topology
+claims and step 5 calls for production-reference measurements. If you run
+the shortcut WITHOUT `41_bench_numa5m`, the dist-ingest stage (45) still runs,
+but the production-reference separation (WO 9.2) is not established — run
+`bash epyc/41_bench_numa5m.sh` separately first if you intend to compare
+against the production pipeline.
 
 ## Step 1 — Checkout and source verification
 
@@ -88,11 +96,12 @@ immutable output dir (`campaign-manifest.json`, `report.md`, `cases/`,
 ```bash
 bash stage0/dist_ingest/run_dist_campaign.sh --quick --out epyc-rental-out/21_bench_dist_ingest/dist_ingest_campaign_placement \
     --campaign-id rental-day-1-pv --scenarios small --candidates fixed_faa --trials 1 --seed rental-day-1-pv \
-    --placement-experiments 1 --scenarios small --candidates fixed_faa
+    --placement-experiments paired
 ```
 
 Placement-validation trials are distinct, linked experiments — excluded
-from performance headline statistics.
+from performance headline statistics. (The campaign accepts
+`--placement-experiments off|paired`; `1` is invalid.)
 
 ## Step 8 — Environment re-capture and drift assessment (WO 7.2)
 

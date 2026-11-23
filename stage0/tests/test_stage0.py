@@ -1763,6 +1763,16 @@ class TestEnvDrift(unittest.TestCase):
         self.assertEqual(drifts[0]["field"], "kernel.cmdline")
         self.assertTrue(drifts[0]["critical"])
 
+    def test_critical_drift_numa_scan_delay(self):
+        before, after = self._env(), self._env()
+        # Both sides must carry the field (an absent->present transition is
+        # not comparable per _drift_changed).
+        before["cpu_extra"]["numa_scan_delay"] = "200"
+        after["cpu_extra"]["numa_scan_delay"] = "120000"
+        drifts = self._drifts(before, after)
+        self.assertTrue(any(d["field"] == "cpu_extra.numa_scan_delay" and d["critical"]
+                            for d in drifts))
+
     def test_critical_drift_thp_defrag(self):
         before, after = self._env(), self._env()
         after["thp"]["defrag"] = "[never]"
@@ -1923,6 +1933,134 @@ class TestNumaCalibrate(unittest.TestCase):
             self.assertIn("memory_placement", doc["observed"])
             self.assertIn("note", doc)
             self.assertIn("diagnostic", doc["note"].lower())
+            # WO review: per-measurement evidence fields exist
+            for key in doc["measurements"]["read_local"].values():
+                self.assertIn("observed_cpu_affinity", key)
+                self.assertIn("pin_error", key)
+                self.assertIn("invalid_pinning", key)
+                self.assertIn("placement", key)
+                self.assertIn("invalid_placement", key)
+
+    # --- C4/C5 corrections-1: measurement selection + evidence (WO §P1.3) --
+
+    def _fake_nodes(self):
+        return [
+            {"node_id": 0, "node_name": "node0", "cpu": 0, "cpulist": "0-13"},
+            {"node_id": 1, "node_name": "node1", "cpu": 1, "cpulist": "14-27"},
+        ]
+
+    def test_copy_remote_selects_dst_on_pair_node(self):
+        # WO review (P1.3a): copy_remote[A->B] reads A and writes B's buffer
+        # (dst on the pair node B, not A). Distinguish remote buffer
+        # selection from local.
+        import numa_calibrate
+        nodes = self._fake_nodes()
+        buffers = {0: 0x1000, 1: 0x2000}
+        sink = {0: 0x3000, 1: 0x4000}
+        buf2 = {0: 0x5000, 1: 0x6000}
+        bench_calls = []
+
+        def bench_fn(dst, src, size, samples):
+            bench_calls.append((dst, src))
+            return {"gbps": 1.0, "mean_s": 1.0}
+
+        def pin_fn(cpu):
+            return {"observed": [cpu], "error": None}
+
+        def place_fn(ptr, size):
+            return {"pages_by_node": {"node0": 8}, "error": None}
+
+        m = numa_calibrate._run_measurements(
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+        cr = m["copy_remote"]["node0->node1"]
+        # copy_remote[A->B]: dst = buf2[B] (the pair node B), src = buffers[A]
+        self.assertIn((buf2[1], buffers[0]), bench_calls)
+        # copy_remote is pinned to thread A: thread on node0 (cpu 0)
+        self.assertEqual(cr["observed_cpu_affinity"], [0])
+        rr = m["read_remote"]["node0->node1"]
+        # read_remote[A->B]: thread pinned to B, reads A into B's sink.
+        self.assertIn((sink[1], buffers[0]), bench_calls)
+        self.assertEqual(rr["observed_cpu_affinity"], [1])
+        # placement verified for every buffer used by each measurement.
+        self.assertIn("buffers", cr["placement"])
+        self.assertIn("buf2", cr["placement"])
+        self.assertIn("buffers", rr["placement"])
+        self.assertIn("sink", rr["placement"])
+        self.assertFalse(cr["invalid_pinning"])
+        self.assertFalse(cr["invalid_placement"])
+
+    def test_copy_local_selects_dst_on_own_node(self):
+        import numa_calibrate
+        nodes = self._fake_nodes()
+        buffers = {0: 0x1000, 1: 0x2000}
+        sink = {0: 0x3000, 1: 0x4000}
+        buf2 = {0: 0x5000, 1: 0x6000}
+        bench_calls = []
+
+        def bench_fn(dst, src, size, samples):
+            bench_calls.append((dst, src))
+            return {"gbps": 1.0, "mean_s": 1.0}
+
+        def pin_fn(cpu):
+            return {"observed": [cpu], "error": None}
+
+        def place_fn(ptr, size):
+            return {"pages_by_node": {"node0": 8}, "error": None}
+
+        m = numa_calibrate._run_measurements(
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+        self.assertEqual(m["copy_local"]["node0"]["placement"]["buf2"]["pages_by_node"],
+                         {"node0": 8})
+        self.assertIn((buf2[0], buffers[0]), bench_calls)
+
+    def test_pin_failure_marks_measurement_invalid(self):
+        import numa_calibrate
+        nodes = self._fake_nodes()
+        buffers = {0: 0x1000, 1: 0x2000}
+        sink = {0: 0x3000, 1: 0x4000}
+        buf2 = {0: 0x5000, 1: 0x6000}
+
+        def bench_fn(dst, src, size, samples):
+            return {"gbps": 1.0, "mean_s": 1.0}
+
+        def pin_fn(cpu):
+            if cpu == 1:
+                return {"observed": None, "error": "pin error: cannot pin"}
+            return {"observed": [cpu], "error": None}
+
+        def place_fn(ptr, size):
+            return {"pages_by_node": {"node0": 8}, "error": None}
+
+        m = numa_calibrate._run_measurements(
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+        # node1 pin fails -> node1 measurements invalid
+        for name in ("read_local", "copy_local"):
+            self.assertTrue(m[name]["node1"]["invalid_pinning"])
+            self.assertEqual(m[name]["node1"]["pin_error"], "pin error: cannot pin")
+            self.assertIsNone(m[name]["node1"]["observed_cpu_affinity"])
+            self.assertFalse(m[name]["node0"]["invalid_pinning"])
+
+    def test_placement_failure_marks_measurement_invalid(self):
+        import numa_calibrate
+        nodes = self._fake_nodes()
+        buffers = {0: 0x1000, 1: 0x2000}
+        sink = {0: 0x3000, 1: 0x4000}
+        buf2 = {0: 0x5000, 1: 0x6000}
+
+        def bench_fn(dst, src, size, samples):
+            return {"gbps": 1.0, "mean_s": 1.0}
+
+        def pin_fn(cpu):
+            return {"observed": [cpu], "error": None}
+
+        def place_fn(ptr, size):
+            return {"pages_by_node": None, "error": "move_pages rc=1"}
+
+        m = numa_calibrate._run_measurements(
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+        for name in ("read_local", "copy_local"):
+            self.assertTrue(m[name]["node0"]["invalid_placement"])
+            self.assertIn("move_pages rc=1", m[name]["node0"]["placement_error"])
 
 
 if __name__ == "__main__":
