@@ -1822,5 +1822,54 @@ class TestEnvDrift(unittest.TestCase):
             self.assertEqual(rep["critical_drift_count"], 1)
 
 
+class TestBinaryProvenance(unittest.TestCase):
+    """C4 — master WO 7.3: experimental binary provenance."""
+
+    def test_build_hashes_includes_dist_engine_and_sources(self):
+        import env_capture
+        bh = env_capture.build_hashes(REPO)
+        self.assertIn("stage0/libdist_ingest.so", bh)
+        if os.path.isfile(os.path.join(STAGE0, "libdist_ingest.so")):
+            self.assertRegex(bh["stage0/libdist_ingest.so"],
+                             r"^[0-9a-f]{64}$")
+
+    def test_binary_provenance_structure(self):
+        import env_capture
+        doc = env_capture.binary_provenance(REPO)
+        self.assertTrue(doc["compiler"].get("version_text"))
+        self.assertTrue(doc["make"].get("version_text"))
+        self.assertTrue(doc.get("build_command_dry_run"))
+        if os.path.isfile(os.path.join(STAGE0, "libdist_ingest.so")):
+            self.assertEqual(doc.get("libdist_ingest_sha256"),
+                             env_capture.build_hashes(REPO).get("stage0/libdist_ingest.so"))
+
+    def test_run_dist_emits_libdist_ingest_sha256(self):
+        # The exact binary hash must appear in the DIST_RESULT of every trial
+        # (master WO 7.3).
+        run_dist_py = os.path.join(REPO, "stage0", "dist_ingest", "run_dist.py")
+        lib_path = os.path.join(STAGE0, "libdist_ingest.so")
+        if not os.path.isfile(lib_path):
+            self.skipTest("libdist_ingest.so not built")
+        with tempfile.TemporaryDirectory(prefix="c45_prov_") as td:
+            inp = os.path.join(td, "in.bin")
+            with open(inp, "wb") as fh:
+                fh.write((b"0123456789abcdef" * 65536)[:1024 * 1024])
+            p = subprocess.run(
+                [sys.executable, run_dist_py, "--candidate", "fixed_faa",
+                 "--input", inp],
+                capture_output=True, text=True, cwd=REPO, timeout=120)
+            self.assertIn("DIST_RESULT ", p.stderr, p.stderr[-1000:])
+            dr = None
+            for line in p.stderr.splitlines():
+                if line.startswith("DIST_RESULT "):
+                    dr = json.loads(line[len("DIST_RESULT "):])
+                    break
+            self.assertIsNotNone(dr)
+            self.assertIn("libdist_ingest_sha256", dr)
+            import env_capture
+            self.assertEqual(dr.get("libdist_ingest_sha256"),
+                             env_capture.build_hashes(REPO).get("stage0/libdist_ingest.so"))
+
+
 if __name__ == "__main__":
     unittest.main()
