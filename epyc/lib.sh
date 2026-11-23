@@ -148,6 +148,19 @@ run_logged() {
     return $rc
 }
 
+# 45 stage: the campaign is a declared deliverable — a campaign that exits 0
+# without producing the campaign manifest is a stage failure, independently
+# of the campaign command's exit status (stub campaigns that exit 0 without
+# writing the manifest are a stage failure).
+require_campaign_manifest() {
+    local camp_dir="$1" rc="${2:-0}"
+    if [ ! -f "$camp_dir/campaign-manifest.json" ]; then
+        err "dist-ingest campaign did not produce campaign-manifest.json (RC=$rc)"
+        return 1
+    fi
+    return 0
+}
+
 # Same as run_logged but for a bash -c string (needed for the fd-redirect
 # trickery in BENCHMARKS/run_benchmark.bash).
 run_bash_logged() {

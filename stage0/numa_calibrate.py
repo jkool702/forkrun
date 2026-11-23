@@ -113,37 +113,70 @@ def _free(ptr, size):
         _numa().numa_free(ptr, size)
 
 
-def _observed_placement(ptr, size):
-    """Observed per-node page counts via move_pages (the existing
+def _observed_placement(ptr, size, expected_node=None):
+    """Observed per-page placement via move_pages (the existing
     observation mechanism; NOT a mbind()-success proxy).
 
-    Returns {"pages_by_node": {...}, "error": None} or
-    {"pages_by_node": None, "error": "..."} on failure.
+    Returns a result dict with:
+      - pages_by_node: {key: count} (keys "node%d" for located pages,
+        "other_status_%d" / "not_present" otherwise), or None on query
+        failure;
+      - n_pages: number of pages in the range;
+      - pages_on_expected: pages located on `expected_node` (None when
+        `expected_node` is None or the query failed);
+      - unsuccessful_pages: pages with missing or negative per-page
+        status (not located / error);
+      - expected_node: the expected node, echoed;
+      - error: None, or the query error string.
+
+    Callers decide validity: the placement matches the expectation when
+    error is None and (expected_node is None or pages_on_expected ==
+    n_pages). A successful move_pages() alone does not establish that the
+    expected-node placement was actually achieved (WO review: wrong-node,
+    missing, and unsuccessful placements are all distinguishable).
     """
     if not ptr:
-        return {"pages_by_node": None, "error": "no buffer address"}
+        return {"pages_by_node": None, "n_pages": 0, "pages_on_expected": None,
+                "unsuccessful_pages": 0, "expected_node": expected_node,
+                "error": "no buffer address"}
     lib = _numa()
     npages = (size + 4095) // 4096
     if npages <= 0:
-        return {"pages_by_node": {}, "error": None}
+        return {"pages_by_node": {}, "n_pages": 0,
+                "pages_on_expected": (0 if expected_node is not None else None),
+                "unsuccessful_pages": 0, "expected_node": expected_node,
+                "error": None}
     page_arr = (ctypes.c_void_p * npages)()
     for i in range(npages):
         page_arr[i] = ptr + i * 4096
     status = (ctypes.c_int * npages)()
     rc = lib.move_pages(0, npages, page_arr, None, status, 0)
     if rc != 0:
-        return {"pages_by_node": None, "error": "move_pages rc=%d" % rc}
+        return {"pages_by_node": None, "n_pages": npages,
+                "pages_on_expected": None, "unsuccessful_pages": 0,
+                "expected_node": expected_node,
+                "error": "move_pages rc=%d" % rc}
     counts = {}
+    n_on_expected = 0
+    n_unsuccessful = 0
     for i in range(npages):
         node = status[i]
         if node is not None and node >= 0:
             key = "node%d" % node
-        elif node is not None:
-            key = "other_status_%d" % node
+            if expected_node is not None and node == expected_node:
+                n_on_expected += 1
         else:
-            key = "not_present"
+            n_unsuccessful += 1
+            key = ("other_status_%d" % node) if node is not None else "not_present"
         counts[key] = counts.get(key, 0) + 1
-    return {"pages_by_node": counts, "error": None}
+    return {
+        "pages_by_node": counts,
+        "n_pages": npages,
+        "pages_on_expected": (n_on_expected if expected_node is not None else None),
+        "unsuccessful_pages": n_unsuccessful,
+        "expected_node": expected_node,
+        "error": None,
+    }
 
 
 def _summ(times_ns, size):
@@ -184,16 +217,27 @@ def _run_measurements(nodes, buffers, sink, buf2, size, n,
 
     bench_fn(dst_ptr, src_ptr, size, samples) -> timing stats (_bench).
     pin_fn(cpu) -> {"observed": [...]|None, "error": str|None}.
-    place_fn(ptr, size) -> {"pages_by_node": {...}|None, "error": str|None}.
+    place_fn(ptr, size, expected_node) -> the placement result from
+    _observed_placement ({"pages_by_node", "n_pages", "pages_on_expected",
+    "unsuccessful_pages", "expected_node", "error"}).
+
+    placement_ptrs entries are (label, ptr, expected_node): the expected
+    node of each buffer used by the measurement — `buffers[A]` is expected
+    on A, `sink[B]`/`buf2[B]` on B.
 
     Returns {measurement_name: {node/pair_key: result_dict}}, where each
     result has the _bench stats plus:
       - observed_cpu_affinity (list|None): the pinned affinity observed
         during this measurement (per-measurement evidence).
       - pin_error (str|None); invalid_pinning (bool).
-      - placement: {label: {"pages_by_node": {...}|None, "error": str|None}}
-        — verified placement of every buffer used by the measurement.
-      - placement_error (str|None); invalid_placement (bool).
+      - placement: {label: entry} where entry is the placement result with
+        "expected_node" echoed in — verified placement of every buffer
+        used by the measurement.
+      - placement_error (str|None): the query error, or the wrong-node /
+        missing / unsuccessful-placement diagnostic; invalid_placement
+        (bool) is set when the observed placement does not match the
+        expected node (a query failure and a wrong node are distinct
+        failure modes).
     """
     measurements = {}
 
@@ -205,10 +249,27 @@ def _run_measurements(nodes, buffers, sink, buf2, size, n,
         res["invalid_pinning"] = bool(res["pin_error"])
         placement = {}
         placement_error = None
-        for label, ptr in placement_ptrs:
-            placement[label] = place_fn(ptr, size)
-            if placement[label].get("error"):
-                placement_error = placement_error or placement[label]["error"]
+        for label, ptr, expected_node in placement_ptrs:
+            obs = place_fn(ptr, size, expected_node)
+            entry = dict(obs) if isinstance(obs, dict) else {"pages_by_node": obs}
+            entry["expected_node"] = expected_node
+            placement[label] = entry
+            if obs.get("error"):
+                # Query failure: the placement evidence itself is broken.
+                placement_error = placement_error or obs.get("error")
+            elif expected_node is not None:
+                on_exp = obs.get("pages_on_expected")
+                total = obs.get("n_pages")
+                un = obs.get("unsuccessful_pages") or 0
+                # WO review: mark placement invalid when pages are on the
+                # wrong node, missing, or have unsuccessful per-page
+                # status — a successful move_pages() does not by itself
+                # establish that the expected-node placement was met.
+                if on_exp is None or total is None or on_exp != total or un:
+                    placement_error = placement_error or (
+                        "placement check failed for buffer '%s': expected node %s, "
+                        "pages_on_expected=%s/%s, unsuccessful_pages=%s"
+                        % (label, expected_node, on_exp, total, un))
         res["placement"] = placement
         res["placement_error"] = placement_error
         res["invalid_placement"] = bool(placement_error)
@@ -222,10 +283,12 @@ def _run_measurements(nodes, buffers, sink, buf2, size, n,
         b2 = buf2.get(node)
         if b1 and sk:
             measurements.setdefault("read_local", {})[nd["node_name"]] = \
-                _meas(sk, b1, pin, [("buffers", b1), ("sink", sk)])
+                _meas(sk, b1, pin,
+                      [("buffers", b1, node), ("sink", sk, node)])
         if b1 and b2:
             measurements.setdefault("copy_local", {})[nd["node_name"]] = \
-                _meas(b2, b1, pin, [("buffers", b1), ("buf2", b2)])
+                _meas(b2, b1, pin,
+                      [("buffers", b1, node), ("buf2", b2, node)])
 
     # Remote read + copy between node pairs (WO review: remote copy reads
     # A (local to the thread) and writes B's buffer; dst is on the pair
@@ -243,15 +306,15 @@ def _run_measurements(nodes, buffers, sink, buf2, size, n,
             measurements.setdefault("read_remote", {})[key] = \
                 _meas(sink[b["node_id"]], buffers[a["node_id"]],
                       pin_fn(b["cpu"]),
-                      [("buffers", buffers[a["node_id"]]),
-                       ("sink", sink[b["node_id"]])])
+                      [("buffers", buffers[a["node_id"]], a["node_id"]),
+                       ("sink", sink[b["node_id"]], b["node_id"])])
             # copy_remote[A->B]: thread pinned to A, copy A's buffer into
             # B's buf2 (remote copy: dst on B is remote from thread A).
             measurements.setdefault("copy_remote", {})[key] = \
                 _meas(buf2[b["node_id"]], buffers[a["node_id"]],
                       pin_fn(a["cpu"]),
-                      [("buffers", buffers[a["node_id"]]),
-                       ("buf2", buf2[b["node_id"]])])
+                      [("buffers", buffers[a["node_id"]], a["node_id"]),
+                       ("buf2", buf2[b["node_id"]], b["node_id"])])
     return measurements
 
 
@@ -336,11 +399,13 @@ def main():
         nodes, buffers, sink, buf2, size, n,
         bench_fn=_bench, pin_fn=_pin, place_fn=_observed_placement)
 
-    # Observed placement: move_pages-verified per buffer.
+    # Observed placement: move_pages-verified per buffer, compared against
+    # the node the buffer was allocated on (_alloc -> numa_alloc_onnode).
     for node in nodes:
         if buffers.get(node["node_id"]):
             report["observed"]["memory_placement"][node["node_name"]] = \
-                _observed_placement(buffers[node["node_id"]], size)
+                _observed_placement(buffers[node["node_id"]], size,
+                                    expected_node=node["node_id"])
 
     # Requested placement (explicit, via numa_alloc_onnode).
     report["requested_memory_placement"] = {

@@ -1939,15 +1939,33 @@ class TestNumaCalibrate(unittest.TestCase):
                 self.assertIn("pin_error", key)
                 self.assertIn("invalid_pinning", key)
                 self.assertIn("placement", key)
+                self.assertIn("placement_error", key)
                 self.assertIn("invalid_placement", key)
+                for entry in key["placement"].values():
+                    self.assertIn("expected_node", entry)
+                    self.assertIn("pages_on_expected", entry)
+                    self.assertIn("n_pages", entry)
+                    self.assertIn("unsuccessful_pages", entry)
+                    self.assertIn("pages_by_node", entry)
 
-    # --- C4/C5 corrections-1: measurement selection + evidence (WO §P1.3) --
+    # --- C4/C5 corrections-1/2: measurement selection + evidence (WO §P1.3) --
 
     def _fake_nodes(self):
         return [
             {"node_id": 0, "node_name": "node0", "cpu": 0, "cpulist": "0-13"},
             {"node_id": 1, "node_name": "node1", "cpu": 1, "cpulist": "14-27"},
         ]
+
+    @staticmethod
+    def _place_on_expected(ptr, size, expected_node=None):
+        """Fake place_fn: all 8 pages reported on the expected node."""
+        if expected_node is None:
+            return {"pages_by_node": {"node0": 8}, "n_pages": 8,
+                    "pages_on_expected": None, "unsuccessful_pages": 0,
+                    "expected_node": None, "error": None}
+        return {"pages_by_node": {"node%d" % expected_node: 8}, "n_pages": 8,
+                "pages_on_expected": 8, "unsuccessful_pages": 0,
+                "expected_node": expected_node, "error": None}
 
     def test_copy_remote_selects_dst_on_pair_node(self):
         # WO review (P1.3a): copy_remote[A->B] reads A and writes B's buffer
@@ -1967,8 +1985,16 @@ class TestNumaCalibrate(unittest.TestCase):
         def pin_fn(cpu):
             return {"observed": [cpu], "error": None}
 
-        def place_fn(ptr, size):
-            return {"pages_by_node": {"node0": 8}, "error": None}
+        def place_fn(ptr, size, expected_node=None):
+            # WO review: every buffer reports as residing on node0 —
+            # including buf2[1], the copy_remote destination, which is
+            # expected on node1. The misplaced destination must now
+            # invalidate the measurement (it previously counted as
+            # placement-valid).
+            return {"pages_by_node": {"node0": 8}, "n_pages": 8,
+                    "pages_on_expected": (8 if expected_node == 0 else 0),
+                    "unsuccessful_pages": 0, "expected_node": expected_node,
+                    "error": None}
 
         m = numa_calibrate._run_measurements(
             nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
@@ -1977,17 +2003,30 @@ class TestNumaCalibrate(unittest.TestCase):
         self.assertIn((buf2[1], buffers[0]), bench_calls)
         # copy_remote is pinned to thread A: thread on node0 (cpu 0)
         self.assertEqual(cr["observed_cpu_affinity"], [0])
+        # The misplaced destination (buf2[1], expected on node1, observed
+        # on node0) invalidates the measurement.
+        self.assertTrue(cr["invalid_placement"])
+        self.assertIn("placement check failed", cr["placement_error"])
+        self.assertIn("expected node 1", cr["placement_error"])
+        self.assertEqual(cr["placement"]["buf2"]["expected_node"], 1)
+        self.assertEqual(cr["placement"]["buf2"]["pages_by_node"].get("node0"), 8)
+        # The source buffer (buffers[0], expected on node0) is observed
+        # there and stays valid.
+        self.assertEqual(cr["placement"]["buffers"]["expected_node"], 0)
+        self.assertEqual(cr["placement"]["buffers"]["pages_on_expected"], 8)
+        self.assertIsNone(cr["placement"]["buffers"]["error"])
+        # read_remote: its sink[B] is likewise misplaced.
         rr = m["read_remote"]["node0->node1"]
-        # read_remote[A->B]: thread pinned to B, reads A into B's sink.
         self.assertIn((sink[1], buffers[0]), bench_calls)
         self.assertEqual(rr["observed_cpu_affinity"], [1])
+        self.assertTrue(rr["invalid_placement"])
+        self.assertIn("expected node 1", rr["placement_error"])
         # placement verified for every buffer used by each measurement.
         self.assertIn("buffers", cr["placement"])
         self.assertIn("buf2", cr["placement"])
         self.assertIn("buffers", rr["placement"])
         self.assertIn("sink", rr["placement"])
         self.assertFalse(cr["invalid_pinning"])
-        self.assertFalse(cr["invalid_placement"])
 
     def test_copy_local_selects_dst_on_own_node(self):
         import numa_calibrate
@@ -2004,13 +2043,15 @@ class TestNumaCalibrate(unittest.TestCase):
         def pin_fn(cpu):
             return {"observed": [cpu], "error": None}
 
-        def place_fn(ptr, size):
-            return {"pages_by_node": {"node0": 8}, "error": None}
-
         m = numa_calibrate._run_measurements(
-            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn,
+            self._place_on_expected)
+        self.assertFalse(m["copy_local"]["node0"]["invalid_placement"])
+        self.assertIsNone(m["copy_local"]["node0"]["placement_error"])
         self.assertEqual(m["copy_local"]["node0"]["placement"]["buf2"]["pages_by_node"],
                          {"node0": 8})
+        self.assertEqual(m["copy_local"]["node0"]["placement"]["buf2"]["expected_node"], 0)
+        self.assertEqual(m["copy_local"]["node0"]["placement"]["buf2"]["pages_on_expected"], 8)
         self.assertIn((buf2[0], buffers[0]), bench_calls)
 
     def test_pin_failure_marks_measurement_invalid(self):
@@ -2028,11 +2069,9 @@ class TestNumaCalibrate(unittest.TestCase):
                 return {"observed": None, "error": "pin error: cannot pin"}
             return {"observed": [cpu], "error": None}
 
-        def place_fn(ptr, size):
-            return {"pages_by_node": {"node0": 8}, "error": None}
-
         m = numa_calibrate._run_measurements(
-            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn,
+            self._place_on_expected)
         # node1 pin fails -> node1 measurements invalid
         for name in ("read_local", "copy_local"):
             self.assertTrue(m[name]["node1"]["invalid_pinning"])
@@ -2053,14 +2092,125 @@ class TestNumaCalibrate(unittest.TestCase):
         def pin_fn(cpu):
             return {"observed": [cpu], "error": None}
 
-        def place_fn(ptr, size):
-            return {"pages_by_node": None, "error": "move_pages rc=1"}
+        def place_fn(ptr, size, expected_node=None):
+            return {"pages_by_node": None, "n_pages": 8, "pages_on_expected": None,
+                    "unsuccessful_pages": 8, "expected_node": expected_node,
+                    "error": "move_pages rc=1"}
 
         m = numa_calibrate._run_measurements(
             nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
         for name in ("read_local", "copy_local"):
             self.assertTrue(m[name]["node0"]["invalid_placement"])
-            self.assertIn("move_pages rc=1", m[name]["node0"]["placement_error"])
+            self.assertEqual(m[name]["node0"]["placement_error"], "move_pages rc=1")
+            self.assertEqual(m[name]["node0"]["placement"]["buffers"]["error"],
+                             "move_pages rc=1")
+
+    def test_placement_wrong_node_invalidates_measurement(self):
+        # WO review: a successful query that reports pages on the wrong
+        # node must invalidate the measurement.
+        import numa_calibrate
+        nodes = self._fake_nodes()
+        buffers = {0: 0x1000, 1: 0x2000}
+        sink = {0: 0x3000, 1: 0x4000}
+        buf2 = {0: 0x5000, 1: 0x6000}
+
+        def bench_fn(dst, src, size, samples):
+            return {"gbps": 1.0, "mean_s": 1.0}
+
+        def pin_fn(cpu):
+            return {"observed": [cpu], "error": None}
+
+        def place_fn(ptr, size, expected_node=None):
+            if expected_node is not None and expected_node == 0:
+                # buffers[0]/sink[0] observed on the WRONG node (1).
+                return {"pages_by_node": {"node1": 8}, "n_pages": 8,
+                        "pages_on_expected": 0, "unsuccessful_pages": 0,
+                        "expected_node": 0, "error": None}
+            return self._place_on_expected(ptr, size, expected_node)
+
+        m = numa_calibrate._run_measurements(
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+        for name in ("read_local", "copy_local"):
+            self.assertTrue(m[name]["node0"]["invalid_placement"], name)
+            self.assertIn("placement check failed", m[name]["node0"]["placement_error"])
+            self.assertIn("expected node 0", m[name]["node0"]["placement_error"])
+            # Observed placement is recorded: pages on the wrong node.
+            self.assertEqual(m[name]["node0"]["placement"]["buffers"]["pages_by_node"].get("node1"), 8)
+            self.assertIsNone(m[name]["node0"]["placement"]["buffers"]["error"])
+            # node1 is where its buffers were expected and observed.
+            self.assertFalse(m[name]["node1"]["invalid_placement"])
+
+    def test_placement_missing_or_unsuccessful_pages_invalidate(self):
+        import numa_calibrate
+        nodes = self._fake_nodes()
+        buffers = {0: 0x1000, 1: 0x2000}
+        sink = {0: 0x3000, 1: 0x4000}
+        buf2 = {0: 0x5000, 1: 0x6000}
+
+        def bench_fn(dst, src, size, samples):
+            return {"gbps": 1.0, "mean_s": 1.0}
+
+        def pin_fn(cpu):
+            return {"observed": [cpu], "error": None}
+
+        def place_fn(ptr, size, expected_node=None):
+            if expected_node == 0:
+                # Pages missing / with unsuccessful status on node0.
+                return {"pages_by_node": {"not_present": 8}, "n_pages": 8,
+                        "pages_on_expected": 0, "unsuccessful_pages": 8,
+                        "expected_node": 0, "error": None}
+            return self._place_on_expected(ptr, size, expected_node)
+
+        m = numa_calibrate._run_measurements(
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+        for name in ("read_local", "copy_local"):
+            self.assertTrue(m[name]["node0"]["invalid_placement"], name)
+            self.assertIn("unsuccessful_pages=8", m[name]["node0"]["placement_error"])
+
+    def test_placement_query_failure_and_wrong_node_are_distinct(self):
+        # WO review: a failed query and a wrong-node placement are two
+        # different failure modes, both detectable in the result.
+        import numa_calibrate
+        nodes = self._fake_nodes()
+        buffers = {0: 0x1000, 1: 0x2000}
+        sink = {0: 0x3000, 1: 0x4000}
+        buf2 = {0: 0x5000, 1: 0x6000}
+
+        def bench_fn(dst, src, size, samples):
+            return {"gbps": 1.0, "mean_s": 1.0}
+
+        def pin_fn(cpu):
+            return {"observed": [cpu], "error": None}
+
+        # Mode 1: query failure.
+        def place_fn(ptr, size, expected_node=None):
+            if expected_node == 0:
+                return {"pages_by_node": None, "n_pages": 8,
+                        "pages_on_expected": None, "unsuccessful_pages": 8,
+                        "expected_node": 0, "error": "move_pages rc=1"}
+            return self._place_on_expected(ptr, size, expected_node)
+
+        m = numa_calibrate._run_measurements(
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn)
+        self.assertTrue(m["read_local"]["node0"]["invalid_placement"])
+        self.assertEqual(m["read_local"]["node0"]["placement_error"], "move_pages rc=1")
+        self.assertEqual(m["read_local"]["node0"]["placement"]["buffers"]["error"],
+                         "move_pages rc=1")
+
+        # Mode 2: valid query, pages on the wrong node.
+        def place_fn2(ptr, size, expected_node=None):
+            if expected_node == 0:
+                return {"pages_by_node": {"node1": 8}, "n_pages": 8,
+                        "pages_on_expected": 0, "unsuccessful_pages": 0,
+                        "expected_node": 0, "error": None}
+            return self._place_on_expected(ptr, size, expected_node)
+
+        m2 = numa_calibrate._run_measurements(
+            nodes, buffers, sink, buf2, 4096, 1, bench_fn, pin_fn, place_fn2)
+        self.assertTrue(m2["read_local"]["node0"]["invalid_placement"])
+        self.assertIsNone(m2["read_local"]["node0"]["placement"]["buffers"]["error"])
+        self.assertIn("placement check failed", m2["read_local"]["node0"]["placement_error"])
+        self.assertEqual(m2["read_local"]["node0"]["placement"]["buffers"]["pages_by_node"].get("node1"), 8)
 
 
 if __name__ == "__main__":

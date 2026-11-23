@@ -578,11 +578,14 @@ def main():
                         # C4 — additional per-trial metrics (master WO 6.4).
                         lines.append("  - trial metrics: ingest_cpu_ns=%s consumer_cpu_ns=%s total_read=%s total_published=%s "
                                      "waits[read/claim/pub/consume/peer_ns]=%s/%s/%s/%s/%s peer_observe_count=%s "
-                                     "max_effective_backlog(sum of node maxima)=%s max_published_backlog(sum of node maxima)=%s "
+                                     "max_effective_backlog_by_node=%s max_effective_backlog_sum_of_node_maxima=%s "
+                                     "max_published_backlog_by_node=%s max_published_backlog_sum_of_node_maxima=%s "
                                      "reservations_hist=%s placement_sampling=%s per_node_bytes=%s" % (
                             r.get("ingest_cpu_ns"), r.get("consumer_cpu_ns"), r.get("total_read"), r.get("total_published"),
                             r.get("wait_ns_read"), r.get("wait_ns_claim"), r.get("wait_ns_publish"), r.get("wait_ns_consume"), r.get("peer_observe_ns"),
-                            r.get("peer_observe_count"), r.get("max_effective_backlog_by_node"), r.get("max_published_backlog_by_node"),
+                            r.get("peer_observe_count"),
+                            r.get("max_effective_backlog_by_node"), r.get("max_effective_backlog_sum_of_node_maxima"),
+                            r.get("max_published_backlog_by_node"), r.get("max_published_backlog_sum_of_node_maxima"),
                             r.get("reservations_hist"), r.get("placement_sampling_overhead"),
                             [(n.get("node"), n.get("bytes_assigned"), n.get("bytes_read"), n.get("bytes_published"), n.get("bytes_consumed")) for n in (r.get("per_node_bytes") or [])]))
                         mpv = dr.get("mapping_provenance") or {}

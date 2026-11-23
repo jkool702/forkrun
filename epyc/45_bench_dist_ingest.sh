@@ -97,12 +97,14 @@ run_logged "$OUTD/dist_ingest_campaign.log" "dist-ingest-campaign" \
 # retains its own immutable output directory and report). P2.7/P2.10:
 # report-generation failure affects the final status.
 banner "45 bench_dist_ingest — dist report"
-if [ -f "$CAMP/campaign-manifest.json" ]; then
+if require_campaign_manifest "$CAMP" "$RC"; then
     run_logged "$OUTD/dist_ingest_report.log" "dist-ingest-report" \
         python3 stage0/dist_ingest/report_dist.py \
             --campaign "$CAMP" --out "$OUTD/dist_ingest_report.md" \
             || { RC=1; warn "dist-ingest report generation failed (see $OUTD/dist_ingest_report.log)"; }
     [ -f "$OUTD/dist_ingest_report.md" ] && log "stage report: $OUTD/dist_ingest_report.md" || RC=1
+else
+    [ "$RC" -eq 0 ] && RC=1
 fi
 [ "$RC" -eq 0 ] && [ "$CALIB_RC" -ne 0 ] && RC=1
 
