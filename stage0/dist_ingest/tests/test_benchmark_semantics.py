@@ -2996,6 +2996,45 @@ class TestC3DurationRepetitionCorrections(unittest.TestCase):
         self.assertEqual(p2["cache_precondition"]["policy"], "best_effort_os_cache")
         self.assertIn("budget", p2["failure_reason"])
 
+    # -- run_case manifest-level: repetition_used (WO §2 reviewer) ---------
+    def test_repetition_used_excludes_not_launched_passes(self):
+        # C3-corrections-5 (WO §2 reviewer): the production manifest field
+        # repetition_used is False when the only repeated pass was not
+        # launched (budget exhausted during cache preconditioning).
+        import stage0.run_case as rc
+        with tempfile.TemporaryDirectory(prefix="c3dq_repused_") as td:
+            dr1 = _mk_fake_dist_result(wall=0.01, consumed=100, reservations=1)
+            clock = {"t": 0.0}
+
+            def fake_precondition(spec_, resolved_):
+                # Preconditioning advances the clock past the repetition budget.
+                clock["t"] += 0.3
+                return {"policy": "best_effort_os_cache", "achieved": True}
+
+            orig = time.monotonic
+            rc.time.monotonic = lambda: clock["t"]
+            try:
+                m, out = self._run_case_fake(
+                    td, self._base_spec(min_duration_seconds=999.0,
+                                        min_duration_repetition_budget_s=0.2),
+                    [_dist_behavior(dr1)],
+                    cache_fn=fake_precondition)
+            finally:
+                rc.time.monotonic = orig
+            dq = m["duration_qualification"]
+            self.assertEqual(dq["stop_reason"], "repetition_budget_exhausted")
+            self.assertEqual(dq["pass_count"], 2)
+            p2 = dq["passes"][1]
+            self.assertEqual(p2["status"], "not_launched_budget_exhausted")
+            self.assertIsNone(p2["process_returncode"])
+            self.assertEqual(p2["termination_reason"], "not_launched")
+            # Production field (regression-catching): the old definition
+            # (len(dq_passes) > 1) would report True here since there are
+            # two pass records; the fix excludes the not-launched record.
+            self.assertFalse(dq["repetition_used"])
+            # The not-launched attempt is still preserved as evidence.
+            self.assertEqual(p2["cache_precondition"]["policy"], "best_effort_os_cache")
+
     # -- loop-level: bounds, budget, cleanup (WO §5, §6.11, §6.12) ----------
     def test_repetition_budget_enforced_and_per_pass_timeout_bounded(self):
         import stage0.run_case as rc
