@@ -48,7 +48,12 @@ def build_hashes(repo):
     for rel in ("python/forkrun/libforkrun_python.so",
                 "python/forkrun/_forkrun_cleanroom",
                 "python/forkrun/_fr_udf.cpython-314-x86_64-linux-gnu.so",
-                "frun.bash"):
+                "frun.bash",
+                # C4 — 7.3: the experimental dist engine binary and its
+                # authoritative sources (hashed for provenance).
+                "stage0/libdist_ingest.so",
+                "stage0/dist_ingest/dist_ingest.c",
+                "stage0/dist_ingest/dist_ingest.h"):
         path = os.path.join(repo, rel)
         if os.path.isfile(path):
             h = hashlib.sha256()
@@ -56,6 +61,52 @@ def build_hashes(repo):
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
             out[rel] = h.hexdigest()
+    return out
+
+
+def binary_provenance(repo):
+    """C4 — 7.3: experimental binary provenance (master WO 7.3).
+
+    Records compiler identity/version, the exact resolved build command
+    (make -n from the dist-ingest Makefile), make version, and the exact
+    libdist_ingest.so SHA-256 (the binary used by every dist trial).
+    """
+    out = {"compiler": {}, "make": {}}
+    for tool in ("cc", "gcc"):
+        try:
+            r = subprocess.run([tool, "--version"], capture_output=True,
+                               text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0 and r.stdout.strip():
+            out["compiler"] = {"tool": tool,
+                               "version_text": r.stdout.strip().splitlines()[0]}
+            break
+    try:
+        r = subprocess.run(["make", "--version"], capture_output=True,
+                           text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            out["make"] = {"version_text": r.stdout.strip().splitlines()[0]}
+    except (OSError, subprocess.SubprocessError):
+        out["make"] = {"version_text": "unknown/unavailable"}
+    makefile = os.path.join(repo, "stage0", "dist_ingest", "Makefile")
+    if os.path.isfile(makefile):
+        try:
+            # -W forces the recipe to be considered even when the target is
+            # up to date, so the exact build command is always recorded.
+            r = subprocess.run(["make", "-C", os.path.join(repo, "stage0", "dist_ingest"),
+                                "-n", "-W", "dist_ingest.c"],
+                               capture_output=True, text=True, timeout=60)
+            out["build_command_dry_run"] = r.stdout.strip()
+            out["build_command_dry_run_rc"] = r.returncode
+        except (OSError, subprocess.SubprocessError):
+            out["build_command_dry_run"] = "unknown/unavailable"
+    # The exact binary hash used by every dist trial.
+    lib_path = os.path.join(repo, "stage0", "libdist_ingest.so")
+    if os.path.isfile(lib_path):
+        out["libdist_ingest_sha256"] = build_hashes(repo).get("stage0/libdist_ingest.so")
+    else:
+        out["libdist_ingest_sha256"] = None
     return out
 
 
@@ -372,6 +423,8 @@ def env_manifest(repo, extra=None):
         # C4 — 7.1/7.1: available memory and disk space.
         "memory_space": _memory_space(),
         "storage_details": _storage_details(extra),
+        # C4 — 7.3: experimental binary provenance (master WO 7.3).
+        "binary_provenance": binary_provenance(repo),
         "python": {"version": platform.python_version(),
                    "executable": sys.executable},
         "cgroup": {

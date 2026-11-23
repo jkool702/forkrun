@@ -124,6 +124,8 @@ def main():
             rec["throughput_bps"] = (dr.get("total_consumed", 0) / dr.get("wall_seconds", 1e9)) if dr.get("wall_seconds") else None
             rec["reservations"] = dr.get("reservations_total")
             rec["ingest_cpu_ns"] = dr.get("ingest_cpu_ns")
+            # C4 — 7.3: binary provenance (exact binary used by every trial).
+            rec["libdist_ingest_sha256"] = dr.get("libdist_ingest_sha256")
             # C4 — additional per-trial metrics (master WO 6.4).
             rec["consumer_cpu_ns"] = dr.get("consumer_cpu_ns")
             rec["total_read"] = dr.get("total_read")
@@ -531,6 +533,9 @@ def main():
                             fmt_tri(r.get("v_mempolicy")), fmt_tri(r.get("v_placement_obs")), fmt_tri(r.get("v_numa_placement")),
                             dr.get("correct"), dr.get("overlap_detected"), dr.get("lost_detected"), dr.get("duplicate_detected"),
                             dr.get("reservations_total"), dr.get("rc")))
+                        # C4 — 7.3: binary provenance line.
+                        if r.get("libdist_ingest_sha256"):
+                            lines.append("  - binary: libdist_ingest_sha256=%s" % (r.get("libdist_ingest_sha256"),))
                         # C4 — additional per-trial metrics (master WO 6.4).
                         lines.append("  - trial metrics: ingest_cpu_ns=%s consumer_cpu_ns=%s total_read=%s total_published=%s "
                                      "waits[read/claim/pub/consume/peer_ns]=%s/%s/%s/%s/%s peer_observe_count=%s max_effective_backlog=%s max_published_backlog=%s "

@@ -970,13 +970,25 @@ export DIST_SHUFFLE_SCENARIOS="$SHUFFLE_SCENARIOS"
 export DIST_CAND_FILTER="$CAND_FILTER"
 
 echo "=== dist-ingest campaign: build"
-make -f Makefile.substrate python-substrate >/dev/null 2>&1 || echo "WARN: python-substrate build issue (continuing)"
-(cd stage0/dist_ingest && make) || { echo "dist-campaign: dist_ingest build failed" >&2; exit 1; }
+mkdir -p "$OUT/env/build"
+make -f Makefile.substrate python-substrate > "$OUT/env/build/python-substrate.log" 2>&1 || echo "WARN: python-substrate build issue (continuing)"
+(cd stage0/dist_ingest && make) > "$OUT/env/build/dist_ingest.log" 2>&1 || { echo "dist-campaign: dist_ingest build failed" >&2; exit 1; }
 
 echo "=== dist-ingest campaign: environment"
 C4_FIRST_INPUT=$(cat "$OUT/.c4_first_input" 2>/dev/null)
 python3 stage0/env_capture.py --out "$OUT/env/env-before.json" --run-id "$CAMPAIGN_ID" --input "$C4_FIRST_INPUT" \
   || { echo "dist-campaign: env-before failed" >&2; exit 1; }
+
+# C4 — 7.3: experimental binary provenance (master WO 7.3).
+python3 - "$OUT" <<'PY' || echo "WARN: binary-provenance capture failed" >&2
+import json, os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), 'stage0'))
+import env_capture
+out = sys.argv[1]
+doc = env_capture.binary_provenance(os.getcwd())
+with open(os.path.join(out, 'env', 'binary-provenance.json'), 'w') as f:
+    json.dump(doc, f, indent=2, sort_keys=True)
+PY
 
 echo "=== dist-ingest campaign: corpora"
 python3 - "$OUT" "$QUICK" <<'PY'
@@ -1308,6 +1320,15 @@ if os.path.isfile(drift_path):
         drift_doc={"campaign_valid": False, "drift_count": -1, "note": "drift-report unreadable"}
 doc["drift"]=drift_doc
 doc["drift_invalidated"]=(False if not drift_doc else (not drift_doc.get("campaign_valid", False)))
+binary_prov=None
+binary_prov_path=os.path.join(out,'env','binary-provenance.json')
+if os.path.isfile(binary_prov_path):
+    try:
+        with open(binary_prov_path) as f: binary_prov=json.load(f)
+    except Exception:
+        binary_prov={"libdist_ingest_sha256": None, "note": "binary-provenance unreadable"}
+doc["binary_provenance"]=binary_prov
+doc["binary_provenance_path"]=binary_prov_path
 with open(os.path.join(out,'campaign-manifest.json'),'w') as f: json.dump(doc,f,indent=2,sort_keys=True)
 PY
 

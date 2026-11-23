@@ -8,6 +8,7 @@ placement, topology uncertainty/duplicate-node validation, explicit provenance.
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import sys
@@ -16,6 +17,22 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 LIB_PATH = os.path.join(os.path.dirname(HERE), "libdist_ingest.so")
+
+
+def _file_sha256(path):
+    """Authoritative binary hash (master WO 7.3: the exact binary used by
+    every dist trial)."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+LIBDIST_INGEST_SHA256 = _file_sha256(LIB_PATH)
 
 DI_MAX_NODES = 64
 
@@ -1317,6 +1334,7 @@ def main():
         "rc": rc,
         "wall_seconds": res.wall_seconds,
         "elapsed_s": elapsed,
+        "libdist_ingest_sha256": LIBDIST_INGEST_SHA256,
         "total_reserved_req": res.total_reserved_req,
         "total_assigned": res.total_assigned,
         "total_read": res.total_read,
