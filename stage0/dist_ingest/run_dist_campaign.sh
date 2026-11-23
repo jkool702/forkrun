@@ -245,6 +245,15 @@ if not selected:
     sys.exit(2)
 
 selected_ids = [s['id'] for s in selected]
+# C4 — record the first selected scenario's campaign input (corpus) path for
+# env_capture storage details (master WO 7.1). Written before env-before.
+try:
+    _first_scen_def = selected[0]['def'] if selected else ''
+    _first_corpus = os.path.basename(_first_scen_def.split('|')[1]) if _first_scen_def else ''
+    with open(os.path.join(out, '.c4_first_input'), 'w') as _f:
+        _f.write(os.path.join(out, 'corpora', _first_corpus) if _first_corpus else '')
+except Exception:
+    pass
 if scen_filter_explicit:
     effective_profile = 'custom'
     profile_overridden = bool(requested_profile)
@@ -965,7 +974,8 @@ make -f Makefile.substrate python-substrate >/dev/null 2>&1 || echo "WARN: pytho
 (cd stage0/dist_ingest && make) || { echo "dist-campaign: dist_ingest build failed" >&2; exit 1; }
 
 echo "=== dist-ingest campaign: environment"
-python3 stage0/env_capture.py --out "$OUT/env/env-before.json" --run-id "$CAMPAIGN_ID" \
+C4_FIRST_INPUT=$(cat "$OUT/.c4_first_input" 2>/dev/null)
+python3 stage0/env_capture.py --out "$OUT/env/env-before.json" --run-id "$CAMPAIGN_ID" --input "$C4_FIRST_INPUT" \
   || { echo "dist-campaign: env-before failed" >&2; exit 1; }
 
 echo "=== dist-ingest campaign: corpora"
@@ -1172,7 +1182,7 @@ while IFS=$'\x1f' read -r sid scen_def t cand map_id map_profile map_variant map
     "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id"
 done < "$EXPERIMENTS_FILE"
 
-python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" \
+python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" --input "$C4_FIRST_INPUT" \
   || echo "WARN: env-after capture failed" >&2
 
 python3 - "$OUT" "$CAMPAIGN_ID" "$SOURCE_SHA" "$TRIALS" "$OUTCOMES" "$SEED" "$CACHE_POLICY" "$SHUFFLE_SCENARIOS" "$CONSUMER_KERNEL" "$STRICT_AFFINITY" "$STRICT_MBIND" "$PHYS_NODES" "$MAPPING_PROFILES" "$PLACEMENT_EXPERIMENTS" "$CACHE_PRECONDITION_POLICY" "$MIN_DURATION_SECONDS" <<'PY'

@@ -85,26 +85,45 @@ def cpu_topology():
     except (OSError, subprocess.SubprocessError):
         pass
     node_dir = "/sys/devices/system/node"
-    if os.path.isdir(node_dir):
-        for name in sorted(os.listdir(node_dir)):
-            if not name.startswith("node"):
-                continue
-            d = os.path.join(node_dir, name)
-            if not os.path.isdir(d):
-                continue
-            cpulist = _read(os.path.join(d, "cpulist"), "")
-            meminfo = _read(os.path.join(d, "meminfo"), "")
-            stats = _read(os.path.join(d, "numastat"), "")
-            out["nodes"][name] = {
-                "cpulist": cpulist,
-                "meminfo": meminfo[:2000],
-                "numastat": stats[:2000],
-            }
+    for name in _discover_nodes():
+        d = os.path.join(node_dir, name)
+        if not os.path.isdir(d):
+            continue
+        cpulist = _read(os.path.join(d, "cpulist"), "")
+        cpumap = _read(os.path.join(d, "cpumap"), "")
+        meminfo = _read(os.path.join(d, "meminfo"), "")
+        stats = _read(os.path.join(d, "numastat"), "")
+        out["nodes"][name] = {
+            "cpulist": cpulist,
+            "cpumap": cpumap,
+            "meminfo": meminfo[:2000],
+            "numastat": stats[:2000],
+        }
+    out["node_online_list"] = _read(
+        os.path.join(node_dir, "online"), "unknown/unavailable")
     return out
 
 
+NUMA_NODE_DIR = "/sys/devices/system/node"
+
+
+def _discover_nodes():
+    """Dynamic NUMA-node names from sysfs (C4 — master WO 7.1).
+
+    Replaces any hardcoded node0..nodeN iteration: returns the sorted
+    names of sysfs directories under /sys/devices/system/node starting
+    with "node" (including "node0"... but also "node1", "node2", ...).
+    """
+    try:
+        return sorted(n for n in os.listdir(NUMA_NODE_DIR)
+                      if n.startswith("node")
+                      and os.path.isdir(os.path.join(NUMA_NODE_DIR, n)))
+    except OSError:
+        return []
+
+
 def _cpu_extra():
-    """Governor + scaling driver, SMT state, and node memory totals."""
+    """Governor + scaling driver, SMT state, and dynamic node totals."""
     out = {}
     try:
         lscpu = subprocess.run(["lscpu"], capture_output=True, text=True,
@@ -129,10 +148,41 @@ def _cpu_extra():
     out["smt"] = {"thread_siblings": out.get("lscpu_key", {}).get(
         "Threads per core", "unknown")}
     out["node_memory"] = {}
-    for name in ("node0", "node1", "node2", "node3", "node4", "node5"):
-        mi = _read("/sys/devices/system/node/%s/meminfo" % name)
+    out["node_distances"] = {}
+    for name in _discover_nodes():
+        mi = _read(os.path.join(NUMA_NODE_DIR, name, "meminfo"))
         if mi:
             out["node_memory"][name] = mi[:400]
+        dist = _read(os.path.join(NUMA_NODE_DIR, name, "distance"))
+        if dist is not None:
+            out["node_distances"][name] = dist
+    # Node-to-socket mapping: parse lscpu -p (socket column per CPU row;
+    # column 3 is the NUMA node). Unknowns recorded explicitly.
+    out["node_to_socket"] = {}
+    try:
+        proc = subprocess.run(["lscpu", "-p"], capture_output=True,
+                              text=True, timeout=30)
+        for line in proc.stdout.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(",")
+            if len(parts) >= 4:
+                try:
+                    node = int(parts[3])
+                    socket = int(parts[2])
+                except (ValueError, IndexError):
+                    continue
+                out["node_to_socket"].setdefault(
+                    "node%d" % node, set()).add(socket)
+        out["node_to_socket"] = {k: sorted(v)
+                                 for k, v in out["node_to_socket"].items()}
+    except (OSError, subprocess.SubprocessError):
+        out["node_to_socket"] = {}
+    # NUMA-related kernel settings (C4 — 7.1).
+    out["numa_balancing"] = _read("/proc/sys/kernel/numa_balancing",
+                                  "unknown/unavailable")
+    out["numa_scan_delay"] = _read("/proc/sys/kernel/numa_scan_delay",
+                                   "unknown/unavailable")
     cfg_path = "/boot/config-%s" % platform.release()
     out["kernel_config"] = {}
     for token in ("CONFIG_PER_VMA_LOCK", "CONFIG_NUMA",
@@ -208,6 +258,16 @@ def _process_state():
         out["affinity"] = sorted(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         out["affinity"] = "unknown/unavailable"
+    # C4 — allowed memory nodes (master WO 7.1).
+    try:
+        status = _read("/proc/self/status", "")
+        mems = [l for l in status.splitlines()
+                if l.startswith("Mems_allowed_list:")]
+        out["mems_allowed_list"] = (
+            mems[0].split(":", 1)[1].strip() if mems
+            else "unknown/unavailable")
+    except OSError:
+        out["mems_allowed_list"] = "unknown/unavailable"
     try:
         import ctypes
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -225,6 +285,60 @@ def _process_state():
                             "rc": rc}
     except Exception as exc:  # keep provenance honest, never crash it
         out["mempolicy"] = "unknown/unavailable (%s)" % type(exc).__name__
+    return out
+
+
+def _memory_space():
+    """Available memory and disk space (master WO 7.1)."""
+    out = {}
+    status = _read("/proc/meminfo", "")
+    for key in ("MemTotal", "MemAvailable", "MemFree"):
+        val = None
+        for line in status.splitlines():
+            if line.startswith(key + ":"):
+                parts = line.split()
+                val = (parts[1] + " kB") if len(parts) >= 2 else None
+                break
+        out[key] = val or "unknown/unavailable"
+    for path in ("/", "/tmp", "/mnt/ramdisk"):
+        label = "root" if path == "/" else path.lstrip("/").replace("/", "_")
+        key = "disk_free_bytes_%s" % label
+        try:
+            st = os.statvfs(path)
+            out[key] = st.f_bavail * st.f_frsize
+        except OSError:
+            out[key] = "unknown/unavailable"
+    return out
+
+
+def _storage_details(extra):
+    """Filesystem/storage details for campaign input (master WO 7.1)."""
+    out = {}
+    input_path = (extra or {}).get("input_path")
+    if not input_path:
+        out["input_path"] = "unknown/unavailable"
+        return out
+    p = os.path.abspath(input_path)
+    out["input_path"] = p
+    out["input_realpath"] = os.path.realpath(p)
+    try:
+        st = os.stat(p)
+        out["input_missing"] = False
+        out["input_size_bytes"] = st.st_size
+        out["input_device"] = st.st_dev
+        out["input_mtime"] = st.st_mtime
+    except OSError as exc:
+        # Missing at capture time is factual, not an error (e.g. env-before
+        # precedes corpus generation); drift flags only when both sides exist.
+        out["input_missing"] = True
+        out["input_error"] = "missing/unavailable (%s)" % exc
+    try:
+        stv = os.statvfs(os.path.dirname(p) or p)
+        out["input_fs_free_bytes"] = stv.f_bavail * stv.f_frsize
+        out["input_fs_total_bytes"] = stv.f_blocks * stv.f_frsize
+    except OSError:
+        out["input_fs_free_bytes"] = "unknown/unavailable"
+        out["input_fs_total_bytes"] = "unknown/unavailable"
     return out
 
 
@@ -249,14 +363,26 @@ def env_manifest(repo, extra=None):
                 "/sys/kernel/mm/transparent_hugepage/shmem_enabled", ""),
             "enabled": _read(
                 "/sys/kernel/mm/transparent_hugepage/enabled", ""),
+            # C4 — 7.1: defrag state.
+            "defrag": _read(
+                "/sys/kernel/mm/transparent_hugepage/defrag",
+                "unknown/unavailable"),
             "per_size": {},
         },
+        # C4 — 7.1/7.1: available memory and disk space.
+        "memory_space": _memory_space(),
+        "storage_details": _storage_details(extra),
         "python": {"version": platform.python_version(),
                    "executable": sys.executable},
         "cgroup": {
             "cpuset_cpus": _read(
                 "/sys/fs/cgroup/cpuset.cpus", None) or _read(
                 "/sys/fs/cgroup/cpuset/cpuset.cpus", None),
+            "cpuset_mems": _read(
+                "/sys/fs/cgroup/cpuset.mems", None)
+                or _read("/sys/fs/cgroup/cpuset/cpuset.mems", None)
+                or _read("/sys/fs/cgroup/cpuset.mems.effective", None)
+                or _read("/sys/fs/cgroup/cpuset/cpuset.mems.effective", None),
             "memory_max": _read("/sys/fs/cgroup/memory.max", None),
             "cpu_max": _read("/sys/fs/cgroup/cpu.max", None),
         },
@@ -282,9 +408,14 @@ def main():
     ap.add_argument("--out", required=True,
                     help="where to write the JSON manifest")
     ap.add_argument("--run-id", default=None)
+    ap.add_argument("--input", default=None,
+                    help="campaign input path to record storage details for")
     args = ap.parse_args()
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     extra = {"run_id": args.run_id} if args.run_id else None
+    if args.input:
+        extra = dict(extra or {})
+        extra["input_path"] = args.input
     manifest = env_manifest(args.repo, extra=extra)
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)
