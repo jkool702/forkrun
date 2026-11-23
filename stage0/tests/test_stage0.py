@@ -1871,5 +1871,59 @@ class TestBinaryProvenance(unittest.TestCase):
                              env_capture.build_hashes(REPO).get("stage0/libdist_ingest.so"))
 
 
+class TestNumaCalibrate(unittest.TestCase):
+    """C4 — master WO 8: NUMA hardware calibration utility."""
+
+    def test_nodes_and_cpus_dynamic(self):
+        import numa_calibrate
+        nodes = numa_calibrate._nodes_and_cpus()
+        self.assertTrue(nodes)
+        for nd in nodes:
+            self.assertIn("node_id", nd)
+            self.assertIn("node_name", nd)
+            self.assertIn("cpulist", nd)
+        ids = [nd["node_id"] for nd in nodes]
+        self.assertEqual(ids, sorted(ids))
+
+    def test_first_cpu_parsing(self):
+        import numa_calibrate
+        self.assertEqual(numa_calibrate._first_cpu("0-13,30"), 0)
+        self.assertEqual(numa_calibrate._first_cpu("14-27"), 14)
+        self.assertIsNone(numa_calibrate._first_cpu(""))
+        self.assertIsNone(numa_calibrate._first_cpu(None))
+
+    def test_bench_stats(self):
+        import ctypes
+        import numa_calibrate
+        size = 4 * 1024 * 1024
+        buf = (ctypes.c_char * size)()
+        sink = (ctypes.c_char * size)()
+        stats = numa_calibrate._bench(sink, buf, size, samples=3)
+        self.assertEqual(stats["samples"], 3)
+        self.assertGreaterEqual(stats["mean_s"], 0.0)
+        self.assertGreaterEqual(stats["stddev_s"], 0.0)
+        if stats["gbps"]:
+            self.assertGreater(stats["gbps"], 0.0)
+
+    def test_main_writes_calibration_report(self):
+        with tempfile.TemporaryDirectory(prefix="calib_") as td:
+            out = os.path.join(td, "cal.json")
+            p = subprocess.run(
+                [sys.executable, os.path.join(STAGE0, "numa_calibrate.py"),
+                 "--out", out, "--size-mb", "2", "--samples", "2"],
+                capture_output=True, text=True, cwd=REPO, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(out) as fh:
+                doc = json.load(fh)
+            self.assertEqual(doc["schema"], "stage0-numa-calibrate")
+            self.assertTrue(doc["host"]["topology_nodes"])
+            for key in ("read_local", "copy_local"):
+                self.assertIn(key, doc["measurements"])
+            self.assertIn("observed", doc)
+            self.assertIn("memory_placement", doc["observed"])
+            self.assertIn("note", doc)
+            self.assertIn("diagnostic", doc["note"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()
