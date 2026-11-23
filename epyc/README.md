@@ -250,6 +250,7 @@ warns (without aborting) if it did not.
 | 42 | `42_bench_tokenize` | LLM tokenize @ 2M docs, 8 systems | 2.5–3.5 h |
 | 43 | `43_bench_ml20m` | AI/ML @ 20M, forkrun only, + F-NUMA1 audit at 8 nodes | 1.5–2.5 h |
 | 44 | `44_bench_headline` | (†)/(max) pinned grid, cell-for-cell vs `headline_2026-09-29.csv` | 20 m |
+| 45 | `45_bench_dist_ingest` | **experimental distributed-ingest campaign** (`stage0/dist_ingest`): auto-triage + campaign + report + calibration + drift; production-reference results (41) kept separate (WO 9.1–9.3) | 45 m |
 | 50 | `50_bench_bash` | `run_benchmark.bash` + GNU Parallel + xargs baselines + 9 targeted sweeps | 1.5 h |
 | 51 | `51_bench_core` | `run_all.py --scale large` (10M lines, median of 5) | 30 m |
 | 60 | `60_utest_bash_full` | `test_frun_comprehensive.sh` — 267 tests, un-timeboxed | 1–1.5 h |
@@ -284,6 +285,9 @@ epyc-rental-out/
 │   ├── headline/               (†)/(max) grid + diff vs the published CSV
 │   ├── ml5m/  ml20m/  tokenize/  core/  numa5m/
 │   └── bash/                   benchmark.out.txt + SUMMARY.txt (incl. steal %)
+├── 21_bench_dist_ingest/       C5 — experimental dist-ingest campaign (immutable out dir + report.md)
+│   ├── dist_ingest_campaign/   campaign-manifest.json + report.md + cases/ + env/ + drift-report.json
+│   └── numa_calibration.json   stage-8 hardware calibration (diagnostic; not in throughput stats)
 └── MANIFEST.sha256
 ```
 

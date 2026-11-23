@@ -67,6 +67,7 @@ Stages (in order):
   42_bench_tokenize       LLM tokenize @ 2M docs, 8 systems
   43_bench_ml20m          AI/ML @ 20M, forkrun only
   44_bench_headline       (dagger)/(max) pinned grid vs the published CSV
+  45_bench_dist_ingest    experimental dist-ingest campaign (immutable out dir)
   50_bench_bash           bash matrix + parallel/xargs baselines + sweeps
   51_bench_core           core python suite @ 10M lines
   60_utest_bash_full      test_frun_comprehensive.sh (267, un-timeboxed)
@@ -119,6 +120,7 @@ STAGES=(
     "42_bench_tokenize|42_bench_tokenize.sh|14400|yes"
     "43_bench_ml20m|43_bench_ml20m.sh|14400|yes"
     "44_bench_headline|44_bench_headline.sh|5400|yes"
+    "45_bench_dist_ingest|45_bench_dist_ingest.sh|3600|no"
     "50_bench_bash|50_bench_bash.sh|10800|no"
     "51_bench_core|51_bench_core.sh|7200|yes"
     "60_utest_bash_full|60_utest_bash_full.sh|10800|no"
@@ -381,7 +383,7 @@ for line in "${STAGES[@]}"; do
     # 90_collect is in the list because it writes ENVIRONMENT.md, DEVIATIONS.md
     # and INTEGRITY_AUDIT.md — the documents a human actually reads.
     case "$name" in
-        10_setup|30_*|31_*|40_*|41_*|42_*|43_*|44_*|50_*|51_*|60_*|90_collect)
+        10_setup|30_*|31_*|40_*|41_*|42_*|43_*|44_*|45_*|50_*|51_*|60_*|90_collect)
             if [ -f "$EPYC_DIR/98_publish.sh" ] && [ "${EPYC_NO_PUBLISH:-0}" != "1" ]; then
                 log "publishing results after $name"
                 bash "$EPYC_DIR/98_publish.sh" --label "$name" \
