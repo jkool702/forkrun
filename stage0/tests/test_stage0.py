@@ -1689,5 +1689,138 @@ class TestRunAllCampaignIntegration(unittest.TestCase):
         self.assertIn("Time-correlated same-interval evidence", rendered)
 
 
+class TestEnvDrift(unittest.TestCase):
+    """C4 — master WO 7.2: environment/topology drift detection."""
+
+    def _env(self, **over):
+        m = {
+            "kernel": {"cmdline": "/boot/vmlinuz quiet", "uptime": "10"},
+            "cpu_topology": {
+                "node_online_list": "0-3",
+                "nodes": {
+                    "node0": {"cpulist": "0-13", "cpumap": "ffff",
+                              "meminfo": "Node 0 MemTotal:  100 kB",
+                              "numastat": "numa_hit 1"},
+                    "node1": {"cpulist": "14-27", "cpumap": "ffff",
+                              "meminfo": "Node 1 MemTotal:  90 kB",
+                              "numastat": "numa_hit 2"},
+                },
+                "cpus": [{"cpu": 0, "node": 0, "core": 0, "socket": 0}],
+            },
+            "cpu_extra": {
+                "node_distances": {"node0": "10 10 10 10"},
+                "node_to_socket": {"node0": [0]},
+                "governors": ["powersave"],
+                "lscpu_key": {"Model name": "EPYC 7763", "CPU(s)": "28"},
+                "numa_balancing": 1,
+                "smt": {"thread_siblings": "2"},
+            },
+            "thp": {"enabled": "[madvise]", "shmem_enabled": "[always]",
+                    "defrag": "[madvise]"},
+            "cgroup": {"cpuset_cpus": "0-27", "cpuset_mems": "0-3",
+                       "cpu_max": "100000 100000", "memory_max": "10G"},
+            "process": {"affinity": [0, 1, 2, 3], "mems_allowed_list": "0-3"},
+            "storage_details": {"input_path": "/x/y.bin",
+                                "input_realpath": "/x/y.bin",
+                                "input_size_bytes": 100, "input_device": 51,
+                                "input_mtime": 100.0, "input_missing": False},
+        }
+        m.update(over)
+        return m
+
+    def _drifts(self, before, after):
+        import env_drift
+        return env_drift._drifts_from(before, after)
+
+    def test_no_drift_when_identical(self):
+        import env_drift
+        m = self._env()
+        self.assertEqual(self._drifts(m, self._env()), [])
+        self.assertTrue(env_drift.summarize(self._drifts(m, m))["campaign_valid"])
+
+    def test_volatile_fields_not_drift(self):
+        import env_drift
+        before = self._env()
+        after = self._env()
+        # Free memory, runtime telemetry, and missing->present input
+        # transitions are not configuration drift.
+        after["cpu_topology"]["nodes"]["node0"]["meminfo"] = \
+            "Node 0 MemTotal:  100 kB\nNode 0 MemFree: 1 kB\nNode 0 NumastatX"
+        after["cpu_topology"]["nodes"]["node0"]["numastat"] = "numa_hit 999"
+        after["cpu_topology"]["nodes"]["node1"]["numastat"] = "numa_miss 7"
+        after["storage_details"]["input_missing"] = True
+        drifts = self._drifts(before, after)
+        critical = [d for d in drifts if d["critical"]]
+        self.assertEqual(critical, [])
+        self.assertEqual([d["field"] for d in drifts], ["storage_details.input_missing"])
+        self.assertTrue(env_drift.summarize(drifts)["campaign_valid"])
+
+    def test_critical_drift_kernel_cmdline(self):
+        before, after = self._env(), self._env()
+        after["kernel"]["cmdline"] = "/boot/vmlinuz quiet numa=fake=4"
+        drifts = self._drifts(before, after)
+        self.assertEqual(len(drifts), 1)
+        self.assertEqual(drifts[0]["field"], "kernel.cmdline")
+        self.assertTrue(drifts[0]["critical"])
+
+    def test_critical_drift_thp_defrag(self):
+        before, after = self._env(), self._env()
+        after["thp"]["defrag"] = "[never]"
+        drifts = self._drifts(before, after)
+        self.assertTrue(any(d["field"] == "thp.defrag" and d["critical"] for d in drifts))
+
+    def test_critical_drift_cgroup_memory_limit(self):
+        before, after = self._env(), self._env()
+        after["cgroup"]["memory_max"] = "20G"
+        drifts = self._drifts(before, after)
+        self.assertTrue(any(d["field"] == "cgroup.memory_max" and d["critical"] for d in drifts))
+
+    def test_critical_drift_input_storage_identity(self):
+        before, after = self._env(), self._env()
+        after["storage_details"]["input_size_bytes"] = 999
+        drifts = self._drifts(before, after)
+        self.assertTrue(any(d["field"] == "storage_details.input_size_bytes" and d["critical"] for d in drifts))
+
+    def test_summarize_campaign_valid_semantics(self):
+        import env_drift
+        critical = env_drift.summarize([{"critical": True, "label": "x"}])
+        self.assertFalse(critical["campaign_valid"])
+        noncritical = env_drift.summarize([{"critical": False, "label": "y"}])
+        self.assertTrue(noncritical["campaign_valid"])
+
+    def test_main_writes_report_and_exit_codes(self):
+        import env_drift
+        drift_script = os.path.join(STAGE0, "env_drift.py")
+        with tempfile.TemporaryDirectory(prefix="drift_") as td:
+            bp = os.path.join(td, "before.json")
+            ap = os.path.join(td, "after.json")
+            rp = os.path.join(td, "drift-report.json")
+            before, after = self._env(), self._env()
+            with open(bp, "w") as fh:
+                json.dump(before, fh)
+            with open(ap, "w") as fh:
+                json.dump(after, fh)
+            # No drift: exit 0.
+            p = subprocess.run([sys.executable, drift_script,
+                                "--before", bp, "--after", bp, "--out", rp],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(rp) as fh:
+                rep = json.load(fh)
+            self.assertTrue(rep["campaign_valid"])
+            # Critical drift: exit 1.
+            after["kernel"]["cmdline"] = "changed"
+            with open(ap, "w") as fh:
+                json.dump(after, fh)
+            p = subprocess.run([sys.executable, drift_script,
+                                "--before", bp, "--after", ap, "--out", rp],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 1, p.stderr)
+            with open(rp) as fh:
+                rep = json.load(fh)
+            self.assertFalse(rep["campaign_valid"])
+            self.assertEqual(rep["critical_drift_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
