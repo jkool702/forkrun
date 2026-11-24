@@ -363,3 +363,54 @@ Local/fake-NUMA tests validate driver and CLI-input/topology-handling/provenance
 - No C4/C5 work performed (environment/telemetry/reporting improvements beyond C3 attribution, binary provenance, calibration utility, EPYC stage/orchestration integration, rehearsal, `RENTAL_READINESS.md` finalization as later-scope items). No physical multi-node NUMA validation/rental; local/fake-NUMA results are not evidence of physical locality/scaling/remote-memory penalties.
 - C3 parameter sweeps/qualification/workload/cache axes are experimental harness/reporting controls; they do not change production forkrun behavior. `drop_caches_if_privileged` is factual and may fall back; it is not a guaranteed cold-cache control.
 - **Explicit confirmation:** no C4/C5, no physical rental, no production adoption. **Stopped for independent review after this C3 checkpoint.**
+
+## Corrections-3 closeout (branch `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3`)
+
+Base: corrections-2 tip `3e6a924e` + this closeout commit. Spec: WO-external review
+(authoritative-independent reviewer) of corrections-2:
+
+- **P1 — wrong-node placement accepted as valid:** fixed — `_observed_placement` records
+  expected_node + observed pages_on_expected + unsuccessful_pages; `_meas` marks
+  invalid_placement on wrong-node/missing/unsuccessful placement; failed query vs wrong
+  node recorded distinctly. (Previous test certified a misplaced destination as valid.)
+- **P2 — backlog label:** `report_dist` now prints `max_*_backlog_by_node` and
+  `max_*_backlog_sum_of_node_maxima` explicitly.
+- **P2 — missing campaign manifest:** `require_campaign_manifest` (epyc/lib.sh) — campaign
+  exiting 0 without manifest → stage exit 1; campaign exit preserved.
+
+plus WO-internal §11 rehearsal rehearsal (corrections-3 base):
+
+- **§5.2 per-node ingestor workload controls** — engine (`di_ingestor_cfg_t`,
+  `di_node.ing_cfg`, `di_ingestor_sleep_ns`, ingest-path hooks), `run_dist.py`
+  (`DiIngestorCfg` + `--ingestor-*-per-node` + provenance), `run_case.py` spec plumbing,
+  campaign scenario-line `pn` field + 4 asymmetric-ingestor scenarios
+  (`slow_ingestor_one/stall_recover/fast_consumer/slow_consumer`). Modes:
+  `off` (default), `delay_per_claim`, `delay_after_read`, `stall_then_recover`,
+  `rate_limit`. Observed evidence + per-node provenance in DIST_RESULT.
+- **§2 placement_sampling=2 (full)** — exhaustive sampling for diagnostics;
+  `--placement-experiments off|paired|full`; placement-validation experiments in
+  'full' mode record placement_sampling=2 + trial_class=placement_validation.
+- **§10.2 sanitizers:** `stage0/dist_ingest/SANITIZER_EVIDENCE.md` — ASan+UBSan:
+  254 tests OK, 0 reports; TSan: 254 tests OK, 0 warnings.
+- **epyc/rehearsal_rehearsal_45.sh** — §11 rehearsal rehearsal (45-stage + plan-only +
+  campaign + 90_collect + provenance reconciliation).
+
+Validation: `TestIngestorWorkloadControls` (6) + `TestCampaignWiring` (4) +
+`test_placement_experiments_full_mode_emits_full_sampling` (2 new campaign tests in
+`TestCampaignWiring`) + `test_engine_placement_sampling_modes_and_rejection` +
+`NONQUICK_NODES4` update; mirror struct updates (5 test files) for the new
+`DiNodeMetrics`/`DiConfig` fields. Suites: 254 dist-ingest, 101 stage0, 7 drain-guard,
+36 numa (skip=1). Sanitizer re-runs: 254 + 254.
+
+Full closeout: `stage0/dist_ingest/RENTAL_READINESS.md` (WO §12, 20 items).
+
+## Corrected corrections-1/2 acceptance
+
+External reviewers' earlier findings (corrections-1 review: P1–P2; corrections-2
+review: 3 findings) remain addressed by corrections-3:
+- corrections-1 review P1 (wrong-node placement) — now fixed by corrections-3 §5.2 +
+  corrections-2 work.
+- corrections-2 review findings — remain fixed by corrections-2 (per external review
+  acceptance of corrections-2).
+
+**Stopped for independent review after corrections-3 reporting.**

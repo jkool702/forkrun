@@ -49,6 +49,25 @@ if [ $rc -eq 0 ]; then
     [ -f "$EPYC_OUT/plan_only_campaign/execution-plan.json" ] && log "PASS: plan-only execution-plan.json (mapping matrix generated)" || { err "FAIL: missing execution-plan.json"; fail=$((fail + 1)); }
 fi
 
+# --- 2b. parameter sweep plan generation (§4) --------------------------------
+rm -rf "$EPYC_OUT/sweep_plan_only_campaign"
+bash stage0/dist_ingest/run_dist_campaign.sh --plan-only \
+    --out "$EPYC_OUT/sweep_plan_only_campaign" --campaign-id rehearsal-reh3-sweep \
+    --scenarios small --trials 1 --seed rehearsal-reh3-seed \
+    --sweep-base-quantum "2097152,4194304" --sweep-max-backlog "67108864,134217728" \
+    > "$EPYC_OUT/sweep_plan_only.log" 2>&1
+check "parameter sweep plan generation (RC)" $?
+python3 - "$EPYC_OUT/sweep_plan_only_campaign/prevalidation.json" <<'PY'
+import json, sys
+pv = json.load(open(sys.argv[1]))
+axes = pv.get("sweep_axes") or []
+psets = pv.get("parameter_sets") or []
+assert axes, "no sweep axes recorded"
+assert any(p.get("base_quantum") in (2097152, 4194304) for p in psets), "expected swept base_quantum in parameter sets"
+print("PASS: parameter sweep plan generation (sweep_axes + parameter_sets recorded)")
+PY
+check "parameter sweep plan generation (evidence)" $?
+
 # --- 3. rehearsal campaign: §5 asymmetric ingestors + §2 paired + §3 repeats + §4 sweeps + §11 random order ------------------
 rm -rf "$EPYC_OUT/rehearsal_campaign"; mkdir -p "$EPYC_OUT/rehearsal_campaign"
 bash stage0/dist_ingest/run_dist_campaign.sh \

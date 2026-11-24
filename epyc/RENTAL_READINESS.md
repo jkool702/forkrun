@@ -12,7 +12,7 @@ Rehearsal date: 2026-11-23.
 
 | # | Step | Artifact | Status |
 |---|---|---|---|
-| 1 | source verify | `campaign-manifest.json` (`source_sha`) | rehearsal: `45` stage rehearsal on `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-1 @ 6886defed99139910ff87fcf6e9b6a9c80060471` — campaign `source_sha` == `env-before.json` git.head_sha == corrected SHA, `git.dirty == false` |
+| 1 | source verify | `campaign-manifest.json` (`source_sha`) | rehearsal: `45` stage rehearsal on `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3 @ 9798f96d1ddc8c3b265c5f0bdfee82385ff52322` — campaign `source_sha` == `env-before.json` git.head_sha == corrected SHA, `git.dirty == false` (rehearsal rehearsal, epyc/rehearsal_rehearsal_45.sh) |
 | 2 | topology verify | `00_environment/PREFLIGHT.txt`, `epyc.env` | rehearsal: `numa=fake=4` (fake, not physical) |
 | 3 | env capture | `env-before-1.json` | rehearsal: OK (stage0/env_capture.py, C4.3+C4.5) |
 | 4 | hardware calibration | `numa_calibration.json` | rehearsal: OK (stage0/numa_calibrate.py, C4.6; local 13–14 GB/s on this box) |
@@ -47,6 +47,19 @@ Rehearsal date: 2026-11-23.
   JSON parses (the P1.1 integration check passed; 45 stage COMPLETE rc=0).
 - Drift rehearsal: `env_drift.py` reports `campaign_valid=True` for the
   rehearsal campaign's env pair.
+- **Corrections-3 rehearsal rehearsal** (`epyc/rehearsal_rehearsal_45.sh`,
+  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `9798f96d…`,
+  `EPYC_OUT=/tmp/opencode/epyc-reh3/out`, exit 0): 45-stage rehearsal OK;
+  plan-only rehearsal (topology discovery + mapping-matrix generation +
+  mapping compatibility validation) OK; rehearsal campaign OK
+  (asymmetric-ingestor scenarios: `slow_ingestor_one`,
+  `slow_ingestor_stall_recover`, `slow_ingestor_fast_consumer`,
+  `slow_ingestor_slow_consumer`; paired placement experiments; repeated
+  passes; randomized candidate order; per-trial provenance:
+  mapping_provenance + duration_qualification + ingestor_controls);
+  provenance reconciliation (campaign source_sha == env-before.json
+  git.head_sha == `9798f96d…`, git.dirty == false, drift_assessment=valid);
+  artifact collection/indexing (`90_collect`) OK.
 
 ## Known limitations of this rehearsal
 
