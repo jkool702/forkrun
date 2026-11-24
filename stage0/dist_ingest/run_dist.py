@@ -58,6 +58,49 @@ CONSUMER_MODE = {
     "stall": 3,
 }
 
+# §5.2: per-node ingestor workload control modes (mirror of dist_ingest.h).
+INGESTOR_MODE = {
+    "off": 0,
+    "delay_per_claim": 1,
+    "delay_after_read": 2,
+    "stall_then_recover": 3,
+    "rate_limit": 4,
+}
+INGESTOR_PHASE = {
+    0: "off",
+    1: "delay_per_claim",
+    2: "delay_after_read_before_publish",
+    3: "stall_then_recover",
+    4: "rate_limit",
+}
+# §2: placement sampling modes: off=performance-isolated, on=bounded
+# (in-run move_pages sampling for placement-validation), full=exhaustive.
+PLACEMENT_SAMPLING_MODE = {"off": 0, "on": 1, "full": 2}
+
+
+def _per_node_list(spec, n, name_map=None):
+    """Parse a comma list of per-node values (empty = zeros).
+
+    With name_map (e.g. INGESTOR_MODE), names are mapped to ints; without it,
+    entries must be ints (or 0 when missing/invalid)."""
+    if not spec:
+        return [0] * n
+    parts = [p.strip() for p in str(spec).split(",")]
+    out = []
+    for i in range(n):
+        v = 0
+        if i < len(parts) and parts[i] not in ("", "-", "None"):
+            s = parts[i]
+            if name_map is not None:
+                v = name_map.get(s, 0)
+            else:
+                try:
+                    v = int(s)
+                except ValueError:
+                    v = 0
+        out.append(v)
+    return out
+
 
 class DiPolicyParams(ctypes.Structure):
     _fields_ = [
@@ -84,6 +127,17 @@ class DiConsumerCfg(ctypes.Structure):
         ("mode", ctypes.c_int),
         ("bytes_per_sec", ctypes.c_uint64),
         ("stall_ms", ctypes.c_uint64),
+    ]
+
+
+class DiIngestorCfg(ctypes.Structure):
+    """§5.2: per-node ingestor workload controls (mirror of dist_ingest.h
+    di_ingestor_cfg_t)."""
+    _fields_ = [
+        ("mode", ctypes.c_int),          # 0=off,1=delay_per_claim,2=delay_after_read,3=stall_then_recover,4=rate_limit
+        ("delay_ns", ctypes.c_uint64),
+        ("stall_ms", ctypes.c_uint64),
+        ("rate_bps", ctypes.c_uint64),
     ]
 
 
@@ -142,6 +196,11 @@ class DiNodeMetrics(ctypes.Structure):
         ("res_hist", ctypes.c_uint64 * 20),
         ("affinity_ingestor", DiAffinityRole),
         ("affinity_consumer", DiAffinityRole),
+        # §5.2: ingestor workload control evidence (observed, per node).
+        ("ingestor_mode", ctypes.c_int),
+        ("ingestor_delay_ns", ctypes.c_uint64),
+        ("ingestor_stall_fired", ctypes.c_uint64),
+        ("ingestor_rate_throttled_ns", ctypes.c_uint64),
         ("mbind_policy_requested", ctypes.c_int),
         ("mbind_policy_applied", ctypes.c_int),
         ("mbind_error", ctypes.c_int),
@@ -185,6 +244,7 @@ class DiConfig(ctypes.Structure):
         ("policy", ctypes.c_int),
         ("params", DiPolicyParams),
         ("consumers", ctypes.POINTER(DiConsumerCfg)),
+        ("ingestors", ctypes.POINTER(DiIngestorCfg)),
         ("cpu_lists", ctypes.c_void_p),
         ("cpu_counts", ctypes.c_void_p),
         ("phys_nodes", ctypes.c_void_p),
@@ -267,6 +327,14 @@ def node_metrics_to_dict(m, idx, requested_phys_node=None, policy=None):
     return {
         "node": idx,
         "requested_physical_node": requested_phys_node,
+        # §5.2: observed ingestor-workload evidence for this node.
+        "ingestor_controls": {
+            "mode": int(m.ingestor_mode),
+            "phase": INGESTOR_PHASE.get(int(m.ingestor_mode), "off"),
+            "delay_ns": int(m.ingestor_delay_ns),
+            "stall_fired": int(m.ingestor_stall_fired),
+            "rate_throttled_ns": int(m.ingestor_rate_throttled_ns),
+        },
         "reservations": m.reservations,
         "bytes_reserved_req": m.bytes_reserved_req,
         "bytes_assigned": m.bytes_assigned,
@@ -1052,16 +1120,21 @@ def _scan_evidence_valid(consumer_kernel_name, total_consumer_bytes_scanned, tot
 
 
 def _placement_sampling_mode_name(mode):
-    # C2: 0=off/performance-isolated, 1=on/in-run placement-validation (timing tainted)
+    # C2: 0=off/performance-isolated, 1=on/bounded in-run placement-validation;
+    # §2: 2=full/exhaustive diagnostics.
     try:
         m = int(mode)
     except Exception:
         m = 0
-    return "on" if m == 1 else "off"
+    if m == 1:
+        return "on"
+    if m == 2:
+        return "full"
+    return "off"
 
 
 def _trial_class_for_sampling(placement_sampling_mode):
-    return "placement_validation" if _placement_sampling_mode_name(placement_sampling_mode) == "on" else "performance"
+    return "placement_validation" if _placement_sampling_mode_name(placement_sampling_mode) in ("on", "full") else "performance"
 
 
 def _performance_measurement_valid(functional_correct, affinity_valid, consumer_kernel_name, total_consumer_bytes_scanned, total_consumed,
@@ -1076,9 +1149,10 @@ def _performance_measurement_valid(functional_correct, affinity_valid, consumer_
         return False
     if affinity_valid is False:
         return False
-    # C2: in-run move_pages sampling imposes treatment-dependent overhead on the timed
-    # candidate; placement-validation experiments are not clean performance measurements.
-    if _placement_sampling_mode_name(placement_sampling_mode) == "on":
+    # C2/§2: in-run move_pages sampling imposes treatment-dependent overhead on the timed
+    # candidate; placement-validation experiments (on/full) are not clean performance
+    # measurements.
+    if _placement_sampling_mode_name(placement_sampling_mode) in ("on", "full"):
         return False
     scan_ok = _scan_evidence_valid(consumer_kernel_name, total_consumer_bytes_scanned, total_consumed)
     if scan_ok is False:
@@ -1124,9 +1198,19 @@ def main():
     ap.add_argument("--consumer-kernel", default="full_byte_scan",
                     choices=["full_byte_scan", "none"],
                     help="deterministic consumer kernel: full_byte_scan (default, memory-touch) or none (explicit opt-out)")
-    ap.add_argument("--placement-sampling", default="off", choices=["on", "off"],
+    ap.add_argument("--placement-sampling", default="off", choices=["off", "on", "full"],
                     help="in-run placement sampling mode: off (default, performance-isolated; no move_pages overhead in timed path) "
-                         "or on (placement-validation experiment; incurs treatment-dependent overhead and is not a clean performance measurement)")
+                         "or on (bounded placement-validation experiment; incurs treatment-dependent overhead and is not a clean "
+                         "performance measurement) or full (exhaustive sampling for diagnostics, also not a clean performance measurement)")
+    ap.add_argument("--ingestor-modes-per-node", default=None,
+                    help="§5.2: per-node ingestor workload control modes, comma list per node index: "
+                         + "|".join(sorted(INGESTOR_MODE)) + " (default off)")
+    ap.add_argument("--ingestor-delay-ns-per-node", default=None,
+                    help="§5.2: per-node delay_ns for modes delay_per_claim/delay_after_read (comma list)")
+    ap.add_argument("--ingestor-stall-ms-per-node", default=None,
+                    help="§5.2: per-node stall_ms for mode stall_then_recover (comma list)")
+    ap.add_argument("--ingestor-rate-bps-per-node", default=None,
+                    help="§5.2: per-node rate_bps for mode rate_limit (comma list)")
     ap.add_argument("--trial-class", default=None, choices=["performance", "placement_validation"],
                     help="explicit trial/experiment class label (defaults from --placement-sampling: off->performance, on->placement_validation)")
     ap.add_argument("--linked-performance-trial", default=None,
@@ -1134,7 +1218,7 @@ def main():
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
-    placement_sampling_mode = 1 if getattr(args, "placement_sampling", "off") == "on" else 0
+    placement_sampling_mode = PLACEMENT_SAMPLING_MODE.get(getattr(args, "placement_sampling", "off"), 0)
     placement_sampling_name = _placement_sampling_mode_name(placement_sampling_mode)
     expected_trial_class = _trial_class_for_sampling(placement_sampling_mode)
     if args.trial_class is not None and args.trial_class != expected_trial_class:
@@ -1196,12 +1280,25 @@ def main():
         cons_arr[args.slow_node].bytes_per_sec = args.slow_bps
         cons_arr[args.slow_node].stall_ms = args.slow_stall_ms
 
+    # §5.2: per-node ingestor workload controls (off by default).
+    ing_modes = _per_node_list(args.ingestor_modes_per_node, n, INGESTOR_MODE)
+    ing_delays = _per_node_list(args.ingestor_delay_ns_per_node, n)
+    ing_stalls = _per_node_list(args.ingestor_stall_ms_per_node, n)
+    ing_rates = _per_node_list(args.ingestor_rate_bps_per_node, n)
+    ing_arr = (DiIngestorCfg * n)()
+    for i in range(n):
+        ing_arr[i].mode = ing_modes[i]
+        ing_arr[i].delay_ns = ing_delays[i]
+        ing_arr[i].stall_ms = ing_stalls[i]
+        ing_arr[i].rate_bps = ing_rates[i]
+
     topo_keepalive = None
     cfg = DiConfig()
     cfg.num_nodes = n
     cfg.policy = policy
     cfg.params = params
     cfg.consumers = ctypes.cast(cons_arr, ctypes.POINTER(DiConsumerCfg))
+    cfg.ingestors = ctypes.cast(ing_arr, ctypes.POINTER(DiIngestorCfg))
     phys_arr, counts_arr, cpu_ptrs, topo_keepalive = build_ctypes_topology(logical_to_phys, per_node_cpus)
     cfg.phys_nodes = ctypes.cast(phys_arr, ctypes.c_void_p)
     if args.no_pin:
@@ -1350,6 +1447,19 @@ def main():
         "consumer_cpu_ns": res.consumer_cpu_ns,
         "res_hist": list(res.res_hist),
         "nodes": nodes_out,
+        # §5.2: ingestor workload-control provenance. "config_per_node" is
+        # the requested control surface; the observed evidence lives in each
+        # node entry's "ingestor_controls".
+        "ingestor_controls": {
+            "config_per_node": [
+                {"node": i, "mode": ing_modes[i],
+                 "phase": INGESTOR_PHASE[ing_modes[i]],
+                 "delay_ns": int(ing_delays[i]),
+                 "stall_ms": int(ing_stalls[i]),
+                 "rate_bps": int(ing_rates[i])}
+                for i in range(n)],
+            "disabled_by_default": all(m == 0 for m in ing_modes),
+        },
         "consumer_kernel": {
             "name": consumer_kernel_name,
             "id": int(params.consumer_kernel),

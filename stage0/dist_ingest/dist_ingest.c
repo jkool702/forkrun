@@ -94,6 +94,7 @@ typedef struct di_node {
 
     di_node_metrics_t m;
     di_consumer_cfg_t cons_cfg;
+    di_ingestor_cfg_t ing_cfg;   /* §5.2: per-node ingestor workload controls */
 
     di_resrec_t *recs;
     size_t recs_n, recs_cap;
@@ -143,6 +144,23 @@ static uint64_t di_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static di_node_t *di_ingestor_of(di_engine_t *eng, di_node_t *n) {
+    /* §5.2: in centralized-ingest mode the single ingestor is node 0. */
+    return eng->centralized_ingest ? &eng->nodes[0] : n;
+}
+
+/* §5.2: sleep an artificial ingestor delay; accumulate measured time.
+ * Zero delay is a no-op (disabled by default; no overhead when unused). */
+static void di_ingestor_sleep_ns(di_node_t *n, uint64_t ns) {
+    if (ns == 0) return;
+    uint64_t t0 = di_now_ns();
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ns / 1000000000ULL);
+    ts.tv_nsec = (long)(ns % 1000000000ULL);
+    nanosleep(&ts, NULL);
+    n->m.ingestor_delay_ns += di_now_ns() - t0;
 }
 
 static uint64_t di_thread_cpu_ns(void) {
@@ -913,6 +931,23 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
     uint64_t t0r = di_now_ns();
     ssize_t rr = di_pread_full(eng, c.buf, (size_t)assigned, start);
     n->m.read_wait_ns += di_now_ns() - t0r;
+    {
+        di_node_t *in = di_ingestor_of(eng, n);
+        if (in->ing_cfg.mode == 4 && in->ing_cfg.rate_bps > 0) {
+            /* §5.2 rate_limit: throttle the ingest loop so the mean ingest
+             * rate <= rate_bps (approximate rate limiting by sleeping
+             * proportional to the bytes just read). */
+            uint64_t t0w = di_now_ns();
+            uint64_t s = ((uint64_t)rr * 1000000000ULL) / in->ing_cfg.rate_bps;
+            if (s > 0) {
+                struct timespec ts;
+                ts.tv_sec = (time_t)(s / 1000000000ULL);
+                ts.tv_nsec = (long)(s % 1000000000ULL);
+                nanosleep(&ts, NULL);
+                in->m.ingestor_rate_throttled_ns += di_now_ns() - t0w;
+            }
+        }
+    }
     if (rr < 0) {
         n->m.last_error = DI_ERR_IO;
         di_free_chunk(&c);
@@ -947,6 +982,11 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
         di_sample_placement(n, c.buf, act);
 
     c.off = start; c.len = act;
+    if (di_ingestor_of(eng, n)->ing_cfg.mode == 2) {
+        /* §5.2 delay_after_read: sleep after the read, before publication. */
+        di_ingestor_sleep_ns(di_ingestor_of(eng, n),
+                             di_ingestor_of(eng, n)->ing_cfg.delay_ns);
+    }
     if (di_queue_push(n, c) != 0) {
         di_free_chunk(&c);
         pthread_mutex_lock(&n->mu);
@@ -955,6 +995,11 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
         pthread_cond_broadcast(&n->cv_can_push);
         pthread_mutex_unlock(&n->mu);
         return -1;
+    }
+    if (di_ingestor_of(eng, n)->ing_cfg.mode == 1) {
+        /* §5.2 delay_per_claim: sleep after each successful claim+publish. */
+        di_ingestor_sleep_ns(di_ingestor_of(eng, n),
+                             di_ingestor_of(eng, n)->ing_cfg.delay_ns);
     }
     return 1;
 }
@@ -968,6 +1013,16 @@ static void *di_ingestor_thread(void *arg) {
         di_engine_stop(eng);
     }
     uint64_t c0 = di_thread_cpu_ns();
+    if (n->ing_cfg.mode == 3 && n->ing_cfg.stall_ms > 0) {
+        /* §5.2: stall_then_recover — initial stall, then recovery
+         * (ingest proceeds normally after the stall). */
+        uint64_t ms = n->ing_cfg.stall_ms;
+        struct timespec ts;
+        ts.tv_sec = (time_t)(ms / 1000ULL);
+        ts.tv_nsec = (long)((ms % 1000ULL) * 1000000ULL);
+        nanosleep(&ts, NULL);
+        n->m.ingestor_stall_fired = 1;
+    }
 
     if (eng->centralized_ingest) {
         /* Single ingestor distributes to all node queues (Section 5 baseline). */
@@ -1075,8 +1130,10 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     if (eng->P.max_reservation == 0) eng->P.max_reservation = eng->P.max_backlog;
     /* Section 9: reject invalid/contradictory config rather than silent misuse */
     if (eng->P.base_quantum == 0 || eng->P.max_backlog == 0) { free(eng); return NULL; }
-    /* C2 correction: placement sampling mode is binary (0=off/perf, 1=on/validation). */
-    if (eng->P.placement_sampling != 0 && eng->P.placement_sampling != 1) { free(eng); return NULL; }
+    /* C2 correction: placement sampling 0=off/perf, 1=on/bounded-validation;
+     * §2: 2=full (exhaustive sampling for diagnostics). */
+    if (eng->P.placement_sampling != 0 && eng->P.placement_sampling != 1
+        && eng->P.placement_sampling != 2) { free(eng); return NULL; }
     if (eng->P.max_reservation > eng->P.max_backlog) eng->P.max_reservation = eng->P.max_backlog;
     eng->P.one_outstanding_per_node = 1;
     if (!eng->P.enable_peer_headroom) eng->P.enable_peer_headroom = 1;
@@ -1110,6 +1167,9 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
         n->phys_node = (cfg->phys_nodes ? cfg->phys_nodes[i] : -1);
         n->cpus = (cfg->cpu_lists ? cfg->cpu_lists[i] : NULL);
         n->ncpus = (cfg->cpu_counts ? cfg->cpu_counts[i] : 0);
+        /* §5.2: per-node ingestor workload controls (off by default). */
+        if (cfg->ingestors) n->ing_cfg = cfg->ingestors[i];
+        n->m.ingestor_mode = n->ing_cfg.mode;
         /* C2: performance-isolated runs never perform in-run placement sampling. */
         if (eng->P.placement_sampling == 0)
             n->m.placement_sampling_not_performed = 1;

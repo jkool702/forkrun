@@ -58,6 +58,11 @@ class DiNodeMetrics(ctypes.Structure):
         ("alloc_bytes", ctypes.c_uint64), ("ingest_cpu_ns", ctypes.c_uint64), ("consumer_cpu_ns", ctypes.c_uint64),
         ("res_hist", ctypes.c_uint64 * 20),
         ("affinity_ingestor", DiAffinityRole), ("affinity_consumer", DiAffinityRole),
+        # §5.2: ingestor workload control evidence (observed, per node).
+        ("ingestor_mode", ctypes.c_int),
+        ("ingestor_delay_ns", ctypes.c_uint64),
+        ("ingestor_stall_fired", ctypes.c_uint64),
+        ("ingestor_rate_throttled_ns", ctypes.c_uint64),
         ("mbind_policy_requested", ctypes.c_int), ("mbind_policy_applied", ctypes.c_int),
         ("mbind_error", ctypes.c_int), ("mbind_requested_count", ctypes.c_uint64), ("mbind_success_count", ctypes.c_uint64), ("mbind_failure_count", ctypes.c_uint64), ("strict_mbind_failed", ctypes.c_int),
         ("strict_affinity_failed", ctypes.c_int), ("last_error", ctypes.c_int),
@@ -82,6 +87,7 @@ class DiConfig(ctypes.Structure):
     _fields_ = [
         ("num_nodes", ctypes.c_int), ("policy", ctypes.c_int), ("params", DiPolicyParams),
         ("consumers", ctypes.POINTER(DiConsumerCfg)),
+        ("ingestors", ctypes.c_void_p),
         ("cpu_lists", ctypes.c_void_p), ("cpu_counts", ctypes.c_void_p), ("phys_nodes", ctypes.c_void_p),
     ]
 

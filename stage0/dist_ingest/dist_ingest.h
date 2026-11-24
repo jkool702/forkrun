@@ -56,6 +56,27 @@ typedef struct {
     uint64_t stall_ms;
 } di_consumer_cfg_t;
 
+/* §5.2: per-node ingestor workload controls (disabled by default).
+ *
+ * mode (per logical node, applied by the ingestor thread/step):
+ *   0 = off (default; no artificial delay, zero measured overhead)
+ *   1 = delay_per_claim      — sleep `delay_ns` after each successful claim+publish
+ *   2 = delay_after_read     — sleep `delay_ns` after read, before publication
+ *   3 = stall_then_recover   — sleep `stall_ms` once at ingestor-thread start,
+ *                              then ingest resumes normally (recovery)
+ *   4 = rate_limit           — throttle the ingest loop so the mean ingest
+ *                              rate <= `rate_bps`
+ * "The exact phase where delay is applied is explicit in configuration and
+ * provenance" (WO §5.2): mode + values are echoed into DIST_RESULT
+ * (configuration/provenance) and observed counters (metrics).
+ */
+typedef struct {
+    int mode;
+    uint64_t delay_ns;   /* modes 1/2 */
+    uint64_t stall_ms;   /* mode 3 */
+    uint64_t rate_bps;   /* mode 4 */
+} di_ingestor_cfg_t;
+
 typedef struct {
     /* Reservation / chunk sizing */
     uint64_t base_quantum;        /* default 2 MiB */
@@ -97,6 +118,8 @@ typedef struct {
     di_policy_params_t params;
     /* Per-node consumer config (len num_nodes). NULL => equal/fast default. */
     const di_consumer_cfg_t *consumers;
+    /* Per-node ingestor workload controls (len num_nodes). NULL => off. */
+    const di_ingestor_cfg_t *ingestors;
     /* Optional per-logical-node CPU list for affinity: array of arrays.
      * cpu_lists[node] points to cpu_counts[node] ints; may be NULL. */
     const int *const *cpu_lists;
@@ -162,6 +185,11 @@ typedef struct {
     /* Affinity (per-role, no shared concurrent writes) */
     di_affinity_role_t affinity_ingestor;
     di_affinity_role_t affinity_consumer;
+    /* §5.2: ingestor workload control evidence (observed, per node). */
+    int ingestor_mode;                 /* observed/requested mode (0=off) */
+    uint64_t ingestor_delay_ns;        /* cumulative sleep (modes 1/2) */
+    uint64_t ingestor_stall_fired;     /* mode 3: initial stall fired (1/0) */
+    uint64_t ingestor_rate_throttled_ns; /* mode 4: cumulative throttle sleep */
     /* Memory-policy application (syscall result; NOT physical placement proof) */
     int mbind_policy_requested;       /* compatibility: any application requested */
     int mbind_policy_applied;         /* compatibility: all requested applications succeeded (and >=1 requested) */

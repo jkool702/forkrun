@@ -75,6 +75,11 @@ class DiNodeMetrics(ctypes.Structure):
         ("alloc_bytes", ctypes.c_uint64), ("ingest_cpu_ns", ctypes.c_uint64), ("consumer_cpu_ns", ctypes.c_uint64),
         ("res_hist", ctypes.c_uint64 * 20),
         ("affinity_ingestor", DiAffinityRole), ("affinity_consumer", DiAffinityRole),
+        # §5.2: ingestor workload control evidence (observed, per node).
+        ("ingestor_mode", ctypes.c_int),
+        ("ingestor_delay_ns", ctypes.c_uint64),
+        ("ingestor_stall_fired", ctypes.c_uint64),
+        ("ingestor_rate_throttled_ns", ctypes.c_uint64),
         ("mbind_policy_requested", ctypes.c_int), ("mbind_policy_applied", ctypes.c_int),
         ("mbind_error", ctypes.c_int),
         ("mbind_requested_count", ctypes.c_uint64), ("mbind_success_count", ctypes.c_uint64), ("mbind_failure_count", ctypes.c_uint64),
@@ -100,6 +105,7 @@ class DiConfig(ctypes.Structure):
     _fields_ = [
         ("num_nodes", ctypes.c_int), ("policy", ctypes.c_int), ("params", DiPolicyParams),
         ("consumers", ctypes.POINTER(DiConsumerCfg)),
+        ("ingestors", ctypes.c_void_p),
         ("cpu_lists", ctypes.c_void_p), ("cpu_counts", ctypes.c_void_p), ("phys_nodes", ctypes.c_void_p),
     ]
 
@@ -571,6 +577,83 @@ class TestCampaignWiring(unittest.TestCase):
         finally:
             shutil.rmtree(out, ignore_errors=True)
 
+    def test_scenario_pn_wires_ingestor_controls_to_specs_and_results(self):
+        """§5.2: scenario-line per-node ingestor workload spec (pn field)
+        reaches spec.json AND DIST_RESULT evidence (slow_ingestor_one,
+        slow_ingestor_stall_recover)."""
+        out = tempfile.mkdtemp(prefix='dist_camp_pn_')
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--out', out, '--campaign-id', 'test-ingestor-pn',
+                   '--scenarios', 'slow_ingestor_one,slow_ingestor_stall_recover',
+                   '--trials', '1', '--seed', 's1']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-2000:] + "\n" + p.stdout[-1000:])
+            specs = []
+            for root, dirs, files in os.walk(os.path.join(out, 'cases')):
+                for f in files:
+                    if f == 'spec.json':
+                        specs.append(os.path.join(root, f))
+            self.assertTrue(specs, 'no specs found')
+            found = 0
+            for sp in specs:
+                with open(sp) as fh:
+                    d = json.load(fh)
+                sid = d.get('scenario')
+                if d.get('ingest_candidate') not in ('fixed_faa', 'local_adaptive', 'relative_adaptive', 'centralized_ingest'):
+                    continue
+                manifest = os.path.join(os.path.dirname(sp), 'manifest.json')
+                with open(manifest) as fh:
+                    m = json.load(fh)
+                dr = m.get('dist_result')
+                if sid == 'slow_ingestor_one':
+                    found += 1
+                    modes = d.get('ingestor_modes_per_node', '').split(',')
+                    self.assertEqual(modes, ['delay_per_claim', '', 'delay_per_claim', ''], msg=sp)
+                    self.assertEqual(d.get('ingestor_delay_ns_per_node', '').split(',')[0], '10000000')
+                    self.assertEqual(d.get('ingestor_delay_ns_per_node', '').split(',')[2], '2000000')
+                    if dr:
+                        ic0 = dr['nodes'][0]['ingestor_controls']
+                        self.assertEqual(ic0['mode'], 1, msg=manifest)
+                        self.assertGreater(ic0['delay_ns'], 0, msg=manifest)
+                elif sid == 'slow_ingestor_stall_recover':
+                    found += 1
+                    modes = d.get('ingestor_modes_per_node', '').split(',')
+                    # Node 0 is the ingestor in BOTH distributed and
+                    # centralized modes, so the stall applies to node 0.
+                    self.assertEqual(modes[0], 'stall_then_recover', msg=sp)
+                    self.assertEqual(d.get('ingestor_stall_ms_per_node', '').split(',')[0], '50')
+                    if dr:
+                        ic0 = dr['nodes'][0]['ingestor_controls']
+                        self.assertEqual(ic0['mode'], 3, msg=manifest)
+                        self.assertGreaterEqual(ic0['stall_fired'], 1, msg=manifest)
+            self.assertGreaterEqual(found, 2, 'expected slow_ingestor_one + slow_ingestor_stall_recover cases')
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_placement_experiments_full_mode_emits_full_sampling(self):
+        """§2: --placement-experiments full -> placement_sampling='full'
+        placement-validation experiments in the plan."""
+        out = tempfile.mkdtemp(prefix='dist_camp_full_')
+        try:
+            cmd = ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                   '--quick', '--out', out, '--campaign-id', 'test-full-placement',
+                   '--scenarios', 'equal', '--trials', '1', '--seed', 's1',
+                   '--placement-experiments', 'full']
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-2000:] + "\n" + p.stdout[-1000:])
+            with open(os.path.join(out, 'prevalidation.json')) as fh:
+                prov = json.load(fh)
+            self.assertEqual(prov.get('placement_experiments'), 'full')
+            # plan: placement-validation experiments exist with sampling full
+            with open(os.path.join(out, 'execution-plan.json')) as fh:
+                plan = json.load(fh)
+            pv = [e for e in plan.get('planned_experiments', []) if e.get('placement_sampling') == 'full']
+            self.assertTrue(pv, 'no full placement-validation experiments planned')
+            for e in pv:
+                self.assertEqual(e.get('trial_class'), 'placement_validation')
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
 
 
 class TestAffinityStrictEnforcement(unittest.TestCase):
@@ -798,8 +881,11 @@ class TestCampaignScenarioValidation(unittest.TestCase):
     """WO-2/WO-3: scenario profile/topology compatibility, preflight validation, and provenance."""
 
     NONQUICK_NODES2 = ['nodes2', 'small', 'tiny']
-    NONQUICK_NODES4 = ['equal', 'slow_one', 'fast_one', 'asymmetric', 'stall_recover',
-                       'nodes2', 'large_seq', 'small', 'tiny', 'boundary', 'backpressure']
+    NONQUICK_NODES4 = ['equal', 'slow_one', 'fast_one', 'asymmetric',
+                       'slow_ingestor_one', 'slow_ingestor_stall_recover',
+                       'slow_ingestor_fast_consumer', 'slow_ingestor_slow_consumer',
+                       'stall_recover', 'nodes2', 'large_seq', 'small', 'tiny',
+                       'boundary', 'backpressure']
     NONQUICK_FULL = ['equal', 'slow_one', 'fast_one', 'asymmetric', 'stall_recover',
                      'nodes2', 'nodes8', 'large_seq', 'small', 'tiny', 'boundary', 'backpressure']
 
@@ -1760,10 +1846,13 @@ class TestCheckpoint2PlacementSamplingIsolation(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_engine_rejects_non_binary_placement_sampling(self):
+    def test_engine_placement_sampling_modes_and_rejection(self):
+        # §2: 0=off (performance-isolated default), 1=on (bounded,
+        # placement-validation), 2=full (exhaustive diagnostics); other
+        # values are rejected.
         lib = load_lib()
         self._setup_dispatch_seam(lib)
-        for bad in (-1, 2, 99):
+        for bad in (-1, 3, 99):
             with self.subTest(placement_sampling=bad):
                 path = make_file(1024 * 1024)
                 fd = os.open(path, os.O_RDONLY)
@@ -1786,7 +1875,36 @@ class TestCheckpoint2PlacementSamplingIsolation(unittest.TestCase):
                     cfg.params = params
                     cfg.consumers = ctypes.cast(cons, ctypes.POINTER(DiConsumerCfg))
                     eng = lib.di_create(fd, st.st_size, ctypes.byref(cfg))
-                    self.assertFalse(eng, msg='di_create must reject non-binary placement_sampling=%s' % bad)
+                    self.assertFalse(eng, msg='di_create must reject placement_sampling=%s' % bad)
+                finally:
+                    os.close(fd)
+                    os.unlink(path)
+        for good in (0, 1, 2):
+            with self.subTest(placement_sampling=good):
+                path = make_file(1024 * 1024)
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    st = os.stat(path)
+                    params = DiPolicyParams()
+                    params.base_quantum = 512 * 1024
+                    params.max_backlog = 8 * 1024 * 1024
+                    params.relative_rounding = 1
+                    params.one_outstanding_per_node = 1
+                    params.enable_peer_headroom = 1
+                    params.consumer_kernel = 1
+                    params.placement_sampling = good
+                    cons = (DiConsumerCfg * 2)()
+                    for i in range(2):
+                        cons[i].mode = 2
+                    cfg = DiConfig()
+                    cfg.num_nodes = 2
+                    cfg.policy = DI_POLICY_FIXED_FAA
+                    cfg.params = params
+                    cfg.consumers = ctypes.cast(cons, ctypes.POINTER(DiConsumerCfg))
+                    eng = lib.di_create(fd, st.st_size, ctypes.byref(cfg))
+                    self.assertTrue(eng, msg='di_create must accept placement_sampling=%s' % good)
+                    if eng:
+                        lib.di_destroy(eng)
                 finally:
                     os.close(fd)
                     os.unlink(path)

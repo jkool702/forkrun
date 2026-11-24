@@ -995,6 +995,15 @@ def run_case(spec, out_dir, campaign_id=None, trial=None,
             cmd += ["--slow-mode", str(spec.get("slow_mode")),
                     "--slow-bps", str(spec.get("slow_bps", 0)),
                     "--slow-stall-ms", str(spec.get("slow_stall_ms", 0))]
+        # §5.2: per-node ingestor workload controls (independent of consumer controls)
+        if spec.get("ingestor_modes_per_node"):
+            cmd += ["--ingestor-modes-per-node", str(spec.get("ingestor_modes_per_node"))]
+        if spec.get("ingestor_delay_ns_per_node"):
+            cmd += ["--ingestor-delay-ns-per-node", str(spec.get("ingestor_delay_ns_per_node"))]
+        if spec.get("ingestor_stall_ms_per_node"):
+            cmd += ["--ingestor-stall-ms-per-node", str(spec.get("ingestor_stall_ms_per_node"))]
+        if spec.get("ingestor_rate_bps_per_node"):
+            cmd += ["--ingestor-rate-bps-per-node", str(spec.get("ingestor_rate_bps_per_node"))]
         if spec.get("json_out_rel"):
             cmd += ["--json-out", os.path.join(out_dir, spec.get("json_out_rel"))]
         proc = subprocess.Popen(

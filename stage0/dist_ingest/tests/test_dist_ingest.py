@@ -102,6 +102,11 @@ class DiNodeMetrics(ctypes.Structure):
         ("res_hist", ctypes.c_uint64 * 20),
         ("affinity_ingestor", DiAffinityRole),
         ("affinity_consumer", DiAffinityRole),
+        # §5.2: ingestor workload control evidence (observed, per node).
+        ("ingestor_mode", ctypes.c_int),
+        ("ingestor_delay_ns", ctypes.c_uint64),
+        ("ingestor_stall_fired", ctypes.c_uint64),
+        ("ingestor_rate_throttled_ns", ctypes.c_uint64),
         ("mbind_policy_requested", ctypes.c_int),
         ("mbind_policy_applied", ctypes.c_int),
         ("mbind_error", ctypes.c_int),
@@ -145,6 +150,7 @@ class DiConfig(ctypes.Structure):
         ("policy", ctypes.c_int),
         ("params", DiPolicyParams),
         ("consumers", ctypes.POINTER(DiConsumerCfg)),
+        ("ingestors", ctypes.c_void_p),
         ("cpu_lists", ctypes.c_void_p),
         ("cpu_counts", ctypes.c_void_p),
         ("phys_nodes", ctypes.c_void_p),
@@ -407,6 +413,95 @@ class TestRunnerCLI(unittest.TestCase):
             self.assertIn('DIST_RESULT', p.stderr)
         finally:
             os.unlink(path)
+
+
+class TestIngestorWorkloadControls(unittest.TestCase):
+    """§5.2: per-node ingestor workload controls (off by default).
+
+    Engine modes: 0=off (default), 1=delay_per_claim, 2=delay_after_read,
+    3=stall_then_recover, 4=rate_limit. Evidence is recorded per node in
+    DIST_RESULT (mode/phase + observed counters); disabled-by-default runs
+    record zero evidence.
+    """
+
+    def _run_dist(self, extra_args, size=4*1024*1024):
+        path = make_file(size)
+        try:
+            cmd = [sys.executable, os.path.join(PKG, 'run_dist.py'),
+                   '--candidate', 'fixed_faa', '--input', path,
+                   '--nodes', '2', '--no-pin'] + extra_args
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-800:] + "\n" + p.stdout[-400:])
+            line = [l for l in p.stderr.splitlines() if l.startswith('DIST_RESULT ')][0]
+            return json.loads(line[len('DIST_RESULT '):])
+        finally:
+            os.unlink(path)
+
+    def _ic(self, d, node):
+        return d['nodes'][node]['ingestor_controls']
+
+    def test_default_off_records_zero_evidence(self):
+        d = self._run_dist([])
+        for nd in d['nodes']:
+            ic = nd['ingestor_controls']
+            self.assertEqual(ic['mode'], 0)
+            self.assertEqual(ic['phase'], 'off')
+            self.assertEqual(ic['delay_ns'], 0)
+            self.assertEqual(ic['stall_fired'], 0)
+            self.assertEqual(ic['rate_throttled_ns'], 0)
+        self.assertTrue(d['correct'])
+        # Provenance: every node recorded as off; controls disabled by default.
+        self.assertTrue(all(x['mode'] == 0 for x in d['ingestor_controls']['config_per_node']))
+        self.assertTrue(d['ingestor_controls']['disabled_by_default'])
+
+    def test_delay_per_claim_fires_and_completes(self):
+        d = self._run_dist(['--ingestor-modes-per-node', 'delay_per_claim',
+                            '--ingestor-delay-ns-per-node', '5000000'])
+        ic = self._ic(d, 0)
+        self.assertEqual(ic['mode'], 1)
+        self.assertEqual(ic['phase'], 'delay_per_claim')
+        self.assertGreater(ic['delay_ns'], 0)
+        self.assertTrue(d['correct'])
+        # Provenance matches the request.
+        cfg = d['ingestor_controls']['config_per_node'][0]
+        self.assertEqual(cfg['mode'], 1)
+        self.assertEqual(cfg['phase'], 'delay_per_claim')
+        self.assertEqual(cfg['delay_ns'], 5000000)
+
+    def test_delay_after_read_before_publish_fires(self):
+        d = self._run_dist(['--ingestor-modes-per-node', 'delay_after_read',
+                            '--ingestor-delay-ns-per-node', '5000000'])
+        ic = self._ic(d, 0)
+        self.assertEqual(ic['mode'], 2)
+        self.assertEqual(ic['phase'], 'delay_after_read_before_publish')
+        self.assertGreater(ic['delay_ns'], 0)
+        self.assertTrue(d['correct'])
+
+    def test_stall_then_recover_fires(self):
+        d = self._run_dist(['--ingestor-modes-per-node', 'stall_then_recover',
+                            '--ingestor-stall-ms-per-node', '20'])
+        ic = self._ic(d, 0)
+        self.assertEqual(ic['mode'], 3)
+        self.assertEqual(ic['phase'], 'stall_then_recover')
+        self.assertGreaterEqual(ic['stall_fired'], 1)
+        self.assertTrue(d['correct'])
+
+    def test_rate_limit_throttles(self):
+        d = self._run_dist(['--ingestor-modes-per-node', 'rate_limit',
+                            '--ingestor-rate-bps-per-node', '1000000'])
+        ic = self._ic(d, 0)
+        self.assertEqual(ic['mode'], 4)
+        self.assertEqual(ic['phase'], 'rate_limit')
+        self.assertGreater(ic['rate_throttled_ns'], 0)
+
+    def test_per_node_modes_apply_independently(self):
+        d = self._run_dist(['--ingestor-modes-per-node', 'delay_per_claim,off',
+                            '--ingestor-delay-ns-per-node', '5000000,0'])
+        self.assertEqual(self._ic(d, 0)['mode'], 1)
+        self.assertEqual(self._ic(d, 0)['phase'], 'delay_per_claim')
+        self.assertEqual(self._ic(d, 1)['mode'], 0)
+        self.assertEqual(self._ic(d, 1)['phase'], 'off')
+        self.assertTrue(d['correct'])
 
 
 if __name__ == '__main__':

@@ -36,9 +36,11 @@ usage: run_dist_campaign.sh [options]
   --sweep-max-reservation L C3 parameter sweep: comma-separated max_reservation byte values (attributable parameter sets)
   --consumer-kernel K      full_byte_scan (default) or none (explicit diagnostic opt-out)
   --placement-experiments M  placement experiment mode: off (default; performance trials only,
-                           placement_sampling=off) or paired (run a linked placement-validation
-                           experiment per performance trial: placement_sampling=on, distinct
-                           trial_class=placement_validation, not mixed into performance headlines)
+                           placement_sampling=off), paired (run a linked placement-validation
+                           experiment per performance trial: placement_sampling=on — bounded
+                           in-run sampling; distinct trial_class=placement_validation, not mixed
+                           into performance headlines), or full (exhaustive placement sampling for
+                           diagnostics; placement_sampling=full)
   --strict-affinity        require verified affinity for all required roles (abort on failure)
   --strict-mbind           require successful mbind policy application (abort on failure)
   --phys-nodes LIST        explicit physical NUMA node ids (comma-separated). Backward-compatible
@@ -109,7 +111,7 @@ done
 
 # Documented executable scenario profiles (default/non-quick scenario set).
 PROFILE_NODES2="nodes2,small,tiny"
-PROFILE_NODES4="equal,slow_one,fast_one,asymmetric,stall_recover,nodes2,large_seq,small,tiny,boundary,backpressure"
+PROFILE_NODES4="equal,slow_one,fast_one,asymmetric,stall_recover,slow_ingestor_one,slow_ingestor_stall_recover,slow_ingestor_fast_consumer,slow_ingestor_slow_consumer,nodes2,large_seq,small,tiny,boundary,backpressure"
 PROFILE_FULL=""
 
 PROFILE_KIND=""
@@ -130,8 +132,8 @@ if [ "$QUICK" -eq 1 ] && { [ "$PROFILE_KIND" = "nodes2" ] || [ "$PROFILE_KIND" =
   exit 2
 fi
 
-if [ "$PLACEMENT_EXPERIMENTS" != "off" ] && [ "$PLACEMENT_EXPERIMENTS" != "paired" ]; then
-  echo "dist-campaign: --placement-experiments must be exactly off or paired (got: $PLACEMENT_EXPERIMENTS)" >&2
+if [ "$PLACEMENT_EXPERIMENTS" != "off" ] && [ "$PLACEMENT_EXPERIMENTS" != "paired" ] && [ "$PLACEMENT_EXPERIMENTS" != "full" ]; then
+  echo "dist-campaign: --placement-experiments must be exactly off, paired, or full (got: $PLACEMENT_EXPERIMENTS)" >&2
   exit 2
 fi
 
@@ -166,6 +168,10 @@ else
   SCENARIOS+=("slow_one|corpora/large.bin|4|fast|0|0|slow|15000000|0|67108864|")
   SCENARIOS+=("fast_one|corpora/large.bin|4|slow|10000000|1|fast|0|0|67108864|")
   SCENARIOS+=("asymmetric|corpora/large.bin|4|fast|0|0|slow|8000000|0|67108864|")
+  SCENARIOS+=("slow_ingestor_one|corpora/large.bin|4|fast|0|-1||0|0|33554432||0=delay_per_claim,10000000;2=delay_per_claim,2000000")
+  SCENARIOS+=("slow_ingestor_stall_recover|corpora/large.bin|4|fast|0|-1||0|0|33554432||0=stall_then_recover,50")
+  SCENARIOS+=("slow_ingestor_fast_consumer|corpora/large.bin|4|fast|0|-1||0|0|33554432||0=delay_per_claim,10000000")
+  SCENARIOS+=("slow_ingestor_slow_consumer|corpora/large.bin|4|slow|1000000|-1||0|0|33554432||0=delay_per_claim,10000000;1=delay_per_claim,5000000")
   SCENARIOS+=("stall_recover|corpora/large.bin|4|fast|0|2|stall|0|800|67108864|")
   SCENARIOS+=("nodes2|corpora/large.bin|2|fast|0|-1|fast|0|0|67108864|")
   SCENARIOS+=("nodes8|corpora/large.bin|8|fast|0|-1|fast|0|0|67108864|")
@@ -759,7 +765,9 @@ cand_list = list(plan_candidates)
 trials_n = int(plan_trials_n)
 seed = str(plan_seed)
 shuf_sc = bool(plan_shuffle_scenarios)
-placement_mode = 'paired' if placement_experiments == 'paired' else 'off'
+# §2: full mode = exhaustive placement sampling for diagnostics (not a
+# clean performance measurement; linked to nothing).
+placement_mode = 'paired' if placement_experiments == 'paired' else ('full' if placement_experiments == 'full' else 'off')
 import random
 # group by (scenario,mapping) preserving scenario order
 sm_keys = []
@@ -820,7 +828,7 @@ for key in sm_keys:
                 }
                 block_exps.append(perf_exp)
                 planned_experiments.append(perf_exp)
-                if placement_mode == 'paired' and cand in _DIST_CANDS:
+                if placement_mode in ('paired', 'full') and cand in _DIST_CANDS:
                     pv_case_id = perf_case_id + '__placement_validation'
                     pv_link = 'cases/%s/trial%s/manifest.json' % (perf_case_id, t)
                     pv_exp = {
@@ -837,7 +845,7 @@ for key in sm_keys:
                         'logical_to_physical': m.get('logical_to_physical'),
                         'phys_nodes': m.get('phys_nodes'),
                         'trial_class': 'placement_validation',
-                        'placement_sampling': 'on',
+                        'placement_sampling': ('on' if placement_mode == 'paired' else 'full'),
                         'linked_performance_trial': pv_link,
                         # C3 attributable axes
                         'parameter_set_id': psid,
@@ -1039,6 +1047,7 @@ run_one_experiment() {
   local exp_cache_precondition_policy="${25:-best_effort_os_cache}"
   local exp_min_duration_seconds="${26:-}"
   local exp_workload_id="${27:-$exp_sid}"
+  local exp_pn="${28:-}"   # §5.2: per-node ingestor workload spec from the scenario line
 
   local outdir="$OUT/cases/$exp_case_id/trial$exp_trial"
   if [ -e "$outdir/manifest.json" ]; then
@@ -1059,11 +1068,45 @@ run_one_experiment() {
     "$STRICT_AFFINITY" "$STRICT_MBIND" "$exp_map_phys" "$exp_map_id" "$exp_map_profile" "$exp_map_variant" \
     "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" \
     "$exp_pset_id" "$exp_base_quantum" "$exp_max_backlog_override" "$exp_max_reservation" \
-    "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id" <<'PY'
-import json, sys
+    "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id" "$exp_pn" <<'PY'
+import json, os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), 'stage0', 'dist_ingest'))
+from run_dist import INGESTOR_MODE
 (spec,sid,cand,cid,inp,nodes,cmode,cbps,snode,smode,sbps,sstall,mbacklog,seed,consumer_kernel,strict_affinity,strict_mbind,
  map_phys,map_id,map_profile,map_variant,trial_class,placement_sampling,linked_perf,
- pset_id,base_quantum,max_backlog_override,max_reservation,cache_precondition_policy,min_duration_seconds,workload_id)=sys.argv[1:32]
+ pset_id,base_quantum,max_backlog_override,max_reservation,cache_precondition_policy,min_duration_seconds,workload_id,pn)=sys.argv[1:33]
+
+def _parse_pn(pn_str, n):
+    """§5.2: parse per-node ingestor workload spec from the scenario line.
+    Grammar: `NODE=MODE[,ARG]` entries separated by ';' — ARG is delay_ns
+    for modes delay_per_claim/delay_after_read, stall_ms for
+    stall_then_recover, and rate_bps for rate_limit.
+    Returns comma-joined per-node lists for run_dist --ingestor-*-per-node
+    (modes as names; run_dist maps them via INGESTOR_MODE)."""
+    modes=['']*n; delays=[0]*n; stalls=[0]*n; rates=[0]*n
+    for ent in (pn_str or '').split(';'):
+        ent=ent.strip()
+        if not ent: continue
+        node_s, _, rest = ent.partition('=')
+        try: node=int(node_s)
+        except ValueError: continue
+        if not (0 <= node < n): continue
+        vals=[v.strip() for v in rest.split(',')]
+        mode = vals[0] if len(vals)>0 and vals[0] in INGESTOR_MODE else ''
+        arg = 0
+        if len(vals)>1 and vals[1] not in ('','-',None):
+            try: arg=int(vals[1])
+            except ValueError: arg=0
+        if mode in ('delay_per_claim', 'delay_after_read'):
+            modes[node]=mode; delays[node]=arg
+        elif mode == 'stall_then_recover':
+            modes[node]=mode; stalls[node]=arg
+        elif mode == 'rate_limit':
+            modes[node]=mode; rates[node]=arg
+    return ",".join(str(x) for x in modes), ",".join(str(x) for x in delays), \
+           ",".join(str(x) for x in stalls), ",".join(str(x) for x in rates)
+
+_ing_modes, _ing_delays, _ing_stalls, _ing_rates = _parse_pn(pn, int(nodes))
 d={
   "id": cid,
   "scenario": sid,
@@ -1128,6 +1171,11 @@ else:
     "slow_mode": smode,
     "slow_bps": int(sbps),
     "slow_stall_ms": int(sstall),
+    # §5.2: per-node ingestor workload controls (independent of consumer).
+    "ingestor_modes_per_node": _ing_modes,
+    "ingestor_delay_ns_per_node": _ing_delays,
+    "ingestor_stall_ms_per_node": _ing_stalls,
+    "ingestor_rate_bps_per_node": _ing_rates,
     "consumer_kernel": consumer_kernel,
     "strict_affinity": bool(int(strict_affinity)),
     "strict_mbind": bool(int(strict_mbind)),
@@ -1174,7 +1222,7 @@ PY
 while IFS=$'\x1f' read -r sid scen_def t cand map_id map_profile map_variant map_phys exp_case_id exp_trial_class exp_placement_sampling exp_linked_perf \
   exp_pset_id exp_base_quantum exp_max_backlog_override exp_max_reservation exp_cache_precondition_policy exp_min_duration_seconds exp_workload_id; do
   [ -z "$sid" ] && continue
-  IFS='|' read -r _sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra <<< "$scen_def"
+  IFS='|' read -r _sid inp nodes cmode cbps snode smode sbps sstall mbacklog extra pn <<< "$scen_def"
   # C3 defaults for backward-compatible plans
   exp_pset_id=${exp_pset_id:-pset__default}
   exp_base_quantum=${exp_base_quantum:-2097152}
@@ -1191,7 +1239,7 @@ while IFS=$'\x1f' read -r sid scen_def t cand map_id map_profile map_variant map
     "$inp" "$nodes" "$cmode" "$cbps" "$snode" "$smode" "$sbps" "$sstall" "$mbacklog" \
     "$exp_trial_class" "$exp_placement_sampling" "$exp_linked_perf" \
     "$exp_pset_id" "$exp_base_quantum" "$exp_max_backlog_override" "$exp_max_reservation" \
-    "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id"
+    "$exp_cache_precondition_policy" "$exp_min_duration_seconds" "$exp_workload_id" "$pn"
 done < "$EXPERIMENTS_FILE"
 
 python3 stage0/env_capture.py --out "$OUT/env/env-after.json" --run-id "$CAMPAIGN_ID" --input "$C4_FIRST_INPUT" \
