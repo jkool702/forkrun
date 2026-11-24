@@ -12,8 +12,8 @@ Rehearsal date: 2026-11-23.
 
 **Corrections-4 sanitizer evidence**: `stage0/dist_ingest/SANITIZER_EVIDENCE.md`
 records ASan+UBSan and TSan reruns on SHA `3d023d66` (259 tests, 0 findings
-each, 2026-11-24; tip `4b5297bb` is doc-only over it —
-`git diff 3d023d66 4b5297bb -- stage0/dist_ingest/dist_ingest.c` is empty),
+each, 2026-11-24; tip `423e7e77` is doc-only over it —
+`git diff 3d023d66 423e7e77 -- stage0/dist_ingest/dist_ingest.c` is empty),
 distinct from the corrections-3 evidence at SHA `60a699e2`.
 
 **Corrections-4 rehearsal rehearsal** (main tree @ `3d023d66`, rerun —

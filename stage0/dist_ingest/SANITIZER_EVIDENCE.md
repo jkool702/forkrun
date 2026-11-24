@@ -43,12 +43,11 @@ is resolved: the evidence now names the tree it validated.
 Build: `make CC=gcc CFLAGS="-O1 -g -fno-omit-frame-pointer -fPIC -fsanitize=address,undefined" LDFLAGS="-shared -pthread -fsanitize=address,undefined" NUMA_LIBS="-lnuma"` —
 `__asan_init` present in `stage0/libdist_ingest.so` (not stripped).
 
-**Corrections-4 rerun (conditional acceptance):** rerun on tip
-`4b5297bb9b8e14be459aa074ce2e7236b7e0fd31` of
-`WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-4` (final code commit
-`3d023d66`; tip adds only doc-only changes — `git diff 3d023d66 4b5297bb --
-stage0/dist_ingest/dist_ingest.c` is empty): **Ran 259 tests — OK, 0
-ASan/UBSan reports, 0 UBSan runtime errors** (2026-11-24).
+**Corrections-4 rerun (conditional acceptance):** rerun on final tip
+`423e7e77` (code commit `3d023d66`; `96ad8818`/`4b5297bb` are doc-only over
+it — `git diff 3d023d66 423e7e77 -- stage0/dist_ingest/dist_ingest.c` is
+empty): **Ran 259 tests — OK, 0 ASan/UBSan reports, 0 UBSan runtime errors**
+(2026-11-24).
 Build: same flags (rebuilt at `3d023d66`); `__asan_init` present in
 `stage0/libdist_ingest.so` (not stripped).
 
@@ -71,12 +70,12 @@ Result (dated 2026-11-23; **rerun** — matching the ASan+UBSan rerun):
 Test source SHA: `60a699e2e38e976932d0e7c2b70abdfbd1f3c870` (clean tree —
 `__tsan_init`/`__tsan_report` symbols present in `stage0/libdist_ingest.so`).
 
-**Corrections-4 rerun (conditional acceptance):** rerun on tip
-`4b5297bb9b8e14be459aa074ce2e7236b7e0fd31`: **Ran 259 tests — OK, 0
+**Corrections-4 rerun (conditional acceptance):** rerun on final tip
+`423e7e77` (doc-only over `3d023d66`): **Ran 259 tests — OK, 0
 ThreadSanitizer warnings** (2026-11-24).
 Build: `make CC=gcc CFLAGS="-O1 -g -fno-omit-frame-pointer -fPIC -fsanitize=thread" LDFLAGS="-shared -pthread -fsanitize=thread" NUMA_LIBS="-lnuma"` —
 `__tsan_init`/`__tsan_report` present in `stage0/libdist_ingest.so` (not
-stripped; tip's extra commit is doc-only over `3d023d66`).
+stripped).
 
 ## Honest scope notes
 
@@ -92,11 +91,11 @@ stripped; tip's extra commit is doc-only over `3d023d66`).
   is no standalone randomized fault-injection fuzzer — failure modes are
   covered deterministically by the suite under the sanitizers above.
 - Sanitizer runs at SHA `60a699e2` (corrections-3) include the
-  corrections-3 C changes; sanitizer runs at `4b5297bb9b8e14be459aa074ce2e7236b7e0fd31`
-  (corrections-4 tip; final code commit `3d023d66`) include the
-  corrections-4 fixes (rate-limit error path, exhaustive
-  `placement_sampling=2`). Both reruns: 259 tests, 0 findings.
-- `git diff 3d023d66 4b5297bb -- stage0/dist_ingest/dist_ingest.c` is empty —
-  the final tip's extra commit is doc-only (`epyc/RENTAL_READINESS.md`,
-  `stage0/dist_ingest/CLOSEOUT.md`), so the sanitizer SHAs are code-exact:
-  sanitizer at `3d023d66` covers the `4b5297bb` tip's C code.
+  corrections-3 C changes; sanitizer runs at `423e7e77` (corrections-4 tip;
+  final code commit `3d023d66`) include the corrections-4 fixes
+  (rate-limit error path, exhaustive `placement_sampling=2`). Both
+  reruns: 259 tests, 0 findings.
+- `git diff 3d023d66 423e7e77 -- stage0/dist_ingest/dist_ingest.c` is empty
+  — the tip's extra commit is doc-only (`stage0/dist_ingest/CLOSEOUT.md`,
+  `epyc/RENTAL_READINESS.md`), so the sanitizer SHA (`3d023d66`) is
+  code-exact for the final tip's C code.

@@ -418,9 +418,8 @@ review: 3 findings) remain addressed by corrections-3:
 ## Corrections-4 closeout (WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-4)
 
 Corrections-4 against `60a699e2e38e976932d0e7c2b70abdfbd1f3c870`, tip
-`4b5297bb9b8e14be459aa074ce2e7236b7e0fd31` (final code commit `3d023d66`;
-tip adds only doc-only changes — `git diff 3d023d66 4b5297bb -- stage0/` is
-empty; 2026-11-24):
+`423e7e77` (final code commit `3d023d66`; `4b5297bb` is doc-only over it —
+`git diff 3d023d66 423e7e77 -- stage0/` is empty; 2026-11-24):
 
 - **Fix 1 — rate-limit error path** (P1): moved the §5.2 rate-limit sleep
   after the `rr<0`/`act<assigned` error checks with overflow-safe
@@ -434,9 +433,9 @@ empty; 2026-11-24):
   `TestPlacementSamplingModes` (`sampled == total_addressable_pages` on a
   >1024-page corpus, mode 1 keeps 1024-page bound).
 - **Fix 3 — sanitizer evidence rerun** (P1, corrected): ASan+UBSan and TSan
-  rerun on `3d023d66` (code-exact for tip `4b5297bb`): **Ran 259 tests —
-  OK, 0 findings both**; `SANITIZER_EVIDENCE.md` records both SHAs
-  (corrections-3 `60a699e2`, corrections-4 `3d023d66`).
+  rerun on tip `423e7e77`: **Ran 259 tests — OK, 0 findings both**
+  (2026-11-24); `SANITIZER_EVIDENCE.md` records both SHAs (corrections-3
+  `60a699e2`, corrections-4 `3d023d66`; tip `423e7e77` is doc-only over it).
   `SANITIZER_EVIDENCE.md` records the exact tested SHA, clean tree,
   build + results (0 findings both).
 - **Fix 4 — fail-closed ingestor-workload preflight** (P2):
