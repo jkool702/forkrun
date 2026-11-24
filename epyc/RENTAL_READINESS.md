@@ -47,20 +47,8 @@ Rehearsal date: 2026-11-23.
   JSON parses (the P1.1 integration check passed; 45 stage COMPLETE rc=0).
 - Drift rehearsal: `env_drift.py` reports `campaign_valid=True` for the
   rehearsal campaign's env pair.
-- **Corrections-3 rehearsal rehearsal** (`epyc/rehearsal_rehearsal_45.sh`,
-  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `8d08c90e…`
-  (the final tip), `EPYC_OUT=/tmp/opencode/epyc-reh3/out`, exit 0): 45-stage
-  rehearsal OK; plan-only rehearsal (topology discovery + mapping-matrix
-  generation + mapping compatibility validation) OK; parameter sweep plan
-  generation (`--sweep-base-quantum`/`--sweep-max-backlog` → `sweep_axes` +
-  `parameter_sets`) OK; rehearsal campaign OK (asymmetric-ingestor
-  scenarios: `slow_ingestor_one`, `slow_ingestor_stall_recover`,
-  `slow_ingestor_fast_consumer`, `slow_ingestor_slow_consumer`; paired
-  placement experiments; repeated passes; randomized candidate order;
-  per-trial provenance: mapping_provenance + duration_qualification +
-  ingestor_controls); provenance reconciliation (campaign source_sha ==
-  env-before.json git.head_sha == `8d08c90e…`, git.dirty == false,
-  drift_assessment=valid); artifact collection/indexing (`90_collect`) OK.
+Note: the branch tip moved after the rehearsal rehearsal (readiness updates);
+the rehearsaled code is the tip's code.
 
 ## Known limitations of this rehearsal
 
