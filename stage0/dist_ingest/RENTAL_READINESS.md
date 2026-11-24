@@ -7,10 +7,10 @@ physical-NUMA validation is a rental requirement, not a rehearsal
 deliverable.
 
 Rehearsal rehearsal (§11): `epyc/rehearsal_rehearsal_45.sh` — run from the
-clean checkout of the final corrected commit (worktree at `8a9aba66…` — the
+clean checkout of the final corrected commit (worktree at `8d08c90e…` — the
 rehearsal rehearsal ran on the final tip). Artifacts under
 `/tmp/opencode/epyc-reh3/out`. Provenance reconciled: campaign `source_sha` ==
-`env-before.json` git.head_sha == `8a9aba66…`, `git.dirty == false`,
+`env-before.json` git.head_sha == `8d08c90e…`, `git.dirty == false`,
 `drift_assessment=valid`. All PASS: 45-stage rehearsal; plan-only rehearsal
 (topology discovery + mapping-matrix generation + mapping compatibility
 validation); parameter sweep plan generation (sweep_axes + parameter_sets);
@@ -21,7 +21,7 @@ recorded); artifact collection/indexing (`90_collect`).
 
 ## 1. Final branch and HEAD
 - Branch: `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3` (corrections-3).
-- Rehearsaled corrected commit (rehearsal rehearsal ran on it): `8a9aba66906370507f070449239d380981cfafe4`.
+- Rehearsaled corrected commit (rehearsal rehearsal ran on it): `8d08c90e99e9ebbbda60dfffafc3d579d0613202` (final tip).
 
 ## 2. All checkpoint commit SHAs
 - corrections-1: `deecdc64` (WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-1 tip: `81da9e63`), `3e6a924e`, `81da9e63`.
@@ -168,8 +168,7 @@ measurements are expected to have been completed first.)
   (`forkrun_ring.c`) sanitizers remain on the forkrun production evidence path
   (`dev/supervisor/SANITIZER_EVIDENCE.md`).
 - The rehearsal rehearsal of corrections-3 ran from the clean worktree
-  `8a9aba66…` (the final tip); the rehearsaled tree is tree-identical to the
-  tip code.
+  `8d08c90e…` (the final tip).
 
 ## Cross-references
 - `epyc/RENTAL_READINESS.md` — rehearsal-status doc (rehearsal-host view).
