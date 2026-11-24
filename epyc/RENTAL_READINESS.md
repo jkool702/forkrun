@@ -26,7 +26,7 @@ Rehearsal date: 2026-11-23.
 ## Rehearsal evidence
 
 - **Corrections-3 rehearsal rehearsal** (`epyc/rehearsal_rehearsal_45.sh`,
-  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `8a9aba66…`
+  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `8d08c90e…`
   (the final tip), `EPYC_OUT=/tmp/opencode/epyc-reh3/out`, exit 0): 45-stage
   rehearsal OK; plan-only rehearsal (topology discovery + mapping-matrix
   generation + mapping compatibility validation) OK; parameter sweep plan
@@ -37,7 +37,7 @@ Rehearsal date: 2026-11-23.
   placement experiments; repeated passes; randomized candidate order;
   per-trial provenance: mapping_provenance + duration_qualification +
   ingestor_controls); provenance reconciliation (campaign source_sha ==
-  env-before.json git.head_sha == `8a9aba66…`, git.dirty == false,
+  env-before.json git.head_sha == `8d08c90e…`, git.dirty == false,
   drift_assessment=valid); artifact collection/indexing (`90_collect`) OK.
 - Plan-only dry-run rehearsal: `run_dist_campaign.sh --plan-only` →
   `dist-campaign plan-only complete` (exit 0).
@@ -48,7 +48,7 @@ Rehearsal date: 2026-11-23.
 - Drift rehearsal: `env_drift.py` reports `campaign_valid=True` for the
   rehearsal campaign's env pair.
 - **Corrections-3 rehearsal rehearsal** (`epyc/rehearsal_rehearsal_45.sh`,
-  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `8a9aba66…`
+  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `8d08c90e…`
   (the final tip), `EPYC_OUT=/tmp/opencode/epyc-reh3/out`, exit 0): 45-stage
   rehearsal OK; plan-only rehearsal (topology discovery + mapping-matrix
   generation + mapping compatibility validation) OK; parameter sweep plan
@@ -59,7 +59,7 @@ Rehearsal date: 2026-11-23.
   placement experiments; repeated passes; randomized candidate order;
   per-trial provenance: mapping_provenance + duration_qualification +
   ingestor_controls); provenance reconciliation (campaign source_sha ==
-  env-before.json git.head_sha == `8a9aba66…`, git.dirty == false,
+  env-before.json git.head_sha == `8d08c90e…`, git.dirty == false,
   drift_assessment=valid); artifact collection/indexing (`90_collect`) OK.
 
 ## Known limitations of this rehearsal
