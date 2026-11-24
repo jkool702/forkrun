@@ -12,7 +12,7 @@ Rehearsal date: 2026-11-23.
 
 | # | Step | Artifact | Status |
 |---|---|---|---|
-| 1 | source verify | `campaign-manifest.json` (`source_sha`) | rehearsal: `45` stage rehearsal on `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3 @ 9798f96d1ddc8c3b265c5f0bdfee82385ff52322` — campaign `source_sha` == `env-before.json` git.head_sha == corrected SHA, `git.dirty == false` (rehearsal rehearsal, epyc/rehearsal_rehearsal_45.sh) |
+| 1 | source verify | `campaign-manifest.json` (`source_sha`) | rehearsal: `45` stage rehearsal on `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3 @ 8a9aba66906370507f070449239d380981cfafe4` — campaign `source_sha` == `env-before.json` git.head_sha == corrected SHA, `git.dirty == false` (rehearsal rehearsal, epyc/rehearsal_rehearsal_45.sh, run from clean worktree at the final tip) |
 | 2 | topology verify | `00_environment/PREFLIGHT.txt`, `epyc.env` | rehearsal: `numa=fake=4` (fake, not physical) |
 | 3 | env capture | `env-before-1.json` | rehearsal: OK (stage0/env_capture.py, C4.3+C4.5) |
 | 4 | hardware calibration | `numa_calibration.json` | rehearsal: OK (stage0/numa_calibrate.py, C4.6; local 13–14 GB/s on this box) |
@@ -25,20 +25,20 @@ Rehearsal date: 2026-11-23.
 
 ## Rehearsal evidence
 
-- `45_bench_dist_ingest.sh` rehearsal rehearsal (clean checkout of corrected
-  commit `6886defed99139910ff87fcf6e9b6a9c80060471` in worktree
-  `/tmp/opencode/wt-corrections`; stage ran with
-  `EPYC_OUT=/tmp/opencode/epyc-reh2/out`; the branch tip (`deecdc64`) is
-  tree-identical to the rehearsaled corrected commit — the rehearsaled
-  code is the tip's code):
-  `/tmp/opencode/epyc-reh2/out/21_bench_dist_ingest/dist_ingest_campaign/`
-  — `campaign-manifest.json` (`source_sha == env-before.json` git.head_sha
-  == `6886defe…`, `dirty == false`; drift_assessment=valid, drift_invalidated=false,
-  all_ok=true; 4 outcomes), `report.md` (headline medians present — drift
-  valid), `dist_ingest_report.md` (stage report, written), `env/{env-before,env-after}.json`,
-  `env/drift-report.json` (campaign_valid=True, 0 critical),
-  `env/binary-provenance.json`, `env/build/{dist_ingest,python-substrate}.log`,
-  4 candidate trials (all `complete=True`).
+- **Corrections-3 rehearsal rehearsal** (`epyc/rehearsal_rehearsal_45.sh`,
+  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `8a9aba66…`
+  (the final tip), `EPYC_OUT=/tmp/opencode/epyc-reh3/out`, exit 0): 45-stage
+  rehearsal OK; plan-only rehearsal (topology discovery + mapping-matrix
+  generation + mapping compatibility validation) OK; parameter sweep plan
+  generation (`--sweep-base-quantum`/`--sweep-max-backlog` → `sweep_axes` +
+  `parameter_sets`) OK; rehearsal campaign OK (asymmetric-ingestor
+  scenarios: `slow_ingestor_one`, `slow_ingestor_stall_recover`,
+  `slow_ingestor_fast_consumer`, `slow_ingestor_slow_consumer`; paired
+  placement experiments; repeated passes; randomized candidate order;
+  per-trial provenance: mapping_provenance + duration_qualification +
+  ingestor_controls); provenance reconciliation (campaign source_sha ==
+  env-before.json git.head_sha == `8a9aba66…`, git.dirty == false,
+  drift_assessment=valid); artifact collection/indexing (`90_collect`) OK.
 - Plan-only dry-run rehearsal: `run_dist_campaign.sh --plan-only` →
   `dist-campaign plan-only complete` (exit 0).
 - Calibration rehearsal: `numa_calibrate.py --size-mb 32 --samples 3` →
@@ -48,18 +48,19 @@ Rehearsal date: 2026-11-23.
 - Drift rehearsal: `env_drift.py` reports `campaign_valid=True` for the
   rehearsal campaign's env pair.
 - **Corrections-3 rehearsal rehearsal** (`epyc/rehearsal_rehearsal_45.sh`,
-  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `9798f96d…`,
-  `EPYC_OUT=/tmp/opencode/epyc-reh3/out`, exit 0): 45-stage rehearsal OK;
-  plan-only rehearsal (topology discovery + mapping-matrix generation +
-  mapping compatibility validation) OK; rehearsal campaign OK
-  (asymmetric-ingestor scenarios: `slow_ingestor_one`,
-  `slow_ingestor_stall_recover`, `slow_ingestor_fast_consumer`,
-  `slow_ingestor_slow_consumer`; paired placement experiments; repeated
-  passes; randomized candidate order; per-trial provenance:
-  mapping_provenance + duration_qualification + ingestor_controls);
-  provenance reconciliation (campaign source_sha == env-before.json
-  git.head_sha == `9798f96d…`, git.dirty == false, drift_assessment=valid);
-  artifact collection/indexing (`90_collect`) OK.
+  run from clean worktree `/tmp/opencode/wt-corrections-3` @ `8a9aba66…`
+  (the final tip), `EPYC_OUT=/tmp/opencode/epyc-reh3/out`, exit 0): 45-stage
+  rehearsal OK; plan-only rehearsal (topology discovery + mapping-matrix
+  generation + mapping compatibility validation) OK; parameter sweep plan
+  generation (`--sweep-base-quantum`/`--sweep-max-backlog` → `sweep_axes` +
+  `parameter_sets`) OK; rehearsal campaign OK (asymmetric-ingestor
+  scenarios: `slow_ingestor_one`, `slow_ingestor_stall_recover`,
+  `slow_ingestor_fast_consumer`, `slow_ingestor_slow_consumer`; paired
+  placement experiments; repeated passes; randomized candidate order;
+  per-trial provenance: mapping_provenance + duration_qualification +
+  ingestor_controls); provenance reconciliation (campaign source_sha ==
+  env-before.json git.head_sha == `8a9aba66…`, git.dirty == false,
+  drift_assessment=valid); artifact collection/indexing (`90_collect`) OK.
 
 ## Known limitations of this rehearsal
 

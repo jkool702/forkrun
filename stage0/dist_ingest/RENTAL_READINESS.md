@@ -6,28 +6,27 @@ commit. Host note: this is the rehearsal-preparation readiness doc —
 physical-NUMA validation is a rental requirement, not a rehearsal
 deliverable.
 
-Rehearsal rehearsal (§11): `epyc/rehearsal_rehearsal_45.sh` — run from a
-clean checkout of the corrected commit (worktree at `9798f96d…`; the branch
-tip adds only the readiness documentation — `git diff 9798f96d..tip` is
-docs-only). Artifacts under `/tmp/opencode/epyc-reh3/out`. Provenance
-reconciled: campaign `source_sha` == `env-before.json` git.head_sha ==
-`9798f96d…`, `git.dirty == false`. All PASS: 45-stage rehearsal; plan-only
-rehearsal (topology discovery + mapping-matrix generation + mapping
-compatibility validation); rehearsal campaign (asymmetric-ingestor
-scenarios + paired placement experiments + repeated passes + randomized
-candidate order; per-trial provenance: mapping_provenance +
-duration_qualification + ingestor_controls recorded); artifact
-collection/indexing (`90_collect`).
+Rehearsal rehearsal (§11): `epyc/rehearsal_rehearsal_45.sh` — run from the
+clean checkout of the final corrected commit (worktree at `8a9aba66…` — the
+rehearsal rehearsal ran on the final tip). Artifacts under
+`/tmp/opencode/epyc-reh3/out`. Provenance reconciled: campaign `source_sha` ==
+`env-before.json` git.head_sha == `8a9aba66…`, `git.dirty == false`,
+`drift_assessment=valid`. All PASS: 45-stage rehearsal; plan-only rehearsal
+(topology discovery + mapping-matrix generation + mapping compatibility
+validation); parameter sweep plan generation (sweep_axes + parameter_sets);
+rehearsal campaign (asymmetric-ingestor scenarios + paired placement
+experiments + repeated passes + randomized candidate order; per-trial
+provenance: mapping_provenance + duration_qualification + ingestor_controls
+recorded); artifact collection/indexing (`90_collect`).
 
 ## 1. Final branch and HEAD
 - Branch: `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3` (corrections-3).
-- Rehearsaled corrected commit: `9798f96d1ddc8c3b265c5f0bdfee82385ff52322`
-  (branch tip carries the readiness updates).
+- Rehearsaled corrected commit (rehearsal rehearsal ran on it): `8a9aba66906370507f070449239d380981cfafe4`.
 
 ## 2. All checkpoint commit SHAs
 - corrections-1: `deecdc64` (WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-1 tip: `81da9e63`), `3e6a924e`, `81da9e63`.
 - corrections-2: `3e6a924e` (C4/C5 corrections-2 — wrong-node placement, backlog line, manifest contract).
-- corrections-3 (rehearsaled): `9798f96d` — per-node ingestor workload controls (§5.2), placement_sampling=full (§2), sanitizer evidence, rehearsal rehearsal.
+- corrections-3 (rehearsaled, final tip): `8a9aba66906370507f070449239d380981cfafe4` — per-node ingestor workload controls (§5.2), placement_sampling=full (§2), sanitizer evidence, rehearsal rehearsal.
 
 ## 3. Changed files (corrections-3 vs corrections-2 tip)
 `stage0/dist_ingest/dist_ingest.{c,h}` (§5.2 engine: `di_ingestor_cfg_t`, `di_node.ing_cfg`, `di_ingestor_sleep_ns`, ingest-path delay hooks, §2 `placement_sampling=2`),
@@ -158,6 +157,8 @@ measurements are expected to have been completed first.)
 
 ## 20. Remaining known limitations
 - No physical rental has been run yet; corrections-3 ready.
+- The §11 rehearsal rehearsal and the §5/§2/§4 rehearsal verifications were
+  conducted on the rehearsal host (fake-NUMA), not on physical rental hardware.
 - Placement-validation campaigns (§2) and telemetry (§7–8) validated at the
   rehearsal-workflow level only (fake-NUMA); they exercise the campaign
   mechanics on a rented box without proving physical behavior.
@@ -167,8 +168,8 @@ measurements are expected to have been completed first.)
   (`forkrun_ring.c`) sanitizers remain on the forkrun production evidence path
   (`dev/supervisor/SANITIZER_EVIDENCE.md`).
 - The rehearsal rehearsal of corrections-3 ran from the clean worktree
-  `9798f96d`; the branch tip adds only this readiness documentation
-  (`git diff 9798f96d..tip --stat` = docs-only).
+  `8a9aba66…` (the final tip); the rehearsaled tree is tree-identical to the
+  tip code.
 
 ## Cross-references
 - `epyc/RENTAL_READINESS.md` — rehearsal-status doc (rehearsal-host view).
