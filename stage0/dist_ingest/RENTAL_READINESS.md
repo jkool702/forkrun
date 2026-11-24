@@ -7,8 +7,8 @@ physical-NUMA validation is a rental requirement, not a rehearsal
 deliverable.
 
 Rehearsal rehearsal (§11): `epyc/rehearsal_rehearsal_45.sh` — run from the
-clean checkout of the final corrected commit (worktree at `8d08c90e…` — the
-rehearsal rehearsal ran on the final tip). Artifacts under
+clean checkout of the corrected commit (worktree at `8d08c90e…`; branch tip
+`52030231` — same code, readiness updates). Artifacts under
 `/tmp/opencode/epyc-reh3/out`. Provenance reconciled: campaign `source_sha` ==
 `env-before.json` git.head_sha == `8d08c90e…`, `git.dirty == false`,
 `drift_assessment=valid`. All PASS: 45-stage rehearsal; plan-only rehearsal
@@ -21,7 +21,7 @@ recorded); artifact collection/indexing (`90_collect`).
 
 ## 1. Final branch and HEAD
 - Branch: `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3` (corrections-3).
-- Rehearsaled corrected commit (rehearsal rehearsal ran on it): `8d08c90e99e9ebbbda60dfffafc3d579d0613202` (final tip).
+- Rehearsaled corrected commit (rehearsal rehearsal ran on it): `8d08c90e99e9ebbbda60dfffafc3d579d0613202` (branch tip: `52030231` — same code, readiness updates).
 
 ## 2. All checkpoint commit SHAs
 - corrections-1: `deecdc64` (WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-1 tip: `81da9e63`), `3e6a924e`, `81da9e63`.

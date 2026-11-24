@@ -12,7 +12,7 @@ Rehearsal date: 2026-11-23.
 
 | # | Step | Artifact | Status |
 |---|---|---|---|
-| 1 | source verify | `campaign-manifest.json` (`source_sha`) | rehearsal: `45` stage rehearsal on `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3 @ 8d08c90e99e9ebbbda60dfffafc3d579d0613202` — campaign `source_sha` == `env-before.json` git.head_sha == corrected SHA, `git.dirty == false` (rehearsal rehearsal, epyc/rehearsal_rehearsal_45.sh, run from clean worktree of the final tip) |
+| 1 | source verify | `campaign-manifest.json` (`source_sha`) | rehearsal: `45` stage rehearsal on `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3 @ 8d08c90e99e9ebbbda60dfffafc3d579d0613202` — campaign `source_sha` == `env-before.json` git.head_sha == rehearsaled corrected commit, `git.dirty == false` (rehearsal rehearsal, epyc/rehearsal_rehearsal_45.sh, run from clean worktree at the rehearsaled commit) |
 | 2 | topology verify | `00_environment/PREFLIGHT.txt`, `epyc.env` | rehearsal: `numa=fake=4` (fake, not physical) |
 | 3 | env capture | `env-before-1.json` | rehearsal: OK (stage0/env_capture.py, C4.3+C4.5) |
 | 4 | hardware calibration | `numa_calibration.json` | rehearsal: OK (stage0/numa_calibrate.py, C4.6; local 13–14 GB/s on this box) |
