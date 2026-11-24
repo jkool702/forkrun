@@ -10,6 +10,14 @@ Physical-NUMA validation is a rental requirement, not a rehearsal deliverable.
 
 Rehearsal date: 2026-11-23.
 
+**Corrections-4 rehearsal rehearsal** (main tree @ `3d023d66`, rerun —
+`epyc/rehearsal_rehearsal_45.sh`, `EPYC_OUT=/tmp/opencode/epyc-reh4/out`,
+exit 0, 2026-11-24): campaign `source_sha` == env-before.json
+git.head_sha == `3d023d6654b3…`, `git.dirty == false`, asymmetric-ingestor
+evidence recorded. Note: the corrections-3 rehearsal rehearsal validated
+8d08c90e; the corrections-4 pass (C/Python fixes) re-rehearsed on the
+final tip `3d023d66` so the tree is proven clean at the rehearsal SHA.
+
 | # | Step | Artifact | Status |
 |---|---|---|---|
 | 1 | source verify | `campaign-manifest.json` (`source_sha`) | rehearsal: `45` stage rehearsal on `WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-3 @ 8d08c90e99e9ebbbda60dfffafc3d579d0613202` — campaign `source_sha` == `env-before.json` git.head_sha == rehearsaled corrected commit, `git.dirty == false` (rehearsal rehearsal, epyc/rehearsal_rehearsal_45.sh, run from clean worktree at the rehearsaled commit) |

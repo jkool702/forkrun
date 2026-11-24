@@ -414,3 +414,39 @@ review: 3 findings) remain addressed by corrections-3:
   acceptance of corrections-2).
 
 **Stopped for independent review after corrections-3 reporting.**
+
+## Corrections-4 closeout (WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-4)
+
+Corrections-4 against `60a699e2e38e976932d0e7c2b70abdfbd1f3c870`, tip
+`3d023d6654b3d3aa2e2cf37a3f40e0ab25e3b1f0` (main checkout, 2026-11-24):
+
+- **Fix 1 — rate-limit error path** (P1): moved the §5.2 rate-limit sleep
+  after the `rr<0`/`act<assigned` error checks with overflow-safe
+  `unsigned __int128` arithmetic (`dist_ingest.c::di_ingest_step`);
+  regression test `TestIngestorWorkloadControls.test_rate_limit_error_path_terminates_promptly`
+  (pread_seam-injected error, prompt termination asserted).
+- **Fix 2 — `placement_sampling=2` exhaustive** (P1):
+  `di_sample_placement` mode 2 now samples every addressable page
+  (heap-allocated `idxs`, `malloc` fallback, all free paths covered);
+  `dist_ingest.h` updated; engine test
+  `TestPlacementSamplingModes` (`sampled == total_addressable_pages` on a
+  >1024-page corpus, mode 1 keeps 1024-page bound).
+- **Fix 3 — sanitizer evidence rerun** (P1): ASan+UBSan and TSan rerun at
+  SHA `60a699e2…` (254→259 tests; rerun reflects the corrected suite);
+  `SANITIZER_EVIDENCE.md` records the exact tested SHA, clean tree,
+  build + results (0 findings both).
+- **Fix 4 — fail-closed ingestor-workload preflight** (P2):
+  `run_dist._per_node_list` strict (unknown names, malformed ints,
+  negative/excess entries raise ValueError); `run_dist.main()` preflight
+  on all four §5.2 lists (exit 2); campaign→run_dist path covered.
+  Tests: `test_malformed_ingestor_args_fail_preflight` +
+  `TestCampaignWiring.test_ingestor_workload_controls_fail_closed_end_to_end`.
+
+**Corrections-4 rehearsal rehearsal:** `epyc/rehearsal_rehearsal_45.sh`
+rerun on the main tree @ `3d023d66` — exit 0, all 3 PASS lines (sweep plan,
+provenance reconciliation: `source_sha` == `env-before` git.head_sha,
+git.dirty == false, asymmetric-ingestor evidence). Rehearsal date
+2026-11-24.
+
+**Final status after corrections-4:** no rental, no physical NUMA
+validation, no production files modified — unchanged from corrections-3.
