@@ -631,6 +631,33 @@ class TestCampaignWiring(unittest.TestCase):
         finally:
             shutil.rmtree(out, ignore_errors=True)
 
+    def test_ingestor_workload_controls_fail_closed_end_to_end(self):
+        """§5.2/§2 preflight (WO review): malformed ingestor workload
+        controls are rejected end-to-end (non-zero exit) — via run_dist's
+        strict `_per_node_list` — instead of silently degrading to
+        defaults."""
+        import tempfile
+        bad_modes = [
+            ['--ingestor-modes-per-node', 'off,rate_limit,extra'],   # excess
+            ['--ingestor-modes-per-node', 'notamode'],               # bad name
+            ['--ingestor-modes-per-node', 'delay_per_claim,-1'],     # negative
+            ['--ingestor-modes-per-node', 'delay_per_claim,nan'],    # non-int
+        ]
+        for extra in bad_modes:
+            out = tempfile.mkdtemp(prefix='dist_ingestor_preflight_')
+            try:
+                p = subprocess.run(
+                    ['bash', 'stage0/dist_ingest/run_dist_campaign.sh',
+                     '--out', out, '--campaign-id', 'test-ingestor-preflight',
+                     '--scenarios', 'slow_ingestor_one', '--trials', '1',
+                     '--seed', 's1'] + extra,
+                    capture_output=True, text=True, cwd=REPO, timeout=600)
+                self.assertNotEqual(
+                    p.returncode, 0,
+                    msg="campaign must fail preflight for %r" % extra)
+            finally:
+                shutil.rmtree(out, ignore_errors=True)
+
     def test_placement_experiments_full_mode_emits_full_sampling(self):
         """§2: --placement-experiments full -> placement_sampling='full'
         placement-validation experiments in the plan."""

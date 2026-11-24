@@ -557,13 +557,25 @@ static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
     if (page <= 0) { n->m.placement_sampling_unavailable = 1; return 0; }
     uint64_t total_pages = ((uint64_t)len + (uint64_t)page - 1) / (uint64_t)page;
     if (total_pages == 0) { n->m.placement_sampling_not_performed = 1; return 0; }
-    uint64_t sample_limit = 1024;
+    /* §2: full mode (placement_sampling=2) is exhaustive; bounded (1)
+     * keeps the 1024-page limit. */
+    uint64_t sample_limit = (n->eng->P.placement_sampling == 2) ? total_pages : 1024;
     n->m.placement_total_addressable_pages += total_pages;
     n->m.placement_sample_limit = sample_limit; /* per-allocation parameter */
-    uint64_t idxs[1024];
+    uint64_t idxs_stack[1024];
+    uint64_t *idxs = idxs_stack;
+    if (sample_limit > sizeof(idxs_stack)/sizeof(*idxs)) {
+        idxs = (uint64_t *)malloc((size_t)sample_limit * sizeof(*idxs));
+        if (!idxs) {
+            n->m.placement_sample_unknown_pages += total_pages;
+            n->m.placement_sampling_unavailable = 1;
+            return -1;
+        }
+    }
     uint64_t count = 0, spacing = 1;
-    if (di_test_sample_indices(total_pages, sample_limit, idxs, 1024, &count, &spacing) != 0 || count == 0) {
+    if (di_test_sample_indices(total_pages, sample_limit, idxs, sample_limit, &count, &spacing) != 0 || count == 0) {
         n->m.placement_sampling_not_performed = 1;
+        if (idxs != idxs_stack) free(idxs);
         return 0;
     }
     n->m.placement_sample_spacing = spacing; /* per-allocation (last allocation) */
@@ -572,6 +584,7 @@ static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
     int *status = (int *)calloc((size_t)count, sizeof(int));
     if (!addrs || !status) {
         free(addrs); free(status);
+        if (idxs != idxs_stack) free(idxs);
         n->m.placement_sample_unknown_pages += count;
         n->m.placement_sampling_unavailable = 1;
         return -1;
@@ -603,6 +616,7 @@ static int di_sample_placement(di_node_t *n, void *buf, size_t len) {
     n->m.placement_sample_unknown_pages += un;
     if (rc != 0) n->m.placement_sampling_unavailable = 1;
     free(addrs); free(status);
+    if (idxs != idxs_stack) free(idxs);
     return 0;
 #else
     (void)buf; (void)len;
@@ -931,23 +945,6 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
     uint64_t t0r = di_now_ns();
     ssize_t rr = di_pread_full(eng, c.buf, (size_t)assigned, start);
     n->m.read_wait_ns += di_now_ns() - t0r;
-    {
-        di_node_t *in = di_ingestor_of(eng, n);
-        if (in->ing_cfg.mode == 4 && in->ing_cfg.rate_bps > 0) {
-            /* §5.2 rate_limit: throttle the ingest loop so the mean ingest
-             * rate <= rate_bps (approximate rate limiting by sleeping
-             * proportional to the bytes just read). */
-            uint64_t t0w = di_now_ns();
-            uint64_t s = ((uint64_t)rr * 1000000000ULL) / in->ing_cfg.rate_bps;
-            if (s > 0) {
-                struct timespec ts;
-                ts.tv_sec = (time_t)(s / 1000000000ULL);
-                ts.tv_nsec = (long)(s % 1000000000ULL);
-                nanosleep(&ts, NULL);
-                in->m.ingestor_rate_throttled_ns += di_now_ns() - t0w;
-            }
-        }
-    }
     if (rr < 0) {
         n->m.last_error = DI_ERR_IO;
         di_free_chunk(&c);
@@ -969,6 +966,25 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
         di_publish_headroom(n);
         pthread_mutex_unlock(&n->mu);
         return -1;
+    }
+    /* §5.2 rate_limit: throttle only a completed read (error/short reads
+     * return above). Overflow-safe sleep: ceil(act / rate_bps * 1e9). */
+    {
+        di_node_t *in = di_ingestor_of(eng, n);
+        if (in->ing_cfg.mode == 4 && in->ing_cfg.rate_bps > 0 && act > 0) {
+            uint64_t t0w = di_now_ns();
+            unsigned __int128 s128 = ((unsigned __int128)act * 1000000000ULL)
+                                     / in->ing_cfg.rate_bps;
+            uint64_t s = (s128 > (unsigned __int128)UINT64_MAX)
+                         ? UINT64_MAX : (uint64_t)s128;
+            if (s > 0) {
+                struct timespec ts;
+                ts.tv_sec = (time_t)(s / 1000000000ULL);
+                ts.tv_nsec = (long)(s % 1000000000ULL);
+                nanosleep(&ts, NULL);
+                in->m.ingestor_rate_throttled_ns += di_now_ns() - t0w;
+            }
+        }
     }
 
     n->m.reservations++;

@@ -47,6 +47,16 @@ class DiConsumerCfg(ctypes.Structure):
     ]
 
 
+class DiIngestorCfg(ctypes.Structure):
+    # §5.2: mirrors dist_ingest.h di_ingestor_cfg_t.
+    _fields_ = [
+        ("mode", ctypes.c_int),          # 0=off,1=delay_per_claim,2=delay_after_read,3=stall_then_recover,4=rate_limit
+        ("delay_ns", ctypes.c_uint64),
+        ("stall_ms", ctypes.c_uint64),
+        ("rate_bps", ctypes.c_uint64),
+    ]
+
+
 class DiAffinityRole(ctypes.Structure):
     _fields_ = [
         ("requested", ctypes.c_int),
@@ -502,6 +512,121 @@ class TestIngestorWorkloadControls(unittest.TestCase):
         self.assertEqual(self._ic(d, 1)['mode'], 0)
         self.assertEqual(self._ic(d, 1)['phase'], 'off')
         self.assertTrue(d['correct'])
+
+    def test_rate_limit_error_path_terminates_promptly(self):
+        # WO review: with rate_limit + injected pread error, the engine must
+        # terminate with the error promptly — the old code slept before
+        # reaching the error path (UINT64_MAX conversion of rr<0 wrapped the
+        # sleep to ~5 hours).
+        import time as _time
+        sys.path.insert(0, PKG)
+        import run_dist
+        lib = ctypes.CDLL(LIB_PATH)
+        lib.di_create.argtypes = [ctypes.c_int, ctypes.c_uint64, ctypes.POINTER(run_dist.DiConfig)]
+        lib.di_create.restype = ctypes.c_void_p
+        lib.di_run.argtypes = [ctypes.c_void_p, ctypes.POINTER(run_dist.DiResult)]
+        lib.di_run.restype = ctypes.c_int
+        lib.di_destroy.argtypes = [ctypes.c_void_p]
+        lib.di_destroy.restype = None
+        lib.di_test_set_pread_seam.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint64]
+        lib.di_test_set_pread_seam.restype = ctypes.c_int
+        path = make_file(1 * 1024 * 1024)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            st = os.stat(path)
+            params = run_dist.DiPolicyParams()
+            params.base_quantum = 512 * 1024
+            params.max_backlog = 8 * 1024 * 1024
+            params.consumer_kernel = 1
+            ing = run_dist.DiIngestorCfg()
+            ing.mode = 4
+            ing.rate_bps = 1000000
+            cfg = run_dist.DiConfig()
+            cfg.num_nodes = 1
+            cfg.policy = DI_POLICY_FIXED_FAA
+            cfg.params = params
+            cfg.ingestors = ctypes.cast(ctypes.byref(ing), ctypes.POINTER(run_dist.DiIngestorCfg))
+            eng = lib.di_create(fd, st.st_size, ctypes.byref(cfg))
+            self.assertTrue(eng)
+            # Inject a pread error on the first read (seam mode 4 = error_at).
+            self.assertEqual(lib.di_test_set_pread_seam(eng, 4, 0, 0), 0)
+            t0 = _time.monotonic()
+            res = run_dist.DiResult()
+            rc = lib.di_run(eng, ctypes.byref(res))
+            elapsed = _time.monotonic() - t0
+            lib.di_destroy(eng)
+            self.assertNotEqual(rc, 0, "engine must fail on injected pread error")
+            self.assertLess(elapsed, 10.0, "engine must terminate promptly on pread error, not sleep")
+            self.assertEqual(res.nodes[0].ingestor_rate_throttled_ns, 0)
+        finally:
+            os.close(fd)
+            os.unlink(path)
+
+
+    def test_malformed_ingestor_args_fail_preflight(self):
+        # WO review: malformed ingestor-workload lists must fail preflight
+        # (non-zero exit) rather than silently degrading to defaults.
+        import subprocess as sp
+        bad_cases = [
+            ['--ingestor-modes-per-node', 'off,rate_limit,extra'],   # excess entries
+            ['--ingestor-modes-per-node', 'badmode'],                # unknown name
+            ['--ingestor-modes-per-node', 'delay_per_claim,-1'],     # negative entry
+            ['--ingestor-modes-per-node', 'delay_per_claim,garbage'], # non-integer
+        ]
+        for extra in bad_cases:
+            path = make_file(4*1024*1024)
+            try:
+                cmd = [sys.executable, os.path.join(PKG, 'run_dist.py'),
+                       '--candidate', 'fixed_faa', '--input', path,
+                       '--nodes', '2', '--no-pin'] + extra
+                p = sp.run(cmd, capture_output=True, text=True, cwd=REPO, timeout=300)
+                self.assertNotEqual(p.returncode, 0,
+                                    msg="%r must fail preflight" % extra)
+                self.assertTrue(p.stderr.strip(), "expected a stderr diagnostic")
+            finally:
+                os.unlink(path)
+
+
+class TestPlacementSamplingModes(unittest.TestCase):
+    """§2: placement-sampling modes — 0=off, 1=on (bounded, <=1024),
+    2=full (exhaustive). Full mode must sample every addressable page."""
+
+    def _run_dist_get_dist_result(self, extra_args, size):
+        path = make_file(size)
+        try:
+            cmd = [sys.executable, os.path.join(PKG, 'run_dist.py'),
+                   '--input', path, '--nodes', '2'] + extra_args
+            p = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO, timeout=300)
+            self.assertEqual(p.returncode, 0, msg=p.stderr[-800:] + "\n" + p.stdout[-400:])
+            line = [l for l in p.stderr.splitlines() if l.startswith('DIST_RESULT ')][0]
+            return json.loads(line[len('DIST_RESULT '):])
+        finally:
+            os.unlink(path)
+
+    def test_full_mode_samples_all_addressable_pages(self):
+        # WO review: mode 2 must be exhaustive; use a corpus >1024 pages/node
+        # (16 MiB input -> 8 MiB/node = 2048 pages) so bounded-1024 behavior
+        # would be distinguishable.
+        d = self._run_dist_get_dist_result(['--placement-sampling', 'full'], 16*1024*1024)
+        seen_big = 0
+        for nd in d['nodes']:
+            pl = nd['placement']
+            if pl['total_addressable_pages'] > 0:
+                self.assertEqual(pl['sampled_pages'], pl['total_addressable_pages'],
+                                 msg="full mode must sample every page on node %s" % nd['node'])
+            if pl['total_addressable_pages'] > 1024:
+                seen_big += 1
+        self.assertGreater(seen_big, 0, 'expected at least one node with >1024 addressable pages')
+        self.assertTrue(d['correct'])
+
+    def test_bounded_mode_limit_still_applies(self):
+        # Mode 1 (on/bounded) keeps the <=1024-page-per-allocation limit.
+        d = self._run_dist_get_dist_result(['--placement-sampling', 'on'], 16*1024*1024)
+        for nd in d['nodes']:
+            pl = nd['placement']
+            if pl['total_addressable_pages'] > 0:
+                self.assertEqual(pl['sample_limit_per_allocation'], 1024, msg=nd['node'])
+                self.assertLessEqual(pl['sampled_pages'], pl['total_addressable_pages'], msg=nd['node'])
 
 
 if __name__ == '__main__':

@@ -30,9 +30,18 @@ make CC=gcc CFLAGS="-O1 -g -fno-omit-frame-pointer -fPIC -fsanitize=address,unde
 LD_PRELOAD=/lib64/libasan.so.8 python3 -m unittest discover -s stage0/dist_ingest/tests
 ```
 
-Result (dated 2026-11-23): **Ran 246 tests — OK, 0 ASan/UBSan reports, 0 UBSan runtime errors**
+Result (dated 2026-11-23; **rerun** — the pre-existing evidence claimed 246
+tests against corrections-2 tip `3e6a924e`, which did not match the 254-test
+suite on the corrected corrections-4 tree `60a699e2`): **Ran 259 tests —
+OK, 0 ASan/UBSan reports, 0 UBSan runtime errors**
 (UBSan in gcc's default recover mode: any `runtime error` line would have been
 captured; none fired).
+Test source SHA: `60a699e2e38e976932d0e7c2b70abdfbd1f3c870`;
+**clean** working tree (`git status --short` empty) at that SHA — the
+corrections-3 finding that the C code moved after the evidence was recorded
+is resolved: the evidence now names the tree it validated.
+Build: `make CC=gcc CFLAGS="-O1 -g -fno-omit-frame-pointer -fPIC -fsanitize=address,undefined" LDFLAGS="-shared -pthread -fsanitize=address,undefined" NUMA_LIBS="-lnuma"` —
+`__asan_init` present in `stage0/libdist_ingest.so` (not stripped).
 
 ## TSan
 
@@ -47,8 +56,11 @@ make CC=gcc CFLAGS="-O1 -g -fno-omit-frame-pointer -fPIC -fsanitize=thread" \
 LD_PRELOAD=/lib64/libtsan.so.2 python3 -m unittest discover -s stage0/dist_ingest/tests
 ```
 
-Result (dated 2026-11-23): **Ran 246 tests — OK, 0 ThreadSanitizer warnings**
+Result (dated 2026-11-23; **rerun** — matching the ASan+UBSan rerun):
+**Ran 259 tests — OK, 0 ThreadSanitizer warnings**
 (empty `WARNING: ThreadSanitizer` set captured).
+Test source SHA: `60a699e2e38e976932d0e7c2b70abdfbd1f3c870` (clean tree —
+`__tsan_init`/`__tsan_report` symbols present in `stage0/libdist_ingest.so`).
 
 ## Honest scope notes
 
@@ -63,6 +75,6 @@ Result (dated 2026-11-23): **Ran 246 tests — OK, 0 ThreadSanitizer warnings**
   seam tests and the seam/counter assertions in `test_dist_ingest.py`); there
   is no standalone randomized fault-injection fuzzer — failure modes are
   covered deterministically by the suite under the sanitizers above.
-- `dist_ingest.c` was not changed by the C4/C5 corrections (calibration is
-  Python-side); sanitizers therefore validate the C code as of
-  `3e6a924e` (corrections-2 tip).
+- Sanitizer runs at SHA `60a699e2` include the corrections-3 C changes and
+  the corrections-4 fixes (rate-limit error path, exhaustive
+  `placement_sampling=2`, strict ingestor-control preflight).

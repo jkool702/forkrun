@@ -108,7 +108,9 @@ typedef struct {
      *   timed measurement trials - placement observation not performed).
      * 1=on  (in-run move_pages sampling for placement-validation experiments;
      *   incurs treatment-dependent overhead in the timed path and must not be
-     *   mixed with performance-comparison headline statistics). */
+     *   mixed with performance-comparison headline statistics).
+     * 2=full (exhaustive sampling for diagnostics; NOT a clean performance
+     *   measurement; bounded-1024 behavior of mode 1 not applied). */
     int placement_sampling;
 } di_policy_params_t;
 

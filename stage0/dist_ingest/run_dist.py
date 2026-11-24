@@ -79,26 +79,38 @@ PLACEMENT_SAMPLING_MODE = {"off": 0, "on": 1, "full": 2}
 
 
 def _per_node_list(spec, n, name_map=None):
-    """Parse a comma list of per-node values (empty = zeros).
-
-    With name_map (e.g. INGESTOR_MODE), names are mapped to ints; without it,
-    entries must be ints (or 0 when missing/invalid)."""
-    if not spec:
-        return [0] * n
-    parts = [p.strip() for p in str(spec).split(",")]
+    """Parse a comma list of per-node values. Fail-closed: malformed specs,
+    unknown mode names (with name_map), or excess/negative entries raise
+    ValueError instead of silently defaulting to zero."""
+    if n is None or n < 0:
+        raise ValueError("bad node count for per-node list: %r" % (n,))
+    parts = []
+    if spec is None or str(spec).strip() == "":
+        parts = []
+    else:
+        s = str(spec).strip()
+        parts = [p.strip() for p in s.split(",")]
     out = []
     for i in range(n):
-        v = 0
-        if i < len(parts) and parts[i] not in ("", "-", "None"):
-            s = parts[i]
-            if name_map is not None:
-                v = name_map.get(s, 0)
-            else:
-                try:
-                    v = int(s)
-                except ValueError:
-                    v = 0
+        s = parts[i] if i < len(parts) else ""
+        if s in ("", "-", "None"):
+            out.append(0)
+            continue
+        if name_map is not None:
+            if s not in name_map:
+                raise ValueError("unknown name %r in per-node list" % (s,))
+            v = name_map[s]
+        else:
+            try:
+                v = int(s)
+            except ValueError:
+                raise ValueError("malformed integer %r in per-node list" % (s,))
+            if v < 0:
+                raise ValueError("negative value %r in per-node list" % (s,))
         out.append(v)
+    nonempty = [p for p in parts if p not in ("", "-")]
+    if len(nonempty) > n:
+        raise ValueError("per-node list has %d entries but only %d nodes" % (len(nonempty), n))
     return out
 
 
@@ -1217,6 +1229,17 @@ def main():
                     help="identifier of the corresponding performance trial for a placement-validation experiment (provenance/linkage)")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
+
+    # §5.2/§2 preflight (fail-closed): malformed ingestor-workload lists,
+    # unknown mode names, negative/excess values, and missing/invalid
+    # placement-sampling params are rejected before any timed trial runs.
+    try:
+        _per_node_list(args.ingestor_modes_per_node, args.nodes, INGESTOR_MODE)
+        _per_node_list(args.ingestor_delay_ns_per_node, args.nodes)
+        _per_node_list(args.ingestor_stall_ms_per_node, args.nodes)
+        _per_node_list(args.ingestor_rate_bps_per_node, args.nodes)
+    except ValueError as exc:
+        raise SystemExit("run_dist preflight rejected malformed ingestor-workload spec: %s" % exc)
 
     placement_sampling_mode = PLACEMENT_SAMPLING_MODE.get(getattr(args, "placement_sampling", "off"), 0)
     placement_sampling_name = _placement_sampling_mode_name(placement_sampling_mode)
