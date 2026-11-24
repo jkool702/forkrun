@@ -10,13 +10,19 @@ Physical-NUMA validation is a rental requirement, not a rehearsal deliverable.
 
 Rehearsal date: 2026-11-23.
 
+**Corrections-4 sanitizer evidence**: `stage0/dist_ingest/SANITIZER_EVIDENCE.md`
+records ASan+UBSan and TSan reruns on SHA `3d023d66` (259 tests, 0 findings
+each, 2026-11-24; tip `4b5297bb` is doc-only over it —
+`git diff 3d023d66 4b5297bb -- stage0/dist_ingest/dist_ingest.c` is empty),
+distinct from the corrections-3 evidence at SHA `60a699e2`.
+
 **Corrections-4 rehearsal rehearsal** (main tree @ `3d023d66`, rerun —
 `epyc/rehearsal_rehearsal_45.sh`, `EPYC_OUT=/tmp/opencode/epyc-reh4/out`,
 exit 0, 2026-11-24): campaign `source_sha` == env-before.json
 git.head_sha == `3d023d6654b3…`, `git.dirty == false`, asymmetric-ingestor
-evidence recorded. Note: the corrections-3 rehearsal rehearsal validated
-8d08c90e; the corrections-4 pass (C/Python fixes) re-rehearsed on the
-final tip `3d023d66` so the tree is proven clean at the rehearsal SHA.
+evidence recorded. Recorded as code-exact for final tip `4b5297bb`
+(second commit `4b5297bb` is doc-only over `3d023d66`; the sanitizer and
+rehearsal SHAs are thus code-exact for the final tip).
 
 | # | Step | Artifact | Status |
 |---|---|---|---|
