@@ -2,8 +2,11 @@ CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter -fPIC -pthread
 LDFLAGS ?= -shared -pthread
 
-# libnuma is optional at runtime in code (best-effort), but link if available.
-NUMA_LIBS := $(shell pkg-config --libs numa 2>/dev/null || echo -lnuma)
+# CK-1: mbind/set_mempolicy/get_mempolicy now go through the Linux syscall
+# interface (SYS_mbind/SYS_set_mempolicy/SYS_get_mempolicy with
+# __NR_* fallbacks) — the libnuma-dev package is NOT required to build.
+# libnuma is still linked when present for best-effort fallbacks.
+NUMA_LIBS := $(shell pkg-config --libs numa 2>/dev/null || true)
 
 all: ../libdist_ingest.so
 

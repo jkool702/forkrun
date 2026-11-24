@@ -17,10 +17,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifdef __linux__
-#include <numaif.h>
-#endif
-
 #define DI_QUANTUM_DEFAULT (2ULL * 1024 * 1024)
 #define DI_ALIGN_2M (2ULL * 1024 * 1024)
 
@@ -442,6 +438,24 @@ static void di_mbind_update_compat(di_node_t *n) {
         (n->m.mbind_requested_count > 0 && n->m.mbind_failure_count == 0) ? 1 : 0;
 }
 
+/* CK-1: mbind via the Linux syscall interface (SYS_mbind) with an
+ * optional libnuma fallback where no syscall is exposed. */
+#if !defined(MPOL_PREFERRED)
+#include <linux/mempolicy.h>
+#endif
+static int di_mbind_syscall(void *addr, size_t len, unsigned long *mask,
+                            unsigned long maxnode) {
+#if defined(SYS_mbind)
+    return (int)syscall(SYS_mbind, addr, len, MPOL_PREFERRED,
+                        mask, maxnode, 0);
+#elif defined(__NR_mbind)
+    return (int)syscall(__NR_mbind, addr, len, MPOL_PREFERRED,
+                        mask, maxnode, 0);
+#else
+    return -1;
+#endif
+}
+
 static int di_mbind_node(void *addr, size_t len, int phys_node, di_node_t *n) {
     if (phys_node < 0) return 0;
     /* Track every allocation attempt where policy application was requested. */
@@ -460,7 +474,7 @@ static int di_mbind_node(void *addr, size_t len, int phys_node, di_node_t *n) {
             return -1;
         }
         mask[phys_node / (int)(sizeof(unsigned long) * 8)] |= 1UL << (phys_node % (int)(sizeof(unsigned long) * 8));
-        long rc = mbind(addr, len, MPOL_PREFERRED, mask, maxnode, 0);
+        long rc = di_mbind_syscall(addr, len, mask, maxnode);
         int err = errno;
         free(mask);
         if (rc != 0) {

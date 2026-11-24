@@ -19,8 +19,19 @@
 #include <sched.h>
 #include <unistd.h>
 #include <errno.h>
-#include <numaif.h> /* set_mempolicy lives in libnuma, not libc */
 #include <string.h>
+
+/* CK-1: set_mempolicy/get_mempolicy via the Linux syscall interface where
+ * the libnuma wrappers are unavailable. */
+#if !defined(MPOL_BIND)
+#include <linux/mempolicy.h>
+#endif
+#if !defined(SYS_set_mempolicy) && defined(__NR_set_mempolicy)
+#define SYS_set_mempolicy __NR_set_mempolicy
+#endif
+#if !defined(SYS_get_mempolicy) && defined(__NR_get_mempolicy)
+#define SYS_get_mempolicy __NR_get_mempolicy
+#endif
 
 /* Query the NUMA node of each page in addrs[0..count).
  *
@@ -92,7 +103,13 @@ int stage0_get_affinity(int out[], long max)
 int stage0_set_mempolicy(int mode, unsigned long size,
                          const void *nodes)
 {
-    return set_mempolicy(mode, (const unsigned long *)nodes, size);
+#if defined(SYS_set_mempolicy)
+    return (int)syscall(SYS_set_mempolicy, mode,
+                        (const unsigned long *)nodes, size);
+#else
+    (void)mode; (void)size; (void)nodes;
+    return -1;
+#endif
 }
 
 /* get_mempolicy(&mode, mask, maxnode). Returns 0 on success; on
@@ -100,5 +117,10 @@ int stage0_set_mempolicy(int mode, unsigned long size,
 int stage0_get_mempolicy(int *mode, unsigned long *mask,
                          unsigned long size)
 {
-    return get_mempolicy(mode, mask, size, NULL, 0);
+#if defined(SYS_get_mempolicy)
+    return (int)syscall(SYS_get_mempolicy, mode, mask, size, NULL, 0);
+#else
+    (void)mode; (void)mask; (void)size;
+    return -1;
+#endif
 }
