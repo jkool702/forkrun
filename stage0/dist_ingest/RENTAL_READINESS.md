@@ -26,7 +26,7 @@ recorded); artifact collection/indexing (`90_collect`).
 ## 2. All checkpoint commit SHAs
 - corrections-1: `deecdc64` (WO-NUMA-ONE-SHOT-RENTAL-PREPARATION-C4-C5-CORRECTIONS-1 tip: `81da9e63`), `3e6a924e`, `81da9e63`.
 - corrections-2: `3e6a924e` (C4/C5 corrections-2 — wrong-node placement, backlog line, manifest contract).
-- corrections-3 (rehearsaled, final tip): `8a9aba66906370507f070449239d380981cfafe4` — per-node ingestor workload controls (§5.2), placement_sampling=full (§2), sanitizer evidence, rehearsal rehearsal.
+- corrections-3 (rehearsaled, final tip): `8d08c90e99e9ebbbda60dfffafc3d579d0613202` — per-node ingestor workload controls (§5.2), placement_sampling=full (§2), sanitizer evidence, rehearsal rehearsal.
 
 ## 3. Changed files (corrections-3 vs corrections-2 tip)
 `stage0/dist_ingest/dist_ingest.{c,h}` (§5.2 engine: `di_ingestor_cfg_t`, `di_node.ing_cfg`, `di_ingestor_sleep_ns`, ingest-path delay hooks, §2 `placement_sampling=2`),
