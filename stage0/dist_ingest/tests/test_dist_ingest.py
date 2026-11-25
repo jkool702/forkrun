@@ -36,6 +36,7 @@ class DiPolicyParams(ctypes.Structure):
         ("enable_peer_headroom", ctypes.c_int),
         ("consumer_kernel", ctypes.c_int),
         ("placement_sampling", ctypes.c_int),
+        ("invariant_asserts", ctypes.c_int),  # CK-5 (appended, matches C)
     ]
 
 

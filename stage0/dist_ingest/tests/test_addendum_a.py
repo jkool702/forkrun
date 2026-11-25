@@ -30,7 +30,7 @@ class DiPolicyParams(ctypes.Structure):
         ("align_reservations", ctypes.c_int), ("prefer_hugepage", ctypes.c_int),
         ("strict_affinity", ctypes.c_int), ("strict_mbind", ctypes.c_int),
         ("one_outstanding_per_node", ctypes.c_int), ("enable_peer_headroom", ctypes.c_int), ("consumer_kernel", ctypes.c_int),
-        ("placement_sampling", ctypes.c_int),
+        ("placement_sampling", ctypes.c_int), ("invariant_asserts", ctypes.c_int),
     ]
 
 

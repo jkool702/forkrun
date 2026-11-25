@@ -38,6 +38,8 @@ typedef enum {
     DI_ERR_NOMEM = -3,
     DI_ERR_STATE = -4,
     DI_ERR_THREAD = -5,
+    /* CK-5: returned when DI_INVARIANT_ASSERT assertions fail. */
+    DI_ERR_INVARIANT = -6,
 } di_err_t;
 
 /* Consumer behavior for a node (used by experimental measurement). */
@@ -112,6 +114,10 @@ typedef struct {
      * 2=full (exhaustive sampling for diagnostics; NOT a clean performance
      *   measurement; bounded-1024 behavior of mode 1 not applied). */
     int placement_sampling;
+    /* CK-5: invariant assertions (DI_INVARIANT_ASSERT build mode; off by
+     * default — diagnostic only, must not appear in performance runs).
+     * Appended at the end to keep existing offsets stable. */
+    int invariant_asserts;
 } di_policy_params_t;
 
 typedef struct {

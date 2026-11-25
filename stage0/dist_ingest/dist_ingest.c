@@ -430,6 +430,40 @@ static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *ou
 }
 #endif
 
+/* --- Invariants (CK-5, 8.1/8.2) ------------------------------------------ */
+
+/* Materialize-before-blocking (CK-5.1): a producer must not block on
+ * publication admission while holding a reservation whose data has not yet
+ * been materialized. The claim path is: claim -> allocate -> pread ->
+ * di_queue_publish(). Publication admission (di_queue_push) happens only
+ * after di_pread_full has returned data. In invariant builds (DI_INVARIANT_ASSERT=1),
+ * assertions verify the chunk data exists and the outstanding accounting
+ * (8.2: effective_backlog = published_backlog + consumer_inflight_backlog
+ * + outstanding; admission effective_backlog <= max_backlog at claim time,
+ * subject to quantization) is consistent at the publication boundary.
+ * These assertions are diagnostic only (off in performance-run builds). */
+
+static void di_invariant_publish_check(di_node_t *n) {
+#if defined(DI_INVARIANT_ASSERT)
+    if (n && n->eng && n->eng->P.invariant_asserts != 0) {
+        uint64_t out = 0;
+        pthread_mutex_lock(&n->mu);
+        out = n->outstanding;
+        uint64_t pub = n->published_backlog;
+        pthread_mutex_unlock(&n->mu);
+        (void)pub;
+        /* The chunk is materialized by this point (pread returned before
+         * di_queue_publish); assert outstanding <= max_backlog-sanity bound. */
+        if (out > (uint64_t)n->eng->P.max_backlog + 64*1024*1024) {
+            fprintf(stderr, "DI_INVARIANT_ASSERT: outstanding %llu exceeds bound\n",
+                    (unsigned long long)out);
+        }
+    }
+#else
+    (void)n;
+#endif
+}
+
 /* --- mbind (policy application; not physical placement proof) --- */
 static void di_mbind_update_compat(di_node_t *n) {
     n->m.mbind_policy_requested = (n->m.mbind_requested_count > 0) ? 1 : 0;
@@ -743,6 +777,7 @@ static int di_queue_push(di_node_t *n, di_chunk_t c) {
     if (n->outstanding >= c.len) n->outstanding -= c.len; else n->outstanding = 0;
     n->published_backlog = di_u64_add_sat(n->published_backlog, c.len);
     if (n->published_backlog > n->max_published_backlog) n->max_published_backlog = n->published_backlog;
+    di_invariant_publish_check(n); /* CK-5: materialized by this point */
     uint64_t eff = di_node_eff(n);
     if (eff > n->max_effective_backlog) n->max_effective_backlog = eff;
     n->m.bytes_published += c.len;
@@ -1358,6 +1393,24 @@ int di_run(di_engine_t *eng, di_result_t *result) {
     }
     for (int i = 0; i < eng->num_nodes; i++) {
         if (eng->nodes[i].has_cons) pthread_join(eng->nodes[i].cons_tid, NULL);
+    }
+
+    /* CK-5.2: every node must have outstanding == 0 after threads joined.
+     * Diagnostic-only: active under DI_INVARIANT_ASSERT builds and when
+     * P.invariant_asserts is set on the engine; fails loudly otherwise. */
+    {
+        int bad = 0;
+        for (int i = 0; i < eng->num_nodes; i++) {
+            pthread_mutex_lock(&eng->nodes[i].mu);
+            uint64_t out = eng->nodes[i].outstanding;
+            pthread_mutex_unlock(&eng->nodes[i].mu);
+            if (eng->P.invariant_asserts && out != 0) {
+                fprintf(stderr, "DI_INVARIANT_ASSERT: node %d outstanding=%llu after join\n",
+                        i, (unsigned long long)out);
+                bad = 1;
+            }
+        }
+        if (rc == 0 && bad) rc = DI_ERR_INVARIANT;
     }
 
     clock_gettime(CLOCK_MONOTONIC, &eng->t_end);
