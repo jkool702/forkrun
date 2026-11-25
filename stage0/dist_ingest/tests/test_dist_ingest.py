@@ -178,6 +178,10 @@ def load_lib():
     lib.di_policy_decide.argtypes = [ctypes.c_int, ctypes.POINTER(DiPolicyParams), ctypes.c_int, ctypes.c_int,
                                      ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64)]
     lib.di_policy_decide.restype = ctypes.c_uint64
+    lib.di_test_set_pread_seam.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint64]
+    lib.di_test_set_pread_seam.restype = ctypes.c_int
+    lib.di_test_set_push_fail_seam.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.di_test_set_push_fail_seam.restype = ctypes.c_int
     lib.di_effective_backlog.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64]
     lib.di_effective_backlog.restype = ctypes.c_uint64
     return lib
