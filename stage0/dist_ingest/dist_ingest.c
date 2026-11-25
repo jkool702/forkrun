@@ -443,25 +443,42 @@ static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *ou
  * subject to quantization) is consistent at the publication boundary.
  * These assertions are diagnostic only (off in performance-run builds). */
 
-static void di_invariant_publish_check(di_node_t *n) {
+/* CK-5.1: materialize-before-blocking — assert at the publication boundary
+ * that the chunk data exists and is materialized. Only the queue-free state
+ * is passed here (caller must not hold n->mu — di_queue_push publishes with
+ * the mutex held, so this function takes a snapshot via the mutex before
+ * the critical section, or the queue is already published).
+ *
+ * Activation: DI_INVARIANT_ASSERT compile mode OR eng->P.invariant_asserts
+ * (runtime). Returns 0 when the invariant holds; on violation writes a
+ * diagnostic and returns -1 so callers in tests can assert on behavior. */
+static int di_invariant_publish_check(di_node_t *n, const di_chunk_t *c) {
+    int viol = 0;
+    if (!n || !n->eng) return 0;
+    /* Snapshot under the mutex-free path (caller holds it), then verify
+     * the chunk data exists for the published range. */
 #if defined(DI_INVARIANT_ASSERT)
-    if (n && n->eng && n->eng->P.invariant_asserts != 0) {
-        uint64_t out = 0;
-        pthread_mutex_lock(&n->mu);
-        out = n->outstanding;
-        uint64_t pub = n->published_backlog;
-        pthread_mutex_unlock(&n->mu);
-        (void)pub;
-        /* The chunk is materialized by this point (pread returned before
-         * di_queue_publish); assert outstanding <= max_backlog-sanity bound. */
-        if (out > (uint64_t)n->eng->P.max_backlog + 64*1024*1024) {
-            fprintf(stderr, "DI_INVARIANT_ASSERT: outstanding %llu exceeds bound\n",
-                    (unsigned long long)out);
+    {
+        if (n->eng->P.invariant_asserts || 1) { /* assert always when compiled */
+            if (c) {
+                if (c->buf == NULL) {
+                    fprintf(stderr, "DI_INVARIANT_ASSERT: publication with NULL chunk buf (materialize-before-blocking)\n");
+                    viol = 1;
+                }
+            }
+            /* Caller holds n->mu here — read outstanding directly. */
+            uint64_t out = n->outstanding;
+            if (out > (uint64_t)n->eng->P.max_backlog + 64*1024*1024) {
+                fprintf(stderr, "DI_INVARIANT_ASSERT: outstanding %llu exceeds bound\n",
+                        (unsigned long long)out);
+                viol = 1;
+            }
         }
     }
 #else
-    (void)n;
+    (void)c;
 #endif
+    return viol;
 }
 
 /* --- mbind (policy application; not physical placement proof) --- */
@@ -777,7 +794,7 @@ static int di_queue_push(di_node_t *n, di_chunk_t c) {
     if (n->outstanding >= c.len) n->outstanding -= c.len; else n->outstanding = 0;
     n->published_backlog = di_u64_add_sat(n->published_backlog, c.len);
     if (n->published_backlog > n->max_published_backlog) n->max_published_backlog = n->published_backlog;
-    di_invariant_publish_check(n); /* CK-5: materialized by this point */
+    di_invariant_publish_check(n, &c); /* CK-5: materialized by this point */
     uint64_t eff = di_node_eff(n);
     if (eff > n->max_effective_backlog) n->max_effective_backlog = eff;
     n->m.bytes_published += c.len;
