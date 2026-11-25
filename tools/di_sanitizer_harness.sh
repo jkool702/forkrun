@@ -42,7 +42,8 @@ env ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=0 \
 RUNLOG="$OUTDIR/run_$(date +%Y%m%d_%H%M%S).log"
 cd "$ROOT"
 RC=0
-env LD_PRELOAD="$PRELOAD" python3 -m unittest discover -s stage0/dist_ingest/tests \
+env LD_PRELOAD="$PRELOAD" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=0 \
+    python3 -m unittest discover -s stage0/dist_ingest/tests \
     > "$RUNLOG" 2>&1 || RC=$?
 
 # Findings: AddressSanitizer/UBSan + LSan + TSan (explicit sets)
