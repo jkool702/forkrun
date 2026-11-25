@@ -18,14 +18,22 @@ using existing telemetry (no new hot-path counters). Categories:
 
 | Regime | Evidence/interpretation |
 |---|---|
-| source-limited | read_wait high, backlog shallow, consume low |
+| source-limited | read_wait high, backlog shallow, consume_wait low |
 | admission-limited | publish_wait high or zero_claims high, backlog high |
-| demand/consumer-limited | consume_wait high, backlog high |
+| demand/consumer-limited | consume_wait high AND backlog >= max (saturation + starvation both required; high consume_wait alone means consumer STARVATION) |
 | balanced | waits low, backlog not persistently saturated |
 
-`mixed` / `indeterminate` are allowed and reported with supporting evidence
-(raw measurements + denominators). Classification tests in
-`tests/test_regime_ck6.py` use synthetic vectors.
+Consumer-wait semantics (corrected): `consume_wait_ns` accumulates time
+blocked on `cv_can_pop` because the queue is EMPTY. High consume_wait =
+consumers starved, NOT saturated. To claim demand/consumer-limited you
+need BOTH high consume_wait (starvation) AND persistently high backlog.
+
+Thresholds are derived from the run duration: define `run_seconds` (set by
+the caller) and require waits to exceed a fraction of it; the classifier
+reports ratios (wait / run_seconds).
+
+Pairing identity: (scenario, mapping, workload, parameter_set, candidate,
+trial) must be preserved when pairing per-node medians for regime R.
 
 ## 9.4 Decision rule (rental, CK-6.5 — predeclared)
 

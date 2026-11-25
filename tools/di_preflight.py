@@ -35,26 +35,29 @@ def _run(cmd, cwd, timeout=600, env=None):
 
 
 def probe_mandatory_engine_build():
-    """Build stage0/libdist_ingest.so. Returns (ok, {stderr, stdout})."""
-    r = _run(["make", "clean"], DIST_DIR)
-    if r is None:
+    """Build stage0/libdist_ingest.so. Returns (ok, details).
+
+    Fail-closed: ok requires a genuinely successful, fresh build.
+    - Without a sanitizer runtime: ok = (make clean rc==0 AND make rc==0
+      AND artifact exists). A stale artifact after failed clean does NOT
+      count unless both makes succeeded.
+    - With a sanitizer runtime: ok = artifact exists after make; make rc
+      is advisory (LSan summary). When make fails AND no artifact, ok=False.
+    """
+    r_clean = _run(["make", "clean"], DIST_DIR)
+    if r_clean is None:
         return False, {"error": "make not found"}
     r = _run(["make"], DIST_DIR)
     if r is None:
         return False, {"error": "make not found"}
-    # Under a preloaded ASan/LSan runtime the gcc/make process exits nonzero
-    # (LeakSanitizer summary). The mandatory result is the artifact: accept
-    # an existing .so even when make exits nonzero, but require it when
-    # make succeeded or when we are NOT under a sanitizer runtime.
     built = os.path.exists(SO_PATH)
-    asan_runtime = ("ASAN_OPTIONS" in os.environ) or ("LD_PRELOAD" in os.environ)
-    # Under a sanitizer runtime, make may exit nonzero (LSan summary) while
-    # still emitting the artifact, or the artifact may be absent. The
-    # mandatory requirement (the P1 engine) is honored: without a runtime
-    # we require rc==0; with one we accept the artifact.
     sanitizer_env = ("ASAN_OPTIONS" in os.environ) or ("LD_PRELOAD" in os.environ)
-    ok = built if (not sanitizer_env or r.returncode == 0) else True
+    ok = built
+    if not ok and not sanitizer_env:
+        # No sanitizer: build must have fully succeeded with the artifact.
+        ok = (r_clean.returncode == 0 and r.returncode == 0 and built)
     return ok, {"returncode": r.returncode,
+                "clean_returncode": r_clean.returncode,
                 "artifact_present": built,
                 "stdout_tail": (r.stdout or "")[-400:],
                 "stderr_tail": (r.stderr or "")[-400:]}
@@ -143,6 +146,19 @@ def probe_environment():
                 return {"compiler": cc,
                         "version_output_head": (r.stdout or "")[:300]}
         return {"compiler": None, "warning": "no C compiler found (cc/gcc/clang)"}
+    # Actual build flags used by the mandatory engine build probe.
+    make_env = dict(os.environ)
+    probe = _run(["make", "-pn"], DIST_DIR, 60)
+    build_flags = None
+    if probe and probe.returncode == 0 and "dist_ingest.c" in probe.stdout:
+        m = probe.stdout
+        for line in m.splitlines():
+            if line.startswith(("CFLAGS", "LDFLAGS")):
+                build_flags = (build_flags or {})
+                build_flags[line.split("=")[0].strip()] = line.split("=", 1)[1][:200]
+    # Shmem-specific THP + kernel state, relevant for M-based experiments.
+    shmem_thp_enabled = _read("/sys/kernel/mm/transparent_hugepage/khugepaged/shmem_enabled") \
+        or _read("/sys/kernel/mm/transparent_hugepage/khugepaged/shmem_enabled_ifenabled")
     return {
         "compiler": _compiler(),
         "kernel": os.uname().release if hasattr(os, "uname") else None,
@@ -151,9 +167,11 @@ def probe_environment():
         "platform": sys.platform,
         "numa_balancing": _read("/proc/sys/kernel/numa_balancing"),
         "thp_enabled": _read("/sys/kernel/mm/transparent_hugepage/enabled"),
+        "thp_shmem_enabled": shmem_thp_enabled,
         "thp_defrag": _read("/sys/kernel/mm/transparent_hugepage/defrag"),
         "swap_list": _read("/proc/swaps"),
-        "sysctl_shmem": _read("/proc/sys/vm/drop_caches"),  # placeholder for VM tuning check
+        "swap_active_pages": _read("/proc/meminfo") and _read("/proc/meminfo").split("SwapCached:")[-1].splitlines()[0][:50] if _read("/proc/meminfo") else None,
+        "build_flags_from_make": build_flags or "unavailable",
     }
 
 

@@ -47,16 +47,21 @@ class TestDiPreflightCK1(unittest.TestCase):
             self.fail("mandatory_engine_build unavailable")
 
     def test_mandatory_failure_nonzero_exit(self):
-        # Simulate failure: run the preflight function with a broken tool dir.
+        # With a deliberately broken compiler, the mandatory build must
+        # genuinely fail: preflight exits nonzero and records
+        # mandatory_engine_build.available == False. Do not derive the
+        # expected result from the result being tested — assert the actual
+        # failure (make with a missing CC).
         r = subprocess.run([sys.executable, TOOL, "--json-out", "/tmp/opencode/di_preflight_ck1b.json"],
                            cwd=REPO_ROOT, capture_output=True, text=True, timeout=900,
-                           env={**os.environ, "CC": "nonexistent-cc"})
-        # Either the build fails (nonzero) or it succeeds — we assert the
-        # contract: exit status reflects mandatory build, not all probes.
+                           env={**os.environ, "CC": "nonexistent-cc-for-preflight-test"})
+        self.assertNotEqual(r.returncode, 0,
+                            msg="preflight must fail-closed on broken mandatory build: rc=%d" % r.returncode)
         with open("/tmp/opencode/di_preflight_ck1b.json") as f:
             d = json.load(f)
-        expected = 0 if d["preflight"]["mandatory_engine_build"]["available"] else 1
-        self.assertEqual(r.returncode, expected)
+        m = d["preflight"]["mandatory_engine_build"]
+        self.assertFalse(m["available"], "mandatory_engine_build must be unavailable with broken CC")
+        self.assertNotEqual(m["returncode"], 0)
 
     def test_mbind_interface_documented(self):
         r = subprocess.run([sys.executable, TOOL], capture_output=True, text=True, cwd=REPO_ROOT, timeout=60)

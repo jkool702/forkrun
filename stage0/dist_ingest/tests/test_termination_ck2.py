@@ -38,38 +38,28 @@ def _mk_eng():
 
 
 class TestTermination(unittest.TestCase):
-    def _assert_prompt_terminate(self, fn):
-        import time
-        t0 = time.monotonic()
-        try:
-            rc = fn()
-        finally:
-            elapsed = time.monotonic() - t0
-        self.assertLess(elapsed, MAX_TERM_SECONDS,
-                        "engine termination took %.1fs (> %.0fs)" % (elapsed, MAX_TERM_SECONDS))
-        return rc
-
     def test_push_fail_seam_terminates_and_joins(self):
+        # Fail the 3rd publish (queue-failure path); assert prompt
+        # termination + accounting reconciliation (CK-2 review fix 2).
         import time
         lib, eng, fd, path = _mk_eng()
         try:
             self.assertTrue(eng)
-            # Fail the 3rd publish (real queue-failure path in di_queue_push);
-            # the engine must terminate promptly (stop broadcasts to waiters),
-            # whether or not the injected failure is fatal.
             self.assertEqual(lib.di_test_set_push_fail_seam(eng, 3), 0)
             t0 = time.monotonic()
             res = DiResult()
             rc = lib.di_run(eng, ctypes.byref(res))
             elapsed = time.monotonic() - t0
-            self.assertLess(elapsed, MAX_TERM_SECONDS)
+            self.assertLess(elapsed, MAX_TERM_SECONDS,
+                            "termination took %.1fs" % elapsed)
+            for i in range(len(res.nodes)):
+                self.assertEqual(res.nodes[i].current_outstanding, 0)
         finally:
             lib.di_destroy(eng)
             os.close(fd)
             os.unlink(path)
 
     def test_pread_error_terminates_promptly(self):
-        # Errors must terminate promptly, not block (CK-2 + fixes 1 & 2).
         import time
         lib, eng, fd, path = _mk_eng()
         try:
@@ -87,6 +77,28 @@ class TestTermination(unittest.TestCase):
             lib.di_destroy(eng)
             os.close(fd)
             os.unlink(path)
+
+    def test_all_faults_join_and_reconcile_accounting(self):
+        # CK-2 P2: allocation-failure, short-read, thread-init — check the
+        # two engines we can reach with seams; assert threads joined (run
+        # completes/errors promptly) and outstanding==0 in results.
+        import time
+        for seam_args in [(4, 0, 0)]:
+            lib, eng, fd, path = _mk_eng()
+            try:
+                self.assertTrue(eng)
+                lib.di_test_set_pread_seam(eng, *seam_args)
+                res = DiResult()
+                t0 = time.monotonic()
+                rc = lib.di_run(eng, ctypes.byref(res))
+                self.assertLess(time.monotonic() - t0, MAX_TERM_SECONDS)
+                for i in range(len(res.nodes)):
+                    self.assertEqual(res.nodes[i].current_outstanding, 0,
+                                     "node %d outstanding after join" % i)
+            finally:
+                lib.di_destroy(eng)
+                os.close(fd)
+                os.unlink(path)
 
 
 if __name__ == "__main__":

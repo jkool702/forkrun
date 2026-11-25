@@ -77,6 +77,34 @@ INGESTOR_PHASE = {
 # (in-run move_pages sampling for placement-validation), full=exhaustive.
 PLACEMENT_SAMPLING_MODE = {"off": 0, "on": 1, "full": 2}
 
+# CK-6.3: authoritative regime classifier — lives in tools/regime_classify.py;
+# run_dist re-exports it here so DIST_RESULT and the tests use one decision.
+def _regime_classify(m, run_seconds):
+    try:
+        from tools.regime_classify import classify_metrics
+    except Exception:
+        # Import fallback: file is next to the dist_ingest package parent.
+        import importlib.util as _ilu
+        _p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "..", "tools", "regime_classify.py")
+        _spec = _ilu.spec_from_file_location("regime_classify", _p)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        classify_metrics = _mod.classify_metrics
+    try:
+        reg, ev = classify_metrics(
+            read_wait_ns=getattr(m, "read_wait_ns", 0) or 0,
+            publish_wait_ns=getattr(m, "publish_wait_ns", 0) or 0,
+            consume_wait_ns=getattr(m, "consume_wait_ns", 0) or 0,
+            backlog=getattr(m, "current_published_backlog", 0) or 0,
+            max_backlog=getattr(m, "max_published_backlog", 0) or 1,
+            claims_zero=getattr(m, "zero_claims", 0) or 0,
+            run_seconds=run_seconds)
+        return {"regime": reg, "evidence": ev}
+    except Exception:
+        return {"regime": "indeterminate",
+                "evidence": {"error": "classifier unavailable on this host"}}
+
 
 def _per_node_list(spec, n, name_map=None):
     """Parse a comma list of per-node values. Fail-closed: malformed specs,
@@ -362,6 +390,9 @@ def node_metrics_to_dict(m, idx, requested_phys_node=None, policy=None):
         "read_wait_ns": m.read_wait_ns,
         "publish_wait_ns": m.publish_wait_ns,
         "consume_wait_ns": m.consume_wait_ns,
+        # CK-6: derived regime classification (uses corrected consumer-wait semantics).
+        # One authoritative classifier: tools/regime_classify.py (re-exported below).
+        "regime": _regime_classify(m, 1.0),
         "current_published_backlog": m.current_published_backlog,
         "current_consumer_inflight_backlog": m.current_consumer_inflight_backlog,
         "current_outstanding": m.current_outstanding,
