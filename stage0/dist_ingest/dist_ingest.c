@@ -623,8 +623,8 @@ static void di_mbind_update_compat(di_node_t *n) {
         (n->m.mbind_requested_count > 0 && n->m.mbind_failure_count == 0) ? 1 : 0;
 }
 
-/* CK-1: mbind via the Linux syscall interface (SYS_mbind) with an
- * optional libnuma fallback where no syscall is exposed. */
+/* CK-1: mbind via the Linux syscall interface (SYS_mbind/__NR_mbind).
+ * No libnuma wrapper fallback exists; no libnuma-dev dependency. */
 #if !defined(MPOL_PREFERRED)
 #include <linux/mempolicy.h>
 #endif

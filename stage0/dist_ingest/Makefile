@@ -2,18 +2,23 @@ CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter -fPIC -pthread
 LDFLAGS ?= -shared -pthread
 
-# CK-1: mbind/set_mempolicy/get_mempolicy now go through the Linux syscall
-# interface (SYS_mbind/SYS_set_mempolicy/SYS_get_mempolicy with
-# __NR_* fallbacks) — the libnuma-dev package is NOT required to build.
-# libnuma is still linked when present for best-effort fallbacks.
-NUMA_LIBS := $(shell pkg-config --libs numa 2>/dev/null || true)
+# CK-1.2: explicit output variable so callers (mandatory preflight, sanitizer
+# harness, tests) can build into an ISOLATED temporary artifact without
+# touching a pre-existing/instrumented artifact. `make clean` removes only
+# $(DI_OUTPUT).
+DI_OUTPUT ?= ../libdist_ingest.so
 
-all: ../libdist_ingest.so
+# CK-1: memory policy goes through the Linux syscall interface only
+# (SYS_mbind/__NR_mbind; SYS_move_pages). The engine calls NO libnuma
+# library functions; libnuma-dev is NOT required and libnuma is NOT linked.
+# No syscall-interface-absent fallback exists (no libnuma wrapper fallback).
 
-../libdist_ingest.so: dist_ingest.c dist_ingest.h
-	$(CC) $(CFLAGS) -o $@ dist_ingest.c $(LDFLAGS) $(NUMA_LIBS)
+all: $(DI_OUTPUT)
+
+$(DI_OUTPUT): dist_ingest.c dist_ingest.h
+	$(CC) $(CFLAGS) -o $@ dist_ingest.c $(LDFLAGS)
 
 clean:
-	rm -f ../libdist_ingest.so
+	rm -f $(DI_OUTPUT)
 
 .PHONY: all clean

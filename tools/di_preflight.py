@@ -14,6 +14,8 @@ downstream consequence. Exit status is nonzero ONLY for mandatory failures
 """
 import argparse
 import json
+import tempfile
+import time
 import os
 import shutil
 import subprocess
@@ -34,33 +36,127 @@ def _run(cmd, cwd, timeout=600, env=None):
         return subprocess.CompletedProcess(cmd, 124, "", "TIMEOUT")
 
 
-def probe_mandatory_engine_build():
-    """Build stage0/libdist_ingest.so. Returns (ok, details).
+def _default_isolated_output():
+    """A fresh, empty temporary directory; output artifact never pre-exists."""
+    import tempfile
+    d = tempfile.mkdtemp(prefix="di_preflight_build_")
+    return os.path.join(d, "libdist_ingest.so")
 
-    Fail-closed: ok requires a genuinely successful, fresh build.
-    - Without a sanitizer runtime: ok = (make clean rc==0 AND make rc==0
-      AND artifact exists). A stale artifact after failed clean does NOT
-      count unless both makes succeeded.
-    - With a sanitizer runtime: ok = artifact exists after make; make rc
-      is advisory (LSan summary). When make fails AND no artifact, ok=False.
+
+def probe_mandatory_engine_build(output_path=None, dist_dir=None, env=None,
+                                 make="make", keep_artifact=False):
+    """Mandatory CK-1.4 build contract. Returns (ok, details).
+
+    ok requires ALL of:
+      1. `make clean` completes successfully (rc==0);
+      2. the expected output artifact is ABSENT after a successful clean;
+      3. a fresh mandatory build completes successfully (rc==0);
+      4. the expected shared library exists after that build;
+      5. the resulting artifact was produced by THIS build (absent before;
+         created after; mtime not older than build start).
+
+    A pre-existing artifact is never sufficient evidence. Builds are ISOLATED
+    (CK-1.2): default output is a fresh temp path; `make clean` removes only
+    that output and never a pre-existing `stage0/libdist_ingest.so` or an
+    instrumented sanitizer artifact. No sanitizer-environment (LD_PRELOAD /
+    ASAN_OPTIONS) exception exists; ordinary preflight contract is never
+    weakened. The actual compiler, resolved compiler path/version, build
+    command, and flags used are recorded.
     """
-    r_clean = _run(["make", "clean"], DIST_DIR)
+    dist = dist_dir or DIST_DIR
+    auto_tmp = output_path is None
+    if output_path is None:
+        output_path = _default_isolated_output()
+    output_path = os.path.abspath(output_path)
+    # ensure parent directory exists for an explicit isolated destination
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    build_env = dict(os.environ if env is None else env)
+    # explicit output for BOTH clean and build
+    make_base = [make, "DI_OUTPUT=" + output_path]
+
+    detail = {"output_artifact": output_path, "dist_dir": dist}
+
+    r_clean = _run(make_base + ["clean"], dist, env=build_env)
     if r_clean is None:
-        return False, {"error": "make not found"}
-    r = _run(["make"], DIST_DIR)
+        return False, {**detail, "error": "make not found"}
+    detail["clean_returncode"] = r_clean.returncode
+    detail["clean_stdout_tail"] = (r_clean.stdout or "")[-400:]
+    detail["clean_stderr_tail"] = (r_clean.stderr or "")[-400:]
+
+    # (2) expected output artifact ABSENT after a successful clean
+    artifact_absent_after_clean = (not os.path.exists(output_path))
+    detail["artifact_absent_after_clean"] = artifact_absent_after_clean
+
+    # (3) fresh mandatory build
+    t0 = time.time()
+    r = _run(make_base, dist, env=build_env)
     if r is None:
-        return False, {"error": "make not found"}
-    built = os.path.exists(SO_PATH)
-    sanitizer_env = ("ASAN_OPTIONS" in os.environ) or ("LD_PRELOAD" in os.environ)
-    ok = built
-    if not ok and not sanitizer_env:
-        # No sanitizer: build must have fully succeeded with the artifact.
-        ok = (r_clean.returncode == 0 and r.returncode == 0 and built)
-    return ok, {"returncode": r.returncode,
-                "clean_returncode": r_clean.returncode,
-                "artifact_present": built,
-                "stdout_tail": (r.stdout or "")[-400:],
-                "stderr_tail": (r.stderr or "")[-400:]}
+        return False, {**detail, "error": "make not found"}
+    detail["returncode"] = r.returncode
+    detail["stdout_tail"] = (r.stdout or "")[-400:]
+    detail["stderr_tail"] = (r.stderr or "")[-400:]
+    detail["build_stdout_full"] = (r.stdout or "")[-4000:]
+    detail["build_start_epoch"] = t0
+
+    # actual compiler + build command/flags used for the mandatory build:
+    # take the compile command echoed by make (ground truth), resolve it on PATH.
+    cmd_lines = [ln.strip() for ln in (r.stdout or "").splitlines()
+                 if ln.strip() and (ln.strip().split()[0].endswith(("cc", "gcc", "clang"))
+                                    or ln.strip().split()[0] == build_env.get("CC", ""))]
+    detail["build_commands"] = cmd_lines[-5:]
+    cc_from_cmd = cmd_lines[0].split()[0] if cmd_lines else None
+    cc_actual = cc_from_cmd or build_env.get("CC") or "cc"
+    cc_resolved = shutil.which(cc_actual, path=build_env.get("PATH", os.environ.get("PATH", "")))
+    detail["compiler"] = cc_actual
+    detail["compiler_resolved_path"] = cc_resolved
+    detail["compiler_version_output_head"] = _compiler_version(cc_resolved or cc_actual, build_env)
+    # effective flags: Makefile defaults + env overrides actually passed
+    detail["cflags"] = build_env.get("CFLAGS", "(Makefile default -O2 -Wall -Wextra -Wno-unused-parameter -fPIC -pthread)")
+    detail["ldflags"] = build_env.get("LDFLAGS", "(Makefile default -shared -pthread)")
+    detail["cc_env"] = build_env.get("CC")
+
+    # (4) expected shared library exists after build
+    built = os.path.exists(output_path)
+    detail["artifact_present"] = built
+    # (5) produced by THIS build: created after t0 and not pre-existing
+    produced_by_this_build = bool(
+        artifact_absent_after_clean and built
+        and os.path.getmtime(output_path) >= (t0 - 1e-3))
+    detail["artifact_produced_by_this_build"] = produced_by_this_build
+    try:
+        if built:
+            import hashlib
+            with open(output_path, "rb") as f:
+                detail["artifact_sha256"] = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        detail["artifact_sha256"] = None
+
+    ok = bool(
+        r_clean.returncode == 0
+        and artifact_absent_after_clean
+        and r.returncode == 0
+        and built
+        and produced_by_this_build
+    )
+    # artifact is KEPT; only auto-created temp dirs are cleaned up.
+    detail["artifact_retained"] = output_path if built else None
+    if auto_tmp:
+        try:
+            parent = os.path.dirname(output_path)
+            if built:
+                os.unlink(output_path)
+            if os.path.basename(parent).startswith("di_preflight_build_"):
+                os.rmdir(parent)
+        except OSError:
+            pass
+    return ok, {**detail, "available": ok, "artifact": output_path if built else None}
+
+
+def _compiler_version(cc, env):
+    if not cc:
+        return None
+    r = _run([cc, "--version"], "/", 30, env=env)
+    return (r.stdout or r.stderr or "")[:300] if r and (r.returncode == 0 or r.stdout or r.stderr) else None
 
 
 def probe_optional_pynuma_symbols():
@@ -123,56 +219,118 @@ def probe_numa_headers():
               "/usr/include/bits/syscall.h"], "/", 30)
     if r and r.returncode == 0 and r.stdout.strip() != "0":
         result["SYS_mbind"] = True
-    if result["numaif_h"] and not result["SYS_mbind"]:
-        result["warning"] = ("numaif.h present but SYS_mbind missing — engine "
-                             "uses the mbind() wrapper as fallback")
-    elif not result["numaif_h"]:
-        result["note"] = ("libnuma-dev absent — engine builds via syscall "
-                          "interface only (P1 mandatory path, no optional degradation)")
+    # CK-1.4: engine uses the Linux syscall interface (SYS_mbind/__NR_mbind,
+    # SYS_move_pages); NO libnuma wrapper fallback exists and libnuma-dev is
+    # not required. numaif.h is informational only.
+    result["interface"] = "linux-syscall (SYS_mbind/__NR_mbind; SYS_move_pages)"
+    result["libnuma_wrapper_fallback"] = False
+    if not result["SYS_mbind"]:
+        result["note"] = ("SYS_mbind not found in bits/syscall.h on this host; "
+                          "engine falls back to __NR_mbind if defined, else mbind "
+                          "application returns failure (reported, not silently "
+                          "ignored); NOT a libnuma wrapper fallback")
+    else:
+        result["note"] = ("libnuma-dev optional; engine does not call libnuma "
+                          "functions and does not link it")
     return result
 
 
+def _read(p):
+    """Defensive read; explicit None when unavailable. Never fabricate."""
+    try:
+        with open(p) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _parse_kv(text, key):
+    """Parse `Key: value` from /proc/meminfo-style text; None if absent."""
+    if not text:
+        return None
+    for line in text.splitlines():
+        if line.startswith(key + ":"):
+            parts = line.split(":", 1)[1].split()
+            if parts:
+                try:
+                    return int(parts[0])
+                except ValueError:
+                    return parts[0]
+    return None
+
+
 def probe_environment():
-    """Record compiler, flags, kernel, Python version, arch, platform."""
-    def _read(p):
-        try:
-            return open(p).read().strip()
-        except OSError:
+    """Record actual environment + real probe results. Optional fields that
+    are missing/unsupported on this kernel/distribution are explicitly
+    None/unavailable — never a fabricated default. Global THP state is kept
+    separate from shmem-specific state; configured swap is kept separate
+    from active swap I/O."""
+    THP = "/sys/kernel/mm/transparent_hugepage"
+    # --- shmem-specific THP (actual shmem controls; separate from global) ---
+    shmem_enabled = _read(os.path.join(THP, "shmem_enabled"))
+    # per-size shmem THP controls where exposed (e.g. hugepages-2048kB/shmem_enabled)
+    per_size_shmem = {}
+    try:
+        for name in sorted(os.listdir(THP)):
+            if name.startswith("hugepages-"):
+                v = _read(os.path.join(THP, name, "shmem_enabled"))
+                if v is not None:
+                    per_size_shmem[name] = v
+                else:
+                    per_size_shmem[name] = None
+    except OSError:
+        per_size_shmem = None
+    meminfo = _read("/proc/meminfo")
+    swaps = _read("/proc/swaps")
+    vmstat = _read("/proc/vmstat")
+    def _vmstat(key):
+        if not vmstat:
             return None
-    def _compiler():
-        for cc in ("cc", "gcc", "clang"):
-            r = _run([cc, "--version"], "/", 30)
-            if r and r.returncode == 0:
-                return {"compiler": cc,
-                        "version_output_head": (r.stdout or "")[:300]}
-        return {"compiler": None, "warning": "no C compiler found (cc/gcc/clang)"}
-    # Actual build flags used by the mandatory engine build probe.
-    make_env = dict(os.environ)
-    probe = _run(["make", "-pn"], DIST_DIR, 60)
-    build_flags = None
-    if probe and probe.returncode == 0 and "dist_ingest.c" in probe.stdout:
-        m = probe.stdout
-        for line in m.splitlines():
-            if line.startswith(("CFLAGS", "LDFLAGS")):
-                build_flags = (build_flags or {})
-                build_flags[line.split("=")[0].strip()] = line.split("=", 1)[1][:200]
-    # Shmem-specific THP + kernel state, relevant for M-based experiments.
-    shmem_thp_enabled = _read("/sys/kernel/mm/transparent_hugepage/khugepaged/shmem_enabled") \
-        or _read("/sys/kernel/mm/transparent_hugepage/khugepaged/shmem_enabled_ifenabled")
+        for line in vmstat.splitlines():
+            if line.startswith(key + " "):
+                try:
+                    return int(line.split()[1])
+                except (ValueError, IndexError):
+                    return None
+        return None
     return {
-        "compiler": _compiler(),
+        # actual compiler used for the mandatory build is recorded in
+        # preflight.mandatory_engine_build; this is informational PATH scan.
+        "compiler_path_scan": _path_compiler_scan(),
         "kernel": os.uname().release if hasattr(os, "uname") else None,
         "arch": os.uname().machine if hasattr(os, "uname") else None,
         "python_version": sys.version,
         "platform": sys.platform,
         "numa_balancing": _read("/proc/sys/kernel/numa_balancing"),
-        "thp_enabled": _read("/sys/kernel/mm/transparent_hugepage/enabled"),
-        "thp_shmem_enabled": shmem_thp_enabled,
-        "thp_defrag": _read("/sys/kernel/mm/transparent_hugepage/defrag"),
-        "swap_list": _read("/proc/swaps"),
-        "swap_active_pages": _read("/proc/meminfo") and _read("/proc/meminfo").split("SwapCached:")[-1].splitlines()[0][:50] if _read("/proc/meminfo") else None,
-        "build_flags_from_make": build_flags or "unavailable",
+        # global (anonymous) THP state — separate from shmem-specific state
+        "thp_enabled": _read(os.path.join(THP, "enabled")),
+        "thp_defrag": _read(os.path.join(THP, "defrag")),
+        "thp_hpage_pmd_size": _read(os.path.join(THP, "hpage_pmd_size")),
+        # shmem-specific THP state (actual shmem control; NOT khugepaged)
+        "thp_shmem_enabled": shmem_enabled,
+        "thp_shmem_per_size": per_size_shmem,
+        "thp_shmem_source": os.path.join(THP, "shmem_enabled"),
+        # configured swap (distinct from active swap I/O)
+        "swap_configured": swaps,                       # /proc/swaps raw
+        "swap_total_kb": _parse_kv(meminfo, "SwapTotal"),
+        "swap_free_kb": _parse_kv(meminfo, "SwapFree"),
+        "swap_cached_kb": _parse_kv(meminfo, "SwapCached"),  # cached swap pages, NOT active I/O
+        # active swap I/O activity (distinct from configured swap)
+        "pswpin": _vmstat("pswpin"),                    # pages swapped in
+        "pswpout": _vmstat("pswpout"),                  # pages swapped out
+        "swap_active_io_source": "/proc/vmstat pswpin/pswpout",
     }
+
+
+def _path_compiler_scan():
+    """Informational: first compiler found in PATH. The ACTUAL compiler used
+    for the mandatory build is recorded in mandatory_engine_build."""
+    for cc in ("cc", "gcc", "clang"):
+        r = _run([cc, "--version"], "/", 30)
+        if r and r.returncode == 0:
+            return {"compiler": cc, "resolved": shutil.which(cc),
+                    "version_output_head": (r.stdout or "")[:300]}
+    return {"compiler": None, "warning": "no C compiler found in PATH (cc/gcc/clang)"}
 
 
 def main():
@@ -190,19 +348,21 @@ def main():
     }
 
     ok, detail = probe_mandatory_engine_build()
-    probes["mandatory_engine_build"] = {
-        "available": ok, **detail,
-        "artifact": SO_PATH if os.path.exists(SO_PATH) else None,
-    }
+    probes["mandatory_engine_build"] = detail
 
     # Probe optional Python substrate build without failing the run.
     r = _run(["make", "-f", "Makefile.substrate", "python-substrate"], REPO_ROOT, 300)
+    sub_ok = bool(r and r.returncode == 0 and
+                  os.path.exists(os.path.join(REPO_ROOT, "stage0", "libstage0.so")))
     probes["optional_python_substrate"] = {
         "returncode": r.returncode if r else None,
-        "available": bool(r and r.returncode == 0 and
-                          os.path.exists(os.path.join(REPO_ROOT, "stage0", "libstage0.so")))
-        if r else False,
+        "available": sub_ok if r else False,
         "note": "build attempted; failure here is a WARNING, not a preflight failure",
+        "warning": (None if sub_ok else
+                    "optional Python substrate libstage0.so build failed; "
+                    "downstream consequence: stage0 Python-extension substrate "
+                    "features unavailable (experimental dist_ingest P1 engine "
+                    "unaffected)"),
     }
 
     status_lines = []
@@ -211,17 +371,23 @@ def main():
         failures.append("mandatory_engine_build")
         status_lines.append("FAIL mandatory: dist_ingest engine build failed — see below")
     else:
-        status_lines.append("PASS mandatory: libdist_ingest.so built (%s)" % SO_PATH)
+        status_lines.append("PASS mandatory: libdist_ingest.so built (%s)"
+                            % probes["mandatory_engine_build"].get("output_artifact", SO_PATH))
 
     for key, p in probes.items():
-        if isinstance(p, dict) and p.get("available"):
+        if not isinstance(p, dict):
+            if p is not None and not isinstance(p, bool):
+                status_lines.append("INFO: %s=%s" % (key, p))
+            continue
+        if p.get("available"):
             status_lines.append("PASS/OK: %s available" % key)
-        elif isinstance(p, dict) and p.get("warning"):
+        if p.get("warning"):
             status_lines.append("WARN: %s — %s" % (key, p["warning"]))
-        elif isinstance(p, dict) and p.get("available") is False and p.get("warning"):
-            status_lines.append("WARN: %s — %s" % (key, p["warning"]))
-        elif p is not None and not isinstance(p, (bool, dict)):
-            status_lines.append("INFO: %s=%s" % (key, p))
+        # optional capability failures visible with actual downstream consequences
+        if key != "mandatory_engine_build" and p.get("available") is False and not p.get("warning"):
+            status_lines.append("WARN: %s — optional capability unavailable; "
+                                "downstream consequence: features depending on it "
+                                "cannot be verified in this campaign" % key)
 
     print("\n".join(status_lines))
 
