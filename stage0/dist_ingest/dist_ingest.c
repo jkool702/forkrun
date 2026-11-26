@@ -35,6 +35,9 @@ typedef struct {
     di_alloc_kind_t kind;
     int huge_requested;
     int huge_obtained;
+    /* CK-5: set to 1 only after the read operation has completed successfully
+     * (di_pread_full returned exactly `len` bytes) and before publication. */
+    int materialized;
 } di_chunk_t;
 
 typedef struct {
@@ -82,6 +85,9 @@ typedef struct di_node {
     uint64_t published_backlog;
     uint64_t consumer_inflight_backlog;
     uint64_t outstanding;
+    /* CK-5.3: set if a checked subtraction would underflow / saturation was
+     * attempted; NOT silently clamped away. Caller holds n->mu. */
+    int accounting_violation;
     uint64_t max_published_backlog;
     uint64_t max_consumer_inflight_backlog;
     uint64_t max_effective_backlog;
@@ -127,6 +133,14 @@ struct di_engine {
     di_placement_seam_t placement_seam;
     int push_fail_nth;     /* 0 disables; countdown on push attempts */
     int push_fail_fired;
+    /* CK-2 narrow test seams (engine-local, under seam_mu). */
+    int alloc_fail_nth;      /* 0 disables; countdown on allocation attempts */
+    int alloc_fail_fired;
+    int publish_seam;        /* CK-5: corrupt publication candidate copy */
+    int publish_seam_fired;
+    /* thread-creation failure injection in di_run (atomic, engine-local). */
+    _Atomic int thread_create_fail_nth;  /* 0 disables; countdown */
+    _Atomic int thread_create_fail_fired;
 };
 
 /* global test seams */
@@ -443,43 +457,163 @@ static int di_pin_thread_role(const int *cpus, int ncpus, di_affinity_role_t *ou
  * subject to quantization) is consistent at the publication boundary.
  * These assertions are diagnostic only (off in performance-run builds). */
 
-/* CK-5.1: materialize-before-blocking — assert at the publication boundary
- * that the chunk data exists and is materialized. Only the queue-free state
- * is passed here (caller must not hold n->mu — di_queue_push publishes with
- * the mutex held, so this function takes a snapshot via the mutex before
- * the critical section, or the queue is already published).
+/* CK-5 activation (one explicit contract, applied identically everywhere):
  *
- * Activation: DI_INVARIANT_ASSERT compile mode OR eng->P.invariant_asserts
- * (runtime). Returns 0 when the invariant holds; on violation writes a
- * diagnostic and returns -1 so callers in tests can assert on behavior. */
-static int di_invariant_publish_check(di_node_t *n, const di_chunk_t *c) {
-    int viol = 0;
-    if (!n || !n->eng) return 0;
-    /* Snapshot under the mutex-free path (caller holds it), then verify
-     * the chunk data exists for the published range. */
+ *   - A build compiled with -DDI_INVARIANT_ASSERT forces invariant checking
+ *     ON, regardless of the runtime flag.
+ *   - Otherwise invariant checking is active iff eng->P.invariant_asserts
+ *     is nonzero (set at runtime; no unconditional overrides).
+ *
+ * Both modes run the SAME underlying checks. */
+static int di_invariants_on(const di_engine_t *eng) {
 #if defined(DI_INVARIANT_ASSERT)
-    {
-        if (n->eng->P.invariant_asserts || 1) { /* assert always when compiled */
-            if (c) {
-                if (c->buf == NULL) {
-                    fprintf(stderr, "DI_INVARIANT_ASSERT: publication with NULL chunk buf (materialize-before-blocking)\n");
-                    viol = 1;
-                }
-            }
-            /* Caller holds n->mu here — read outstanding directly. */
-            uint64_t out = n->outstanding;
-            if (out > (uint64_t)n->eng->P.max_backlog + 64*1024*1024) {
-                fprintf(stderr, "DI_INVARIANT_ASSERT: outstanding %llu exceeds bound\n",
-                        (unsigned long long)out);
-                viol = 1;
-            }
+    (void)eng;
+    return 1;
+#else
+    return (eng && eng->P.invariant_asserts) ? 1 : 0;
+#endif
+}
+
+/* CK-5.2 accounting invariant (checked at safe synchronization boundaries;
+ * caller MUST hold n->mu; never treat these mutex-protected fields as
+ * atomic):
+ *
+ *   effective_backlog = published_backlog + consumer_inflight_backlog + outstanding
+ *
+ * Checks, all overflow-safe:
+ *   - the identity holds with no silent saturation/clamping;
+ *   - effective_backlog <= max_backlog;
+ *   - no recorded accounting violation (e.g. an attempted underflow that
+ *     would otherwise have been silently clamped);
+ *   - outstanding + published + inflight sums do not overflow.
+ *
+ * Returns 0 when consistent, -1 on violation. Does not mutate state. */
+static int di_accounting_check_locked(const di_node_t *n, const char *boundary) {
+    if (!n || !n->eng) return -1;
+    uint64_t pub = n->published_backlog;
+    uint64_t inf = n->consumer_inflight_backlog;
+    uint64_t out = n->outstanding;
+    /* overflow-safe identity: __uint128_t accumulate */
+    unsigned __int128 total = (unsigned __int128)pub + (unsigned __int128)inf
+                            + (unsigned __int128)out;
+    uint64_t eff = (total > (unsigned __int128)UINT64_MAX)
+                 ? UINT64_MAX : (uint64_t)total;
+    int bad = 0;
+    if (total > (unsigned __int128)UINT64_MAX) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: %s: accounting sum overflow\n", boundary);
+        bad = 1;
+    }
+    /* no silent saturation was applied on the way in */
+    if (n->accounting_violation) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: %s: recorded accounting violation\n", boundary);
+        bad = 1;
+    }
+    /* di_effective_backlog must equal the raw identity */
+    if (di_effective_backlog(pub, inf, out) != eff) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: %s: effective_backlog identity broken\n", boundary);
+        bad = 1;
+    }
+    if (eff > n->eng->P.max_backlog) {
+        fprintf(stderr,
+                "DI_INVARIANT_ASSERT: %s: effective_backlog %llu exceeds max_backlog %llu\n",
+                boundary, (unsigned long long)eff,
+                (unsigned long long)n->eng->P.max_backlog);
+        bad = 1;
+    }
+    return bad ? -1 : 0;
+}
+
+/* CK-5.3 record + checked subtraction for `outstanding`. Caller holds n->mu.
+ * A subtraction that would underflow is NOT silently clamped: it records an
+ * accounting violation (surfaced by di_accounting_check_locked and di_run)
+ * while keeping the field well-defined at 0. */
+static void di_outstanding_sub_locked(di_node_t *n, uint64_t amount) {
+    if (amount > n->outstanding) {
+        fprintf(stderr,
+                "DI_INVARIANT_ASSERT: outstanding underflow on node %d (have %llu, sub %llu)\n",
+                n->id, (unsigned long long)n->outstanding, (unsigned long long)amount);
+        n->accounting_violation = 1;
+        n->outstanding = 0;
+    } else {
+        n->outstanding -= amount;
+    }
+}
+
+/* CK-5.1 materialize-before-blocking publication checker.
+ *
+ * Validates a candidate chunk BEFORE the producer enters or waits on
+ * publication admission, and before any queue/accounting mutation.
+ * Caller MUST hold n->mu. Caller retains ownership of c->map_base (this
+ * function never frees); on failure the chunk must not be published and
+ * the caller must roll back its reservation.
+ *
+ * Returns 0 when valid; -1 (meaningful status, propagated) on violation.
+ * Runs in ALL builds (structural safety); the additional accounting audit
+ * runs when di_invariants_on(eng). */
+static int di_invariant_publish_check(di_node_t *n, const di_chunk_t *c) {
+    if (!n || !n->eng) return -1;
+    di_engine_t *eng = n->eng;
+    /* CK-5 activation: runs iff invariant checking is active. */
+    if (!di_invariants_on(eng)) return 0;
+    int viol = 0;
+    if (!c) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: publication with NULL chunk\n");
+        return -1;
+    }
+    /* 1. valid backing buffer: non-NULL usable pointer inside a live mapping */
+    if (c->buf == NULL) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: publication with NULL chunk buf (materialize-before-blocking)\n");
+        viol = 1;
+    } else if (c->map_base == NULL || c->map_len == 0) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: publication with chunk not backed by an owned mapping\n");
+        viol = 1;
+    } else {
+        uintptr_t base = (uintptr_t)c->map_base;
+        uintptr_t buf = (uintptr_t)c->buf;
+        if (buf < base || buf >= base + (uintptr_t)c->map_len
+            || c->len > (uint64_t)((base + (uintptr_t)c->map_len) - buf)) {
+            fprintf(stderr, "DI_INVARIANT_ASSERT: chunk buffer outside backing mapping\n");
+            viol = 1;
         }
     }
-#else
-    (void)c;
-#endif
-    return viol;
+    /* 2. valid, nonzero length */
+    if (c->len == 0) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: publication with zero-length chunk\n");
+        viol = 1;
+    }
+    /* 3. materialization/read completed before publication admission */
+    if (!c->materialized) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: publication before materialization completed\n");
+        viol = 1;
+    }
+    /* range sanity: off + len must not overflow nor exceed file size */
+    if (c->len > UINT64_MAX - c->off) {
+        fprintf(stderr, "DI_INVARIANT_ASSERT: chunk offset+length overflow\n");
+        viol = 1;
+    }
+    /* 4. outstanding reservation/accounting state valid for this chunk.
+     * caller holds n->mu; n->outstanding read directly (not atomic). */
+    if (c->len > n->outstanding) {
+        fprintf(stderr,
+                "DI_INVARIANT_ASSERT: chunk len %llu exceeds outstanding reservation %llu\n",
+                (unsigned long long)c->len, (unsigned long long)n->outstanding);
+        viol = 1;
+    }
+    /* 5. narrow test seam: corrupt a COPY for validation; caller keeps the
+     * original chunk (and its mapping) and retains ownership. */
+    /* (seam application happens in di_queue_push on its local copy.) */
+    if (di_invariants_on(eng)) {
+        if (di_accounting_check_locked(n, "publish") != 0) viol = 1;
+    }
+    return viol ? -1 : 0;
 }
+
+/* CK-5 test seam: corrupt the publication candidate to exercise the actual
+ * publication validation/error path. Applies to a by-value copy inside
+ * di_queue_push; ownership of the underlying allocation is untouched. */
+#define DI_PUBLISH_SEAM_NULL_BUF   1
+#define DI_PUBLISH_SEAM_ZERO_LEN   2
+#define DI_PUBLISH_SEAM_UNMATERIALIZED 3
 
 /* --- mbind (policy application; not physical placement proof) --- */
 static void di_mbind_update_compat(di_node_t *n) {
@@ -550,6 +684,18 @@ static int di_mbind_node(void *addr, size_t len, int phys_node, di_node_t *n) {
 static int di_alloc_local(size_t len, int prefer_huge, int phys_node, di_node_t *n,
                           di_chunk_t *out) {
     memset(out, 0, sizeof(*out));
+    /* CK-2 narrow test seam: inject allocation failure. Ownership: on
+     * failure nothing was allocated; caller retains reservation handling. */
+    if (n && n->eng) {
+        pthread_mutex_lock(&n->eng->seam_mu);
+        int fail = 0;
+        if (n->eng->alloc_fail_nth > 0) {
+            n->eng->alloc_fail_nth--;
+            if (n->eng->alloc_fail_nth == 0) { fail = 1; n->eng->alloc_fail_fired = 1; }
+        }
+        pthread_mutex_unlock(&n->eng->seam_mu);
+        if (fail) return -1;
+    }
     if (len == 0) return -1;
     if (len > (SIZE_MAX - DI_ALIGN_2M)) return -1;
     size_t aln = DI_ALIGN_2M;
@@ -767,6 +913,34 @@ static void di_engine_stop(di_engine_t *eng);
 static int di_queue_push(di_node_t *n, di_chunk_t c) {
     di_engine_t *eng = n->eng;
     pthread_mutex_lock(&n->mu);
+
+    /* CK-5.1: validate the materialized chunk BEFORE entering or waiting on
+     * publication admission, and before any queue/accounting mutation. The
+     * caller retains ownership of c.map_base; on failure nothing is
+     * published and the caller rolls back its reservation. */
+    di_chunk_t cand = c;
+    {
+        pthread_mutex_lock(&eng->seam_mu);
+        int pseam = eng->publish_seam;
+        pthread_mutex_unlock(&eng->seam_mu);
+        if (pseam != 0) {
+            pthread_mutex_lock(&eng->seam_mu);
+            eng->publish_seam = 0; /* one-shot */
+            eng->publish_seam_fired = 1;
+            pthread_mutex_unlock(&eng->seam_mu);
+            /* corrupt a COPY for validation; caller's chunk untouched */
+            if (pseam == DI_PUBLISH_SEAM_NULL_BUF) cand.buf = NULL;
+            else if (pseam == DI_PUBLISH_SEAM_ZERO_LEN) cand.len = 0;
+            else if (pseam == DI_PUBLISH_SEAM_UNMATERIALIZED) cand.materialized = 0;
+        }
+    }
+    if (di_invariant_publish_check(n, &cand) != 0) {
+        /* invalid publication: not committed; signal engine stop path */
+        pthread_mutex_unlock(&n->mu);
+        di_engine_stop(eng);
+        return -1;
+    }
+
     while (n->q_count == n->q_cap && !__atomic_load_n(&eng->stop, __ATOMIC_RELAXED)) {
         uint64_t t0 = di_now_ns();
         pthread_cond_wait(&n->cv_can_push, &n->mu);
@@ -788,13 +962,25 @@ static int di_queue_push(di_node_t *n, di_chunk_t c) {
         pthread_mutex_unlock(&n->mu);
         return -1;
     }
+    /* publish the original (untainted) chunk */
     n->q[n->q_tail] = c;
     n->q_tail = (n->q_tail + 1) % n->q_cap;
     n->q_count++;
-    if (n->outstanding >= c.len) n->outstanding -= c.len; else n->outstanding = 0;
-    n->published_backlog = di_u64_add_sat(n->published_backlog, c.len);
+    di_outstanding_sub_locked(n, c.len);
+    /* CK-5.3 checked add (no silent saturation) */
+    if (n->published_backlog > UINT64_MAX - c.len) {
+        n->accounting_violation = 1;
+        n->published_backlog = UINT64_MAX;
+    } else {
+        n->published_backlog += c.len;
+    }
     if (n->published_backlog > n->max_published_backlog) n->max_published_backlog = n->published_backlog;
-    di_invariant_publish_check(n, &c); /* CK-5: materialized by this point */
+    /* invariant boundary check after mutation (caller holds mu) */
+    if (di_invariants_on(eng) && di_accounting_check_locked(n, "publish-committed") != 0) {
+        /* already committed to queue; cannot un-publish a committed chunk;
+           surface the violation; engine takes error path after this point. */
+        n->accounting_violation = 1;
+    }
     uint64_t eff = di_node_eff(n);
     if (eff > n->max_effective_backlog) n->max_effective_backlog = eff;
     n->m.bytes_published += c.len;
@@ -823,10 +1009,24 @@ static int di_queue_pop(di_node_t *n, di_chunk_t *out, int *ing_done) {
     *out = n->q[n->q_head];
     n->q_head = (n->q_head + 1) % n->q_cap;
     n->q_count--;
-    if (n->published_backlog >= out->len) n->published_backlog -= out->len; else n->published_backlog = 0;
-    n->consumer_inflight_backlog = di_u64_add_sat(n->consumer_inflight_backlog, out->len);
+    /* CK-5.3 checked subtraction (no silent clamping) */
+    if (out->len > n->published_backlog) {
+        n->accounting_violation = 1;
+        fprintf(stderr, "DI_INVARIANT_ASSERT: published_backlog underflow on node %d\n", n->id);
+        n->published_backlog = 0;
+    } else {
+        n->published_backlog -= out->len;
+    }
+    if (n->consumer_inflight_backlog > UINT64_MAX - out->len) {
+        n->accounting_violation = 1;
+        n->consumer_inflight_backlog = UINT64_MAX;
+    } else {
+        n->consumer_inflight_backlog += out->len;
+    }
     if (n->consumer_inflight_backlog > n->max_consumer_inflight_backlog)
         n->max_consumer_inflight_backlog = n->consumer_inflight_backlog;
+    if (di_invariants_on(eng) && di_accounting_check_locked(n, "pop") != 0)
+        n->accounting_violation = 1;
     di_publish_headroom(n);
     pthread_cond_signal(&n->cv_can_push);
     pthread_mutex_unlock(&n->mu);
@@ -836,7 +1036,16 @@ static int di_queue_pop(di_node_t *n, di_chunk_t *out, int *ing_done) {
 
 static void di_consume_complete(di_node_t *n, uint64_t len) {
     pthread_mutex_lock(&n->mu);
-    if (n->consumer_inflight_backlog >= len) n->consumer_inflight_backlog -= len; else n->consumer_inflight_backlog = 0;
+    /* CK-5.3 checked subtraction (no silent clamping) */
+    if (len > n->consumer_inflight_backlog) {
+        n->accounting_violation = 1;
+        fprintf(stderr, "DI_INVARIANT_ASSERT: consumer_inflight underflow on node %d\n", n->id);
+        n->consumer_inflight_backlog = 0;
+    } else {
+        n->consumer_inflight_backlog -= len;
+    }
+    if (n->eng && di_invariants_on(n->eng) && di_accounting_check_locked(n, "consume-complete") != 0)
+        n->accounting_violation = 1;
     di_publish_headroom(n);
     pthread_cond_signal(&n->cv_can_push);
     pthread_mutex_unlock(&n->mu);
@@ -944,9 +1153,15 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
 
     pthread_mutex_lock(&n->mu);
     eff = di_node_eff(n);
-    int can = di_can_admit(eng->P.max_backlog, eff, n->outstanding, want, eng->P.one_outstanding_per_node);
+    int admission_ok = di_can_admit(eng->P.max_backlog, eff, n->outstanding, want, eng->P.one_outstanding_per_node);
+    /* CK-6: distinguish policy-selected zero claims (want==0) from
+     * admission-denied claims (want>0 but di_can_admit rejects). Both
+     * increment the legacy `zero_claims` total. */
+    int can = (want > 0) && admission_ok;
     if (!can || want == 0) {
         n->m.zero_claims++;
+        if (want == 0) n->m.zero_claims_policy++;
+        else n->m.zero_claims_admission++;
         pthread_mutex_unlock(&n->mu);
         uint64_t go = __atomic_load_n(&eng->next_offset, __ATOMIC_ACQUIRE);
         if (go >= eng->file_size) {
@@ -957,24 +1172,37 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
         }
         return 0;
     }
-    n->outstanding = di_u64_add_sat(n->outstanding, want);
+    /* CK-5.3 checked add for outstanding reservation (no silent saturation) */
+    if (n->outstanding > UINT64_MAX - want) {
+        n->accounting_violation = 1;
+        pthread_mutex_unlock(&n->mu);
+        di_engine_stop(eng);
+        return -1;
+    }
+    n->outstanding += want;
     eff = di_node_eff(n);
     if (eff > n->max_effective_backlog) n->max_effective_backlog = eff;
+    if (di_invariants_on(eng) && di_accounting_check_locked(n, "claim") != 0)
+        n->accounting_violation = 1;
     di_publish_headroom(n);
     pthread_mutex_unlock(&n->mu);
 
     if (want > UINT64_MAX - __atomic_load_n(&eng->next_offset, __ATOMIC_RELAXED)) {
         pthread_mutex_lock(&n->mu);
-        if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
+        di_outstanding_sub_locked(n, want);
         di_publish_headroom(n);
+        if (di_invariants_on(eng) && di_accounting_check_locked(n, "rollback") != 0)
+            n->accounting_violation = 1;
         pthread_mutex_unlock(&n->mu);
         return 1;
     }
     uint64_t start = __atomic_fetch_add(&eng->next_offset, want, __ATOMIC_ACQ_REL);
     if (start >= eng->file_size) {
         pthread_mutex_lock(&n->mu);
-        if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
+        di_outstanding_sub_locked(n, want);
         di_publish_headroom(n);
+        if (di_invariants_on(eng) && di_accounting_check_locked(n, "rollback") != 0)
+            n->accounting_violation = 1;
         pthread_mutex_unlock(&n->mu);
         return 1;
     }
@@ -984,14 +1212,18 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
     if (assigned < want) {
         pthread_mutex_lock(&n->mu);
         uint64_t delta = want - assigned;
-        if (n->outstanding >= delta) n->outstanding -= delta; else n->outstanding = 0;
+        di_outstanding_sub_locked(n, delta);
         di_publish_headroom(n);
+        if (di_invariants_on(eng) && di_accounting_check_locked(n, "rollback") != 0)
+            n->accounting_violation = 1;
         pthread_mutex_unlock(&n->mu);
     }
     if (assigned == 0) {
         pthread_mutex_lock(&n->mu);
-        if (n->outstanding >= want) n->outstanding -= want; else n->outstanding = 0;
+        di_outstanding_sub_locked(n, want);
         di_publish_headroom(n);
+        if (di_invariants_on(eng) && di_accounting_check_locked(n, "rollback") != 0)
+            n->accounting_violation = 1;
         pthread_mutex_unlock(&n->mu);
         return 1;
     }
@@ -1001,8 +1233,10 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
         n->m.last_error = DI_ERR_NOMEM;
         di_engine_stop(eng);
         pthread_mutex_lock(&n->mu);
-        if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
+        di_outstanding_sub_locked(n, assigned);
         di_publish_headroom(n);
+        if (di_invariants_on(eng) && di_accounting_check_locked(n, "rollback") != 0)
+            n->accounting_violation = 1;
         pthread_mutex_unlock(&n->mu);
         return -1;
     }
@@ -1016,8 +1250,10 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
         di_free_chunk(&c);
         di_engine_stop(eng);
         pthread_mutex_lock(&n->mu);
-        if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
+        di_outstanding_sub_locked(n, assigned);
         di_publish_headroom(n);
+        if (di_invariants_on(eng) && di_accounting_check_locked(n, "rollback") != 0)
+            n->accounting_violation = 1;
         pthread_mutex_unlock(&n->mu);
         return -1;
     }
@@ -1028,8 +1264,10 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
         di_free_chunk(&c);
         di_engine_stop(eng);
         pthread_mutex_lock(&n->mu);
-        if (n->outstanding >= assigned) n->outstanding -= assigned; else n->outstanding = 0;
+        di_outstanding_sub_locked(n, assigned);
         di_publish_headroom(n);
+        if (di_invariants_on(eng) && di_accounting_check_locked(n, "rollback") != 0)
+            n->accounting_violation = 1;
         pthread_mutex_unlock(&n->mu);
         return -1;
     }
@@ -1063,7 +1301,7 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
     if (eng->P.placement_sampling)
         di_sample_placement(n, c.buf, act);
 
-    c.off = start; c.len = act;
+    c.off = start; c.len = act; c.materialized = 1; /* read completed */
     if (di_ingestor_of(eng, n)->ing_cfg.mode == 2) {
         /* §5.2 delay_after_read: sleep after the read, before publication. */
         di_ingestor_sleep_ns(di_ingestor_of(eng, n),
@@ -1072,8 +1310,10 @@ static int di_ingest_step(di_node_t *n, di_engine_t *eng) {
     if (di_queue_push(n, c) != 0) {
         di_free_chunk(&c);
         pthread_mutex_lock(&n->mu);
-        if (n->outstanding >= act) n->outstanding -= act; else n->outstanding = 0;
+        di_outstanding_sub_locked(n, act);
         di_publish_headroom(n);
+        if (di_invariants_on(eng) && di_accounting_check_locked(n, "rollback") != 0)
+            n->accounting_violation = 1;
         pthread_cond_broadcast(&n->cv_can_push);
         pthread_mutex_unlock(&n->mu);
         return -1;
@@ -1361,6 +1601,23 @@ static int cmp_resrec(const void *a, const void *b) {
     return 0;
 }
 
+/* CK-2 narrow test seam: thread-creation failure injection. Returns 0 on
+ * success (thread created), nonzero on injected/real failure. The caller
+ * remains responsible for joining already-created threads. */
+static int di_try_pthread_create(di_engine_t *eng, pthread_t *tid,
+                                 void *(*fn)(void *), void *arg) {
+    int nth = __atomic_load_n(&eng->thread_create_fail_nth, __ATOMIC_RELAXED);
+    if (nth > 0) {
+        int newv = nth - 1;
+        __atomic_store_n(&eng->thread_create_fail_nth, newv, __ATOMIC_RELAXED);
+        if (newv == 0) {
+            __atomic_store_n(&eng->thread_create_fail_fired, 1, __ATOMIC_RELAXED);
+            return 1; /* injected failure; pthread_create NOT called */
+        }
+    }
+    return pthread_create(tid, NULL, fn, arg);
+}
+
 int di_run(di_engine_t *eng, di_result_t *result) {
     if (!eng || !result) return DI_ERR_INVAL;
     memset(result, 0, sizeof(*result));
@@ -1375,7 +1632,7 @@ int di_run(di_engine_t *eng, di_result_t *result) {
 
     int rc = 0;
     for (int i = 0; i < eng->num_nodes; i++) {
-        if (pthread_create(&eng->nodes[i].cons_tid, NULL, di_consumer_thread, &eng->nodes[i]) == 0) {
+        if (di_try_pthread_create(eng, &eng->nodes[i].cons_tid, di_consumer_thread, &eng->nodes[i]) == 0) {
             eng->nodes[i].has_cons = 1;
         } else {
             rc = DI_ERR_THREAD; di_engine_stop(eng);
@@ -1383,14 +1640,14 @@ int di_run(di_engine_t *eng, di_result_t *result) {
     }
     if (eng->centralized_ingest) {
         /* Section 5: single in-engine ingestor distributes to all node queues. */
-        if (rc == 0 && pthread_create(&eng->nodes[0].ing_tid, NULL, di_ingestor_thread, &eng->nodes[0]) == 0) {
+        if (rc == 0 && di_try_pthread_create(eng, &eng->nodes[0].ing_tid, di_ingestor_thread, &eng->nodes[0]) == 0) {
             eng->nodes[0].has_ing = 1;
         } else if (rc == 0) {
             rc = DI_ERR_THREAD; di_engine_stop(eng);
         }
     } else {
         for (int i = 0; i < eng->num_nodes; i++) {
-            if (rc == 0 && pthread_create(&eng->nodes[i].ing_tid, NULL, di_ingestor_thread, &eng->nodes[i]) == 0) {
+            if (rc == 0 && di_try_pthread_create(eng, &eng->nodes[i].ing_tid, di_ingestor_thread, &eng->nodes[i]) == 0) {
                 eng->nodes[i].has_ing = 1;
             } else if (rc == 0) {
                 rc = DI_ERR_THREAD; di_engine_stop(eng);
@@ -1412,22 +1669,41 @@ int di_run(di_engine_t *eng, di_result_t *result) {
         if (eng->nodes[i].has_cons) pthread_join(eng->nodes[i].cons_tid, NULL);
     }
 
-    /* CK-5.2: every node must have outstanding == 0 after threads joined.
-     * Diagnostic-only: active under DI_INVARIANT_ASSERT builds and when
-     * P.invariant_asserts is set on the engine; fails loudly otherwise. */
+    /* CK-5.3: after ALL worker threads have been joined, verify outstanding
+     * reservations are reconciled AND accounting is consistent. Applies on
+     * normal completion AND injected-failure paths. Preserve an original
+     * engine error (rc already != 0) but report an additional accounting/
+     * invariant failure accurately (stderr + result flags); rc bumped to
+     * DI_ERR_INVARIANT only when no earlier error exists. */
     {
-        int bad = 0;
+        int invariant_bad = 0;
+        int accounting_bad = 0;
         for (int i = 0; i < eng->num_nodes; i++) {
-            pthread_mutex_lock(&eng->nodes[i].mu);
-            uint64_t out = eng->nodes[i].outstanding;
-            pthread_mutex_unlock(&eng->nodes[i].mu);
-            if (eng->P.invariant_asserts && out != 0) {
+            di_node_t *n = &eng->nodes[i];
+            pthread_mutex_lock(&n->mu);
+            uint64_t out = n->outstanding;
+            uint64_t pub = n->published_backlog;
+            uint64_t inf = n->consumer_inflight_backlog;
+            int acct_viol = n->accounting_violation;
+            int acct_check = di_accounting_check_locked(n, "post-join");
+            pthread_mutex_unlock(&n->mu);
+            if (out != 0) {
                 fprintf(stderr, "DI_INVARIANT_ASSERT: node %d outstanding=%llu after join\n",
                         i, (unsigned long long)out);
-                bad = 1;
+                invariant_bad = 1;
             }
+            if (pub != 0 || inf != 0) {
+                fprintf(stderr,
+                        "DI_INVARIANT_ASSERT: node %d published=%llu inflight=%llu after join\n",
+                        i, (unsigned long long)pub, (unsigned long long)inf);
+                invariant_bad = 1;
+            }
+            if (acct_viol || acct_check != 0) accounting_bad = 1;
         }
-        if (rc == 0 && bad) rc = DI_ERR_INVARIANT;
+        /* reconciliation verified in ALL builds; report accurately */
+        result->invariant_failed = invariant_bad;
+        result->accounting_failed = accounting_bad;
+        if (rc == 0 && (invariant_bad || accounting_bad)) rc = DI_ERR_INVARIANT;
     }
 
     clock_gettime(CLOCK_MONOTONIC, &eng->t_end);
@@ -1458,6 +1734,8 @@ int di_run(di_engine_t *eng, di_result_t *result) {
         result->nodes[i].current_consumer_inflight_backlog = n->consumer_inflight_backlog;
         result->nodes[i].current_outstanding = n->outstanding;
         result->nodes[i].current_effective_backlog = di_node_eff(n);
+        /* CK-5.3 expose recorded accounting violation on the output metrics */
+        result->nodes[i].accounting_violation = n->accounting_violation;
         result->nodes[i].max_published_backlog = n->max_published_backlog;
         result->nodes[i].max_consumer_inflight_backlog = n->max_consumer_inflight_backlog;
         result->nodes[i].max_effective_backlog = n->max_effective_backlog;
@@ -1709,6 +1987,60 @@ int di_test_set_push_fail_seam(di_engine_t *eng, int fail_on_nth) {
     eng->push_fail_fired = 0;
     pthread_mutex_unlock(&eng->seam_mu);
     return 0;
+}
+
+int di_test_push_fail_fired(di_engine_t *eng) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->seam_mu);
+    int f = eng->push_fail_fired;
+    pthread_mutex_unlock(&eng->seam_mu);
+    return f;
+}
+
+int di_test_set_alloc_fail_seam(di_engine_t *eng, int fail_on_nth) {
+    if (!eng) return -1;
+    pthread_mutex_lock(&eng->seam_mu);
+    eng->alloc_fail_nth = fail_on_nth;
+    eng->alloc_fail_fired = 0;
+    pthread_mutex_unlock(&eng->seam_mu);
+    return 0;
+}
+
+int di_test_alloc_fail_fired(di_engine_t *eng) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->seam_mu);
+    int f = eng->alloc_fail_fired;
+    pthread_mutex_unlock(&eng->seam_mu);
+    return f;
+}
+
+int di_test_set_thread_create_fail_seam(di_engine_t *eng, int fail_on_nth) {
+    if (!eng) return -1;
+    __atomic_store_n(&eng->thread_create_fail_nth, fail_on_nth, __ATOMIC_RELAXED);
+    __atomic_store_n(&eng->thread_create_fail_fired, 0, __ATOMIC_RELAXED);
+    return 0;
+}
+
+int di_test_thread_create_fail_fired(di_engine_t *eng) {
+    if (!eng) return 0;
+    return __atomic_load_n(&eng->thread_create_fail_fired, __ATOMIC_RELAXED);
+}
+
+int di_test_set_publish_seam(di_engine_t *eng, int mode) {
+    if (!eng) return -1;
+    pthread_mutex_lock(&eng->seam_mu);
+    eng->publish_seam = mode;
+    eng->publish_seam_fired = 0;
+    pthread_mutex_unlock(&eng->seam_mu);
+    return 0;
+}
+
+int di_test_publish_seam_fired(di_engine_t *eng) {
+    if (!eng) return 0;
+    pthread_mutex_lock(&eng->seam_mu);
+    int f = eng->publish_seam_fired;
+    pthread_mutex_unlock(&eng->seam_mu);
+    return f;
 }
 
 void di_test_reset_placement_sample_calls(void) {

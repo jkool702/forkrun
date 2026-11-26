@@ -79,7 +79,8 @@ class DiNodeMetrics(ctypes.Structure):
         ("mbind_policy_requested", ctypes.c_int), ("mbind_policy_applied", ctypes.c_int),
         ("mbind_error", ctypes.c_int), ("mbind_requested_count", ctypes.c_uint64), ("mbind_success_count", ctypes.c_uint64), ("mbind_failure_count", ctypes.c_uint64), ("strict_mbind_failed", ctypes.c_int),
         ("strict_affinity_failed", ctypes.c_int), ("last_error", ctypes.c_int),
-    ]
+            ("zero_claims_policy", ctypes.c_uint64), ("zero_claims_admission", ctypes.c_uint64), ("accounting_violation", ctypes.c_int),
+]
 
 
 class DiResult(ctypes.Structure):
@@ -93,6 +94,7 @@ class DiResult(ctypes.Structure):
         ("ingest_cpu_ns", ctypes.c_uint64), ("consumer_cpu_ns", ctypes.c_uint64),
         ("num_nodes", ctypes.c_int), ("policy", ctypes.c_int),
         ("nodes", DiNodeMetrics * DI_MAX_NODES), ("res_hist", ctypes.c_uint64 * 20),
+        ("invariant_failed", ctypes.c_int), ("accounting_failed", ctypes.c_int),
     ]
 
 

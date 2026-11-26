@@ -208,6 +208,15 @@ typedef struct {
     int strict_mbind_failed;          /* strict enforcement of successful policy application failed */
     int strict_affinity_failed;       /* aggregate: required role failed under strict affinity (run enforcement) */
     int last_error;
+    /* CK-6: `zero_claims` total split (added at end; experimental ABI, not
+     * production). zero_claims_policy: want==0 (policy-selected zero claim;
+     * NOT an admission failure). zero_claims_admission: want>0 but
+     * di_can_admit rejected (admission-denied claim). */
+    uint64_t zero_claims_policy;
+    uint64_t zero_claims_admission;
+    /* CK-5.3: a checked accounting subtraction would have underflowed /
+     * saturation was attempted; NOT silently clamped. */
+    int accounting_violation;
 } di_node_metrics_t;
 
 typedef struct {
@@ -232,6 +241,13 @@ typedef struct {
     di_node_metrics_t nodes[DI_MAX_NODES];
     /* Reservation size histogram (log2-ish buckets, bytes): <=4K,8K,...,>=256M */
     uint64_t res_hist[20];
+    /* CK-5.3 (appended; experimental ABI): post-join reconciliation verdicts.
+     * invariant_failed: outstanding/published/inflight not reconciled to 0
+     *   after threads joined. accounting_failed: recorded accounting
+     *   violation or accounting-identity check failed. rc is still preserved
+     *   for an earlier engine error; rc==DI_ERR_INVARIANT iff rc was clear. */
+    int invariant_failed;
+    int accounting_failed;
 } di_result_t;
 
 /* Opaque engine handle. */
@@ -293,6 +309,19 @@ int di_test_set_placement_seam(di_engine_t *eng, int mode, int rc_or_unused,
 /* Failure-injection seams. */
 int di_test_set_create_fail_seam(int fail_after_nodes); /* -1 disables */
 int di_test_set_push_fail_seam(di_engine_t *eng, int fail_on_nth); /* 0 disables */
+/* CK-2: narrow test-only getter: 1 if the push_fail seam actually fired. */
+int di_test_push_fail_fired(di_engine_t *eng);
+/* CK-2: allocation-failure injection in di_alloc_local. 0 disables. */
+int di_test_set_alloc_fail_seam(di_engine_t *eng, int fail_on_nth);
+int di_test_alloc_fail_fired(di_engine_t *eng);
+/* CK-2: thread-creation-failure injection in di_run. 0 disables. */
+int di_test_set_thread_create_fail_seam(di_engine_t *eng, int fail_on_nth);
+int di_test_thread_create_fail_fired(di_engine_t *eng);
+/* CK-5: publication-candidate corruption seam. mode: 0=off,
+ * 1=null buf, 2=zero len, 3=unmaterialized. Corrupts a by-value copy;
+ * ownership of the underlying allocation is preserved. */
+int di_test_set_publish_seam(di_engine_t *eng, int mode);
+int di_test_publish_seam_fired(di_engine_t *eng);
 /* C2 test seam: placement sampler dispatch count (incremented only when sampler is invoked). */
 void di_test_reset_placement_sample_calls(void);
 uint64_t di_test_get_placement_sample_calls(void);

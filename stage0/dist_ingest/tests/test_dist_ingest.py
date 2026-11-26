@@ -127,7 +127,8 @@ class DiNodeMetrics(ctypes.Structure):
         ("strict_mbind_failed", ctypes.c_int),
         ("strict_affinity_failed", ctypes.c_int),
         ("last_error", ctypes.c_int),
-    ]
+            ("zero_claims_policy", ctypes.c_uint64), ("zero_claims_admission", ctypes.c_uint64), ("accounting_violation", ctypes.c_int),
+]
 
 
 class DiResult(ctypes.Structure):
@@ -152,6 +153,7 @@ class DiResult(ctypes.Structure):
         ("policy", ctypes.c_int),
         ("nodes", DiNodeMetrics * DI_MAX_NODES),
         ("res_hist", ctypes.c_uint64 * 20),
+        ("invariant_failed", ctypes.c_int), ("accounting_failed", ctypes.c_int),
     ]
 
 
@@ -183,6 +185,14 @@ def load_lib():
     lib.di_test_set_pread_seam.restype = ctypes.c_int
     lib.di_test_set_push_fail_seam.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.di_test_set_push_fail_seam.restype = ctypes.c_int
+    for _name in ("di_test_push_fail_fired", "di_test_alloc_fail_fired",
+                  "di_test_thread_create_fail_fired", "di_test_publish_seam_fired"):
+        getattr(lib, _name).argtypes = [ctypes.c_void_p]
+        getattr(lib, _name).restype = ctypes.c_int
+    for _name in ("di_test_set_alloc_fail_seam", "di_test_set_thread_create_fail_seam",
+                  "di_test_set_publish_seam"):
+        getattr(lib, _name).argtypes = [ctypes.c_void_p, ctypes.c_int]
+        getattr(lib, _name).restype = ctypes.c_int
     lib.di_effective_backlog.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64]
     lib.di_effective_backlog.restype = ctypes.c_uint64
     return lib
