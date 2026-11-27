@@ -238,7 +238,7 @@ def source_audit():
             reason = ""
             if not first:
                 reason = "empty first argument"
-            elif first in SYSCALL_ALLOWLIST or resolved in SYSCALL_ALLOWLIST:
+            elif resolved in SYSCALL_ALLOWLIST:
                 ok = True
             elif re.fullmatch(r"0[xX][0-9a-fA-F]+|\d+", first):
                 reason = "numeric syscall number (not a verifiable allowlist name)"
