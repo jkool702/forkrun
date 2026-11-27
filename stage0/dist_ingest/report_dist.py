@@ -645,6 +645,8 @@ def main():
                             lines.append("  - invalid reasons: %s" % r.get("invalid_reasons"))
             lines.append("")
 
+    emit_paired_regime_report(lines, groups)
+
     lines.append("## Invalid / incomplete / failed / unreadable / missing trials")
     lines.append("")
     if not invalid:
@@ -682,6 +684,129 @@ def main():
     with open(args.out, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     print("wrote", args.out)
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# CK-6.5 paired, regime-grouped comparison.
+#
+# Pair identity is the set of INVARIANT conditions shared by baseline and
+# candidate; the candidate LABEL selects which two arms are compared and is
+# NOT part of the pair key. Performance is duration-normalized (not raw
+# consumed bytes). Invalid/incorrect trials are excluded. Automated
+# regime-based DECISION-making (numeric improvement threshold) is DEFERRED
+# (see CK6_REGIME_CLASSIFIER.md); this emits paired evidence, not a verdict.
+# ---------------------------------------------------------------------------
+BASELINE_CANDIDATE = "centralized_ingest"
+
+PAIR_KEY_FIELDS = (
+    "scenario", "mapping_id", "workload_id", "parameter_set_id", "trial",
+    "node", "physical_node", "consumer_kernel", "trial_class",
+    "placement_sampling", "cache_precondition_policy",
+)
+
+
+def _regime_of(n):
+    r = (n or {}).get("regime")
+    if isinstance(r, dict):
+        return r.get("regime", "indeterminate")
+    return "indeterminate"
+
+
+def _node_perf_bps(n, wall_s):
+    """duration-normalized per-node performance: bytes_consumed / wall."""
+    try:
+        b = float((n or {}).get("bytes_consumed") or 0)
+        w = float(wall_s or 0)
+        return (b / w) if w > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def paired_regime_groups(groups):
+    """Node-level paired records keyed WITHOUT candidate. Returns
+    {pair_key: {candidate: node_record}}."""
+    pairs = defaultdict(dict)
+    for (scen, mapping_id, pset_id, cand), recs in groups.items():
+        for rec in recs:
+            if rec.get("invalid"):
+                continue
+            if not rec.get("correct_functional", False) or not rec.get("complete", False):
+                continue
+            dr = rec.get("dist") or {}
+            wall = rec.get("engine_wall_s") or dr.get("wall_seconds")
+            nodes = dr.get("nodes") or []
+            consumer_kernel = rec.get("consumer_kernel")
+            for n in nodes:
+                pk = (
+                    scen, mapping_id, rec.get("workload_id") or scen, pset_id,
+                    rec.get("trial"), n.get("node"), n.get("requested_physical_node"),
+                    consumer_kernel, rec.get("trial_class") or "performance",
+                    rec.get("placement_sampling") or "off",
+                    rec.get("cache_precondition_policy"),
+                )
+                pairs[pk][cand] = {
+                    "candidate": cand, "regime": _regime_of(n),
+                    "perf_bps": _node_perf_bps(n, wall), "wall_seconds": wall,
+                    "bytes_consumed": n.get("bytes_consumed"), "invalid": False,
+                }
+    return pairs
+
+
+def emit_paired_regime_report(lines, groups):
+    pairs = paired_regime_groups(groups)
+    lines.append("## CK-6.5 Paired, regime-grouped comparison (duration-normalized)")
+    lines.append("")
+    lines.append("Pair identity (invariant shared conditions; candidate NOT in key): "
+                 + ", ".join(PAIR_KEY_FIELDS) + ".")
+    lines.append("Baseline arm: `%s`. Performance = per-node `bytes_consumed / wall_seconds` "
+                 "(duration-normalized, NOT raw consumed bytes). Invalid/incorrect trials excluded."
+                 % BASELINE_CANDIDATE)
+    lines.append("**Automated regime-based decision-making is DEFERRED.** No numeric improvement "
+                 "threshold is applied; the legacy 15%% figure is not retained as an evidence-based "
+                 "guarantee. This section emits paired evidence; it does not authorize a rental or "
+                 "declare a winner.")
+    lines.append("")
+    regime_grouped = defaultdict(list)
+    n_pairs = 0
+    for pk, arms in pairs.items():
+        base = arms.get(BASELINE_CANDIDATE)
+        if not base:
+            continue
+        for cand, node in arms.items():
+            if cand == BASELINE_CANDIDATE:
+                continue
+            base_p = base.get("perf_bps")
+            cand_p = node.get("perf_bps")
+            improvement = None
+            if base_p and cand_p and base_p > 0:
+                improvement = (cand_p - base_p) / base_p
+            regime_key = (base.get("regime"), node.get("regime"))
+            regime_grouped[regime_key].append({
+                "pair": dict(zip(PAIR_KEY_FIELDS, pk)), "candidate": cand,
+                "baseline_regime": base.get("regime"), "candidate_regime": node.get("regime"),
+                "baseline_perf_bps": base_p, "candidate_perf_bps": cand_p,
+                "paired_improvement": improvement})
+            n_pairs += 1
+    lines.append("Qualifying pairs (baseline+candidate, valid, shared invariant key): **%d**" % n_pairs)
+    lines.append("")
+    if not regime_grouped:
+        lines.append("No qualifying pairs. Insufficient sample => inconclusive; cannot form a paired "
+                     "regime-grouped comparison.")
+        lines.append("")
+        return
+    lines.append("| baseline regime | candidate regime | candidate | pairs | median paired improvement (duration-normalized) |")
+    lines.append("|---|---|---|---:|---:|")
+    for (breg, creg), rows in sorted(regime_grouped.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
+        for cand in sorted({r["candidate"] for r in rows}):
+            vals = [r["paired_improvement"] for r in rows if r["candidate"] == cand and r["paired_improvement"] is not None]
+            med = statistics.median(vals) if vals else None
+            lines.append("| %s | %s | %s | %d | %s |" % (
+                breg, creg, cand, len([r for r in rows if r["candidate"] == cand]),
+                fmt(med, 4) if med is not None else "n/a"))
+    lines.append("")
 
 
 if __name__ == "__main__":

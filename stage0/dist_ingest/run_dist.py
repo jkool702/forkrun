@@ -79,31 +79,69 @@ PLACEMENT_SAMPLING_MODE = {"off": 0, "on": 1, "full": 2}
 
 # CK-6.3: authoritative regime classifier — lives in tools/regime_classify.py;
 # run_dist re-exports it here so DIST_RESULT and the tests use one decision.
-def _regime_classify(m, run_seconds):
+#
+# CK-6.2/6.5 corrected inputs:
+#   * run_seconds = ACTUAL res.wall_seconds (not a hardcoded 1.0)
+#   * max_backlog = ACTUAL configured params.max_backlog (engine-effective
+#     capacity; NOT a metric high-water mark like max_published_backlog /
+#     max_effective_backlog, which are reported separately as observed)
+#   * observed backlog = current_effective_backlog (final; NOT saturation proof)
+#   * claim/admission info: zero_claims total + zero_claims_policy /
+#     zero_claims_admission split + reservations + claim_wait_ns
+#   * per-node denominators documented in evidence
+def _regime_classify(m, run_seconds, max_backlog=None,
+                     consumer_threads=1, ingestor_threads=1):
+    try:
+        classify_metrics = _load_authoritative_classifier()
+    except Exception as e:
+        # CK-6.5: do NOT swallow classifier import failures; explicit indeterminate.
+        return {"regime": "indeterminate",
+                "evidence": {"valid": False, "regime": "indeterminate"},
+                "error": "classifier unavailable: %s" % (e,)}
+    def _num(name, default=0):
+        v = getattr(m, name, default)
+        return default if v is None else v
+    try:
+        reg, ev = classify_metrics(
+            read_wait_ns=_num("read_wait_ns", 0),
+            publish_wait_ns=_num("publish_wait_ns", 0),
+            consume_wait_ns=_num("consume_wait_ns", 0),
+            claim_wait_ns=_num("claim_wait_ns", 0),
+            backlog=_num("current_effective_backlog", 0),
+            max_backlog=max_backlog,
+            claims_zero=_num("zero_claims", 0),
+            claims_zero_policy=_num("zero_claims_policy", 0),
+            claims_zero_admission=getattr(m, "zero_claims_admission", None),
+            reservations=_num("reservations", 0),
+            backlog_final_effective=_num("current_effective_backlog", None),
+            backlog_max_effective_observed=_num("max_effective_backlog", None),
+            max_published_backlog_observed=_num("max_published_backlog", None),
+            run_seconds=run_seconds,
+            consumer_threads=consumer_threads,
+            ingestor_threads=ingestor_threads)
+        out = {"regime": reg, "evidence": ev}
+        if not ev.get("valid", True):
+            out["error"] = "; ".join(ev.get("validation_errors", []))
+        return out
+    except Exception as e:
+        # CK-6.5: do NOT swallow classifier execution failures.
+        return {"regime": "indeterminate",
+                "evidence": {"valid": False, "regime": "indeterminate"},
+                "error": "classifier execution failed: %s" % (e,)}
+
+
+def _load_authoritative_classifier():
     try:
         from tools.regime_classify import classify_metrics
+        return classify_metrics
     except Exception:
-        # Import fallback: file is next to the dist_ingest package parent.
         import importlib.util as _ilu
         _p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "..", "tools", "regime_classify.py")
         _spec = _ilu.spec_from_file_location("regime_classify", _p)
         _mod = _ilu.module_from_spec(_spec)
         _spec.loader.exec_module(_mod)
-        classify_metrics = _mod.classify_metrics
-    try:
-        reg, ev = classify_metrics(
-            read_wait_ns=getattr(m, "read_wait_ns", 0) or 0,
-            publish_wait_ns=getattr(m, "publish_wait_ns", 0) or 0,
-            consume_wait_ns=getattr(m, "consume_wait_ns", 0) or 0,
-            backlog=getattr(m, "current_published_backlog", 0) or 0,
-            max_backlog=getattr(m, "max_published_backlog", 0) or 1,
-            claims_zero=getattr(m, "zero_claims", 0) or 0,
-            run_seconds=run_seconds)
-        return {"regime": reg, "evidence": ev}
-    except Exception:
-        return {"regime": "indeterminate",
-                "evidence": {"error": "classifier unavailable on this host"}}
+        return _mod.classify_metrics
 
 
 def _per_node_list(spec, n, name_map=None):
@@ -249,9 +287,9 @@ class DiNodeMetrics(ctypes.Structure):
         ("mbind_success_count", ctypes.c_uint64),
         ("mbind_failure_count", ctypes.c_uint64),
         ("strict_mbind_failed", ctypes.c_int),
-        ("strict_affinity_failed", ctypes.c_int),
-        ("last_error", ctypes.c_int),
-    ]
+        ("strict_affinity_failed", ctypes.c_int), ("last_error", ctypes.c_int),
+            ("zero_claims_policy", ctypes.c_uint64), ("zero_claims_admission", ctypes.c_uint64), ("accounting_violation", ctypes.c_int),
+]
 
 
 class DiResult(ctypes.Structure):
@@ -276,6 +314,7 @@ class DiResult(ctypes.Structure):
         ("policy", ctypes.c_int),
         ("nodes", DiNodeMetrics * DI_MAX_NODES),
         ("res_hist", ctypes.c_uint64 * 20),
+        ("invariant_failed", ctypes.c_int), ("accounting_failed", ctypes.c_int),
     ]
 
 
@@ -316,7 +355,27 @@ def affinity_role_to_dict(r):
     }
 
 
-def node_metrics_to_dict(m, idx, requested_phys_node=None, policy=None):
+def _effective_max_backlog_configured(params):
+    """Engine-effective configured capacity (mirrors di_create):
+    params.max_backlog if >0 else 64 * effective base_quantum; NOT a
+    metric high-water mark."""
+    try:
+        mb = int(params.max_backlog)
+    except Exception:
+        return None
+    if mb > 0:
+        return mb
+    try:
+        bq = int(params.base_quantum)
+    except Exception:
+        bq = 0
+    if bq <= 0:
+        bq = 2 * 1024 * 1024
+    return 64 * bq
+
+
+def node_metrics_to_dict(m, idx, requested_phys_node=None, policy=None,
+                         run_seconds=None, max_backlog=None):
     # placement_sample_all_matched is a narrow summary: all sampled pages observed on
     # preferred/target node. It does NOT imply every page in allocation was examined and
     # does NOT imply mbind syscall success/failure by itself.
@@ -390,13 +449,16 @@ def node_metrics_to_dict(m, idx, requested_phys_node=None, policy=None):
         "read_wait_ns": m.read_wait_ns,
         "publish_wait_ns": m.publish_wait_ns,
         "consume_wait_ns": m.consume_wait_ns,
-        # CK-6: derived regime classification (uses corrected consumer-wait semantics).
-        # One authoritative classifier: tools/regime_classify.py (re-exported below).
-        "regime": _regime_classify(m, 1.0),
+        # CK-6: derived regime classification (corrected semantics).
+        # One authoritative classifier: tools/regime_classify.py.
+        # CK-6.2: ACTUAL run duration + ACTUAL configured max_backlog.
+        "regime": _regime_classify(m, run_seconds, max_backlog=max_backlog),
         "current_published_backlog": m.current_published_backlog,
         "current_consumer_inflight_backlog": m.current_consumer_inflight_backlog,
         "current_outstanding": m.current_outstanding,
         "current_effective_backlog": m.current_effective_backlog,
+        # CK-6: configured backlog capacity (NOT a high-water mark)
+        "max_backlog_configured": max_backlog,
         "max_published_backlog": m.max_published_backlog,
         "max_consumer_inflight_backlog": m.max_consumer_inflight_backlog,
         "max_effective_backlog": m.max_effective_backlog,
@@ -1380,7 +1442,11 @@ def main():
 
     emit_stage0_lines(res, args.candidate)
 
-    nodes_out = [node_metrics_to_dict(res.nodes[i], i, logical_to_phys[i] if i < len(logical_to_phys) else None, policy=policy) for i in range(res.num_nodes)]
+    # CK-6.2: pass ACTUAL run duration + ACTUAL configured backlog cap.
+    _effective_max_backlog = _effective_max_backlog_configured(params)
+    nodes_out = [node_metrics_to_dict(res.nodes[i], i, logical_to_phys[i] if i < len(logical_to_phys) else None,
+                                      policy=policy, run_seconds=res.wall_seconds,
+                                      max_backlog=_effective_max_backlog) for i in range(res.num_nodes)]
     functional_correct = (rc == 0 and not res.overlap_detected and not res.duplicate_detected and not res.lost_detected
                           and not res.input_changed and res.total_consumed == st.st_size)
     affinity_valid = _affinity_valid_factual(nodes_out)

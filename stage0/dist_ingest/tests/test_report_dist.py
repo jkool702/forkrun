@@ -692,3 +692,61 @@ class TestReportDistDriftFailClosed(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestCK65PairedRegimeGrouped(unittest.TestCase):
+    def _arm(self, cand, trial, wall, consumed, regime="balanced", valid=True, scen="sc"):
+        return {"case": "sc__legacy__%s" % cand, "scenario": scen, "candidate": cand,
+                "trial": trial, "status": "ok", "mapping_id": "legacy", "mapping_profile": "auto",
+                "trial_class": "performance", "placement_sampling": "off",
+                "manifest": "cases/sc__legacy__%s/trial%s/manifest.json" % (cand, trial)}
+
+    def _mk(self, tmp, trial_arms):
+        outcomes = []
+        manifests = {}
+        for cand, trial, wall, consumed, regime in trial_arms:
+            o = self._arm(cand, trial, wall, consumed, regime)
+            outcomes.append(o)
+            dr = _dist_manifest_base(complete=True, wall=wall, correct=True, consumed=consumed)
+            dr["dist_result"]["nodes"][0]["bytes_consumed"] = consumed
+            dr["dist_result"]["nodes"][0]["regime"] = {"regime": regime, "evidence": {}}
+            manifests[o["manifest"]] = dr
+        return outcomes, manifests
+
+    def test_pairing_candidate_not_in_key_and_duration_normalized(self):
+        tmp = tempfile.mkdtemp(prefix="rptck65_")
+        # baseline + candidate, SAME scenario/trial/node/workload, DIFFERENT wall + consumed
+        arms = [
+            ("centralized_ingest", 1, 2.0, 1000, "balanced"),
+            ("fixed_faa", 1, 1.0, 2000, "consumer-starved"),   # faster + different regime
+        ]
+        outcomes, manifests = self._mk(tmp, arms)
+        make_campaign(tmp, outcomes, manifests)
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertIn("CK-6.5 Paired, regime-grouped", text)
+        self.assertIn("candidate NOT in key", text)
+        self.assertIn("duration-normalized", text)
+        self.assertIn("Qualifying pairs", text)
+        # pair formed across candidate arms on shared invariant key
+        self.assertIn("**1**", text)
+        # candidate label not part of pair identity
+        self.assertNotIn('"candidate"' , text.split("Pair identity")[1].split("Baseline arm")[0])
+        self.assertIn("Automated regime-based decision-making is DEFERRED", text)
+        self.assertIn("not retained as an evidence-based guarantee", text)
+
+    def test_invalid_trials_excluded_from_pairs(self):
+        tmp = tempfile.mkdtemp(prefix="rptck65x_")
+        arms = [("centralized_ingest", 1, 1.0, 1000, "balanced"),
+                ("fixed_faa", 1, 1.0, 1000, "balanced")]
+        outcomes, manifests = self._mk(tmp, arms)
+        # make candidate arm incorrect => excluded
+        for k in manifests:
+            if "fixed_faa" in k:
+                manifests[k]["dist_result"]["correct"] = False
+                manifests[k]["dist_result"]["validity"]["functional_correctness"] = False
+                manifests[k]["dist_result"]["rc"] = 1
+        make_campaign(tmp, outcomes, manifests)
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertIn("No qualifying pairs", text)
