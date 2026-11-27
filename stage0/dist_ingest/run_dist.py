@@ -363,6 +363,8 @@ def _effective_max_backlog_configured(params):
         mb = int(params.max_backlog)
     except Exception:
         return None
+    if mb < 0:
+        return None
     if mb > 0:
         return mb
     try:
@@ -1373,6 +1375,8 @@ def main():
     params = DiPolicyParams()
     params.base_quantum = args.base_quantum
     params.max_reservation = args.max_reservation
+    if args.max_backlog < 0:
+        raise SystemExit("invalid --max-backlog %d (must be >= 0)" % args.max_backlog)
     params.max_backlog = args.max_backlog
     params.rel_min_claim = args.rel_min_claim
     params.rel_max_claim_quanta = args.rel_max_claim_quanta
