@@ -1,0 +1,292 @@
+..................................................................................../tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/tests/test_benchmark_semantics.py:2803: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/c3dq_ok_w3g8mj01/out/duration_passes/pass1/pass-summary.json' mode='r' encoding='UTF-8'>
+  s1 = json.load(open(os.path.join(out, "duration_passes", "pass1",
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+............................................................................DI_INVARIANT_ASSERT: publication with NULL chunk buf (materialize-before-blocking)
+...DI_INVARIANT_ASSERT: publication with NULL chunk buf (materialize-before-blocking)
+.DI_INVARIANT_ASSERT: publication before materialization completed
+.DI_INVARIANT_ASSERT: publication with zero-length chunk
+...................................................................................................................../tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpezz2cos_/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpezz2cos_/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpy_knrz0n/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpy_knrz0n/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/tests/test_symbol_audit_ck4.py:174: ResourceWarning: unclosed file <_io.BufferedWriter name='/tmp/tmp3ysefvwu/x.so'>
+  so = os.path.join(tmp, "x.so"); open(so, "wb").write(b"x")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/tests/test_symbol_audit_ck4.py:178: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp3ysefvwu/bin/nm' mode='w' encoding='UTF-8'>
+  open(fake, "w").write("#!/bin/sh\nexit 1\n")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/tests/test_symbol_audit_ck4.py:192: ResourceWarning: unclosed file <_io.BufferedWriter name='/tmp/tmpfyyk4iiz/x.so'>
+  so = os.path.join(tmp, "x.so"); open(so, "wb").write(b"x")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/tests/test_symbol_audit_ck4.py:196: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpfyyk4iiz/bin/nm' mode='w' encoding='UTF-8'>
+  open(fake, "w").write("#!/bin/sh\nprintf '         U fork\\n         U pthread_create\\n         U clone3\\n'\nexit 0\n")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/tests/test_symbol_audit_ck4.py:160: ResourceWarning: unclosed file <_io.BufferedWriter name='/tmp/tmp8i_12q2w/x.so'>
+  open(so, "wb").write(b"not really a so")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.../tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpbqhlalkn/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpbqhlalkn/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpitfgqlgm/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpitfgqlgm/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp9pg67zqz/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp9pg67zqz/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpx44j2zfl/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpx44j2zfl/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpk0ij1ffb/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpk0ij1ffb/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpoq2c0upf/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpoq2c0upf/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp4dt_eojs/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp4dt_eojs/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpeiugsyhx/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpeiugsyhx/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp0zowl01b/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp0zowl01b/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpvod22q3z/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpvod22q3z/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpgl9npfj9/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpgl9npfj9/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpeqnf5hub/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpeqnf5hub/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmptkxgt97k/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmptkxgt97k/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp1i5c3ion/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp1i5c3ion/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp2blq4qsv/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp2blq4qsv/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp1dkv2o09/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp1dkv2o09/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpw79sfpfh/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmpw79sfpfh/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp9n043i9l/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp9n043i9l/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp_tjojj0t/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp_tjojj0t/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp9awlkzq_/dist_ingest/dist_ingest.c' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/opencode/wt-final-corrections-2/tools/di_symbol_audit.py:209: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmp9awlkzq_/dist_ingest/dist_ingest.h' mode='r' encoding='utf-8'>
+  raw = open(src, encoding="utf-8", errors="strict").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..../tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/tests/test_termination_ck2.py:190: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/opencode/wt-final-corrections-2/stage0/dist_ingest/dist_ingest.c' mode='r' encoding='UTF-8'>
+  "dist_ingest.c")).read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..............................
+----------------------------------------------------------------------
+Ran 340 tests in 143.058s
+
+OK
+{
+  "bad": [
+    {
+      "file": "../../tmpy_knrz0n/dist_ingest/dist_ingest.c",
+      "kind": "process-creation",
+      "line": 1,
+      "symbol": "fork",
+      "text": "fork"
+    }
+  ],
+  "ok": false,
+  "source_audit": {
+    "errors": [],
+    "hits": [
+      {
+        "file": "../../tmpy_knrz0n/dist_ingest/dist_ingest.c",
+        "kind": "process-creation",
+        "line": 1,
+        "symbol": "fork",
+        "text": "fork"
+      }
+    ],
+    "sources_scanned": 2,
+    "syscall_allowlist": [
+      "SYS_mbind",
+      "SYS_move_pages",
+      "__NR_mbind",
+      "__NR_move_pages"
+    ]
+  },
+  "source_threads_only_ok": false,
+  "symbol_audit": {
+    "available": true,
+    "nm": "/usr/bin/nm",
+    "process_creation_symbols_found": [],
+    "shared_object": "/tmp/opencode/wt-final-corrections-2/stage0/libdist_ingest.so",
+    "undefined_symbols": [
+      "_ITM_deregisterTMCloneTable",
+      "_ITM_registerTMCloneTable",
+      "__cxa_finalize",
+      "__errno_location",
+      "__gmon_start__",
+      "__sched_cpualloc",
+      "__sched_cpufree",
+      "__tsan_atomic32_fetch_add",
+      "__tsan_atomic32_load",
+      "__tsan_atomic32_store",
+      "__tsan_atomic64_fetch_add",
+      "__tsan_atomic64_load",
+      "__tsan_atomic64_store",
+      "__tsan_func_entry",
+      "__tsan_func_exit",
+      "__tsan_init",
+      "__tsan_read1",
+      "__tsan_read4",
+      "__tsan_read8",
+      "__tsan_read_range",
+      "__tsan_write4",
+      "__tsan_write8",
+      "__tsan_write_range",
+      "calloc",
+      "clock_gettime",
+      "fprintf",
+      "free",
+      "fstat",
+      "fwrite",
+      "malloc",
+      "memcpy",
+      "memset",
+      "mmap",
+      "munmap",
+      "nanosleep",
+      "pread",
+      "pthread_cond_broadcast",
+      "pthread_cond_destroy",
+      "pthread_cond_init",
+      "pthread_cond_signal",
+      "pthread_cond_wait",
+      "pthread_create",
+      "pthread_getaffinity_np",
+      "pthread_join",
+      "pthread_mutex_destroy",
+      "pthread_mutex_init",
+      "pthread_mutex_lock",
+      "pthread_mutex_unlock",
+      "pthread_self",
+      "pthread_setaffinity_np",
+      "qsort",
+      "realloc",
+      "sched_getaffinity",
+      "stderr",
+      "syscall",
+      "sysconf"
+    ]
+  },
+  "threads_only_symbols_ok": true
+}
+{
+  "bad": [
+    {
+      "file": "/nonexistent.so",
+      "symbol": "symbol-scan-unavailable",
+      "text": "libdist_ingest.so not built: /nonexistent.so"
+    }
+  ],
+  "ok": false,
+  "source_audit": {
+    "errors": [],
+    "hits": [],
+    "sources_scanned": 2,
+    "syscall_allowlist": [
+      "SYS_mbind",
+      "SYS_move_pages",
+      "__NR_mbind",
+      "__NR_move_pages"
+    ]
+  },
+  "source_threads_only_ok": true,
+  "symbol_audit": {
+    "available": false,
+    "reason": "libdist_ingest.so not built: /nonexistent.so"
+  },
+  "threads_only_symbols_ok": false
+}

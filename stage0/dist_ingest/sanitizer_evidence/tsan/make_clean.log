@@ -1,0 +1,3 @@
+make: Entering directory '/tmp/opencode/wt-final-corrections-2/stage0/dist_ingest'
+rm -f ../libdist_ingest.so
+make: Leaving directory '/tmp/opencode/wt-final-corrections-2/stage0/dist_ingest'
