@@ -104,17 +104,31 @@ LDFLAGS="-shared -pthread $SAN"
 LD_JSON="$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$LDFLAGS")"
 
 RT=""
-for cand in "$("$CC" -print-file-name=lib${RT_KIND}.so 2>/dev/null)" "/lib64/lib${RT_KIND}.so"; do
-  [ -n "$cand" ] && [ -e "$cand" ] && { RT="$cand"; break; }
+# discover actual ELF runtime (not a linker script); verify it can preload
+_rt_dir="$(dirname "$("$CC" -print-file-name=lib${RT_KIND}.so 2>/dev/null)" 2>/dev/null || echo /usr/lib64)"
+for cand in \
+    "$("$CC" -print-file-name=lib${RT_KIND}.so.8 2>/dev/null)" \
+    "$("$CC" -print-file-name=lib${RT_KIND}.so.2 2>/dev/null)" \
+    "$("$CC" -print-file-name=lib${RT_KIND}.so.1 2>/dev/null)" \
+    $(ls "$_rt_dir"/lib${RT_KIND}.so.* /usr/lib64/lib${RT_KIND}.so.* /lib64/lib${RT_KIND}.so.* 2>/dev/null | grep -vE '\.so$' | sort -Vr) ; do
+  [ -n "$cand" ] && [ -e "$cand" ] || continue
+  cand="$(readlink -f "$cand" 2>/dev/null || echo "$cand")"
+  # skip linker scripts; require it to actually preload
+  if [ "$(head -c4 "$cand" 2>/dev/null | od -An -tx1 | tr -d ' ')" != "7f454c46" ]; then continue; fi
+  if env LD_PRELOAD="$cand" ASAN_OPTIONS=detect_leaks=0 python3 -c 'pass' 2>/dev/null; then
+    RT="$cand"; break
+  fi
 done
-# resolve symlinks to actual runtime
-[ -n "$RT" ] && RT="$(readlink -f "$RT" 2>/dev/null || echo "$RT")"
 RT_JSON="$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$RT")"
 PRELOAD="$RT"
 PRELOAD_JSON="$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$PRELOAD")"
 UBSAN_RT_JSON='""'
 if [ "$UBSAN" = 1 ]; then
-  URT="$("$CC" -print-file-name=libubsan.so 2>/dev/null)"; [ -e "$URT" ] && URT="$(readlink -f "$URT" 2>/dev/null || echo "$URT")"
+  URT=""
+for _u in "$("$CC" -print-file-name=libubsan.so.1 2>/dev/null)" $(ls /usr/lib64/libubsan.so.* /lib64/libubsan.so.* 2>/dev/null | grep -vE '\.so$' | sort -Vr); do
+  [ -n "$_u" ] && [ -e "$_u" ] || continue; _u="$(readlink -f "$_u" 2>/dev/null || echo "$_u")"
+  [ "$(head -c4 "$_u" 2>/dev/null | od -An -tx1 | tr -d ' ')" = "7f454c46" ] && { URT="$_u"; break; }
+done
   UBSAN_RT_JSON="$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$URT")"
 fi
 
