@@ -138,9 +138,11 @@ def probe_mandatory_engine_build(output_path=None, dist_dir=None, env=None,
         and built
         and produced_by_this_build
     )
-    # artifact is KEPT; only auto-created temp dirs are cleaned up.
-    detail["artifact_retained"] = output_path if built else None
-    if auto_tmp:
+    # P2 (CK-1): artifact_retained accuracy. Honor `keep_artifact`.
+    # - auto-created temp output + not keep_artifact: artifact REMOVED; retained=null.
+    # - explicit output_path or keep_artifact: artifact KEPT; retained=path.
+    should_remove = auto_tmp and not keep_artifact
+    if should_remove:
         try:
             parent = os.path.dirname(output_path)
             if built:
@@ -149,7 +151,10 @@ def probe_mandatory_engine_build(output_path=None, dist_dir=None, env=None,
                 os.rmdir(parent)
         except OSError:
             pass
-    return ok, {**detail, "available": ok, "artifact": output_path if built else None}
+    retained = bool(built and not should_remove)
+    detail["artifact_retained"] = (output_path if retained else None)
+    detail["artifact_retained_on_disk"] = retained
+    return ok, {**detail, "available": ok, "artifact": output_path if retained else None}
 
 
 def _compiler_version(cc, env):

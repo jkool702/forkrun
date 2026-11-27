@@ -141,6 +141,9 @@ struct di_engine {
     /* thread-creation failure injection in di_run (atomic, engine-local). */
     _Atomic int thread_create_fail_nth;  /* 0 disables; countdown */
     _Atomic int thread_create_fail_fired;
+    /* CK-5 (P1): explicit engine-level invariant-violation flag, aggregated
+     * after threads join; drives DI_ERR_INVARIANT; not silently lost. */
+    _Atomic int invariant_failed;
 };
 
 /* global test seams */
@@ -590,6 +593,13 @@ static int di_invariant_publish_check(di_node_t *n, const di_chunk_t *c) {
     if (c->len > UINT64_MAX - c->off) {
         fprintf(stderr, "DI_INVARIANT_ASSERT: chunk offset+length overflow\n");
         viol = 1;
+    } else if (c->off > eng->file_size || c->len > eng->file_size - c->off) {
+        /* CK-5 (P2): enforce off <= file_size && len <= file_size - off */
+        fprintf(stderr,
+                "DI_INVARIANT_ASSERT: chunk range [%llu,+%llu) exceeds file_size %llu\n",
+                (unsigned long long)c->off, (unsigned long long)c->len,
+                (unsigned long long)eng->file_size);
+        viol = 1;
     }
     /* 4. outstanding reservation/accounting state valid for this chunk.
      * caller holds n->mu; n->outstanding read directly (not atomic). */
@@ -935,7 +945,9 @@ static int di_queue_push(di_node_t *n, di_chunk_t c) {
         }
     }
     if (di_invariant_publish_check(n, &cand) != 0) {
-        /* invalid publication: not committed; signal engine stop path */
+        /* invalid publication: not committed; explicit invariant-failure
+         * reason (CK-5 P1) + engine stop; not lost to generic DI_ERR_STATE */
+        __atomic_store_n(&eng->invariant_failed, 1, __ATOMIC_RELEASE);
         pthread_mutex_unlock(&n->mu);
         di_engine_stop(eng);
         return -1;
@@ -980,6 +992,7 @@ static int di_queue_push(di_node_t *n, di_chunk_t c) {
         /* already committed to queue; cannot un-publish a committed chunk;
            surface the violation; engine takes error path after this point. */
         n->accounting_violation = 1;
+        __atomic_store_n(&eng->invariant_failed, 1, __ATOMIC_RELEASE);
     }
     uint64_t eff = di_node_eff(n);
     if (eff > n->max_effective_backlog) n->max_effective_backlog = eff;
@@ -1479,6 +1492,7 @@ di_engine_t *di_create(int fd, uint64_t file_size, const di_config_t *cfg) {
     __atomic_store_n(&eng->stop, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&eng->ingestors_done, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&eng->input_changed, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&eng->invariant_failed, 0, __ATOMIC_RELAXED);
 
     int initialized = 0;
     for (int i = 0; i < eng->num_nodes; i++) {
@@ -1701,9 +1715,10 @@ int di_run(di_engine_t *eng, di_result_t *result) {
             if (acct_viol || acct_check != 0) accounting_bad = 1;
         }
         /* reconciliation verified in ALL builds; report accurately */
-        result->invariant_failed = invariant_bad;
+        int eng_inv = __atomic_load_n(&eng->invariant_failed, __ATOMIC_ACQUIRE);
+        result->invariant_failed = invariant_bad || eng_inv;
         result->accounting_failed = accounting_bad;
-        if (rc == 0 && (invariant_bad || accounting_bad)) rc = DI_ERR_INVARIANT;
+        if (rc == 0 && (result->invariant_failed || result->accounting_failed)) rc = DI_ERR_INVARIANT;
     }
 
     clock_gettime(CLOCK_MONOTONIC, &eng->t_end);

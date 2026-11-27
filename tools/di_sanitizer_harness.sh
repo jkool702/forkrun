@@ -78,6 +78,7 @@ write_result() {  # called on every exit path
     "lsan_enabled": ${LSAN_ENABLED:-false},
     "lsan_effective": ${LSAN_EFFECTIVE:-false},
     "lsan_findings": ${LSAN_FINDINGS:-0},
+    "lsan_smoke_return_code": ${LSAN_SMOKE_RC:-null},
     "lsan_runlog": ${LSAN_RUNLOG_JSON:-"\"\""},
     "note": ${LSAN_NOTE_JSON:-"\"\""}
   },
@@ -134,14 +135,15 @@ fi
 
 # ---- clean + sanitizer build (status checked) ----
 CLEAN_RC=0
-if ! make -C "$DIST" clean > "$OUTDIR/make_clean.log" 2>&1; then
-  CLEAN_RC=$?
+if make -C "$DIST" clean > "$OUTDIR/make_clean.log" 2>&1; then
+  CLEAN_RC=0
+else
+  CLEAN_RC=$?   # actual make clean status (not negated)
   echo "make clean FAILED rc=$CLEAN_RC" >&2
   SHA_AFTER="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
   write_result "REVIEW_REQUIRED"
   exit 4
 fi
-CLEAN_RC=0
 
 BUILD_RC=0
 env ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
@@ -217,7 +219,7 @@ ARTIFACT_UNCHANGED=false
 [ -n "$SHA256_BEFORE" ] && [ "$SHA256_BEFORE" = "$SHA256_AFTER" ] && ARTIFACT_UNCHANGED=true
 
 # ---- separate LSan leak check (standalone engine smoke; no python runtime) ----
-LSAN_ATTEMPTED=false; LSAN_ENABLED=false; LSAN_EFFECTIVE=false; LSAN_FINDINGS=0
+LSAN_ATTEMPTED=false; LSAN_ENABLED=false; LSAN_EFFECTIVE=false; LSAN_FINDINGS=0; LSAN_SMOKE_RC=null
 LSAN_RUNLOG_JSON='""'; LSAN_NOTE_JSON='""'
 if [ "$MODE" = "asan-ubsan" ]; then
   LSAN_ATTEMPTED=true
@@ -241,6 +243,7 @@ int main(void){
     if (!e) { close(fd); return 3; }
     di_result_t r; int rc = di_run(e, &r);
     di_destroy(e); close(fd);
+    /* exit 0 iff engine run succeeded; sanitizer aborts/leaks make nonzero */
     return rc == 0 ? 0 : 4;
 }
 C
@@ -249,17 +252,21 @@ C
        -I"$DIST" "$SMOKE" -o "$OUTDIR/di_lsan_smoke" -L"$ROOT/stage0" -ldist_ingest -Wl,-rpath,"$ROOT/stage0" -pthread \
        >> "$LSAN_LOG" 2>&1; then
     LSAN_ENABLED=true
+    LSAN_SMOKE_RC=0
     env LD_PRELOAD="$PRELOAD" LD_LIBRARY_PATH="$ROOT/stage0" \
         ASAN_OPTIONS="detect_leaks=1:halt_on_error=1" UBSAN_OPTIONS="halt_on_error=1" \
-        DI_LSAN_INPUT="$OUTDIR/lsan_input.txt" "$OUTDIR/di_lsan_smoke" >> "$LSAN_LOG" 2>&1 || true
+        DI_LSAN_INPUT="$OUTDIR/lsan_input.txt" "$OUTDIR/di_lsan_smoke" >> "$LSAN_LOG" 2>&1 || LSAN_SMOKE_RC=$?
     LSAN_FINDINGS=$( { grep -cE "LeakSanitizer|leaked" "$LSAN_LOG" 2>/dev/null || true; } | head -1 ); LSAN_FINDINGS=${LSAN_FINDINGS:-0}
-    # effective if it actually ran (no asan runtime init failure) 
+    # effective ONLY if: built + actually ran + return code 0 + no sanitizer
+    # runtime-init failure + no LeakSanitizer findings. NOT unconditional.
     if grep -qE "AddressSanitizer runtime|cannot load|ERROR: .*Sanitizer.*(initialization|failed)" "$LSAN_LOG" 2>/dev/null; then
       LSAN_EFFECTIVE=false
-    elif [ -s "$LSAN_LOG" ] || true; then
+    elif [ "$LSAN_SMOKE_RC" -eq 0 ] && [ "${LSAN_FINDINGS:-0}" -eq 0 ]; then
       LSAN_EFFECTIVE=true
+    else
+      LSAN_EFFECTIVE=false
     fi
-    LSAN_NOTE_JSON='"separate standalone engine smoke (no python runtime); detect_leaks=1; absence of findings is NOT proof of no leaks; python-suite LSan not validated"'
+    LSAN_NOTE_JSON='"separate standalone engine smoke (no python runtime); detect_leaks=1; effective iff built + rc==0 + no LSan findings + no runtime-init failure; absence of findings is NOT proof of no leaks; python-suite LSan not validated"'
   else
     LSAN_NOTE_JSON='"standalone LSan smoke failed to build; LSan not validated"'
   fi

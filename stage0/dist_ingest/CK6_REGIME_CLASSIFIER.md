@@ -112,7 +112,11 @@ conditions; additional unrecorded conditions noted as a limitation).
 
 **Performance = duration-normalized** per-node `bytes_consumed /
 wall_seconds` (NOT raw consumed bytes when durations differ). Invalid/
-incorrect/incomplete/perf-invalid trials excluded. `report_dist.py`
+incorrect/incomplete trials excluded; **`performance_measurement`
+(`v_perf`) must be explicitly `true` for BOTH arms; `false` AND `unknown`
+are excluded; repetition `v_perf_headline=false` excludes.** **Campaign
+drift (invalidated/failed/unavailable/unreadable) SUPPRESSES paired
+performance comparison** (same as headline medians). `report_dist.py`
 emits a **paired, regime-grouped** report (`emit_paired_regime_report`):
 baseline `centralized_ingest`, pairs per regime, median paired
 duration-normalized improvement; insufficient pairs => inconclusive.

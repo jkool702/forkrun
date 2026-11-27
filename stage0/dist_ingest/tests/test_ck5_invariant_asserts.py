@@ -160,6 +160,9 @@ class TestCK5MalformedChunk(unittest.TestCase):
             self.assertTrue(lib.di_test_publish_seam_fired(eng), "publish seam must fire")
             # engine takes an appropriate error/stop path
             self.assertNotEqual(rc, 0, "malformed chunk must not yield success")
+            # CK-5 P1: precise invariant failure reason, not generic DI_ERR_STATE
+            self.assertEqual(rc, DI_ERR_INVARIANT, "malformed chunk must return DI_ERR_INVARIANT(-6)")
+            self.assertEqual(res.invariant_failed, 1, "invariant_failed flag must be set on injected invariant violation")
             # no deadlock; engine terminated and JOINED its threads (di_run returned)
             self.assertLess(elapsed, 10.0, "no deadlock; threads joined")
             # invalid chunk NOT published (not committed to queue; nothing published/consumed)

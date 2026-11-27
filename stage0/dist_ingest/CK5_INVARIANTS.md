@@ -105,7 +105,12 @@ accurately** (stderr + `di_result_t.invariant_failed` +
 
 ## Failure semantics
 - Invalid chunk → not published; reservation rolled back; ownership
-  preserved; `DI_ERR_INVARIANT` path; engine stop; threads joined.
+  preserved; **explicit engine-level `invariant_failed`** (`_Atomic int`,
+  set RELEASE on violation, read ACQUIRE post-join); `di_engine_stop`;
+  threads joined; `di_result_t.invariant_failed=1`; **`di_run` returns
+  `DI_ERR_INVARIANT` (-6) when no earlier engine error exists**; a
+  generic `DI_ERR_STATE` stop mapping does NOT override the precise
+  invariant reason; original error preserved. (P1 correction.)
 - Accounting violation → recorded (not clamped); reported; rc.
 - Normal completion → success `outstanding==0`.
 - `DI_ERR_INVARIANT = -6`.

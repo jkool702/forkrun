@@ -645,7 +645,7 @@ def main():
                             lines.append("  - invalid reasons: %s" % r.get("invalid_reasons"))
             lines.append("")
 
-    emit_paired_regime_report(lines, groups)
+    emit_paired_regime_report(lines, groups, campaign_drift_invalidated=campaign_drift_invalidated)
 
     lines.append("## Invalid / incomplete / failed / unreadable / missing trials")
     lines.append("")
@@ -735,6 +735,17 @@ def paired_regime_groups(groups):
                 continue
             if not rec.get("correct_functional", False) or not rec.get("complete", False):
                 continue
+            # CK-6.5 (P1): performance comparisons require performance-valid
+            # trials. `performance_measurement` must be explicitly TRUE;
+            # false OR unknown are excluded. Invalid trials already filtered.
+            # `performance_measurement` must be explicitly True (v_perf);
+            # repeated-trial aggregate (v_perf_headline), if present, must
+            # also not exclude it. false/unknown => excluded.
+            perf_ok = rec.get("v_perf")
+            if perf_ok is not True:
+                continue
+            if rec.get("v_perf_headline") is False:
+                continue
             dr = rec.get("dist") or {}
             wall = rec.get("engine_wall_s") or dr.get("wall_seconds")
             nodes = dr.get("nodes") or []
@@ -755,7 +766,7 @@ def paired_regime_groups(groups):
     return pairs
 
 
-def emit_paired_regime_report(lines, groups):
+def emit_paired_regime_report(lines, groups, campaign_drift_invalidated=False):
     pairs = paired_regime_groups(groups)
     lines.append("## CK-6.5 Paired, regime-grouped comparison (duration-normalized)")
     lines.append("")
@@ -769,6 +780,13 @@ def emit_paired_regime_report(lines, groups):
                  "guarantee. This section emits paired evidence; it does not authorize a rental or "
                  "declare a winner.")
     lines.append("")
+    if campaign_drift_invalidated:
+        # CK-6.5 (P1): campaign drift invalidated/failed/unavailable/unreadable
+        # suppresses paired performance comparison (same as headline medians).
+        lines.append("**Paired performance comparison SUPPRESSED** — campaign drift assessment is "
+                     "invalidated/failed/unavailable/unreadable; paired performance evidence not established.")
+        lines.append("")
+        return
     regime_grouped = defaultdict(list)
     n_pairs = 0
     for pk, arms in pairs.items():
