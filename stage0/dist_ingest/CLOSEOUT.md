@@ -1,41 +1,63 @@
-# WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1 — Closeout
+# WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-FINAL-CORRECTIONS-2 — Closeout
 
-**Base (corrections-4):** `a1db06a0`
-**Final SHA:** `3a92373f644a6a0152abb1a3019250986bf8ce07` (working tree clean)
-**Status:** all 7 checkpoints complete; no rental.
+**Work order:** CK-5→CK-1→CK-6→CK-2→CK-4→CK-3→CK-7 corrective pass.
+**Base:** `66efac3ebaed84a4265f9c3c82686961ed7fb42a`
+(branch `WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-IMPL`).
+**Working branch:** `WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-FINAL-CORRECTIONS-2`.
+**No rental. No production adoption. No physical-NUMA validation. Frozen
+production files untouched. Not merged to main. No MADV_POPULATE_WRITE /
+prepopulation-window / per-node-memfd / production-ingest changes.**
 
-## Checkpoints (one per commit)
+## Identities (distinct; CK-7.1; no self-referential commit hash)
 
-| CK | Subject | Commit |
+- **Sanitizer-tested source SHA:** `3f4f3f892a045d5c2c733b1825bd19dcdd973de6`
+  (clean tree; ASan+UBSan + TSan; see SANITIZER_EVIDENCE.md). NOT
+  claimed as final branch HEAD.
+- **Final C-code SHA:** last commit touching
+  `stage0/dist_ingest/dist_ingest.c` = `a6ba01a0ccfb3ba51d8fd3af11ae7d87f0fb3213`;
+  `dist_ingest.h` = `6a0d6cd47eb4cb632f6086578681ab8109c41098`. C
+  unchanged afterward; sanitizer-tested C == final C.
+- **Final branch HEAD:** actual `git rev-parse HEAD` in terminal
+  closeout report (not requiring a commit to contain its own hash).
+- **Subsequent documentation-only commits:** listed in terminal report;
+  this commit and later doc-only commits do not change C/sanitizer
+  evidence.
+
+## Checkpoints
+
+| CK | status | summary |
 |---|---|---|
-| CK-1 | Build portability + preflight honesty | `72f170da` |
-| CK-2 | Liveness audit + fault-injection termination | `6135e6c4` |
-| CK-3 | Atomic semantics + sanitizer harnesses | `7c6ab6be` |
-| CK-3 fix | Preflight accepts sanitizer-runtime builds | `a73f8ba9` |
-| CK-4 | Threads-only invariant + fork audit | `d64f91a1` |
-| CK-5 | Invariant assertions (deadlock fix) + tests | `85f83c9e` |
-| CK-3/6/2/4 review fixes | Deadlock, classifier semantics, fail-closed preflight, symbol audit, sanitizer rerun | `fc49efb9` |
-| CK-6 | Regime classifier (authoritative) + DIST_RESULT regime | `766025bd` |
-| CK-6/3 fixes | DIST_RESULT regime + harness robustness | `48354ae0`, `21fc710e` |
-| CK-7 | Rental plan gate + closeout | `b7cb81dc` |
-| CK-3 | Atomic inventory + sanitizer evidence at `21fc710e` | `3a92373f` |
+| CK-5 | PASS | real invariant checking + enforceable; publication checker pre-admission; propagated; no invalid publish; materialized flag; checked arithmetic; no silent clamping; post-join reconciliation (normal+injected); original error preserved; extra reported; tests both activation + malformed; CK5_INVARIANTS |
+| CK-1 | PASS | mandatory preflight fail-closed (clean rc + artifact absent + fresh build + exists + produced-by-this-build; no stale; no sanitizer exception); isolated DI_OUTPUT; accurate env (shmem THP + per-size; global vs shmem; swap vs active pswpin/pswpout; actual compiler/cmd/flags; optional consequences; no stale libnuma); tests; JSON=console |
+| CK-6 | PASS | corrected classifier semantics; actual C instrumentation; no consumer-limited; starvation/backpressure/read/claim; zero-claim split; normalization + denominators; validation→indeterminate; actual wall + configured max_backlog (no hardcoded 1.0; no high-water-as-cap); not swallowed; DIST_RESULT evidence; pairing key (no candidate); duration-normalized; paired regime-grouped report; **automated regime decision DEFERRED; 15% not guarantee**; same classifier; tests |
+| CK-2 | PASS | queue-push injection fired + result + join + reconcile; pread immediate/after-partial/premature-EOF + no rate-limit-after-error + rollback + join; alloc-fail + thread-create-fail + partial-init; proven; accounting; prompt bound; LIVENESS accurate + sleep bounds; no heartbeat |
+| CK-4 | PASS | enforceable source + syscall + undefined-symbol audit; fail-closed; allowlist; unknown→review; multiline+alias; inline-asm; clone/clone3; nm; pthread_create ok; bad honored; threads_only honest; FORK_AUDIT; tests |
+| CK-3 | PASS | atomic inventory regenerated actual (43); all sites; corrected next_offset ACQ_REL / outstanding+published not atomic / peer_headroom / stop / ingestors_done / input_changed / test atomics; mutex inventory; sanitizer harness fail-closed; instrumentation; artifact unchanged; LSan honesty; ASan+UBSan+TSan rerun final C; logs+results retained; SANITIZER_EVIDENCE; **LSan not validated (full suite); separate smoke; not proof** |
+| CK-7 | PASS | identities; history archive corrected + full preservation; rental gate unsigned + accurate; provenance |
 
-### Archival of pre-review closeout history
+## Validation (see terminal report for exact commands/results)
 
-Archived to `stage0/dist_ingest/CLOSEOUT_HISTORY.md` (original 444-line
-history preserved).
+- `python3 -m unittest discover -s stage0/dist_ingest/tests`
+- `python3 -m unittest stage0.tests.test_stage0`
+- `python3 -m unittest python.tests.test_numa_drain_guard`
+- `python3 -m unittest python.tests.test_numa`
+- preflight (`tools/di_preflight.py`) normal + deliberate-failure;
+  JSON=console; stale-artifact + broken-compiler fail-closed
+- `python3 tools/di_symbol_audit.py` rc matches results
+- invariant runtime + compile-time tests; valid + injected invalid
+- sanitizer harness asan-ubsan + tsan final C; nonzero on REVIEW_REQUIRED;
+  retained logs/results
+- repo integrity: clean; pushed; frozen files untouched; no main merge;
+  no rental; no physical-NUMA claim; no MADV_POPULATE_WRITE
 
-## Suites (final SHA 3a92373f)
-
-- `discover -s stage0/dist_ingest/tests`: **276 OK**
-- Sanitizer harnesses (`tools/di_sanitizer_harness.sh`): ASan+UBSan (276,
-  0 findings) + TSan (276, 0 findings) at `21fc710e`
-- Symbol audit (`tools/di_symbol_audit.py`): `threads_only_symbols_ok=true`
+## Historical archive
+Full previous artifacts preserved in `CLOSEOUT_HISTORY.md`; corrected
+"444-line" claim; git intact.
 
 ## Rental gate
-
-`stage0/dist_ingest/RENTAL_PLAN_REVIEW.md` — unsigned (not authorized).
+`RENTAL_PLAN_REVIEW.md` — **UNSIGNED; not authorized to rent.**
+Automated regime-based decision-making DEFERRED. LSan not validated
+(full suite). Physical-NUMA evidence not collected.
 
 ---
-*Closeout by WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1 (corrections per
-external review of b7cb81dc).*
+*Closeout WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-FINAL-CORRECTIONS-2.*
