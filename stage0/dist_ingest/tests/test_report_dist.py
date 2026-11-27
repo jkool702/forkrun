@@ -36,6 +36,13 @@ def make_campaign(tmp, outcomes, manifests):
                 json.dump(obj, f)
 
 
+def add_valid_drift(tmp):
+    p = os.path.join(tmp, 'campaign-manifest.json')
+    camp = json.load(open(p))
+    camp['drift_assessment'] = 'valid'
+    json.dump(camp, open(p, 'w'))
+
+
 def run_report(camp_dir):
     out = os.path.join(camp_dir, "report.md")
     p = subprocess.run([sys.executable, REPORT, "--campaign", camp_dir, "--out", out],
@@ -214,6 +221,7 @@ class TestReportDist(unittest.TestCase):
                 "cases/a/trial3/manifest.json": self._dist_manifest(complete=True, correct=True, wall=0.25, consumed=1000, validity=v_false),
             }
             make_campaign(tmp, outcomes, manifests)
+            add_valid_drift(tmp)
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # only trial 1 is performance-valid: median engine wall 2.000, throughput 0.001 MB/s
@@ -259,6 +267,7 @@ class TestReportDist(unittest.TestCase):
                 "cases/a/trial2/manifest.json": self._dist_manifest(complete=True, correct=True, wall=0.5, consumed=1000, validity=v_true, kernel='none', scan_bytes=0, scan_ok=True),
             }
             make_campaign(tmp, outcomes, manifests)
+            add_valid_drift(tmp)
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             self.assertIn("mixed-kernels-not-comparable", text)
@@ -371,6 +380,7 @@ class TestCheckpoint2PlacementSamplingReporting(unittest.TestCase):
                 "cases/sc__legacy__fixed_faa__placement_validation/trial1/manifest.json": self._placement_validation_manifest(linked=linked, wall=0.1, consumed=1000),
             }
             make_campaign(tmp, outcomes, manifests)
+            add_valid_drift(tmp)
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # headline stats must reflect only the performance trial (2.0s, 0.001 MB/s), not the placement-validation trial
@@ -409,6 +419,7 @@ class TestCheckpoint2PlacementSamplingReporting(unittest.TestCase):
                 "cases/pv_unreadable/trial3/manifest.json": "__UNREADABLE__",
             }
             make_campaign(tmp, outcomes, manifests)
+            add_valid_drift(tmp)
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             # performance-class denominator/stats must include only the performance trial
@@ -496,6 +507,7 @@ class TestReportDistRepeatedTrials(unittest.TestCase):
                          "candidate": "fixed_faa", "trial": 1, "status": "ok",
                          "manifest": "cases/a/trial1/manifest.json"}]
             make_campaign(tmp, outcomes, {"cases/a/trial1/manifest.json": manifest})
+            add_valid_drift(tmp)
             rc, text, err = run_report(tmp)
             self.assertEqual(rc, 0, msg=err + "\n" + text)
             return text
@@ -663,8 +675,10 @@ class TestReportDistDriftFailClosed(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_campaign_without_drift_fields_keeps_medians(self):
-        # Old campaigns without drift fields: medians preserved (backward compat).
+    def test_campaign_without_drift_fields_suppresses_medians(self):
+        # CK-6.5 (P1 unified drift gate): a campaign with NO established
+        # valid drift (old campaigns without drift fields) SUPPRESSES
+        # headline performance medians; missing drift is never 'no drift'.
         tmp = tempfile.mkdtemp(prefix="rptdrift3_")
         try:
             camp = {
@@ -684,8 +698,10 @@ class TestReportDistDriftFailClosed(unittest.TestCase):
             with open(os.path.join(tmp, "campaign-manifest.json"), "w") as f:
                 json.dump(camp, f)
             text = self._run_report(tmp)
-            self.assertIn("| sc | legacy | pset__default | fixed_faa | 1 | 1 | 1 | 1 | 0.001 | 2.000 |", text)
-            self.assertNotIn("Campaign drift status", text)
+            # missing drift => suppressed (no headline medians)
+            self.assertNotIn("0.001 | 2.000 |", text)
+            self.assertIn("Headline performance medians are suppressed", text)
+            self.assertIn("no-performance-valid-trials", text)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -874,3 +890,76 @@ class TestCK65PairedRegimeGrouped(unittest.TestCase):
         self.assertEqual(rc, 0, msg=err + text)
         self.assertIn("No qualifying pairs", text)   # repeated trial excluded
         self.assertNotIn("99999", text.split("CK-6.5 Paired")[-1].split("## Invalid")[0])
+
+class TestUnifiedDriftValidity(unittest.TestCase):
+    """P1 unified drift gate: one canonical validity decision for BOTH
+    headline and paired performance."""
+    def _mk(self, tmp, perf_arm_pair=True, drift_marker="__MISSING__"):
+        arms = [("centralized_ingest", 1, 1.0, 1000, "balanced"),
+                ("fixed_faa", 1, 1.0, 1000, "balanced")]
+        outcomes, manifests = self._arm_pair(arms)
+        make_campaign(tmp, outcomes, manifests)
+        p = os.path.join(tmp, "campaign-manifest.json")
+        camp = json.load(open(p))
+        if drift_marker == "__MISSING__":
+            camp.pop("drift", None); camp.pop("drift_assessment", None)
+        else:
+            camp["drift_assessment"] = drift_marker[0]; camp["drift"] = drift_marker[1]
+        json.dump(camp, open(p, "w"))
+        return tmp
+
+    def _arm_pair(self, arms):
+        tmp_outcomes = []; manifests = {}
+        for cand, trial, wall, consumed, regime in arms:
+            o = {"case": "sc__legacy__%s" % cand, "scenario": "sc", "candidate": cand,
+                 "trial": trial, "status": "ok", "mapping_id": "legacy",
+                 "trial_class": "performance", "placement_sampling": "off",
+                 "manifest": "cases/sc__legacy__%s/trial%s/manifest.json" % (cand, trial)}
+            tmp_outcomes.append(o)
+            dr = _dist_manifest_base(complete=True, wall=wall, correct=True, consumed=consumed)
+            dr["dist_result"]["nodes"][0]["bytes_consumed"] = consumed
+            dr["dist_result"]["nodes"][0]["regime"] = {"regime": regime, "evidence": {}}
+            dr["dist_result"]["validity"]["performance_measurement"] = True
+            manifests[o["manifest"]] = dr
+        return tmp_outcomes, manifests
+
+    def _assert_both_suppressed(self, tmp):
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertIn("Headline performance medians are suppressed", text)
+        self.assertIn("Paired performance comparison SUPPRESSED", text)
+
+    def test_missing_drift_suppresses_both(self):
+        tmp = tempfile.mkdtemp(); self._mk(tmp, drift_marker="__MISSING__")
+        self._assert_both_suppressed(tmp)
+
+    def test_malformed_drift_suppresses_both(self):
+        tmp = tempfile.mkdtemp(); self._mk(tmp, drift_marker=(None, {"garbage": 1}))
+        self._assert_both_suppressed(tmp)
+
+    def test_unknown_drift_suppresses_both(self):
+        tmp = tempfile.mkdtemp(); self._mk(tmp, drift_marker=("weird", None))
+        self._assert_both_suppressed(tmp)
+
+    def test_invalidated_drift_suppresses_both(self):
+        tmp = tempfile.mkdtemp(); self._mk(tmp, drift_marker=("invalidated", None))
+        self._assert_both_suppressed(tmp)
+
+    def test_campaign_valid_false_suppresses_both(self):
+        tmp = tempfile.mkdtemp(); self._mk(tmp, drift_marker=(None, {"campaign_valid": False}))
+        self._assert_both_suppressed(tmp)
+
+    def test_explicit_valid_drift_permits_both(self):
+        tmp = tempfile.mkdtemp(); self._mk(tmp, drift_marker=("valid", None))
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertNotIn("Headline performance medians are suppressed", text)
+        self.assertNotIn("Paired performance comparison SUPPRESSED", text)
+        self.assertIn("Qualifying pairs (baseline+candidate", text)
+
+    def test_campaign_valid_true_permits_both(self):
+        tmp = tempfile.mkdtemp(); self._mk(tmp, drift_marker=(None, {"campaign_valid": True}))
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertNotIn("Headline performance medians are suppressed", text)
+        self.assertNotIn("Paired performance comparison SUPPRESSED", text)

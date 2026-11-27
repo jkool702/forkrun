@@ -1,9 +1,14 @@
 # WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-FINAL-CORRECTIONS-2 — Closeout
 
+**Working branch:**
+`WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-FINAL-CORRECTIONS-4`
+(narrow `FINAL-CORRECTIONS-4` correction pass over `...FINAL-CORRECTIONS-2`;
+not a new base; original `...FINAL-CORRECTIONS-2` history intact).
+
 **Work order:** CK-5→CK-1→CK-6→CK-2→CK-4→CK-3→CK-7 corrective pass.
 **Base:** `66efac3ebaed84a4265f9c3c82686961ed7fb42a`
 (branch `WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-IMPL`).
-**Working branch:** `WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-FINAL-CORRECTIONS-2`.
+**Working branch:** `WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-FINAL-CORRECTIONS-4`.
 **No rental. No production adoption. No physical-NUMA validation. Frozen
 production files untouched. Not merged to main. No MADV_POPULATE_WRITE /
 prepopulation-window / per-node-memfd / production-ingest changes.**
@@ -32,7 +37,7 @@ prepopulation-window / per-node-memfd / production-ingest changes.**
 | CK-6 | PASS | corrected classifier semantics; actual C instrumentation; no consumer-limited; starvation/backpressure/read/claim; zero-claim split; normalization + denominators; validation→indeterminate; actual wall + configured max_backlog (no hardcoded 1.0; no high-water-as-cap); not swallowed; DIST_RESULT evidence; pairing key (no candidate); duration-normalized; paired regime-grouped report; **automated regime decision DEFERRED; 15% not guarantee**; same classifier; tests |
 | CK-2 | PASS | queue-push injection fired + result + join + reconcile; pread immediate/after-partial/premature-EOF + no rate-limit-after-error + rollback + join; alloc-fail + thread-create-fail + partial-init; proven; accounting; prompt bound; LIVENESS accurate + sleep bounds; no heartbeat |
 | CK-4 | PASS | enforceable source + syscall + undefined-symbol audit; fail-closed; allowlist; unknown→review; multiline+alias; inline-asm; clone/clone3; nm; pthread_create ok; bad honored; threads_only honest; FORK_AUDIT; tests |
-| CK-3 | PASS | atomic inventory regenerated actual (43); all sites; corrected next_offset ACQ_REL / outstanding+published not atomic / peer_headroom / stop / ingestors_done / input_changed / test atomics; mutex inventory; sanitizer harness fail-closed; instrumentation; artifact unchanged; LSan honesty; ASan+UBSan+TSan rerun final C; logs+results retained; SANITIZER_EVIDENCE; **LSan not validated (full suite); separate smoke; not proof** |
+| CK-3 | PASS | atomic inventory regenerated actual (47); all sites; corrected next_offset ACQ_REL / outstanding+published not atomic / peer_headroom / stop / ingestors_done / input_changed / test atomics; mutex inventory; sanitizer harness fail-closed; instrumentation; artifact unchanged; LSan honesty; ASan+UBSan+TSan rerun final C; logs+results retained; SANITIZER_EVIDENCE; **LSan not validated (full suite); separate smoke; not proof** |
 | CK-7 | PASS | identities; history archive corrected + full preservation; rental gate unsigned + accurate; provenance |
 
 ## Validation (see terminal report for exact commands/results)

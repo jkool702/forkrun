@@ -71,20 +71,31 @@ def main():
     # never "no drift".
     drift = camp.get("drift")
     drift_assessment = camp.get("drift_assessment")
-    if drift_assessment is None and isinstance(drift, dict):
-        drift_assessment = "invalidated" if drift.get("campaign_valid") is False else "valid"
-    campaign_drift_invalidated = drift_assessment in ("invalidated", "failed", "unavailable", "unreadable")
-    # CK-6.5 (P1): paired PERFORMANCE comparison requires an EXPLICITLY
-    # ESTABLISHED VALID drift assessment. Missing / unreadable / malformed /
-    # unknown / invalidated => suppress. Only `drift_assessment=="valid"`
-    # (or `drift.campaign_valid is True` when no assessment string) qualifies.
-    # NOT inferred "valid" from a present-but-empty drift object.
-    campaign_drift_valid = (
-        camp.get("drift_assessment") == "valid"
-        or (camp.get("drift_assessment") is None
-            and isinstance(drift, dict)
-            and drift.get("campaign_valid") is True)
-    )
+    # ONE canonical campaign-drift validity decision, shared by headline
+    # AND paired performance. Valid requires explicit establishment:
+    #   drift_assessment == "valid", OR (no assessment string AND
+    #   drift.campaign_valid is True). NOT inferred valid from a
+    #   present-but-empty/malformed drift object. campaign_valid==False =>
+    #   invalidated. Missing / unreadable / malformed / unknown /
+    #   invalidated / failed / unavailable / unreadable => NOT valid =>
+    #   suppress BOTH headline AND paired performance. Missing drift is
+    #   "unavailable", never "no drift". A missing drift report is
+    #   unavailable, never implicitly valid.
+    if drift_assessment is not None:
+        _effective_assessment = drift_assessment
+    elif isinstance(drift, dict):
+        if drift.get("campaign_valid") is False:
+            _effective_assessment = "invalidated"
+        elif drift.get("campaign_valid") is True:
+            _effective_assessment = "valid"
+        else:
+            _effective_assessment = None   # malformed/empty/unknown drift object
+    else:
+        _effective_assessment = None       # missing drift => unavailable
+    campaign_drift_valid = (_effective_assessment == "valid")
+    drift_assessment = _effective_assessment if _effective_assessment is not None else drift_assessment
+    # unified: anything not explicitly valid suppresses performance
+    campaign_drift_invalidated = not campaign_drift_valid
 
     groups = defaultdict(list)
     invalid = []
