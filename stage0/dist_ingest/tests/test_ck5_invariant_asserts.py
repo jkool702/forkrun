@@ -121,6 +121,9 @@ class TestCK5Activation(unittest.TestCase):
                 self.assertEqual(lib.di_test_set_publish_seam(eng, PUBLISH_SEAM_NULL_BUF), 0)
                 rc, res, elapsed = _run(lib, eng)
                 self.assertNotEqual(rc, 0, "malformed chunk must fail in compile-time mode")
+                # same precise invariant reason as runtime mode (not just nonzero)
+                self.assertEqual(rc, DI_ERR_INVARIANT, "compile-time malformed chunk must return DI_ERR_INVARIANT(-6)")
+                self.assertEqual(res.invariant_failed, 1, "invariant_failed flag must be set in compile-time mode")
                 self.assertTrue(lib.di_test_publish_seam_fired(eng), "publish seam must fire")
                 self.assertLess(elapsed, 10.0, "no deadlock")
             finally:

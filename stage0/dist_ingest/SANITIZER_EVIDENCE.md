@@ -31,8 +31,8 @@ runtime discovered; artifact instrumentation verified; LD_PRELOAD actual.
 
 | Sanitizer | mode | source SHA | tests | findings | test RC | artifact unchanged | result |
 |---|---|---|---|---|---|---|---|
-| ASan+UBSan | full suite | `3f4f3f89` | **Ran 344 tests** | **0** | 0 | yes (SHA-256) | PASS_OK |
-| TSan | full suite | `3f4f3f89` | **Ran 344 tests** | **0** | 0 | yes (SHA-256) | PASS_OK |
+| ASan+UBSan | full suite | `408283c9` | **Ran 344 tests** | **0** | 0 | yes (SHA-256) | PASS_OK |
+| TSan | full suite | `408283c9` | **Ran 344 tests** | **0** | 0 | yes (SHA-256) | PASS_OK |
 
 Flags: ASan+UBSan `-O1 -g -fno-omit-frame-pointer -fPIC -fsanitize=address,undefined`
 + `-shared -pthread -fsanitize=address,undefined`; ASan `halt_on_error=1`;
@@ -63,4 +63,4 @@ Artifacts (retained): `sanitizer_evidence/asan-ubsan/` + `sanitizer_evidence/tsa
 
 ## Historical (not current evidence)
 Prior evidence at `21fc710e` (276 tests, detect_leaks=0) and earlier
-are historical; superseded by this fresh rerun at `3f4f3f89`.
+are historical; superseded by this fresh rerun at `408283c9`.

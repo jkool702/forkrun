@@ -3,10 +3,10 @@
 **Source of truth:** actual `__atomic_*` call sites in
 `stage0/dist_ingest/dist_ingest.c` at the final C SHA. Regenerated
 systematically with `tools/di_atomic_inventory.py`. **Count is actual,
-not conceptual; NOT required to be 37.** Production ABI unaffected (this
+not conceptual; NOT required to be any fixed number.** Production ABI unaffected (this
 is the experimental engine; no frozen production file).
 
-**Atomic inventory: 43 `__atomic_*` call sites** (17 store_n + 23
+**Atomic inventory: 47 `__atomic_*` call sites** (20 store_n + 24
 load_n + 3 fetch_add). **NOT atomic (mutex-protected):** `n->outstanding`,
 `n->published_backlog`, `n->consumer_inflight_backlog`,
 `n->accounting_violation`, `n->max_*`, queue fields, `n->m.*`, seams;
@@ -42,6 +42,11 @@ directly with a relaxed load — see per-object sync below.
 - readers: di_ingest_step (**RELAXED** reads of OTHER nodes' peer_headroom for adaptive policy).
 - **order:** advisory hint only. A claim is always re-checked under n->mu via di_can_admit; peer staleness cannot over-admit. **atomic field; not omitted.**
 
+### `eng->invariant_failed` — `_Atomic int` — CORRECTNESS-CRITICAL (CK-5 P1)
+- writers: di_create store 0 RELAXED; **di_queue_push store 1 __ATOMIC_RELEASE** on invalid publication (`di_invariant_publish_check` fails); store 1 __ATOMIC_RELEASE on accounting boundary violation.
+- reader: di_run **__ATOMIC_ACQUIRE** post-join; OR'd into `result->invariant_failed`; drives `DI_ERR_INVARIANT`.
+- **order:** RELEASE store on violation + ACQUIRE read after pthread_join; explicit reason not lost; no silent reset.
+
 ### test-only atomics — ADVISORY (not correctness-critical; no hot-path effect when unused)
 - `g_placement_sample_calls` (`_Atomic uint64_t`): fetch_add RELAXED; store 0 RELAXED; load RELAXED. test counter.
 - `g_create_fail_after_nodes` (`_Atomic int`): store RELAXED; load RELAXED. fault-injection seam.
@@ -61,54 +66,57 @@ directly with a relaxed load — see per-object sync below.
 - Advisory atomics: RELAXED sufficient.
 
 ## Call-site table (every actual __atomic_* operation; generated)
-TOTAL __atomic_* call sites: 43
+TOTAL __atomic_* call sites: 47
 
 | # | line | op | object | order | enclosing fn |
 |---|---|---|---|---|---|
-| 1 | 240 | store_n | `&n->peer_headroom` | RELAXED | di_publish_headroom |
-| 2 | 755 | fetch_add | `&g_placement_sample_calls` | RELAXED | di_sample_placement |
-| 3 | 861 | store_n | `&eng->input_changed` | RELEASE | di_pread_full |
-| 4 | 944 | load_n | `&eng->stop` | RELAXED | di_queue_push |
-| 5 | 949 | load_n | `&eng->stop` | RELAXED | di_queue_push |
-| 6 | 999 | load_n | `&eng->ingestors_done` | ACQUIRE | di_queue_pop |
-| 7 | 1000 | load_n | `&eng->stop` | RELAXED | di_queue_pop |
-| 8 | 1086 | store_n | `&eng->stop` | RELEASE | di_engine_stop |
-| 9 | 1135 | load_n | `&eng->nodes[i].peer_headroom` | RELAXED | di_ingest_step |
-| 10 | 1144 | load_n | `&eng->nodes[i].peer_headroom` | RELAXED | di_ingest_step |
-| 11 | 1166 | load_n | `&eng->next_offset` | ACQUIRE | di_ingest_step |
-| 12 | 1190 | load_n | `&eng->next_offset` | RELAXED | di_ingest_step |
-| 13 | 1199 | fetch_add | `&eng->next_offset` | ACQ_REL | di_ingest_step |
-| 14 | 1262 | store_n | `&eng->input_changed` | RELEASE | di_ingest_step |
-| 15 | 1353 | load_n | `&eng->stop` | RELAXED | di_ingestor_thread |
-| 16 | 1359 | load_n | `&eng->next_offset` | ACQUIRE | di_ingestor_thread |
-| 17 | 1373 | load_n | `&eng->next_offset` | ACQUIRE | di_ingestor_thread |
-| 18 | 1383 | store_n | `&eng->ingestors_done` | RELEASE | di_ingestor_thread |
-| 19 | 1394 | load_n | `&eng->stop` | RELAXED | di_ingestor_thread |
-| 20 | 1402 | load_n | `&eng->next_offset` | ACQUIRE | di_ingestor_thread |
-| 21 | 1412 | load_n | `&eng->next_offset` | ACQUIRE | di_ingestor_thread |
-| 22 | 1422 | fetch_add | `&eng->ingestors_done` | ACQ_REL | di_ingestor_thread |
-| 23 | 1478 | store_n | `&eng->next_offset` | RELAXED | di_create |
-| 24 | 1479 | store_n | `&eng->stop` | RELAXED | di_create |
-| 25 | 1480 | store_n | `&eng->ingestors_done` | RELAXED | di_create |
-| 26 | 1481 | store_n | `&eng->input_changed` | RELAXED | di_create |
-| 27 | 1554 | store_n | `&n->peer_headroom` | RELAXED | di_create |
-| 28 | 1558 | load_n | `&g_create_fail_after_nodes` | RELAXED | di_create |
-| 29 | 1609 | load_n | `&eng->thread_create_fail_nth` | RELAXED | cmp_resrec |
-| 30 | 1612 | store_n | `&eng->thread_create_fail_nth` | RELAXED | cmp_resrec |
-| 31 | 1614 | store_n | `&eng->thread_create_fail_fired` | RELAXED | cmp_resrec |
-| 32 | 1661 | store_n | `&eng->ingestors_done` | RELEASE | di_run |
-| 33 | 1712 | load_n | `&eng->next_offset` | ACQUIRE | di_run |
-| 34 | 1714 | load_n | `&eng->input_changed` | ACQUIRE | di_run |
-| 35 | 1787 | load_n | `&eng->input_changed` | ACQUIRE | di_run |
-| 36 | 1793 | load_n | `&eng->stop` | RELAXED | di_run |
-| 37 | 1799 | load_n | `&eng->next_offset` | ACQUIRE | di_run |
-| 38 | 1979 | store_n | `&g_create_fail_after_nodes` | RELAXED | di_test_set_create_fail_seam |
-| 39 | 2019 | store_n | `&eng->thread_create_fail_nth` | RELAXED | di_test_set_thread_create_fail_seam |
-| 40 | 2020 | store_n | `&eng->thread_create_fail_fired` | RELAXED | di_test_set_thread_create_fail_seam |
-| 41 | 2026 | load_n | `&eng->thread_create_fail_fired` | RELAXED | di_test_thread_create_fail_fired |
-| 42 | 2047 | store_n | `&g_placement_sample_calls` | RELAXED | di_test_reset_placement_sample_calls |
-| 43 | 2051 | load_n | `&g_placement_sample_calls` | RELAXED | di_test_get_placement_sample_calls |
+| 1 | 243 | store_n | `&n->peer_headroom` | RELAXED | di_publish_headroom |
+| 2 | 765 | fetch_add | `&g_placement_sample_calls` | RELAXED | di_sample_placement |
+| 3 | 871 | store_n | `&eng->input_changed` | RELEASE | di_pread_full |
+| 4 | 950 | store_n | `&eng->invariant_failed` | RELEASE | di_queue_push |
+| 5 | 956 | load_n | `&eng->stop` | RELAXED | di_queue_push |
+| 6 | 961 | load_n | `&eng->stop` | RELAXED | di_queue_push |
+| 7 | 995 | store_n | `&eng->invariant_failed` | RELEASE | di_queue_push |
+| 8 | 1012 | load_n | `&eng->ingestors_done` | ACQUIRE | di_queue_pop |
+| 9 | 1013 | load_n | `&eng->stop` | RELAXED | di_queue_pop |
+| 10 | 1099 | store_n | `&eng->stop` | RELEASE | di_engine_stop |
+| 11 | 1148 | load_n | `&eng->nodes[i].peer_headroom` | RELAXED | di_ingest_step |
+| 12 | 1157 | load_n | `&eng->nodes[i].peer_headroom` | RELAXED | di_ingest_step |
+| 13 | 1179 | load_n | `&eng->next_offset` | ACQUIRE | di_ingest_step |
+| 14 | 1203 | load_n | `&eng->next_offset` | RELAXED | di_ingest_step |
+| 15 | 1212 | fetch_add | `&eng->next_offset` | ACQ_REL | di_ingest_step |
+| 16 | 1275 | store_n | `&eng->input_changed` | RELEASE | di_ingest_step |
+| 17 | 1366 | load_n | `&eng->stop` | RELAXED | di_ingestor_thread |
+| 18 | 1372 | load_n | `&eng->next_offset` | ACQUIRE | di_ingestor_thread |
+| 19 | 1386 | load_n | `&eng->next_offset` | ACQUIRE | di_ingestor_thread |
+| 20 | 1396 | store_n | `&eng->ingestors_done` | RELEASE | di_ingestor_thread |
+| 21 | 1407 | load_n | `&eng->stop` | RELAXED | di_ingestor_thread |
+| 22 | 1415 | load_n | `&eng->next_offset` | ACQUIRE | di_ingestor_thread |
+| 23 | 1425 | load_n | `&eng->next_offset` | ACQUIRE | di_ingestor_thread |
+| 24 | 1435 | fetch_add | `&eng->ingestors_done` | ACQ_REL | di_ingestor_thread |
+| 25 | 1491 | store_n | `&eng->next_offset` | RELAXED | di_create |
+| 26 | 1492 | store_n | `&eng->stop` | RELAXED | di_create |
+| 27 | 1493 | store_n | `&eng->ingestors_done` | RELAXED | di_create |
+| 28 | 1494 | store_n | `&eng->input_changed` | RELAXED | di_create |
+| 29 | 1495 | store_n | `&eng->invariant_failed` | RELAXED | di_create |
+| 30 | 1568 | store_n | `&n->peer_headroom` | RELAXED | di_create |
+| 31 | 1572 | load_n | `&g_create_fail_after_nodes` | RELAXED | di_create |
+| 32 | 1623 | load_n | `&eng->thread_create_fail_nth` | RELAXED | cmp_resrec |
+| 33 | 1626 | store_n | `&eng->thread_create_fail_nth` | RELAXED | cmp_resrec |
+| 34 | 1628 | store_n | `&eng->thread_create_fail_fired` | RELAXED | cmp_resrec |
+| 35 | 1675 | store_n | `&eng->ingestors_done` | RELEASE | di_run |
+| 36 | 1718 | load_n | `&eng->invariant_failed` | ACQUIRE | di_run |
+| 37 | 1727 | load_n | `&eng->next_offset` | ACQUIRE | di_run |
+| 38 | 1729 | load_n | `&eng->input_changed` | ACQUIRE | di_run |
+| 39 | 1802 | load_n | `&eng->input_changed` | ACQUIRE | di_run |
+| 40 | 1808 | load_n | `&eng->stop` | RELAXED | di_run |
+| 41 | 1814 | load_n | `&eng->next_offset` | ACQUIRE | di_run |
+| 42 | 1994 | store_n | `&g_create_fail_after_nodes` | RELAXED | di_test_set_create_fail_seam |
+| 43 | 2034 | store_n | `&eng->thread_create_fail_nth` | RELAXED | di_test_set_thread_create_fail_seam |
+| 44 | 2035 | store_n | `&eng->thread_create_fail_fired` | RELAXED | di_test_set_thread_create_fail_seam |
+| 45 | 2041 | load_n | `&eng->thread_create_fail_fired` | RELAXED | di_test_thread_create_fail_fired |
+| 46 | 2062 | store_n | `&g_placement_sample_calls` | RELAXED | di_test_reset_placement_sample_calls |
+| 47 | 2066 | load_n | `&g_placement_sample_calls` | RELAXED | di_test_get_placement_sample_calls |
 
 ---
-*Regenerated WO-...-FINAL-CORRECTIONS-2 (CK-3). fn column best-effort;
-authoritative = source line + object + op + order.*
+*Regenerated ... (CK-3). fn column best-effort; authoritative = source line + object + op + order.*

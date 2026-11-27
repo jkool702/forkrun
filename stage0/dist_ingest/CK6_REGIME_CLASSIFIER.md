@@ -114,9 +114,12 @@ conditions; additional unrecorded conditions noted as a limitation).
 wall_seconds` (NOT raw consumed bytes when durations differ). Invalid/
 incorrect/incomplete trials excluded; **`performance_measurement`
 (`v_perf`) must be explicitly `true` for BOTH arms; `false` AND `unknown`
-are excluded; repetition `v_perf_headline=false` excludes.** **Campaign
-drift (invalidated/failed/unavailable/unreadable) SUPPRESSES paired
-performance comparison** (same as headline medians). `report_dist.py`
+are excluded; repetition `v_perf_headline=false` excludes.** **Campaign drift:** paired performance requires an **explicitly established
+VALID** drift assessment; invalidated/failed/unavailable/unreadable AND
+**missing/malformed/unknown suppress** (missing drift never 'no drift').
+**Repeated-duration trials are EXCLUDED** from per-node paired report
+unless per-node aggregates across passes exist; aggregate wall time not
+combined with pass-1 numerator/regime. `report_dist.py`
 emits a **paired, regime-grouped** report (`emit_paired_regime_report`):
 baseline `centralized_ingest`, pairs per regime, median paired
 duration-normalized improvement; insufficient pairs => inconclusive.

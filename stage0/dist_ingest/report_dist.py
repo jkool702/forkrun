@@ -74,6 +74,17 @@ def main():
     if drift_assessment is None and isinstance(drift, dict):
         drift_assessment = "invalidated" if drift.get("campaign_valid") is False else "valid"
     campaign_drift_invalidated = drift_assessment in ("invalidated", "failed", "unavailable", "unreadable")
+    # CK-6.5 (P1): paired PERFORMANCE comparison requires an EXPLICITLY
+    # ESTABLISHED VALID drift assessment. Missing / unreadable / malformed /
+    # unknown / invalidated => suppress. Only `drift_assessment=="valid"`
+    # (or `drift.campaign_valid is True` when no assessment string) qualifies.
+    # NOT inferred "valid" from a present-but-empty drift object.
+    campaign_drift_valid = (
+        camp.get("drift_assessment") == "valid"
+        or (camp.get("drift_assessment") is None
+            and isinstance(drift, dict)
+            and drift.get("campaign_valid") is True)
+    )
 
     groups = defaultdict(list)
     invalid = []
@@ -645,7 +656,9 @@ def main():
                             lines.append("  - invalid reasons: %s" % r.get("invalid_reasons"))
             lines.append("")
 
-    emit_paired_regime_report(lines, groups, campaign_drift_invalidated=campaign_drift_invalidated)
+    emit_paired_regime_report(lines, groups,
+                              campaign_drift_invalidated=campaign_drift_invalidated,
+                              campaign_drift_valid=campaign_drift_valid)
 
     lines.append("## Invalid / incomplete / failed / unreadable / missing trials")
     lines.append("")
@@ -746,6 +759,14 @@ def paired_regime_groups(groups):
                 continue
             if rec.get("v_perf_headline") is False:
                 continue
+            # CK-6.5 (P1): repeated-duration trials are EXCLUDED from the
+            # per-node paired report. Their headline aggregate wall time
+            # would not match the pass-1 node numerator/regime; actual
+            # per-node aggregates across contributing passes are not
+            # available in artifacts. (No silent numerator/denominator mix.)
+            _dq = rec.get("duration_qualification") or {}
+            if _dq.get("repetition_used") or rec.get("qualified_duration_passes"):
+                continue
             dr = rec.get("dist") or {}
             wall = rec.get("engine_wall_s") or dr.get("wall_seconds")
             nodes = dr.get("nodes") or []
@@ -766,7 +787,8 @@ def paired_regime_groups(groups):
     return pairs
 
 
-def emit_paired_regime_report(lines, groups, campaign_drift_invalidated=False):
+def emit_paired_regime_report(lines, groups, campaign_drift_invalidated=False,
+                              campaign_drift_valid=False):
     pairs = paired_regime_groups(groups)
     lines.append("## CK-6.5 Paired, regime-grouped comparison (duration-normalized)")
     lines.append("")
@@ -780,11 +802,14 @@ def emit_paired_regime_report(lines, groups, campaign_drift_invalidated=False):
                  "guarantee. This section emits paired evidence; it does not authorize a rental or "
                  "declare a winner.")
     lines.append("")
-    if campaign_drift_invalidated:
-        # CK-6.5 (P1): campaign drift invalidated/failed/unavailable/unreadable
-        # suppresses paired performance comparison (same as headline medians).
+    if campaign_drift_invalidated or not campaign_drift_valid:
+        # CK-6.5 (P1): paired performance requires explicitly established
+        # VALID drift; invalidated/failed/unavailable/unreadable AND missing/
+        # malformed/unknown suppress paired performance (same spirit as
+        # headline medians; missing drift is never 'no drift').
         lines.append("**Paired performance comparison SUPPRESSED** — campaign drift assessment is "
-                     "invalidated/failed/unavailable/unreadable; paired performance evidence not established.")
+                     "not explicitly established as valid (invalidated/failed/unavailable/unreadable/"
+                     "missing/malformed/unknown); paired performance evidence not established.")
         lines.append("")
         return
     regime_grouped = defaultdict(list)

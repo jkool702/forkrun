@@ -715,6 +715,12 @@ class TestCK65PairedRegimeGrouped(unittest.TestCase):
             manifests[o["manifest"]] = dr
         return outcomes, manifests
 
+    def _mk_valid_drift(self, tmp, outcomes, manifests):
+        make_campaign(tmp, outcomes, manifests)
+        camp = json.load(open(os.path.join(tmp, "campaign-manifest.json")))
+        camp["drift_assessment"] = "valid"
+        json.dump(camp, open(os.path.join(tmp, "campaign-manifest.json"), "w"))
+
     def test_pairing_candidate_not_in_key_and_duration_normalized(self):
         tmp = tempfile.mkdtemp(prefix="rptck65_")
         # baseline + candidate, SAME scenario/trial/node/workload, DIFFERENT wall + consumed
@@ -723,7 +729,7 @@ class TestCK65PairedRegimeGrouped(unittest.TestCase):
             ("fixed_faa", 1, 1.0, 2000, "consumer-starved"),   # faster + different regime
         ]
         outcomes, manifests = self._mk(tmp, arms)
-        make_campaign(tmp, outcomes, manifests)
+        self._mk_valid_drift(tmp, outcomes, manifests)
         rc, text, err = run_report(tmp)
         self.assertEqual(rc, 0, msg=err + text)
         self.assertIn("CK-6.5 Paired, regime-grouped", text)
@@ -748,7 +754,7 @@ class TestCK65PairedRegimeGrouped(unittest.TestCase):
                 manifests[k]["dist_result"]["correct"] = False
                 manifests[k]["dist_result"]["validity"]["functional_correctness"] = False
                 manifests[k]["dist_result"]["rc"] = 1
-        make_campaign(tmp, outcomes, manifests)
+        self._mk_valid_drift(tmp, outcomes, manifests)
         rc, text, err = run_report(tmp)
         self.assertEqual(rc, 0, msg=err + text)
         self.assertIn("No qualifying pairs", text)
@@ -760,7 +766,7 @@ class TestCK65PairedRegimeGrouped(unittest.TestCase):
         outcomes, manifests = self._mk(tmp, arms)
         for k in manifests:
             manifests[k]["dist_result"]["validity"]["performance_measurement"] = None  # unknown
-        make_campaign(tmp, outcomes, manifests)
+        self._mk_valid_drift(tmp, outcomes, manifests)
         rc, text, err = run_report(tmp)
         self.assertEqual(rc, 0, msg=err + text)
         self.assertIn("No qualifying pairs", text)
@@ -773,7 +779,7 @@ class TestCK65PairedRegimeGrouped(unittest.TestCase):
         outcomes, manifests = self._mk(tmp, arms)
         for k in manifests:
             manifests[k]["dist_result"]["validity"]["performance_measurement"] = False
-        make_campaign(tmp, outcomes, manifests)
+        self._mk_valid_drift(tmp, outcomes, manifests)
         rc, text, err = run_report(tmp)
         self.assertEqual(rc, 0, msg=err + text)
         self.assertIn("No qualifying pairs", text)
@@ -787,7 +793,7 @@ class TestCK65PairedRegimeGrouped(unittest.TestCase):
         for k in manifests:
             if "fixed_faa" in k:
                 manifests[k]["dist_result"]["validity"]["performance_measurement"] = None
-        make_campaign(tmp, outcomes, manifests)
+        self._mk_valid_drift(tmp, outcomes, manifests)
         rc, text, err = run_report(tmp)
         self.assertEqual(rc, 0, msg=err + text)
         self.assertIn("No qualifying pairs", text)
@@ -807,3 +813,64 @@ class TestCK65PairedRegimeGrouped(unittest.TestCase):
         self.assertIn("Paired performance comparison SUPPRESSED", text)
         self.assertIn("No qualifying pairs", text) if False else None
         self.assertNotIn("Qualifying pairs (baseline+candidate", text)
+
+    def _perf_arm_pair(self, tmp):
+        arms = [("centralized_ingest", 1, 1.0, 1000, "balanced"),
+                ("fixed_faa", 1, 1.0, 1000, "balanced")]
+        outcomes, manifests = self._mk(tmp, arms)
+        make_campaign(tmp, outcomes, manifests)
+        return outcomes, manifests
+
+    def test_missing_drift_suppresses_paired_performance(self):
+        tmp = tempfile.mkdtemp(prefix="rptck65m_")
+        self._perf_arm_pair(tmp)  # no drift metadata at all
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertIn("Paired performance comparison SUPPRESSED", text)
+        self.assertNotIn("Qualifying pairs (baseline+candidate", text)
+
+    def test_malformed_drift_suppresses_paired_performance(self):
+        tmp = tempfile.mkdtemp(prefix="rptck65mm_")
+        self._perf_arm_pair(tmp)
+        camp = json.load(open(os.path.join(tmp, "campaign-manifest.json")))
+        camp["drift"] = {"garbage": 123}            # malformed drift object
+        camp["drift_assessment"] = "weird-unknown"   # unknown assessment
+        json.dump(camp, open(os.path.join(tmp, "campaign-manifest.json"), "w"))
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertIn("Paired performance comparison SUPPRESSED", text)
+
+    def test_unreadable_drift_suppresses_paired_performance(self):
+        tmp = tempfile.mkdtemp(prefix="rptck65u2_")
+        self._perf_arm_pair(tmp)
+        camp = json.load(open(os.path.join(tmp, "campaign-manifest.json")))
+        camp["drift_assessment"] = "unreadable"
+        json.dump(camp, open(os.path.join(tmp, "campaign-manifest.json"), "w"))
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertIn("Paired performance comparison SUPPRESSED", text)
+
+    def test_repeated_duration_trials_excluded_from_per_node_pairing(self):
+        tmp = tempfile.mkdtemp(prefix="rptck65r_")
+        arms = [("centralized_ingest", 1, 1.0, 1000, "balanced"),
+                ("fixed_faa", 1, 1.0, 1000, "balanced")]
+        outcomes, manifests = self._mk(tmp, arms)
+        # repeated-duration trial: valid aggregate BUT pass-1 node metrics
+        # differ from aggregate wall. Must NOT mix numerator/regime + denominator.
+        for k in manifests:
+            m = manifests[k]
+            m["duration_qualification"] = {"repetition_used": True, "pass_count": 3,
+                                           "stop_reason": "target_met", "meets_target": True}
+            m["duration_aggregate"] = {"aggregate_valid": True,
+                                       "aggregate_engine_wall_seconds": 30.0,
+                                       "aggregate_consumed_bytes": 99999,
+                                       "aggregate_scanned_bytes": 99999,
+                                       "aggregate_throughput_bps": 1.0}
+            m["wall_s"] = 30.0
+            m["dist_result"]["wall_seconds"] = 1.0  # pass-1 engine wall
+            m["dist_result"]["nodes"][0]["bytes_consumed"] = 1000  # pass-1 numerator
+        self._mk_valid_drift(tmp, outcomes, manifests)
+        rc, text, err = run_report(tmp)
+        self.assertEqual(rc, 0, msg=err + text)
+        self.assertIn("No qualifying pairs", text)   # repeated trial excluded
+        self.assertNotIn("99999", text.split("CK-6.5 Paired")[-1].split("## Invalid")[0])

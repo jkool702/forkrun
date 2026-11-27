@@ -37,14 +37,14 @@ not authorization; it is a checklist. **Not signed.**
       (SANITIZER_EVIDENCE.md; ASan+UBSan + TSan on final C; harness
       fail-closed; artifact unchanged; **LSan NOT validated for full
       suite; separate standalone LSan smoke; not proof no leaks**);
-      [ ] atomic inventory regenerated (actual 43 sites).
+      [ ] atomic inventory regenerated (actual 47 sites).
 - **CK-4:** [ ] required tests pass on final reviewed HEAD; [ ]
       enforceable symbol/source/syscall audit (`di_symbol_audit.py`,
       fail-closed) — `threads_only`.
 - **CK-5:** [ ] invariant checking real + enforceable; publication
       checker before admission; propagated; no invalid publish;
       accounting reconciliation; post-join; activation consistent.
-- [ ] Placement/physical-NUMA evidence limitations understood
+- [ ] Placement/physical-NUMA evidence **limitations** understood (physical evidence NOT required pre-rental; collected at Gate 2)
       (fake/local NUMA ≠ physical; mbind syscall ≠ physical placement;
       no physical-NUMA validation claimed).
 - [ ] Teardown, artifact preservation, host cleanup ready.
@@ -61,13 +61,34 @@ not authorization; it is a checklist. **Not signed.**
 - Reviewed plan artifact path: ________________
 - Reviewer: ________________  Date: ________________
 
-**Sign-off:** physically signed OFF/ON — all items pass + deferrals
-accepted + physical-NUMA evidence collected on rented hardware, rental
-authorized. Otherwise: **"not authorized to rent."**
+## Two distinct gates (no circular authorization) (P1 correction)
+
+### Gate 1 — PRE-RENTAL authorization (this gate)
+Independent sign-off of: experimental **plan**, readiness, test
+integrity, sanitizer/invariant/classifier evidence, **cleanup +
+teardown + artifact preservation + host-cleanup readiness**, pairing
+contract, explicit **accepted limitations + deferrals**, no outstanding
+P1. **Does NOT require physical-NUMA evidence** (which can only be
+collected after rental). **This is the only gate that authorizes
+rental.**
+
+**Pre-rental sign-off:** physically signed by independent reviewer —
+all Gate-1 items pass + deferrals accepted → **pre-rental rental
+authorized.** Otherwise: **"not authorized to rent."** (Currently
+UNSIGNED.)
+
+### Gate 2 — POST-RENTAL validation (separate; does NOT authorize rental)
+After rental, evaluate ACTUAL **physical-NUMA** evidence: real physical
+placement (move_pages on hardware), memory locality, throughput/scaling,
+ambiguity resolution, then approve **any production adoption** or
+further expansion. **Production adoption requires Gate 2 + separate
+authorization; never implied by Gate 1.** Physical-NUMA evidence is
+NOT claimed in this work order.
 
 This is a documented gate, not automation. **Do not initiate rental
-until independently signed. No physical-NUMA rental was initiated and
-no physical-NUMA validation is claimed by this work order.**
+until Gate 1 independently signed. No physical-NUMA rental was
+initiated and no physical-NUMA validation is claimed by this work
+order.** No production adoption. No merge to main.
 
 ---
 *WO-NUMA-PRE-RENTAL-READINESS-HARDENING-1-FINAL-CORRECTIONS-2 (CK-7).

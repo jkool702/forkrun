@@ -14,8 +14,8 @@ prepopulation-window / per-node-memfd / production-ingest changes.**
   (clean tree; ASan+UBSan + TSan; see SANITIZER_EVIDENCE.md). NOT
   claimed as final branch HEAD.
 - **Final C-code SHA:** last commit touching
-  `stage0/dist_ingest/dist_ingest.c` = `a6ba01a0ccfb3ba51d8fd3af11ae7d87f0fb3213`;
-  `dist_ingest.h` = `6a0d6cd47eb4cb632f6086578681ab8109c41098`. C
+  `stage0/dist_ingest/dist_ingest.c` = `408283c9df488e5338d911d94b249a35f473aad0`;
+  `dist_ingest.h` = `408283c9df488e5338d911d94b249a35f473aad0`. C
   unchanged afterward; sanitizer-tested C == final C.
 - **Final branch HEAD:** actual `git rev-parse HEAD` in terminal
   closeout report (not requiring a commit to contain its own hash).
