@@ -1,7 +1,7 @@
 {
   "sanitizer": "asan-ubsan",
-  "source_sha": "3f4f3f892a045d5c2c733b1825bd19dcdd973de6",
-  "final_source_sha": "3f4f3f892a045d5c2c733b1825bd19dcdd973de6",
+  "source_sha": "408283c9df488e5338d911d94b249a35f473aad0",
+  "final_source_sha": "408283c9df488e5338d911d94b249a35f473aad0",
   "dirty": 0,
   "compiler": "gcc",
   "compiler_version": "gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2)",
@@ -16,11 +16,11 @@
   "instrumentation_symbol": "__asan_init",
   "instrumentation_evidence": "                 U __asan_init\n                 U __asan_option_detect_stack_use_after_return\n                 U __asan_poison_stack_memory\n                 U __asan_register_globals\n                 U __asan_report_load1",
   "loaded_artifact": "/tmp/opencode/wt-final-corrections-2/stage0/libdist_ingest.so",
-  "artifact_sha256_before": "8bb484640e79e50c2c03d977f7e8ce6b4671eb14e39db134c482eb590f8fd1fd",
-  "artifact_sha256_after": "8bb484640e79e50c2c03d977f7e8ce6b4671eb14e39db134c482eb590f8fd1fd",
+  "artifact_sha256_before": "b8099d540809d313b28fbe64efd6cccae9f64ed7321841e45579e404114c573c",
+  "artifact_sha256_after": "b8099d540809d313b28fbe64efd6cccae9f64ed7321841e45579e404114c573c",
   "artifact_unchanged": true,
-  "runlog": "/tmp/opencode/di-san-asan-ubsan/run_20261126_193028.log",
-  "tests": "Ran 340 tests in 101.967s",
+  "runlog": "/tmp/opencode/final-asan2/run_20261126_214749.log",
+  "tests": "Ran 344 tests in 103.622s",
   "test_return_code": 0,
   "sanitizer_findings": 0,
   "sanitizer_finding_lines": [],
@@ -30,8 +30,9 @@
     "lsan_enabled": true,
     "lsan_effective": true,
     "lsan_findings": 0,
-    "lsan_runlog": "/tmp/opencode/di-san-asan-ubsan/lsan_smoke.log",
-    "note": "separate standalone engine smoke (no python runtime); detect_leaks=1; absence of findings is NOT proof of no leaks; python-suite LSan not validated"
+    "lsan_smoke_return_code": 0,
+    "lsan_runlog": "/tmp/opencode/final-asan2/lsan_smoke.log",
+    "note": "separate standalone engine smoke (no python runtime); detect_leaks=1; effective iff built + rc==0 + no LSan findings + no runtime-init failure; absence of findings is NOT proof of no leaks; python-suite LSan not validated"
   },
   "interpretation": "PASS_OK"
 }

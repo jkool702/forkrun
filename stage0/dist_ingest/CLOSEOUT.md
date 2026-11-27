@@ -10,7 +10,7 @@ prepopulation-window / per-node-memfd / production-ingest changes.**
 
 ## Identities (distinct; CK-7.1; no self-referential commit hash)
 
-- **Sanitizer-tested source SHA:** `3f4f3f892a045d5c2c733b1825bd19dcdd973de6`
+- **Sanitizer-tested source SHA:** `408283c9df488e5338d911d94b249a35f473aad0`
   (clean tree; ASan+UBSan + TSan; see SANITIZER_EVIDENCE.md). NOT
   claimed as final branch HEAD.
 - **Final C-code SHA:** last commit touching

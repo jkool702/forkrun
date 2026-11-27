@@ -9,11 +9,11 @@ machine-readable result.json on any failure; nonzero on REVIEW_REQUIRED;
 runtime discovery; compiler/flags/runtime recorded; logs preserved).
 
 ## Identities (distinct; CK-7.1)
-- **Sanitizer-tested source SHA:** `3f4f3f892a045d5c2c733b1825bd19dcdd973de6`
+- **Sanitizer-tested source SHA:** `408283c9df488e5338d911d94b249a35f473aad0`
   (dirty=0; both modes; CLEAN tree).
 - **Final C-code SHA:** last commit touching `dist_ingest.c`/`dist_ingest.h`
-  — dist_ingest.c `a6ba01a0ccfb3ba51d8fd3af11ae7d87f0fb3213`,
-  dist_ingest.h `6a0d6cd47eb4cb632f6086578681ab8109c41098`; C content
+  — dist_ingest.c `408283c9df488e5338d911d94b249a35f473aad0`,
+  dist_ingest.h `408283c9df488e5338d911d94b249a35f473aad0`; C content
   unchanged by sanitizer run + subsequent commits. (actual SHA recorded
   by `git log`; not requiring self-reference.)
 - **Final branch HEAD** + **subsequent documentation-only commits:** see
@@ -31,8 +31,8 @@ runtime discovered; artifact instrumentation verified; LD_PRELOAD actual.
 
 | Sanitizer | mode | source SHA | tests | findings | test RC | artifact unchanged | result |
 |---|---|---|---|---|---|---|---|
-| ASan+UBSan | full suite | `3f4f3f89` | **Ran 340 tests** | **0** | 0 | yes (SHA-256) | PASS_OK |
-| TSan | full suite | `3f4f3f89` | **Ran 340 tests** | **0** | 0 | yes (SHA-256) | PASS_OK |
+| ASan+UBSan | full suite | `3f4f3f89` | **Ran 344 tests** | **0** | 0 | yes (SHA-256) | PASS_OK |
+| TSan | full suite | `3f4f3f89` | **Ran 344 tests** | **0** | 0 | yes (SHA-256) | PASS_OK |
 
 Flags: ASan+UBSan `-O1 -g -fno-omit-frame-pointer -fPIC -fsanitize=address,undefined`
 + `-shared -pthread -fsanitize=address,undefined`; ASan `halt_on_error=1`;
@@ -50,7 +50,10 @@ Artifacts (retained): `sanitizer_evidence/asan-ubsan/` + `sanitizer_evidence/tsa
   findings is not proof of no leaks.
 - **Separate standalone engine LSan smoke attempted** (no python
   runtime): `detect_leaks=1`, engine create→run→destroy;
-  `lsan_enabled=true`, `lsan_effective=true`, `lsan_findings=0`.
+  `lsan_enabled=true`, `lsan_effective=true`, `lsan_findings=0`,
+  `lsan_smoke_return_code=0`. Effective only iff built + actually ran +
+  return code 0 + no LSan finding + no runtime-init failure; smoke return
+  code recorded; NOT unconditional;
   Recorded as effective; **not** claimed as proof of no leaks.
   See `sanitizer_evidence/asan-ubsan/lsan_smoke.log`.
 - **TSan**: actual TSan runtime verified + instrumentation `__tsan_init`;

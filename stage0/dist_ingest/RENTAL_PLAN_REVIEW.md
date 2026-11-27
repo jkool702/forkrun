@@ -55,7 +55,7 @@ not authorization; it is a checklist. **Not signed.**
 
 ## Recorded provenance
 - Reviewed source SHA: ________________
-- Sanitizer-tested SHA: `3f4f3f892a045d5c2c733b1825bd19dcdd973de6`
+- Sanitizer-tested SHA: `408283c9df488e5338d911d94b249a35f473aad0`
   (re-verify at review; see SANITIZER_EVIDENCE.md + CLOSEOUT.md)
 - Final C-code SHA / final branch HEAD / doc-only commits: see CLOSEOUT.md
 - Reviewed plan artifact path: ________________
