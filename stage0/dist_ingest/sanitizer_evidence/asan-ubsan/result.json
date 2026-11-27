@@ -1,7 +1,7 @@
 {
   "sanitizer": "asan-ubsan",
-  "source_sha": "408283c9df488e5338d911d94b249a35f473aad0",
-  "final_source_sha": "408283c9df488e5338d911d94b249a35f473aad0",
+  "source_sha": "00b06bc311e0c5bb4eb0e2f7bc79660e7ccce652",
+  "final_source_sha": "00b06bc311e0c5bb4eb0e2f7bc79660e7ccce652",
   "dirty": 0,
   "compiler": "gcc",
   "compiler_version": "gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2)",
@@ -19,8 +19,8 @@
   "artifact_sha256_before": "b8099d540809d313b28fbe64efd6cccae9f64ed7321841e45579e404114c573c",
   "artifact_sha256_after": "b8099d540809d313b28fbe64efd6cccae9f64ed7321841e45579e404114c573c",
   "artifact_unchanged": true,
-  "runlog": "/tmp/opencode/final-asan2/run_20261126_214749.log",
-  "tests": "Ran 344 tests in 103.622s",
+  "runlog": "/tmp/opencode/c3-asan/run_20261126_222650.log",
+  "tests": "Ran 348 tests in 103.947s",
   "test_return_code": 0,
   "sanitizer_findings": 0,
   "sanitizer_finding_lines": [],
@@ -31,7 +31,7 @@
     "lsan_effective": true,
     "lsan_findings": 0,
     "lsan_smoke_return_code": 0,
-    "lsan_runlog": "/tmp/opencode/final-asan2/lsan_smoke.log",
+    "lsan_runlog": "/tmp/opencode/c3-asan/lsan_smoke.log",
     "note": "separate standalone engine smoke (no python runtime); detect_leaks=1; effective iff built + rc==0 + no LSan findings + no runtime-init failure; absence of findings is NOT proof of no leaks; python-suite LSan not validated"
   },
   "interpretation": "PASS_OK"
