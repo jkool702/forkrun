@@ -183,6 +183,8 @@ def load_lib():
     lib.di_policy_decide.restype = ctypes.c_uint64
     lib.di_test_set_pread_seam.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint64]
     lib.di_test_set_pread_seam.restype = ctypes.c_int
+    lib.di_test_pread_seam_fired.argtypes = [ctypes.c_void_p]
+    lib.di_test_pread_seam_fired.restype = ctypes.c_int
     lib.di_test_set_push_fail_seam.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.di_test_set_push_fail_seam.restype = ctypes.c_int
     for _name in ("di_test_push_fail_fired", "di_test_alloc_fail_fired",
