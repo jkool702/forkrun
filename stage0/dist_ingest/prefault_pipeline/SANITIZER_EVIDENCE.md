@@ -1,8 +1,8 @@
 # Sanitizer evidence — prefault_pipeline (WO-NUMA-PIPELINED-MADV-POPULATE-WRITE-STAGE0)
 
 **Separate from existing dist_ingest evidence. NOT claimed to be covered
-by it.** Source `prefault_pipeline.c`. Exact source SHA: **470f6905c3b84725980c0b0f603ad521fd869e68**
-(prototype C source at clean committed tree; sanitizer re-run + 39 tests at this SHA; `git diff <san-SHA> <final> -- prefault_pipeline.c` empty).; build command + runtime + exit status recorded.
+by it.** Source `prefault_pipeline.c`. Exact source SHA: **67c8b20f24a863211c1a84b2163d0c831eb2d9aa**
+(prototype C source at clean committed tree (Corrections-1); sanitizer re-run + 53 tests at this SHA; ASan+UBSan+TSan+LSan clean (incl workers-per-node=2); `git diff <san-SHA> <final> -- prefault_pipeline.c` empty).
 
 ## Build (strict diagnostics)
 ```
@@ -14,7 +14,7 @@ cc -O1 -g -fno-omit-frame-pointer -fsanitize=thread -o prefault_pipeline-tsan pr
 ```
 
 ## Results (this environment; exact SHA in CLOSEOUT + `git rev-parse HEAD`)
-- **Normal**: build + `python3 -m unittest stage0.dist_ingest.prefault_pipeline.tests.test_prefault_pipeline` → 39 OK.
+- **Normal**: build + `python3 -m unittest stage0.dist_ingest.prefault_pipeline.tests.test_prefault_pipeline` → 53 OK.
 - **ASan+UBSan** (`-fsanitize=address,undefined`, `ASAN_OPTIONS=detect_leaks=1`, `UBSAN_OPTIONS=halt_on_error=1`): smoke all 3 modes + slot-size/gen paths → rc=0, 0 findings; **LSan smoke clean** (memory freed; no leaks reported — not proof).
 - **TSan** (`-fsanitize=thread`, `halt_on_error=1`): all 3 modes → rc=0, 0 `WARNING: ThreadSanitizer`; verified runtime + instrumentation.
 - **LSan** attempted; effective on smoke; absence ≠ proof no leaks.
