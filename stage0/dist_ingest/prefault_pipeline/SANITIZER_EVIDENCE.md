@@ -1,8 +1,7 @@
 # Sanitizer evidence — prefault_pipeline (WO-NUMA-PIPELINED-MADV-POPULATE-WRITE-STAGE0)
 
 **Separate from existing dist_ingest evidence. NOT claimed to be covered
-by it.** Source `prefault_pipeline.c`. Exact source SHA recorded at
-commit; build command + runtime + exit status recorded.
+by it.** Source `prefault_pipeline.c`. Exact source SHA: **be6625409507dc76e541701469de75393b3344e7**; build command + runtime + exit status recorded.
 
 ## Build (strict diagnostics)
 ```

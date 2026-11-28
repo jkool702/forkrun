@@ -5,7 +5,7 @@ no rental; no physical-NUMA claim; Gate 1 unaffected (unsigned); no
 existing engine/production/frozen file modified.**
 
 ## Provenance
-- Base `767994fad45e4a9f6f8bed8fe8b69ac0c6355bd5`; branch `WO-NUMA-PIPELINED-MADV-POPULATE-WRITE-STAGE0`. Final HEAD + clean tree in terminal report.
+- Base `767994fad45e4a9f6f8bed8fe8b69ac0c6355bd5`; branch `WO-NUMA-PIPELINED-MADV-POPULATE-WRITE-STAGE0`. Final HEAD + clean tree in terminal report; sanitizer-tested source SHA see SANITIZER_EVIDENCE.
 - Only new files under `stage0/dist_ingest/prefault_pipeline/`. CK-4 audit scope: prototype not linked into `libdist_ingest.so`, separately sanitized; `di_symbol_audit` skips it. `di_symbol_audit` `SYS_set_mempolicy`... not added to engine allowlist (prototype not scanned).
 
 ## Functional correctness (separate from performance)
