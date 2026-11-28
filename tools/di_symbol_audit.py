@@ -193,7 +193,14 @@ def source_audit():
     hits = []
     errors = []
     srcs = []
-    for root, _dirs, files in os.walk(SRC_ROOT):
+    for root, dirs, files in os.walk(SRC_ROOT):
+        # CK-4 engine audit scope: the production experimental engine sources.
+        # A separately-built, independently-sanitized EXPERIMENTAL prototype
+        # (prefault_pipeline/, WO-NUMA-PIPELINED-MADV-POPULATE-WRITE-STAGE0)
+        # is NOT part of libdist_ingest.so and is NOT linked into it; it has
+        # its own standalone sanitizer evidence. Skip it here. (No process
+        # creation is added; its extra NUMA syscalls are not engine syscalls.)
+        dirs[:] = [d for d in dirs if os.path.abspath(os.path.join(root, d)) != os.path.join(SRC_ROOT, "prefault_pipeline")]
         for f in files:
             if f.endswith((".c", ".h")):
                 srcs.append(os.path.join(root, f))

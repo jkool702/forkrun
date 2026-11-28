@@ -1,0 +1,24 @@
+{
+ "mode": "lazy",
+ "rc": 0, "failed": 0, "failed_errno": 0, "fail_msg": "",
+ "slot_size": 2097152, "slots_per_node": 2, "num_nodes": 1, "num_slots": 2,
+ "total_reserved_capacity": 4194304, "map_len": 4194304, "map_base_alignment": 2097152,
+ "page_size": 4096, "memfd": 3,
+ "nodes": [0],
+ "total_received": 16777216, "total_copied": 16777216, "total_published": 16777216, "total_consumed": 16777216,
+ "total_reserved": 4194304, "reserved_preparing_capacity": 4194304,
+ "wall_seconds": 0.063821652, "effective_ingest_bytes_per_sec": 262876554.809, "slots_completed": 8,
+ "input_wait_ns": 50991471, "slot_wait_ns": 8953, "copy_ns": 8843279,
+ "preparation_worker_busy_ns": 0, "overlap_summed_worker_ns": 0, "overlap_union_wall_ns": 0, "wait_union_ns": 50991471, "prep_union_ns": 0, "prep_completed_during_input_wait": 0, "reader_no_prepared_count": 0,
+ "prepared_total_bytes": 0, "prepared_destination_bytes": 0, "prepared_ratio": 0.000000,
+ "bytes_copied_lazy": 16777216, "bytes_copied_prepared": 0, "ready_at_assign": 0, "ready_after_arrival": 0,
+ "copy_minor_faults": 4096, "copy_major_faults": 0,
+ "per_node": [
+  {"node": 0, "slots": 0, "bytes": 16777216, "prep_ops": 0, "prep_ns": 0, "prep_fail": 0,
+   "prep_throughput_bps": 0.000, "prepared_busy_ns": 0,
+   "copied_bytes": 16777216, "copy_ns": 8843279, "copy_minflt": 4096, "copy_majflt": 0,
+   "placement_samples": 0, "placed_on_node": 0, "placed_other": 0, "placed_unknown": 0, "placement_ns": 0}
+ ],
+ "total_prep_ns": 0, "total_prep_ops": 0, "total_prep_fail": 0,
+ "slots_free": 2, "slots_ready": 0, "num_slots": 2
+}
