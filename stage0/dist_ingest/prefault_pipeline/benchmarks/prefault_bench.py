@@ -6,7 +6,7 @@ supplied through ACTUAL stdin/pipe input. Compares modes A/B/C
 deterministic input + arrival schedule. Preserves raw artifacts. No
 performance-improvement threshold on fake NUMA. NOT production.
 """
-import argparse, json, os, random, shlex, subprocess, sys, tempfile, time
+import argparse, json, os, random, shlex, statistics, subprocess, sys, tempfile, time
 
 MODES = ["lazy", "serial_madvise", "pipeline_madvise"]
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,19 +48,24 @@ def schedule_chunks(total, schedule, burst_size, gap_s, rng):
     return chunks
 
 
-def feed_stdin(proc, data, chunks):
-    """Feed actual stdin/pipe with schedule. Returns writer blocking stats."""
+def _det_chunk(off, n):
+    return bytes(((off + i) & 0xFF) for i in range(n))
+
+
+def feed_stdin(proc, total, chunks):
+    """P2: stream actual stdin/pipe with schedule; NO full retention; NO
+       repeated slicing of a retained buffer. Deterministic bytes generated
+       on the fly; identical across modes."""
     writer_blocks = 0
+    off = 0
     for (b, gap) in chunks:
         if gap > 0:
             time.sleep(gap)
-        chunk = data[:b]; data = data[b:]
+        chunk = _det_chunk(off, b); off += b
         try:
-            proc.stdin.write(chunk)
-            proc.stdin.flush()
+            proc.stdin.write(chunk); proc.stdin.flush()
         except BrokenPipeError:
-            writer_blocks += 1
-            break
+            writer_blocks += 1; break
     try:
         proc.stdin.close()
     except BrokenPipeError:
@@ -68,7 +73,7 @@ def feed_stdin(proc, data, chunks):
     return {"writer_blocking_events": writer_blocks}
 
 
-def run_once(bin_path, mode, cfg, data, chunks, json_path):
+def run_once(bin_path, mode, cfg, total, chunks, json_path):
     cmd = [bin_path, "--mode", mode,
            "--slot-size", str(cfg["slot_size"]),
            "--slots-per-node", str(cfg["slots_per_node"]),
@@ -82,7 +87,7 @@ def run_once(bin_path, mode, cfg, data, chunks, json_path):
         cmd += ["--placement-sampling"]
     t0 = time.monotonic()
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    feeder = feed_stdin(proc, data, chunks)
+    feeder = feed_stdin(proc, total, chunks)
     out, err = proc.communicate(timeout=600)
     t1 = time.monotonic()
     result = None
@@ -96,22 +101,46 @@ def run_once(bin_path, mode, cfg, data, chunks, json_path):
             "result": result, "feeder": feeder}
 
 
+def _discover_node_count():
+    try:
+        raw = open("/sys/devices/system/node/online").read().strip()
+    except OSError:
+        return 1
+    n = 0
+    for part in raw.split(","):
+        if "-" in part:
+            a, b = part.split("-", 1); n += int(b) - int(a) + 1
+        elif part:
+            n += 1
+    return max(1, n)
+
+
+def _valid_accounting(res):
+    if not isinstance(res, dict):
+        return False
+    tr = res.get("total_received", 0); tc = res.get("total_copied", 0)
+    tp = res.get("total_published", 0); tcons = res.get("total_consumed", 0)
+    return (res.get("rc", 1) == 0 and res.get("failed", 1) == 0
+            and tr == tc == tp == tcons
+            and tr >= 0 and tc >= 0 and tp >= 0 and tcons >= 0)
+
+
 def summarize_md(campaign, outpath):
     L = ["# Prefault pipeline campaign (fake-NUMA / dev workstation)", "",
          "NOT physical-NUMA evidence; NOT production; no improvement threshold.", ""]
     for cell in campaign["cells"]:
         L.append("## %s schedule=%s reps=%d" % (cell["schedule"], cell["schedule"], cell["reps"]))
         for mode in MODES:
-            runs = [r for r in cell["runs"] if r["mode"] == mode and r.get("result")]
+            runs = [r for r in cell["runs"] if r["mode"] == mode and r.get("result") and r.get("returncode") == 0 and _valid_accounting(r.get("result"))]
             if not runs:
                 L.append("- %s: no valid runs" % mode); continue
             bps = [r["result"].get("effective_ingest_bytes_per_sec", 0) for r in runs]
             ov = [r["result"].get("overlap_summed_worker_ns", 0) for r in runs]
             prep_ratio = [r["result"].get("prepared_ratio", 0) for r in runs]
-            med_bps = sorted(bps)[len(bps)//2]
+            med_bps = statistics.median(bps)
             L.append("- **%s**: median_e2e_Bps=%.1f  median_overlap_summed_ns=%d  median_prepared_ratio=%.4f  valid=%d/%d" % (
-                mode, med_bps, sorted(ov)[len(ov)//2], sorted(prep_ratio)[len(prep_ratio)//2],
-                len(runs), len([r for r in cell["runs"] if r["mode"] == mode])))
+                mode, med_bps, statistics.median(ov), statistics.median(prep_ratio),
+                len(runs), len([r for r in cell['runs'] if r['mode'] == mode])))
         L.append("")
     with open(outpath, "w") as f:
         f.write("\n".join(L))
@@ -145,10 +174,12 @@ def main():
            "workers_per_node": args.workers_per_node, "nodes": args.nodes,
            "consumer_delay_ns": args.consumer_delay_ns, "placement_sampling": args.placement_sampling}
     # force many generations: total > ring capacity
-    numnodes = len(args.nodes.split(",")) if args.nodes else 1
+    if args.nodes:
+        numnodes = len(args.nodes.split(","))
+    else:
+        numnodes = _discover_node_count()   # P2: match C discovery; don't assume 1
     ring_cap = args.slot_size * args.slots_per_node * numnodes
     total = max(args.total_bytes, ring_cap * args.min_generations)
-    data = deterministic_bytes(total)
     rng = random.Random(args.seed)
 
     campaign = {"schema": "prefault-pipeline-campaign/1", "bin": args.bin,
@@ -170,7 +201,7 @@ def main():
                 # SAME schedule for all modes in a rep
                 chunks = schedule_chunks(total, schedule, args.burst_size, args.gap, random.Random(args.seed + rep))
                 jpath = os.path.join(args.out, "run_%s_%s_%d.json" % (schedule, mode, rep))
-                r = run_once(args.bin, mode, cfg, data, chunks, jpath)
+                r = run_once(args.bin, mode, cfg, total, chunks, jpath)
                 r["mode"] = mode; r["rep"] = rep; r["schedule"] = schedule
                 cell["runs"].append(r); campaign["commands"].append(r["cmd_str"])
                 # raw artifacts

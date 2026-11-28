@@ -131,3 +131,4 @@ numa1/
 # Experimental dist-ingest prototype artifacts
 stage0/dist_ingest/runs/
 stage0/libdist_ingest.so
+stage0/dist_ingest/prefault_pipeline/prefault_pipeline

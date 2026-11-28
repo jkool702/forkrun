@@ -295,6 +295,31 @@ def undefined_symbol_audit():
     return result
 
 
+def prototype_source_audit():
+    """Separate, explicit audit of the standalone prototype (NOT engine scope).
+    Rejects process-creation; does NOT widen the engine syscall allowlist;
+    reports the prototype's own syscalls transparently."""
+    root = os.path.join(SRC_ROOT, "prefault_pipeline")
+    hits = []; syscalls = []
+    if os.path.isdir(root):
+        for r, _d, files in os.walk(root):
+            for f in files:
+                if not f.endswith((".c", ".h")):
+                    continue
+                p = os.path.join(r, f)
+                try:
+                    txt = _strip_comments_and_strings(open(p, encoding="utf-8").read())
+                except (OSError, UnicodeDecodeError):
+                    hits.append({"file": os.path.relpath(p, REPO_ROOT), "symbol": "cannot-inspect"}); continue
+                for rx in (PROC_SRC_RE, EXEC_SRC_RE, EXEC_BARE_RE):
+                    for m in rx.finditer(txt):
+                        hits.append({"file": os.path.relpath(p, REPO_ROOT), "symbol": m.group(0), "kind": "process-creation"})
+                for m in SYSCALL_CALL_RE.finditer(txt):
+                    syscalls.append({"file": os.path.relpath(p, REPO_ROOT), "snippet": txt[m.start():m.start()+60].split("\n")[0]})
+    return {"available": os.path.isdir(root), "process_creation_hits": hits,
+            "prototype_direct_syscalls": syscalls, "note": "separate from engine allowlist"}
+
+
 def main():
     src = source_audit()
     sym = undefined_symbol_audit()
@@ -310,11 +335,20 @@ def main():
         for s in sym.get("process_creation_symbols_found", []):
             bad.append({"file": SO, "symbol": s, "text": "undefined prohibited symbol"})
     result = {"source_audit": src, "symbol_audit": sym,
+              "prototype_audit": prototype_source_audit(),
+              "prototype_scope_note": (
+                  "CK-4 ENGINE audit scope scans stage0/dist_ingest engine C/header "
+                  "sources + libdist_ingest.so; the standalone prefault_pipeline "
+                  "prototype (not linked into libdist_ingest.so, own sanitizer "
+                  "evidence, adds SYS_set_mempolicy) is NOT scanned by the ENGINE "
+                  "scan and is NOT a widening of the engine syscall allowlist; it "
+                  "is separately checked (no process creation) under prototype_audit."),
               "bad": bad,
               "threads_only_symbols_ok": (sym_ok and not sym.get("process_creation_symbols_found")),
               "source_threads_only_ok": not src["hits"] and not src["errors"],
               "ok": not bad}
     print(json.dumps(result, indent=2, sort_keys=True))
+    bad.extend(result["prototype_audit"]["process_creation_hits"])
     # fail closed: any finding / unavailable evidence => nonzero
     return 0 if not bad else 1
 

@@ -97,6 +97,7 @@ typedef struct {
     uint64_t prep_start_ns, prep_end_ns;
     uint64_t assign_ns, arrival_ns, copy_start_ns, copy_end_ns, publish_ns, consume_ns, reclaim_start_ns, reclaim_end_ns;
     int prepared_before_assign;        /* READY recorded before assignment */
+    uint64_t checksum;                /* FNV-1a copy-integrity (staged==dest) */
     /* per-slot accounting */
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -113,10 +114,10 @@ typedef struct {
 
 /* ------- per-node stats ------- */
 typedef struct {
-    uint64_t slots; uint64_t bytes; uint64_t prep_ops; uint64_t prep_ns; uint64_t prep_fail;
-    uint64_t copied_bytes; uint64_t copy_ns; uint64_t minflt; uint64_t majflt;
-    uint64_t placed_on_node; uint64_t placed_other; uint64_t placed_unknown; uint64_t placement_samples; uint64_t placement_ns;
-} node_stat_t;
+    _Atomic uint64_t slots; _Atomic uint64_t bytes; _Atomic uint64_t prep_ops; _Atomic uint64_t prep_ns; _Atomic uint64_t prep_fail;
+    _Atomic uint64_t copied_bytes; _Atomic uint64_t copy_ns; _Atomic uint64_t minflt; _Atomic uint64_t majflt;
+    _Atomic uint64_t placed_on_node; _Atomic uint64_t placed_other; _Atomic uint64_t placed_unknown; _Atomic uint64_t placement_samples; _Atomic uint64_t placement_ns;
+} node_stat_t; /* C11 atomics: multi-worker-per-node safe */
 
 /* ------- engine ------- */
 typedef struct {
@@ -130,16 +131,18 @@ typedef struct {
     const char *json_out;
     /* mapping */
     int memfd; unsigned char *map; size_t map_len; size_t map_align; size_t total_capacity;
+    void *map_reserved_base; size_t map_reserved_len;
     slot_t *slots; int num_slots;
     staging_t *staging;
     /* state */
     pthread_t *prep_threads; int num_prep;
     pthread_t consumer_tid; pthread_t reader_tid;
-    atomic_int stop; atomic_int failed; atomic_int shutting_down;
+    atomic_int stop; atomic_int failed; atomic_int shutting_down; atomic_int reader_done;
     int failed_errno; char fail_msg[256];
     pthread_mutex_t mu; pthread_cond_t cv_ready; pthread_cond_t cv_free; pthread_cond_t cv_pub; pthread_cond_t cv_done;
     /* actual input accounting (separate from reserved/preparing) */
     atomic_ullong total_received, total_copied, total_published, total_consumed;
+    atomic_ullong slots_completed;
     atomic_ullong next_pub_off;      /* next expected publish order */
     atomic_ullong next_consume_off;  /* ordered consumer */
     /* measurement */
@@ -241,12 +244,10 @@ static int pin_to_node(int node, int *chosen_cpu){
     /* intersect with process affinity */
     cpu_set_t cur; CPU_ZERO(&cur); sched_getaffinity(0,sizeof cur,&cur);
     int chosen=-1;
-    for(int i=0;i<nl;i++){ if(CPU_ISSET(list[i],&cur)){ CPU_SET(list[i],&set); if(chosen<0)chosen=list[i]; allowed_any=1; } }
-    if(!allowed_any){
-        /* fall back to any allowed cpu */
-        for(int c=0;c<CPU_SETSIZE;c++) if(CPU_ISSET(c,&cur)){CPU_SET(c,&set);chosen=c;allowed_any=1;break;}
-    }
-    if(!allowed_any) return EPERM;
+    for(int i=0;i<nl;i++){ if(CPU_ISSET(list[i],&cur)){ chosen=list[i]; break; } }
+    /* P1: NO fallback to a CPU on another node; fail-closed. single CPU on node. */
+    if(chosen<0) return EPERM;
+    CPU_ZERO(&set); CPU_SET(chosen,&set);
     if(sched_setaffinity(0,sizeof set,&set)!=0) return errno;
     /* verify */
     cpu_set_t got; CPU_ZERO(&got); sched_getaffinity(0,sizeof got,&got);
@@ -359,9 +360,9 @@ static void *prep_thread(void *arg){
                 size_t step=numpages>lim?numpages/lim:1;
                 for(size_t k=0;k<lim;k++){ size_t idx=k*step; if(idx>=numpages)idx=numpages-1; addrs[k]=(unsigned char*)addr+idx*(size_t)pg; }
                 long rc=syscall(SYS_move_pages,0,(unsigned long)lim,addrs,NULL,status,0);
-                node_stat_t *ns=&e->node_stat[node]; ns->placement_samples+=lim; ns->placement_ns+=now_ns()-ps0;
-                if(rc==0){ for(size_t k=0;k<lim;k++){ if(status[k]==node)ns->placed_on_node++; else if(status[k]>=0)ns->placed_other++; else ns->placed_unknown++; } }
-                else ns->placed_unknown+=lim;
+                node_stat_t *ns=&e->node_stat[node]; atomic_fetch_add(&ns->placement_samples,lim); atomic_fetch_add(&ns->placement_ns,now_ns()-ps0);
+                if(rc==0){ for(size_t k=0;k<lim;k++){ if(status[k]==node)atomic_fetch_add(&ns->placed_on_node,1); else if(status[k]>=0)atomic_fetch_add(&ns->placed_other,1); else atomic_fetch_add(&ns->placed_unknown,1); } }
+                else atomic_fetch_add(&ns->placed_unknown,lim);
             }
             free(addrs); free(status);
 #endif
@@ -370,18 +371,27 @@ static void *prep_thread(void *arg){
         /* commit READY only if still same generation & state */
         pthread_mutex_lock(&e->mu);
         int still = (s->generation==mygen) && (s->state==PREPARING);
+        int injected_stale=0;
+        if(still && seam_has(e,"stale-gen")){ injected_stale=1; still=0; } /* inject stale completion; rejected */
         if(!ok){
             /* failed/partial prep NEVER becomes READY */
-            if(still){ slot_transition(s,PREPARING,RECLAIMING); slot_transition(s,RECLAIMING,FREE); s->generation++; pthread_cond_broadcast(&e->cv_free); }
-            pthread_mutex_unlock(&e->mu);
-            e->node_stat[node].prep_fail++;
+            /* P1: failed MADV_POPULATE_WRITE can leave SOME pages populated;
+               QUARANTINE + reclaim (punch hole) before reuse; NOT silently FREE. */
+            if(still){
+                slot_transition(s,PREPARING,RECLAIMING);
+                pthread_mutex_unlock(&e->mu);
+                int prc=0; if(fallocate(e->memfd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)s->offset,(off_t)s->capacity)!=0) prc=errno;
+                pthread_mutex_lock(&e->mu); slot_transition(s,RECLAIMING,FREE); s->generation++; s->prep_ok=0; s->prepared_before_assign=0; pthread_cond_broadcast(&e->cv_free); pthread_mutex_unlock(&e->mu);
+                if(prc!=0){ engine_fail(e,prc,"reclamation after preparation failure"); }
+            } else pthread_mutex_unlock(&e->mu);
+            atomic_fetch_add(&e->node_stat[node].prep_fail,1);
             engine_fail(e, perrno?perrno:EIO, "MADV_POPULATE_WRITE/preparation failure");
             break;
         }
         if(still && !atomic_load(&e->stop)){
             s->prep_ok=1; s->prep_errno=0; s->prep_start_ns=t0; s->prep_end_ns=t1;
             slot_transition(s,PREPARING,READY);
-            e->node_stat[node].prep_ops++; e->node_stat[node].prep_ns += (t1-t0); e->node_stat[node].slots++;
+            atomic_fetch_add(&e->node_stat[node].prep_ops,1); atomic_fetch_add(&e->node_stat[node].prep_ns,(t1-t0)); atomic_fetch_add(&e->node_stat[node].slots,1);
             atomic_fetch_add(&e->prepare_busy_ns[node], t1-t0);
             /* record prep interval for overlap measurement */
             if(e->prep_iv_n==e->prep_iv_cap){ size_t nc=e->prep_iv_cap?e->prep_iv_cap*2:64; interval_t *nv=realloc(e->prep_iv,nc*sizeof(interval_t)); if(nv){e->prep_iv=nv;e->prep_iv_cap=nc;} }
@@ -391,7 +401,9 @@ static void *prep_thread(void *arg){
             atomic_fetch_add(&e->prepared_total_bytes, s->capacity);
             pthread_cond_broadcast(&e->cv_ready);
         } else if(still){
-            /* stopping or stale; revert PREPARING->FREE, reject stale completion */
+            slot_transition(s,PREPARING,RECLAIMING); slot_transition(s,RECLAIMING,FREE); s->generation++; pthread_cond_broadcast(&e->cv_free);
+        } else if(injected_stale){
+            /* injected stale completion rejected; revert; no stale effect */
             slot_transition(s,PREPARING,RECLAIMING); slot_transition(s,RECLAIMING,FREE); s->generation++; pthread_cond_broadcast(&e->cv_free);
         } else { /* stale completion; rejected */ }
         pthread_mutex_unlock(&e->mu);
@@ -410,62 +422,40 @@ static void *consumer_thread(void *arg){
     while(1){
         slot_t *s=NULL;
         pthread_mutex_lock(&e->mu);
-        while(1){
+        for(;;){
             if(e->pub_n>0){ s=e->pub_q[e->pub_head]; e->pub_head=(e->pub_head+1)%e->pub_cap; e->pub_n--; break; }
-            if(atomic_load(&e->stop)||atomic_load(&e->failed)){ pthread_mutex_unlock(&e->mu); return NULL; }
+            if(atomic_load(&e->reader_done) && e->pub_n==0){ pthread_mutex_unlock(&e->mu); return NULL; }
             pthread_cond_wait(&e->cv_pub,&e->mu);
         }
         pthread_mutex_unlock(&e->mu);
-        /* consumer can't recycle before consumer completes */
         s->consume_ns=now_ns();
-        /* validate ordering + no dup/overlap + generation */
-        pthread_mutex_lock(&e->mu);
-        uint64_t expect=atomic_load(&e->next_consume_off);
-        pthread_mutex_unlock(&e->mu);
+        /* independent per-slot checksum verified on consumer destination */
+        const unsigned char *dp=(const unsigned char*)e->map + s->offset;
+        uint64_t dcksum=1469598103934665603ULL; for(size_t k=0;k<s->valid_len;k++){ dcksum^=dp[k]; dcksum*=1099511628211ULL; }
+        int bytes_ok = (dcksum==s->checksum);
+        pthread_mutex_lock(&e->mu); uint64_t expect=atomic_load(&e->next_consume_off); pthread_mutex_unlock(&e->mu);
         int seam_consumer=seam_has(e,"consumer");
         int order_ok = (s->input_off==expect);
-        /* validate actual bytes were copied: spot-check dest vs staging pattern is app checked by reader; verify len>0 or final */
-        if(seam_consumer || !order_ok){
-            engine_fail(e,EIO, seam_consumer?"injected consumer failure":"consumer ordering/overlap violation");
-        }
-        if(seam_has(e,"stale-gen")){ /* simulate stale completion attempt; must not affect later incarnation */
-            pthread_mutex_lock(&e->mu); s->generation; pthread_mutex_unlock(&e->mu);
+        if(seam_consumer || !order_ok || !bytes_ok){
+            engine_fail(e,EIO, seam_consumer?"injected consumer failure":(!order_ok?"consumer ordering/overlap violation":(!bytes_ok?"consumer byte-content/checksum mismatch":"consumer violation")));
         }
         atomic_fetch_add(&e->next_consume_off, s->valid_len);
         if(e->consumer_delay_ns>0){ struct timespec ts; ts.tv_sec=e->consumer_delay_ns/1000000000L; ts.tv_nsec=e->consumer_delay_ns%1000000000L; nanosleep(&ts,NULL); }
         atomic_fetch_add(&e->total_consumed, s->valid_len);
-        e->node_stat[s->node].bytes += s->valid_len;
-
-        /* reclamation lifecycle: CONSUMED->RECLAIMING->(punch)->FREE + gen++ */
-        pthread_mutex_lock(&e->mu);
-        s->state=CONSUMED;
-        s->reclaim_start_ns=now_ns();
-        s->state=RECLAIMING;
-        pthread_mutex_unlock(&e->mu);
-
-        size_t off=s->offset, len=s->capacity;
-        int prc=0;
+        atomic_fetch_add(&e->slots_completed,1);
+        atomic_fetch_add(&e->node_stat[s->node].bytes, s->valid_len);
+        pthread_mutex_lock(&e->mu); s->state=CONSUMED; s->reclaim_start_ns=now_ns(); s->state=RECLAIMING; pthread_mutex_unlock(&e->mu);
+        size_t off=s->offset, len=s->capacity; int prc=0;
         if(seam_has(e,"punch-hole")){ prc=EIO; }
-        else { if(fallocate(e->memfd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)off, (off_t)len)!=0) prc=errno; }
-        if(prc!=0){
-            pthread_mutex_lock(&e->mu); s->reclaim_end_ns=now_ns(); pthread_mutex_unlock(&e->mu);
-            engine_fail(e, prc, "reclamation/hole-punch failure (no silent fallback)");
-            return NULL;
-        }
-        /* verify reclamation success */
-        pthread_mutex_lock(&e->mu);
-        s->reclaim_end_ns=now_ns();
-        s->valid_len=0; s->input_off=0; s->prep_ok=0; s->prepared_before_assign=0;
-        s->state=FREE; s->generation++;   /* advance generation; stale completions rejected */
-        atomic_fetch_add(&e->next_pub_off,0); /* no-op */
-        pthread_cond_broadcast(&e->cv_free);
-        pthread_cond_broadcast(&e->cv_done);
-        pthread_mutex_unlock(&e->mu);
+        else { if(fallocate(e->memfd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)off,(off_t)len)!=0) prc=errno; }
+        if(prc!=0){ pthread_mutex_lock(&e->mu); s->reclaim_end_ns=now_ns(); pthread_mutex_unlock(&e->mu); engine_fail(e,prc,"reclamation/hole-punch failure (no silent fallback)"); return NULL; }
+        pthread_mutex_lock(&e->mu); s->reclaim_end_ns=now_ns(); s->valid_len=0; s->input_off=0; s->prep_ok=0; s->prepared_before_assign=0; s->state=FREE; s->generation++;
+        pthread_cond_broadcast(&e->cv_free); pthread_cond_broadcast(&e->cv_done); pthread_mutex_unlock(&e->mu);
     }
     return NULL;
 }
 
-/* ---------- ordered stdin reader ---------- */
+/* ---------- ordered stdin reader ---------- *//* ---------- ordered stdin reader ---------- */
 static int reader_read_full(engine_t *e, unsigned char *buf, size_t want, size_t *got_out, int *eof_out){
     size_t done=0; *eof_out=0;
     while(done<want){
@@ -537,18 +527,32 @@ static void *reader_thread(void *arg){
         pthread_mutex_unlock(&e->mu);
         uint64_t sw1=now_ns(); atomic_fetch_add(&e->slot_wait_ns, sw1-sw0);
 
-        /* synchronous MADV mode: ingest thread does madvise itself */
+        /* per-slot NUMA placement parity across modes: per-thread node policy; rc checked */
+        { int mrc=set_thread_policy_node(snode); if(mrc!=0){ engine_fail(e,mrc,"reader per-slot memory-policy setup failure"); break; } }
         if(e->mode==1){
-            /* lazy control representing current demand... serial applies madvise before waiting for input */
-            int rc;
-            if(seam_has(e,"madvise")){ rc=-1; errno=EIO; }
+            /* synchronous MADV control: policy + MADV_POPULATE_WRITE on calling
+               thread; measured separately; included in e2e. */
+            uint64_t p0=now_ns(); int rc; int injected=0;
+            if(seam_has(e,"madvise")){ rc=-1; errno=EIO; injected=1; }
             else rc=madvise((unsigned char*)e->map+soff, slot_size, MADV_POPULATE_WRITE);
-            if(rc!=0){ engine_fail(e,errno,"serial_madvise: MADV_POPULATE_WRITE failure"); 
-                       pthread_mutex_lock(&e->mu); s->state=FREE; s->generation++; pthread_cond_broadcast(&e->cv_free); pthread_mutex_unlock(&e->mu); break; }
-            atomic_fetch_add(&e->prepare_busy_ns[snode], 0); /* counted in slot_wait via... we measure separately */
-            pthread_mutex_lock(&e->mu); s->prep_ok=1; s->prep_end_ns=now_ns(); s->prepared_before_assign=1; pthread_mutex_unlock(&e->mu);
+            uint64_t p1=now_ns();
+            if(rc!=0){
+                /* failed MADV_POPULATE_WRITE can leave some pages populated;
+                   quarantine + reclaim before reuse; NOT silently FREE. */
+                engine_fail(e,errno?errno:EIO, injected?"injected serial MADV failure":"serial_madvise: MADV_POPULATE_WRITE failure");
+                pthread_mutex_lock(&e->mu); s->state=RECLAIMING; pthread_mutex_unlock(&e->mu);
+                int prc=0; if(fallocate(e->memfd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)soff,(off_t)slot_size)!=0) prc=errno;
+                pthread_mutex_lock(&e->mu); s->state=FREE; s->generation++; s->prep_ok=0; s->prepared_before_assign=0; pthread_cond_broadcast(&e->cv_free); pthread_mutex_unlock(&e->mu);
+                if(prc!=0){ engine_fail(e,prc,"reclamation after serial prep failure"); }
+                break;
+            }
+            atomic_fetch_add(&e->prepare_busy_ns[snode], p1-p0);
+            atomic_fetch_add(&e->node_stat[snode].prep_ops,1); atomic_fetch_add(&e->node_stat[snode].prep_ns,(p1-p0)); atomic_fetch_add(&e->node_stat[snode].slots,1);
+            atomic_fetch_add(&e->prepared_total_bytes, slot_size);
+            pthread_mutex_lock(&e->mu); s->prep_ok=1; s->prep_end_ns=p1; s->prep_start_ns=p0; s->prepared_before_assign=1; pthread_mutex_unlock(&e->mu);
         }
-        /* lazy mode: NO madvise; normal first-write faults during memcpy */
+        /* lazy mode: NO madvise; per-slot policy above; normal first-write faults during memcpy */
+        /* pipeline mode: reader must not perform preparation */
         /* pipeline mode: input reader must not perform preparation (MADV_POPULATE_WRITE done by prep workers) */
 
         s->assign_ns=now_ns();
@@ -561,25 +565,35 @@ static void *reader_thread(void *arg){
         if(!staging){ engine_fail(e,EIO,"no staging buffer for node"); break; }
 
         /* ---- wait for input on stdin, read partials until slot full or EOF ---- */
-        size_t total=0; int local_eof=0;
+        size_t total=0; int local_eof=0; int read_err=0;
         uint64_t input_off_assign;
         while(total<slot_size && !local_eof){
             size_t got=0;
             int rc=reader_read_full(e, staging+total, slot_size-total, &got, &local_eof);
             total+=got;
-            if(rc!=0){ if(!seam_has(e,"read")){ } engine_fail(e,rc,"input read error"); eof=1; break; }
-            if(atomic_load(&e->stop)){ eof=1; break; }
+            if(rc!=0){ read_err=1; engine_fail(e,rc,"input read error"); eof=1; break; }
+            if(atomic_load(&e->stop)||atomic_load(&e->failed)){ read_err=1; eof=1; break; }
         }
         s->arrival_ns=now_ns();
+        if(read_err){
+            /* P1: on fatal read error, do NOT publish partial; discard +
+               safely reclaim; break. Consumer drains published. */
+            pthread_mutex_lock(&e->mu); s->state=RECLAIMING; pthread_mutex_unlock(&e->mu);
+            int prc=0; if(!seam_has(e,"punch-hole")){ if(fallocate(e->memfd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)soff,(off_t)slot_size)!=0) prc=errno; } else prc=EIO;
+            pthread_mutex_lock(&e->mu); s->state=FREE; s->generation++; s->valid_len=0; pthread_cond_broadcast(&e->cv_free); pthread_mutex_unlock(&e->mu);
+            if(prc!=0){ engine_fail(e,prc,"reclamation after read error"); }
+            break;
+        }
         if(total==0){
             /* empty final read must NOT publish a zero-byte data slot */
             if(local_eof) eof=1;
-            /* reclaim empty slot without publishing */
-            pthread_mutex_lock(&e->mu);
-            s->state=RECLAIMING;
-            pthread_mutex_unlock(&e->mu);
-            if(!seam_has(e,"punch-hole")) fallocate(e->memfd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)soff,(off_t)slot_size);
+            /* reclaim empty slot without publishing; P2: do NOT ignore fallocate failure */
+            pthread_mutex_lock(&e->mu); s->state=RECLAIMING; pthread_mutex_unlock(&e->mu);
+            int prc=0;
+            if(seam_has(e,"punch-hole")) prc=EIO;
+            else if(fallocate(e->memfd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)soff,(off_t)slot_size)!=0) prc=errno;
             pthread_mutex_lock(&e->mu); s->state=FREE; s->generation++; pthread_cond_broadcast(&e->cv_free); pthread_mutex_unlock(&e->mu);
+            if(prc!=0){ engine_fail(e,prc,"reclamation/hole-punch failure on empty slot (no silent fallback)"); eof=1; }
             if(local_eof) eof=1; break;
         }
         if(local_eof) eof=1;
@@ -598,7 +612,10 @@ static void *reader_thread(void *arg){
         pthread_mutex_lock(&e->mu); s->state=COPYING; s->copy_start_ns=now_ns(); pthread_mutex_unlock(&e->mu);
         struct rusage ru0,ru1; getrusage(RUSAGE_THREAD,&ru0);
         uint64_t c0=now_ns();
-        memcpy((unsigned char*)e->map + soff, staging, total);   /* explicit memcpy, NOT read-into-dest */
+        uint64_t cksum=1469598103934665603ULL; for(size_t k=0;k<total;k++){ cksum^=staging[k]; cksum*=1099511628211ULL; } s->checksum=cksum;   /* independent input-side per-slot checksum */
+        unsigned char *dst=(unsigned char*)e->map + soff;
+        memcpy(dst, staging, total);   /* explicit memcpy, NOT read-into-dest */
+        if(seam_has(e,"copy-corrupt") && total>0){ dst[0]^=0xFF; }   /* injected copy corruption; consumer checksum detects */
         uint64_t c1=now_ns();
         getrusage(RUSAGE_THREAD,&ru1);
         pthread_mutex_lock(&e->mu); s->copy_end_ns=now_ns(); pthread_mutex_unlock(&e->mu);
@@ -609,9 +626,9 @@ static void *reader_thread(void *arg){
         /* which bucket */
         int copied_prepared = s->prepared_before_assign;
         if(copied_prepared) atomic_fetch_add(&e->bytes_copied_prepared,total); else atomic_fetch_add(&e->bytes_copied_lazy,total);
-        e->node_stat[snode].copied_bytes+=total; e->node_stat[snode].copy_ns+=(c1-c0);
-        e->node_stat[snode].minflt+=(unsigned long)(ru1.ru_minflt-ru0.ru_minflt);
-        e->node_stat[snode].majflt+=(unsigned long)(ru1.ru_majflt-ru0.ru_majflt);
+        atomic_fetch_add(&e->node_stat[snode].copied_bytes,total); atomic_fetch_add(&e->node_stat[snode].copy_ns,(c1-c0));
+        atomic_fetch_add(&e->node_stat[snode].minflt,(unsigned long)(ru1.ru_minflt-ru0.ru_minflt));
+        atomic_fetch_add(&e->node_stat[snode].majflt,(unsigned long)(ru1.ru_majflt-ru0.ru_majflt));
 
         /* verify generation before publication; no publication before copy completion */
         pthread_mutex_lock(&e->mu);
@@ -635,7 +652,6 @@ static void *reader_thread(void *arg){
 static int setup_mapping(engine_t *e){
     long pg=sysconf(_SC_PAGESIZE); if(pg<=0)pg=4096;
     if(e->slot_size < (size_t)pg || (e->slot_size % (size_t)pg)!=0) return EINVAL;
-    /* num_nodes * slots_per_node * slot_size with overflow checks */
     size_t ns=(size_t)e->num_slots;
     if(e->slot_size && ns > SIZE_MAX/e->slot_size) return EOVERFLOW;
     size_t total=ns*e->slot_size; if(total==0||total>SIZE_MAX/2) return EOVERFLOW;
@@ -643,74 +659,75 @@ static int setup_mapping(engine_t *e){
     e->memfd=memfd_create("prefault_pipeline", MFD_CLOEXEC);
     if(e->memfd<0) return errno;
     if(ftruncate(e->memfd,(off_t)total)!=0) return errno;
-    /* guarantee 2MiB (and page) aligned virtual range: reserve oversize then carve */
+    /* P1: guaranteed aligned virtual range WITHOUT shifting memfd file offset.
+     * Reserve ANONYMOUS oversized (PROT_NONE); align inside; map memfd AT FILE
+       OFFSET ZERO into aligned addr MAP_FIXED; keep prefix/suffix; slot0==off0. */
     size_t want_align = THP_DEFAULT_SLOT > (size_t)pg ? THP_DEFAULT_SLOT : (size_t)pg;
-    size_t reserve = total + want_align;
-    void *resv=mmap(NULL, reserve, PROT_READ|PROT_WRITE, MAP_SHARED, e->memfd, 0);
+    if(want_align==0 || want_align%(size_t)pg!=0) return EINVAL;
+    size_t reserve = total + want_align; if(reserve < total) return EOVERFLOW;
+    void *resv=mmap(NULL, reserve, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if(resv==MAP_FAILED) return errno;
     uintptr_t base=(uintptr_t)resv; uintptr_t aligned=(base + want_align - 1) & ~(uintptr_t)(want_align-1);
-    /* munmap slack */
-    if(aligned>base){ munmap((void*)base, aligned-base); }
-    uintptr_t end=base+reserve; uintptr_t aend=aligned+total; if(aend<end){ munmap((void*)aend, end-aend); }
+    void *m=mmap((void*)aligned, total, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_FIXED, e->memfd, 0);
+    if(m==MAP_FAILED || (uintptr_t)m!=aligned){ munmap(resv,reserve); return errno?errno:EINVAL; }
     e->map=(unsigned char*)aligned; e->map_len=total; e->map_align=want_align;
+    e->map_reserved_base=resv; e->map_reserved_len=reserve;
     if((uintptr_t)e->map % want_align !=0) return EINVAL;
-    /* slots */
     e->slots=calloc((size_t)e->num_slots,sizeof(slot_t)); if(!e->slots) return ENOMEM;
     for(int i=0;i<e->num_slots;i++){
-        slot_t *s=&e->slots[i]; s->id=(uint64_t)i; s->generation=0; s->node=e->nodes[i % e->num_nodes];
-        s->offset=(size_t)i*e->slot_size; s->capacity=e->slot_size; s->state=FREE;
-        pthread_mutex_init(&s->mu,NULL); pthread_cond_init(&s->cv,NULL);
-        /* mbind slot range too; per-thread policy is authoritative */
-        mbind_range((unsigned char*)e->map + s->offset, e->slot_size, s->node);
+        slot_t *sl=&e->slots[i]; sl->id=(uint64_t)i; sl->generation=0; sl->node=e->nodes[i % e->num_nodes];
+        sl->offset=(size_t)i*e->slot_size; sl->capacity=e->slot_size; sl->state=FREE;
+        pthread_mutex_init(&sl->mu,NULL); pthread_cond_init(&sl->cv,NULL);
+        mbind_range((unsigned char*)e->map + sl->offset, e->slot_size, sl->node);
     }
     e->pub_cap = e->num_slots + e->num_nodes + 4; e->pub_q=calloc((size_t)e->pub_cap,sizeof(slot_t*)); if(!e->pub_q) return ENOMEM;
-    /* per-node staging preallocated + first-touched + policy */
     e->staging=calloc((size_t)e->num_nodes,sizeof(staging_t)); if(!e->staging) return ENOMEM;
     for(int i=0;i<e->num_nodes;i++){
         int node=e->nodes[i]; e->staging[i].node=node; e->staging[i].staging_capacity=e->slot_size;
         e->staging[i].staging=mmap(NULL, e->slot_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1,0);
         if(e->staging[i].staging==MAP_FAILED) return ENOMEM;
-        /* prepare staging under known policy; first-touch it so it doesn't contaminate measurement */
-        set_thread_policy_node(node); memset(e->staging[i].staging,0,e->slot_size); e->staging[i].staging_policy_ok=1;
+        int prc=set_thread_policy_node(node); e->staging[i].staging_policy_ok=(prc==0); e->staging[i].staging_errno=prc;
+        if(prc!=0) return prc;
+        memset(e->staging[i].staging,0,e->slot_size);
     }
-    /* reset reader policy on main thread */
     return 0;
 }
 
-/* ---------- run ---------- */
+/* ---------- run ---------- *//* ---------- run ---------- */
 static int run(engine_t *e){
-    /* preparation workers: one per node * workers_per_node; pin + per-thread policy */
+    int rc=0; int created_prep=0; int created_consumer=0; int created_reader=0;
     int total_workers=0;
     if(e->mode==2) total_workers=e->num_nodes*e->workers_per_node;
     e->num_prep=total_workers;
     if(total_workers>0){
         e->prep_threads=calloc((size_t)total_workers,sizeof(pthread_t));
-        if(!e->prep_threads) return ENOMEM;
+        if(!e->prep_threads){ engine_fail(e,ENOMEM,"prep thread alloc"); rc=ENOMEM; goto shutdown; }
         for(int i=0;i<total_workers;i++){
-            prep_arg_t *pa=calloc(1,sizeof(prep_arg_t)); if(!pa) return ENOMEM;
+            prep_arg_t *pa=calloc(1,sizeof(prep_arg_t)); if(!pa){ engine_fail(e,ENOMEM,"prep arg alloc"); rc=ENOMEM; goto shutdown; }
             pa->e=e; pa->node=e->nodes[i % e->num_nodes]; pa->worker_idx=i;
-            if(seam_has(e,"no-worker-create")){ engine_fail(e,EAGAIN,"injected worker creation failure"); free(pa); return e->failed_errno?e->failed_errno:EAGAIN; }
-            if(pthread_create(&e->prep_threads[i],NULL,prep_thread,pa)!=0){ engine_fail(e,EAGAIN,"preparation worker creation failure"); free(pa); return e->failed_errno?e->failed_errno:EAGAIN; }
+            if(seam_has(e,"no-worker-create")){ engine_fail(e,EAGAIN,"injected worker creation failure"); free(pa); rc=EAGAIN; goto shutdown; }
+            if(seam_has(e,"no-worker-create-nth") && i>=1){ engine_fail(e,EAGAIN,"injected worker creation failure (nth)"); free(pa); rc=EAGAIN; goto shutdown; }
+            if(pthread_create(&e->prep_threads[i],NULL,prep_thread,pa)!=0){ engine_fail(e,EAGAIN,"preparation worker creation failure"); free(pa); rc=EAGAIN; goto shutdown; }
+            created_prep=i+1;
         }
     }
-    /* consumer */
-    if(pthread_create(&e->consumer_tid,NULL,consumer_thread,e)!=0){ engine_fail(e,EAGAIN,"consumer thread creation failure"); return EAGAIN; }
-    /* reader (ordered, single); pin to first node allowed cpu; per-thread policy; */
-    pin_to_node(e->nodes[0],NULL); set_thread_policy_node(e->nodes[0]);
-    if(pthread_create(&e->reader_tid,NULL,reader_thread,e)!=0){ engine_fail(e,EAGAIN,"reader thread creation failure"); return EAGAIN; }
-
-    pthread_join(e->reader_tid,NULL);
-    /* tell consumer no more publishing */
+    if(pthread_create(&e->consumer_tid,NULL,consumer_thread,e)!=0){ engine_fail(e,EAGAIN,"consumer thread creation failure"); rc=EAGAIN; goto shutdown; }
+    created_consumer=1;
+    { int prc=pin_to_node(e->nodes[0],NULL); if(prc!=0){ engine_fail(e,prc,"reader CPU affinity failure"); rc=prc; goto shutdown; } }
+    { int mrc=set_thread_policy_node(e->nodes[0]); if(mrc!=0){ engine_fail(e,mrc,"reader memory-policy setup failure"); rc=mrc; goto shutdown; } }
+    if(pthread_create(&e->reader_tid,NULL,reader_thread,e)!=0){ engine_fail(e,EAGAIN,"reader thread creation failure"); rc=EAGAIN; goto shutdown; }
+    created_reader=1;
+    pthread_join(e->reader_tid,NULL); created_reader=0;
+    atomic_store(&e->reader_done,1);
     pthread_mutex_lock(&e->mu); pthread_cond_broadcast(&e->cv_pub); pthread_mutex_unlock(&e->mu);
-    /* wait consumer drains published then stop */
-    pthread_mutex_lock(&e->mu);
-    while(e->pub_n>0){ pthread_cond_wait(&e->cv_done,&e->mu); }
-    pthread_mutex_unlock(&e->mu);
+shutdown:
     atomic_store(&e->stop,1);
     pthread_mutex_lock(&e->mu); pthread_cond_broadcast(&e->cv_pub); pthread_cond_broadcast(&e->cv_free); pthread_cond_broadcast(&e->cv_ready); pthread_cond_broadcast(&e->cv_done); pthread_mutex_unlock(&e->mu);
-    pthread_join(e->consumer_tid,NULL);
-    for(int i=0;i<e->num_prep;i++){ pthread_mutex_lock(&e->mu); pthread_cond_broadcast(&e->cv_free); pthread_mutex_unlock(&e->mu); pthread_join(e->prep_threads[i],NULL); }
-    return atomic_load(&e->failed) ? (e->failed_errno?e->failed_errno:EIO) : 0;
+    if(created_reader){ pthread_join(e->reader_tid,NULL); }
+    if(created_consumer){ pthread_join(e->consumer_tid,NULL); }
+    for(int i=0;i<created_prep;i++){ pthread_mutex_lock(&e->mu); pthread_cond_broadcast(&e->cv_free); pthread_mutex_unlock(&e->mu); pthread_join(e->prep_threads[i],NULL); }
+    if(atomic_load(&e->failed)) return e->failed_errno?e->failed_errno:(rc?rc:EIO);
+    return rc;
 }
 
 /* ---------- output ---------- */
@@ -771,8 +788,10 @@ static void emit_json(engine_t *e, FILE *out, uint64_t elapsed_ns, int rc, const
     /* accounting separation */
     fprintf(out," \"total_received\": %llu, \"total_copied\": %llu, \"total_published\": %llu, \"total_consumed\": %llu,\n",
         (unsigned long long)total_received,(unsigned long long)total_copied,(unsigned long long)total_published,(unsigned long long)total_consumed);
-    fprintf(out," \"total_reserved\": %zu, \"reserved_preparing_capacity\": %zu,\n", e->total_capacity, e->total_capacity);
-    fprintf(out," \"wall_seconds\": %.9f, \"effective_ingest_bytes_per_sec\": %.3f, \"slots_completed\": %llu,\n", wall, bps, (unsigned long long)total_consumed/e->slot_size);
+    /* P2: total_reserved_capacity (bounded ring total) vs actual current reserved */
+    { int actual=0; for(int i=0;i<e->num_slots;i++){ slot_state_t st=e->slots[i].state; if(st!=FREE&&st!=READY) actual++; }
+      fprintf(out," \"total_reserved\": %zu, \"reserved_preparing_capacity\": %zu, \"total_reserved_capacity\": %zu, \"slots_reserved_or_preparing\": %d,\n", e->total_capacity, e->total_capacity, e->total_capacity, actual); }
+    fprintf(out," \"wall_seconds\": %.9f, \"effective_ingest_bytes_per_sec\": %.3f, \"slots_completed\": %llu,\n", wall, bps, (unsigned long long)atomic_load(&e->slots_completed));
     /* overlap */
     fprintf(out," \"input_wait_ns\": %llu, \"slot_wait_ns\": %llu, \"copy_ns\": %llu,\n",
         (unsigned long long)atomic_load(&e->input_wait_ns),(unsigned long long)atomic_load(&e->slot_wait_ns),(unsigned long long)atomic_load(&e->copy_ns));
@@ -794,17 +813,17 @@ static void emit_json(engine_t *e, FILE *out, uint64_t elapsed_ns, int rc, const
     fprintf(out," \"per_node\": [\n");
     for(int i=0;i<e->num_nodes;i++){
         int node=e->nodes[i]; node_stat_t *ns=&e->node_stat[node];
-        prep_total+=ns->prep_ns; prep_ops+=ns->prep_ops; prep_fail+=ns->prep_fail;
+        prep_total+=atomic_load(&ns->prep_ns); prep_ops+=atomic_load(&ns->prep_ops); prep_fail+=atomic_load(&ns->prep_fail);
         /* bytes per node + slots per node */
-        uint64_t node_bytes=ns->bytes;
+        uint64_t node_bytes=atomic_load(&ns->bytes);
         fprintf(out,"  {\"node\": %d, \"slots\": %llu, \"bytes\": %llu, \"prep_ops\": %llu, \"prep_ns\": %llu, \"prep_fail\": %llu,\n",
-            node,(unsigned long long)ns->slots,(unsigned long long)node_bytes,(unsigned long long)ns->prep_ops,(unsigned long long)ns->prep_ns,(unsigned long long)ns->prep_fail);
+            node,(unsigned long long)atomic_load(&ns->slots),(unsigned long long)node_bytes,(unsigned long long)atomic_load(&ns->prep_ops),(unsigned long long)atomic_load(&ns->prep_ns),(unsigned long long)atomic_load(&ns->prep_fail));
         fprintf(out,"   \"prep_throughput_bps\": %.3f, \"prepared_busy_ns\": %llu,\n",
-            ns->prep_ns? (double)(ns->prep_ops*e->slot_size)/(ns->prep_ns/1e9):0.0, (unsigned long long)atomic_load(&e->prepare_busy_ns[node]));
+            ns->prep_ns? (double)(atomic_load(&ns->prep_ops)*e->slot_size)/(atomic_load(&ns->prep_ns)/1e9):0.0, (unsigned long long)atomic_load(&e->prepare_busy_ns[node]));
         fprintf(out,"   \"copied_bytes\": %llu, \"copy_ns\": %llu, \"copy_minflt\": %llu, \"copy_majflt\": %llu,\n",
-            (unsigned long long)ns->copied_bytes,(unsigned long long)ns->copy_ns,(unsigned long long)ns->minflt,(unsigned long long)ns->majflt);
+            (unsigned long long)atomic_load(&ns->copied_bytes),(unsigned long long)atomic_load(&ns->copy_ns),(unsigned long long)atomic_load(&ns->minflt),(unsigned long long)atomic_load(&ns->majflt));
         fprintf(out,"   \"placement_samples\": %llu, \"placed_on_node\": %llu, \"placed_other\": %llu, \"placed_unknown\": %llu, \"placement_ns\": %llu}\n",
-            (unsigned long long)ns->placement_samples,(unsigned long long)ns->placed_on_node,(unsigned long long)ns->placed_other,(unsigned long long)ns->placed_unknown,(unsigned long long)ns->placement_ns);
+            (unsigned long long)atomic_load(&ns->placement_samples),(unsigned long long)atomic_load(&ns->placed_on_node),(unsigned long long)atomic_load(&ns->placed_other),(unsigned long long)atomic_load(&ns->placed_unknown),(unsigned long long)atomic_load(&ns->placement_ns));
         if(i<e->num_nodes-1) fprintf(out,",\n");
     }
     fprintf(out," ],\n");
@@ -820,7 +839,7 @@ int main(int argc, char **argv){
     engine_t e; memset(&e,0,sizeof e);
     e.mode=2; e.slot_size=THP_DEFAULT_SLOT; e.slots_per_node=2; e.workers_per_node=1;
     e.num_nodes=0; e.consumer_delay_ns=0; e.placement_sampling=0; e.seam=NULL; e.json_out=NULL;
-    atomic_init(&e.stop,0); atomic_init(&e.failed,0); atomic_init(&e.shutting_down,0);
+    atomic_init(&e.stop,0); atomic_init(&e.failed,0); atomic_init(&e.shutting_down,0); atomic_init(&e.reader_done,0);
     pthread_mutex_init(&e.mu,NULL); pthread_cond_init(&e.cv_ready,NULL); pthread_cond_init(&e.cv_free,NULL); pthread_cond_init(&e.cv_pub,NULL); pthread_cond_init(&e.cv_done,NULL);
     const char *mode="pipeline_madvise";
     const char *nodelist=NULL;
@@ -869,7 +888,7 @@ int main(int argc, char **argv){
     /* cleanup (LSan-clean) */
     for(int i=0;i<e.num_slots;i++){ pthread_mutex_destroy(&e.slots[i].mu); pthread_cond_destroy(&e.slots[i].cv); }
     for(int i=0;i<e.num_nodes;i++){ if(e.staging && e.staging[i].staging && e.staging[i].staging!=MAP_FAILED) munmap(e.staging[i].staging, e.staging[i].staging_capacity); }
-    if(e.map && e.map_len) munmap(e.map, e.map_len);
+    if(e.map_reserved_base && e.map_reserved_len) munmap(e.map_reserved_base, e.map_reserved_len);
     if(e.memfd>=0) close(e.memfd);
     free(e.slots); free(e.pub_q); free(e.staging); free(e.prep_threads);
     free(e.prep_iv); free(e.wait_iv);
